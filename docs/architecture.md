@@ -48,29 +48,77 @@ Its machine inputs are:
 - the engine config;
 - the reviewed candidate universe.
 
-The worker normalizes observations, computes the registered feature physics,
-and publishes an immutable, sequence-numbered JSON object. A multi-output
-transaction is written to durable worker state before any object becomes
-visible. Restart completes or rolls back that transaction without publishing a
-half generation. The checkpoint also owns a random 128-bit source generation.
-LONG and CARRY publish under generation-qualified source names, so restoring the
-checkpoint continues its sequence while creating a new checkpoint starts a new
-source at sequence one. The engine removes an object only after its bytes are in
-the WAL.
+The worker normalizes inputs, computes the registered features, and publishes
+immutable sequence-numbered observations. Frequent inputs enter an fsynced,
+size- and count-bounded JSONL journal. Each entry carries a strict schema,
+contiguous source sequence, and the exact output bytes it produced. At a hard
+limit or the one-hour checkpoint-age boundary, the worker streams its state
+through a pending atomic checkpoint. Restart finishes an interrupted
+publication, replays later journal entries, and requires the regenerated output
+bytes to match exactly.
 
-The heartbeat binds the worker to its public realm, public hosts, source-file
-hashes, feature-contract hashes, engine-config hash, universe hashes, source
-generation, input sequence, output sequences, and latest feature clocks.
-`ready` means the cold history is complete and at least one watermark has been
-published. The worker keeps the full causal 90-day, 150-name CARRY envelope
-within the shared 16 MiB observation limit; the reducer, not the transport,
-applies the registered top-N rule.
+The checkpoint owns the random 128-bit source generation used by LONG and
+CARRY. Restart and ordinary checkpoint compaction preserve that generation and
+its output sequences. Only initializing a genuinely new state root creates a
+new generation at sequence one. The engine removes an observation only after
+its exact bytes are durable in the WAL.
+
+One persistent Bybit public WebSocket actor owns ticker deltas and confirmed
+hourly candles. Each socket is a source epoch. Subscription replies are matched
+to the exact request. Forty-five seconds without an accepted market event opens
+a gap; acknowledgements and pongs do not reset that clock or the retry delay. A
+transient refusal, timeout, idle stream, or disconnect reconnects forever with
+capped backoff. A permanently bad topic is narrowed to the individual topic and
+quarantined; accepted topics remain live, and a one-minute timer re-probes the
+topic on the same socket. Bybit's request-wide unsupported-operation/category
+response is surfaced as a global fault and is never split into topic
+quarantines.
+
+A reconnect clears transient ticker state. REST candle repair closes the gap,
+and REST ticker snapshots can fill missing or stale fields without overwriting
+WebSocket fields received after the REST request began. Each ticker field keeps
+its own receipt clock, so a delta cannot refresh an unchanged field.
+
+Instrument, funding, candle-repair, ticker-fallback, and optional Binance whale
+work run independently but share one process-wide HTTP request bound. Cold
+candle acquisition commits profile-sized chunks rather than retaining all raw
+results. Each history producer holds one bounded job and waits for its commit
+acknowledgement before fetching another. Page length, timestamp grid, requested
+range, unique-row count, and immutable history are checked before durable
+mutation. A venue or normalization fault pauses only that lane and opens repair
+where needed. A sequence, state, spool, serialization, or disk fault remains a
+process error; it is never recast as ordinary source degradation.
+responses. The reviewed LONG and CARRY populations are the worker generation's
+ceiling. The live WebSocket follows both the top-of-book quote and ticker for
+their current trading members plus BTC, ETH, and the registered regime symbol.
+The engine execution feed also keeps a separate clock for each L1 quote topic.
+A promised L1 snapshot that stays silent for 45 seconds is re-subscribed on the
+live socket without interrupting healthy topics.
+
+The signal spool has a total bound and separate `current`, `lifecycle`,
+`catchup`, and `other` quotas. Market snapshots, readiness, LONG features, and
+CARRY features coalesce while an older output of the same kind waits for the
+engine. After that file drains, the next eligible source wake republishes the
+latest state. Funding lifecycle rows and CARRY scorer catch-up remain ordered,
+non-replaceable records. One class reaching its quota does not stop unrelated
+classes unless the total spool limit is reached.
+
+The heartbeat binds the worker to its realm and exact inputs and reports source
+generation, input and output sequences, the current LONG and CARRY horizons,
+CARRY scorer catch-up, independent LONG and CARRY cycle completions, REST
+fallback, WebSocket epochs and topic coverage, queue bounds, and spool pressure.
+During restart it stays `starting` until both sleeve cycles complete or the
+three-cadence startup window expires. `ready` describes current WebSocket
+transport health. A degraded transport can still produce decisions through
+fresh REST fallback; the separate sleeve clocks prove whether it actually does.
 
 ## Native directional reducers
 
-The engine records a signal observation before waking a strategy. Symbol
-admission is dynamic, so a reviewed universe is a starting set rather than a
-compile-time ceiling.
+The engine records a signal observation before waking a strategy. The reviewed
+universe is the exact runtime ceiling for one worker generation, not a
+compile-time list. An observation may ask the engine to add market subscriptions
+for accepted symbols inside that artifact; the engine persists those admissions
+in the WAL. The artifact identity cannot change in place.
 
 The three directional sleeves have typed pure reducers under
 `engine/engine-strategies/src/native_*`:
@@ -87,6 +135,19 @@ The plug layer supplies facts: durable observation, account view, attributed
 positions, owned orders, instrument rules, and clock. The reducer returns the
 next checkpoint, cross-sleeve events, signal receipt, and order effects. It has
 no file, network, credential, or clock access.
+
+An account view whose private-stream observation clock is zero is explicitly
+invalid even if its last equity and margin numbers are finite. It cannot size or
+grow a position. A durable signal, selection, or handoff timestamp ahead of the
+current wall clock also cannot reopen or grow risk after a clock rollback; the
+plug schedules the next wake at that timestamp. Both cases still allow exits,
+reduction-only resizes, stop repair, and checkpoint progress.
+
+CARRY keeps its one-minute admission selection in the checkpoint. A new symbol
+joins that set only after the shared target planner has a valid price,
+instrument rule, entry window, quantized quantity, and venue minimum and can
+therefore emit an `Enter` step. Missing facts preserve the desired target for a
+later retry without consuming the limited slots.
 
 A decision fingerprint covers the rule and the feature contract that can
 change a decision. Operational cadence, retry timing, and an operator entry
@@ -166,8 +227,12 @@ The load-bearing source formats are:
 | Sleeve | Format | Named sources |
 | --- | --- | --- |
 | LONG | `long-book-state-v2` | `state` |
-| CARRY | `carry-reducer-v2-target-book-v1` | `reducer_checkpoint`, `target_book` |
-| Exodus | `exodus-state-v1-v4-event-tape-v1` | `carry_events`, `identity`, `state` |
+| CARRY | `carry-sizing-anchors-v1-early-exits-v1-target-book-v1` | `early_exits`, `sizing_anchors`, `target_book` |
+| Exodus | `exodus-state-v1-v4-event-tape-v1-identity-v2` | `carry_events`, `identity`, `legacy_paths`, `state` |
+
+The importer treats only an absent CARRY early-exit map and an absent CARRY
+pre-settlement event tape as canonical empty state. All other sources must be
+present, and a present malformed source is refused.
 
 A truly empty account generation initializes canonical empty checkpoints. A
 nonempty WAL must either verify as a complete current native generation or
@@ -195,6 +260,7 @@ WAL, authenticated venue state, and trade log. Evidence grading is defined in
 
 ## Other strategies
 
-`maker_canary` keeps strategy slot 3 in the mainnet config and is disabled. Its
+`maker_canary` keeps the fourth durable strategy slot (strategy ID 3) in mainnet
+and is disabled. Its
 signal decay, fair price, inventory protection, and quote plan are one Rust
 reducer, and its registered JSON is rendered to TOML by Rust.

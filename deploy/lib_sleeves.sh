@@ -171,6 +171,210 @@ lm_rollout_units() {
         | cut -d '|' -f2
 }
 
+# Rollout stops the ordered union of the installed and candidate generations.
+# The installed side may carry either supported manifest schema; only active
+# schema-v1 rows participate because retired rows have no installed unit.
+lm_rollout_transition_inventory() {
+    [ "$#" -ge 2 ] && [ "$#" -le 3 ] || return 2
+    local incumbent_manifest="$1" candidate_manifest="$2"
+    local wanted_realm="${3:-}"
+    local incumbent_header incumbent_columns candidate_header candidate_columns rows
+    local manifest incumbent_schema
+    case "$wanted_realm" in
+        ""|demo|mainnet|shared) ;;
+        *) return 2 ;;
+    esac
+    for manifest in "$incumbent_manifest" "$candidate_manifest"; do
+        [ -f "$manifest" ] && [ ! -L "$manifest" ] || {
+            echo "rollout transition manifest is missing or linked: $manifest" >&2
+            return 1
+        }
+    done
+    incumbent_header="$(sed -n '1p' "$incumbent_manifest")" || return 1
+    incumbent_columns="$(sed -n '2p' "$incumbent_manifest")" || return 1
+    candidate_header="$(sed -n '1p' "$candidate_manifest")" || return 1
+    candidate_columns="$(sed -n '2p' "$candidate_manifest")" || return 1
+    case "$incumbent_header|$incumbent_columns" in
+        '# fleet-manifest-v1|# unit|state|kind|realm|lifecycle|stop_order|activation|operator|depends_on|health|output_artifact|timer_service|first_delay_s|cadence_s|accuracy_s|runtime_s|input_artifact')
+            incumbent_schema=1
+            ;;
+        '# fleet-manifest-v2|# unit|kind|realm|lifecycle|stop_order|activation|operator|depends_on|health|output_artifact|timer_service|first_delay_s|cadence_s|accuracy_s|runtime_s|input_artifact')
+            incumbent_schema=2
+            ;;
+        *)
+            echo "incumbent fleet manifest has an unsupported transition schema: $incumbent_manifest" >&2
+            return 1
+            ;;
+    esac
+    [ "$candidate_header" = '# fleet-manifest-v2' ] \
+        && [ "$candidate_columns" = '# unit|kind|realm|lifecycle|stop_order|activation|operator|depends_on|health|output_artifact|timer_service|first_delay_s|cadence_s|accuracy_s|runtime_s|input_artifact' ] || {
+        echo "candidate fleet manifest is not schema v2: $candidate_manifest" >&2
+        return 1
+    }
+    rows="$(
+        LC_ALL=C awk -F '|' \
+            -v incumbent="$incumbent_manifest" \
+            -v incumbent_schema="$incumbent_schema" \
+            -v wanted_realm="$wanted_realm" '
+function fail_at(manifest, line, message) {
+    print "invalid rollout transition manifest at " manifest ":" line ": " message > "/dev/stderr"
+    failed = 1
+}
+function is_uint(value) { return value ~ /^[1-9][0-9]*$/ }
+function selected(unit) { return wanted_realm == "" || union_realm[unit] == wanted_realm }
+function add_active(manifest, unit, kind, realm, phase, order, dependencies, line, key, order_key) {
+    key = manifest SUBSEP unit
+    if (active[key]++) {
+        fail_at(manifest, line, "duplicate active unit " unit)
+        return
+    }
+    order_key = manifest SUBSEP phase SUBSEP order
+    if (order_seen[order_key]++) fail_at(manifest, line, "duplicate stop order in " phase ": " order)
+    active_name[key] = 1
+    active_kind[key] = kind
+    active_realm[key] = realm
+    active_phase[key] = phase
+    active_order[key] = order
+    active_dependencies[key] = dependencies
+    active_line[key] = line
+    if (phase == "owner") owner_count[manifest SUBSEP realm]++
+    if ((unit in union_phase) &&
+        (union_phase[unit] != phase || union_kind[unit] != kind || union_realm[unit] != realm)) {
+        fail_at(manifest, line, "unit identity changes across rollout: " unit)
+    } else if (!(unit in union_phase)) {
+        union_phase[unit] = phase
+        union_kind[unit] = kind
+        union_realm[unit] = realm
+        # Incumbent rows are read first. Their order is the deterministic
+        # preference for rollback; candidate-only rows keep candidate order.
+        union_preference[unit] = order + 0
+    }
+}
+function emit_phase(wanted,    remaining, unit, edge, parts, ready, best, sequence) {
+    remaining = 0
+    for (unit in union_phase) {
+        if (union_phase[unit] == wanted && selected(unit)) remaining++
+    }
+    sequence = 0
+    while (remaining > 0) {
+        best = ""
+        for (unit in union_phase) {
+            if (union_phase[unit] != wanted || !selected(unit) || emitted[unit]) continue
+            ready = 1
+            for (edge in must_stop_before) {
+                split(edge, parts, SUBSEP)
+                if (parts[2] == unit && selected(parts[1]) && !emitted[parts[1]]) {
+                    ready = 0
+                    break
+                }
+            }
+            if (ready &&
+                (best == "" || union_preference[unit] < union_preference[best] ||
+                 (union_preference[unit] == union_preference[best] && unit < best))) {
+                best = unit
+            }
+        }
+        if (best == "") {
+            fail_at("transition", 1, "installed and candidate dependencies form a stop-order cycle")
+            return
+        }
+        emitted[best] = 1
+        sequence++
+        merged_order[wanted SUBSEP sequence] = best
+        remaining--
+    }
+}
+FNR <= 2 { next }
+/\r/ { fail_at(FILENAME, FNR, "carriage returns are not allowed"); next }
+/^#/ { next }
+/^[[:space:]]*$/ { next }
+{
+    manifest = (FILENAME == incumbent ? "incumbent" : "candidate")
+    schema = (FILENAME == incumbent ? incumbent_schema : 2)
+    expected_fields = (schema == 1 ? 17 : 16)
+    if (NF != expected_fields) {
+        fail_at(FILENAME, FNR, "expected " expected_fields " fields, found " NF)
+        next
+    }
+    unit = $1
+    state = (schema == 1 ? $2 : "current")
+    kind = (schema == 1 ? $3 : $2)
+    realm = (schema == 1 ? $4 : $3)
+    phase = (schema == 1 ? $5 : $4)
+    order = (schema == 1 ? $6 : $5)
+    dependencies = (schema == 1 ? $9 : $8)
+    if (unit !~ /^liquidity-migration-[A-Za-z0-9_.@-]+\.(service|timer)$/) {
+        fail_at(FILENAME, FNR, "invalid unit name " unit)
+    }
+    key = manifest SUBSEP unit
+    if (seen[key]++) fail_at(FILENAME, FNR, "duplicate unit " unit)
+    if (state !~ /^(current|retired)$/) fail_at(FILENAME, FNR, "invalid state for " unit)
+    if (kind !~ /^(service|timer)$/ || unit !~ ("\\." kind "$")) {
+        fail_at(FILENAME, FNR, "kind disagrees with unit suffix for " unit)
+    }
+    if (realm !~ /^(demo|mainnet|shared)$/) fail_at(FILENAME, FNR, "invalid realm for " unit)
+    if (phase !~ /^(downstream|owner)$/) fail_at(FILENAME, FNR, "invalid lifecycle phase for " unit)
+    if (!is_uint(order)) fail_at(FILENAME, FNR, "invalid stop order for " unit)
+    if (dependencies != "-" && dependencies !~ /^liquidity-migration-[A-Za-z0-9_.@-]+\.(service|timer)(,liquidity-migration-[A-Za-z0-9_.@-]+\.(service|timer))*$/) {
+        fail_at(FILENAME, FNR, "invalid dependency list for " unit)
+    }
+    if (state == "retired") next
+    add_active(manifest, unit, kind, realm, phase, order, dependencies, FNR)
+}
+END {
+    manifests["incumbent"] = 1
+    manifests["candidate"] = 1
+    for (manifest in manifests) {
+        if (owner_count[manifest SUBSEP "demo"] != 1) {
+            fail_at(manifest, 1, "manifest must have one active demo owner")
+        }
+        if (owner_count[manifest SUBSEP "mainnet"] != 1) {
+            fail_at(manifest, 1, "manifest must have one active mainnet owner")
+        }
+    }
+    for (key in active_dependencies) {
+        split(key, parts, SUBSEP)
+        manifest = parts[1]
+        unit = parts[2]
+        if (active_dependencies[key] == "-") continue
+        count = split(active_dependencies[key], values, ",")
+        for (dep_index = 1; dep_index <= count; dep_index++) {
+            dependency = values[dep_index]
+            dependency_key = manifest SUBSEP dependency
+            if (!(dependency_key in active_name)) {
+                fail_at(manifest, active_line[key], unit " depends on an inactive or unknown unit " dependency)
+                continue
+            }
+            if (active_phase[key] == "owner" && active_phase[dependency_key] == "downstream") {
+                fail_at(manifest, active_line[key], "owner depends on downstream unit: " unit)
+            }
+            if (active_phase[key] == active_phase[dependency_key] &&
+                active_order[key] >= active_order[dependency_key]) {
+                fail_at(manifest, active_line[key], unit " must stop before dependency " dependency)
+            }
+            must_stop_before[unit SUBSEP dependency] = 1
+        }
+    }
+    if (failed) exit 1
+    emit_phase("downstream")
+    emit_phase("owner")
+    if (failed) exit 1
+    for (key in merged_order) {
+        split(key, parts, SUBSEP)
+        unit = merged_order[key]
+        print parts[1] "|" parts[2] "|" unit
+    }
+}
+' "$incumbent_manifest" "$candidate_manifest"
+    )" || return 1
+    [ -n "$rows" ] || {
+        echo "rollout transition inventory is empty" >&2
+        return 1
+    }
+    printf '%s\n' "$rows" \
+        | LC_ALL=C sort -t '|' -k1,1 -k2,2n -k3,3
+}
+
 lm_realm_units() {
     _lru_realm="$1"
     case "$_lru_realm" in demo|mainnet|shared) ;; *) return 2 ;; esac

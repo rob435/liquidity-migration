@@ -110,6 +110,12 @@ impl FeedState {
         }
     }
 
+    pub(crate) fn reset_quote(&mut self, symbol: &str) {
+        if let Some(id) = self.table.get(symbol) {
+            self.books[id.0 as usize] = BookState::default();
+        }
+    }
+
     /// Absorb one parsed frame and say what it means.
     pub fn apply(&mut self, frame: &ParsedFrame<'_>, recv_ns: u64) -> Applied {
         match frame {
@@ -520,6 +526,33 @@ mod tests {
             apply(&mut s, &ob(101, "delta", r#"[["10.0","1.0"]]"#, "[]")),
             Applied::Resync(ResyncReason::DeltaBeforeSnapshot)
         );
+    }
+
+    #[test]
+    fn resetting_one_quote_preserves_its_ticker_delta_state() {
+        let mut state = feed_state();
+        apply(
+            &mut state,
+            &ob(
+                100,
+                "snapshot",
+                r#"[["10.0","1.5"]]"#,
+                r#"[["10.1","2.5"]]"#,
+            ),
+        );
+        let ticker_snapshot = r#"{"topic":"tickers.BTCUSDT","type":"snapshot","data":{"symbol":"BTCUSDT","lastPrice":"100.0","markPrice":"100.1","indexPrice":"100.2"},"cs":1,"ts":500}"#;
+        apply(&mut state, ticker_snapshot);
+
+        state.reset_quote("BTCUSDT");
+        assert_eq!(
+            apply(&mut state, &ob(101, "delta", r#"[["10.0","1.0"]]"#, "[]")),
+            Applied::Resync(ResyncReason::DeltaBeforeSnapshot)
+        );
+        let ticker_delta = r#"{"topic":"tickers.BTCUSDT","type":"delta","data":{"symbol":"BTCUSDT","indexPrice":"200.5"},"cs":2,"ts":600}"#;
+        let ticker = ticker(apply(&mut state, ticker_delta));
+        assert_eq!(ticker.last_px, 100.0);
+        assert_eq!(ticker.mark_px, 100.1);
+        assert_eq!(ticker.index_px, 200.5);
     }
 
     #[test]

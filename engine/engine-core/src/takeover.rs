@@ -1,7 +1,9 @@
 //! Stopped-runtime import of one native strategy's whole-sleeve state.
 
 use std::error::Error;
+use std::fs::OpenOptions;
 use std::io::Read;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
 use engine_types::{
@@ -472,9 +474,27 @@ fn checkpoint_from_source(
     Ok((checkpoint, translated.pending_events))
 }
 
-fn read_sources(
+fn same_source_snapshot(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    left.dev() == right.dev()
+        && left.ino() == right.ino()
+        && left.mode() == right.mode()
+        && left.nlink() == right.nlink()
+        && left.uid() == right.uid()
+        && left.gid() == right.gid()
+        && left.size() == right.size()
+        && left.mtime() == right.mtime()
+        && left.mtime_nsec() == right.mtime_nsec()
+        && left.ctime() == right.ctime()
+        && left.ctime_nsec() == right.ctime_nsec()
+}
+
+fn read_sources_with_before_open<F>(
     configured: &[(String, std::path::PathBuf)],
-) -> Result<Vec<StrategyImportSource>, Box<dyn Error>> {
+    mut before_open: F,
+) -> Result<Vec<StrategyImportSource>, Box<dyn Error>>
+where
+    F: FnMut(&Path),
+{
     if configured.is_empty() {
         return Err("import-strategy-state needs at least one --source NAME=PATH".into());
     }
@@ -497,9 +517,12 @@ fn read_sources(
         }
         previous = Some(name);
         let metadata = std::fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        if metadata.file_type().is_symlink()
+            || !metadata.file_type().is_file()
+            || metadata.nlink() != 1
+        {
             return Err(format!(
-                "import source {} is not a regular non-symlink file",
+                "import source {} is not a single regular non-symlink file",
                 path.display()
             )
             .into());
@@ -513,26 +536,34 @@ fn read_sources(
             )
             .into());
         }
-        total = total.saturating_add(metadata.len());
-        if total > MAX_IMPORT_BUNDLE_BYTES {
-            return Err(
-                format!("import source bundle exceeds {MAX_IMPORT_BUNDLE_BYTES} bytes").into(),
-            );
-        }
-        let mut file = std::fs::File::open(path)?;
+        before_open(path);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?;
         let opened = file.metadata()?;
-        if !opened.file_type().is_file() || opened.len() != metadata.len() {
+        if !opened.file_type().is_file()
+            || opened.nlink() != 1
+            || !same_source_snapshot(&metadata, &opened)
+        {
             return Err(format!(
                 "import source {} changed while it was opened",
                 path.display()
             )
             .into());
         }
+        total = total.saturating_add(opened.len());
+        if total > MAX_IMPORT_BUNDLE_BYTES {
+            return Err(
+                format!("import source bundle exceeds {MAX_IMPORT_BUNDLE_BYTES} bytes").into(),
+            );
+        }
         let mut bytes = Vec::with_capacity(opened.len() as usize);
         file.by_ref()
             .take(MAX_IMPORT_SOURCE_BYTES + 1)
             .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 != opened.len() {
+        let after = file.metadata()?;
+        if bytes.len() as u64 != opened.len() || !same_source_snapshot(&opened, &after) {
             return Err(
                 format!("import source {} changed while it was read", path.display()).into(),
             );
@@ -543,6 +574,12 @@ fn read_sources(
         });
     }
     Ok(sources)
+}
+
+fn read_sources(
+    configured: &[(String, std::path::PathBuf)],
+) -> Result<Vec<StrategyImportSource>, Box<dyn Error>> {
+    read_sources_with_before_open(configured, |_| {})
 }
 
 fn source_bundle_sha256(sources: &[StrategyImportSource]) -> String {
@@ -1293,5 +1330,20 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("non-symlink"));
+    }
+
+    #[test]
+    fn source_swap_between_identity_check_and_open_is_refused() {
+        let source = crate::testpath::temp_path("takeover-source-swap");
+        let replacement = crate::testpath::temp_path("takeover-source-replacement");
+        std::fs::write(source.path(), b"first").unwrap();
+        std::fs::write(replacement.path(), b"other").unwrap();
+
+        let error =
+            read_sources_with_before_open(&[("state".into(), source.path().to_path_buf())], |_| {
+                std::fs::rename(replacement.path(), source.path()).unwrap()
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("changed while it was opened"));
     }
 }

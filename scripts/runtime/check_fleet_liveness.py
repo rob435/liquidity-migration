@@ -53,6 +53,38 @@ from liquidity_migration.ops.telegram import as_block, send_telegram_message  # 
 # Severity order for message framing only.
 CRITICAL = "CRITICAL"
 WARNING = "WARNING"
+_LONG_DECISION_MAX_AGE_MS = 26 * 60 * 60 * 1000
+_CARRY_DECISION_MAX_AGE_MS = 26 * 60 * 60 * 1000
+_SIGNAL_CYCLE_STALE_AFTER_CADENCES = 3
+_SPOOL_CLASSES = ("current", "lifecycle", "catchup", "other")
+
+
+def _signal_feature_contract_sha256(
+    signal_config: dict[str, Any], sleeve: str
+) -> str:
+    if sleeve == "long":
+        feature_physics = signal_config["long"]["features"]
+    elif sleeve == "carry":
+        feature_physics = signal_config["carry_feature_physics"]
+    else:
+        raise ValueError("signal feature sleeve must be long or carry")
+    contract = {
+        "schema_version": signal_config["schema_version"],
+        "kind": signal_config["kind"],
+        "routing_source": signal_config["routing"]["source"],
+        "sources": signal_config["sources"],
+        "public_market_realm": signal_config["live"]["public_market_realm"],
+        "sleeve": sleeve,
+        "feature_physics": feature_physics,
+    }
+    canonical = json.dumps(
+        contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _plain_name(label: str) -> str:
@@ -170,6 +202,75 @@ class UnitRuntime:
     invocation_id: str | None
     active_age_minutes: float | None
     main_pid: int | None = None
+    memory_current_bytes: int | None = None
+    memory_max_bytes: int | None = None
+
+
+def evaluate_signal_worker_memory(
+    runtime: UnitRuntime | None,
+    *,
+    label: str,
+) -> Alert | None:
+    """Report finite systemd memory pressure before the worker reaches OOM."""
+    if runtime is None:
+        return None
+    used = runtime.memory_current_bytes
+    limit = runtime.memory_max_bytes
+    if type(used) is not int or used < 0 or type(limit) is not int or limit <= 0:
+        return None
+    used_fraction = used / limit
+    if used_fraction < 0.75:
+        return None
+    severity = CRITICAL if used_fraction >= 0.90 else WARNING
+    percent = used_fraction * 100
+    return Alert(
+        key=f"signal-worker:{label}:memory",
+        severity=severity,
+        message=(
+            f"{label}: signal-worker memory is near its systemd limit: "
+            f"MemoryCurrent={used} bytes ({used / (1024 * 1024):.2f} MiB); "
+            f"MemoryMax={limit} bytes ({limit / (1024 * 1024):.2f} MiB); "
+            f"usage={percent:.6f}%"
+        ),
+        headline=(
+            f"{_plain_name(label)}: signal-worker memory is at {percent:.2f}% "
+            "of its limit."
+        ),
+    )
+
+
+def _append_cycle_clock_problem(
+    payload: dict[str, Any],
+    *,
+    timestamp_key: str,
+    cadence_key: str,
+    expected_cadence_ms: int | None,
+    now_ms: int,
+    heartbeat_max_age_ms: float,
+    problems: list[str],
+) -> None:
+    """Require one durable sleeve completion within three configured cadences."""
+    timestamp = payload.get(timestamp_key)
+    if type(timestamp) is not int or timestamp <= 0:
+        problems.append(f"{timestamp_key} is missing")
+        return
+    age_ms = now_ms - timestamp
+    if age_ms < 0:
+        problems.append(f"{timestamp_key} is future-dated")
+        return
+    reported_cadence = payload.get(cadence_key)
+    cadence_ms = expected_cadence_ms if expected_cadence_ms is not None else reported_cadence
+    if type(cadence_ms) is not int or cadence_ms <= 0:
+        return
+    stale_after_ms = max(
+        cadence_ms * _SIGNAL_CYCLE_STALE_AFTER_CADENCES,
+        heartbeat_max_age_ms,
+    )
+    if age_ms > stale_after_ms:
+        problems.append(
+            f"{timestamp_key} is {age_ms / 1000:.0f}s old "
+            f"(limit {stale_after_ms / 1000:.0f}s)"
+        )
 
 
 def evaluate_signal_worker_heartbeat(
@@ -180,50 +281,572 @@ def evaluate_signal_worker_heartbeat(
     expected_pid: int | None,
     expected_hashes: dict[str, str],
     label: str,
-) -> Alert | None:
-    """Validate the Rust worker's exact running generation and public inputs."""
-    problems: list[str] = []
-    if payload.get("schema_version") != 1:
-        problems.append("schema_version is not 1")
+    allow_starting: bool = False,
+    expected_long_cycle_cadence_ms: int | None = None,
+    expected_carry_cycle_cadence_ms: int | None = None,
+) -> list[Alert]:
+    """Classify worker identity, producer, sleeve, spool, and transport health."""
+    producer_problems: list[str] = []
+    schema_version = payload.get("schema_version")
+    if type(schema_version) is not int or schema_version != 1:
+        producer_problems.append("schema_version is not integer 1")
     if payload.get("kind") != "liquidity_migration_signal_worker_heartbeat":
-        problems.append("kind is not the directional worker contract")
-    if payload.get("status") != "ready":
-        problems.append("status is not ready")
+        producer_problems.append("kind is not the directional worker contract")
     if payload.get("credential_free") is not True:
-        problems.append("credential_free is not true")
+        producer_problems.append("credential_free is not true")
     if payload.get("public_market_realm") != "mainnet" or payload.get(
         "public_bybit_host"
     ) != "api.bybit.com":
-        problems.append("public Bybit source is not mainnet api.bybit.com")
-    if expected_pid is None or payload.get("pid") != expected_pid:
-        problems.append("heartbeat process id is not the current systemd process")
+        producer_problems.append("public Bybit source is not mainnet api.bybit.com")
+    pid = payload.get("pid")
+    if type(pid) is not int or not 0 < pid <= 0xFFFF_FFFF:
+        producer_problems.append("pid is not a positive u32")
+    elif expected_pid is None or pid != expected_pid:
+        producer_problems.append("heartbeat process id is not the current systemd process")
     updated_at_ms = payload.get("updated_at_ms")
     if type(updated_at_ms) is not int:
-        problems.append("updated_at_ms is missing")
+        producer_problems.append("updated_at_ms is missing")
     else:
         age_ms = now_ms - updated_at_ms
         if age_ms < 0:
-            problems.append("heartbeat is future-dated")
+            producer_problems.append("heartbeat is future-dated")
         elif age_ms > max_age_seconds * 1000:
-            problems.append(f"heartbeat is {age_ms / 1000:.0f}s old")
-    for key, expected in expected_hashes.items():
-        if payload.get(key) != expected:
-            problems.append(f"{key} does not match the installed input")
-    for key in ("last_input_sequence", "long_output_sequence", "carry_output_sequence"):
-        if type(payload.get(key)) is not int or payload[key] <= 0:
-            problems.append(f"{key} has not advanced")
-    if type(payload.get("last_observed_ts_ms")) is not int or payload[
-        "last_observed_ts_ms"
+            producer_problems.append(f"heartbeat is {age_ms / 1000:.0f}s old")
+    for hash_key, expected_hash in expected_hashes.items():
+        if payload.get(hash_key) != expected_hash:
+            producer_problems.append(
+                f"{hash_key} does not match the installed input"
+            )
+    for hash_key in (
+        "long_feature_contract_sha256",
+        "carry_feature_contract_sha256",
+    ):
+        digest = payload.get(hash_key)
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            producer_problems.append(f"{hash_key} is not lowercase sha256")
+    for cadence_key, expected_cadence in (
+        ("long_cycle_cadence_ms", expected_long_cycle_cadence_ms),
+        ("carry_cycle_cadence_ms", expected_carry_cycle_cadence_ms),
+    ):
+        cadence = payload.get(cadence_key)
+        if type(cadence) is not int or cadence <= 0:
+            producer_problems.append(f"{cadence_key} is invalid")
+        elif expected_cadence is not None and cadence != expected_cadence:
+            producer_problems.append(
+                f"{cadence_key} does not match the installed cadence"
+            )
+
+    status = payload.get("status")
+    if status == "starting":
+        if not allow_starting:
+            producer_problems.append("status is still starting outside startup grace")
+        if not producer_problems:
+            return []
+        return [
+            Alert(
+                key=f"signal-worker:{label}:producer",
+                severity=CRITICAL,
+                message=f"{label}: producer continuity failed: "
+                + "; ".join(producer_problems),
+                headline=f"{_plain_name(label)}: signal producer is not live.",
+            )
+        ]
+    if status not in ("ready", "degraded"):
+        producer_problems.append(f"status is not ready or degraded: {status!r}")
+        return [
+            Alert(
+                key=f"signal-worker:{label}:producer",
+                severity=CRITICAL,
+                message=f"{label}: producer continuity failed: "
+                + "; ".join(producer_problems),
+                headline=f"{_plain_name(label)}: signal producer is not live.",
+            )
+        ]
+
+    if type(payload.get("last_input_sequence")) is not int or payload[
+        "last_input_sequence"
     ] <= 0:
-        problems.append("no causal public observation is recorded")
-    if not problems:
-        return None
-    return Alert(
-        key=f"signal-worker:{label}",
-        severity=CRITICAL,
-        message=f"{label}: " + "; ".join(problems),
-        headline=f"{_plain_name(label)}: Rust signal input is stale, mismatched, or not ready.",
+        producer_problems.append("last_input_sequence has not advanced")
+    source_generation = payload.get("source_generation")
+    if (
+        not isinstance(source_generation, str)
+        or len(source_generation) != 32
+        or any(character not in "0123456789abcdef" for character in source_generation)
+    ):
+        producer_problems.append("source_generation is not a durable lowercase-hex identity")
+    last_observed_ts_ms = payload.get("last_observed_ts_ms")
+    if type(last_observed_ts_ms) is not int or last_observed_ts_ms <= 0:
+        producer_problems.append("no causal public observation is recorded")
+    else:
+        observation_age_ms = now_ms - last_observed_ts_ms
+        if observation_age_ms < 0:
+            producer_problems.append("causal public observation is future-dated")
+        elif observation_age_ms > max_age_seconds * 1000:
+            producer_problems.append(
+                f"causal public observation is {observation_age_ms / 1000:.0f}s old"
+            )
+
+    long_problems: list[str] = []
+    if type(payload.get("long_output_sequence")) is not int or payload[
+        "long_output_sequence"
+    ] <= 0:
+        long_problems.append("long_output_sequence has not advanced")
+    long_ts_ms = payload.get("last_long_feature_ts_ms")
+    if type(long_ts_ms) is not int or long_ts_ms <= 0:
+        long_problems.append("last_long_feature_ts_ms is missing")
+    else:
+        long_age_ms = now_ms - long_ts_ms
+        if long_age_ms < 0:
+            long_problems.append("last_long_feature_ts_ms is future-dated")
+        elif long_age_ms > _LONG_DECISION_MAX_AGE_MS:
+            long_problems.append(
+                f"last_long_feature_ts_ms is {long_age_ms / 3_600_000:.1f}h old"
+            )
+    _append_cycle_clock_problem(
+        payload,
+        timestamp_key="last_long_cycle_completed_wall_ts_ms",
+        cadence_key="long_cycle_cadence_ms",
+        expected_cadence_ms=expected_long_cycle_cadence_ms,
+        now_ms=now_ms,
+        heartbeat_max_age_ms=max_age_seconds * 1000,
+        problems=long_problems,
     )
+
+    carry_problems: list[str] = []
+    if type(payload.get("carry_output_sequence")) is not int or payload[
+        "carry_output_sequence"
+    ] <= 0:
+        carry_problems.append("carry_output_sequence has not advanced")
+    carry_ts_ms = payload.get("last_carry_decision_ts_ms")
+    if type(carry_ts_ms) is not int or carry_ts_ms <= 0:
+        carry_problems.append("last_carry_decision_ts_ms is missing")
+    else:
+        carry_age_ms = now_ms - carry_ts_ms
+        if carry_age_ms < 0:
+            carry_problems.append("last_carry_decision_ts_ms is future-dated")
+        elif carry_age_ms > _CARRY_DECISION_MAX_AGE_MS:
+            carry_problems.append(
+                f"last_carry_decision_ts_ms is {carry_age_ms / 3_600_000:.1f}h old"
+            )
+    _append_cycle_clock_problem(
+        payload,
+        timestamp_key="last_carry_cycle_completed_wall_ts_ms",
+        cadence_key="carry_cycle_cadence_ms",
+        expected_cadence_ms=expected_carry_cycle_cadence_ms,
+        now_ms=now_ms,
+        heartbeat_max_age_ms=max_age_seconds * 1000,
+        problems=carry_problems,
+    )
+
+    spool_problems: list[str] = []
+    for used_key, cap_key in (
+        ("spool_files", "spool_file_cap"),
+        ("spool_bytes", "spool_byte_cap"),
+    ):
+        used = payload.get(used_key)
+        cap = payload.get(cap_key)
+        if type(used) is not int or used < 0:
+            spool_problems.append(f"{used_key} is invalid")
+        if type(cap) is not int or cap <= 0:
+            spool_problems.append(f"{cap_key} is invalid")
+        if type(used) is int and used >= 0 and type(cap) is int and cap > 0:
+            if used > cap:
+                spool_problems.append(f"{used_key} exceeds {cap_key}")
+            elif used == cap:
+                spool_problems.append(f"{used_key} has reached {cap_key}")
+    spool_bytes = payload.get("spool_bytes")
+    spool_byte_cap = payload.get("spool_byte_cap")
+    spool_byte_soft_threshold = payload.get("spool_byte_soft_threshold")
+    if type(spool_byte_soft_threshold) is not int or spool_byte_soft_threshold <= 0:
+        spool_problems.append("spool_byte_soft_threshold is invalid")
+    elif type(spool_byte_cap) is int and spool_byte_cap > 0:
+        if spool_byte_soft_threshold > spool_byte_cap:
+            spool_problems.append("spool_byte_soft_threshold exceeds spool_byte_cap")
+        elif (
+            type(spool_bytes) is int
+            and 0 <= spool_bytes <= spool_byte_cap
+            and spool_bytes >= spool_byte_soft_threshold
+        ):
+            spool_problems.append("spool_bytes has reached spool_byte_soft_threshold")
+    coalesced = payload.get("replaceable_outputs_coalesced")
+    if type(coalesced) is not int or coalesced < 0:
+        spool_problems.append("replaceable_outputs_coalesced is invalid")
+    if payload.get("spool_backpressured") is True:
+        spool_problems.append("signal spool is backpressured")
+    elif payload.get("spool_backpressured") is not False:
+        spool_problems.append("spool_backpressured is invalid")
+
+    spool_class_maps: dict[str, dict[str, object]] = {}
+    for key, minimum in (
+        ("spool_class_files", 0),
+        ("spool_class_bytes", 0),
+        ("spool_class_file_caps", 1),
+        ("spool_class_byte_caps", 1),
+        ("spool_class_byte_soft_thresholds", 1),
+    ):
+        value = payload.get(key)
+        if type(value) is not dict:
+            spool_problems.append(f"{key} is invalid")
+            continue
+        spool_class_maps[key] = value
+        if set(value) != set(_SPOOL_CLASSES):
+            spool_problems.append(f"{key} does not contain exactly the spool classes")
+        invalid_classes = [
+            class_name
+            for class_name in _SPOOL_CLASSES
+            if type(value.get(class_name)) is not int
+            or value[class_name] < minimum
+        ]
+        if invalid_classes:
+            spool_problems.append(
+                f"{key} has invalid values for {', '.join(invalid_classes)}"
+            )
+
+    class_files = spool_class_maps.get("spool_class_files", {})
+    class_bytes = spool_class_maps.get("spool_class_bytes", {})
+    class_file_caps = spool_class_maps.get("spool_class_file_caps", {})
+    class_byte_caps = spool_class_maps.get("spool_class_byte_caps", {})
+    class_byte_soft_thresholds = spool_class_maps.get(
+        "spool_class_byte_soft_thresholds", {}
+    )
+    for total_key, class_values in (
+        ("spool_files", class_files),
+        ("spool_bytes", class_bytes),
+    ):
+        total = payload.get(total_key)
+        raw_class_totals = tuple(
+            class_values.get(class_name) for class_name in _SPOOL_CLASSES
+        )
+        class_totals = [
+            value
+            for value in raw_class_totals
+            if type(value) is int and value >= 0
+        ]
+        if (
+            type(total) is int
+            and total >= 0
+            and set(class_values) == set(_SPOOL_CLASSES)
+            and len(class_totals) == len(_SPOOL_CLASSES)
+            and total != sum(class_totals)
+        ):
+            spool_problems.append(
+                f"{total_key} does not equal the sum of its spool class map"
+            )
+    for class_name in _SPOOL_CLASSES:
+        files = class_files.get(class_name)
+        file_cap = class_file_caps.get(class_name)
+        if (
+            type(files) is int
+            and files >= 0
+            and type(file_cap) is int
+            and file_cap > 0
+        ):
+            if files > file_cap:
+                spool_problems.append(
+                    f"spool_class_files[{class_name}] exceeds its file cap"
+                )
+            elif files == file_cap:
+                spool_problems.append(
+                    f"spool_class_files[{class_name}] has reached its file cap"
+                )
+        bytes_used = class_bytes.get(class_name)
+        byte_cap = class_byte_caps.get(class_name)
+        byte_soft_threshold = class_byte_soft_thresholds.get(class_name)
+        if (
+            type(bytes_used) is int
+            and bytes_used >= 0
+            and type(byte_cap) is int
+            and byte_cap > 0
+        ):
+            if bytes_used > byte_cap:
+                spool_problems.append(
+                    f"spool_class_bytes[{class_name}] exceeds its byte cap"
+                )
+            elif (
+                type(byte_soft_threshold) is int
+                and byte_soft_threshold > 0
+                and bytes_used >= byte_soft_threshold
+            ):
+                spool_problems.append(
+                    f"spool_class_bytes[{class_name}] has reached its byte soft threshold"
+                )
+        if (
+            type(byte_soft_threshold) is int
+            and byte_soft_threshold > 0
+            and type(byte_cap) is int
+            and byte_cap > 0
+            and byte_soft_threshold > byte_cap
+        ):
+            spool_problems.append(
+                f"spool_class_byte_soft_thresholds[{class_name}] exceeds its byte cap"
+            )
+
+    backpressured_classes = payload.get("spool_backpressured_classes")
+    if (
+        type(backpressured_classes) is not list
+        or any(type(class_name) is not str for class_name in backpressured_classes)
+        or len(set(backpressured_classes)) != len(backpressured_classes)
+    ):
+        spool_problems.append("spool_backpressured_classes is invalid")
+    else:
+        unknown_classes = sorted(set(backpressured_classes) - set(_SPOOL_CLASSES))
+        if unknown_classes:
+            spool_problems.append(
+                "spool_backpressured_classes contains unknown classes: "
+                + ", ".join(unknown_classes)
+            )
+        if backpressured_classes:
+            spool_problems.append(
+                "signal spool classes are backpressured: "
+                + ", ".join(backpressured_classes)
+            )
+
+    transport_problems: list[str] = []
+    transport_critical_problems: list[str] = []
+    websocket_fallback_required = False
+    ws_connected = payload.get("bybit_ws_connected")
+    if type(ws_connected) is not bool:
+        transport_critical_problems.append("bybit_ws_connected is invalid")
+        websocket_fallback_required = True
+    elif not ws_connected:
+        transport_problems.append("Bybit public WebSocket is disconnected")
+        websocket_fallback_required = True
+    ws_epoch = payload.get("bybit_ws_epoch")
+    if type(ws_epoch) is not int or ws_epoch < 0:
+        transport_critical_problems.append("bybit_ws_epoch is invalid")
+        websocket_fallback_required = True
+    elif ws_epoch == 0:
+        transport_problems.append("Bybit public WebSocket has no completed subscription epoch")
+        websocket_fallback_required = True
+    ws_gap_open = payload.get("bybit_ws_gap_open")
+    if ws_gap_open is True:
+        transport_problems.append("Bybit public WebSocket repair gap is open")
+        websocket_fallback_required = True
+    elif ws_gap_open is not False:
+        transport_critical_problems.append("bybit_ws_gap_open is invalid")
+        websocket_fallback_required = True
+    gap_open_since_ms = payload.get("bybit_ws_gap_open_since_wall_ts_ms")
+    valid_gap_open_since = False
+    valid_gap_open_since_ms: int | None = None
+    if ws_gap_open is True:
+        if type(gap_open_since_ms) is not int or gap_open_since_ms <= 0:
+            transport_critical_problems.append("open WebSocket gap has no start clock")
+        elif gap_open_since_ms > now_ms:
+            transport_critical_problems.append("WebSocket gap start is future-dated")
+        else:
+            valid_gap_open_since = True
+            valid_gap_open_since_ms = gap_open_since_ms
+    elif gap_open_since_ms is not None:
+        transport_critical_problems.append("closed WebSocket gap still has a start clock")
+    for key in ("bybit_ws_reconnect_count", "bybit_ws_fault_count"):
+        value = payload.get(key)
+        if type(value) is not int or value < 0:
+            transport_critical_problems.append(f"{key} is invalid")
+    frame_ts_ms = payload.get("bybit_ws_last_frame_ts_ms")
+    if type(frame_ts_ms) is not int or frame_ts_ms <= 0:
+        transport_problems.append("Bybit public WebSocket has no data frame")
+        websocket_fallback_required = True
+    else:
+        frame_age_ms = now_ms - frame_ts_ms
+        if frame_age_ms < 0:
+            transport_critical_problems.append(
+                "Bybit public WebSocket data frame is future-dated"
+            )
+        elif frame_age_ms > max_age_seconds * 1000:
+            transport_problems.append(
+                f"Bybit public WebSocket data frame is {frame_age_ms / 1000:.0f}s old"
+            )
+            websocket_fallback_required = True
+    ticker_rows = payload.get("bybit_ws_ticker_rows")
+    ticker_capacity = payload.get("bybit_ws_ticker_capacity")
+    valid_ticker_capacity = type(ticker_capacity) is int and ticker_capacity > 0
+    if type(ticker_rows) is not int or ticker_rows < 0 or not valid_ticker_capacity:
+        transport_critical_problems.append("Bybit public WebSocket ticker bounds are invalid")
+        websocket_fallback_required = True
+    ticker_coverage_complete = payload.get("bybit_ws_ticker_coverage_complete")
+    if type(ticker_coverage_complete) is not bool:
+        transport_critical_problems.append(
+            "bybit_ws_ticker_coverage_complete is invalid"
+        )
+        websocket_fallback_required = True
+    elif valid_ticker_capacity and type(ticker_rows) is int and ticker_rows >= 0 and (
+        ticker_rows != ticker_capacity or not ticker_coverage_complete
+    ):
+        transport_problems.append("Bybit public WebSocket ticker population is incomplete")
+        websocket_fallback_required = True
+    for accepted_key, quarantined_key, topic_name in (
+        (
+            "bybit_ws_ticker_topics_accepted",
+            "bybit_ws_ticker_topics_quarantined",
+            "ticker",
+        ),
+        (
+            "bybit_ws_kline_topics_accepted",
+            "bybit_ws_kline_topics_quarantined",
+            "kline",
+        ),
+    ):
+        accepted = payload.get(accepted_key)
+        quarantined = payload.get(quarantined_key)
+        if type(accepted) is not int or accepted < 0:
+            transport_critical_problems.append(f"{accepted_key} is invalid")
+            if topic_name == "ticker":
+                websocket_fallback_required = True
+        elif valid_ticker_capacity and accepted != ticker_capacity:
+            transport_problems.append(
+                f"Bybit public WebSocket {topic_name} topic population is incomplete"
+            )
+            if topic_name == "ticker":
+                websocket_fallback_required = True
+        if type(quarantined) is not int or quarantined < 0:
+            transport_critical_problems.append(f"{quarantined_key} is invalid")
+            if topic_name == "ticker":
+                websocket_fallback_required = True
+        elif quarantined > 0:
+            transport_problems.append(
+                f"Bybit public WebSocket has {quarantined} quarantined {topic_name} topics"
+            )
+            if topic_name == "ticker":
+                websocket_fallback_required = True
+    queued_frames = payload.get("bybit_ws_queued_frames")
+    queue_capacity = payload.get("bybit_ws_queue_capacity")
+    if (
+        type(queued_frames) is not int
+        or type(queue_capacity) is not int
+        or queued_frames < 0
+        or queue_capacity <= 0
+        or queued_frames > queue_capacity
+    ):
+        transport_critical_problems.append("Bybit public WebSocket queue bounds are invalid")
+
+    rest_success_count = payload.get("rest_ticker_success_count")
+    rest_success_ts_ms = payload.get("rest_ticker_last_success_wall_ts_ms")
+    valid_rest_success = False
+    valid_rest_success_ts_ms: int | None = None
+    if type(rest_success_count) is not int or rest_success_count < 0:
+        transport_critical_problems.append("rest_ticker_success_count is invalid")
+    elif rest_success_count == 0:
+        if rest_success_ts_ms is not None:
+            transport_critical_problems.append(
+                "REST ticker success clock exists without a success count"
+            )
+    elif type(rest_success_ts_ms) is not int or rest_success_ts_ms <= 0:
+        transport_critical_problems.append("REST ticker successes have no completion clock")
+    elif rest_success_ts_ms > now_ms:
+        transport_critical_problems.append("REST ticker success clock is future-dated")
+    else:
+        valid_rest_success = True
+        valid_rest_success_ts_ms = rest_success_ts_ms
+
+    rest_failure_count = payload.get("rest_ticker_failure_count")
+    rest_failure_ts_ms = payload.get("rest_ticker_last_failure_wall_ts_ms")
+    if type(rest_failure_count) is not int or rest_failure_count < 0:
+        transport_critical_problems.append("rest_ticker_failure_count is invalid")
+    elif rest_failure_count == 0:
+        if rest_failure_ts_ms is not None:
+            transport_critical_problems.append(
+                "REST ticker failure clock exists without a failure count"
+            )
+    elif type(rest_failure_ts_ms) is not int or rest_failure_ts_ms <= 0:
+        transport_critical_problems.append("REST ticker failures have no completion clock")
+    elif rest_failure_ts_ms > now_ms:
+        transport_critical_problems.append("REST ticker failure clock is future-dated")
+
+    if websocket_fallback_required:
+        if not valid_rest_success:
+            transport_critical_problems.append(
+                "WebSocket degradation has no successful REST ticker fallback"
+            )
+        elif valid_rest_success_ts_ms is not None:
+            rest_success_age_ms = now_ms - valid_rest_success_ts_ms
+            if rest_success_age_ms > max_age_seconds * 1000:
+                transport_critical_problems.append(
+                    f"REST ticker fallback is {rest_success_age_ms / 1000:.0f}s old"
+                )
+            elif (
+                valid_gap_open_since
+                and valid_gap_open_since_ms is not None
+                and valid_rest_success_ts_ms < valid_gap_open_since_ms
+            ):
+                transport_critical_problems.append(
+                    "REST ticker fallback has not completed since the WebSocket gap opened"
+                )
+
+    alerts: list[Alert] = []
+    if producer_problems:
+        alerts.append(
+            Alert(
+                key=f"signal-worker:{label}:producer",
+                severity=CRITICAL,
+                message=f"{label}: producer continuity failed: "
+                + "; ".join(producer_problems),
+                headline=f"{_plain_name(label)}: signal producer continuity stopped.",
+            )
+        )
+    if long_problems:
+        alerts.append(
+            Alert(
+                key=f"signal-worker:{label}:long",
+                severity=CRITICAL,
+                message=f"{label}: LONG decision continuity failed: "
+                + "; ".join(long_problems),
+                headline=f"{_plain_name(label)}: LONG decisions are stalled.",
+            )
+        )
+    if carry_problems:
+        alerts.append(
+            Alert(
+                key=f"signal-worker:{label}:carry",
+                severity=CRITICAL,
+                message=f"{label}: CARRY decision continuity failed: "
+                + "; ".join(carry_problems),
+                headline=f"{_plain_name(label)}: CARRY decisions are stalled.",
+            )
+        )
+    if spool_problems:
+        alerts.append(
+            Alert(
+                key=f"signal-worker:{label}:spool",
+                severity=CRITICAL,
+                message=f"{label}: signal spool cannot guarantee publication: "
+                + "; ".join(spool_problems),
+                headline=f"{_plain_name(label)}: signal spool is blocked or invalid.",
+            )
+        )
+    if transport_problems or transport_critical_problems:
+        continuity_healthy = not (
+            producer_problems or long_problems or carry_problems or spool_problems
+        )
+        severity = (
+            CRITICAL
+            if transport_critical_problems or not continuity_healthy
+            else WARNING
+        )
+        context = (
+            "fresh REST fallback, producer, and sleeve clocks remain within their liveness windows"
+            if continuity_healthy and websocket_fallback_required
+            else "fresh producer and sleeve clocks remain within their liveness windows"
+            if continuity_healthy
+            else "producer or sleeve continuity is also failing"
+        )
+        alerts.append(
+            Alert(
+                key=f"signal-worker:{label}:transport",
+                severity=severity,
+                message=f"{label}: public WebSocket transport is degraded while {context}: "
+                + "; ".join([*transport_problems, *transport_critical_problems]),
+                headline=(
+                    f"{_plain_name(label)}: WebSocket degraded; signal decisions remain live."
+                    if severity == WARNING and continuity_healthy
+                    else f"{_plain_name(label)}: public stream transport is invalid."
+                ),
+            )
+        )
+    return alerts
 
 
 def gather_signal_worker_alerts(
@@ -236,17 +859,38 @@ def gather_signal_worker_alerts(
     engine_config: Path,
     universe: Path,
     runtime: UnitRuntime | None,
-    now_ms: int,
+    now_ms: int | None,
     max_age_seconds: float,
     startup_grace_minutes: float,
     label: str,
 ) -> list[Alert]:
     try:
+        signal_config_bytes = signal_config.read_bytes()
+        signal_config_payload = json.loads(signal_config_bytes)
+        if not isinstance(signal_config_payload, dict):
+            raise ValueError("signal config is not an object")
+        live_config = signal_config_payload["live"]
+        if not isinstance(live_config, dict):
+            raise ValueError("signal config live section is not an object")
+        expected_long_cycle_cadence_ms = live_config["kline_cadence_ms"]
+        expected_carry_cycle_cadence_ms = live_config["kline_cadence_ms"]
+        for cadence in (
+            expected_long_cycle_cadence_ms,
+            expected_carry_cycle_cadence_ms,
+        ):
+            if type(cadence) is not int or cadence <= 0:
+                raise ValueError("signal config cycle cadence is invalid")
         universe_payload = json.loads(universe.read_bytes())
         expected_hashes = {
-            "signal_config_sha256": hashlib.sha256(signal_config.read_bytes()).hexdigest(),
+            "signal_config_sha256": hashlib.sha256(signal_config_bytes).hexdigest(),
             "long_rule_sha256": hashlib.sha256(long_rule.read_bytes()).hexdigest(),
+            "long_feature_contract_sha256": _signal_feature_contract_sha256(
+                signal_config_payload, "long"
+            ),
             "carry_config_sha256": hashlib.sha256(carry_config.read_bytes()).hexdigest(),
+            "carry_feature_contract_sha256": _signal_feature_contract_sha256(
+                signal_config_payload, "carry"
+            ),
             "operational_config_sha256": hashlib.sha256(
                 operational_config.read_bytes()
             ).hexdigest(),
@@ -257,26 +901,33 @@ def gather_signal_worker_alerts(
         payload = json.loads(heartbeat_path.read_bytes())
         if not isinstance(payload, dict):
             raise ValueError("heartbeat is not an object")
-        alert = evaluate_signal_worker_heartbeat(
+        evaluation_now_ms = _now_ms() if now_ms is None else now_ms
+        alerts = evaluate_signal_worker_heartbeat(
             payload,
-            now_ms=now_ms,
+            now_ms=evaluation_now_ms,
             max_age_seconds=max_age_seconds,
             expected_pid=runtime.main_pid if runtime is not None else None,
             expected_hashes=expected_hashes,
             label=label,
+            allow_starting=_within_startup_grace(
+                runtime, max_age_minutes=startup_grace_minutes
+            ),
+            expected_long_cycle_cadence_ms=expected_long_cycle_cadence_ms,
+            expected_carry_cycle_cadence_ms=expected_carry_cycle_cadence_ms,
         )
     except (KeyError, OSError, TypeError, ValueError) as exc:
-        alert = Alert(
-            key=f"signal-worker:{label}",
-            severity=CRITICAL,
-            message=f"{label}: signal heartbeat or installed input is unreadable: {type(exc).__name__}: {exc}",
-            headline=f"{_plain_name(label)}: Rust signal heartbeat is unreadable.",
-        )
-    if alert is None:
-        return []
-    if _within_startup_grace(runtime, max_age_minutes=startup_grace_minutes):
-        return []
-    return [alert]
+        alerts = [
+            Alert(
+                key=f"signal-worker:{label}:producer",
+                severity=CRITICAL,
+                message=f"{label}: signal heartbeat or installed input is unreadable: {type(exc).__name__}: {exc}",
+                headline=f"{_plain_name(label)}: Rust signal heartbeat is unreadable.",
+            )
+        ]
+    memory_alert = evaluate_signal_worker_memory(runtime, label=label)
+    if memory_alert is not None:
+        alerts.append(memory_alert)
+    return alerts
 
 
 def _within_startup_grace(
@@ -1181,10 +1832,26 @@ def _boottime_ns() -> int | None:
         return None
 
 
-def _unit_runtime_metadata(units: list[str]) -> dict[str, UnitRuntime]:
-    """Read generation id and monotonic active age for systemd services.
+def _parse_systemd_byte_count(raw: str | None) -> int | None:
+    """Parse one systemd byte property without turning probe noise into an alert."""
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value or value.lower() in {"infinity", "[not set]", "n/a"}:
+        return None
+    try:
+        parsed = int(value, 10)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
 
-    Missing or malformed metadata yields no signal-worker startup grace.
+
+def _unit_runtime_metadata(units: list[str]) -> dict[str, UnitRuntime]:
+    """Read generation, active age, process, and memory for systemd services.
+
+    Missing or malformed identity metadata yields no signal-worker startup
+    grace. Missing, unlimited, or malformed memory metadata is unavailable and
+    never changes the health of an otherwise healthy worker.
     """
     boot_ns = _boottime_ns()
     metadata: dict[str, UnitRuntime] = {}
@@ -1198,6 +1865,8 @@ def _unit_runtime_metadata(units: list[str]) -> dict[str, UnitRuntime]:
                     "--property=InvocationID",
                     "--property=ActiveEnterTimestampMonotonic",
                     "--property=MainPID",
+                    "--property=MemoryCurrent",
+                    "--property=MemoryMax",
                 ],
                 capture_output=True,
                 text=True,
@@ -1210,6 +1879,10 @@ def _unit_runtime_metadata(units: list[str]) -> dict[str, UnitRuntime]:
             invocation_id = validate_systemd_invocation_id(raw_invocation_id) if raw_invocation_id is not None else None
             active_enter_us = int(values.get("ActiveEnterTimestampMonotonic") or "0")
             main_pid_value = int(values.get("MainPID") or "0")
+            memory_current_bytes = _parse_systemd_byte_count(
+                values.get("MemoryCurrent")
+            )
+            memory_max_bytes = _parse_systemd_byte_count(values.get("MemoryMax"))
             active_age_minutes: float | None = None
             if boot_ns is not None and active_enter_us > 0:
                 age_ns = boot_ns - active_enter_us * 1_000
@@ -1219,6 +1892,8 @@ def _unit_runtime_metadata(units: list[str]) -> dict[str, UnitRuntime]:
                 invocation_id=invocation_id,
                 active_age_minutes=active_age_minutes,
                 main_pid=main_pid_value if main_pid_value > 0 else None,
+                memory_current_bytes=memory_current_bytes,
+                memory_max_bytes=memory_max_bytes,
             )
         except (OSError, subprocess.SubprocessError, ValueError):
             metadata[unit] = UnitRuntime(
@@ -1536,7 +2211,7 @@ def main() -> int:
             engine_config=worker_input_paths["engine config"],
             universe=worker_input_paths["candidate universe"],
             runtime=unit_runtime.get(signal_worker.unit),
-            now_ms=now_ms,
+            now_ms=None,
             max_age_seconds=args.max_signal_heartbeat_age_sec,
             startup_grace_minutes=args.max_signal_startup_min,
             label=signal_worker.unit,

@@ -169,7 +169,7 @@ activation_watchdog_mode() {
         || refuse "activation watchdog release marker boundary is invalid"
     for rust_binary in "$ENGINE" "$SIGNAL_WORKER"; do
         [ -f "$rust_binary" ] && [ ! -L "$rust_binary" ] \
-            && [ "$(stat -c %u "$rust_binary")" -eq 0 ] \
+            && [ "$(stat -c %u "$rust_binary")" = 0 ] \
             && [ "$(stat -c %a "$rust_binary")" = 755 ] \
             || refuse "activation watchdog Rust binary boundary is invalid: $rust_binary"
     done

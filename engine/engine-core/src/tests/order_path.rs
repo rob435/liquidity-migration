@@ -1749,6 +1749,358 @@ async fn an_intent_with_an_unreal_number_never_reaches_the_log() {
     }
 }
 
+#[tokio::test]
+async fn a_refused_retired_maker_exit_retries_on_a_later_wake_without_hitting_the_cap() {
+    let params: toml::Value = toml::from_str(
+        r#"
+        symbols = ["BTCUSDT"]
+        half_spread_bps = 10.0
+        requote_bps = 2.0
+        qty = 0.1
+        max_position = 0.3
+        stop_loss_fraction = 0.35
+        "#,
+    )
+    .expect("maker config");
+    let maker = engine_strategies::quoter::Quoter::from_params(StrategyId(0), &params)
+        .expect("maker strategy");
+    let old_order = "old-maker-short";
+    let replayed = vec![
+        WalRecord::Names {
+            strategies: vec!["quoter".into()],
+            symbols: vec!["BTCUSDT".into(), "OLDUSDT".into()],
+        },
+        WalRecord::OrderSent {
+            request: OrderRequest {
+                client_order_id: old_order.into(),
+                strategy: StrategyId(0),
+                symbol: SymbolId(1),
+                side: Side::Sell,
+                qty: 0.04,
+                kind: OrderKind::Market,
+                stop: Some(StopSpec { trigger_px: 110.0 }),
+                reduce_only: false,
+                close_position: false,
+            },
+            wire_ns: 1,
+            arrival_mid: 100.0,
+        },
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                exec_id: "old-maker-fill".into(),
+                client_order_id: old_order.into(),
+                symbol: SymbolId(1),
+                side: Side::Sell,
+                qty: 0.04,
+                px: 100.0,
+                fee: Some(0.0),
+                is_maker: true,
+                venue_ts_ms: recent_replay_ms(),
+                recv_ns: 2,
+            },
+        },
+    ];
+    let held = vec![engine_types::PositionView {
+        symbol: SymbolId(1),
+        side: Side::Sell,
+        qty: 0.04,
+        entry_px: 100.0,
+        stop_px: 110.0,
+        stop_attached: true,
+        leverage: None,
+    }];
+    let refusal = RiskVerdict::Deny {
+        reason: DenyReason::UnknownState {
+            detail: "persistent test refusal".into(),
+        },
+    };
+    let (mut engine, h) = build_with_venue_state(
+        refusal,
+        vec![Box::new(maker)],
+        &["BTCUSDT", "OLDUSDT"],
+        &replayed,
+        Vec::new(),
+        held,
+    )
+    .await;
+    let active = engine.market().table.get("BTCUSDT").unwrap();
+    let retry_records = h.records.clone();
+    let stop_after_retry = async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let attempts = retry_records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        record,
+                        WalRecord::Intent { intent } if intent.tag == "quote-drain"
+                    )
+                })
+                .count();
+            if attempts >= 2 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the maker retry timer never fired"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    };
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(active, 0, false),
+            &mut ScriptOrderFeed::empty(),
+            stop_after_retry,
+        )
+        .await
+        .unwrap();
+
+    let drain_times = h
+        .records
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|record| match record {
+            WalRecord::Intent { intent } if intent.tag == "quote-drain" => Some(intent.decided_ns),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        drain_times.len(),
+        2,
+        "one boot attempt and one timer retry, not a same-wake refusal storm"
+    );
+    assert!(
+        drain_times[1].saturating_sub(drain_times[0]) >= 1_000_000_000,
+        "the retry happened before its one-second delay: {drain_times:?}"
+    );
+    assert!(h.sends.lock().unwrap().is_empty());
+    assert!(
+        h.records.lock().unwrap().iter().all(|record| !matches!(
+            record,
+            WalRecord::Note { text, .. } if text.contains("actions, exits included")
+        )),
+        "the engine action cap must not drop the retired-symbol exit"
+    );
+}
+
+#[tokio::test]
+async fn a_venue_rejected_native_long_exit_retries_only_after_its_timer() {
+    let config: engine_strategies::native_long::plan::StrategyConfig =
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "profile_name": "v12",
+            "environment": "demo",
+            "rule_sha256": "1".repeat(64),
+            "feature_contract_sha256": "2".repeat(64),
+            "operational_profile_sha256": "3".repeat(64),
+            "entries_enabled": true,
+            "rule": {
+                "execution_strategy_id": "long_native_v12_wide_stop",
+                "entry_delay_hours": 1,
+                "fc_min_day_return": 0.15,
+                "fc_top_volume_rank_max": 10.0,
+                "fc_min_close_location": 0.7,
+                "fc_max_hold_days": 3,
+                "fc_max_atr_pct": 0.12,
+                "fc_atr_stop_mult": 3.0,
+                "fc_sigma_mult": 2.5,
+                "fc_sniper_retrace_pct": 0.01,
+                "fc_sniper_deadline_hours": 6,
+                "weekend_size_mult": 1.5,
+                "fc_close_loc_multi_day": 0.6,
+                "fc_stop_time_decay_hours": 48,
+                "fc_stop_time_decay_atr_mult": 1.5,
+                "max_concurrent_positions": 10,
+                "cooldown_days": 7,
+                "gross_exposure": 1.0,
+                "vol_floor_annual": 0.3,
+                "max_position_weight": 0.3,
+                "vol_target_annual": 0.6,
+                "vol_target_min_scale": 0.3,
+                "vol_target_max_scale": 1.25
+            },
+            "notional_multiplier": 6.0,
+            "entry_leverage": 5.0,
+            "order_notional_pct_equity": 0.0,
+            "wallet_balance_fraction": 1.0,
+            "max_new_entries_per_cycle": 5,
+            "signal_freshness_ms": 86_400_000,
+            "book_validity_ms": 3_600_000,
+            "entry_floor_usdt": 6.0,
+            "resize_floor_usdt": 1.0,
+            "resize_floor_fraction": 0.05,
+            "engine_entry_cutoff_ms": 900_000,
+            "rest_entries": false,
+            "hold_decision_price": false,
+            "give_up_instead_of_crossing": false
+        }))
+        .expect("LONG config");
+    let now_ms = clock::wall_ms();
+    let entry_ts_ms = now_ms - 2 * 86_400_000;
+    let state = engine_strategies::native_long::plan::SleeveState {
+        schema_version: engine_strategies::native_common::DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+        symbols: std::collections::BTreeMap::from([(
+            "BTCUSDT".into(),
+            engine_strategies::native_long::plan::PriorState {
+                requested: true,
+                filled: true,
+                entry_ts_ms,
+                entry_price: 100.0,
+                target_notional_usdt: 10.0,
+                stop_loss_fraction: 0.2,
+                stop_decay_after_ms: 0,
+                decayed_stop_loss_fraction: 0.0,
+                max_hold_deadline_ts_ms: now_ms - 1,
+                max_hold_duration_ms: 86_400_000,
+                entry_valid_until_ms: now_ms + 3_600_000,
+                cooldown_until_ms: 0,
+                attempted_signal_ts_ms: entry_ts_ms,
+                active_positions: 1,
+            },
+        )]),
+        ..engine_strategies::native_long::plan::SleeveState::default()
+    };
+    let params = toml::Value::Table(
+        [(
+            "config_json".into(),
+            toml::Value::String(serde_json::to_string(&config).expect("LONG config JSON")),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let long = engine_strategies::native_long::NativeLong::from_params(StrategyId(0), &params)
+        .expect("LONG strategy");
+    let opening = "old-long-entry";
+    let replayed = vec![
+        WalRecord::Names {
+            strategies: vec!["long_native".into()],
+            symbols: vec!["BTCUSDT".into()],
+        },
+        WalRecord::OrderSent {
+            request: OrderRequest {
+                client_order_id: opening.into(),
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: 0.1,
+                kind: OrderKind::Market,
+                stop: Some(StopSpec { trigger_px: 80.0 }),
+                reduce_only: false,
+                close_position: false,
+            },
+            wire_ns: 1,
+            arrival_mid: 100.0,
+        },
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                exec_id: "old-long-fill".into(),
+                client_order_id: opening.into(),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: 0.1,
+                px: 100.0,
+                fee: Some(0.0),
+                is_maker: false,
+                venue_ts_ms: recent_replay_ms(),
+                recv_ns: 2,
+            },
+        },
+        WalRecord::StrategyGlobalCheckpoint {
+            wall_ts_ms: recent_replay_ms(),
+            strategy: StrategyId(0),
+            checkpoint: StrategyCheckpoint {
+                schema_version:
+                    engine_strategies::native_common::DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+                decision_fingerprint: config.fingerprint(),
+                payload: serde_json::to_vec(&state).expect("LONG checkpoint"),
+            },
+            provenance: None,
+        },
+    ];
+    let held = vec![engine_types::PositionView {
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty: 0.1,
+        entry_px: 100.0,
+        stop_px: 80.0,
+        stop_attached: true,
+        leverage: None,
+    }];
+    let tape = tape();
+    let (wal, records) = MockWal::new(tape.clone());
+    let (mut venue, sends) = MockVenue::new(tape, &["BTCUSDT"]);
+    venue.reply = Some(VenueError::Rejected {
+        code: 110001,
+        message: "persistent test rejection".into(),
+    });
+    venue.account_readings.lock().unwrap().push_back(held);
+    let (risk, _) = MockRisk::with(allow_all());
+    let replayed = replay_with_history_boundary(&replayed);
+    let mut engine = Engine::boot(
+        &settings(),
+        "0000000000000000",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(long)],
+        &replayed,
+    )
+    .await
+    .expect("boot");
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let retry_sends = sends.clone();
+    let stop_after_retry = async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while retry_sends.lock().unwrap().len() < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the LONG exit retry timer never fired"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    };
+
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 0, false),
+            &mut ScriptOrderFeed::empty(),
+            stop_after_retry,
+        )
+        .await
+        .expect("run");
+
+    let exit_times = records
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|record| match record {
+            WalRecord::Intent { intent } if intent.tag == "long-native" && intent.reduce_only => {
+                Some(intent.decided_ns)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sends.lock().unwrap().len(),
+        2,
+        "one boot exit and one timer retry"
+    );
+    assert_eq!(exit_times.len(), 2);
+    assert!(
+        exit_times[1].saturating_sub(exit_times[0]) >= 1_000_000_000,
+        "the venue rejection retried inside the same wake: {exit_times:?}"
+    );
+    assert!(records.lock().unwrap().iter().all(|record| !matches!(
+        record,
+        WalRecord::Note { text, .. } if text.contains("actions, exits included")
+    )));
+}
+
 #[test]
 fn invalid_kernel_verdicts_are_finite_fail_closed_records() {
     let verdicts = [

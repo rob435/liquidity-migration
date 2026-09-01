@@ -227,6 +227,14 @@ pub fn reduce(
         .checkpoint_fingerprint
         .as_ref()
         .is_some_and(|seen| seen != &fingerprint);
+    let pending_event_ids = input
+        .events
+        .iter()
+        .map(|event| event.event_id.as_str())
+        .collect::<BTreeSet<_>>();
+    state
+        .consumed_event_ids
+        .retain(|event_id| pending_event_ids.contains(event_id.as_str()));
     let mut summary = Summary::default();
     state.entry_retry_after_ms.retain(|symbol, retry_at| {
         let pending = *retry_at > input.now_ms && state.open.contains_key(symbol);
@@ -302,6 +310,8 @@ pub fn reduce(
             consumed_sources.push((config.carry_sleeve_name.clone(), event.event_id));
             continue;
         }
+        let entry_deadline = event.settlement_ts_ms
+            + (config.rule.entry_valid_minutes_after_settlement - 15) * MIN_MS;
         let blocked = if event.fired_ts_ms > input.now_ms {
             Some("event_not_yet_available")
         } else if event.environment != config.environment {
@@ -310,12 +320,6 @@ pub fn reduce(
             || event.source_config_id != config.rule.accepted_source_config_id
         {
             Some("incompatible_source")
-        } else if !input.account_healthy {
-            Some("engine_account_health_unavailable")
-        } else if due.contains(&event.symbol) {
-            Some("symbol_cover_pending")
-        } else if state.open.contains_key(&event.symbol) {
-            Some("symbol_already_open")
         } else {
             None
         };
@@ -325,8 +329,6 @@ pub fn reduce(
                 .push((event.event_id.clone(), reason.to_owned()));
             continue;
         }
-        let entry_deadline = event.settlement_ts_ms
-            + (config.rule.entry_valid_minutes_after_settlement - 15) * MIN_MS;
         let terminal_reason = if input.now_ms >= entry_deadline {
             Some("entry_deadline_passed")
         } else if event.carry_side.as_deref() != Some("long")
@@ -337,6 +339,29 @@ pub fn reduce(
         } else {
             None
         };
+        if let Some(reason) = terminal_reason {
+            state.consumed_event_ids.insert(event.event_id.clone());
+            consumed_sources.push((config.carry_sleeve_name.clone(), event.event_id.clone()));
+            summary
+                .blocked_events
+                .push((event.event_id.clone(), reason.to_owned()));
+            continue;
+        }
+        let transient_block = if !input.account_healthy {
+            Some("engine_account_health_unavailable")
+        } else if due.contains(&event.symbol) {
+            Some("symbol_cover_pending")
+        } else if state.open.contains_key(&event.symbol) {
+            Some("symbol_already_open")
+        } else {
+            None
+        };
+        if let Some(reason) = transient_block {
+            summary
+                .blocked_events
+                .push((event.event_id.clone(), reason.to_owned()));
+            continue;
+        }
         if input.now_ms < entry_deadline && (!config.entries_enabled || mismatch) {
             summary.blocked_events.push((
                 event.event_id.clone(),
@@ -350,12 +375,6 @@ pub fn reduce(
         }
         state.consumed_event_ids.insert(event.event_id.clone());
         consumed_sources.push((config.carry_sleeve_name.clone(), event.event_id.clone()));
-        if let Some(reason) = terminal_reason {
-            summary
-                .blocked_events
-                .push((event.event_id.clone(), reason.to_owned()));
-            continue;
-        }
         let qty = event.carry_qty.expect("validated quantity");
         let mark = event.mark_px.expect("validated mark");
         state.open.insert(
@@ -375,24 +394,25 @@ pub fn reduce(
     let mut targets = Vec::new();
     for record in state.open.values() {
         let is_due = due.contains(&record.symbol);
-        let growth_blocked =
-            !is_due && (!config.entries_enabled || state.refused_entries.contains(&record.symbol));
+        let growth_blocked = !is_due
+            && (record.fired_ts_ms > input.now_ms
+                || !config.entries_enabled
+                || !input.account_healthy
+                || state.refused_entries.contains(&record.symbol));
         let held = input.facts.held.get(&record.symbol);
         if growth_blocked && held.is_none() {
             continue;
         }
-        let held_short_qty = held
-            .filter(|position| position.side == engine_types::Side::Sell)
-            .map(|position| position.qty);
-        let capped_qty = if growth_blocked {
-            held_short_qty
+        let (capped_qty, capped_notional) = if growth_blocked {
+            match held {
+                Some(position) if position.side == engine_types::Side::Sell => (
+                    record.target_qty.map(|qty| qty.min(position.qty)),
+                    -record.notional_usdt.abs().min(position.notional().abs()),
+                ),
+                Some(_) | None => (None, 0.0),
+            }
         } else {
-            record.target_qty
-        };
-        let capped_notional = if growth_blocked {
-            held.map_or(0.0, |position| -position.notional().abs())
-        } else {
-            -record.notional_usdt.abs()
+            (record.target_qty, -record.notional_usdt.abs())
         };
         targets.push(PlannedTarget {
             target: Target {
@@ -757,5 +777,279 @@ mod tests {
                 }
             ] if source_strategy_name == "carry" && event_id == &fire.event_id
         ));
+    }
+
+    #[test]
+    fn expired_fire_is_consumed_even_while_account_health_is_unavailable() {
+        let fire = event();
+        let deadline = fire.settlement_ts_ms
+            + (config(true).rule.entry_valid_minutes_after_settlement - 15) * MIN_MS;
+        let output = reduce(
+            ReducerInput {
+                now_ms: deadline,
+                events: vec![fire.clone()],
+                facts: PlannerFacts::default(),
+                owned_working_symbols: BTreeSet::new(),
+                owned_opening_order_ids: BTreeMap::new(),
+                account_healthy: false,
+                checkpoint_fingerprint: None,
+            },
+            SleeveState::default(),
+            &config(true),
+        )
+        .expect("terminal event");
+        assert!(output
+            .next_state
+            .consumed_event_ids
+            .contains(&fire.event_id));
+        assert!(output
+            .summary
+            .blocked_events
+            .iter()
+            .any(|(event_id, reason)| event_id == &fire.event_id
+                && reason == "entry_deadline_passed"));
+        assert!(output.execution.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::ConsumeCarryFire { event_id, .. } if event_id == &fire.event_id
+        )));
+    }
+
+    #[test]
+    fn consumed_event_tombstone_retires_after_the_engine_event_is_gone() {
+        let fire = event();
+        let mut state = SleeveState {
+            schema_version: 1,
+            ..SleeveState::default()
+        };
+        state.consumed_event_ids.insert(fire.event_id);
+        let output = reduce(
+            ReducerInput {
+                now_ms: 1_800_000_000_000,
+                events: Vec::new(),
+                facts: PlannerFacts::default(),
+                owned_working_symbols: BTreeSet::new(),
+                owned_opening_order_ids: BTreeMap::new(),
+                account_healthy: true,
+                checkpoint_fingerprint: None,
+            },
+            state,
+            &config(true),
+        )
+        .expect("event acknowledgement observed");
+        assert!(output.next_state.consumed_event_ids.is_empty());
+    }
+
+    #[test]
+    fn unhealthy_account_blocks_partial_growth_but_keeps_reductions_live() {
+        let now_ms = 1_800_000_000_000;
+        let mut state = SleeveState {
+            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+            ..SleeveState::default()
+        };
+        state.open.insert(
+            "AUSDT".into(),
+            OpenRecord {
+                symbol: "AUSDT".into(),
+                notional_usdt: 10.0,
+                settlement_ts_ms: now_ms + 20 * MIN_MS,
+                fired_ts_ms: now_ms - MIN_MS,
+                target_qty: Some(1.0),
+            },
+        );
+        let run = |qty| {
+            let mut facts = PlannerFacts::default();
+            facts.prices.insert("AUSDT".into(), 10.0);
+            facts.rules.insert(
+                "AUSDT".into(),
+                engine_types::InstrumentRule {
+                    tick_size: 0.01,
+                    qty_step: 0.1,
+                    min_qty: 0.1,
+                    min_notional: 5.0,
+                },
+            );
+            facts.held.insert(
+                "AUSDT".into(),
+                Held {
+                    side: Side::Sell,
+                    qty,
+                    px: 10.0,
+                    entry_px: 10.0,
+                    stop_px: 13.5,
+                },
+            );
+            reduce(
+                ReducerInput {
+                    now_ms,
+                    events: Vec::new(),
+                    facts,
+                    owned_working_symbols: BTreeSet::new(),
+                    owned_opening_order_ids: BTreeMap::new(),
+                    account_healthy: false,
+                    checkpoint_fingerprint: None,
+                },
+                state.clone(),
+                &config(true),
+            )
+            .expect("unhealthy account replan")
+        };
+
+        let partial = run(0.5);
+        assert!(!partial.execution.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Order(crate::native_common::OrderEffect {
+                step: Step::Resize {
+                    reduce_only: false,
+                    ..
+                },
+                ..
+            })
+        )));
+
+        let oversized = run(2.0);
+        assert!(oversized.execution.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Order(crate::native_common::OrderEffect {
+                step: Step::Resize {
+                    reduce_only: true,
+                    ..
+                },
+                ..
+            })
+        )));
+    }
+
+    #[test]
+    fn future_durable_fire_blocks_only_entries_and_growth() {
+        let now_ms = 1_800_000_000_000;
+        let fired_ts_ms = now_ms + MIN_MS;
+        let record = OpenRecord {
+            symbol: "AUSDT".into(),
+            notional_usdt: 10.0,
+            settlement_ts_ms: fired_ts_ms + 20 * MIN_MS,
+            fired_ts_ms,
+            target_qty: Some(1.0),
+        };
+        let state = SleeveState {
+            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+            open: BTreeMap::from([("AUSDT".into(), record)]),
+            ..SleeveState::default()
+        };
+        let run = |holding: Option<(Side, f64, f64)>| {
+            let mut facts = PlannerFacts::default();
+            facts.prices.insert("AUSDT".into(), 10.0);
+            facts.rules.insert(
+                "AUSDT".into(),
+                engine_types::InstrumentRule {
+                    tick_size: 0.01,
+                    qty_step: 0.1,
+                    min_qty: 0.1,
+                    min_notional: 5.0,
+                },
+            );
+            if let Some((side, qty, stop_px)) = holding {
+                facts.held.insert(
+                    "AUSDT".into(),
+                    Held {
+                        side,
+                        qty,
+                        px: 10.0,
+                        entry_px: 10.0,
+                        stop_px,
+                    },
+                );
+            }
+            reduce(
+                ReducerInput {
+                    now_ms,
+                    events: Vec::new(),
+                    facts,
+                    owned_working_symbols: BTreeSet::new(),
+                    owned_opening_order_ids: BTreeMap::new(),
+                    account_healthy: true,
+                    checkpoint_fingerprint: None,
+                },
+                state.clone(),
+                &config(true),
+            )
+            .expect("backward-clock replan")
+        };
+
+        let flat = run(None);
+        assert!(!flat
+            .execution
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Order(_))));
+
+        let partial = run(Some((Side::Sell, 0.5, 13.5)));
+        assert!(!partial.execution.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Order(crate::native_common::OrderEffect {
+                step: Step::Resize {
+                    reduce_only: false,
+                    ..
+                },
+                ..
+            })
+        )));
+
+        let oversized = run(Some((Side::Sell, 2.0, 13.5)));
+        assert!(oversized.execution.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Order(crate::native_common::OrderEffect {
+                step: Step::Resize {
+                    reduce_only: true,
+                    ..
+                },
+                ..
+            })
+        )));
+
+        let restop = run(Some((Side::Sell, 1.0, 15.0)));
+        assert!(restop.execution.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Order(crate::native_common::OrderEffect {
+                step: Step::Restop { .. },
+                ..
+            })
+        )));
+
+        let wrong_side = run(Some((Side::Buy, 1.0, 6.5)));
+        assert!(wrong_side.execution.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Order(crate::native_common::OrderEffect {
+                step: Step::Exit { .. },
+                ..
+            })
+        )));
+
+        let mut resumed_input = ReducerInput {
+            now_ms: fired_ts_ms,
+            events: Vec::new(),
+            facts: PlannerFacts::default(),
+            owned_working_symbols: BTreeSet::new(),
+            owned_opening_order_ids: BTreeMap::new(),
+            account_healthy: true,
+            checkpoint_fingerprint: None,
+        };
+        resumed_input.facts.prices.insert("AUSDT".into(), 10.0);
+        resumed_input.facts.rules.insert(
+            "AUSDT".into(),
+            engine_types::InstrumentRule {
+                tick_size: 0.01,
+                qty_step: 0.1,
+                min_qty: 0.1,
+                min_notional: 5.0,
+            },
+        );
+        let resumed = reduce(resumed_input, flat.next_state, &config(true)).expect("fire time");
+        assert!(resumed.execution.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Order(crate::native_common::OrderEffect {
+                step: Step::Enter { .. },
+                ..
+            })
+        )));
     }
 }

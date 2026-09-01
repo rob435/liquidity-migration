@@ -64,7 +64,9 @@ system as a joined contract, including:
 - account-view freshness, private-feed readiness, reconciliation latches,
   pending controls, and position attribution;
 - signal-worker process identity, ready state, source hashes, rule and feature
-  hashes, universe hashes, sequence progress, and feature watermarks;
+  hashes, universe hashes, sequence progress, feature watermarks, source epoch,
+  subscription and ticker coverage, data-frame freshness, gap state, and fixed
+  queue/cache occupancy;
 - WAL and state storage health;
 - host clock state and public-data freshness; and
 - backup, upload, and forward-capture jobs where configured.
@@ -72,6 +74,18 @@ system as a joined contract, including:
 One systemd process being `active` does not suppress a stale heartbeat or a
 latched engine. A worker that is active but no longer advances observations is
 also unhealthy.
+
+Worker alerts use independent keys for producer continuity, LONG cycles, CARRY
+cycles, spool pressure, WebSocket transport, and memory pressure. LONG and CARRY
+each page after three configured cycle cadences even when the process and
+heartbeat still update. Their current feature and action horizons are separate
+from historical CARRY scorer catch-up.
+
+A WebSocket-only fault is a warning only while a fresh REST ticker fallback
+completed after the gap opened and producer plus sleeve clocks remain healthy.
+Missing fallback or stalled decisions makes it critical. Systemd
+`MemoryCurrent` against a finite `MemoryMax` warns at 75% and becomes critical
+at 90%; the alert includes exact bytes, MiB, and percentage.
 
 Alerts are keyed and persisted. A new condition sends immediately, a continuing
 condition re-alerts after its cooldown, and a cleared condition sends one

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::ConfigIdentity;
-pub use engine_strategies::native_common::{UniverseIdentity, UniverseMode};
+pub use engine_strategies::native_common::{TickerObservation, UniverseIdentity, UniverseMode};
 pub use engine_types::SignalObservation as NormalizedObservation;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -67,25 +67,40 @@ pub struct InstrumentObservation {
     pub is_prelisting: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct TickerObservation {
+pub struct InstrumentTradingInterval {
+    pub trading_from_ms: i64,
+    pub trading_through_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapCoverage {
+    pub completed_at_ms: i64,
+    pub kline_end_ms: i64,
+    pub funding_end_ms: i64,
+    pub whale_end_ms: i64,
+    pub source_contract_sha256: String,
+    pub long_feature_sha256: String,
+    pub carry_feature_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCoverage {
     pub symbol: String,
-    pub observed_ts_ms: i64,
-    pub available_at_ms: i64,
-    pub last_price: Option<f64>,
-    pub mark_price: Option<f64>,
-    pub index_price: Option<f64>,
-    pub bid1_price: Option<f64>,
-    pub ask1_price: Option<f64>,
-    pub bid1_size: Option<f64>,
-    pub ask1_size: Option<f64>,
-    pub open_interest: Option<f64>,
-    pub open_interest_value: Option<f64>,
-    pub turnover_24h: Option<f64>,
-    pub volume_24h: Option<f64>,
-    pub funding_rate: Option<f64>,
-    pub next_funding_time_ms: Option<i64>,
+    pub checked_from_ms: i64,
+    pub checked_through_ms: i64,
+    #[serde(default)]
+    pub replace_coverage: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CoverageInterval {
+    pub checked_from_ms: i64,
+    pub checked_through_ms: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -96,6 +111,12 @@ pub enum WireEvent {
         sequence: u64,
         symbol: String,
         available_at_ms: i64,
+        #[serde(default)]
+        checked_from_ms: Option<i64>,
+        #[serde(default)]
+        checked_through_ms: Option<i64>,
+        #[serde(default)]
+        replace_coverage: bool,
         rows: Vec<Vec<Value>>,
     },
     BybitFundingBatch {
@@ -103,6 +124,14 @@ pub enum WireEvent {
         sequence: u64,
         symbol: String,
         available_at_ms: i64,
+        #[serde(default)]
+        checked_from_ms: Option<i64>,
+        #[serde(default)]
+        checked_through_ms: Option<i64>,
+        #[serde(default)]
+        replace_coverage: bool,
+        #[serde(default)]
+        emit_lifecycle: bool,
         rows: Vec<BybitFundingWire>,
     },
     BybitInstrumentSnapshot {
@@ -123,6 +152,8 @@ pub enum WireEvent {
         schema_version: u32,
         sequence: u64,
         available_at_ms: i64,
+        #[serde(default)]
+        coverage: Vec<SourceCoverage>,
         rows: Vec<BinanceWhaleWire>,
     },
     UniverseSnapshot {
@@ -130,10 +161,39 @@ pub enum WireEvent {
         sequence: u64,
         universe: UniverseIdentity,
     },
+    BootstrapComplete {
+        schema_version: u32,
+        sequence: u64,
+        coverage: BootstrapCoverage,
+    },
     Watermark {
         schema_version: u32,
         sequence: u64,
         observed_ts_ms: i64,
+    },
+    LongWatermark {
+        schema_version: u32,
+        sequence: u64,
+        observed_ts_ms: i64,
+        data_through_ms: i64,
+        #[serde(default)]
+        gap_symbols: Vec<String>,
+    },
+    CarryWatermark {
+        schema_version: u32,
+        sequence: u64,
+        observed_ts_ms: i64,
+        data_through_ms: i64,
+        #[serde(default)]
+        gap_symbols: Vec<String>,
+    },
+    CarryScorerCatchupWatermark {
+        schema_version: u32,
+        sequence: u64,
+        observed_ts_ms: i64,
+        decision_through_ms: i64,
+        #[serde(default)]
+        gap_symbols: Vec<String>,
     },
 }
 
@@ -146,7 +206,11 @@ impl WireEvent {
             | Self::BybitTickerSnapshot { schema_version, .. }
             | Self::BinanceWhaleBatch { schema_version, .. }
             | Self::UniverseSnapshot { schema_version, .. }
+            | Self::BootstrapComplete { schema_version, .. }
             | Self::Watermark { schema_version, .. } => *schema_version,
+            Self::LongWatermark { schema_version, .. }
+            | Self::CarryWatermark { schema_version, .. }
+            | Self::CarryScorerCatchupWatermark { schema_version, .. } => *schema_version,
         }
     }
 
@@ -158,7 +222,11 @@ impl WireEvent {
             | Self::BybitTickerSnapshot { sequence, .. }
             | Self::BinanceWhaleBatch { sequence, .. }
             | Self::UniverseSnapshot { sequence, .. }
+            | Self::BootstrapComplete { sequence, .. }
             | Self::Watermark { sequence, .. } => *sequence,
+            Self::LongWatermark { sequence, .. }
+            | Self::CarryWatermark { sequence, .. }
+            | Self::CarryScorerCatchupWatermark { sequence, .. } => *sequence,
         }
     }
 }
@@ -206,6 +274,12 @@ pub struct BybitInstrumentWire {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BybitTickerWire {
     pub symbol: String,
+    #[serde(default)]
+    pub mark_observed_ts_ms: Option<i64>,
+    #[serde(default)]
+    pub funding_observed_ts_ms: Option<i64>,
+    #[serde(default)]
+    pub schedule_observed_ts_ms: Option<i64>,
     #[serde(default)]
     pub last_price: Option<Value>,
     #[serde(default)]
@@ -350,12 +424,19 @@ pub enum ObservationPayload {
         marks: Vec<MarketMark>,
         rejections: Vec<DataRejection>,
     },
+    CarryScorerCatchup {
+        decision_ts_ms: i64,
+        rows: Vec<CarryFeatureRow>,
+        rejections: Vec<DataRejection>,
+    },
     MarketSnapshot {
+        expires_at_ms: i64,
         tickers: Vec<TickerObservation>,
         marks: Vec<MarketMark>,
         presettlement: Vec<PresettlementPublicObservation>,
     },
     FundingUpdate {
+        decision_ts_ms: i64,
         settled_funding: Vec<SettledFunding>,
     },
     UniverseChanged,

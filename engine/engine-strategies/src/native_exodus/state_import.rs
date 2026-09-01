@@ -834,6 +834,15 @@ mod tests {
     }
 
     #[test]
+    fn empty_event_tape_is_valid_but_a_present_malformed_tape_is_rejected() {
+        let config = config();
+        assert!(parse_event_tape(b"", &config, "demo")
+            .expect("absent-is-empty staging bytes")
+            .is_empty());
+        assert!(parse_event_tape(b"{}\n", &config, "demo").is_err());
+    }
+
+    #[test]
     fn refuses_wrong_account_noncanonical_and_nonempty_v1_identity() {
         let config = config();
         let sources = |identity_bytes: Vec<u8>, state: Vec<u8>| {

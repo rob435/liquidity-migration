@@ -150,7 +150,7 @@
   "expected_decision_output": {
     "schema_version": 1,
     "action": "write",
-    "target_book_sha256": "ae97f9eea8879ca7dbbb8be0a5b2c689b364342dc5624bddcdfa00f5a1995f57",
+    "target_book_sha256": "c3eabdb999a11650074b99b0d062547aebefa412fd7d8148d142edfa011bab69",
     "next_state": {
       "schema_version": 1,
       "sizing_anchors": [
@@ -209,8 +209,8 @@
     ],
     "drop_exit_fires": ["DROPUSDT"]
   },
-  "target_book_utf8": "{\n  \"decision_ts_ms\": 1800000000000,\n  \"source\": \"carry_hold_v7_live_v1\",\n  \"targets\": [\n    {\n      \"entry_valid_until_ms\": 1800020700000,\n      \"leverage\": 2.0,\n      \"notional_usdt\": 20.0,\n      \"stop_loss_fraction\": 0.35,\n      \"symbol\": \"ALPHAUSDT\",\n      \"target_qty\": null\n    },\n    {\n      \"entry_valid_until_ms\": 1800020700000,\n      \"leverage\": 2.0,\n      \"notional_usdt\": 12.0,\n      \"stop_loss_fraction\": 0.35,\n      \"symbol\": \"GAMMAUSDT\",\n      \"target_qty\": null\n    },\n    {\n      \"entry_valid_until_ms\": 1800020700000,\n      \"leverage\": 2.0,\n      \"notional_usdt\": 7.0,\n      \"stop_loss_fraction\": 0.35,\n      \"symbol\": \"NOPRICEUSDT\",\n      \"target_qty\": null\n    },\n    {\n      \"entry_valid_until_ms\": 1800020700000,\n      \"leverage\": 2.0,\n      \"notional_usdt\": 10.0,\n      \"stop_loss_fraction\": 0.35,\n      \"symbol\": \"SMALLUSDT\",\n      \"target_qty\": null\n    }\n  ],\n  \"valid_until_ms\": 1800108000000,\n  \"version\": 2\n}\n",
-  "target_book_sha256": "ae97f9eea8879ca7dbbb8be0a5b2c689b364342dc5624bddcdfa00f5a1995f57",
+  "target_book_utf8": "{\n  \"decision_ts_ms\": 1800000000000,\n  \"source\": \"carry_hold_v7_live_v1\",\n  \"targets\": [\n    {\n      \"entry_valid_until_ms\": 1800020700000,\n      \"leverage\": 2.0,\n      \"notional_usdt\": 20.0,\n      \"stop_loss_fraction\": 0.35,\n      \"symbol\": \"ALPHAUSDT\",\n      \"target_qty\": null\n    },\n    {\n      \"entry_valid_until_ms\": 1800020700000,\n      \"leverage\": 2.0,\n      \"notional_usdt\": 20.0,\n      \"stop_loss_fraction\": 0.35,\n      \"symbol\": \"BLOCKUSDT\",\n      \"target_qty\": null\n    },\n    {\n      \"entry_valid_until_ms\": 1800020700000,\n      \"leverage\": 2.0,\n      \"notional_usdt\": 12.0,\n      \"stop_loss_fraction\": 0.35,\n      \"symbol\": \"GAMMAUSDT\",\n      \"target_qty\": null\n    },\n    {\n      \"entry_valid_until_ms\": 1800020700000,\n      \"leverage\": 2.0,\n      \"notional_usdt\": 7.0,\n      \"stop_loss_fraction\": 0.35,\n      \"symbol\": \"NOPRICEUSDT\",\n      \"target_qty\": null\n    },\n    {\n      \"entry_valid_until_ms\": 1800020700000,\n      \"leverage\": 2.0,\n      \"notional_usdt\": 10.0,\n      \"stop_loss_fraction\": 0.35,\n      \"symbol\": \"SMALLUSDT\",\n      \"target_qty\": null\n    }\n  ],\n  \"valid_until_ms\": 1800108000000,\n  \"version\": 2\n}\n",
+  "target_book_sha256": "c3eabdb999a11650074b99b0d062547aebefa412fd7d8148d142edfa011bab69",
   "rust_replay": {
     "now_ms": 1800003000000,
     "held_symbols": [
@@ -224,6 +224,8 @@
     ],
     "prices": {
       "ALPHAUSDT": 20.0,
+      "BLOCKUSDT": 10.0,
+      "CAPUSDT": 10.0,
       "GAMMAUSDT": 2.0,
       "SMALLUSDT": 10.0
     },
@@ -248,6 +250,7 @@
       {"kind": "exit", "symbol": "EXITUSDT", "side": "sell", "qty": 4.0},
       {"kind": "exit", "symbol": "ORPHANUSDT", "side": "sell", "qty": 1.0},
       {"kind": "exit", "symbol": "PREUSDT", "side": "sell", "qty": 2.5},
+      {"kind": "enter", "symbol": "BLOCKUSDT", "side": "buy", "qty": 2.0, "stop_px": 6.5},
       {"kind": "enter", "symbol": "GAMMAUSDT", "side": "buy", "qty": 6.0, "stop_px": 1.3}
     ],
     "expected_planner_skips": [

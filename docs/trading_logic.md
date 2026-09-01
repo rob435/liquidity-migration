@@ -162,8 +162,13 @@ Source of truth:
 - rule: [`configs/lane2_toxic_flow_quoter_v1.json`](../configs/lane2_toxic_flow_quoter_v1.json)
 - reducer: [`engine/engine-strategies/src/quoter`](../engine/engine-strategies/src/quoter)
 
-The mainnet block remains in strategy slot 3 and `quote_enabled = false`. Rust
-renders its economic fields from the registered JSON.
+The mainnet block remains in the fourth durable strategy slot (strategy ID 3)
+and `quote_enabled = false`. Rust renders its economic fields from the
+registered JSON. When quoting is disabled, the sleeve cancels recovered opening
+orders and drains its attributed inventory. When quoting is enabled, only
+symbols removed from its configured universe are drained; configured symbols
+are never flattened merely because the process restarted. A refused drain waits
+for its bounded retry timer before another attempt.
 
 When enabled by a reviewed config, the reducer combines microprice, weighted
 book imbalance, volatility, inventory, queue value, and fast/slow aggressive

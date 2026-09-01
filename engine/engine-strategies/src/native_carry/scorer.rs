@@ -259,9 +259,16 @@ pub fn score_decision(
     if rows.is_empty() {
         return Err("CARRY feature batch is empty");
     }
+    if prior.last_decision_ts_ms > decision_ts_ms {
+        return Err("CARRY decision regressed behind scorer state");
+    }
+    let mut identities = BTreeSet::new();
     for row in rows {
         if !valid_symbol(&row.symbol) || row.bar_ts_ms <= 0 || row.bar_ts_ms % DAY_MS != 0 {
             return Err("CARRY feature row identity is invalid");
+        }
+        if !identities.insert((row.symbol.as_str(), row.bar_ts_ms)) {
+            return Err("CARRY feature batch contains duplicate symbol-days");
         }
         if row.by_funding.is_some_and(|value| !value.is_finite()) {
             return Err("CARRY funding is non-finite");
@@ -375,10 +382,14 @@ pub fn score_decision(
         }
     }
     let gross = current_weights.values().sum();
+    state
+        .by_symbol
+        .retain(|_, row| row.last_ts_ms == decision_ts_ms);
     state.last_decision_ts_ms = decision_ts_ms;
     if state.first_replay_ts_ms == 0 {
         state.first_replay_ts_ms = first;
     }
+    let durable_replay_days = decision_ts_ms.saturating_sub(state.first_replay_ts_ms) / DAY_MS;
     state.last_weights = current_weights.clone();
     state.last_universe_size = current_universe.len();
     Ok((
@@ -387,7 +398,7 @@ pub fn score_decision(
             decision_ts_ms,
             weights: current_weights,
             universe_size: current_universe.len(),
-            replay_days,
+            replay_days: durable_replay_days,
             gross,
         },
         state,
@@ -628,11 +639,45 @@ mod tests {
                 last_ts_ms: 49 * DAY_MS,
             },
         );
+        prior.by_symbol.insert(
+            "GONEUSDT".into(),
+            HysteresisState {
+                held: true,
+                last_ts_ms: 49 * DAY_MS,
+            },
+        );
         prior.last_decision_ts_ms = 49 * DAY_MS;
         let (book, state) = score_decision(&rows, 50 * DAY_MS, &prior, &cfg).expect("book");
         assert!(!book.weights.contains_key("S01USDT"));
         assert!(!state.by_symbol["S01USDT"].held);
         assert!(book.weights.contains_key("S00USDT"));
+        assert!(!state.by_symbol.contains_key("GONEUSDT"));
+    }
+
+    #[test]
+    fn duplicate_and_regressed_generations_are_rejected() {
+        let row = CarryFeatureRow {
+            symbol: "AUSDT".into(),
+            bar_ts_ms: 50 * DAY_MS,
+            ..CarryFeatureRow::default()
+        };
+        assert_eq!(
+            score_decision(
+                &[row.clone(), row.clone()],
+                50 * DAY_MS,
+                &ScorerState::default(),
+                &config(),
+            ),
+            Err("CARRY feature batch contains duplicate symbol-days")
+        );
+        let prior = ScorerState {
+            last_decision_ts_ms: 51 * DAY_MS,
+            ..ScorerState::default()
+        };
+        assert_eq!(
+            score_decision(&[row], 50 * DAY_MS, &prior, &config()),
+            Err("CARRY decision regressed behind scorer state")
+        );
     }
 
     #[test]

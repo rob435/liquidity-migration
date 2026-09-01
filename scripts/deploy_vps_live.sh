@@ -133,9 +133,22 @@ fi
 LM_FLEET_MANIFEST="$LOCAL_REPOSITORY/deploy/fleet_manifest.tsv"
 . "$LOCAL_REPOSITORY/deploy/lib_sleeves.sh"
 lm_validate_fleet_manifest
+# These arrays are the candidate baseline for direct install/activation modes.
+# Rollout replaces them with the exact installed-plus-candidate union before it
+# snapshots or changes systemd state.
 LOCAL_ROLLOUT_DOWNSTREAM_UNITS=()
 LOCAL_ROLLOUT_OWNER_UNITS=()
 LOCAL_MAINNET_QUARANTINE_UNITS=()
+LOCAL_CANDIDATE_FLEET_MANIFEST_B64="$(
+    base64 < "$LM_FLEET_MANIFEST" | tr -d '\r\n'
+)" || {
+    echo "cannot encode the candidate fleet manifest for emergency containment" >&2
+    exit 1
+}
+[ -n "$LOCAL_CANDIDATE_FLEET_MANIFEST_B64" ] || {
+    echo "encoded candidate fleet manifest is empty" >&2
+    exit 1
+}
 while IFS= read -r unit; do
     LOCAL_ROLLOUT_DOWNSTREAM_UNITS+=("$unit")
 done < <(lm_rollout_units downstream)
@@ -169,8 +182,10 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
 	printf 'MAINNET_QUARANTINE_UNITS=('
 	for unit in "${LOCAL_MAINNET_QUARANTINE_UNITS[@]}"; do printf ' %q' "$unit"; done
 	printf ' )\n'
+	printf 'CANDIDATE_FLEET_MANIFEST_B64=%q\n' "$LOCAL_CANDIDATE_FLEET_MANIFEST_B64"
 	printf 'ENGINE_UNIT=%q\n' "$LOCAL_ENGINE_UNIT"
 	printf 'MAINNET_OWNER_UNIT=%q\n' "$LOCAL_MAINNET_OWNER_UNIT"
+	declare -f lm_rollout_transition_inventory
 	cat <<'REMOTE_SCRIPT'
 # `-E` propagates the ERR trap into shell functions so a strict phase can still
 # report which phase died; see run_strict_phase below.
@@ -332,6 +347,7 @@ acquire_maintenance_locks() {
 }
 
 PROFILE_MARKER=/etc/liquidity-migration/profile
+INSTALLED_FLEET_MANIFEST=/etc/liquidity-migration/fleet-manifest.tsv
 # The stopped-state importer reads these sources only when the Rust WAL does
 # not yet contain complete native strategy checkpoints.
 LONG_DEMO_ROOT=/opt/liquidity-migration/data/bybit-long-demo-event
@@ -643,7 +659,8 @@ ensure_runtime_identities() {
 normalize_takeover_source_access() {
     /usr/bin/python3 - "$SIGNAL_WORKER_USER" "$RUNTIME_GROUP" \
         /var/lib/liquidity-migration/targets \
-        long-demo-state.json long-mainnet-state.json <<'PY'
+        long-demo-state.json long-mainnet-state.json \
+        carry-demo.json carry-mainnet.json <<'PY'
 import grp
 import os
 import pwd
@@ -816,6 +833,238 @@ PY
     chown root:root "$MAINNET_TELEGRAM_ENV" && chmod 0600 "$MAINNET_TELEGRAM_ENV" \
         || fail "cannot secure funded notification environment"
 }
+stage_incumbent_candidate_universe() {
+    local realm="$1" source target endpoint
+    local target_gid
+    case "$realm" in
+        demo)
+            source=/etc/liquidity-migration/producer-demo-source/candidate-universe.json
+            target=/etc/liquidity-migration/signal-worker-demo-source/candidate-universe.json
+            endpoint=api-demo.bybit.com
+            ;;
+        mainnet)
+            source=/etc/liquidity-migration/producer-mainnet-source/candidate-universe.json
+            target=/etc/liquidity-migration/signal-worker-mainnet-source/candidate-universe.json
+            endpoint=api.bybit.com
+            ;;
+        *) fail "invalid candidate-universe transition realm: $realm" ;;
+    esac
+    target_gid="$(getent group "$RUNTIME_GROUP" | awk -F: 'NR == 1 { print $3 }')" \
+        || fail "cannot resolve runtime group for candidate-universe transition"
+    [[ "$target_gid" =~ ^[0-9]+$ ]] \
+        || fail "signal-worker group id is invalid"
+    [ ! -L "$(dirname "$target")" ] \
+        || fail "signal-worker candidate-universe directory is linked: $(dirname "$target")"
+    install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$(dirname "$target")" \
+        || fail "cannot create $realm signal-worker candidate-universe directory"
+    "$PYTHON" - "$source" "$target" "$realm" "$endpoint" 0 "$target_gid" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+(
+    source,
+    target,
+    realm,
+    endpoint,
+    target_uid_raw,
+    target_gid_raw,
+) = sys.argv[1:]
+source_path = Path(source)
+target_path = Path(target)
+target_uid = int(target_uid_raw)
+target_gid = int(target_gid_raw)
+
+
+def reject_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON number {value}")
+
+
+def stable_regular_bytes(path: Path, label: str) -> tuple[bytes, os.stat_result]:
+    before = os.lstat(path)
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise RuntimeError(f"{label} is not a non-symlink regular file: {path}")
+    if before.st_nlink != 1:
+        raise RuntimeError(f"{label} has more than one name: {path}")
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if not os.path.samestat(before, opened):
+            raise RuntimeError(f"{label} changed before it was read: {path}")
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            data = handle.read()
+        current = os.lstat(path)
+        if not os.path.samestat(opened, current):
+            raise RuntimeError(f"{label} changed while it was read: {path}")
+        return data, opened
+    finally:
+        os.close(descriptor)
+
+
+def symbol_list(value: object, label: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise RuntimeError(f"{label} must be a non-empty list")
+    if any(type(item) is not str or not item for item in value):
+        raise RuntimeError(f"{label} contains an invalid symbol")
+    symbols = list(value)
+    if symbols != sorted(set(symbols)):
+        raise RuntimeError(f"{label} must be sorted and unique")
+    return symbols
+
+
+def validate(data: bytes, label: str) -> None:
+    try:
+        payload = json.loads(data, parse_constant=reject_constant)
+    except (UnicodeDecodeError, ValueError) as error:
+        raise RuntimeError(f"{label} is not valid JSON: {error}") from None
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{label} must contain one JSON object")
+    identity = (
+        payload.get("schema_version"),
+        payload.get("kind"),
+        payload.get("strategy_domain"),
+        payload.get("environment"),
+        payload.get("endpoint"),
+    )
+    expected_identity = (
+        5,
+        "account_execution_candidate_universe",
+        "crypto_perpetuals",
+        realm,
+        endpoint,
+    )
+    if identity != expected_identity:
+        raise RuntimeError(f"{label} has the wrong schema, realm, or endpoint")
+    symbols = symbol_list(payload.get("symbols"), f"{label} symbols")
+    if type(payload.get("symbol_count")) is not int \
+            or payload["symbol_count"] != len(symbols):
+        raise RuntimeError(f"{label} symbol_count does not match symbols")
+    profiles = payload.get("profile_eligible_symbols")
+    if not isinstance(profiles, dict) or set(profiles) != {"long", "carry"}:
+        raise RuntimeError(f"{label} must contain exactly LONG and CARRY populations")
+    long_symbols = symbol_list(profiles["long"], f"{label} LONG population")
+    carry_symbols = symbol_list(profiles["carry"], f"{label} CARRY population")
+    if not set(long_symbols).issubset(symbols) or not set(carry_symbols).issubset(symbols):
+        raise RuntimeError(f"{label} profile populations escape the instrument set")
+    snapshot = payload.get("snapshot_ts_ns")
+    completed = payload.get("snapshot_completed_ts_ns", snapshot)
+    if type(snapshot) is not int or snapshot <= 0 \
+            or type(completed) is not int or completed < snapshot:
+        raise RuntimeError(f"{label} has an invalid acquisition interval")
+    artifact_sha256 = payload.get("artifact_sha256")
+    if type(artifact_sha256) is not str \
+            or len(artifact_sha256) != 64 \
+            or any(character not in "0123456789abcdef" for character in artifact_sha256):
+        raise RuntimeError(f"{label} has an invalid artifact hash")
+    payload["artifact_sha256"] = ""
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    if hashlib.sha256(canonical).hexdigest() != artifact_sha256:
+        raise RuntimeError(f"{label} artifact hash does not match its content")
+
+
+copied = not os.path.lexists(target_path)
+source_data: bytes | None = None
+if copied:
+    try:
+        source_data, source_stat = stable_regular_bytes(
+            source_path,
+            "incumbent candidate universe",
+        )
+    except FileNotFoundError:
+        raise SystemExit(
+            f"candidate-universe transition has neither incumbent nor native artifact: "
+            f"{source_path} -> {target_path}"
+        ) from None
+    if source_stat.st_uid != target_uid or source_stat.st_gid != target_gid \
+            or stat.S_IMODE(source_stat.st_mode) != 0o640:
+        raise SystemExit(
+            f"incumbent candidate universe is not owner {target_uid}:{target_gid} mode 0640: "
+            f"{source_path}"
+        )
+    try:
+        validate(source_data, "incumbent candidate universe")
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from None
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{target_path.name}.",
+        dir=target_path.parent,
+    )
+    try:
+        os.fchown(descriptor, target_uid, target_gid)
+        os.fchmod(descriptor, 0o640)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(source_data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target_path)
+        directory = os.open(target_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+try:
+    target_data, target_stat = stable_regular_bytes(
+        target_path,
+        "native candidate universe",
+    )
+    validate(target_data, "native candidate universe")
+except (FileNotFoundError, RuntimeError) as error:
+    raise SystemExit(str(error)) from None
+if copied and target_data != source_data:
+    raise SystemExit("native candidate universe is not byte-identical to the incumbent")
+descriptor = os.open(
+    target_path,
+    os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+)
+try:
+    if not os.path.samestat(target_stat, os.fstat(descriptor)):
+        raise SystemExit("native candidate universe changed before ownership was secured")
+    os.fchown(descriptor, target_uid, target_gid)
+    os.fchmod(descriptor, 0o640)
+    secured = os.fstat(descriptor)
+finally:
+    os.close(descriptor)
+if secured.st_uid != target_uid or secured.st_gid != target_gid \
+        or stat.S_IMODE(secured.st_mode) != 0o640:
+    raise SystemExit("native candidate-universe ownership or mode is invalid")
+if not os.path.samestat(secured, os.lstat(target_path)):
+    raise SystemExit("native candidate universe changed while ownership was secured")
+print(
+    json.dumps(
+        {
+            "status": "candidate_universe_transition_ready",
+            "realm": realm,
+            "copied": copied,
+            "sha256": hashlib.sha256(target_data).hexdigest(),
+        },
+        sort_keys=True,
+    )
+)
+PY
+    [ "$?" -eq 0 ] \
+        || fail "cannot stage the $realm incumbent candidate universe"
+}
+
 reconcile_demo_engine_environment() {
     local source="$REPO_DIR/deploy/engine.env.template"
     local target="$ENGINE_ENVIRONMENT"
@@ -958,6 +1207,16 @@ prepare_demo_runtime_config() {
     for path in "$demo_candidate" "$demo_profile"; do
         [ "${path#/}" != "$path" ] || fail "demo signal-worker input must be absolute: $path"
     done
+    [ "$demo_candidate" = \
+        /etc/liquidity-migration/signal-worker-demo-source/candidate-universe.json ] \
+        || fail "demo signal-worker candidate-universe path is not canonical"
+    stage_incumbent_candidate_universe demo
+    if [ -e /etc/liquidity-migration/producer-mainnet-source/candidate-universe.json ] \
+        || [ -L /etc/liquidity-migration/producer-mainnet-source/candidate-universe.json ] \
+        || [ -e /etc/liquidity-migration/signal-worker-mainnet-source/candidate-universe.json ] \
+        || [ -L /etc/liquidity-migration/signal-worker-mainnet-source/candidate-universe.json ]; then
+        stage_incumbent_candidate_universe mainnet
+    fi
     operational_profile_source="$REPO_DIR/configs/operational.demo.json"
     [ -f "$operational_profile_source" ] && [ ! -L "$operational_profile_source" ] \
         || fail "missing tracked operational profile: $operational_profile_source"
@@ -970,7 +1229,7 @@ PY
     install -d -o root -g root -m 0700 "$(dirname "$demo_profile")"
     install -o root -g root -m 0600 "$operational_profile_source" "$demo_profile"
     [ -f "$demo_candidate" ] && [ ! -L "$demo_candidate" ] \
-        || fail "install a reviewed demo candidate universe: $demo_candidate"
+        || fail "staged demo candidate universe is missing: $demo_candidate"
     chown root:root /etc/liquidity-migration/sleeves.resolved.env
     chmod 0600 /etc/liquidity-migration/sleeves.resolved.env
     write_signal_worker_environment "$DEMO_SIGNAL_SOURCE_ENV" "$SIGNAL_WORKER_DEMO_ENV"
@@ -1090,6 +1349,119 @@ require_clean_head() {
     require_clean_checkout_at "$EXPECTED_COMMIT" "exact-commit operation"
 }
 
+install_fleet_manifest_snapshot() {
+    [ "$#" -eq 1 ] || return 2
+    local source="$1" parent mode
+    [ -f "$source" ] && [ ! -L "$source" ] \
+        || fail "fleet manifest snapshot source is missing or linked: $source"
+    parent="$(dirname "$INSTALLED_FLEET_MANIFEST")" \
+        || fail "cannot resolve the installed fleet manifest directory"
+    install -d -o root -g root -m 0700 "$parent" \
+        || fail "cannot prepare the installed fleet manifest directory"
+    [ -d "$parent" ] && [ ! -L "$parent" ] \
+        && [ "$(stat -c %u "$parent")" -eq 0 ] \
+        && [ "$(stat -c %g "$parent")" -eq 0 ] \
+        || fail "installed fleet manifest directory is not root-owned"
+    mode="$(stat -c %a "$parent")" \
+        || fail "cannot inspect the installed fleet manifest directory"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) \
+        || fail "installed fleet manifest directory is group/world writable"
+    /usr/bin/python3 - "$source" "$INSTALLED_FLEET_MANIFEST" <<'PY'
+import os
+import stat
+import sys
+import tempfile
+
+MAX_MANIFEST_BYTES = 1024 * 1024
+source, target = sys.argv[1:]
+
+
+def signature(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+before = os.lstat(source)
+if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) \
+        or before.st_nlink != 1 or before.st_size > MAX_MANIFEST_BYTES:
+    raise SystemExit("fleet manifest snapshot source is not a bounded single file")
+descriptor = os.open(
+    source,
+    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+)
+try:
+    opened = os.fstat(descriptor)
+    if signature(before) != signature(opened):
+        raise SystemExit("fleet manifest snapshot source changed while it was opened")
+    chunks: list[bytes] = []
+    remaining = MAX_MANIFEST_BYTES + 1
+    while remaining:
+        chunk = os.read(descriptor, min(64 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    payload = b"".join(chunks)
+    after = os.fstat(descriptor)
+    if not payload or len(payload) > MAX_MANIFEST_BYTES \
+            or len(payload) != opened.st_size or signature(opened) != signature(after):
+        raise SystemExit("fleet manifest snapshot source changed while it was read")
+finally:
+    os.close(descriptor)
+
+parent = os.path.dirname(target)
+descriptor, temporary = tempfile.mkstemp(prefix=".fleet-manifest.", dir=parent)
+try:
+    os.fchmod(descriptor, 0o600)
+    os.fchown(descriptor, 0, 0)
+    written = 0
+    while written < len(payload):
+        count = os.write(descriptor, payload[written:])
+        if count <= 0:
+            raise OSError("short write while installing fleet manifest snapshot")
+        written += count
+    os.fsync(descriptor)
+    installed = os.fstat(descriptor)
+    if installed.st_uid != 0 or installed.st_gid != 0 \
+            or stat.S_IMODE(installed.st_mode) != 0o600 \
+            or installed.st_nlink != 1 or installed.st_size != len(payload):
+        raise SystemExit("fleet manifest snapshot staging metadata is invalid")
+    os.close(descriptor)
+    descriptor = -1
+    os.replace(temporary, target)
+    directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except BaseException:
+    if descriptor >= 0:
+        os.close(descriptor)
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+
+installed = os.lstat(target)
+if stat.S_ISLNK(installed.st_mode) or not stat.S_ISREG(installed.st_mode) \
+        or installed.st_uid != 0 or installed.st_gid != 0 \
+        or stat.S_IMODE(installed.st_mode) != 0o600 or installed.st_nlink != 1 \
+        or installed.st_size != len(payload):
+    raise SystemExit("installed fleet manifest snapshot failed verification")
+PY
+    [ "$?" -eq 0 ] || fail "cannot install the root-owned fleet manifest snapshot"
+}
+
 running_liqmig_units() {
     local rows
     rows="$(systemctl list-units 'liquidity-migration-*' --all --no-legend --no-pager --plain 2>/dev/null)" \
@@ -1169,6 +1541,8 @@ install_mode() {
     run_phase persist-install-boot-fence disable_rollout_units_for_boot_fence
     installed_head="$(safe_git rev-parse HEAD)" || fail "cannot read installed checkout HEAD"
     require_clean_checkout_at "$installed_head" "install"
+    run_phase snapshot-incumbent-fleet-manifest \
+        install_fleet_manifest_snapshot "$REPO_DIR/deploy/fleet_manifest.tsv"
 
     safe_git checkout -B "$BRANCH" "$EXPECTED_COMMIT" \
         || fail "cannot select the prefetched exact commit"
@@ -1202,6 +1576,8 @@ install_mode() {
     . deploy/lib_sleeves.sh
     . deploy/lib_systemd_environment.sh
     run_phase install-systemd-manifest lm_install_current_systemd_units
+    run_phase install-fleet-manifest-snapshot \
+        install_fleet_manifest_snapshot "$REPO_DIR/deploy/fleet_manifest.tsv"
     for unit in $(lm_expected_systemd_units); do
         systemctl disable --now "$unit" 2>/dev/null || true
     done
@@ -1499,10 +1875,149 @@ run_engine_takeover_command() {
     )
 }
 
+remove_native_takeover_temps() {
+    local path failed=0
+    for path in "$@"; do
+        [ -n "$path" ] || continue
+        if ! rm -f -- "$path"; then
+            echo "cannot remove temporary takeover source: $path" >&2
+            failed=1
+        fi
+    done
+    return "$failed"
+}
+
+stage_native_takeover_source() {
+    [ "$#" -eq 5 ] || return 2
+    local source="$1" template="$2" kind="$3"
+    local output_name="$4" temporary_name="$5"
+    local staged
+    [[ "$output_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+        && [[ "$temporary_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+        || fail "takeover staging output variable name is invalid"
+    case "$kind" in
+        required|carry-early-exits-v1|carry-event-tape-v1) ;;
+        *) fail "unsupported takeover source kind: $kind" ;;
+    esac
+    printf -v "$output_name" '%s' ""
+    printf -v "$temporary_name" '%s' ""
+    staged="$(mktemp "$template")" \
+        || fail "cannot create a staged takeover source for $source"
+    printf -v "$output_name" '%s' "$staged"
+    printf -v "$temporary_name" '%s' "$staged"
+    if ! "$PYTHON" - "$SIGNAL_WORKER_USER" "$RUNTIME_GROUP" \
+        "$source" "$staged" "$kind" <<'PY'
+import grp
+import os
+import pwd
+import stat
+import sys
+
+MAX_SOURCE_BYTES = 16 * 1024 * 1024
+owner = pwd.getpwnam(sys.argv[1]).pw_uid
+group = grp.getgrnam(sys.argv[2]).gr_gid
+source, target, kind = sys.argv[3:]
+
+
+def snapshot(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+try:
+    before = os.lstat(source)
+except FileNotFoundError:
+    if kind == "required":
+        raise SystemExit(f"required takeover source is missing: {source}") from None
+    payload = b'{"fired":{}}\n' if kind == "carry-early-exits-v1" else b""
+else:
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise SystemExit(f"takeover source is not a regular non-symlink file: {source}")
+    if before.st_nlink != 1 or before.st_size > MAX_SOURCE_BYTES:
+        raise SystemExit(f"takeover source link or size boundary is invalid: {source}")
+    if before.st_uid != owner or before.st_gid != group:
+        raise SystemExit(f"takeover source owner is not the signal worker: {source}")
+    descriptor = os.open(
+        source,
+        os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if snapshot(before) != snapshot(opened):
+            raise SystemExit(f"takeover source changed while it was opened: {source}")
+        chunks: list[bytes] = []
+        remaining = MAX_SOURCE_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if len(payload) > MAX_SOURCE_BYTES or len(payload) != opened.st_size \
+                or snapshot(opened) != snapshot(after):
+            raise SystemExit(f"takeover source changed while it was read: {source}")
+    finally:
+        os.close(descriptor)
+
+target_before = os.lstat(target)
+if not stat.S_ISREG(target_before.st_mode) or target_before.st_nlink != 1:
+    raise SystemExit(f"takeover staging target is not a single regular file: {target}")
+descriptor = os.open(
+    target,
+    os.O_WRONLY | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+)
+try:
+    if not os.path.samestat(target_before, os.fstat(descriptor)):
+        raise SystemExit(f"takeover staging target changed while it was opened: {target}")
+    written = 0
+    while written < len(payload):
+        count = os.write(descriptor, payload[written:])
+        if count <= 0:
+            raise OSError("short write while staging takeover source")
+        written += count
+    os.fsync(descriptor)
+    staged = os.fstat(descriptor)
+    if not stat.S_ISREG(staged.st_mode) or staged.st_nlink != 1 \
+            or staged.st_size != len(payload):
+        raise SystemExit(f"staged takeover source failed verification: {target}")
+finally:
+    os.close(descriptor)
+PY
+    then
+        rm -f -- "$staged"
+        fail "cannot snapshot the exact takeover source bytes for $source"
+    fi
+    chown root:"$RUNTIME_GROUP" "$staged" && chmod 0640 "$staged" || {
+        rm -f -- "$staged"
+        fail "cannot secure the staged takeover source for $source"
+    }
+    [ -f "$staged" ] && [ ! -L "$staged" ] \
+        && [ "$(stat -c %h "$staged")" -eq 1 ] \
+        && [ "$(stat -c %u "$staged")" -eq 0 ] \
+        && [ "$(stat -c %G "$staged")" = "$RUNTIME_GROUP" ] \
+        && [ "$(stat -c %a "$staged")" = 640 ] \
+        || {
+            rm -f -- "$staged"
+            fail "staged takeover source ownership or mode is invalid"
+        }
+}
+
 import_native_strategy_state() {
     local realm="$1" config wal long_root carry_root exodus_root
-    local long_state carry_checkpoint carry_book carry_events exodus_identity exodus_state
-    local present=0 source
+    local long_state carry_checkpoint carry_early_exits carry_book carry_events
+    local exodus_identity exodus_state exodus_target_book engine_heartbeat exodus_legacy_paths
+    local required_present=0 optional_present=0 source
     case "$realm" in
         demo)
             config="$ENGINE_DEMO_CONFIG"
@@ -1510,6 +2025,7 @@ import_native_strategy_state() {
             long_root="$LONG_DEMO_ROOT"
             carry_root="$CARRY_DEMO_ROOT"
             exodus_root="$EXODUS_DEMO_ROOT"
+            engine_heartbeat=/var/lib/liquidity-migration-engine/heartbeat.json
             ;;
         mainnet)
             config="$ENGINE_MAINNET_CONFIG"
@@ -1517,15 +2033,18 @@ import_native_strategy_state() {
             long_root="$LONG_MAINNET_ROOT"
             carry_root="$CARRY_MAINNET_ROOT"
             exodus_root="$EXODUS_MAINNET_ROOT"
+            engine_heartbeat=/var/lib/liquidity-migration-engine-mainnet/heartbeat.json
             ;;
         *) fail "unsupported strategy-state import realm: $realm" ;;
     esac
     long_state="/var/lib/liquidity-migration/targets/long-${realm}-state.json"
     carry_checkpoint="$carry_root/.cache/carry_sizing_anchors.json"
+    carry_early_exits="$carry_root/carry_early_exits.json"
     carry_book="/var/lib/liquidity-migration/targets/carry-${realm}.json"
     carry_events="$carry_root/carry_presettlement_events.jsonl"
     exodus_identity="$exodus_root/exodus_state_identity.json"
     exodus_state="$exodus_root/exodus_state.json"
+    exodus_target_book="/var/lib/liquidity-migration/targets/exodus-${realm}.json"
 
     # A completed native generation is authoritative. The stopped-state
     # sources cannot overwrite a reducer that has advanced.
@@ -1535,17 +2054,27 @@ import_native_strategy_state() {
     fi
 
     for source in \
-        "$long_state" "$carry_checkpoint" "$carry_book" "$carry_events" \
-        "$exodus_identity" "$exodus_state"; do
+        "$long_state" "$carry_checkpoint" "$carry_book" "$exodus_identity" "$exodus_state"; do
         [ ! -L "$source" ] || fail "strategy-state takeover source is linked: $source"
         if [ -e "$source" ]; then
             [ -f "$source" ] \
                 || fail "strategy-state takeover source is not a regular file: $source"
-            present=$((present + 1))
+            required_present=$((required_present + 1))
+        fi
+    done
+    # These are the only retired sources whose readers define absence as an
+    # exact empty state. The other five files are required state, not defaults.
+    for source in "$carry_early_exits" "$carry_events"; do
+        [ ! -L "$source" ] || fail "strategy-state takeover source is linked: $source"
+        if [ -e "$source" ]; then
+            [ -f "$source" ] \
+                || fail "strategy-state takeover source is not a regular file: $source"
+            optional_present=$((optional_present + 1))
         fi
     done
 
-    if [ "$present" -eq 0 ] && [ ! -s "$wal" ]; then
+    if [ "$required_present" -eq 0 ] && [ "$optional_present" -eq 0 ] \
+        && [ ! -s "$wal" ]; then
         run_engine_takeover_command "$realm" "$config" initialize-native-strategy-state \
             || fail "cannot initialize empty native strategy state for $realm"
         run_engine_takeover_command "$realm" "$config" verify-native-strategy-state \
@@ -1553,29 +2082,116 @@ import_native_strategy_state() {
         echo "native-state-ok realm=$realm result=initialized-empty"
         return 0
     fi
-    [ "$present" -eq 6 ] \
-        || fail "$realm strategy-state takeover is incomplete: found $present of 6 sources"
+    [ "$required_present" -eq 5 ] \
+        || fail "$realm strategy-state takeover is incomplete: found $required_present of 5 required sources"
 
-    run_engine_takeover_command "$realm" "$config" import-strategy-state \
-        --strategy long \
-        --source-format long-book-state-v2 \
-        --source "state=$long_state" \
-        || fail "cannot import exact LONG state for $realm"
-    run_engine_takeover_command "$realm" "$config" import-strategy-state \
-        --strategy carry \
-        --source-format carry-reducer-v2-target-book-v1 \
-        --source "reducer_checkpoint=$carry_checkpoint" \
-        --source "target_book=$carry_book" \
-        || fail "cannot import exact CARRY state for $realm"
-    run_engine_takeover_command "$realm" "$config" import-strategy-state \
-        --strategy exodus \
-        --source-format exodus-state-v1-v4-event-tape-v1 \
-        --source "carry_events=$carry_events" \
-        --source "identity=$exodus_identity" \
-        --source "state=$exodus_state" \
-        || fail "cannot import exact Exodus state for $realm"
-    run_engine_takeover_command "$realm" "$config" verify-native-strategy-state \
-        || fail "imported $realm native strategy state failed verification"
+    (
+        local long_state_source carry_checkpoint_source carry_early_exits_source
+        local carry_book_source carry_events_source exodus_identity_source exodus_state_source
+        local long_state_temp="" carry_checkpoint_temp="" carry_early_exits_temp=""
+        local carry_book_temp="" carry_events_temp="" exodus_identity_temp=""
+        local exodus_state_temp="" import_status=0
+        cleanup_native_takeover_temps() {
+            local status="$?"
+            trap - EXIT
+            if ! remove_native_takeover_temps \
+                "$exodus_legacy_paths" "$long_state_temp" "$carry_checkpoint_temp" \
+                "$carry_early_exits_temp" "$carry_book_temp" "$carry_events_temp" \
+                "$exodus_identity_temp" "$exodus_state_temp" \
+                && [ "$status" -eq 0 ]; then
+                status=1
+            fi
+            exit "$status"
+        }
+        exodus_legacy_paths=""
+        trap cleanup_native_takeover_temps EXIT
+        stage_native_takeover_source \
+            "$long_state" \
+            "/run/liquidity-migration/long-${realm}-state.XXXXXX" \
+            required long_state_source long_state_temp
+        stage_native_takeover_source \
+            "$carry_checkpoint" \
+            "/run/liquidity-migration/carry-${realm}-sizing.XXXXXX" \
+            required carry_checkpoint_source carry_checkpoint_temp
+        stage_native_takeover_source \
+            "$carry_early_exits" \
+            "/run/liquidity-migration/carry-${realm}-early-exits.XXXXXX" \
+            carry-early-exits-v1 carry_early_exits_source carry_early_exits_temp
+        stage_native_takeover_source \
+            "$carry_book" \
+            "/run/liquidity-migration/carry-${realm}-target-book.XXXXXX" \
+            required carry_book_source carry_book_temp
+        stage_native_takeover_source \
+            "$carry_events" \
+            "/run/liquidity-migration/carry-${realm}-events.XXXXXX" \
+            carry-event-tape-v1 carry_events_source carry_events_temp
+        stage_native_takeover_source \
+            "$exodus_identity" \
+            "/run/liquidity-migration/exodus-${realm}-identity.XXXXXX" \
+            required exodus_identity_source exodus_identity_temp
+        stage_native_takeover_source \
+            "$exodus_state" \
+            "/run/liquidity-migration/exodus-${realm}-state.XXXXXX" \
+            required exodus_state_source exodus_state_temp
+
+        run_engine_takeover_command "$realm" "$config" import-strategy-state \
+            --strategy long \
+            --source-format long-book-state-v2 \
+            --source "state=$long_state_source" \
+            || fail "cannot import exact LONG state for $realm"
+        run_engine_takeover_command "$realm" "$config" import-strategy-state \
+            --strategy carry \
+            --source-format carry-sizing-anchors-v1-early-exits-v1-target-book-v1 \
+            --source "early_exits=$carry_early_exits_source" \
+            --source "sizing_anchors=$carry_checkpoint_source" \
+            --source "target_book=$carry_book_source" \
+            || fail "cannot import exact CARRY state for $realm"
+        exodus_legacy_paths="$(
+            mktemp "/run/liquidity-migration/exodus-${realm}-legacy-paths.XXXXXX"
+        )" || fail "cannot create the $realm Exodus legacy-path bundle"
+        [ -f "$exodus_legacy_paths" ] && [ ! -L "$exodus_legacy_paths" ] \
+            && [ "$(stat -c %h "$exodus_legacy_paths")" -eq 1 ] \
+            || fail "$realm Exodus legacy-path bundle is not a single regular file"
+        if ! "$PYTHON" - "$carry_events" "$exodus_target_book" "$engine_heartbeat" \
+            > "$exodus_legacy_paths" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+event_path, target_book_path, engine_heartbeat_path = sys.argv[1:]
+for value in (event_path, target_book_path, engine_heartbeat_path):
+    if not Path(value).is_absolute():
+        raise SystemExit(f"legacy path is not absolute: {value!r}")
+payload = {
+    "schema_version": 1,
+    "event_path": event_path,
+    "target_book_path": target_book_path,
+    "engine_heartbeat_path": engine_heartbeat_path,
+}
+sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+        then
+            fail "cannot render the $realm Exodus legacy-path bundle"
+        fi
+        chown root:"$RUNTIME_GROUP" "$exodus_legacy_paths" \
+            && chmod 0640 "$exodus_legacy_paths" \
+            || fail "cannot secure the $realm Exodus legacy-path bundle"
+        if run_engine_takeover_command "$realm" "$config" import-strategy-state \
+            --strategy exodus \
+            --source-format exodus-state-v1-v4-event-tape-v1-identity-v2 \
+            --source "carry_events=$carry_events_source" \
+            --source "identity=$exodus_identity_source" \
+            --source "legacy_paths=$exodus_legacy_paths" \
+            --source "state=$exodus_state_source"; then
+            import_status=0
+        else
+            import_status=$?
+        fi
+        [ "$import_status" -eq 0 ] \
+            || fail "cannot import exact Exodus state for $realm"
+        run_engine_takeover_command "$realm" "$config" verify-native-strategy-state \
+            || fail "imported $realm native strategy state failed verification"
+    ) || fail "$realm strategy-state takeover failed"
     echo "native-state-ok realm=$realm result=imported"
 }
 
@@ -3667,17 +4283,21 @@ provision_mainnet_prerequisites() {
         || fail "funded signal-worker source must declare SIGNAL_WORKER_REALM=mainnet"
     risk_policy_file="$OPERATIONAL_PROFILE_FILE"
     universe_file="$CANDIDATE_UNIVERSE_FILE"
+    [ "$universe_file" = \
+        /etc/liquidity-migration/signal-worker-mainnet-source/candidate-universe.json ] \
+        || fail "funded signal-worker candidate-universe path is not canonical"
 
     install -d -o root -g "$RUNTIME_GROUP" -m 0750 \
         "$(dirname "$risk_policy_file")" \
         || fail "cannot create the mainnet signal-worker input directory"
+    stage_incumbent_candidate_universe mainnet
     # The installed profile is always the render of the current dials, so a
     # dial edit can never drift from what the kernel enforces.
     "$PYTHON" -m liquidity_migration.policy.real_money_arming render-profile \
         --execute --overwrite --output "$risk_policy_file" \
         || fail "mainnet dials do not render a loadable profile"
     [ -f "$universe_file" ] && [ ! -L "$universe_file" ] \
-        || fail "install a reviewed mainnet candidate-universe artifact before activation: $universe_file"
+        || fail "staged mainnet candidate-universe artifact is missing: $universe_file"
     write_signal_worker_environment "$MAINNET_SIGNAL_SOURCE_ENV" "$SIGNAL_WORKER_MAINNET_ENV"
     project_mainnet_telegram_environment
 }
@@ -3732,10 +4352,54 @@ resolve_fail_safe_python() {
     printf '%s\n' "$interpreter"
 }
 
-# Emergency containment must not trust the checkout: it operates only on this
-# fixed unit allowlist through PID 1, then proves every installed unit inactive
-# and persistently disabled. The caller may subsequently change credentials,
-# but a failed credential rewrite still leaves the funded fleet quarantined.
+# Emergency containment treats the installed root-owned snapshot and the
+# embedded candidate only as strict data. It does not need the remote checkout
+# or Git metadata. The ordered union includes a generation being retired.
+prepare_mainnet_quarantine_inventory() {
+    local incumbent_manifest candidate_manifest parent mode rows phase order unit status=0
+    [ -x /usr/bin/base64 ] || return 1
+    incumbent_manifest="$INSTALLED_FLEET_MANIFEST"
+    parent="$(dirname "$incumbent_manifest")" || return 1
+    [ -d "$parent" ] && [ ! -L "$parent" ] \
+        && [ "$(/usr/bin/stat -c %u "$parent")" -eq 0 ] \
+        || return 1
+    mode="$(/usr/bin/stat -c %a "$parent")" || return 1
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) || return 1
+    [ -f "$incumbent_manifest" ] && [ ! -L "$incumbent_manifest" ] \
+        && [ "$(/usr/bin/stat -c %u "$incumbent_manifest")" -eq 0 ] \
+        && [ "$(/usr/bin/stat -c %g "$incumbent_manifest")" -eq 0 ] \
+        && [ "$(/usr/bin/stat -c %a "$incumbent_manifest")" = 600 ] \
+        && [ "$(/usr/bin/stat -c %h "$incumbent_manifest")" -eq 1 ] \
+        || return 1
+    candidate_manifest="$(
+        /usr/bin/mktemp /run/liquidity-migration/mainnet-quarantine-manifest.XXXXXX
+    )" || return 1
+    /bin/chmod 0600 "$candidate_manifest" || status=1
+    if [ "$status" -eq 0 ]; then
+        printf '%s' "$CANDIDATE_FLEET_MANIFEST_B64" \
+            | /usr/bin/base64 --decode > "$candidate_manifest" || status=1
+    fi
+    if [ "$status" -eq 0 ]; then
+        rows="$(
+            lm_rollout_transition_inventory \
+                "$incumbent_manifest" "$candidate_manifest" mainnet
+        )" || status=1
+    fi
+    /bin/rm -f -- "$candidate_manifest" || status=1
+    [ "$status" -eq 0 ] || return 1
+
+    MAINNET_QUARANTINE_UNITS=()
+    while IFS='|' read -r phase order unit; do
+        [ -n "$unit" ] || continue
+        [[ "$order" =~ ^[1-9][0-9]*$ ]] || return 1
+        case "$phase" in downstream|owner) ;; *) return 1 ;; esac
+        MAINNET_QUARANTINE_UNITS+=("$unit")
+    done <<< "$rows"
+    [ "${#MAINNET_QUARANTINE_UNITS[@]}" -gt 0 ] || return 1
+    printf 'mainnet-quarantine-inventory-ok units=%s incumbent=snapshot candidate=embedded\n' \
+        "${#MAINNET_QUARANTINE_UNITS[@]}"
+}
+
 quarantine_mainnet_units() {
     local unit load_state failures=0
     [ -x /usr/bin/systemctl ] || return 1
@@ -3769,6 +4433,8 @@ quarantine_mainnet_units() {
 
 disarm_mainnet_mode() {
     local fail_safe_python
+    prepare_mainnet_quarantine_inventory \
+        || fail "cannot build the installed-plus-candidate funded unit inventory"
     quarantine_mainnet_units \
         || fail "cannot prove the funded units inactive and disabled"
     fail_safe_python="$(resolve_fail_safe_python)" \
@@ -3793,15 +4459,18 @@ class DisarmError(Exception):
     pass
 
 
+def root_owned_nonwritable_directory(value: os.stat_result) -> bool:
+    return (
+        stat.S_ISDIR(value.st_mode)
+        and value.st_uid == 0
+        and not stat.S_IMODE(value.st_mode) & 0o022
+    )
+
+
 def checked_snapshot(path: str) -> tuple[bytes, os.stat_result]:
     parent = os.path.dirname(path)
     parent_stat = os.lstat(parent)
-    if (
-        not stat.S_ISDIR(parent_stat.st_mode)
-        or parent_stat.st_uid != 0
-        or parent_stat.st_gid != 0
-        or stat.S_IMODE(parent_stat.st_mode) & 0o022
-    ):
+    if not root_owned_nonwritable_directory(parent_stat):
         raise DisarmError("unsafe credential directory")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
@@ -3923,6 +4592,8 @@ PY
 }
 
 stop_mainnet_mode() {
+    prepare_mainnet_quarantine_inventory \
+        || fail "cannot build the installed-plus-candidate funded unit inventory"
     quarantine_mainnet_units \
         || fail "cannot prove the funded units inactive and disabled"
     echo "stop-mainnet-ok"
@@ -3930,20 +4601,71 @@ stop_mainnet_mode() {
     echo "note: REAL_MONEY was not read; run disarm-mainnet to remove arming at the credential boundary."
 }
 
-# The local side resolves these arrays from deploy/fleet_manifest.tsv before it
-# sends the remote program. This lets a new commit quiesce units absent from the
-# host's installed checkout while keeping stop order in one inventory.
+# The local side supplies the candidate baseline. Rollout replaces it with the
+# validated union of the installed manifest and the exact prefetched candidate.
 ROLLOUT_STOPPED=0
 ROLLOUT_IRREVERSIBLE=0
 ROLLOUT_COMPLETE=0
+ROLLOUT_TRANSITION_READY=0
 ROLLOUT_CURRENT_COMMIT=""
 ROLLOUT_CANCELLATION_SIGNAL=""
 ROLLOUT_PRIOR_ACTIVE_UNITS=()
 ROLLOUT_PRIOR_ENABLED_UNITS=()
 ROLLOUT_PRIOR_RUNTIME_ENABLED_UNITS=()
 
+prepare_rollout_transition_inventory() {
+    local incumbent_manifest="$REPO_DIR/deploy/fleet_manifest.tsv"
+    local candidate_manifest="$ENGINE_BUILD_DIR/deploy/fleet_manifest.tsv"
+    local incumbent_helper="$REPO_DIR/deploy/lib_sleeves.sh"
+    local candidate_helper="$ENGINE_BUILD_DIR/deploy/lib_sleeves.sh"
+    local rows phase order unit
+    [ "$ENGINE_PREFETCHED_COMMIT" = "$EXPECTED_COMMIT" ] \
+        || fail "rollout transition candidate was not prefetched at $EXPECTED_COMMIT"
+    [ -f "$incumbent_manifest" ] && [ ! -L "$incumbent_manifest" ] \
+        || fail "installed fleet manifest is missing or linked: $incumbent_manifest"
+    [ -f "$candidate_manifest" ] && [ ! -L "$candidate_manifest" ] \
+        || fail "prefetched candidate fleet manifest is missing or linked: $candidate_manifest"
+    [ -f "$incumbent_helper" ] && [ ! -L "$incumbent_helper" ] \
+        || fail "installed fleet helper is missing or linked: $incumbent_helper"
+    [ -f "$candidate_helper" ] && [ ! -L "$candidate_helper" ] \
+        || fail "prefetched candidate fleet helper is missing or linked: $candidate_helper"
+    (
+        LM_FLEET_MANIFEST="$incumbent_manifest"
+        . "$incumbent_helper"
+        lm_validate_fleet_manifest
+    ) || fail "installed fleet manifest failed its schema validator"
+    (
+        LM_FLEET_MANIFEST="$candidate_manifest"
+        . "$candidate_helper"
+        lm_validate_fleet_manifest
+    ) || fail "prefetched candidate fleet manifest failed its schema validator"
+    rows="$(lm_rollout_transition_inventory "$incumbent_manifest" "$candidate_manifest")" \
+        || fail "cannot build the validated rollout transition inventory"
+    ROLLOUT_DOWNSTREAM_UNITS=()
+    ROLLOUT_OWNER_UNITS=()
+    while IFS='|' read -r phase order unit; do
+        [ -n "$unit" ] || continue
+        [[ "$order" =~ ^[1-9][0-9]*$ ]] \
+            || fail "rollout transition unit has an invalid stop order: $unit"
+        case "$phase" in
+            downstream) ROLLOUT_DOWNSTREAM_UNITS+=("$unit") ;;
+            owner) ROLLOUT_OWNER_UNITS+=("$unit") ;;
+            *) fail "rollout transition unit has an invalid lifecycle: $unit" ;;
+        esac
+    done <<< "$rows"
+    [ "${#ROLLOUT_DOWNSTREAM_UNITS[@]}" -gt 0 ] \
+        && [ "${#ROLLOUT_OWNER_UNITS[@]}" -gt 0 ] \
+        || fail "rollout transition inventory is incomplete"
+    ROLLOUT_TRANSITION_READY=1
+    printf 'rollout-transition-ok downstream=%s owners=%s incumbent=%s candidate=%s\n' \
+        "${#ROLLOUT_DOWNSTREAM_UNITS[@]}" "${#ROLLOUT_OWNER_UNITS[@]}" \
+        "$incumbent_manifest" "$candidate_manifest"
+}
+
 snapshot_prior_topology() {
     local unit enabled
+    [ "$ROLLOUT_TRANSITION_READY" -eq 1 ] \
+        || fail "rollout transition inventory was not prepared before topology snapshot"
     ROLLOUT_PRIOR_ACTIVE_UNITS=()
     ROLLOUT_PRIOR_ENABLED_UNITS=()
     ROLLOUT_PRIOR_RUNTIME_ENABLED_UNITS=()
@@ -4292,6 +5014,8 @@ rollout_mode() {
     trap 'rollout_cancel HUP 129' HUP
     trap 'rollout_cancel PIPE 141' PIPE
     run_strict_phase rollout-target-prefetch prefetch_rollout_target
+    run_strict_phase prepare-rollout-transition-inventory \
+        prepare_rollout_transition_inventory
     run_strict_phase snapshot-prior-topology snapshot_prior_topology
 
     ROLLOUT_STOPPED=1

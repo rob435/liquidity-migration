@@ -26,6 +26,7 @@ def _load():
 M = _load()
 HOUR = 3_600_000
 MIN = 60_000
+MIB = 1024 * 1024
 CURRENT_INVOCATION_ID = "78" * 16
 PRIOR_INVOCATION_ID = "9a" * 16
 
@@ -52,12 +53,257 @@ def _ready_signal_heartbeat(now_ms: int, hashes: dict[str, str]) -> dict[str, ob
         "public_market_realm": "mainnet",
         "public_bybit_host": "api.bybit.com",
         "credential_free": True,
+        "signal_config_sha256": "1" * 64,
+        "long_rule_sha256": "2" * 64,
+        "long_feature_contract_sha256": "3" * 64,
+        "carry_config_sha256": "4" * 64,
+        "carry_feature_contract_sha256": "5" * 64,
+        "operational_config_sha256": "6" * 64,
+        "engine_config_sha256": "7" * 64,
+        "universe_artifact_sha256": "8" * 64,
+        "universe_file_sha256": "9" * 64,
         "last_input_sequence": 17,
         "long_output_sequence": 9,
         "carry_output_sequence": 8,
+        "source_generation": "ab" * 16,
         "last_observed_ts_ms": now_ms - 2_000,
+        "last_long_feature_ts_ms": max(1, now_ms - HOUR),
+        "long_skipped_generation_count": 0,
+        "last_long_skipped_first_ts_ms": None,
+        "last_long_skipped_last_ts_ms": None,
+        "last_carry_decision_ts_ms": max(1, now_ms - HOUR),
+        "last_carry_scorer_ts_ms": max(1, now_ms - HOUR),
+        "last_carry_upcoming_ts_ms": None,
+        "last_long_cycle_completed_wall_ts_ms": now_ms - MIN,
+        "last_carry_cycle_completed_wall_ts_ms": now_ms - MIN,
+        "long_cycle_cadence_ms": MIN,
+        "carry_cycle_cadence_ms": MIN,
+        "rest_ticker_last_success_wall_ts_ms": None,
+        "rest_ticker_last_failure_wall_ts_ms": None,
+        "rest_ticker_success_count": 0,
+        "rest_ticker_failure_count": 0,
+        "bybit_ws_connected": True,
+        "bybit_ws_epoch": 4,
+        "bybit_ws_gap_open": False,
+        "bybit_ws_gap_open_since_wall_ts_ms": None,
+        "bybit_ws_reconnect_count": 2,
+        "bybit_ws_fault_count": 1,
+        "bybit_ws_last_frame_ts_ms": now_ms - 1_500,
+        "bybit_ws_ticker_rows": 152,
+        "bybit_ws_ticker_capacity": 152,
+        "bybit_ws_ticker_coverage_complete": True,
+        "bybit_ws_ticker_topics_accepted": 152,
+        "bybit_ws_ticker_topics_quarantined": 0,
+        "bybit_ws_kline_topics_accepted": 152,
+        "bybit_ws_kline_topics_quarantined": 0,
+        "bybit_ws_queued_frames": 2,
+        "bybit_ws_queue_capacity": 304,
+        "spool_files": 12,
+        "spool_bytes": 32_000,
+        "spool_file_cap": 4_096,
+        "spool_byte_cap": 2 * 1024 * MIB,
+        "spool_byte_soft_threshold": 1_488 * MIB,
+        "replaceable_outputs_coalesced": 3,
+        "spool_backpressured": False,
+        "spool_class_files": {
+            "current": 4,
+            "lifecycle": 3,
+            "catchup": 2,
+            "other": 3,
+        },
+        "spool_class_bytes": {
+            "current": 8_000,
+            "lifecycle": 8_000,
+            "catchup": 8_000,
+            "other": 8_000,
+        },
+        "spool_class_file_caps": {
+            "current": 8,
+            "lifecycle": 2_048,
+            "catchup": 1_024,
+            "other": 1_024,
+        },
+        "spool_class_byte_caps": {
+            "current": 512 * MIB,
+            "lifecycle": 512 * MIB,
+            "catchup": 1024 * MIB,
+            "other": 768 * MIB,
+        },
+        "spool_class_byte_soft_thresholds": {
+            "current": 352 * MIB,
+            "lifecycle": 432 * MIB,
+            "catchup": 464 * MIB,
+            "other": 688 * MIB,
+        },
+        "spool_backpressured_classes": [],
         **hashes,
     }
+
+
+def test_ready_signal_heartbeat_matches_rust_worker_schema() -> None:
+    assert set(_ready_signal_heartbeat(40 * HOUR, {})) == {
+        "schema_version",
+        "kind",
+        "status",
+        "pid",
+        "updated_at_ms",
+        "public_market_realm",
+        "public_bybit_host",
+        "credential_free",
+        "signal_config_sha256",
+        "long_rule_sha256",
+        "long_feature_contract_sha256",
+        "carry_config_sha256",
+        "carry_feature_contract_sha256",
+        "operational_config_sha256",
+        "engine_config_sha256",
+        "universe_artifact_sha256",
+        "universe_file_sha256",
+        "source_generation",
+        "last_input_sequence",
+        "long_output_sequence",
+        "carry_output_sequence",
+        "last_observed_ts_ms",
+        "last_long_feature_ts_ms",
+        "long_skipped_generation_count",
+        "last_long_skipped_first_ts_ms",
+        "last_long_skipped_last_ts_ms",
+        "last_carry_decision_ts_ms",
+        "last_carry_scorer_ts_ms",
+        "last_carry_upcoming_ts_ms",
+        "last_long_cycle_completed_wall_ts_ms",
+        "last_carry_cycle_completed_wall_ts_ms",
+        "long_cycle_cadence_ms",
+        "carry_cycle_cadence_ms",
+        "rest_ticker_last_success_wall_ts_ms",
+        "rest_ticker_last_failure_wall_ts_ms",
+        "rest_ticker_success_count",
+        "rest_ticker_failure_count",
+        "bybit_ws_connected",
+        "bybit_ws_epoch",
+        "bybit_ws_gap_open",
+        "bybit_ws_gap_open_since_wall_ts_ms",
+        "bybit_ws_reconnect_count",
+        "bybit_ws_fault_count",
+        "bybit_ws_last_frame_ts_ms",
+        "bybit_ws_ticker_rows",
+        "bybit_ws_ticker_capacity",
+        "bybit_ws_ticker_coverage_complete",
+        "bybit_ws_ticker_topics_accepted",
+        "bybit_ws_ticker_topics_quarantined",
+        "bybit_ws_kline_topics_accepted",
+        "bybit_ws_kline_topics_quarantined",
+        "bybit_ws_queued_frames",
+        "bybit_ws_queue_capacity",
+        "spool_files",
+        "spool_bytes",
+        "spool_file_cap",
+        "spool_byte_cap",
+        "spool_byte_soft_threshold",
+        "replaceable_outputs_coalesced",
+        "spool_backpressured",
+        "spool_class_files",
+        "spool_class_bytes",
+        "spool_class_file_caps",
+        "spool_class_byte_caps",
+        "spool_class_byte_soft_thresholds",
+        "spool_backpressured_classes",
+    }
+
+
+def test_signal_feature_hashes_match_the_rust_contract() -> None:
+    signal_config = json.loads(
+        (REPO_ROOT / "configs" / "signal-worker.demo.json").read_text(encoding="utf-8")
+    )
+
+    assert M._signal_feature_contract_sha256(signal_config, "long") == (
+        "1b9f6fc251f1f2a57a9cd92b9fa39786336384e1db021342efb9a314c923d0b7"
+    )
+    assert M._signal_feature_contract_sha256(signal_config, "carry") == (
+        "d9a96b4c1b9f4a6bf4cdf1bac280025c258e0a5121d716529c9bf9ce2e60000c"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "problem"),
+    [
+        ("schema_version", True, "schema_version is not integer 1"),
+        ("schema_version", 1.0, "schema_version is not integer 1"),
+        ("pid", 441.0, "pid is not a positive u32"),
+        ("pid", "441", "pid is not a positive u32"),
+    ],
+)
+def test_signal_worker_heartbeat_rejects_non_integer_schema_and_pid(
+    field: str,
+    value: object,
+    problem: str,
+) -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload[field] = value
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:producer"]
+    assert alerts[0].severity == M.CRITICAL
+    assert problem in alerts[0].message
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("long_feature_contract_sha256", None),
+        ("carry_feature_contract_sha256", "A" * 64),
+    ],
+)
+def test_signal_worker_heartbeat_requires_feature_contract_hashes(
+    field: str, value: object
+) -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload[field] = value
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:producer"]
+    assert alerts[0].severity == M.CRITICAL
+    assert f"{field} is not lowercase sha256" in alerts[0].message
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["long_feature_contract_sha256", "carry_feature_contract_sha256"],
+)
+def test_signal_worker_heartbeat_binds_feature_contract_hashes(field: str) -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={field: "a" * 64},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:producer"]
+    assert alerts[0].severity == M.CRITICAL
+    assert f"{field} does not match the installed input" in alerts[0].message
 
 
 def test_signal_worker_heartbeat_binds_process_inputs_and_public_source() -> None:
@@ -65,22 +311,19 @@ def test_signal_worker_heartbeat_binds_process_inputs_and_public_source() -> Non
     hashes = {f"input_{index}_sha256": f"{index:064x}" for index in range(6)}
     payload = _ready_signal_heartbeat(now_ms, hashes)
 
-    assert (
-        M.evaluate_signal_worker_heartbeat(
-            payload,
-            now_ms=now_ms,
-            max_age_seconds=30,
-            expected_pid=441,
-            expected_hashes=hashes,
-            label="demo worker",
-        )
-        is None
-    )
+    assert M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes=hashes,
+        label="demo worker",
+    ) == []
 
     payload["pid"] = 442
     payload["public_bybit_host"] = "api-demo.bybit.com"
     payload["input_3_sha256"] = "f" * 64
-    alert = M.evaluate_signal_worker_heartbeat(
+    alerts = M.evaluate_signal_worker_heartbeat(
         payload,
         now_ms=now_ms,
         max_age_seconds=30,
@@ -88,10 +331,500 @@ def test_signal_worker_heartbeat_binds_process_inputs_and_public_source() -> Non
         expected_hashes=hashes,
         label="demo worker",
     )
-    assert alert is not None
+    assert [alert.key for alert in alerts] == ["signal-worker:demo worker:producer"]
+    alert = alerts[0]
+    assert alert.severity == M.CRITICAL
     assert "current systemd process" in alert.message
     assert "mainnet api.bybit.com" in alert.message
     assert "input_3_sha256" in alert.message
+
+
+def test_routine_repair_degraded_status_does_not_page_websocket_transport() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload["status"] = "degraded"
+
+    assert M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    ) == []
+
+
+def test_signal_worker_heartbeat_requires_live_source_and_feature_clocks() -> None:
+    now_ms = 40 * HOUR
+    hashes = {"signal_config_sha256": "a" * 64}
+    payload = _ready_signal_heartbeat(now_ms, hashes)
+
+    payload["source_generation"] = "not-a-generation"
+    payload["last_observed_ts_ms"] = now_ms - 30_001
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes=hashes,
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:producer"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "source_generation" in alerts[0].message
+    assert "causal public observation is 30s old" in alerts[0].message
+
+
+def test_signal_worker_heartbeat_reports_long_and_carry_stalls_independently() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload["last_long_feature_ts_ms"] = now_ms - 26 * HOUR - 1
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:long"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "last_long_feature_ts_ms is 26.0h old" in alerts[0].message
+
+    payload["last_carry_decision_ts_ms"] = now_ms + 1
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == [
+        "signal-worker:mainnet worker:long",
+        "signal-worker:mainnet worker:carry",
+    ]
+    assert all(alert.severity == M.CRITICAL for alert in alerts)
+    assert "last_carry_decision_ts_ms is future-dated" in alerts[1].message
+
+
+def test_signal_worker_websocket_degradation_is_warning_while_decisions_are_live() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload.update(
+        {
+            "status": "degraded",
+            "bybit_ws_connected": False,
+            "bybit_ws_epoch": 0,
+            "bybit_ws_gap_open": True,
+            "bybit_ws_gap_open_since_wall_ts_ms": now_ms - 5_000,
+            "bybit_ws_last_frame_ts_ms": now_ms - 30_001,
+            "bybit_ws_ticker_rows": 151,
+            "bybit_ws_ticker_capacity": 152,
+            "bybit_ws_ticker_coverage_complete": False,
+            "rest_ticker_last_success_wall_ts_ms": now_ms - 1_000,
+            "rest_ticker_success_count": 3,
+        }
+    )
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:transport"]
+    alert = alerts[0]
+    assert alert.severity == M.WARNING
+    assert "fresh REST fallback, producer, and sleeve clocks" in alert.message
+    assert "WebSocket is disconnected" in alert.message
+    assert "no completed subscription epoch" in alert.message
+    assert "repair gap is open" in alert.message
+    assert "data frame is 30s old" in alert.message
+    assert "ticker population is incomplete" in alert.message
+
+
+def test_signal_worker_websocket_degradation_is_critical_without_live_rest_fallback() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload.update(
+        {
+            "status": "degraded",
+            "bybit_ws_connected": False,
+            "bybit_ws_gap_open": True,
+            "bybit_ws_gap_open_since_wall_ts_ms": now_ms - 10_000,
+            "rest_ticker_last_success_wall_ts_ms": now_ms - 11_000,
+            "rest_ticker_success_count": 1,
+        }
+    )
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:transport"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "has not completed since the WebSocket gap opened" in alerts[0].message
+
+
+def test_signal_worker_websocket_degradation_is_critical_when_a_sleeve_stalls() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload.update(
+        {
+            "status": "degraded",
+            "bybit_ws_connected": False,
+            "bybit_ws_gap_open": True,
+            "bybit_ws_gap_open_since_wall_ts_ms": now_ms - 5_000,
+            "rest_ticker_last_success_wall_ts_ms": now_ms - 1_000,
+            "rest_ticker_success_count": 1,
+            "last_long_cycle_completed_wall_ts_ms": now_ms - 3 * MIN - 1,
+        }
+    )
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+        expected_long_cycle_cadence_ms=MIN,
+        expected_carry_cycle_cadence_ms=MIN,
+    )
+
+    assert [alert.key for alert in alerts] == [
+        "signal-worker:mainnet worker:long",
+        "signal-worker:mainnet worker:transport",
+    ]
+    assert all(alert.severity == M.CRITICAL for alert in alerts)
+    assert "producer or sleeve continuity is also failing" in alerts[1].message
+
+
+def test_signal_worker_kline_topic_gap_uses_fresh_sleeve_cycles_as_fallback() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload["bybit_ws_kline_topics_accepted"] = 151
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:transport"]
+    assert alerts[0].severity == M.WARNING
+    assert "kline topic population is incomplete" in alerts[0].message
+    assert "successful REST ticker fallback" not in alerts[0].message
+
+
+def test_signal_worker_cycle_clocks_fail_independently_after_three_cadences() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload["last_long_cycle_completed_wall_ts_ms"] = now_ms - 3 * MIN - 1
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+        expected_long_cycle_cadence_ms=MIN,
+        expected_carry_cycle_cadence_ms=MIN,
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:long"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "last_long_cycle_completed_wall_ts_ms is 180s old" in alerts[0].message
+    assert "last_long_feature_ts_ms" not in alerts[0].message
+
+    payload["last_long_cycle_completed_wall_ts_ms"] = now_ms - MIN
+    payload["last_carry_cycle_completed_wall_ts_ms"] = now_ms - 3 * MIN - 1
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+        expected_long_cycle_cadence_ms=MIN,
+        expected_carry_cycle_cadence_ms=MIN,
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:carry"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "last_carry_cycle_completed_wall_ts_ms is 180s old" in alerts[0].message
+    assert "last_carry_decision_ts_ms" not in alerts[0].message
+
+
+def test_signal_worker_cycle_fields_are_present_and_bound_to_installed_cadence() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload["long_cycle_cadence_ms"] = 2 * MIN
+    payload["last_carry_cycle_completed_wall_ts_ms"] = None
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+        expected_long_cycle_cadence_ms=MIN,
+        expected_carry_cycle_cadence_ms=MIN,
+    )
+
+    assert [alert.key for alert in alerts] == [
+        "signal-worker:mainnet worker:producer",
+        "signal-worker:mainnet worker:carry",
+    ]
+    assert "long_cycle_cadence_ms does not match" in alerts[0].message
+    assert "last_carry_cycle_completed_wall_ts_ms is missing" in alerts[1].message
+
+
+def test_signal_worker_invalid_queue_and_spool_backpressure_are_critical() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload.update(
+        {
+            "bybit_ws_queued_frames": 305,
+            "bybit_ws_queue_capacity": 304,
+            "spool_files": 4_097,
+            "spool_file_cap": 4_096,
+            "spool_byte_cap": 0,
+            "spool_backpressured": True,
+        }
+    )
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == [
+        "signal-worker:mainnet worker:spool",
+        "signal-worker:mainnet worker:transport",
+    ]
+    assert all(alert.severity == M.CRITICAL for alert in alerts)
+    assert "spool_files exceeds spool_file_cap" in alerts[0].message
+    assert "spool_byte_cap is invalid" in alerts[0].message
+    assert "signal spool is backpressured" in alerts[0].message
+    assert "queue bounds are invalid" in alerts[1].message
+
+
+def test_signal_worker_class_only_spool_backpressure_is_critical() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload["spool_backpressured_classes"] = ["lifecycle"]
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:spool"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "signal spool classes are backpressured: lifecycle" in alerts[0].message
+
+
+def test_signal_worker_class_file_count_at_cap_is_critical() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload["spool_class_files"]["lifecycle"] = payload["spool_class_file_caps"][
+        "lifecycle"
+    ]
+    payload["spool_files"] = sum(payload["spool_class_files"].values())
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:spool"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "spool_class_files[lifecycle] has reached its file cap" in alerts[0].message
+
+
+@pytest.mark.parametrize("threshold_delta", [0, 1])
+def test_signal_worker_class_bytes_at_or_above_soft_threshold_are_critical(
+    threshold_delta: int,
+) -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload["spool_class_bytes"]["lifecycle"] = (
+        payload["spool_class_byte_soft_thresholds"]["lifecycle"] + threshold_delta
+    )
+    payload["spool_bytes"] = sum(payload["spool_class_bytes"].values())
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:spool"]
+    assert alerts[0].severity == M.CRITICAL
+    assert (
+        "spool_class_bytes[lifecycle] has reached its byte soft threshold"
+        in alerts[0].message
+    )
+
+
+def test_signal_worker_malformed_class_spool_maps_and_caps_are_critical() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload["spool_class_files"] = {"current": 4}
+    payload["spool_class_byte_caps"]["lifecycle"] = 0
+    payload["spool_class_byte_soft_thresholds"]["other"] = -1
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:spool"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "spool_class_files does not contain exactly" in alerts[0].message
+    assert "spool_class_byte_caps has invalid values for lifecycle" in alerts[0].message
+    assert (
+        "spool_class_byte_soft_thresholds has invalid values for other"
+        in alerts[0].message
+    )
+
+
+def test_signal_worker_class_spool_usage_above_caps_is_critical() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload["spool_class_files"]["current"] = 9
+    payload["spool_class_bytes"]["catchup"] = 1024 * 1024 * 1024 + 1
+    payload["spool_files"] = sum(payload["spool_class_files"].values())
+    payload["spool_bytes"] = sum(payload["spool_class_bytes"].values())
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:spool"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "spool_class_files[current] exceeds its file cap" in alerts[0].message
+    assert "spool_class_bytes[catchup] exceeds its byte cap" in alerts[0].message
+
+
+@pytest.mark.parametrize("total_key", ["spool_files", "spool_bytes"])
+def test_signal_worker_spool_totals_must_equal_class_sums(total_key: str) -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload[total_key] += 1
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:spool"]
+    assert alerts[0].severity == M.CRITICAL
+    assert f"{total_key} does not equal the sum of its spool class map" in alerts[0].message
+
+
+@pytest.mark.parametrize(
+    ("threshold", "problem"),
+    [
+        (None, "spool_byte_soft_threshold is invalid"),
+        (0, "spool_byte_soft_threshold is invalid"),
+        (-1, "spool_byte_soft_threshold is invalid"),
+        (2 * 1024 * MIB + 1, "spool_byte_soft_threshold exceeds spool_byte_cap"),
+    ],
+)
+def test_signal_worker_global_spool_soft_threshold_must_be_valid(
+    threshold: object,
+    problem: str,
+) -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload["spool_byte_soft_threshold"] = threshold
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:spool"]
+    assert alerts[0].severity == M.CRITICAL
+    assert problem in alerts[0].message
+
+
+def test_signal_worker_global_spool_soft_threshold_is_a_blocking_boundary() -> None:
+    now_ms = 40 * HOUR
+    payload = _ready_signal_heartbeat(now_ms, {})
+    payload["spool_class_bytes"] = {
+        "current": 351 * MIB,
+        "lifecycle": 431 * MIB,
+        "catchup": 463 * MIB,
+        "other": 243 * MIB,
+    }
+    payload["spool_bytes"] = sum(payload["spool_class_bytes"].values())
+    assert payload["spool_bytes"] == payload["spool_byte_soft_threshold"]
+
+    alerts = M.evaluate_signal_worker_heartbeat(
+        payload,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        expected_pid=441,
+        expected_hashes={},
+        label="mainnet worker",
+    )
+
+    assert [alert.key for alert in alerts] == ["signal-worker:mainnet worker:spool"]
+    assert alerts[0].severity == M.CRITICAL
+    assert "spool_bytes has reached spool_byte_soft_threshold" in alerts[0].message
 
 
 def test_signal_worker_startup_grace_is_generation_bound(tmp_path: Path) -> None:
@@ -109,16 +842,139 @@ def test_signal_worker_startup_grace_is_generation_bound(tmp_path: Path) -> None
         startup_grace_minutes=30,
         label="worker",
     )
+    alerts = M.gather_signal_worker_alerts(
+        **args,
+        runtime=M.UnitRuntime(CURRENT_INVOCATION_ID, 5.0, 441),
+    )
+    assert [alert.key for alert in alerts] == ["signal-worker:worker:producer"]
+    assert "unreadable" in alerts[0].message
+
+
+def test_signal_worker_only_tolerates_valid_starting_heartbeat_inside_grace(
+    tmp_path: Path,
+) -> None:
+    now_ms = 40 * HOUR
+    paths = {
+        name: tmp_path / name
+        for name in (
+            "signal.json",
+            "long.json",
+            "carry.json",
+            "operational.json",
+            "engine.json",
+        )
+    }
+    for name, path in paths.items():
+        path.write_text(name, encoding="utf-8")
+    signal_payload = {
+        "schema_version": 1,
+        "kind": "liquidity_migration_signal_worker",
+        "routing": {"source": "directional_public_v1"},
+        "sources": {},
+        "live": {
+            "kline_cadence_ms": MIN,
+            "public_market_realm": "mainnet",
+        },
+        "long": {"features": {}},
+        "carry_feature_physics": {},
+    }
+    paths["signal.json"].write_text(json.dumps(signal_payload), encoding="utf-8")
+    universe = tmp_path / "universe.json"
+    universe.write_text(json.dumps({"artifact_sha256": "c" * 64}), encoding="utf-8")
+    expected_hashes = {
+        "signal_config_sha256": M.hashlib.sha256(paths["signal.json"].read_bytes()).hexdigest(),
+        "long_rule_sha256": M.hashlib.sha256(paths["long.json"].read_bytes()).hexdigest(),
+        "long_feature_contract_sha256": M._signal_feature_contract_sha256(
+            signal_payload, "long"
+        ),
+        "carry_config_sha256": M.hashlib.sha256(paths["carry.json"].read_bytes()).hexdigest(),
+        "carry_feature_contract_sha256": M._signal_feature_contract_sha256(
+            signal_payload, "carry"
+        ),
+        "operational_config_sha256": M.hashlib.sha256(
+            paths["operational.json"].read_bytes()
+        ).hexdigest(),
+        "engine_config_sha256": M.hashlib.sha256(paths["engine.json"].read_bytes()).hexdigest(),
+        "universe_file_sha256": M.hashlib.sha256(universe.read_bytes()).hexdigest(),
+        "universe_artifact_sha256": "c" * 64,
+    }
+    heartbeat = tmp_path / "heartbeat.json"
+    payload = _ready_signal_heartbeat(now_ms, expected_hashes)
+    payload.update(
+        {
+            "status": "starting",
+            "source_generation": "",
+            "last_input_sequence": 0,
+            "long_output_sequence": 0,
+            "carry_output_sequence": 0,
+            "last_observed_ts_ms": 0,
+            "last_long_feature_ts_ms": None,
+            "last_carry_decision_ts_ms": None,
+            "last_long_cycle_completed_wall_ts_ms": None,
+            "last_carry_cycle_completed_wall_ts_ms": None,
+            "bybit_ws_connected": False,
+            "bybit_ws_epoch": 0,
+            "bybit_ws_gap_open": True,
+            "bybit_ws_gap_open_since_wall_ts_ms": now_ms - 1_000,
+            "bybit_ws_last_frame_ts_ms": None,
+            "bybit_ws_ticker_rows": 0,
+            "bybit_ws_ticker_coverage_complete": False,
+            "bybit_ws_ticker_topics_accepted": 0,
+            "bybit_ws_kline_topics_accepted": 0,
+            "bybit_ws_queued_frames": 0,
+            "bybit_ws_queue_capacity": 0,
+            "spool_files": 0,
+            "spool_bytes": 0,
+            "spool_file_cap": 0,
+            "spool_byte_cap": 0,
+        }
+    )
+    heartbeat.write_text(json.dumps(payload), encoding="utf-8")
+    args = dict(
+        heartbeat_path=heartbeat,
+        signal_config=paths["signal.json"],
+        long_rule=paths["long.json"],
+        carry_config=paths["carry.json"],
+        operational_config=paths["operational.json"],
+        engine_config=paths["engine.json"],
+        universe=universe,
+        now_ms=now_ms,
+        max_age_seconds=30,
+        startup_grace_minutes=30,
+        label="worker",
+    )
+
     assert M.gather_signal_worker_alerts(
         **args,
         runtime=M.UnitRuntime(CURRENT_INVOCATION_ID, 5.0, 441),
     ) == []
+
     alerts = M.gather_signal_worker_alerts(
         **args,
         runtime=M.UnitRuntime(CURRENT_INVOCATION_ID, 31.0, 441),
     )
-    assert [alert.key for alert in alerts] == ["signal-worker:worker"]
-    assert "unreadable" in alerts[0].message
+    assert [alert.key for alert in alerts] == ["signal-worker:worker:producer"]
+    assert "outside startup grace" in alerts[0].message
+
+    payload["pid"] = 442
+    heartbeat.write_text(json.dumps(payload), encoding="utf-8")
+    alerts = M.gather_signal_worker_alerts(
+        **args,
+        runtime=M.UnitRuntime(CURRENT_INVOCATION_ID, 5.0, 441),
+    )
+    assert [alert.key for alert in alerts] == ["signal-worker:worker:producer"]
+    assert "current systemd process" in alerts[0].message
+
+    payload["pid"] = 441
+    payload["status"] = "ready"
+    heartbeat.write_text(json.dumps(payload), encoding="utf-8")
+    alerts = M.gather_signal_worker_alerts(
+        **args,
+        runtime=M.UnitRuntime(CURRENT_INVOCATION_ID, 5.0, 441),
+    )
+    assert "signal-worker:worker:producer" in {alert.key for alert in alerts}
+    assert "signal-worker:worker:long" in {alert.key for alert in alerts}
+    assert "signal-worker:worker:carry" in {alert.key for alert in alerts}
 
 
 def test_unit_states_alert_only_on_terminal_failed_without_install_state() -> None:
@@ -240,6 +1096,97 @@ def test_unit_runtime_metadata_uses_systemd_generation_and_boottime(
             active_age_minutes=5.0,
         )
     }
+
+
+def test_signal_worker_memory_reports_609_of_640_mib_as_critical() -> None:
+    mib = 1024 * 1024
+    alert = M.evaluate_signal_worker_memory(
+        M.UnitRuntime(
+            invocation_id=CURRENT_INVOCATION_ID,
+            active_age_minutes=5.0,
+            main_pid=441,
+            memory_current_bytes=609 * mib,
+            memory_max_bytes=640 * mib,
+        ),
+        label="mainnet worker",
+    )
+
+    assert alert is not None
+    assert alert.key == "signal-worker:mainnet worker:memory"
+    assert alert.severity == M.CRITICAL
+    assert "MemoryCurrent=638582784 bytes (609.00 MiB)" in alert.message
+    assert "MemoryMax=671088640 bytes (640.00 MiB)" in alert.message
+    assert "usage=95.156250%" in alert.message
+
+
+def test_signal_worker_memory_below_warning_threshold_does_not_alert() -> None:
+    mib = 1024 * 1024
+    runtime = M.UnitRuntime(
+        invocation_id=CURRENT_INVOCATION_ID,
+        active_age_minutes=5.0,
+        memory_current_bytes=479 * mib,
+        memory_max_bytes=640 * mib,
+    )
+
+    assert M.evaluate_signal_worker_memory(runtime, label="worker") is None
+
+
+@pytest.mark.parametrize(
+    ("used_mib", "expected_severity"),
+    [(480, M.WARNING), (576, M.CRITICAL)],
+)
+def test_signal_worker_memory_thresholds_are_inclusive(
+    used_mib: int,
+    expected_severity: str,
+) -> None:
+    mib = 1024 * 1024
+    alert = M.evaluate_signal_worker_memory(
+        M.UnitRuntime(
+            invocation_id=CURRENT_INVOCATION_ID,
+            active_age_minutes=5.0,
+            memory_current_bytes=used_mib * mib,
+            memory_max_bytes=640 * mib,
+        ),
+        label="worker",
+    )
+
+    assert alert is not None
+    assert alert.severity == expected_severity
+
+
+@pytest.mark.parametrize(
+    ("memory_current", "memory_max"),
+    [
+        ("638582784", "infinity"),
+        ("", ""),
+        ("[not set]", "671088640"),
+        ("malformed", "671088640"),
+        ("638582784", "malformed"),
+    ],
+)
+def test_unavailable_systemd_memory_values_do_not_alert(
+    monkeypatch,
+    memory_current: str,
+    memory_max: str,
+) -> None:
+    monkeypatch.setattr(M, "_boottime_ns", lambda: 65 * 60_000_000_000)
+    monkeypatch.setattr(
+        M.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout=(
+                f"InvocationID={CURRENT_INVOCATION_ID}\n"
+                "ActiveEnterTimestampMonotonic=3600000000\n"
+                "MainPID=441\n"
+                f"MemoryCurrent={memory_current}\n"
+                f"MemoryMax={memory_max}\n"
+            )
+        ),
+    )
+
+    runtime = M._unit_runtime_metadata(["worker.service"])["worker.service"]
+
+    assert M.evaluate_signal_worker_memory(runtime, label="worker") is None
 
 
 def test_unit_states_timers_alert_on_not_active() -> None:

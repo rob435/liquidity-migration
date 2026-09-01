@@ -73,14 +73,22 @@ to a process unless a field explicitly says `wall`. Venue timestamps and local
 receive timestamps in Rust WAL records are the execution-latency evidence.
 Target publication time and filesystem modification time are not.
 
-The live signal and LONG clocks are deliberately separate:
+Data time, availability time, scoring time, action time, and process liveness
+are separate:
 
 | Field | Meaning |
 | --- | --- |
-| `observed_wall_ts_ms` | Public-data/source time represented by a normalized worker observation |
-| `available_wall_ts_ms` | First time the complete observation was available; never earlier than its observed time |
-| `feature_ts_ms` | Closed feature boundary carried in a LONG signal batch |
-| `decision_ts_ms` | Wall-clock decision time at which the native reducer applies the batch and lifecycle clocks |
+| `last_observed_ts_ms` | Latest public input made durable by the worker |
+| `observed_wall_ts_ms` | Source or production time represented by the outer observation |
+| `available_wall_ts_ms` | Wall time when the complete observation became available |
+| `feature_ts_ms` | Closed LONG feature boundary |
+| LONG `decision_ts_ms` | Wall time used to apply the LONG feature batch |
+| CARRY `decision_ts_ms` | Daily UTC score generation, not the later engine application time |
+| `last_carry_scorer_ts_ms` | Latest historical CARRY ranking replayed into scorer state only |
+| `last_carry_decision_ts_ms` | Latest current CARRY generation allowed to change the live book |
+| `last_carry_upcoming_ts_ms` | Latest next-generation sizing frame carried forward, not a current entry decision |
+| `expires_at_ms` | Oldest actionable ticker-field clock plus its allowed age |
+| `last_long_cycle_completed_wall_ts_ms` / `last_carry_cycle_completed_wall_ts_ms` | Independent wall clocks proving each producer cycle still completes |
 | `entry_valid_until_ms` | Original interval in which the engine may enter; later observations do not extend it |
 | `entry_ts_ms` | First engine observation of a uniquely LONG-attributed venue holding; zero before that evidence |
 | `max_hold_duration_ms` | Duration frozen with the accepted request |
@@ -91,13 +99,54 @@ account-global, manual, inherited, or shared position cannot start a sleeve's
 fill clock. The Rust heartbeat exposes a configured sleeve name only when the
 fill ledger has one owner and its signed quantity matches the venue quantity.
 
+The worker does not sequence a market snapshot already expired when delivered.
+CARRY consumes a snapshot that expires while waiting in the spool without
+applying lifecycle actions. REST results are stamped when the response
+completes, not when the request starts.
+
+Every retained source family prunes against its monotone availability
+high-water mark. An older response that finishes or is committed after a newer
+one can add valid older coverage, but it cannot move the retention window
+backward or delete newer candle, funding, instrument-lifetime, or whale state.
+Source rows are normalized and checked against durable history before commit.
+Malformed, off-grid, out-of-range, duplicate-conflicting, and revised venue
+rows stay local to their acquisition lane. Once a durable commit starts, every
+state, sequence, spool, serialization, and I/O error propagates and stops the
+worker instead of being hidden as a venue fault.
+
 ## Durable strategy artifacts
 
-The signal worker commits normalized history, exact observation bytes, output
-sequences, and its next checkpoint as one local pending transaction. Restore
-finishes that transaction before acquisition resumes. The engine accepts only
+The signal worker journals each normalized source event and the exact output
+bytes it produced. Journal entries, total bytes, retained entry count, source
+queues, and ticker caches all have hard bounds. At the count, byte, or hourly
+age boundary, the worker streams its current state into one pending checkpoint
+and atomically replaces the prior checkpoint. Restore finishes an interrupted
+replacement, replays any later journal entries, and verifies that replay makes
+the same observation bytes before acquisition resumes. The engine accepts only
 the immutable sequence-numbered observation envelope, writes it to the WAL,
 then wakes the addressed native reducer.
+
+Each candle symbol also owns a durable checked-through frontier. The frontier
+records a completed acquisition interval; it does not pretend that a
+pre-listing or no-trade hour was a candle. Reconnect repair advances the
+frontier in bounded chunks and individual symbol failures remain isolated and
+visible instead of discarding successful work for every sleeve.
+
+The instrument lane reads Bybit `Trading`, `Delivering`, and `Closed` rows. A
+valid launch time opens a symbol's causal trading interval, and a positive
+delivery time closes it. Kline, funding, whale, cold-bootstrap, and CARRY
+catch-up requirements are intersected with that interval. A delisted symbol
+therefore remains eligible for pre-delivery history without creating permanent
+post-delivery gaps. A missing or contradictory current instrument row does not
+invent a delisting time; it blocks current eligibility until authoritative
+status returns.
+
+The signal spool has total and per-class bounds. Replaceable current-state
+outputs coalesce and republish after the pending file drains. Funding lifecycle
+and CARRY scorer-catch-up observations remain ordered and non-replaceable. The
+heartbeat reports exact usage and limits for `current`, `lifecycle`, `catchup`,
+and `other`; a blocked class is unhealthy even while aggregate usage remains
+below its total cap.
 
 LONG, CARRY, and Exodus live state is strategy-owned checkpoint data in the
 engine WAL. CARRY hands a pre-settlement fire to Exodus as an engine-owned

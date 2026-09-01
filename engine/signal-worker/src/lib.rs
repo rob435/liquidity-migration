@@ -5,6 +5,7 @@
 //! the registered rolling features, and emits typed observations for native
 //! reducers. It has no account, key, signer, or order type.
 
+pub mod bybit_ws;
 pub mod config;
 pub mod features;
 pub mod http;

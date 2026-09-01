@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use engine_types::{
-    Action, InstrumentRule, Intent, OrderKind, Side, StopSpec, StrategyCheckpoint, StrategyCtx,
-    StrategyEvent, StrategyId, WorkPolicy,
+    Action, InstrumentRule, Intent, OrderKind, Side, StopSpec, StrategyAccountSummary,
+    StrategyCheckpoint, StrategyCtx, StrategyEvent, StrategyId, WorkPolicy,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,6 +19,14 @@ use crate::position_plan::{Held, PlanRules, Skipped, Step, SymbolFacts, Target};
 pub const DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION: u16 = 1;
 pub const CARRY_SLEEVE_NAME: &str = "carry";
 pub const EXODUS_SLEEVE_NAME: &str = "exodus";
+
+pub fn directional_account_is_healthy(account: StrategyAccountSummary) -> bool {
+    account.observed_ns != 0
+        && account.equity_usdt.is_finite()
+        && account.equity_usdt > 0.0
+        && account.available_margin_usdt.is_finite()
+        && account.available_margin_usdt >= 0.0
+}
 
 /// Config identity copied into every signal-worker payload. The strategy
 /// checks the fields that bind its own registered rule; the remaining hashes
@@ -65,6 +73,36 @@ pub struct UniverseIdentity {
     pub carry_symbols: Vec<String>,
 }
 
+/// Public ticker fields shared byte-for-byte by the Rust producer and CARRY
+/// consumer. Per-field clocks prevent a fresh delta from extending the life of
+/// an unrelated stale value.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TickerObservation {
+    pub symbol: String,
+    pub observed_ts_ms: i64,
+    pub available_at_ms: i64,
+    #[serde(default)]
+    pub mark_observed_ts_ms: Option<i64>,
+    #[serde(default)]
+    pub funding_observed_ts_ms: Option<i64>,
+    #[serde(default)]
+    pub schedule_observed_ts_ms: Option<i64>,
+    pub last_price: Option<f64>,
+    pub mark_price: Option<f64>,
+    pub index_price: Option<f64>,
+    pub bid1_price: Option<f64>,
+    pub ask1_price: Option<f64>,
+    pub bid1_size: Option<f64>,
+    pub ask1_size: Option<f64>,
+    pub open_interest: Option<f64>,
+    pub open_interest_value: Option<f64>,
+    pub turnover_24h: Option<f64>,
+    pub volume_24h: Option<f64>,
+    pub funding_rate: Option<f64>,
+    pub next_funding_time_ms: Option<i64>,
+}
+
 pub fn validate_signal_identity(
     config: &SignalConfigIdentity,
     universe: Option<&UniverseIdentity>,
@@ -85,6 +123,9 @@ pub fn validate_signal_identity(
         return Err("signal payload config identity is invalid");
     }
     let universe = universe.ok_or("signal payload has no universe identity")?;
+    let symbols = universe.symbols.iter().collect::<BTreeSet<_>>();
+    let long_symbols = universe.long_symbols.iter().collect::<BTreeSet<_>>();
+    let carry_symbols = universe.carry_symbols.iter().collect::<BTreeSet<_>>();
     if universe.environment != expected_environment
         || universe.endpoint.is_empty()
         || universe.snapshot_ts_ms <= 0
@@ -100,8 +141,37 @@ pub fn validate_signal_identity(
             .carry_symbols
             .iter()
             .any(|symbol| !valid_symbol(symbol))
+        || symbols.len() != universe.symbols.len()
+        || long_symbols.len() != universe.long_symbols.len()
+        || carry_symbols.len() != universe.carry_symbols.len()
+        || long_symbols.iter().any(|symbol| !symbols.contains(symbol))
+        || carry_symbols.iter().any(|symbol| !symbols.contains(symbol))
     {
         return Err("signal payload universe identity is invalid");
+    }
+    Ok(())
+}
+
+pub fn validate_exact_symbol_coverage(
+    eligible: &[String],
+    accepted: &[String],
+    rejected: &[String],
+) -> Result<(), &'static str> {
+    let expected = eligible.iter().collect::<BTreeSet<_>>();
+    if expected.len() != eligible.len() {
+        return Err("declared eligible population contains duplicates");
+    }
+    let mut seen = BTreeSet::new();
+    for symbol in accepted.iter().chain(rejected) {
+        if !expected.contains(symbol) {
+            return Err("batch symbol escapes declared eligible population");
+        }
+        if !seen.insert(symbol) {
+            return Err("batch symbol is accepted or rejected more than once");
+        }
+    }
+    if seen != expected {
+        return Err("batch omits members of declared eligible population");
     }
     Ok(())
 }
@@ -642,6 +712,65 @@ mod tests {
         assert!(valid_symbol("BTCUSDT"));
         assert!(!valid_symbol("btcUSDT"));
         assert!(!valid_symbol("BTC-USDT"));
+    }
+
+    #[test]
+    fn directional_account_requires_an_observed_finite_positive_snapshot() {
+        let healthy = StrategyAccountSummary {
+            equity_usdt: 1_000.0,
+            available_margin_usdt: 500.0,
+            observed_ns: 1,
+        };
+        assert!(directional_account_is_healthy(healthy));
+        assert!(!directional_account_is_healthy(StrategyAccountSummary {
+            observed_ns: 0,
+            ..healthy
+        }));
+        assert!(!directional_account_is_healthy(StrategyAccountSummary {
+            equity_usdt: f64::NAN,
+            ..healthy
+        }));
+        assert!(!directional_account_is_healthy(StrategyAccountSummary {
+            available_margin_usdt: -1.0,
+            ..healthy
+        }));
+    }
+
+    #[test]
+    fn feature_coverage_is_an_exact_partition_of_the_declared_population() {
+        let eligible = vec!["AUSDT".to_owned(), "BUSDT".to_owned()];
+        assert_eq!(
+            validate_exact_symbol_coverage(&eligible, &["AUSDT".to_owned()], &["BUSDT".to_owned()]),
+            Ok(())
+        );
+        assert_eq!(
+            validate_exact_symbol_coverage(
+                &eligible,
+                &["AUSDT".to_owned(), "AUSDT".to_owned()],
+                &["BUSDT".to_owned()]
+            ),
+            Err("batch symbol is accepted or rejected more than once")
+        );
+        assert_eq!(
+            validate_exact_symbol_coverage(&eligible, &["AUSDT".to_owned()], &["AUSDT".to_owned()]),
+            Err("batch symbol is accepted or rejected more than once")
+        );
+        assert_eq!(
+            validate_exact_symbol_coverage(&eligible, &["AUSDT".to_owned()], &["CUSDT".to_owned()]),
+            Err("batch symbol escapes declared eligible population")
+        );
+        assert_eq!(
+            validate_exact_symbol_coverage(&eligible, &["AUSDT".to_owned()], &[]),
+            Err("batch omits members of declared eligible population")
+        );
+        assert_eq!(
+            validate_exact_symbol_coverage(
+                &["AUSDT".to_owned(), "AUSDT".to_owned()],
+                &["AUSDT".to_owned()],
+                &[]
+            ),
+            Err("declared eligible population contains duplicates")
+        );
     }
 
     #[test]

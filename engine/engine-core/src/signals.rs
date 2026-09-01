@@ -209,6 +209,7 @@ impl SignalFeed for NoSignals {
 pub struct SpoolSignalFeed {
     directory: PathBuf,
     returned_path: Option<PathBuf>,
+    known_paths: BTreeSet<PathBuf>,
     poll: Duration,
 }
 
@@ -217,6 +218,7 @@ impl SpoolSignalFeed {
         Self {
             directory: directory.into(),
             returned_path: None,
+            known_paths: BTreeSet::new(),
             poll: Duration::from_millis(100),
         }
     }
@@ -226,7 +228,7 @@ impl SpoolSignalFeed {
         self
     }
 
-    fn read_one(path: &Path) -> Result<SignalObservation, SignalError> {
+    fn read_one(path: &Path) -> Result<Option<SignalObservation>, SignalError> {
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -247,12 +249,16 @@ impl SpoolSignalFeed {
         let named_sequence = sequence.parse::<u64>().map_err(|error| {
             SignalError::Source(format!("signal file {file_name} has bad sequence: {error}"))
         })?;
-        let raw = std::fs::read(path).map_err(|error| {
-            SignalError::Source(format!(
-                "cannot read signal file {}: {error}",
-                path.display()
-            ))
-        })?;
+        let raw = match std::fs::read(path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(SignalError::Source(format!(
+                    "cannot read signal file {}: {error}",
+                    path.display()
+                )));
+            }
+        };
         let observation: SignalObservation = serde_json::from_slice(&raw).map_err(|error| {
             SignalError::Source(format!(
                 "signal file {} is not an observation: {error}",
@@ -268,7 +274,7 @@ impl SpoolSignalFeed {
                 path.display()
             )));
         }
-        Ok(observation)
+        Ok(Some(observation))
     }
 }
 
@@ -290,14 +296,14 @@ impl SignalFeed for SpoolSignalFeed {
         }
         loop {
             let directory = self.directory.clone();
-            let mut paths = tokio::task::spawn_blocking(move || {
+            let discovered = tokio::task::spawn_blocking(move || {
                 let entries = std::fs::read_dir(&directory).map_err(|error| {
                     SignalError::Source(format!(
                         "cannot scan signal spool {}: {error}",
                         directory.display()
                     ))
                 })?;
-                let mut paths = Vec::new();
+                let mut paths = BTreeSet::new();
                 for entry in entries {
                     let path = entry
                         .map_err(|error| SignalError::Source(error.to_string()))?
@@ -306,22 +312,25 @@ impl SignalFeed for SpoolSignalFeed {
                         .extension()
                         .is_some_and(|extension| extension == "json")
                     {
-                        paths.push(path);
+                        paths.insert(path);
                     }
                 }
-                paths.sort();
                 Ok::<_, SignalError>(paths)
             })
             .await
             .map_err(|error| SignalError::Source(format!("signal spool task failed: {error}")))??;
+            self.known_paths.extend(discovered);
 
-            if let Some(path) = paths.drain(..).next() {
+            if let Some(path) = self.known_paths.pop_first() {
                 let read_path = path.clone();
                 let observation = tokio::task::spawn_blocking(move || Self::read_one(&read_path))
                     .await
                     .map_err(|error| {
                         SignalError::Source(format!("signal read task failed: {error}"))
                     })??;
+                let Some(observation) = observation else {
+                    continue;
+                };
                 self.returned_path = Some(path);
                 return Ok(observation);
             }
@@ -432,6 +441,62 @@ mod tests {
             "a failed admission source stays for inspection"
         );
         std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_file_deleted_between_scan_and_read_is_skipped() {
+        let directory = crate::testpath::temp_path("signal-spool-delete-race");
+        std::fs::create_dir(directory.path()).unwrap();
+        let missing = observation();
+        let mut live = missing.clone();
+        live.sequence = 2;
+        live.observation_id = "funding-2".into();
+        live.content_sha256 = content_sha256(&live);
+        let missing_path = spool_path(directory.path(), &missing);
+        let live_path = spool_path(directory.path(), &live);
+        std::fs::write(&missing_path, serde_json::to_vec(&missing).unwrap()).unwrap();
+        std::fs::write(&live_path, serde_json::to_vec(&live).unwrap()).unwrap();
+
+        let mut feed =
+            SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
+        feed.known_paths.insert(missing_path.clone());
+        feed.known_paths.insert(live_path.clone());
+        std::fs::remove_file(missing_path).unwrap();
+        assert_eq!(feed.next_observation().await.unwrap(), live);
+
+        std::fs::remove_file(live_path).unwrap();
+        std::fs::remove_dir(directory.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn each_pop_merges_new_lower_sequences_from_an_independent_lane() {
+        let directory = crate::testpath::temp_path("signal-spool-independent-lanes");
+        std::fs::create_dir(directory.path()).unwrap();
+        let mut high = observation();
+        high.sequence = 100;
+        high.observation_id = "long-100".into();
+        high.content_sha256 = content_sha256(&high);
+        let high_path = spool_path(directory.path(), &high);
+        std::fs::write(&high_path, serde_json::to_vec(&high).unwrap()).unwrap();
+
+        let mut feed =
+            SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
+        assert_eq!(feed.next_observation().await.unwrap(), high);
+
+        let mut low = observation();
+        low.destination = StrategyId(3);
+        low.sequence = 1;
+        low.observation_id = "carry-1".into();
+        low.content_sha256 = content_sha256(&low);
+        let low_path = spool_path(directory.path(), &low);
+        std::fs::write(&low_path, serde_json::to_vec(&low).unwrap()).unwrap();
+
+        assert_eq!(feed.next_observation().await.unwrap(), low);
+        assert!(!high_path.exists());
+        assert!(low_path.exists());
+
+        std::fs::remove_file(low_path).unwrap();
         std::fs::remove_dir(directory.path()).unwrap();
     }
 

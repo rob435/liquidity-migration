@@ -180,7 +180,7 @@ async fn a_new_worker_generation_starts_at_sequence_one_after_an_old_cursor() {
 }
 
 #[tokio::test]
-async fn signal_admits_one_symbol_everywhere_before_durable_delivery() {
+async fn signal_admits_quote_and_ticker_everywhere_before_durable_delivery() {
     let signal_ids = Rc::new(RefCell::new(Vec::new()));
     let market_names = Rc::new(RefCell::new(Vec::new()));
     let (done, stopped) = tokio::sync::oneshot::channel();
@@ -207,14 +207,18 @@ async fn signal_admits_one_symbol_everywhere_before_durable_delivery() {
     let mut orders = ScriptOrderFeed::empty();
     let learned = orders.learned.clone();
     let (sender, mut signals) = crate::signals::signal_channel();
+    let market_subscriptions = vec![
+        Subscription {
+            symbol: "HELDUSDT".into(),
+            feed: Feed::Quote,
+        },
+        Subscription {
+            symbol: "HELDUSDT".into(),
+            feed: Feed::Ticker,
+        },
+    ];
     sender
-        .try_send(observation(
-            1,
-            vec![Subscription {
-                symbol: "HELDUSDT".into(),
-                feed: Feed::Quote,
-            }],
-        ))
+        .try_send(observation(1, market_subscriptions.clone()))
         .unwrap();
     engine
         .run_with_signals(&mut market, &mut orders, &mut signals, async {
@@ -235,6 +239,15 @@ async fn signal_admits_one_symbol_everywhere_before_durable_delivery() {
         *learned.lock().unwrap(),
         vec![("HELDUSDT".into(), SymbolId(2))]
     );
+    let WalRecord::SegmentBase {
+        signal_subscriptions,
+        ..
+    } = engine.rotation_base(recent_replay_ms())
+    else {
+        unreachable!()
+    };
+    assert_eq!(signal_subscriptions.len(), 1);
+    assert_eq!(signal_subscriptions[0].subscriptions, market_subscriptions);
     let records = h.records.lock().unwrap();
     assert!(records.iter().any(|record| matches!(
         record,

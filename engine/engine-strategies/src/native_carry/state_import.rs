@@ -14,12 +14,26 @@ use crate::native_common::{
 };
 
 pub const SOURCE_FORMAT: &str = "carry-reducer-v2-target-book-v1";
+pub const SOURCE_FORMAT_LEGACY_V1: &str = "carry-sizing-anchors-v1-early-exits-v1-target-book-v1";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LegacyReducerState {
     schema_version: u16,
     anchors: BTreeMap<String, f64>,
+    fired: BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySizingAnchorsV1 {
+    schema_version: u16,
+    anchors: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyEarlyExitsV1 {
     fired: BTreeMap<String, i64>,
 }
 
@@ -51,26 +65,44 @@ pub fn translate(
     source_format: &str,
     sources: &[StrategyImportSource],
 ) -> Result<TranslatedStrategyState, String> {
-    if source_format != SOURCE_FORMAT {
-        return Err(format!(
-            "CARRY does not support source format {source_format:?}"
-        ));
+    let (legacy, book_source) = match source_format {
+        SOURCE_FORMAT => {
+            require_source_names(sources, &["reducer_checkpoint", "target_book"])?;
+            let legacy: LegacyReducerState = serde_json::from_slice(&sources[0].bytes)
+                .map_err(|error| format!("CARRY reducer checkpoint: {error}"))?;
+            if legacy.schema_version != 2 {
+                return Err("CARRY reducer checkpoint schema is not v2".to_owned());
+            }
+            (legacy, &sources[1])
+        }
+        SOURCE_FORMAT_LEGACY_V1 => {
+            require_source_names(sources, &["early_exits", "sizing_anchors", "target_book"])?;
+            let anchors: LegacySizingAnchorsV1 = serde_json::from_slice(&sources[1].bytes)
+                .map_err(|error| format!("CARRY sizing anchors: {error}"))?;
+            if anchors.schema_version != 1 {
+                return Err("CARRY sizing-anchor schema is not v1".to_owned());
+            }
+            let exits: LegacyEarlyExitsV1 = serde_json::from_slice(&sources[0].bytes)
+                .map_err(|error| format!("CARRY early exits: {error}"))?;
+            (
+                LegacyReducerState {
+                    schema_version: 2,
+                    anchors: anchors.anchors,
+                    fired: exits.fired,
+                },
+                &sources[2],
+            )
+        }
+        _ => {
+            return Err(format!(
+                "CARRY does not support source format {source_format:?}"
+            ))
+        }
+    };
+    if legacy.anchors.len() > 2 {
+        return Err("CARRY reducer checkpoint retains more than two sizing anchors".to_owned());
     }
-    if sources.len() != 2
-        || sources[0].name != "reducer_checkpoint"
-        || sources[1].name != "target_book"
-    {
-        return Err(
-            "CARRY import requires --source reducer_checkpoint=PATH and --source target_book=PATH"
-                .to_owned(),
-        );
-    }
-    let legacy: LegacyReducerState = serde_json::from_slice(&sources[0].bytes)
-        .map_err(|error| format!("CARRY reducer checkpoint: {error}"))?;
-    if legacy.schema_version != 2 || legacy.anchors.len() > 2 {
-        return Err("CARRY reducer checkpoint schema is not v2".to_owned());
-    }
-    let book: LegacyBook = serde_json::from_slice(&sources[1].bytes)
+    let book: LegacyBook = serde_json::from_slice(&book_source.bytes)
         .map_err(|error| format!("CARRY legacy position snapshot: {error}"))?;
     if !matches!(book.version, 1 | 2)
         || book.source != config.profile_name
@@ -178,6 +210,21 @@ pub fn translate(
         checkpoint_payload: checkpoint_payload(&state),
         pending_events: Vec::new(),
     })
+}
+
+fn require_source_names(sources: &[StrategyImportSource], expected: &[&str]) -> Result<(), String> {
+    if sources.len() != expected.len()
+        || sources
+            .iter()
+            .map(|source| source.name.as_str())
+            .ne(expected.iter().copied())
+    {
+        return Err(format!(
+            "CARRY import requires exact sorted sources: {}",
+            expected.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -307,5 +354,104 @@ mod tests {
                 .decision_ts_ms,
             1_800_000_000_000
         );
+    }
+
+    #[test]
+    fn translates_the_split_v1_files_written_by_the_retired_producer() {
+        let decision_ts_ms = 1_800_000_000_000_i64;
+        let translated = translate(
+            &config(),
+            SOURCE_FORMAT_LEGACY_V1,
+            &[
+                StrategyImportSource {
+                    name: "early_exits".into(),
+                    bytes: serde_json::to_vec(&serde_json::json!({
+                        "fired": {"BETAUSDT": decision_ts_ms}
+                    }))
+                    .expect("early exits"),
+                },
+                StrategyImportSource {
+                    name: "sizing_anchors".into(),
+                    bytes: serde_json::to_vec(&serde_json::json!({
+                        "schema_version": 1,
+                        "anchors": {decision_ts_ms.to_string(): 1_000.0}
+                    }))
+                    .expect("sizing anchors"),
+                },
+                StrategyImportSource {
+                    name: "target_book".into(),
+                    bytes: serde_json::to_vec(&serde_json::json!({
+                        "version": 1,
+                        "source": "carry_hold_v7_live_v1",
+                        "decision_ts_ms": decision_ts_ms,
+                        "valid_until_ms": decision_ts_ms + 108_000_000,
+                        "targets": [{
+                            "symbol": "ALPHAUSDT",
+                            "notional_usdt": 20.0,
+                            "stop_loss_fraction": 0.35,
+                            "leverage": 2.0
+                        }]
+                    }))
+                    .expect("target book"),
+                },
+            ],
+        )
+        .expect("translate split v1 files");
+
+        let state: SleeveState =
+            serde_json::from_slice(&translated.checkpoint_payload).expect("checkpoint");
+        assert_eq!(state.sizing_anchors[&decision_ts_ms], 1_000.0);
+        assert_eq!(state.fired_exits["BETAUSDT"], decision_ts_ms);
+        assert_eq!(state.desired_targets["ALPHAUSDT"].notional_usdt, 20.0);
+    }
+
+    #[test]
+    fn split_v1_import_rejects_an_upgraded_or_reordered_source_bundle() {
+        let sources = [
+            StrategyImportSource {
+                name: "sizing_anchors".into(),
+                bytes: br#"{"schema_version":1,"anchors":{}}"#.to_vec(),
+            },
+            StrategyImportSource {
+                name: "early_exits".into(),
+                bytes: br#"{"fired":{}}"#.to_vec(),
+            },
+            StrategyImportSource {
+                name: "target_book".into(),
+                bytes: Vec::new(),
+            },
+        ];
+        assert!(translate(&config(), SOURCE_FORMAT_LEGACY_V1, &sources)
+            .expect_err("source order is part of the stopped-state contract")
+            .contains("exact sorted sources"));
+    }
+
+    #[test]
+    fn split_v1_import_rejects_a_present_malformed_early_exit_file() {
+        let decision_ts_ms = 1_800_000_000_000_i64;
+        let sources = [
+            StrategyImportSource {
+                name: "early_exits".into(),
+                bytes: br#"{"fired":[]}"#.to_vec(),
+            },
+            StrategyImportSource {
+                name: "sizing_anchors".into(),
+                bytes: br#"{"schema_version":1,"anchors":{}}"#.to_vec(),
+            },
+            StrategyImportSource {
+                name: "target_book".into(),
+                bytes: serde_json::to_vec(&serde_json::json!({
+                    "version": 1,
+                    "source": "carry_hold_v7_live_v1",
+                    "decision_ts_ms": decision_ts_ms,
+                    "valid_until_ms": decision_ts_ms + 108_000_000,
+                    "targets": [],
+                }))
+                .expect("target book"),
+            },
+        ];
+        assert!(translate(&config(), SOURCE_FORMAT_LEGACY_V1, &sources)
+            .expect_err("a present malformed source must not become an empty default")
+            .contains("CARRY early exits"));
     }
 }

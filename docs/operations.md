@@ -100,11 +100,13 @@ EXPECTED_COMMIT=<40-lowercase-hex> \
 ```
 
 Rollout prefetches and compiles before it stops the incumbent. It then stops
+the validated ordered union of the installed and candidate manifests,
 downstream units before account owners, proves the managed fleet quiescent,
-installs the exact commit, activates owners before dependants, and verifies
-the resulting topology. A failure before checkout mutation can restore the
-prior topology; a failure after authority changes leaves the managed fleet
-stopped for explicit recovery.
+installs the exact commit, activates owners before dependants, and verifies the
+resulting topology. This transition inventory covers retired producer units
+even though they are absent from the candidate manifest. A failure before
+checkout mutation can restore the prior topology; a failure after authority
+changes leaves the managed fleet stopped for explicit recovery.
 
 Install builds the Rust release before generating strategy config. Rust
 renders the exact native directional blocks and, for mainnet, the maker block.
@@ -130,15 +132,28 @@ mainnet uses the read-only attestor for stopped-state identity. An exact retry
 is a no-op. A partial bundle, another account, changed source bytes, or a
 conflicting checkpoint stops installation.
 
-The six stopped-state source roles are:
+The seven persistent stopped-state source roles are:
 
 | Sleeve | Source roles |
 | --- | --- |
 | LONG | `state` |
-| CARRY | `reducer_checkpoint`, `target_book` |
+| CARRY | `early_exits`, `sizing_anchors`, `target_book` |
 | Exodus | `carry_events`, `identity`, `state` |
 
-They are takeover inputs only. The running native reducers do not read them.
+Only `carry_early_exits.json` and `carry_presettlement_events.jsonl` may be
+absent: deployment supplies their canonical empty bytes to the strict importer
+because the retired producers create those files only after the first event.
+Every other source is required, and a present malformed file is refused.
+
+Deployment also generates the Exodus `legacy_paths` source from the exact
+installed event, target, and engine-heartbeat paths. These are takeover inputs
+only. The running native reducers do not read them.
+
+The reviewed candidate-universe file is copied byte-for-byte from an incumbent
+producer source path only when the native path is absent. Its schema, realm,
+endpoint, populations, counts, self-hash, ownership, and mode are checked both
+before and after the atomic copy. An existing native file wins and must pass the
+same checks.
 
 ## Runtime pause and resume
 
@@ -233,10 +248,11 @@ realm policy. Do not replace a failed check with an interpretation of an old
 doc or an old rollout receipt.
 
 Liveness separately checks current heartbeats, account and signal freshness,
-worker progress, WAL growth and storage, feed readiness, runtime controls,
-timers, clock state, latched faults, and native reducer errors. Symbol entry
-blockers remain trading state and do not page. A systemd `active` state alone
-is not proof that a trading loop is healthy.
+independent LONG and CARRY cycle completion, spool publication, WebSocket and
+REST fallback state, systemd memory pressure, WAL growth and storage, feed
+readiness, controls, timers, host clock, latches, and native reducer errors.
+Symbol entry blockers remain trading state and do not page. A systemd `active`
+state alone is not proof that either sleeve is producing decisions.
 
 ## Recovery rules
 

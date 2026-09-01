@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
+import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -466,8 +469,8 @@ def test_funded_directional_reducers_and_maker_canary_are_wired_to_the_engine() 
     assert "lane2_toxic_flow_quoter_v1.json" in render
     assert "render_maker_canary_config.py" not in render
     assert "long-book-state-v2" in takeover
-    assert "carry-reducer-v2-target-book-v1" in takeover
-    assert "exodus-state-v1-v4-event-tape-v1" in takeover
+    assert "carry-sizing-anchors-v1-early-exits-v1-target-book-v1" in takeover
+    assert "exodus-state-v1-v4-event-tape-v1-identity-v2" in takeover
     assert "verify-native-strategy-state" in takeover
     assert "initialize-native-strategy-state" in takeover
     assert install_mode.index("engine-build") < install_mode.index(
@@ -498,6 +501,11 @@ def test_native_takeover_is_stopped_account_bound_complete_and_retry_safe() -> N
         "import_native_strategy_state",
         "require_rollout_for_funded_generation_change",
     )
+    staging = _function(
+        deploy,
+        "stage_native_takeover_source",
+        "import_native_strategy_state",
+    )
 
     assert "BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET" in runner
     assert "BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET" in runner
@@ -511,12 +519,20 @@ def test_native_takeover_is_stopped_account_bound_complete_and_retry_safe() -> N
     assert '--reuid "$runtime_user" --regid "$RUNTIME_GROUP" --clear-groups' in runner
 
     assert takeover.index("verify-native-strategy-state") < takeover.index("for source in")
-    assert 'if [ "$present" -eq 0 ] && [ ! -s "$wal" ]' in takeover
+    assert '[ "$required_present" -eq 0 ] && [ "$optional_present" -eq 0 ]' in takeover
     assert "initialize-native-strategy-state" in takeover
-    assert '[ "$present" -eq 6 ]' in takeover
+    assert '[ "$required_present" -eq 5 ]' in takeover
+    assert "carry-early-exits-v1" in staging
+    assert "carry-event-tape-v1" in staging
+    assert "{\"fired\":{}}" in staging
+    assert "os.O_NOFOLLOW" in staging
+    assert "snapshot(before) != snapshot(opened)" in staging
+    assert "snapshot(opened) != snapshot(after)" in staging
+    assert 'chown root:"$RUNTIME_GROUP" "$staged"' in staging
     for source in (
         "long-${realm}-state.json",
         "carry_sizing_anchors.json",
+        "carry_early_exits.json",
         "carry-${realm}.json",
         "carry_presettlement_events.jsonl",
         "exodus_state_identity.json",
@@ -529,6 +545,188 @@ def test_native_takeover_is_stopped_account_bound_complete_and_retry_safe() -> N
     assert takeover.rindex("verify-native-strategy-state") > takeover.index(
         "--strategy exodus"
     )
+    carry = takeover[takeover.index("--strategy carry") : takeover.index("--strategy exodus")]
+    assert "carry-sizing-anchors-v1-early-exits-v1-target-book-v1" in carry
+    assert carry.index('early_exits=$carry_early_exits_source') < carry.index(
+        'sizing_anchors=$carry_checkpoint_source'
+    ) < carry.index('target_book=$carry_book_source')
+
+    exodus = takeover[takeover.index("exodus_legacy_paths=") :]
+    assert 'exodus_target_book="/var/lib/liquidity-migration/targets/exodus-${realm}.json"' in takeover
+    assert "/var/lib/liquidity-migration-engine/heartbeat.json" in takeover
+    assert "/var/lib/liquidity-migration-engine-mainnet/heartbeat.json" in takeover
+    for field in (
+        '"schema_version": 1',
+        '"event_path": event_path',
+        '"target_book_path": target_book_path',
+        '"engine_heartbeat_path": engine_heartbeat_path',
+    ):
+        assert field in exodus
+    assert 'json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\\n"' in exodus
+    assert "exodus-state-v1-v4-event-tape-v1-identity-v2" in exodus
+    assert exodus.index('carry_events=$carry_events_source') < exodus.index(
+        'identity=$exodus_identity_source'
+    ) < exodus.index('legacy_paths=$exodus_legacy_paths') < exodus.index(
+        'state=$exodus_state_source'
+    )
+    assert 'chown root:"$RUNTIME_GROUP" "$exodus_legacy_paths"' in exodus
+    assert "trap cleanup_native_takeover_temps EXIT" in takeover
+    assert "grant_native_takeover_source_access" not in takeover
+    assert "restore_native_takeover_source_access" not in takeover
+    for staged_source in (
+        "long_state_source",
+        "carry_checkpoint_source",
+        "carry_early_exits_source",
+        "carry_book_source",
+        "carry_events_source",
+        "exodus_identity_source",
+        "exodus_state_source",
+    ):
+        assert staged_source in takeover
+
+
+@pytest.mark.skipif(os.name == "nt", reason="takeover staging uses Unix file descriptors")
+def test_takeover_source_bytes_are_copied_without_changing_the_source(tmp_path: Path) -> None:
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    program = _python_heredoc(
+        _function(
+            deploy,
+            "stage_native_takeover_source",
+            "import_native_strategy_state",
+        )
+    )
+    source_owner = pwd.getpwuid(os.getuid()).pw_name
+    runtime_group = grp.getgrgid(os.getgid()).gr_name
+    source = tmp_path / "source.json"
+    staged = tmp_path / "staged.json"
+    payload = b'{"exact":"bytes"}\n'
+    source.write_bytes(payload)
+    source.chmod(0o600)
+    staged.write_bytes(b"")
+    staged.chmod(0o600)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-",
+            source_owner,
+            runtime_group,
+            str(source),
+            str(staged),
+            "required",
+        ],
+        input=program.encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr.decode()
+    assert source.read_bytes() == payload
+    assert staged.read_bytes() == payload
+    assert stat.S_IMODE(source.stat().st_mode) == 0o600
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(b'{"swapped":"after-staging"}\n')
+    os.replace(replacement, source)
+    assert staged.read_bytes() == payload
+
+
+def test_missing_optional_takeover_sources_are_exact_temporary_empty_files(
+    tmp_path: Path,
+) -> None:
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    program = _python_heredoc(
+        _function(deploy, "stage_native_takeover_source", "import_native_strategy_state")
+    )
+    source_owner = pwd.getpwuid(os.getuid()).pw_name
+    runtime_group = grp.getgrgid(os.getgid()).gr_name
+    early_source = tmp_path / "missing-early.json"
+    event_source = tmp_path / "missing-events.jsonl"
+    early_staged = tmp_path / "early.staged"
+    event_staged = tmp_path / "events.staged"
+    for staged in (early_staged, event_staged):
+        staged.write_bytes(b"not-empty")
+        staged.chmod(0o600)
+    for source, staged, kind in (
+        (early_source, early_staged, "carry-early-exits-v1"),
+        (event_source, event_staged, "carry-event-tape-v1"),
+    ):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-",
+                source_owner,
+                runtime_group,
+                str(source),
+                str(staged),
+                kind,
+            ],
+            input=program.encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr.decode()
+    assert early_staged.read_bytes() == b'{"fired":{}}\n'
+    assert event_staged.read_bytes() == b""
+    assert not early_source.exists()
+    assert not event_source.exists()
+
+
+def test_present_optional_takeover_source_is_staged_exactly(
+    tmp_path: Path,
+) -> None:
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    program = _python_heredoc(
+        _function(deploy, "stage_native_takeover_source", "import_native_strategy_state")
+    )
+    source_owner = pwd.getpwuid(os.getuid()).pw_name
+    runtime_group = grp.getgrgid(os.getgid()).gr_name
+    source = tmp_path / "carry_early_exits.json"
+    staged = tmp_path / "staged.json"
+    malformed = b'{"fired":[]}\n'
+    source.write_bytes(malformed)
+    staged.write_bytes(b"")
+    staged.chmod(0o600)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-",
+            source_owner,
+            runtime_group,
+            str(source),
+            str(staged),
+            "carry-early-exits-v1",
+        ],
+        input=program.encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr.decode()
+    assert source.read_bytes() == malformed
+    assert staged.read_bytes() == malformed
+
+
+def test_takeover_temporary_cleanup_removes_every_staged_source(tmp_path: Path) -> None:
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    cleanup = _function(
+        deploy,
+        "remove_native_takeover_temps",
+        "stage_native_takeover_source",
+    )
+    staged = [tmp_path / "early.tmp", tmp_path / "events.tmp", tmp_path / "paths.tmp"]
+    for path in staged:
+        path.write_bytes(b"staged")
+    script = f"""
+set -euo pipefail
+{cleanup}
+remove_native_takeover_temps {' '.join(shlex.quote(str(path)) for path in staged)}
+"""
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert not any(path.exists() for path in staged)
 
 
 def test_demo_engine_template_has_an_exact_account_id_and_mainnet_requires_one() -> None:
@@ -653,6 +851,207 @@ def test_demo_engine_environment_reconciliation_precedes_runtime_build() -> None
     install = _function(deploy, "install_mode", "load_authorization")
     assert prepare.index("reconcile_demo_engine_environment") < prepare.index("write_signal_worker_environment")
     assert install.index("prepare_demo_runtime_config") < install.index("build_engine")
+
+
+def _candidate_universe_bytes(realm: str, long_count: int, carry_count: int) -> bytes:
+    endpoint = "api-demo.bybit.com" if realm == "demo" else "api.bybit.com"
+    symbols = [f"S{index:03d}USDT" for index in range(max(long_count, carry_count))]
+    payload: dict[str, object] = {
+        "schema_version": 5,
+        "kind": "account_execution_candidate_universe",
+        "strategy_domain": "crypto_perpetuals",
+        "environment": realm,
+        "endpoint": endpoint,
+        "snapshot_ts_ns": 1_800_000_000_000_000_000,
+        "snapshot_completed_ts_ns": 1_800_000_000_000_000_001,
+        "symbols": symbols,
+        "symbol_count": len(symbols),
+        "profile_eligible_symbols": {
+            "long": symbols[:long_count],
+            "carry": symbols[:carry_count],
+        },
+        "artifact_sha256": "",
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    payload["artifact_sha256"] = hashlib.sha256(canonical).hexdigest()
+    return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="deployment ownership contract is Unix-only")
+@pytest.mark.parametrize(
+    ("realm", "endpoint", "long_count"),
+    [
+        ("demo", "api-demo.bybit.com", 118),
+        ("mainnet", "api.bybit.com", 120),
+    ],
+)
+def test_incumbent_candidate_universe_transition_is_validated_and_byte_exact(
+    tmp_path: Path,
+    realm: str,
+    endpoint: str,
+    long_count: int,
+) -> None:
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    transition = _function(
+        deploy,
+        "stage_incumbent_candidate_universe",
+        "reconcile_demo_engine_environment",
+    )
+    program = _python_heredoc(transition)
+    source_dir = tmp_path / "incumbent"
+    target_dir = tmp_path / "native"
+    source_dir.mkdir()
+    target_dir.mkdir()
+    source = source_dir / "candidate-universe.json"
+    target = target_dir / "candidate-universe.json"
+    original = _candidate_universe_bytes(realm, long_count, 150)
+    source.write_bytes(original)
+    source.chmod(0o640)
+
+    def run() -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-",
+                str(source),
+                str(target),
+                realm,
+                endpoint,
+                str(os.getuid()),
+                str(os.getgid()),
+            ],
+            input=program.encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+
+    result = run()
+    assert result.returncode == 0, result.stderr.decode()
+    receipt = json.loads(result.stdout)
+    assert receipt["status"] == "candidate_universe_transition_ready"
+    assert receipt["realm"] == realm
+    assert receipt["copied"] is True
+    assert target.read_bytes() == original
+    assert target.stat().st_ino != source.stat().st_ino
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+    assert target.stat().st_uid == os.getuid()
+    assert target.stat().st_gid == os.getgid()
+    assert not list(target_dir.glob(".candidate-universe.json.*"))
+
+    result = run()
+    assert result.returncode == 0, result.stderr.decode()
+    assert json.loads(result.stdout)["copied"] is False
+    assert target.read_bytes() == original
+
+
+@pytest.mark.skipif(os.name == "nt", reason="deployment ownership contract is Unix-only")
+@pytest.mark.parametrize("corruption", ["realm", "population", "self_hash"])
+def test_incumbent_candidate_universe_transition_rejects_invalid_source(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    program = _python_heredoc(
+        _function(
+            deploy,
+            "stage_incumbent_candidate_universe",
+            "reconcile_demo_engine_environment",
+        )
+    )
+    source_dir = tmp_path / "incumbent"
+    target_dir = tmp_path / "native"
+    source_dir.mkdir()
+    target_dir.mkdir()
+    source = source_dir / "candidate-universe.json"
+    target = target_dir / "candidate-universe.json"
+    payload = json.loads(_candidate_universe_bytes("demo", 118, 150))
+    if corruption == "realm":
+        payload["environment"] = "mainnet"
+    elif corruption == "population":
+        payload["profile_eligible_symbols"]["long"].append("ZZZUSDT")
+    else:
+        payload["artifact_sha256"] = "0" * 64
+    if corruption != "self_hash":
+        payload["artifact_sha256"] = ""
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        payload["artifact_sha256"] = hashlib.sha256(canonical).hexdigest()
+    source.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    source.chmod(0o640)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-",
+            str(source),
+            str(target),
+            "demo",
+            "api-demo.bybit.com",
+            str(os.getuid()),
+            str(os.getgid()),
+        ],
+        input=program.encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert not target.exists()
+    assert not list(target_dir.glob(".candidate-universe.json.*"))
+
+
+def test_install_stages_incumbent_universes_into_native_paths() -> None:
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    transition = _function(
+        deploy,
+        "stage_incumbent_candidate_universe",
+        "reconcile_demo_engine_environment",
+    )
+    prepare = _function(
+        deploy,
+        "prepare_demo_runtime_config",
+        "trusted_checkout_directory",
+    )
+    provision = _function(
+        deploy,
+        "provision_mainnet_prerequisites",
+        "require_mainnet_preflight",
+    )
+    for required in (
+        "/etc/liquidity-migration/producer-demo-source/candidate-universe.json",
+        "/etc/liquidity-migration/producer-mainnet-source/candidate-universe.json",
+        "/etc/liquidity-migration/signal-worker-demo-source/candidate-universe.json",
+        "/etc/liquidity-migration/signal-worker-mainnet-source/candidate-universe.json",
+        'payload["symbol_count"] != len(symbols)',
+        'set(long_symbols).issubset(symbols)',
+        'set(carry_symbols).issubset(symbols)',
+        'stat.S_IMODE(source_stat.st_mode) != 0o640',
+        'target_data != source_data',
+        'os.fchmod(descriptor, 0o640)',
+        'os.replace(temporary, target_path)',
+    ):
+        assert required in transition
+    for snapshot_specific_count in ("expected_long", "expected_carry", "118", "120", "150"):
+        assert snapshot_specific_count not in transition
+    assert prepare.index("stage_incumbent_candidate_universe demo") < prepare.index(
+        'write_signal_worker_environment "$DEMO_SIGNAL_SOURCE_ENV"'
+    )
+    assert "stage_incumbent_candidate_universe mainnet" in prepare
+    assert provision.index("stage_incumbent_candidate_universe mainnet") < provision.index(
+        'write_signal_worker_environment "$MAINNET_SIGNAL_SOURCE_ENV"'
+    )
+    assert "install a reviewed demo candidate universe" not in prepare
+    assert "install a reviewed mainnet candidate-universe artifact" not in provision
 
 
 def test_engine_release_is_locked_commit_bound_and_digest_checked() -> None:
@@ -805,22 +1204,170 @@ def test_mainnet_preflight_uses_only_credentials_and_neutral_signal_inputs() -> 
 
 def test_mainnet_disarm_quarantines_before_checkout_independent_rewrite() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
+    inventory = _function(
+        text,
+        "prepare_mainnet_quarantine_inventory",
+        "quarantine_mainnet_units",
+    )
     quarantine = _function(text, "quarantine_mainnet_units", "disarm_mainnet_mode")
     block = _function(text, "disarm_mainnet_mode", "stop_mainnet_mode")
+    inventory_at = block.index("prepare_mainnet_quarantine_inventory")
     quarantine_at = block.index("quarantine_mainnet_units")
     replace_at = block.index("os.replace(temporary, path)")
     sync_at = block.index("os.fsync(directory)")
-    assert quarantine_at < replace_at < sync_at
+    assert inventory_at < quarantine_at < replace_at < sync_at
+    assert "lm_rollout_transition_inventory" in inventory
+    assert '"$incumbent_manifest" "$candidate_manifest" mainnet' in inventory
+    assert "CANDIDATE_FLEET_MANIFEST_B64" in inventory
+    assert 'incumbent_manifest="$INSTALLED_FLEET_MANIFEST"' in inventory
+    assert "safe_git" not in inventory
+    assert ".git" not in inventory
+    assert 'stat -c %g "$parent"' not in inventory
+    assert "incumbent=snapshot candidate=embedded" in inventory
+    assert '. "$incumbent' not in inventory
     assert 'environment["REAL_MONEY"] = "false"' in block
     assert "/usr/bin/systemctl disable --now" in quarantine
     assert "still-enabled" in quarantine and "still-active" in quarantine
     assert "/bin/sync" in quarantine
     assert 'getattr(os, "O_NOFOLLOW", 0)' in block
+    assert "parent_stat.st_gid != 0" not in block
+    assert "before.st_gid != 0" in block
+    assert "current.st_gid != 0" in block
     assert "before.st_nlink != 1" in block
     assert "/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C" in block
     assert '"$fail_safe_python" -I -S -' in block
     assert "from liquidity_migration" not in block
     assert ".venv" not in block
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or sys.platform != "linux" or os.geteuid() != 0,
+    reason="exact root:runtime ownership integration requires root on Linux",
+)
+def test_emergency_paths_accept_root_runtime_0750_parent(tmp_path: Path) -> None:
+    runtime_gid = next(row.gr_gid for row in grp.getgrall() if row.gr_gid != 0)
+    parent = tmp_path / "liquidity-migration"
+    parent.mkdir()
+    os.chown(parent, 0, runtime_gid)
+    parent.chmod(0o750)
+
+    manifest = (ROOT / "deploy/fleet_manifest.tsv").read_bytes()
+    snapshot = parent / "fleet-manifest.tsv"
+    snapshot.write_bytes(manifest)
+    os.chown(snapshot, 0, 0)
+    snapshot.chmod(0o600)
+    Path("/run/liquidity-migration").mkdir(parents=True, exist_ok=True)
+
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    inventory = _function(
+        deploy,
+        "prepare_mainnet_quarantine_inventory",
+        "quarantine_mainnet_units",
+    )
+    encoded = base64.b64encode(manifest).decode("ascii")
+    inventory_script = f"""
+set -euo pipefail
+. {shlex.quote(str(ROOT / "deploy/lib_sleeves.sh"))}
+INSTALLED_FLEET_MANIFEST={shlex.quote(str(snapshot))}
+CANDIDATE_FLEET_MANIFEST_B64={shlex.quote(encoded)}
+MAINNET_QUARANTINE_UNITS=()
+{inventory}
+prepare_mainnet_quarantine_inventory
+printf '%s\n' "${{MAINNET_QUARANTINE_UNITS[@]}}"
+"""
+    completed = subprocess.run(
+        ["bash", "-c", inventory_script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "mainnet-quarantine-inventory-ok" in completed.stdout
+    assert "liquidity-migration-engine-mainnet.service" in completed.stdout
+
+    credential = parent / "bybit-mainnet.env"
+    credential.write_bytes(b"BYBIT_REAL_API_KEY=opaque\nREAL_MONEY=true\n")
+    os.chown(credential, 0, 0)
+    credential.chmod(0o600)
+    disarm = _function(deploy, "disarm_mainnet_mode", "stop_mainnet_mode")
+    anchor = '"$fail_safe_python" -I -S - "$MAINNET_CREDENTIAL_ENV" <<\'PY\'\n'
+    start = disarm.index(anchor) + len(anchor)
+    program = disarm[start : disarm.index("\nPY\n", start)]
+    rewritten = subprocess.run(
+        [sys.executable, "-I", "-S", "-", str(credential)],
+        input=program.encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    assert rewritten.returncode == 0, rewritten.stderr.decode()
+    assert b"REAL_MONEY=false\n" in credential.read_bytes()
+    assert credential.stat().st_uid == 0
+    assert credential.stat().st_gid == 0
+    assert stat.S_IMODE(credential.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("git_state", ["missing", "corrupt"])
+def test_mainnet_containment_union_works_with_missing_or_corrupt_remote_git(
+    tmp_path: Path,
+    git_state: str,
+) -> None:
+    checkout = tmp_path / "remote-checkout"
+    checkout.mkdir()
+    if git_state == "corrupt":
+        metadata = checkout / ".git"
+        metadata.mkdir()
+        (metadata / "HEAD").write_text("not a ref or object\n", encoding="utf-8")
+    snapshot = tmp_path / "installed.tsv"
+    candidate = tmp_path / "candidate.tsv"
+    manifest = (ROOT / "deploy/fleet_manifest.tsv").read_bytes()
+    snapshot.write_bytes(manifest)
+    candidate.write_bytes(manifest)
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f". {shlex.quote(str(ROOT / 'deploy/lib_sleeves.sh'))}; "
+                "lm_rollout_transition_inventory \"$1\" \"$2\" mainnet"
+            ),
+            "containment-test",
+            str(snapshot),
+            str(candidate),
+        ],
+        cwd=checkout,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    units = {line.split("|", 2)[2] for line in completed.stdout.splitlines()}
+    assert units == {
+        row.split("|", 1)[0]
+        for row in (ROOT / "deploy/fleet_manifest.tsv").read_text(encoding="utf-8").splitlines()
+        if row and not row.startswith("#") and row.split("|")[2] == "mainnet"
+    }
+
+
+def test_install_persists_the_manifest_snapshot_before_checkout_loss() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    snapshot = _function(
+        text,
+        "install_fleet_manifest_snapshot",
+        "running_liqmig_units",
+    )
+    install = _function(text, "install_mode", "load_authorization")
+    assert "os.O_NOFOLLOW" in snapshot
+    assert "os.fchown(descriptor, 0, 0)" in snapshot
+    assert "os.fchmod(descriptor, 0o600)" in snapshot
+    assert snapshot.index("os.replace(temporary, target)") < snapshot.index(
+        "os.fsync(directory)"
+    )
+    assert install.index("snapshot-incumbent-fleet-manifest") < install.index(
+        'safe_git checkout -B "$BRANCH" "$EXPECTED_COMMIT"'
+    )
+    assert install.index("install-systemd-manifest") < install.index(
+        "install-fleet-manifest-snapshot"
+    )
 
 
 def test_embedded_fail_safe_disarm_parser_is_strict_and_standalone() -> None:
@@ -834,8 +1381,21 @@ def test_embedded_fail_safe_disarm_parser_is_strict_and_standalone() -> None:
     exec(compile(definitions, "<embedded-fail-safe-disarm>", "exec"), namespace)
     parse_environment = namespace["parse_environment"]
     disarm_error = namespace["DisarmError"]
+    safe_parent = namespace["root_owned_nonwritable_directory"]
     assert callable(parse_environment)
     assert isinstance(disarm_error, type)
+    runtime_group_parent = os.stat_result(
+        (stat.S_IFDIR | 0o750, 1, 1, 1, 0, 1234, 0, 0, 0, 0)
+    )
+    writable_parent = os.stat_result(
+        (stat.S_IFDIR | 0o770, 1, 1, 1, 0, 1234, 0, 0, 0, 0)
+    )
+    nonroot_parent = os.stat_result(
+        (stat.S_IFDIR | 0o750, 1, 1, 1, 1, 1234, 0, 0, 0, 0)
+    )
+    assert safe_parent(runtime_group_parent) is True  # type: ignore[operator]
+    assert safe_parent(writable_parent) is False  # type: ignore[operator]
+    assert safe_parent(nonroot_parent) is False  # type: ignore[operator]
     assert parse_environment(  # type: ignore[operator]
         b"BYBIT_REAL_API_KEY='opaque value'\nREAL_MONEY=true\n"
     ) == {"BYBIT_REAL_API_KEY": "opaque value", "REAL_MONEY": "true"}
@@ -971,6 +1531,51 @@ def test_rollout_stop_list_covers_every_current_non_owner_unit() -> None:
     )
     listed = set(completed.stdout.splitlines())
     assert units - owners == listed - {unit for unit in listed if unit not in units}
+
+
+def test_rollout_transition_union_is_prepared_before_snapshot_and_used_everywhere() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    prepare = _function(
+        text,
+        "prepare_rollout_transition_inventory",
+        "snapshot_prior_topology",
+    )
+    rollout = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
+    snapshot = _function(text, "snapshot_prior_topology", "prior_topology_contains")
+    restore_snapshot = _function(
+        text,
+        "restore_prior_topology_snapshot",
+        "restore_prior_topology",
+    )
+    restore = _function(text, "restore_prior_topology", "stop_rollout_units")
+    fence = _function(
+        text,
+        "disable_rollout_units_for_boot_fence",
+        "stop_all_rollout_units_best_effort",
+    )
+    quarantine = _function(text, "stop_all_rollout_units_best_effort", "cleanup_notice")
+    quiescent = _function(text, "require_quiescent", "git_fetch")
+
+    assert "declare -f lm_rollout_transition_inventory" in text[: text.index("REMOTE_SCRIPT")]
+    assert 'incumbent_manifest="$REPO_DIR/deploy/fleet_manifest.tsv"' in prepare
+    assert 'candidate_manifest="$ENGINE_BUILD_DIR/deploy/fleet_manifest.tsv"' in prepare
+    assert 'ENGINE_PREFETCHED_COMMIT" = "$EXPECTED_COMMIT' in prepare
+    assert '. "$incumbent_helper"' in prepare
+    assert '. "$candidate_helper"' in prepare
+    assert prepare.count("lm_validate_fleet_manifest") == 2
+    assert "lm_rollout_transition_inventory" in prepare
+    assert "ROLLOUT_DOWNSTREAM_UNITS=()" in prepare
+    assert "ROLLOUT_OWNER_UNITS=()" in prepare
+    assert "ROLLOUT_TRANSITION_READY=1" in prepare
+    assert rollout.index("rollout-target-prefetch") < rollout.index(
+        "prepare-rollout-transition-inventory"
+    ) < rollout.index("snapshot-prior-topology") < rollout.index("stop-downstream-units")
+    assert 'ROLLOUT_TRANSITION_READY" -eq 1' in snapshot
+    for block in (snapshot, restore_snapshot, fence, quarantine, quiescent):
+        assert "ROLLOUT_DOWNSTREAM_UNITS" in block
+        assert "ROLLOUT_OWNER_UNITS" in block
+    assert "stop_all_rollout_units_best_effort" in restore
+    assert "restore_prior_topology_snapshot" in restore
 
 
 def test_transient_builder_is_bounded_tracked_and_cleaned_on_exit() -> None:

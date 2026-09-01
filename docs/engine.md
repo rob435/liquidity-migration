@@ -108,15 +108,45 @@ be silently applied.
 
 The worker writes its own multi-output transaction to durable state before it
 makes any output visible. The same checkpoint persists a random 128-bit source
-generation used in both LONG and CARRY source names. Restore keeps that source
-and its sequences; a new checkpoint creates a distinct source whose sequence
-starts at one. The heartbeat binds that generation alongside the source config,
+generation used in both LONG and CARRY source names. Restore and ordinary
+compaction keep that source and its sequences; only a genuinely new state root
+creates a distinct source at sequence one. The heartbeat binds that generation
+alongside the source config,
 rules, feature contracts, operational profile, engine config, universe, input
 sequence, output sequences, and feature watermarks.
 
-Subscriptions are restored from the WAL. A new symbol can be admitted while
-the process is running; the symbol table is append-only and its full mapping is
-restated in the WAL.
+The public transport is continuous rather than cycle-owned. A persistent
+WebSocket actor reconnects forever through explicit gap epochs; bounded REST
+lanes repair history and refresh slower inputs independently. Source events are
+journaled between streamed checkpoint compactions, so a five-second ticker
+cadence does not serialize or clone the whole history on every wake.
+
+REST history jobs have hard accepted-config ceilings. LONG accepts at most 180
+cold-start days and adds its fixed 48-hour feature pad, while the complete CARRY
+replay, feature, and pad window is at most 4,368 hours. Each end-exclusive LONG
+or CARRY kline window therefore has at most 4,368 hourly rows. A merged repair
+job can span one LONG and two CARRY windows, so its conservative hard bound is
+13,104 rows. At the minimum one-hour funding interval, an inclusive funding job
+has at most 4,369 rows; longer intervals have fewer. The whale window is at most
+30 days: 8,641 inclusive five-minute points reduce to at most 30 daily rows.
+Kline, funding, and whale jobs move through one-job chunks and wait for the prior
+chunk's commit result before the next fetch.
+
+Current outputs coalesce while the engine is behind and republish from current
+state after the pending file drains. Immutable lifecycle and scorer-catch-up
+observations retain their own quotas and order. A structurally valid observation
+from the prior config fingerprint is consumed without planning; an outer/inner
+fingerprint mismatch, corrupt payload, wrong realm, or wrong destination remains
+a hard error. This prevents one valid pre-cutover spool row from pinning the new
+generation.
+
+Subscriptions are restored from the WAL. Signal-requested market subscriptions
+inside the reviewed artifact become durable in the WAL. The symbol table is
+append-only and its full mapping is restated in the WAL. Every directional
+symbol requests a top-of-book quote for the engine's entry-freshness gate and a
+ticker for mark, index, funding, and settlement fields. The market feed tracks
+each L1 quote separately and re-subscribes one that stays silent for 45 seconds;
+traffic from other symbols cannot hide that stale quote.
 
 ## Strategy contract
 

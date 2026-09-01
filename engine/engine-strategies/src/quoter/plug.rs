@@ -35,6 +35,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use engine_types::{
     BookLevel, EngineEvent, Feed, Intent, MarketEvent, OrderKind, OrderUpdate, QuoteFillFeatures,
     Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription, SymbolId, TimeInForce,
+    TimerId,
 };
 
 use super::plan::{
@@ -62,6 +63,8 @@ const QUOTE_TAG: &str = "quote";
 /// refused leaves the order resting, and a strategy that asked once and never
 /// again would leave it there for good.
 const CANCEL_AGAIN_AFTER_NS: u64 = 1_000_000_000;
+const DRAIN_RETRY_AFTER_NS: u64 = 1_000_000_000;
+const DRAIN_RETRY_TIMER: TimerId = TimerId(1);
 const FAST_FILL_MEMORY: usize = 8192;
 
 /// What this strategy has asked the venue to do about one of its orders.
@@ -106,6 +109,10 @@ pub struct Quoter {
     /// here through partial fills so a busy market-data stream cannot emit a
     /// second exit while the first one is still working.
     flatten_pending: HashSet<SymbolId>,
+    /// Failed exits wait here for one shared timer. A persistent refusal must
+    /// leave the current engine wake instead of feeding another identical
+    /// exit straight back into the same action queue.
+    flatten_retry: HashSet<SymbolId>,
 }
 
 impl Quoter {
@@ -304,6 +311,7 @@ impl Quoter {
             fast_fills: HashMap::new(),
             fast_fill_order: VecDeque::new(),
             flatten_pending: HashSet::new(),
+            flatten_retry: HashSet::new(),
         })
     }
 
@@ -320,6 +328,23 @@ impl Quoter {
 
     fn mine(&self, symbol: SymbolId) -> bool {
         self.ids.contains(&Some(symbol))
+    }
+
+    fn manages_drain_inventory(&self, symbol: SymbolId, ctx: &dyn StrategyCtx) -> bool {
+        if self.quote_enabled && self.mine(symbol) {
+            return false;
+        }
+        if ctx.my_position(symbol).abs() > 1e-12
+            || self
+                .fast_inventory
+                .get(&symbol)
+                .is_some_and(|qty| qty.abs() > 1e-12)
+        {
+            return true;
+        }
+        let mut resting = Vec::new();
+        ctx.resting(&mut resting);
+        resting.iter().any(|order| order.symbol == symbol)
     }
 
     /// Ask the venue to pull an order, unless we have just asked.
@@ -409,6 +434,9 @@ impl Quoter {
                 .get(&symbol)
                 .copied()
                 .unwrap_or_default();
+        let durable_flatten_pending = out
+            .iter()
+            .any(|order| order.symbol == symbol && order.reduce_only);
         for order in out.iter().filter(|o| o.symbol == symbol) {
             if let Some(px) = order.px() {
                 self.working.push(WorkingQuote {
@@ -434,13 +462,13 @@ impl Quoter {
                 position,
                 working: &self.working,
                 foreign_owner: ctx.foreign_position(symbol),
-                flatten_pending: self.flatten_pending.contains(&symbol),
+                flatten_pending: self.flatten_pending.contains(&symbol) || durable_flatten_pending,
                 instrument: rule,
             },
             DecisionRules {
                 quote: self.rules,
                 micro: self.micro_rules,
-                quote_enabled: self.quote_enabled,
+                quote_enabled: self.quote_enabled && self.mine(symbol),
             },
         );
         self.micro.insert(symbol, output.state);
@@ -495,21 +523,62 @@ impl Quoter {
         }
     }
 
-    fn pull_all_on_feed_reset(&mut self, ctx: &mut dyn StrategyCtx) {
+    fn delay_flatten_retry(&mut self, symbol: SymbolId, ctx: &mut dyn StrategyCtx) {
+        let timer_idle = self.flatten_retry.is_empty();
+        self.flatten_retry.insert(symbol);
+        if timer_idle {
+            ctx.arm_timer(DRAIN_RETRY_TIMER, DRAIN_RETRY_AFTER_NS);
+        }
+    }
+
+    fn retry_flatten(&mut self, ctx: &mut dyn StrategyCtx) {
+        let mut symbols = std::mem::take(&mut self.flatten_retry)
+            .into_iter()
+            .collect::<Vec<_>>();
+        symbols.sort_by_key(|symbol| symbol.0);
+        for symbol in symbols {
+            let active_quote = self.quote_enabled && self.mine(symbol);
+            if active_quote || self.manages_drain_inventory(symbol, ctx) {
+                self.requote(symbol, None, ctx);
+            }
+        }
+    }
+
+    fn reset_market_epoch(&mut self, ctx: &mut dyn StrategyCtx) {
         self.micro.clear();
+        self.working.clear();
         self.fast_inventory.clear();
         self.fast_fills.clear();
         self.fast_fill_order.clear();
+        self.flatten_retry.clear();
         let mut resting = Vec::new();
         ctx.resting(&mut resting);
         let mine: Vec<(SymbolId, String)> = resting
             .iter()
-            .filter(|order| self.mine(order.symbol))
+            .filter(|order| !order.reduce_only)
             .map(|order| (order.symbol, order.client_order_id.to_string()))
             .collect();
+        let recovered_symbols = resting.iter().map(|order| order.symbol).collect::<Vec<_>>();
+        drop(resting);
         let now_ns = ctx.now_ns();
         for (symbol, id) in mine {
             self.pull(symbol, &id, now_ns, ctx);
+        }
+        let mut symbols = self.ids.iter().flatten().copied().collect::<Vec<_>>();
+        let mut position_names = Vec::new();
+        ctx.my_position_names(&mut position_names);
+        symbols.extend(
+            position_names
+                .into_iter()
+                .filter_map(|name| ctx.symbol_id(name)),
+        );
+        symbols.extend(recovered_symbols);
+        symbols.sort_by_key(|symbol| symbol.0);
+        symbols.dedup();
+        for symbol in symbols {
+            if !self.quote_enabled || !self.mine(symbol) {
+                self.requote(symbol, None, ctx);
+            }
         }
     }
 
@@ -662,6 +731,10 @@ impl Strategy for Quoter {
     fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
         self.resolve(&*ctx);
         let (symbol, signal) = match event {
+            EngineEvent::Boot => {
+                self.reset_market_epoch(ctx);
+                return;
+            }
             EngineEvent::Market(MarketEvent::Depth { symbol, depth }) => (
                 *symbol,
                 Some(SignalInput::Depth {
@@ -694,7 +767,11 @@ impl Strategy for Quoter {
                 }),
             ),
             EngineEvent::Market(MarketEvent::FeedReset { .. }) => {
-                self.pull_all_on_feed_reset(ctx);
+                self.reset_market_epoch(ctx);
+                return;
+            }
+            EngineEvent::Timer { id, .. } if *id == DRAIN_RETRY_TIMER => {
+                self.retry_flatten(ctx);
                 return;
             }
             // A fill changed the inventory and took a quote out of the book.
@@ -737,6 +814,7 @@ impl Strategy for Quoter {
                     .is_some_and(|order| order.reduce_only && order.filled_qty + 1e-12 >= order.qty)
                 {
                     self.flatten_pending.remove(symbol);
+                    self.flatten_retry.remove(symbol);
                 }
                 (*symbol, None)
             }
@@ -749,10 +827,13 @@ impl Strategy for Quoter {
                 let Some(order) = ctx.order_facts(client_order_id) else {
                     return;
                 };
+                let symbol = order.symbol;
                 if order.reduce_only {
-                    self.flatten_pending.remove(&order.symbol);
+                    self.flatten_pending.remove(&symbol);
+                    self.delay_flatten_retry(symbol, ctx);
+                    return;
                 }
-                (order.symbol, None)
+                (symbol, None)
             }
             EngineEvent::IntentRefused {
                 symbol,
@@ -760,11 +841,12 @@ impl Strategy for Quoter {
                 ..
             } => {
                 self.flatten_pending.remove(symbol);
-                (*symbol, None)
+                self.delay_flatten_retry(*symbol, ctx);
+                return;
             }
             _ => return,
         };
-        if self.mine(symbol) {
+        if self.mine(symbol) || self.manages_drain_inventory(symbol, ctx) {
             self.requote(symbol, signal, ctx);
         }
     }

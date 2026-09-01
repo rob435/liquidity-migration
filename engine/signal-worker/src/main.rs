@@ -114,7 +114,7 @@ async fn run() -> Result<(), WorkerError> {
         } => {
             let (config, universe) = load_common(&common)?;
             reject_overlapping_paths(&spool_dir, &state_dir, &heartbeat)?;
-            LiveRunner::new(
+            let runner = LiveRunner::open_responsive(
                 config,
                 universe,
                 LiveRunOptions {
@@ -122,9 +122,12 @@ async fn run() -> Result<(), WorkerError> {
                     spool_dir,
                     heartbeat,
                 },
-            )?
-            .run()
-            .await
+            )
+            .await?;
+            match runner {
+                Some(runner) => runner.run().await,
+                None => Ok(()),
+            }
         }
     }
 }

@@ -17,6 +17,8 @@ use crate::native_common::{
 use crate::position_plan::{plan as plan_targets, PlanRules, Step, Target};
 
 pub const CONTRACT_SCHEMA_VERSION: u16 = 1;
+// Admission cycles are one minute, matching the registered idle-cycle clock.
+pub const ENTRY_CYCLE_MS: i64 = 60_000;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -206,6 +208,12 @@ pub struct SleeveState {
     pub refused_entries: BTreeSet<String>,
     #[serde(default)]
     pub entry_retry_after_ms: BTreeMap<String, i64>,
+    #[serde(default)]
+    pub entry_cycle_started_ms: i64,
+    #[serde(default)]
+    pub entry_cycle_selected_symbols: BTreeSet<String>,
+    #[serde(default)]
+    pub entry_trail_by_symbol: BTreeMap<String, f64>,
     pub last_publication_decision_ts_ms: i64,
     #[serde(default)]
     pub current_decision: Option<CarryDecision>,
@@ -290,6 +298,16 @@ impl SleeveState {
                 .entry_retry_after_ms
                 .iter()
                 .any(|(symbol, retry_at)| !self.refused_entries.contains(symbol) || *retry_at <= 0)
+            || self.entry_cycle_started_ms < 0
+            || self
+                .entry_cycle_selected_symbols
+                .iter()
+                .any(|symbol| !valid_symbol(symbol))
+            || (self.entry_cycle_started_ms == 0 && !self.entry_cycle_selected_symbols.is_empty())
+            || self
+                .entry_trail_by_symbol
+                .iter()
+                .any(|(symbol, trail)| !valid_symbol(symbol) || !trail.is_finite())
         {
             return Err("CARRY checkpoint portfolio state is invalid");
         }
@@ -371,6 +389,71 @@ pub struct ReducerOutput {
     pub execution: ExecutionOutput,
 }
 
+#[derive(Clone, Debug)]
+pub struct ScorerCatchupInput {
+    pub decision_ts_ms: i64,
+    pub rows: Vec<CarryFeatureRow>,
+    pub signal_receipt: (String, u64, String),
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScorerCatchupOutput {
+    pub next_state: SleeveState,
+    pub execution: ExecutionOutput,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ReplanMode {
+    Ordinary,
+    BootRecovery,
+}
+
+pub fn reduce_scorer_catchup(
+    input: ScorerCatchupInput,
+    mut state: SleeveState,
+    config: &StrategyConfig,
+) -> Result<ScorerCatchupOutput, &'static str> {
+    config.validate()?;
+    if state.schema_version == 0 {
+        state.schema_version = DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION;
+    }
+    state.validate()?;
+    let previous_ts_ms = state.scorer.last_decision_ts_ms;
+    if previous_ts_ms > 0
+        && input.decision_ts_ms != previous_ts_ms
+        && input.decision_ts_ms != previous_ts_ms.saturating_add(DAY_MS)
+    {
+        return Err("CARRY scorer catch-up is not the next UTC generation");
+    }
+    let (_, scorer) = score_decision(
+        &input.rows,
+        input.decision_ts_ms,
+        &state.scorer,
+        &config.rule,
+    )?;
+    state.scorer = scorer;
+    state.validate()?;
+    let (source, sequence, observation_id) = input.signal_receipt;
+    Ok(ScorerCatchupOutput {
+        execution: ExecutionOutput {
+            effects: vec![
+                Effect::PersistCheckpoint {
+                    symbol: String::new(),
+                    config_fingerprint: config.fingerprint(),
+                    payload: checkpoint_payload(&state),
+                },
+                Effect::ConsumeSignal {
+                    source,
+                    sequence,
+                    observation_id,
+                },
+            ],
+            skipped: Vec::new(),
+        },
+        next_state: state,
+    })
+}
+
 pub fn reduce_signal(
     batch: CarrySignalBatch,
     mut input: ReducerInput,
@@ -411,8 +494,17 @@ pub fn reduce_signal(
 
 pub fn reduce_lifecycle(
     input: ReducerInput,
+    state: SleeveState,
+    config: &StrategyConfig,
+) -> Result<ReducerOutput, &'static str> {
+    reduce_lifecycle_with_mode(input, state, config, ReplanMode::Ordinary)
+}
+
+pub fn reduce_lifecycle_with_mode(
+    input: ReducerInput,
     mut state: SleeveState,
     config: &StrategyConfig,
+    replan_mode: ReplanMode,
 ) -> Result<ReducerOutput, &'static str> {
     config.validate()?;
     if input.now_ms <= 0
@@ -433,23 +525,39 @@ pub fn reduce_lifecycle(
         state.schema_version = DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION;
     }
     state.validate()?;
-    let expired_retries = state
-        .entry_retry_after_ms
-        .iter()
-        .filter(|(_, retry_at)| **retry_at <= input.now_ms)
-        .map(|(symbol, _)| symbol.clone())
-        .collect::<Vec<_>>();
-    for symbol in expired_retries {
-        state.entry_retry_after_ms.remove(&symbol);
-        state.refused_entries.remove(&symbol);
+    let decision_ts = input.decision.decision_ts_ms;
+    let decision_available = decision_ts <= input.now_ms;
+    if decision_ts < state.last_publication_decision_ts_ms {
+        return Err("CARRY decision regressed behind durable state");
     }
     if mismatch {
         state.desired_targets.clear();
     }
 
-    let decision_ts = input.decision.decision_ts_ms;
-    if decision_ts > state.last_publication_decision_ts_ms {
+    let new_generation = decision_ts > state.last_publication_decision_ts_ms;
+    if new_generation || !input.trail_by_symbol.is_empty() {
+        state.entry_trail_by_symbol = input.trail_by_symbol.clone();
+    }
+    state
+        .entry_trail_by_symbol
+        .retain(|symbol, _| input.decision.weights.contains_key(symbol));
+    let cycle_reset = state.entry_cycle_started_ms == 0
+        || input.now_ms >= state.entry_cycle_started_ms.saturating_add(ENTRY_CYCLE_MS);
+    if cycle_reset {
+        state.entry_cycle_started_ms = input.now_ms;
+        state.entry_cycle_selected_symbols.clear();
         state.refused_entries.clear();
+        state.entry_retry_after_ms.clear();
+    }
+    if replan_mode == ReplanMode::BootRecovery && !decision_available {
+        state.entry_cycle_selected_symbols.clear();
+    }
+    if state.entry_cycle_selected_symbols.len() > config.max_new_entries_per_cycle {
+        state.entry_cycle_selected_symbols = state
+            .entry_cycle_selected_symbols
+            .into_iter()
+            .take(config.max_new_entries_per_cycle)
+            .collect();
     }
     state
         .fired_exits
@@ -635,11 +743,20 @@ pub fn reduce_lifecycle(
         .into_iter()
         .collect::<BTreeSet<_>>();
     let mut desired_weights = BTreeMap::new();
+    let mut entry_effect_symbols = BTreeSet::new();
     let mut summary = PlanSummary {
         desired_book_size: effective.weights.len(),
         desired_gross_weight: effective.gross,
         ..PlanSummary::default()
     };
+    let plan_rules = PlanRules {
+        entry_floor_usdt: config.execution.entry_floor_usdt,
+        resize_floor_usdt: config.execution.resize_floor_usdt,
+        resize_floor_fraction: config.execution.resize_floor_fraction,
+        entry_cutoff_ms: config.execution.engine_entry_cutoff_ms,
+    };
+    let entry_valid_until_ms =
+        decision_ts + config.execution.signal_validity_ms - config.execution.engine_entry_cutoff_ms;
     if !input.account_healthy || sizing_equity.is_none() {
         summary.entry_blocked_reason = "engine_account_health_unavailable".into();
         for symbol in state
@@ -666,19 +783,24 @@ pub fn reduce_lifecycle(
             .cloned()
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| {
-            input
-                .trail_by_symbol
+            state
+                .entry_trail_by_symbol
                 .get(left)
                 .copied()
                 .unwrap_or(0.0)
-                .total_cmp(&input.trail_by_symbol.get(right).copied().unwrap_or(0.0))
+                .total_cmp(
+                    &state
+                        .entry_trail_by_symbol
+                        .get(right)
+                        .copied()
+                        .unwrap_or(0.0),
+                )
                 .then_with(|| left.cmp(right))
         });
         summary.engine_blocked_entries = entries
             .iter()
             .filter(|symbol| input.entry_blockers.contains_key(*symbol))
             .count();
-        entries.retain(|symbol| !input.entry_blockers.contains_key(symbol));
         if input.now_ms
             >= decision_ts + config.execution.signal_validity_ms
                 - config.execution.engine_entry_cutoff_ms
@@ -688,7 +810,13 @@ pub fn reduce_lifecycle(
         }
         for symbol in entries {
             let target = effective.weights[&symbol] * sizing * config.notional_multiplier;
-            if target.abs() < config.execution.entry_floor_usdt {
+            let engine_blocked = input.entry_blockers.contains_key(&symbol) && !cycle_reset;
+            if engine_blocked {
+                summary.entry_blocked_reason = input.entry_blockers[&symbol].clone();
+                if previous_targets.contains_key(&symbol) {
+                    desired_weights.insert(symbol.clone(), effective.weights[&symbol]);
+                }
+            } else if target.abs() < config.execution.entry_floor_usdt {
                 summary.entry_dust_skips += 1;
             } else if !config.entries_enabled || mismatch || state.refused_entries.contains(&symbol)
             {
@@ -699,11 +827,60 @@ pub fn reduce_lifecycle(
                 } else {
                     "entry_refused".into()
                 };
-            } else if summary.planned_entries >= config.max_new_entries_per_cycle {
-                summary.entry_cap_deferrals += 1;
+                if !mismatch && previous_targets.contains_key(&symbol) {
+                    desired_weights.insert(symbol.clone(), effective.weights[&symbol]);
+                }
             } else {
-                desired_weights.insert(symbol.clone(), effective.weights[&symbol]);
-                summary.planned_entries += 1;
+                let already_working = input.owned_working_symbols.contains(&symbol);
+                let already_selected = state.entry_cycle_selected_symbols.contains(&symbol);
+                if already_working {
+                    desired_weights.insert(symbol.clone(), effective.weights[&symbol]);
+                    continue;
+                }
+
+                let candidate = Target {
+                    symbol: symbol.clone(),
+                    notional_usdt: target,
+                    stop_loss_fraction: config.stop_loss_fraction,
+                    entry_valid_until_ms: Some(entry_valid_until_ms),
+                    target_qty: None,
+                };
+                let can_enter = decision_available
+                    && plan_targets(
+                        &[candidate],
+                        &[],
+                        &input.facts,
+                        input.now_ms,
+                        decision_ts + config.execution.book_validity_ms,
+                        plan_rules,
+                    )
+                    .steps
+                    .iter()
+                    .any(|step| matches!(step, Step::Enter { .. }));
+
+                if already_selected {
+                    desired_weights.insert(symbol.clone(), effective.weights[&symbol]);
+                    if replan_mode == ReplanMode::BootRecovery && can_enter {
+                        entry_effect_symbols.insert(symbol.clone());
+                        summary.planned_entries += 1;
+                    }
+                } else if !can_enter {
+                    // Keep the target retryable, but do not spend a durable
+                    // admission slot until the planner can emit an entry.
+                    desired_weights.insert(symbol.clone(), effective.weights[&symbol]);
+                } else if state.entry_cycle_selected_symbols.len()
+                    >= config.max_new_entries_per_cycle
+                {
+                    summary.entry_cap_deferrals += 1;
+                    if previous_targets.contains_key(&symbol) {
+                        desired_weights.insert(symbol.clone(), effective.weights[&symbol]);
+                    }
+                } else {
+                    desired_weights.insert(symbol.clone(), effective.weights[&symbol]);
+                    state.entry_cycle_selected_symbols.insert(symbol.clone());
+                    entry_effect_symbols.insert(symbol);
+                    summary.planned_entries += 1;
+                }
             }
         }
     }
@@ -740,8 +917,6 @@ pub fn reduce_lifecycle(
                     }
                 }
             }
-            let entry_valid_until_ms = decision_ts + config.execution.signal_validity_ms
-                - config.execution.engine_entry_cutoff_ms;
             targets.push(PlannedTarget {
                 target: Target {
                     symbol: symbol.clone(),
@@ -772,12 +947,7 @@ pub fn reduce_lifecycle(
         &input.facts,
         input.now_ms,
         decision_ts + config.execution.book_validity_ms,
-        PlanRules {
-            entry_floor_usdt: config.execution.entry_floor_usdt,
-            resize_floor_usdt: config.execution.resize_floor_usdt,
-            resize_floor_fraction: config.execution.resize_floor_fraction,
-            entry_cutoff_ms: config.execution.engine_entry_cutoff_ms,
-        },
+        plan_rules,
     );
     summary.planned_resizes = planned
         .steps
@@ -833,18 +1003,33 @@ pub fn reduce_lifecycle(
             }
         }
     }
-    let removed_while_unhealthy = previous_targets
-        .keys()
-        .filter(|symbol| !state.desired_targets.contains_key(*symbol))
-        .cloned()
-        .collect::<BTreeSet<_>>();
     let steps = planned
         .steps
         .into_iter()
         .filter(|step| {
-            let account_allows = input.account_healthy
-                || matches!(step, Step::Exit { symbol, .. } if removed_while_unhealthy.contains(symbol));
-            account_allows
+            let risk_increase_allows = (input.account_healthy && decision_available)
+                || matches!(
+                    step,
+                    Step::Exit { .. }
+                        | Step::Resize {
+                            reduce_only: true,
+                            ..
+                        }
+                        | Step::Restop { .. }
+                );
+            let selected_entry =
+                !matches!(step, Step::Enter { .. }) || entry_effect_symbols.contains(step.symbol());
+            let opening_not_refused = !matches!(
+                step,
+                Step::Enter { .. }
+                    | Step::Resize {
+                        reduce_only: false,
+                        ..
+                    }
+            ) || !state.refused_entries.contains(step.symbol());
+            risk_increase_allows
+                && selected_entry
+                && opening_not_refused
                 && (!input.owned_working_symbols.contains(step.symbol())
                     || matches!(step, Step::Restop { .. }))
         })
@@ -921,7 +1106,7 @@ pub fn carry_event_id(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::position_plan::Held;
+    use crate::position_plan::{Held, Skipped};
 
     const FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1015,6 +1200,462 @@ mod tests {
         .is_err());
     }
 
+    fn entry_symbols(effects: &[Effect]) -> BTreeSet<String> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Order(crate::native_common::OrderEffect {
+                    step: Step::Enter { symbol, .. },
+                    ..
+                }) => Some(symbol.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn entry_facts(symbols: &[&str]) -> PlannerFacts {
+        let rule = engine_types::InstrumentRule {
+            tick_size: 0.01,
+            qty_step: 0.1,
+            min_qty: 0.1,
+            min_notional: 5.0,
+        };
+        PlannerFacts {
+            prices: symbols
+                .iter()
+                .map(|symbol| ((*symbol).to_owned(), 100.0))
+                .collect(),
+            rules: symbols
+                .iter()
+                .map(|symbol| ((*symbol).to_owned(), rule))
+                .collect(),
+            ..PlannerFacts::default()
+        }
+    }
+
+    fn scorer_rows(first_day: i64, last_day: i64) -> Vec<CarryFeatureRow> {
+        let mut rows = Vec::new();
+        for day in first_day..=last_day {
+            for index in 0..50 {
+                rows.push(CarryFeatureRow {
+                    symbol: format!("S{index:03}USDT"),
+                    bar_ts_ms: day * DAY_MS,
+                    by_funding: Some(-0.002),
+                    adv24: Some(1_000.0 - index as f64),
+                    trail_fund_24h: Some(-0.012),
+                    ret_3d: Some(0.1),
+                    vol_30d_daily: Some(0.1),
+                    in_universe: true,
+                    ..CarryFeatureRow::default()
+                });
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn takeover_entry_budget_is_durable_and_replans_only_at_allowed_boundaries() {
+        let decision_ts_ms = 100 * DAY_MS;
+        let now_ms = decision_ts_ms + 1_000;
+        let symbols = ["AUSDT", "BUSDT", "CUSDT"];
+        let decision = CarryDecision {
+            schema_version: 1,
+            decision_ts_ms,
+            weights: symbols
+                .iter()
+                .map(|symbol| ((*symbol).to_owned(), 0.1))
+                .collect(),
+            universe_size: 100,
+            replay_days: 45,
+            gross: 0.3,
+        };
+        let valid_until = decision_ts_ms + config().execution.signal_validity_ms
+            - config().execution.engine_entry_cutoff_ms;
+        let mut state = SleeveState {
+            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+            sizing_anchors: BTreeMap::from([(decision_ts_ms, 1_000.0)]),
+            desired_targets: symbols
+                .iter()
+                .map(|symbol| {
+                    (
+                        (*symbol).to_owned(),
+                        StoredTarget {
+                            notional_usdt: 100.0,
+                            stop_loss_fraction: config().stop_loss_fraction,
+                            leverage: config().entry_leverage,
+                            entry_valid_until_ms: valid_until,
+                        },
+                    )
+                })
+                .collect(),
+            last_publication_decision_ts_ms: decision_ts_ms,
+            current_decision: Some(decision.clone()),
+            ..SleeveState::default()
+        };
+        let input = ReducerInput {
+            now_ms,
+            decision,
+            upcoming_decision: None,
+            settled_funding: Vec::new(),
+            presettlement: Vec::new(),
+            durable_fires: Vec::new(),
+            trail_by_symbol: BTreeMap::from([
+                ("AUSDT".to_owned(), -3.0),
+                ("BUSDT".to_owned(), -2.0),
+                ("CUSDT".to_owned(), -1.0),
+            ]),
+            entry_blockers: BTreeMap::new(),
+            account_healthy: true,
+            equity_usdt: 1_000.0,
+            upcoming_sizing_equity_usdt: None,
+            facts: entry_facts(&symbols),
+            owned_working_symbols: BTreeSet::new(),
+            owned_opening_order_ids: BTreeMap::new(),
+            checkpoint_fingerprint: None,
+            signal_receipt: None,
+        };
+
+        let first = reduce_lifecycle(input.clone(), state.clone(), &config()).expect("takeover");
+        assert_eq!(first.next_state.desired_targets.len(), 3);
+        assert_eq!(first.next_state.entry_cycle_selected_symbols.len(), 2);
+        assert_eq!(entry_symbols(&first.execution.effects).len(), 2);
+        assert_eq!(first.summary.entry_cap_deferrals, 1);
+
+        let same_cycle = reduce_lifecycle(input.clone(), first.next_state.clone(), &config())
+            .expect("ordinary same-cycle wake");
+        assert!(entry_symbols(&same_cycle.execution.effects).is_empty());
+        assert_eq!(same_cycle.next_state.desired_targets.len(), 3);
+
+        let restored: SleeveState =
+            serde_json::from_slice(&checkpoint_payload(&first.next_state)).expect("restore");
+        let boot = reduce_lifecycle_with_mode(
+            input.clone(),
+            restored,
+            &config(),
+            ReplanMode::BootRecovery,
+        )
+        .expect("boot recovery");
+        assert_eq!(
+            entry_symbols(&boot.execution.effects),
+            first.next_state.entry_cycle_selected_symbols
+        );
+
+        let first_selected = first.next_state.entry_cycle_selected_symbols.clone();
+        let mut next_cycle_input = input.clone();
+        next_cycle_input.now_ms += ENTRY_CYCLE_MS;
+        next_cycle_input.owned_working_symbols = first_selected;
+        let deferred = reduce_lifecycle(next_cycle_input, first.next_state.clone(), &config())
+            .expect("deferred next-cycle entry");
+        assert_eq!(
+            entry_symbols(&deferred.execution.effects),
+            BTreeSet::from(["CUSDT".into()])
+        );
+
+        let refused_symbol = first
+            .next_state
+            .entry_cycle_selected_symbols
+            .iter()
+            .next()
+            .expect("selected")
+            .clone();
+        state = first.next_state;
+        state.refused_entries.insert(refused_symbol.clone());
+        let mut refused_input = input.clone();
+        refused_input
+            .entry_blockers
+            .insert(refused_symbol.clone(), "entry_refused".into());
+        let refused_wake = reduce_lifecycle(refused_input.clone(), state, &config())
+            .expect("same-cycle refusal wake");
+        assert!(entry_symbols(&refused_wake.execution.effects).is_empty());
+        assert_eq!(refused_wake.next_state.desired_targets.len(), 3);
+
+        refused_input.now_ms += ENTRY_CYCLE_MS;
+        let retried = reduce_lifecycle(refused_input, refused_wake.next_state, &config())
+            .expect("next-cycle refusal retry");
+        assert!(entry_symbols(&retried.execution.effects).contains(&refused_symbol));
+        assert!(retried.next_state.refused_entries.is_empty());
+    }
+
+    #[test]
+    fn missing_planner_facts_do_not_consume_the_entry_budget() {
+        let decision_ts_ms = 100 * DAY_MS;
+        let now_ms = decision_ts_ms + 1_000;
+        let decision = CarryDecision {
+            schema_version: 1,
+            decision_ts_ms,
+            weights: BTreeMap::from([
+                ("MISSINGPRICEUSDT".into(), 0.1),
+                ("MISSINGRULEUSDT".into(), 0.1),
+                ("VIABLEUSDT".into(), 0.1),
+                ("WAITUSDT".into(), 0.1),
+            ]),
+            universe_size: 100,
+            replay_days: 45,
+            gross: 0.4,
+        };
+        let state = SleeveState {
+            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+            sizing_anchors: BTreeMap::from([(decision_ts_ms, 1_000.0)]),
+            ..SleeveState::default()
+        };
+        let mut cfg = config();
+        cfg.max_new_entries_per_cycle = 1;
+        let input = ReducerInput {
+            now_ms,
+            decision,
+            upcoming_decision: None,
+            settled_funding: Vec::new(),
+            presettlement: Vec::new(),
+            durable_fires: Vec::new(),
+            trail_by_symbol: BTreeMap::from([
+                ("MISSINGPRICEUSDT".into(), -4.0),
+                ("MISSINGRULEUSDT".into(), -3.0),
+                ("VIABLEUSDT".into(), -2.0),
+                ("WAITUSDT".into(), -1.0),
+            ]),
+            entry_blockers: BTreeMap::new(),
+            account_healthy: true,
+            equity_usdt: 1_000.0,
+            upcoming_sizing_equity_usdt: None,
+            facts: {
+                let mut facts = entry_facts(&["VIABLEUSDT", "WAITUSDT"]);
+                facts.prices.insert("MISSINGRULEUSDT".into(), 100.0);
+                facts
+            },
+            owned_working_symbols: BTreeSet::new(),
+            owned_opening_order_ids: BTreeMap::new(),
+            checkpoint_fingerprint: None,
+            signal_receipt: None,
+        };
+
+        let first = reduce_lifecycle(input.clone(), state, &cfg).expect("first cycle");
+        assert_eq!(
+            entry_symbols(&first.execution.effects),
+            BTreeSet::from(["VIABLEUSDT".into()])
+        );
+        assert_eq!(first.summary.planned_entries, 1);
+        assert_eq!(first.summary.entry_cap_deferrals, 1);
+        assert_eq!(
+            first.next_state.entry_cycle_selected_symbols,
+            BTreeSet::from(["VIABLEUSDT".into()])
+        );
+        assert!(first.execution.skipped.iter().any(
+            |skip| matches!(skip, Skipped::NoPrice { symbol } if symbol == "MISSINGPRICEUSDT")
+        ));
+        assert!(first
+            .execution
+            .skipped
+            .iter()
+            .any(|skip| matches!(skip, Skipped::NoInstrumentRule { symbol } if symbol == "MISSINGRULEUSDT")));
+
+        let mut recovered_input = input;
+        recovered_input.now_ms += ENTRY_CYCLE_MS;
+        recovered_input.owned_working_symbols = BTreeSet::from(["VIABLEUSDT".into()]);
+        recovered_input.facts = entry_facts(&[
+            "MISSINGPRICEUSDT",
+            "MISSINGRULEUSDT",
+            "VIABLEUSDT",
+            "WAITUSDT",
+        ]);
+        let recovered = reduce_lifecycle(recovered_input, first.next_state, &cfg)
+            .expect("next cycle with recovered facts");
+        assert_eq!(
+            entry_symbols(&recovered.execution.effects),
+            BTreeSet::from(["MISSINGPRICEUSDT".into()])
+        );
+    }
+
+    #[test]
+    fn recovered_planner_facts_retry_a_stale_blocker_at_the_next_cycle() {
+        let decision_ts_ms = 100 * DAY_MS;
+        let now_ms = decision_ts_ms + 2 * ENTRY_CYCLE_MS;
+        let decision = CarryDecision {
+            schema_version: 1,
+            decision_ts_ms,
+            weights: BTreeMap::from([("AUSDT".into(), 0.1)]),
+            universe_size: 100,
+            replay_days: 45,
+            gross: 0.1,
+        };
+        let state = SleeveState {
+            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+            sizing_anchors: BTreeMap::from([(decision_ts_ms, 1_000.0)]),
+            desired_targets: BTreeMap::from([(
+                "AUSDT".into(),
+                StoredTarget {
+                    notional_usdt: 100.0,
+                    stop_loss_fraction: config().stop_loss_fraction,
+                    leverage: config().entry_leverage,
+                    entry_valid_until_ms: decision_ts_ms + config().execution.signal_validity_ms
+                        - config().execution.engine_entry_cutoff_ms,
+                },
+            )]),
+            last_publication_decision_ts_ms: decision_ts_ms,
+            current_decision: Some(decision.clone()),
+            entry_cycle_started_ms: now_ms - ENTRY_CYCLE_MS,
+            entry_cycle_selected_symbols: BTreeSet::from(["AUSDT".into()]),
+            ..SleeveState::default()
+        };
+        let output = reduce_lifecycle(
+            ReducerInput {
+                now_ms,
+                decision,
+                upcoming_decision: None,
+                settled_funding: Vec::new(),
+                presettlement: Vec::new(),
+                durable_fires: Vec::new(),
+                trail_by_symbol: BTreeMap::from([("AUSDT".into(), -1.0)]),
+                entry_blockers: BTreeMap::from([("AUSDT".into(), "no_price".into())]),
+                account_healthy: true,
+                equity_usdt: 1_000.0,
+                upcoming_sizing_equity_usdt: None,
+                facts: entry_facts(&["AUSDT"]),
+                owned_working_symbols: BTreeSet::new(),
+                owned_opening_order_ids: BTreeMap::new(),
+                checkpoint_fingerprint: None,
+                signal_receipt: None,
+            },
+            state,
+            &config(),
+        )
+        .expect("recovered next-cycle facts");
+
+        assert_eq!(
+            entry_symbols(&output.execution.effects),
+            ["AUSDT".into()].into()
+        );
+        assert_eq!(
+            output.next_state.entry_cycle_selected_symbols,
+            ["AUSDT".into()].into()
+        );
+    }
+
+    #[test]
+    fn scorer_catchup_advances_only_scorer_then_current_batch_plans_once() {
+        let mut state = SleeveState {
+            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+            desired_targets: BTreeMap::from([(
+                "KEEPUSDT".into(),
+                StoredTarget {
+                    notional_usdt: 20.0,
+                    stop_loss_fraction: 0.35,
+                    leverage: 2.0,
+                    entry_valid_until_ms: 60 * DAY_MS,
+                },
+            )]),
+            refused_entries: BTreeSet::from(["KEEPUSDT".into()]),
+            entry_cycle_started_ms: 45 * DAY_MS,
+            entry_cycle_selected_symbols: BTreeSet::from(["KEEPUSDT".into()]),
+            ..SleeveState::default()
+        };
+        for (sequence, day) in [46_i64, 47, 48].into_iter().enumerate() {
+            let prior = state.clone();
+            let rows = if day == 46 {
+                scorer_rows(1, day)
+            } else {
+                scorer_rows(day, day)
+            };
+            let output = reduce_scorer_catchup(
+                ScorerCatchupInput {
+                    decision_ts_ms: day * DAY_MS,
+                    rows,
+                    signal_receipt: (
+                        "worker".into(),
+                        sequence as u64 + 1,
+                        format!("catchup-{day}"),
+                    ),
+                },
+                state,
+                &config(),
+            )
+            .expect("contiguous catch-up");
+            assert!(matches!(
+                output.execution.effects.as_slice(),
+                [
+                    Effect::PersistCheckpoint { .. },
+                    Effect::ConsumeSignal { .. }
+                ]
+            ));
+            assert!(output.execution.skipped.is_empty());
+            assert_eq!(output.next_state.scorer.last_decision_ts_ms, day * DAY_MS);
+            let mut expected = prior;
+            expected.scorer = output.next_state.scorer.clone();
+            assert_eq!(output.next_state, expected);
+            state = output.next_state;
+        }
+
+        assert!(reduce_scorer_catchup(
+            ScorerCatchupInput {
+                decision_ts_ms: 50 * DAY_MS,
+                rows: scorer_rows(50, 50),
+                signal_receipt: ("worker".into(), 4, "gap".into()),
+            },
+            state.clone(),
+            &config(),
+        )
+        .expect_err("a missing catch-up day must fail")
+        .contains("next UTC generation"));
+
+        let current_day = 49;
+        let placeholder = CarryDecision {
+            schema_version: 1,
+            decision_ts_ms: current_day * DAY_MS,
+            weights: BTreeMap::new(),
+            universe_size: 1,
+            replay_days: 0,
+            gross: 0.0,
+        };
+        let input = ReducerInput {
+            now_ms: current_day * DAY_MS + 1,
+            decision: placeholder,
+            upcoming_decision: None,
+            settled_funding: Vec::new(),
+            presettlement: Vec::new(),
+            durable_fires: Vec::new(),
+            trail_by_symbol: BTreeMap::new(),
+            entry_blockers: BTreeMap::new(),
+            account_healthy: false,
+            equity_usdt: 0.0,
+            upcoming_sizing_equity_usdt: None,
+            facts: PlannerFacts::default(),
+            owned_working_symbols: BTreeSet::new(),
+            owned_opening_order_ids: BTreeMap::new(),
+            checkpoint_fingerprint: None,
+            signal_receipt: Some(("worker".into(), 4, "current".into())),
+        };
+        let batch = CarrySignalBatch {
+            schema_version: 1,
+            decision_ts_ms: current_day * DAY_MS,
+            rows: scorer_rows(current_day, current_day),
+            upcoming_rows: Vec::new(),
+            settled_funding: Vec::new(),
+            presettlement: Vec::new(),
+            marks: Vec::new(),
+            rejections: Vec::new(),
+        };
+        let output = reduce_signal(batch.clone(), input.clone(), state, &config())
+            .expect("ordinary current planning batch");
+        assert_eq!(
+            output
+                .next_state
+                .current_decision
+                .as_ref()
+                .expect("current decision")
+                .decision_ts_ms,
+            current_day * DAY_MS
+        );
+        assert_eq!(
+            output.next_state.last_publication_decision_ts_ms,
+            current_day * DAY_MS
+        );
+        let mut duplicate_input = input;
+        duplicate_input.signal_receipt = Some(("worker".into(), 5, "current-duplicate".into()));
+        let duplicate = reduce_signal(batch, duplicate_input, output.next_state.clone(), &config())
+            .expect("same current generation is idempotent");
+        assert_eq!(duplicate.next_state, output.next_state);
+        assert!(duplicate.execution.skipped.is_empty());
+    }
+
     #[test]
     fn fixture_lifecycle_emits_event_then_checkpoint_then_orders() {
         let fixture: serde_json::Value = serde_json::from_str(FIXTURE).expect("fixture");
@@ -1044,6 +1685,22 @@ mod tests {
                 .prices
                 .insert(symbol, row["mark_px"].as_f64().expect("mark"));
         }
+        for (symbol, price) in fixture["rust_replay"]["prices"]
+            .as_object()
+            .expect("prices")
+        {
+            facts
+                .prices
+                .insert(symbol.clone(), price.as_f64().expect("price"));
+        }
+        let rule: engine_types::InstrumentRule =
+            serde_json::from_value(fixture["rust_replay"]["instrument_rule"].clone())
+                .expect("instrument rule");
+        facts.rules = decision
+            .weights
+            .keys()
+            .map(|symbol| (symbol.clone(), rule))
+            .collect();
         let presettlement: Vec<PresettlementObservation> = fixture["decision_input"]
             ["presettlement"]
             .as_array()
@@ -1129,6 +1786,61 @@ mod tests {
             Some(&1_300.0)
         );
 
+        let target_symbols = output
+            .next_state
+            .desired_targets
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            output.next_state.entry_cycle_selected_symbols.len(),
+            config().max_new_entries_per_cycle
+        );
+        let regressed_cycle_start = input.now_ms + ENTRY_CYCLE_MS;
+        let mut checkpoint_state = output.next_state.clone();
+        checkpoint_state.entry_cycle_started_ms = regressed_cycle_start;
+        let restored: SleeveState = serde_json::from_slice(&checkpoint_payload(&checkpoint_state))
+            .expect("restart checkpoint");
+        let mut repeated_input = input.clone();
+        repeated_input.trail_by_symbol.clear();
+        repeated_input.signal_receipt = None;
+        let repeated =
+            reduce_lifecycle(repeated_input, restored, &config()).expect("same generation wake");
+        assert_eq!(
+            repeated.next_state.entry_cycle_started_ms, regressed_cycle_start,
+            "a backward wall clock preserves the durable admission window"
+        );
+        assert_eq!(
+            repeated.next_state.entry_cycle_selected_symbols.len(),
+            config().max_new_entries_per_cycle
+        );
+        assert_eq!(
+            repeated
+                .next_state
+                .desired_targets
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            target_symbols
+        );
+
+        let mut catch_up_state = output.next_state.clone();
+        catch_up_state.last_publication_decision_ts_ms = input.decision.decision_ts_ms - DAY_MS;
+        catch_up_state.entry_cycle_started_ms = input.now_ms;
+        catch_up_state.entry_cycle_selected_symbols =
+            BTreeSet::from(["BETAUSDT".to_owned(), "GAMMAUSDT".to_owned()]);
+        let catch_up_selected = catch_up_state.entry_cycle_selected_symbols.clone();
+        let mut catch_up_input = input.clone();
+        catch_up_input.now_ms += 1;
+        catch_up_input.signal_receipt = None;
+        let catch_up = reduce_lifecycle(catch_up_input, catch_up_state, &config())
+            .expect("next source generation inside the same admission window");
+        assert_eq!(catch_up.next_state.entry_cycle_started_ms, input.now_ms);
+        assert_eq!(
+            catch_up.next_state.entry_cycle_selected_symbols, catch_up_selected,
+            "source generation changes do not reset the durable time budget"
+        );
+
         // Crash boundary: only the first event append reached the WAL. The
         // signal is delivered again with that durable event but the old
         // checkpoint. Recovery persists fired state without publishing a
@@ -1205,5 +1917,231 @@ mod tests {
                 ..
             })
         )));
+    }
+
+    #[test]
+    fn future_durable_decision_blocks_only_entries_and_growth() {
+        let now_ms = 20 * DAY_MS;
+        let decision_ts_ms = now_ms + ENTRY_CYCLE_MS;
+        let symbols = ["FLATUSDT", "GROWUSDT", "REDUCEUSDT", "RESTOPUSDT"];
+        let decision = CarryDecision {
+            schema_version: 1,
+            decision_ts_ms,
+            weights: symbols
+                .iter()
+                .map(|symbol| ((*symbol).to_owned(), 0.1))
+                .collect(),
+            universe_size: 100,
+            replay_days: 90,
+            gross: 0.4,
+        };
+        let cfg = config();
+        let entry_valid_until_ms = decision_ts_ms + cfg.execution.signal_validity_ms
+            - cfg.execution.engine_entry_cutoff_ms;
+        let state = SleeveState {
+            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+            sizing_anchors: BTreeMap::from([(decision_ts_ms, 1_000.0)]),
+            desired_targets: symbols
+                .iter()
+                .map(|symbol| {
+                    (
+                        (*symbol).to_owned(),
+                        StoredTarget {
+                            notional_usdt: 100.0,
+                            stop_loss_fraction: cfg.stop_loss_fraction,
+                            leverage: cfg.entry_leverage,
+                            entry_valid_until_ms,
+                        },
+                    )
+                })
+                .collect(),
+            entry_cycle_started_ms: decision_ts_ms,
+            entry_cycle_selected_symbols: BTreeSet::from(["FLATUSDT".to_owned()]),
+            last_publication_decision_ts_ms: decision_ts_ms,
+            current_decision: Some(decision.clone()),
+            ..SleeveState::default()
+        };
+        let mut facts = entry_facts(&[
+            "FLATUSDT",
+            "GROWUSDT",
+            "REDUCEUSDT",
+            "RESTOPUSDT",
+            "OLDUSDT",
+        ]);
+        for (symbol, qty, stop_px) in [
+            ("GROWUSDT", 0.5, 65.0),
+            ("REDUCEUSDT", 1.5, 65.0),
+            ("RESTOPUSDT", 1.0, 50.0),
+            ("OLDUSDT", 1.0, 65.0),
+        ] {
+            facts.held.insert(
+                symbol.into(),
+                Held {
+                    side: Side::Buy,
+                    qty,
+                    px: 100.0,
+                    entry_px: 100.0,
+                    stop_px,
+                },
+            );
+        }
+        let input = ReducerInput {
+            now_ms,
+            decision,
+            upcoming_decision: None,
+            settled_funding: Vec::new(),
+            presettlement: Vec::new(),
+            durable_fires: Vec::new(),
+            trail_by_symbol: BTreeMap::new(),
+            entry_blockers: BTreeMap::new(),
+            account_healthy: true,
+            equity_usdt: 1_000.0,
+            upcoming_sizing_equity_usdt: None,
+            facts,
+            owned_working_symbols: BTreeSet::new(),
+            owned_opening_order_ids: BTreeMap::new(),
+            checkpoint_fingerprint: None,
+            signal_receipt: None,
+        };
+
+        let output =
+            reduce_lifecycle_with_mode(input.clone(), state, &cfg, ReplanMode::BootRecovery)
+                .expect("backward-clock boot");
+        let steps = output
+            .execution
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Order(order) => Some(&order.step),
+                _ => None,
+            });
+        let steps = steps.collect::<Vec<_>>();
+        assert!(!steps.iter().any(|step| matches!(
+            step,
+            Step::Enter { .. }
+                | Step::Resize {
+                    reduce_only: false,
+                    ..
+                }
+        )));
+        assert!(steps.iter().any(|step| matches!(
+            step,
+            Step::Resize {
+                symbol,
+                reduce_only: true,
+                ..
+            } if symbol == "REDUCEUSDT"
+        )));
+        assert!(steps
+            .iter()
+            .any(|step| matches!(step, Step::Restop { symbol, .. } if symbol == "RESTOPUSDT")));
+        assert!(steps
+            .iter()
+            .any(|step| matches!(step, Step::Exit { symbol, .. } if symbol == "OLDUSDT")));
+        assert!(!output
+            .next_state
+            .entry_cycle_selected_symbols
+            .contains("FLATUSDT"));
+
+        let mut resumed_input = input;
+        resumed_input.now_ms = decision_ts_ms;
+        let resumed = reduce_lifecycle(resumed_input, output.next_state, &cfg)
+            .expect("decision-time recovery");
+        assert!(entry_symbols(&resumed.execution.effects).contains("FLATUSDT"));
+    }
+
+    #[test]
+    fn unhealthy_account_keeps_orphan_exits_live_across_wakes_and_boot() {
+        let decision_ts_ms = 20 * DAY_MS;
+        let now_ms = decision_ts_ms + 1_000;
+        let decision = CarryDecision {
+            schema_version: 1,
+            decision_ts_ms,
+            weights: BTreeMap::from([("AUSDT".into(), 0.1)]),
+            universe_size: 100,
+            replay_days: 90,
+            gross: 0.1,
+        };
+        let state = SleeveState {
+            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+            sizing_anchors: BTreeMap::from([(decision_ts_ms, 1_000.0)]),
+            desired_targets: BTreeMap::from([(
+                "AUSDT".into(),
+                StoredTarget {
+                    notional_usdt: 100.0,
+                    stop_loss_fraction: config().stop_loss_fraction,
+                    leverage: config().entry_leverage,
+                    entry_valid_until_ms: decision_ts_ms + config().execution.signal_validity_ms
+                        - config().execution.engine_entry_cutoff_ms,
+                },
+            )]),
+            last_publication_decision_ts_ms: decision_ts_ms,
+            current_decision: Some(decision.clone()),
+            entry_cycle_started_ms: now_ms,
+            ..SleeveState::default()
+        };
+        let mut facts = entry_facts(&["AUSDT", "OLDUSDT"]);
+        facts.held.insert(
+            "OLDUSDT".into(),
+            Held {
+                side: Side::Buy,
+                qty: 1.0,
+                px: 10.0,
+                entry_px: 10.0,
+                stop_px: 6.5,
+            },
+        );
+        let input = ReducerInput {
+            now_ms,
+            decision,
+            upcoming_decision: None,
+            settled_funding: Vec::new(),
+            presettlement: Vec::new(),
+            durable_fires: Vec::new(),
+            trail_by_symbol: BTreeMap::from([("AUSDT".into(), -1.0)]),
+            entry_blockers: BTreeMap::new(),
+            account_healthy: false,
+            equity_usdt: 1_000.0,
+            upcoming_sizing_equity_usdt: None,
+            facts,
+            owned_working_symbols: BTreeSet::new(),
+            owned_opening_order_ids: BTreeMap::new(),
+            checkpoint_fingerprint: None,
+            signal_receipt: None,
+        };
+        let assert_only_orphan_exit = |output: &ReducerOutput| {
+            assert!(output.execution.effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Order(crate::native_common::OrderEffect {
+                    step: Step::Exit { symbol, .. },
+                    ..
+                }) if symbol == "OLDUSDT"
+            )));
+            assert!(!output.execution.effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Order(crate::native_common::OrderEffect {
+                    step: Step::Enter { .. }
+                        | Step::Resize {
+                            reduce_only: false,
+                            ..
+                        },
+                    ..
+                })
+            )));
+        };
+
+        let first = reduce_lifecycle(input.clone(), state, &config()).expect("first orphan exit");
+        assert_only_orphan_exit(&first);
+        let repeated = reduce_lifecycle(input.clone(), first.next_state.clone(), &config())
+            .expect("repeated orphan exit");
+        assert_only_orphan_exit(&repeated);
+        let boot = reduce_lifecycle_with_mode(
+            input,
+            repeated.next_state,
+            &config(),
+            ReplanMode::BootRecovery,
+        )
+        .expect("boot orphan exit");
+        assert_only_orphan_exit(&boot);
     }
 }

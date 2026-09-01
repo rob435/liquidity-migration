@@ -25,9 +25,27 @@ Each realm has one credential-free Rust `signal-worker`. It acquires Bybit and
 Binance public inputs, persists its normalized history and multi-output
 transaction, and publishes immutable sequence-numbered observations. Its
 checkpoint persists the random source generation used by the LONG and CARRY
-namespaces. A replacement checkpoint gets a distinct source and starts its
-sequence at one. The engine puts each observation in its WAL before waking a
-strategy.
+namespaces. Restart and ordinary checkpoint compaction keep that generation and
+its sequences. Only a genuinely new state root creates a new source at sequence
+one. The engine puts each observation in its WAL before waking a strategy.
+
+The worker keeps one persistent Bybit WebSocket actor and separate bounded REST
+lanes for instruments, funding, ticker fallback, candle repair, and optional
+whale data. A disconnect opens a new source epoch, clears transient ticker
+state, and reconnects forever with capped backoff. Exact subscription replies
+separate topic faults from transient and request-wide faults. Quarantined topics
+retry on the same healthy socket every minute; accepted topics stay live while
+REST fills missing ticker fields and candle intervals. Only accepted market data
+resets the retry and idle clocks. Each ticker field keeps its own receipt clock.
+Cold history is acquired in bounded chunks while heartbeat and shutdown remain
+responsive. Accepted lookbacks and response grids place a hard row ceiling on
+each fetch. Kline, funding, and whale lanes retain one job at a time and wait
+for its durable commit result before fetching the next. Venue network,
+normalization, range, and history-rewrite faults pause and retry only that lane
+before mutation. Sequence, state, spool, serialization, and disk faults stop
+the process. A bounded input journal absorbs frequent source deltas and
+compacts to an atomic checkpoint. Current outputs coalesce while the engine is
+behind; ordered lifecycle and scorer catch-up rows keep separate spool quotas.
 
 The engine runs three native directional reducers in fixed WAL order:
 
@@ -35,9 +53,9 @@ The engine runs three native directional reducers in fixed WAL order:
 2. `long_native` (`long`)
 3. `exodus_native` (`exodus`)
 
-Mainnet keeps `quoter` (`maker_canary`) in slot 4 with quoting disabled. The
-slot stays present because fill attribution and strategy identity are indexed
-by order.
+Mainnet keeps `quoter` (`maker_canary`) in the fourth durable slot (strategy ID
+3) with quoting disabled. The slot stays present because fill attribution and
+strategy identity are indexed by order.
 
 CARRY publishes its pre-settlement handoff as an internal durable event.
 Exodus consumes that event in the same engine and owns its checkpoint. The
@@ -70,12 +88,25 @@ these repository ceilings.
 The engine applies account-wide gross, margin, leverage, instrument, quote-age,
 account-view-age, and stop-loss limits. Growth can be refused; genuine
 reductions continue. Each opening order carries a venue-native stop contract.
+The engine tracks every required top-of-book topic separately. Forty-five
+seconds without that symbol's promised L1 snapshot triggers a same-socket
+re-subscription while healthy symbols continue.
 
 LONG owns signal admission, sizing, stop decay, cooldown, and time exit. It has
 no take-profit. CARRY owns daily sizing anchors, settled and pre-settlement
 exits, next-day drop exits, admission, and the $6 entry plus $1/5% resize
 boundaries. Exodus covers on its registered settlement clock and retains a
 durable retry until its attributed exposure and owned opening work are flat.
+LONG and CARRY keep their one-minute entry-admission budget in their checkpoint;
+extra market, retry, control, or boot wakes cannot reset it. Exodus keeps a
+temporarily blocked handoff pending through account-health recovery. A CARRY
+candidate consumes an admission slot only when the shared planner can emit its
+opening order; missing planner facts remain retryable. An explicitly invalidated
+private account view and a future durable opening timestamp block growth but do
+not block reductions. The maker cancels recovered opening quotes and drains its
+attributed inventory when quoting is globally disabled or that symbol is
+retired. A configured enabled symbol is not flattened. Refused drains retry on
+a bounded timer.
 
 ### Runtime controls
 
@@ -103,10 +134,16 @@ generation receives canonical empty checkpoints.
 
 ### Observability
 
-Liveness checks bind each engine and worker to the installed release, realm,
-input hashes, engine-config hash, universe hashes, sequence progress, and
-freshness clocks. The worker heartbeat also exposes its persisted source
-generation directly.
+Liveness binds each engine and worker to the installed release and exact inputs,
+then reports producer, LONG, CARRY, spool, transport, and memory faults
+independently. LONG and CARRY must each complete within three configured
+cadences; their current feature and action horizons remain separate from the
+CARRY scorer catch-up cursor. Memory warns at 75% of a finite systemd limit and
+becomes critical at 90%. Any blocked spool class, malformed class quota, or
+class usage at its file cap or byte soft limit is independently critical even
+when aggregate spool usage is below its cap. The checker binds the exact Rust
+heartbeat schema, process ID, installed feature-contract hashes, and global-to-
+class spool totals.
 
 Trade notifications derive entries from fresh engine-attributed venue
 positions and exits from the engine trade log. Target files are takeover

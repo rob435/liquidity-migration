@@ -2,7 +2,7 @@
 //! verb it reaches for. The arithmetic is tested in `plan.rs`; these check the
 //! wiring — that a maker can place, move and pull through the engine.
 
-use engine_types::{Action, Feed, InstrumentRule, OrderKind, Side};
+use engine_types::{Action, EngineEvent, Feed, InstrumentRule, OrderKind, OrderUpdate, Side};
 
 use super::plug::Quoter;
 use crate::mock_ctx::{Harness, RestingSeed};
@@ -563,6 +563,93 @@ fn a_feed_reset_pulls_every_resting_quote() {
 }
 
 #[test]
+fn boot_pulls_every_recovered_maker_order_before_market_news() {
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    let symbol = h.ctx.id_of("BTCUSDT");
+    for (id, side, px) in [("eng-bid", Side::Buy, 99.9), ("eng-ask", Side::Sell, 100.1)] {
+        h.ctx.resting.push(RestingSeed {
+            client_order_id: id.into(),
+            symbol,
+            side,
+            kind: OrderKind::Limit {
+                px,
+                tif: engine_types::TimeInForce::PostOnly,
+            },
+            qty: 0.1,
+            filled_qty: 0.0,
+            reduce_only: false,
+            acked: true,
+        });
+    }
+
+    h.boot();
+
+    let actions = h.drain_actions();
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| matches!(action, Action::Cancel { .. }))
+            .count(),
+        2
+    );
+    assert!(
+        actions
+            .iter()
+            .all(|action| !matches!(action, Action::Place(_))),
+        "boot waits for fresh market data before quoting"
+    );
+}
+
+#[test]
+fn enabled_boot_preserves_a_recovered_reduce_only_drain() {
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    let symbol = h.ctx.id_of("BTCUSDT");
+    h.ctx.set_my_position("BTCUSDT", 0.05);
+    h.ctx.resting.push(RestingSeed {
+        client_order_id: "recovered-drain".into(),
+        symbol,
+        side: Side::Sell,
+        kind: OrderKind::Market,
+        qty: 0.05,
+        filled_qty: 0.0,
+        reduce_only: true,
+        acked: false,
+    });
+
+    h.boot();
+
+    assert!(
+        h.drain_actions().is_empty(),
+        "boot keeps the durable drain and waits for fresh market data"
+    );
+}
+
+#[test]
+fn boot_discards_fast_fill_inventory_that_the_durable_ledger_does_not_own() {
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    h.fast_fill(
+        "fast-before-restart",
+        "eng-bid",
+        "BTCUSDT",
+        Side::Buy,
+        0.3,
+        100.0,
+    );
+    let _ = h.drain_actions();
+
+    h.boot();
+    assert!(h.drain_actions().is_empty());
+    h.quote("BTCUSDT", 99.0, 101.0);
+
+    let intents = placed(&mut h);
+    assert_eq!(
+        intents.len(),
+        2,
+        "restart inventory comes from durable attribution, not the fast-fill bridge"
+    );
+}
+
+#[test]
 fn a_full_side_is_not_asked_to_cancel_on_every_price_either() {
     // The same hole on the path that predates the foreign-name branch: at the
     // inventory ceiling the planner pulls the side on every single requote.
@@ -813,6 +900,18 @@ fn placed_orders(actions: Vec<Action>) -> Vec<(Side, f64, f64)> {
         .collect()
 }
 
+fn fire_next_timer(h: &mut Harness) {
+    let timer = h.ctx.timers.pop().expect("the retry timer is armed");
+    h.ctx.set_now(timer.due_ns);
+    h.strategy.on_event(
+        &EngineEvent::Timer {
+            id: timer.id,
+            now_ns: timer.due_ns,
+        },
+        &mut h.ctx,
+    );
+}
+
 fn side_px(orders: &[(Side, f64, f64)], side: Side) -> f64 {
     orders
         .iter()
@@ -840,6 +939,247 @@ fn the_live_quoter_asks_for_the_touch_the_deep_book_and_aggressor_trades() {
 }
 
 #[test]
+fn enabled_boot_drains_retired_inventory_but_not_an_active_symbol() {
+    let mut h = micro_bench("");
+    h.ctx.set_my_position("BTCUSDT", 0.02);
+    h.ctx.set_my_position("OLDUSDT", -0.04);
+    let retired = h.ctx.id_of("OLDUSDT");
+
+    h.boot();
+
+    let exits = placed(&mut h);
+    assert_eq!(exits.len(), 1);
+    assert_eq!(exits[0].symbol, retired);
+    assert_eq!(exits[0].side, Side::Buy);
+    assert_eq!(exits[0].qty, 0.04);
+    assert!(exits[0].reduce_only);
+    assert!(matches!(exits[0].kind, OrderKind::Market));
+}
+
+#[test]
+fn enabled_feed_reset_drains_retired_inventory_but_not_an_active_symbol() {
+    let mut h = micro_bench("");
+    h.ctx.set_my_position("BTCUSDT", 0.02);
+    h.ctx.set_my_position("OLDUSDT", -0.04);
+    let retired = h.ctx.id_of("OLDUSDT");
+
+    h.feed_reset();
+
+    let exits = placed(&mut h);
+    assert_eq!(exits.len(), 1);
+    assert_eq!(exits[0].symbol, retired);
+    assert_eq!(exits[0].side, Side::Buy);
+    assert_eq!(exits[0].qty, 0.04);
+    assert!(exits[0].reduce_only);
+    assert!(matches!(exits[0].kind, OrderKind::Market));
+}
+
+#[test]
+fn enabled_boot_and_feed_reset_keep_a_recovered_retired_drain() {
+    let mut h = micro_bench("");
+    h.ctx.set_my_position("OLDUSDT", -0.04);
+    let retired = h.ctx.id_of("OLDUSDT");
+    h.ctx.resting.push(RestingSeed {
+        client_order_id: "recovered-retired-drain".into(),
+        symbol: retired,
+        side: Side::Buy,
+        kind: OrderKind::Market,
+        qty: 0.04,
+        filled_qty: 0.0,
+        reduce_only: true,
+        acked: false,
+    });
+
+    h.boot();
+
+    assert!(
+        h.drain_actions().is_empty(),
+        "the durable retired-symbol drain remains the only pending exit"
+    );
+
+    h.feed_reset();
+    assert!(
+        h.drain_actions().is_empty(),
+        "a feed reset does not duplicate the durable retired-symbol drain"
+    );
+}
+
+#[test]
+fn enabled_retired_inventory_retries_a_refused_drain_until_flat() {
+    let mut h = micro_bench("");
+    h.ctx.set_my_position("OLDUSDT", -0.04);
+    let retired = h.ctx.id_of("OLDUSDT");
+    h.boot();
+    let initial = placed(&mut h);
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0].symbol, retired);
+
+    h.strategy.on_event(
+        &EngineEvent::IntentRefused {
+            symbol: retired,
+            reduce_only: true,
+            reason: "test refusal".into(),
+        },
+        &mut h.ctx,
+    );
+
+    assert!(
+        h.drain_actions().is_empty(),
+        "the refusal cannot feed another exit into the same engine wake"
+    );
+    assert_eq!(h.ctx.arm_calls.len(), 1);
+    assert_eq!(
+        h.ctx.arm_calls[0].due_ns - h.ctx.arm_calls[0].armed_ns,
+        1_000_000_000
+    );
+    h.strategy.on_event(
+        &EngineEvent::IntentRefused {
+            symbol: retired,
+            reduce_only: true,
+            reason: "duplicate refusal before the retry is due".into(),
+        },
+        &mut h.ctx,
+    );
+    assert!(h.drain_actions().is_empty());
+    assert_eq!(
+        h.ctx.arm_calls.len(),
+        1,
+        "repeated terminal news coalesces behind the pending timer"
+    );
+
+    fire_next_timer(&mut h);
+    let retry = placed(&mut h);
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].symbol, retired);
+    assert_eq!(retry[0].side, Side::Buy);
+    assert_eq!(retry[0].qty, 0.04);
+    assert!(retry[0].reduce_only);
+
+    h.ctx.set_my_position("OLDUSDT", 0.0);
+    h.strategy.on_event(
+        &EngineEvent::IntentRefused {
+            symbol: retired,
+            reduce_only: true,
+            reason: "late refusal after the ledger is flat".into(),
+        },
+        &mut h.ctx,
+    );
+    assert!(h.drain_actions().is_empty());
+    fire_next_timer(&mut h);
+    assert!(
+        h.drain_actions().is_empty(),
+        "a retired symbol leaves management once its attributed inventory is flat"
+    );
+}
+
+fn active_reduce_only_order(h: &mut Harness, client_order_id: &str) -> engine_types::SymbolId {
+    let symbol = h.ctx.id_of("BTCUSDT");
+    h.ctx.resting.push(RestingSeed {
+        client_order_id: client_order_id.into(),
+        symbol,
+        side: Side::Sell,
+        kind: OrderKind::Limit {
+            px: 100.05,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
+        qty: 0.1,
+        filled_qty: 0.0,
+        reduce_only: true,
+        acked: true,
+    });
+    symbol
+}
+
+fn assert_active_reduction_requoted(h: &mut Harness) {
+    let retry = placed(h);
+    assert!(
+        retry
+            .iter()
+            .any(|intent| intent.side == Side::Sell && intent.reduce_only),
+        "the quiet-feed retry must restore the inventory-reducing quote: {retry:?}"
+    );
+}
+
+#[test]
+fn an_enabled_reduce_only_refusal_retries_on_timer_without_market_news() {
+    let mut h = micro_bench("");
+    h.ctx.set_my_position("BTCUSDT", 0.05);
+    h.depth("BTCUSDT", &[(99.9, 1.0)], &[(100.1, 1.0)]);
+    let initial = placed(&mut h);
+    assert!(initial
+        .iter()
+        .any(|intent| intent.side == Side::Sell && intent.reduce_only));
+    let symbol = h.ctx.id_of("BTCUSDT");
+
+    h.strategy.on_event(
+        &EngineEvent::IntentRefused {
+            symbol,
+            reduce_only: true,
+            reason: "test refusal".into(),
+        },
+        &mut h.ctx,
+    );
+
+    assert!(
+        h.drain_actions().is_empty(),
+        "the refusal wake must not immediately repeat the quote"
+    );
+    fire_next_timer(&mut h);
+    assert_active_reduction_requoted(&mut h);
+}
+
+#[test]
+fn an_enabled_reduce_only_reject_retries_on_timer_without_market_news() {
+    let mut h = micro_bench("");
+    h.ctx.set_my_position("BTCUSDT", 0.05);
+    h.depth("BTCUSDT", &[(99.9, 1.0)], &[(100.1, 1.0)]);
+    let _ = h.drain_actions();
+    active_reduce_only_order(&mut h, "rejected-reduction");
+
+    h.strategy.on_event(
+        &EngineEvent::Order(OrderUpdate::Reject {
+            client_order_id: "rejected-reduction".into(),
+            code: 110001,
+            reason: "test rejection".into(),
+        }),
+        &mut h.ctx,
+    );
+
+    assert!(
+        h.drain_actions().is_empty(),
+        "the rejection wake must not immediately repeat the quote"
+    );
+    h.ctx.resting.clear();
+    fire_next_timer(&mut h);
+    assert_active_reduction_requoted(&mut h);
+}
+
+#[test]
+fn an_enabled_reduce_only_cancel_retries_on_timer_without_market_news() {
+    let mut h = micro_bench("");
+    h.ctx.set_my_position("BTCUSDT", 0.05);
+    h.depth("BTCUSDT", &[(99.9, 1.0)], &[(100.1, 1.0)]);
+    let _ = h.drain_actions();
+    active_reduce_only_order(&mut h, "cancelled-reduction");
+
+    h.strategy.on_event(
+        &EngineEvent::Order(OrderUpdate::Cancelled {
+            client_order_id: "cancelled-reduction".into(),
+            recv_ns: 1_000,
+        }),
+        &mut h.ctx,
+    );
+
+    assert!(
+        h.drain_actions().is_empty(),
+        "the cancellation wake must not immediately repeat the quote"
+    );
+    h.ctx.resting.clear();
+    fire_next_timer(&mut h);
+    assert_active_reduction_requoted(&mut h);
+}
+
+#[test]
 fn a_disabled_quoter_drains_once_instead_of_leaving_inventory_behind() {
     let mut h = micro_bench("quote_enabled = false");
     h.ctx.set_my_position("BTCUSDT", 0.05);
@@ -863,6 +1203,140 @@ fn a_disabled_quoter_drains_once_instead_of_leaving_inventory_behind() {
     assert_eq!(exits[0].qty, 0.05);
     assert!(matches!(exits[0].kind, OrderKind::Market));
     assert!(exits[0].stop.is_none());
+}
+
+#[test]
+fn a_disabled_quoter_drains_recovered_inventory_on_boot_without_market_news() {
+    let mut h = micro_bench("quote_enabled = false");
+    h.ctx.set_my_position("BTCUSDT", 0.05);
+
+    h.boot();
+
+    let exits: Vec<_> = h
+        .drain_actions()
+        .into_iter()
+        .filter_map(|action| match action {
+            Action::Place(intent) => Some(intent),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(exits.len(), 1);
+    assert_eq!(exits[0].side, Side::Sell);
+    assert_eq!(exits[0].qty, 0.05);
+    assert!(exits[0].reduce_only);
+    assert!(matches!(exits[0].kind, OrderKind::Market));
+}
+
+#[test]
+fn a_disabled_boot_does_not_duplicate_a_recovered_drain_order() {
+    let mut h = micro_bench("quote_enabled = false");
+    let symbol = h.ctx.id_of("BTCUSDT");
+    h.ctx.set_my_position("BTCUSDT", 0.05);
+    h.ctx.resting.push(RestingSeed {
+        client_order_id: "recovered-drain".into(),
+        symbol,
+        side: Side::Sell,
+        kind: OrderKind::Market,
+        qty: 0.05,
+        filled_qty: 0.0,
+        reduce_only: true,
+        acked: false,
+    });
+
+    h.boot();
+
+    let actions = h.drain_actions();
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| matches!(action, Action::Cancel { .. }))
+            .count(),
+        0,
+        "the recovered reduce-only drain remains live across restart"
+    );
+    assert!(
+        actions
+            .iter()
+            .all(|action| !matches!(action, Action::Place(_))),
+        "the durable reduce-only order is the pending drain"
+    );
+}
+
+#[test]
+fn a_disabled_boot_finds_inventory_outside_the_current_quote_list() {
+    let mut h = micro_bench("quote_enabled = false");
+    h.ctx.set_my_position("OLDUSDT", -0.04);
+
+    h.boot();
+
+    let exit = h
+        .drain_actions()
+        .into_iter()
+        .find_map(|action| match action {
+            Action::Place(intent) => Some(intent),
+            _ => None,
+        })
+        .expect("recovered inventory must be drained");
+    assert_eq!(exit.symbol, h.ctx.id_of("OLDUSDT"));
+    assert_eq!(exit.side, Side::Buy);
+    assert_eq!(exit.qty, 0.04);
+    assert!(exit.reduce_only);
+    assert!(matches!(exit.kind, OrderKind::Market));
+}
+
+#[test]
+fn a_refused_recovered_drain_is_retried_outside_the_current_quote_list() {
+    let mut h = micro_bench("quote_enabled = false");
+    h.ctx.set_my_position("OLDUSDT", -0.04);
+    let symbol = h.ctx.id_of("OLDUSDT");
+    h.boot();
+    let _ = h.drain_actions();
+
+    h.strategy.on_event(
+        &EngineEvent::IntentRefused {
+            symbol,
+            reduce_only: true,
+            reason: "test refusal".into(),
+        },
+        &mut h.ctx,
+    );
+
+    assert!(
+        h.drain_actions().is_empty(),
+        "a recovered drain also leaves the refusal wake before retrying"
+    );
+    fire_next_timer(&mut h);
+    let retry = h
+        .drain_actions()
+        .into_iter()
+        .find_map(|action| match action {
+            Action::Place(intent) => Some(intent),
+            _ => None,
+        })
+        .expect("durable recovered inventory must remain managed after refusal");
+    assert_eq!(retry.symbol, symbol);
+    assert_eq!(retry.side, Side::Buy);
+    assert_eq!(retry.qty, 0.04);
+    assert!(retry.reduce_only);
+}
+
+#[test]
+fn boot_forgets_pre_restart_microstructure_flow() {
+    let mut restarted = toxic_bench("");
+    restarted.depth("BTCUSDT", &[(99.9, 1.0)], &[(100.1, 1.0)]);
+    let _ = restarted.drain_actions();
+    restarted.trades("BTCUSDT", 10.0, 0.0, 100.0);
+    let _ = restarted.drain_actions();
+    restarted.boot();
+    assert!(restarted.drain_actions().is_empty());
+    restarted.depth("BTCUSDT", &[(99.9, 1.0)], &[(100.1, 1.0)]);
+    let after_restart = placed_orders(restarted.drain_actions());
+
+    let mut fresh = toxic_bench("");
+    fresh.depth("BTCUSDT", &[(99.9, 1.0)], &[(100.1, 1.0)]);
+    let fresh_start = placed_orders(fresh.drain_actions());
+
+    assert_eq!(after_restart, fresh_start);
 }
 
 #[test]

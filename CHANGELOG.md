@@ -6,6 +6,48 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-01 — Directional sleeves become perpetual across source and restart
+  boundaries.** The credential-free worker replaces cycle-owned Bybit clients
+  with one persistent public WebSocket actor plus independent bounded
+  instrument, funding, candle-repair, and whale lanes. Subscription epochs,
+  fresh ticker coverage, checked-through candle frontiers, market-only retry
+  clocks, timed same-socket topic re-probes, endless capped reconnects, and REST
+  repair keep accepted topics live and account for every eligible symbol as a
+  feature row or explicit rejection. The engine also re-subscribes an
+  individually silent top-of-book topic without disrupting healthy symbols. Cold
+  acquisition is profile-scoped and chunked. Accepted lookbacks and every
+  fetch page have hard row ceilings; each lane waits for the prior durable
+  commit before retaining another result. Malformed, off-grid, revised, or
+  out-of-range venue rows fail only their source lane before mutation, while
+  sequence, state, spool, serialization, and disk failures remain process-fatal.
+  Frequent source events use a
+  bounded append journal between streamed checkpoint compactions instead of
+  cloning and rewriting the whole history every five seconds. LONG and CARRY
+  persist the registered one-minute admission budget across boot, market, and
+  retry wakes; CARRY also preserves cross-sectional entry ranking and spends a
+  slot only when the shared order planner can emit an opening order. Missing
+  prices, instrument rules, and venue-minimum failures remain retryable without
+  starving a lower-ranked viable entry. A monotone availability clock bounds
+  every source prune, so an older parallel response cannot delete newer candle,
+  funding, instrument, or whale state. Current
+  outputs coalesce and republish after a stalled consumer drains; lifecycle and
+  scorer catch-up records keep separate quotas, and class-specific pressure is
+  a critical liveness fault even below the total spool cap. Launch and delivery
+  clocks bound historical acquisition. An invalidated private account view and
+  a durable opening timestamp ahead of a rolled-back wall clock block growth in
+  every directional sleeve while exits and reductions continue. Exodus keeps
+  transiently blocked handoffs pending and schedules their retry and deadline.
+  The maker recovers its orders on boot and drains attributed inventory only
+  when quoting is globally disabled or that symbol is retired; a refused drain
+  retries on a bounded timer instead of immediately looping.
+  Rollout stops the validated installed-plus-candidate fleet union, migrates
+  reviewed universe bytes atomically, imports the exact retired CARRY and
+  Exodus state formats, and binds root-owned takeover files to their checked
+  inode before import. Worker liveness pages producer, LONG, CARRY, spool,
+  transport, and memory faults independently, validates the exact heartbeat
+  schema and feature hashes, and pages at spool refusal boundaries. This
+  repository change does not deploy or arm either account.
+
 - **2026-08-31 — The active fleet has one native directional path.** Python
   producer daemons, target-book diagnostics, one-way schema migration tools,
   dedicated Python decision-contract launchers, retired unit tombstones, and

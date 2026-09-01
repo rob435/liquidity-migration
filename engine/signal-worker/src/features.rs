@@ -48,6 +48,11 @@ pub fn build_long_features(
         .filter(|symbol| !excluded.contains(symbol))
         .chain([cfg.regime_symbol.as_str(), "ETHUSDT"])
         .collect();
+    let current: BTreeSet<&str> = symbols
+        .iter()
+        .map(String::as_str)
+        .filter(|symbol| !excluded.contains(symbol))
+        .collect();
     let mut by_symbol: BTreeMap<String, Vec<DailyBar>> = BTreeMap::new();
     let mut rejections: Vec<DataRejection> = symbols
         .iter()
@@ -60,21 +65,26 @@ pub fn build_long_features(
         .collect();
     for symbol in wanted {
         let Some(history) = klines.get(symbol) else {
-            rejections.push(DataRejection {
-                symbol: symbol.to_owned(),
-                reason: "cold_start_no_klines".to_owned(),
-                first_missing_ts_ms: None,
-            });
+            if current.contains(symbol) {
+                rejections.push(DataRejection {
+                    symbol: symbol.to_owned(),
+                    reason: "cold_start_no_klines".to_owned(),
+                    first_missing_ts_ms: None,
+                });
+            }
             continue;
         };
         if let Some(missing) =
             first_internal_gap(history, observed_ts_ms, cfg.cold_start_lookback_days)
         {
-            rejections.push(DataRejection {
-                symbol: symbol.to_owned(),
-                reason: "hourly_kline_gap".to_owned(),
-                first_missing_ts_ms: Some(missing),
-            });
+            if current.contains(symbol) {
+                rejections.push(DataRejection {
+                    symbol: symbol.to_owned(),
+                    reason: "hourly_kline_gap".to_owned(),
+                    first_missing_ts_ms: Some(missing),
+                });
+            }
+            continue;
         }
         by_symbol.insert(
             symbol.to_owned(),
@@ -106,11 +116,6 @@ pub fn build_long_features(
     let eth_regime_on = sma_regime(by_symbol.get("ETHUSDT"), feature_ts_ms, cfg.regime_sma_days)
         .unwrap_or(cfg.regime_missing_is_on);
 
-    let current: BTreeSet<&str> = symbols
-        .iter()
-        .map(String::as_str)
-        .filter(|symbol| !excluded.contains(symbol))
-        .collect();
     let mut rows = Vec::new();
     for (symbol, bars) in &by_symbol {
         if !current.contains(symbol.as_str()) {
@@ -118,6 +123,12 @@ pub fn build_long_features(
         }
         if let Some(row) = long_row(symbol, bars, feature_ts_ms, cfg, btc_regime, eth_regime_on) {
             rows.push(row);
+        } else {
+            rejections.push(DataRejection {
+                symbol: symbol.clone(),
+                reason: "feature_row_unavailable".to_owned(),
+                first_missing_ts_ms: None,
+            });
         }
     }
     rows.sort_by(|a, b| a.symbol.cmp(&b.symbol));
@@ -207,6 +218,7 @@ pub fn build_carry_features_at(
                 reason: "hourly_kline_gap".to_owned(),
                 first_missing_ts_ms: Some(missing),
             });
+            continue;
         }
         let Some(row) = carry_row(
             symbol,
@@ -502,15 +514,13 @@ fn carry_row(
     let adv24 = hourly_sum(history, decision_ts_ms, cfg.adv_window_hours, |row| {
         row.turnover_quote
     });
-    let trail_fund_24h =
-        contiguous_window(history, decision_ts_ms, cfg.trail_window_hours).then(|| {
-            funding.map_or(0.0, |rows| {
-                rows.range((decision_ts_ms - cfg.trail_window_hours * HOUR_MS + 1)..=decision_ts_ms)
-                    .filter(|(_, row)| row.available_at_ms <= observed_ts_ms)
-                    .map(|(_, row)| row.rate)
-                    .sum()
-            })
-        });
+    let trail_fund_24h = trail_funding_at(
+        history,
+        funding,
+        decision_ts_ms,
+        cfg.trail_window_hours,
+        observed_ts_ms,
+    );
     let shifted_close = close_at_end(
         history,
         decision_ts_ms - cfg.momentum_lookback_hours * HOUR_MS,
@@ -626,18 +636,29 @@ fn crowd_persistence(
 ) -> Option<f64> {
     let window = window?;
     let rows = funding?;
-    let history = rows
+    let latest = rows
         .range(..=ts_ms)
         .rev()
-        .filter_map(|(_, row)| (row.available_at_ms <= observed_ts_ms).then_some(row))
-        .skip(1);
-    let mut count = 0;
+        .find_map(|(_, row)| (row.available_at_ms <= observed_ts_ms).then_some(row))?;
+    let interval_ms = latest.funding_interval_min.checked_mul(60_000)?;
+    if interval_ms <= 0 || ts_ms.saturating_sub(latest.settlement_ts_ms) >= interval_ms {
+        return None;
+    }
     let mut deep = 0;
-    for row in history.take(window) {
-        count += 1;
+    for offset in 1..=window {
+        let offset = i64::try_from(offset).ok()?;
+        let expected_ts_ms = latest
+            .settlement_ts_ms
+            .checked_sub(offset.checked_mul(interval_ms)?)?;
+        let row = rows.get(&expected_ts_ms)?;
+        if row.available_at_ms > observed_ts_ms
+            || row.funding_interval_min != latest.funding_interval_min
+        {
+            return None;
+        }
         deep += usize::from(row.rate < -deep_bp / 1e4);
     }
-    (count == window).then(|| deep as f64 / window as f64)
+    Some(deep as f64 / window as f64)
 }
 
 fn fresh_whale(
@@ -663,14 +684,32 @@ fn trail_funding_at(
     hours: i64,
     observed_ts_ms: i64,
 ) -> Option<f64> {
-    contiguous_window(history, ts_ms, hours).then(|| {
-        funding.map_or(0.0, |rows| {
-            rows.range((ts_ms - hours * HOUR_MS + 1)..=ts_ms)
-                .filter(|(_, row)| row.available_at_ms <= observed_ts_ms)
-                .map(|(_, row)| row.rate)
-                .sum()
-        })
-    })
+    if !contiguous_window(history, ts_ms, hours) {
+        return None;
+    }
+    let rows = funding?;
+    let latest = rows
+        .range(..=ts_ms)
+        .rev()
+        .find_map(|(_, row)| (row.available_at_ms <= observed_ts_ms).then_some(row))?;
+    let interval_ms = latest.funding_interval_min.checked_mul(60_000)?;
+    if interval_ms <= 0 || ts_ms.saturating_sub(latest.settlement_ts_ms) >= interval_ms {
+        return None;
+    }
+    let start_ms = ts_ms.saturating_sub(hours.saturating_mul(HOUR_MS));
+    let mut settlement_ts_ms = latest.settlement_ts_ms;
+    let mut total = 0.0;
+    while settlement_ts_ms > start_ms {
+        let row = rows.get(&settlement_ts_ms)?;
+        if row.available_at_ms > observed_ts_ms
+            || row.funding_interval_min != latest.funding_interval_min
+        {
+            return None;
+        }
+        total += row.rate;
+        settlement_ts_ms = settlement_ts_ms.checked_sub(interval_ms)?;
+    }
+    Some(total)
 }
 
 fn hourly_sum(
@@ -898,6 +937,66 @@ mod tests {
     }
 
     #[test]
+    fn funding_trails_require_each_expected_settlement_in_both_windows() {
+        let decision = 100 * DAY_MS;
+        let mut history = BTreeMap::new();
+        for open_ts_ms in (decision - 96 * HOUR_MS..decision).step_by(HOUR_MS as usize) {
+            history.insert(
+                open_ts_ms,
+                HourlyKline {
+                    symbol: "BTCUSDT".into(),
+                    open_ts_ms,
+                    available_at_ms: decision,
+                    open: 1.0,
+                    high: 1.0,
+                    low: 1.0,
+                    close: 1.0,
+                    volume_base: 1.0,
+                    turnover_quote: 1.0,
+                },
+            );
+        }
+        let mut funding = BTreeMap::new();
+        for settlement_ts_ms in (decision - 96 * HOUR_MS..=decision).step_by(HOUR_MS as usize) {
+            funding.insert(
+                settlement_ts_ms,
+                SettledFunding {
+                    symbol: "BTCUSDT".into(),
+                    settlement_ts_ms,
+                    available_at_ms: decision,
+                    rate: -0.001,
+                    funding_interval_min: 60,
+                },
+            );
+        }
+        close_option(
+            trail_funding_at(&history, Some(&funding), decision, 24, decision),
+            Some(-0.024),
+        );
+        funding.remove(&(decision - 22 * HOUR_MS));
+        assert_eq!(
+            trail_funding_at(&history, Some(&funding), decision, 24, decision),
+            None
+        );
+        funding.insert(
+            decision - 22 * HOUR_MS,
+            SettledFunding {
+                symbol: "BTCUSDT".into(),
+                settlement_ts_ms: decision - 22 * HOUR_MS,
+                available_at_ms: decision,
+                rate: -0.001,
+                funding_interval_min: 60,
+            },
+        );
+        let shifted = decision - 48 * HOUR_MS;
+        funding.remove(&(shifted - 22 * HOUR_MS));
+        assert_eq!(
+            trail_funding_at(&history, Some(&funding), shifted, 24, decision),
+            None
+        );
+    }
+
+    #[test]
     fn long_features_match_recorded_golden_with_identical_nulls() {
         let golden: LongGolden =
             serde_json::from_str(include_str!("../tests/fixtures/long_feature_golden.json"))
@@ -986,6 +1085,61 @@ mod tests {
             close_option(actual.atr_14d_pct, expected.atr_14d_pct);
             close(actual.btc_rv_30, expected.btc_rv_30);
         }
+        engine_strategies::native_common::validate_exact_symbol_coverage(
+            &symbols
+                .iter()
+                .map(|symbol| (*symbol).to_owned())
+                .collect::<Vec<_>>(),
+            &actual
+                .rows
+                .iter()
+                .map(|row| row.symbol.clone())
+                .collect::<Vec<_>>(),
+            &actual
+                .rejections
+                .iter()
+                .map(|row| row.symbol.clone())
+                .collect::<Vec<_>>(),
+        )
+        .expect("LONG producer emits an exact sleeve partition");
+
+        let mut gapped = history.clone();
+        let missing = golden.observed_ts_ms - 10 * HOUR_MS;
+        gapped.get_mut("AAAUSDT").unwrap().remove(&missing);
+        let gapped = build_long_features(
+            &gapped,
+            &symbols
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>(),
+            golden.observed_ts_ms,
+            &config,
+        );
+        assert!(gapped.rows.iter().all(|row| row.symbol != "AAAUSDT"));
+        assert_eq!(
+            gapped
+                .rejections
+                .iter()
+                .filter(|row| row.symbol == "AAAUSDT")
+                .count(),
+            1,
+            "a gapped symbol is rejected instead of accepted and rejected"
+        );
+
+        let cold = build_long_features(
+            &KlineHistory::new(),
+            &["AAAUSDT".to_owned()],
+            golden.observed_ts_ms,
+            &config,
+        );
+        assert_eq!(
+            cold.rejections
+                .iter()
+                .map(|row| row.symbol.as_str())
+                .collect::<Vec<_>>(),
+            vec!["AAAUSDT"],
+            "support-only regime symbols never escape into sleeve rejections"
+        );
     }
 
     #[test]
@@ -1113,6 +1267,50 @@ mod tests {
             close_option(actual.turn_growth_3d, expected.turn_growth_3d);
             close_option(actual.d_tt_ls_3d, expected.d_tt_ls_3d);
         }
+        engine_strategies::native_common::validate_exact_symbol_coverage(
+            &symbols
+                .iter()
+                .map(|symbol| (*symbol).to_owned())
+                .collect::<Vec<_>>(),
+            &actual
+                .rows
+                .iter()
+                .filter(|row| row.bar_ts_ms == golden.decision_ts_ms)
+                .map(|row| row.symbol.clone())
+                .collect::<Vec<_>>(),
+            &actual
+                .rejections
+                .iter()
+                .map(|row| row.symbol.clone())
+                .collect::<Vec<_>>(),
+        )
+        .expect("CARRY producer emits an exact sleeve partition");
+
+        let mut gapped = klines.clone();
+        let missing = golden.decision_ts_ms - 10 * HOUR_MS;
+        gapped.get_mut("AAAUSDT").unwrap().remove(&missing);
+        let gapped = build_carry_features_at(
+            &gapped,
+            &funding,
+            &whales,
+            &symbols
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>(),
+            golden.decision_ts_ms,
+            golden.decision_ts_ms,
+            &config,
+        );
+        assert!(gapped.rows.iter().all(|row| row.symbol != "AAAUSDT"));
+        assert_eq!(
+            gapped
+                .rejections
+                .iter()
+                .filter(|row| row.symbol == "AAAUSDT")
+                .count(),
+            1,
+            "a gapped symbol is rejected instead of accepted and rejected"
+        );
     }
 
     #[test]

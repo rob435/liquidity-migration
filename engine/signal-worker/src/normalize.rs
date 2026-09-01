@@ -150,6 +150,24 @@ pub fn normalize_tickers(
             symbol: normalized_symbol(&row.symbol)?,
             observed_ts_ms,
             available_at_ms,
+            mark_observed_ts_ms: ticker_field_clock(
+                row.mark_observed_ts_ms,
+                row.mark_price.is_some(),
+                observed_ts_ms,
+                available_at_ms,
+            )?,
+            funding_observed_ts_ms: ticker_field_clock(
+                row.funding_observed_ts_ms,
+                row.funding_rate.is_some(),
+                observed_ts_ms,
+                available_at_ms,
+            )?,
+            schedule_observed_ts_ms: ticker_field_clock(
+                row.schedule_observed_ts_ms,
+                row.next_funding_time.is_some(),
+                observed_ts_ms,
+                available_at_ms,
+            )?,
             last_price: positive_optional(row.last_price.as_ref(), "lastPrice")?,
             mark_price: positive_optional(row.mark_price.as_ref(), "markPrice")?,
             index_price: positive_optional(row.index_price.as_ref(), "indexPrice")?,
@@ -171,6 +189,24 @@ pub fn normalize_tickers(
     out.sort_by(|a, b| a.symbol.cmp(&b.symbol));
     reject_duplicate_symbols(out.iter().map(|row| row.symbol.as_str()), "ticker")?;
     Ok(out)
+}
+
+fn ticker_field_clock(
+    explicit: Option<i64>,
+    present: bool,
+    fallback: i64,
+    available_at_ms: i64,
+) -> Result<Option<i64>, WorkerError> {
+    if !present {
+        return Ok(None);
+    }
+    let value = explicit.unwrap_or(fallback);
+    if value <= 0 || value > available_at_ms {
+        return Err(WorkerError::input(
+            "ticker field freshness has an invalid clock",
+        ));
+    }
+    Ok(Some(value))
 }
 
 pub fn normalize_whales(

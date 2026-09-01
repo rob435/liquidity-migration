@@ -13,6 +13,8 @@ use crate::position_plan::{plan as plan_targets, PlanRules, Target};
 pub const CONTRACT_SCHEMA_VERSION: u16 = 1;
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
+// Admission cycles are one minute, matching the registered live-physics clock.
+pub const ENTRY_CYCLE_MS: i64 = 60_000;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -426,8 +428,12 @@ pub fn decide(
         return Ok(output);
     };
     let age_ms = input.decision_ts_ms - signal_ts_ms;
+    if age_ms < 0 {
+        let mut output = DecisionOutput::empty(DecisionAction::Wait, "signal_not_available", input);
+        output.signal_ts_ms = signal_ts_ms;
+        return Ok(output);
+    }
     for (condition, reason) in [
-        (age_ms < 0, "signal_not_available"),
         (age_ms >= config.signal_freshness_ms, "signal_stale"),
         (prior.cooldown_until_ms > input.decision_ts_ms, "cooldown"),
         (
@@ -717,6 +723,10 @@ pub struct SleeveState {
     pub cooldown_until_ms: BTreeMap<String, i64>,
     pub attempted_signal_ts_ms: BTreeMap<String, i64>,
     pub refused_entries: BTreeSet<String>,
+    #[serde(default)]
+    pub entry_cycle_started_ms: i64,
+    #[serde(default)]
+    pub entry_cycle_selected_symbols: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -793,6 +803,12 @@ impl SleeveState {
                 .refused_entries
                 .iter()
                 .any(|symbol| !valid_symbol(symbol))
+            || self.entry_cycle_started_ms < 0
+            || self
+                .entry_cycle_selected_symbols
+                .iter()
+                .any(|symbol| !valid_symbol(symbol))
+            || (self.entry_cycle_started_ms == 0 && !self.entry_cycle_selected_symbols.is_empty())
         {
             return Err("LONG checkpoint portfolio state is invalid");
         }
@@ -802,6 +818,7 @@ impl SleeveState {
 
 #[derive(Clone, Debug)]
 pub struct BatchInput {
+    pub now_ms: i64,
     pub decisions: Vec<DecisionInput>,
     pub facts: PlannerFacts,
     pub owned_working_symbols: BTreeSet<String>,
@@ -817,12 +834,52 @@ pub struct BatchOutput {
     pub execution: ExecutionOutput,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ReplanMode {
+    Ordinary,
+    BootRecovery,
+}
+
+fn remember_pending_signal(state: &mut SleeveState, input: &DecisionInput) {
+    let Some(feature_row) = input.feature_row.clone() else {
+        return;
+    };
+    let signal_ts_ms = if input.signal_ts_ms == 0 {
+        feature_row.ts_ms
+    } else {
+        input.signal_ts_ms
+    };
+    let signal_close = if input.signal_close == 0.0 {
+        feature_row.close.unwrap_or(0.0)
+    } else {
+        input.signal_close
+    };
+    state.pending_signals.insert(
+        input.symbol.clone(),
+        PendingSignal {
+            signal_ts_ms,
+            signal_close,
+            feature_row,
+        },
+    );
+}
+
 /// Complete live transition. Restore mismatch with surviving exposure emits
-/// only cancels/flat targets; a future or repeated signal changes no state.
+/// only cancels/flat targets; a future signal remains pending until its clock
+/// catches up, while a repeated signal changes no state.
 pub fn reduce_batch(
+    input: BatchInput,
+    state: SleeveState,
+    config: &StrategyConfig,
+) -> Result<BatchOutput, &'static str> {
+    reduce_batch_with_mode(input, state, config, ReplanMode::Ordinary)
+}
+
+pub fn reduce_batch_with_mode(
     input: BatchInput,
     mut state: SleeveState,
     config: &StrategyConfig,
+    replan_mode: ReplanMode,
 ) -> Result<BatchOutput, &'static str> {
     config.validate()?;
     let original_state = state.clone();
@@ -835,21 +892,57 @@ pub fn reduce_batch(
         state.schema_version = DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION;
     }
     state.validate()?;
+    if input.now_ms <= 0
+        || input
+            .decisions
+            .iter()
+            .any(|decision| decision.decision_ts_ms > input.now_ms)
+    {
+        return Err("LONG batch wall clock is invalid");
+    }
+    let now_ms = input.now_ms;
+    let clock_blocked_growth_symbols = state
+        .symbols
+        .iter()
+        .filter(|(_, prior)| prior.attempted_signal_ts_ms > now_ms)
+        .map(|(symbol, _)| symbol.clone())
+        .collect::<BTreeSet<_>>();
+    if !input.decisions.is_empty()
+        && (state.entry_cycle_started_ms == 0
+            || now_ms >= state.entry_cycle_started_ms.saturating_add(ENTRY_CYCLE_MS))
+    {
+        state.entry_cycle_started_ms = now_ms;
+        state.entry_cycle_selected_symbols.clear();
+        state.refused_entries.clear();
+    }
+    if replan_mode == ReplanMode::BootRecovery {
+        state
+            .entry_cycle_selected_symbols
+            .retain(|symbol| !clock_blocked_growth_symbols.contains(symbol));
+    }
+    if state.entry_cycle_selected_symbols.len() > config.max_new_entries_per_cycle {
+        state.entry_cycle_selected_symbols = state
+            .entry_cycle_selected_symbols
+            .into_iter()
+            .take(config.max_new_entries_per_cycle)
+            .collect();
+    }
 
     let mut targets = Vec::new();
     let mut outputs = Vec::new();
+    let mut entry_effect_symbols = BTreeSet::new();
     let mut next = state.clone();
     if mismatch {
-        for symbol in input
+        let recovery_symbols = input
             .facts
             .held_symbols()
             .into_iter()
             .chain(input.owned_working_symbols.iter().cloned())
-            .collect::<BTreeSet<_>>()
-        {
+            .collect::<BTreeSet<_>>();
+        for symbol in &recovery_symbols {
             targets.push(PlannedTarget {
                 target: Target {
-                    symbol,
+                    symbol: symbol.clone(),
                     notional_usdt: 0.0,
                     stop_loss_fraction: 0.01,
                     entry_valid_until_ms: None,
@@ -858,16 +951,10 @@ pub fn reduce_batch(
                 leverage: config.entry_leverage,
             });
         }
-        next.exit_pending.extend(input.facts.held_symbols());
+        next.exit_pending.extend(recovery_symbols);
     } else {
         // Reconcile durable requests with the attributed position and owned
         // order books before considering a new signal generation.
-        let now_ms = input
-            .decisions
-            .iter()
-            .map(|decision| decision.decision_ts_ms)
-            .max()
-            .unwrap_or(1);
         let known_symbols = next.symbols.keys().cloned().collect::<Vec<_>>();
         for symbol in known_symbols {
             let mut remove = false;
@@ -956,7 +1043,6 @@ pub fn reduce_batch(
             .filter(|state| state.requested)
             .count()
             .max(input.facts.held.len());
-        let mut admitted = 0_usize;
         for mut decision_input in decisions {
             let generation = if decision_input.signal_ts_ms == 0 {
                 decision_input
@@ -994,9 +1080,6 @@ pub fn reduce_batch(
                 .get(&decision_input.symbol)
                 .copied()
                 .unwrap_or(prior.attempted_signal_ts_ms);
-            if admitted >= config.max_new_entries_per_cycle && !prior.requested {
-                continue;
-            }
             decision_input.equity_usdt = decision_input.equity_usdt.max(0.0);
             let output = decide(&decision_input, &prior, config)?;
             let mut updated = prior.clone();
@@ -1006,7 +1089,18 @@ pub fn reduce_batch(
                 && !input.owned_working_symbols.contains(&decision_input.symbol);
             match output.action {
                 DecisionAction::Enter => {
+                    if !prior.requested
+                        && !next
+                            .entry_cycle_selected_symbols
+                            .contains(&decision_input.symbol)
+                        && next.entry_cycle_selected_symbols.len()
+                            >= config.max_new_entries_per_cycle
+                    {
+                        remember_pending_signal(&mut next, &decision_input);
+                        continue;
+                    }
                     if !config.entries_enabled || mismatch {
+                        remember_pending_signal(&mut next, &decision_input);
                         outputs.push(output);
                         continue;
                     }
@@ -1023,7 +1117,6 @@ pub fn reduce_batch(
                     next.attempted_signal_ts_ms
                         .insert(decision_input.symbol.clone(), output.signal_ts_ms);
                     active += 1;
-                    admitted += 1;
                     next.pending_signals.remove(&decision_input.symbol);
                 }
                 DecisionAction::Exit if !retire_expired => {
@@ -1034,31 +1127,35 @@ pub fn reduce_batch(
                     next.pending_signals.remove(&decision_input.symbol);
                 }
                 DecisionAction::Wait if !prior.requested => {
-                    if let Some(feature_row) = decision_input.feature_row.clone() {
-                        let signal_ts_ms = if decision_input.signal_ts_ms == 0 {
-                            feature_row.ts_ms
-                        } else {
-                            decision_input.signal_ts_ms
-                        };
-                        let signal_close = if decision_input.signal_close == 0.0 {
-                            feature_row.close.unwrap_or(0.0)
-                        } else {
-                            decision_input.signal_close
-                        };
-                        next.pending_signals.insert(
-                            decision_input.symbol.clone(),
-                            PendingSignal {
-                                signal_ts_ms,
-                                signal_close,
-                                feature_row,
-                            },
-                        );
-                    }
+                    remember_pending_signal(&mut next, &decision_input);
                 }
                 DecisionAction::Reject if !prior.requested => {
                     next.pending_signals.remove(&decision_input.symbol);
                 }
                 DecisionAction::Wait | DecisionAction::Hold | DecisionAction::Reject => {}
+            }
+            let unresolved_open = (prior.requested || updated.requested)
+                && !updated.filled
+                && !input.facts.held.contains_key(&decision_input.symbol)
+                && !input.owned_working_symbols.contains(&decision_input.symbol)
+                && config.entries_enabled
+                && !mismatch
+                && !clock_blocked_growth_symbols.contains(&decision_input.symbol)
+                && !next.refused_entries.contains(&decision_input.symbol);
+            if unresolved_open {
+                let already_selected = next
+                    .entry_cycle_selected_symbols
+                    .contains(&decision_input.symbol);
+                if already_selected {
+                    if replan_mode == ReplanMode::BootRecovery {
+                        entry_effect_symbols.insert(decision_input.symbol.clone());
+                    }
+                } else if next.entry_cycle_selected_symbols.len() < config.max_new_entries_per_cycle
+                {
+                    next.entry_cycle_selected_symbols
+                        .insert(decision_input.symbol.clone());
+                    entry_effect_symbols.insert(decision_input.symbol.clone());
+                }
             }
             if retire_expired {
                 next.symbols.remove(&decision_input.symbol);
@@ -1118,6 +1215,21 @@ pub fn reduce_batch(
     next.exit_pending.retain(|symbol| {
         input.facts.held.contains_key(symbol) || input.owned_working_symbols.contains(symbol)
     });
+    next.cooldown_until_ms.retain(|_, until| *until > now_ms);
+    let live_symbols = next.symbols.keys().cloned().collect::<BTreeSet<_>>();
+    let pending_symbols = next
+        .pending_signals
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let freshness_floor = now_ms.saturating_sub(config.signal_freshness_ms);
+    next.attempted_signal_ts_ms.retain(|symbol, attempted| {
+        *attempted >= freshness_floor
+            || live_symbols.contains(symbol)
+            || pending_symbols.contains(symbol)
+    });
+    next.refused_entries
+        .retain(|symbol| next.attempted_signal_ts_ms.contains_key(symbol));
     let held_symbols = input.facts.held_symbols();
     let raw_targets = targets
         .iter()
@@ -1129,12 +1241,6 @@ pub fn reduce_batch(
         .map(|decision| decision.decision_ts_ms + config.book_validity_ms)
         .max()
         .unwrap_or(i64::MAX);
-    let now_ms = input
-        .decisions
-        .iter()
-        .map(|decision| decision.decision_ts_ms)
-        .max()
-        .unwrap_or(1);
     let planned = plan_targets(
         &raw_targets,
         &held_symbols,
@@ -1180,8 +1286,32 @@ pub fn reduce_batch(
         .steps
         .into_iter()
         .filter(|step| {
-            !input.owned_working_symbols.contains(step.symbol())
-                || matches!(step, crate::position_plan::Step::Restop { .. })
+            let selected_entry = !matches!(step, crate::position_plan::Step::Enter { .. })
+                || entry_effect_symbols.contains(step.symbol());
+            let growth_allowed = config.entries_enabled
+                && !mismatch
+                && !clock_blocked_growth_symbols.contains(step.symbol());
+            let growth_not_blocked = !matches!(
+                step,
+                crate::position_plan::Step::Enter { .. }
+                    | crate::position_plan::Step::Resize {
+                        reduce_only: false,
+                        ..
+                    }
+            ) || growth_allowed;
+            let opening_not_refused = !matches!(
+                step,
+                crate::position_plan::Step::Enter { .. }
+                    | crate::position_plan::Step::Resize {
+                        reduce_only: false,
+                        ..
+                    }
+            ) || !next.refused_entries.contains(step.symbol());
+            selected_entry
+                && growth_not_blocked
+                && opening_not_refused
+                && (!input.owned_working_symbols.contains(step.symbol())
+                    || matches!(step, crate::position_plan::Step::Restop { .. }))
         })
         .collect();
     effects.extend(order_effects(steps, &targets, "long-native"));
@@ -1254,6 +1384,65 @@ mod tests {
             hold_decision_price: false,
             give_up_instead_of_crossing: false,
         }
+    }
+
+    fn entry_input(symbol: &str, signal_ts_ms: i64) -> DecisionInput {
+        DecisionInput {
+            decision_ts_ms: signal_ts_ms + HOUR_MS,
+            symbol: symbol.into(),
+            signal_ts_ms,
+            signal_close: 100.0,
+            market_price: Some(98.0),
+            observed_low: Some(98.0),
+            equity_usdt: 1_000.0,
+            feature_row: Some(FeatureRow {
+                symbol: symbol.into(),
+                ts_ms: signal_ts_ms,
+                close: Some(100.0),
+                log_return: Some(0.2),
+                sigma_daily_30d: Some(0.04),
+                today_volume_rank: Some(1.0),
+                in_universe: true,
+                close_location: Some(0.8),
+                atr_14d_pct: Some(0.05),
+                regime_on: true,
+                eth_regime_on: true,
+                ..FeatureRow::default()
+            }),
+        }
+    }
+
+    fn entry_facts(symbols: &[&str]) -> PlannerFacts {
+        let rule = engine_types::InstrumentRule {
+            tick_size: 0.01,
+            qty_step: 0.1,
+            min_qty: 0.1,
+            min_notional: 5.0,
+        };
+        PlannerFacts {
+            prices: symbols
+                .iter()
+                .map(|symbol| ((*symbol).to_owned(), 98.0))
+                .collect(),
+            rules: symbols
+                .iter()
+                .map(|symbol| ((*symbol).to_owned(), rule))
+                .collect(),
+            ..PlannerFacts::default()
+        }
+    }
+
+    fn entered_symbols(effects: &[Effect]) -> BTreeSet<String> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Order(crate::native_common::OrderEffect {
+                    step: crate::position_plan::Step::Enter { symbol, .. },
+                    ..
+                }) => Some(symbol.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -1373,6 +1562,7 @@ mod tests {
         );
         let output = reduce_batch(
             BatchInput {
+                now_ms: 1_000,
                 decisions: vec![],
                 facts,
                 owned_working_symbols: BTreeSet::new(),
@@ -1395,5 +1585,529 @@ mod tests {
                 ..
             })
         )));
+    }
+
+    #[test]
+    fn backward_clock_preserves_a_pending_signal_until_it_can_enter() {
+        let generation = 10 * DAY_MS;
+        let mut future = entry_input("BTCUSDT", generation);
+        future.decision_ts_ms = generation - 1;
+        let before = reduce_batch(
+            BatchInput {
+                now_ms: generation - 1,
+                decisions: vec![future],
+                facts: entry_facts(&["BTCUSDT"]),
+                owned_working_symbols: BTreeSet::new(),
+                owned_opening_order_ids: BTreeMap::new(),
+                checkpoint_fingerprint: None,
+                signal_receipt: Some(("worker".into(), 1, "future-observation".into())),
+            },
+            SleeveState::default(),
+            &fixture_config(),
+        )
+        .expect("backward-clock plan");
+        assert!(matches!(
+            before.decisions.as_slice(),
+            [DecisionOutput {
+                action: DecisionAction::Wait,
+                reason,
+                ..
+            }] if reason == "signal_not_available"
+        ));
+        assert!(before.execution.effects.iter().all(|effect| !matches!(
+            effect,
+            Effect::Order(crate::native_common::OrderEffect {
+                step: crate::position_plan::Step::Enter { .. },
+                ..
+            })
+        )));
+
+        let restored: SleeveState = serde_json::from_slice(&checkpoint_payload(&before.next_state))
+            .expect("restart checkpoint");
+        let pending = restored
+            .pending_signals
+            .get("BTCUSDT")
+            .expect("the future signal remains durable")
+            .clone();
+        let caught_up_at = generation + HOUR_MS;
+        let after = reduce_batch(
+            BatchInput {
+                now_ms: caught_up_at,
+                decisions: vec![DecisionInput {
+                    decision_ts_ms: caught_up_at,
+                    symbol: "BTCUSDT".into(),
+                    signal_ts_ms: pending.signal_ts_ms,
+                    signal_close: pending.signal_close,
+                    market_price: Some(98.0),
+                    observed_low: Some(98.0),
+                    equity_usdt: 1_000.0,
+                    feature_row: Some(pending.feature_row),
+                }],
+                facts: entry_facts(&["BTCUSDT"]),
+                owned_working_symbols: BTreeSet::new(),
+                owned_opening_order_ids: BTreeMap::new(),
+                checkpoint_fingerprint: None,
+                signal_receipt: None,
+            },
+            restored,
+            &fixture_config(),
+        )
+        .expect("caught-up plan");
+
+        assert!(entered_symbols(&after.execution.effects).contains("BTCUSDT"));
+        assert!(!after.next_state.pending_signals.contains_key("BTCUSDT"));
+        assert!(after.next_state.symbols["BTCUSDT"].requested);
+    }
+
+    #[test]
+    fn disabled_signal_and_cycle_budget_survive_repeated_wakes() {
+        let generation = 10 * DAY_MS;
+        let mut disabled = fixture_config();
+        disabled.entries_enabled = false;
+        let first = reduce_batch(
+            BatchInput {
+                now_ms: generation + HOUR_MS,
+                decisions: vec![entry_input("AUSDT", generation)],
+                facts: PlannerFacts::default(),
+                owned_working_symbols: BTreeSet::new(),
+                owned_opening_order_ids: BTreeMap::new(),
+                checkpoint_fingerprint: None,
+                signal_receipt: Some(("worker".into(), 1, "obs".into())),
+            },
+            SleeveState::default(),
+            &disabled,
+        )
+        .expect("disabled generation");
+        assert!(first.next_state.pending_signals.contains_key("AUSDT"));
+
+        let mut enabled = fixture_config();
+        enabled.max_new_entries_per_cycle = 1;
+        let admitted = reduce_batch(
+            BatchInput {
+                now_ms: generation + HOUR_MS,
+                decisions: vec![
+                    entry_input("AUSDT", generation),
+                    entry_input("BUSDT", generation),
+                ],
+                facts: PlannerFacts::default(),
+                owned_working_symbols: BTreeSet::new(),
+                owned_opening_order_ids: BTreeMap::new(),
+                checkpoint_fingerprint: None,
+                signal_receipt: None,
+            },
+            first.next_state,
+            &enabled,
+        )
+        .expect("enabled generation");
+        assert_eq!(admitted.next_state.symbols.len(), 1);
+        assert_eq!(admitted.next_state.entry_cycle_selected_symbols.len(), 1);
+        assert_eq!(
+            admitted
+                .next_state
+                .attempted_signal_ts_ms
+                .values()
+                .filter(|timestamp| **timestamp == generation)
+                .count(),
+            1
+        );
+
+        let mut checkpoint_state = admitted.next_state;
+        checkpoint_state.entry_cycle_started_ms = generation + 2 * HOUR_MS;
+        let restored: SleeveState = serde_json::from_slice(&checkpoint_payload(&checkpoint_state))
+            .expect("restart checkpoint");
+        let repeated = reduce_batch(
+            BatchInput {
+                now_ms: generation + HOUR_MS,
+                decisions: vec![
+                    entry_input("AUSDT", generation),
+                    entry_input("BUSDT", generation),
+                ],
+                facts: PlannerFacts::default(),
+                owned_working_symbols: BTreeSet::new(),
+                owned_opening_order_ids: BTreeMap::new(),
+                checkpoint_fingerprint: None,
+                signal_receipt: None,
+            },
+            restored,
+            &enabled,
+        )
+        .expect("repeated generation");
+        assert_eq!(repeated.next_state.symbols.len(), 1);
+        assert_eq!(repeated.next_state.entry_cycle_selected_symbols.len(), 1);
+        assert_eq!(
+            repeated.next_state.entry_cycle_started_ms,
+            generation + 2 * HOUR_MS,
+            "a backward wall clock preserves the durable admission window"
+        );
+        assert!(repeated.next_state.pending_signals.contains_key("BUSDT"));
+        assert_eq!(
+            repeated
+                .next_state
+                .attempted_signal_ts_ms
+                .values()
+                .filter(|timestamp| **timestamp == generation)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn delayed_batch_uses_engine_wall_time_for_the_entry_cutoff() {
+        let generation = 10 * DAY_MS;
+        let decision = entry_input("BTCUSDT", generation);
+        let config = fixture_config();
+        let deadline = decision
+            .decision_ts_ms
+            .saturating_add(config.book_validity_ms)
+            .saturating_sub(config.engine_entry_cutoff_ms);
+        let make_input = |now_ms| BatchInput {
+            now_ms,
+            decisions: vec![decision.clone()],
+            facts: entry_facts(&["BTCUSDT"]),
+            owned_working_symbols: BTreeSet::new(),
+            owned_opening_order_ids: BTreeMap::new(),
+            checkpoint_fingerprint: None,
+            signal_receipt: None,
+        };
+
+        let before = reduce_batch(make_input(deadline - 1), SleeveState::default(), &config)
+            .expect("batch before cutoff");
+        assert!(entered_symbols(&before.execution.effects).contains("BTCUSDT"));
+
+        let closed = reduce_batch(make_input(deadline), SleeveState::default(), &config)
+            .expect("batch at cutoff");
+        assert!(entered_symbols(&closed.execution.effects).is_empty());
+        assert!(matches!(
+            closed.execution.skipped.as_slice(),
+            [crate::position_plan::Skipped::EntryWindowClosed { symbol }]
+                if symbol == "BTCUSDT"
+        ));
+    }
+
+    #[test]
+    fn takeover_budget_is_durable_silent_same_cycle_and_exact_on_boot() {
+        let generation = 10 * DAY_MS;
+        let symbols = ["AUSDT", "BUSDT", "CUSDT"];
+        let decisions = symbols
+            .iter()
+            .map(|symbol| entry_input(symbol, generation))
+            .collect::<Vec<_>>();
+        let facts = entry_facts(&symbols);
+        let input = || BatchInput {
+            now_ms: generation + HOUR_MS,
+            decisions: decisions.clone(),
+            facts: facts.clone(),
+            owned_working_symbols: BTreeSet::new(),
+            owned_opening_order_ids: BTreeMap::new(),
+            checkpoint_fingerprint: None,
+            signal_receipt: None,
+        };
+
+        let mut seed_config = fixture_config();
+        seed_config.max_new_entries_per_cycle = symbols.len();
+        let seeded = reduce_batch(input(), SleeveState::default(), &seed_config).expect("seed");
+        let mut takeover = seeded.next_state;
+        takeover.entry_cycle_started_ms = 0;
+        takeover.entry_cycle_selected_symbols.clear();
+
+        let mut config = fixture_config();
+        config.max_new_entries_per_cycle = 2;
+        let first = reduce_batch(input(), takeover, &config).expect("takeover admission");
+        assert_eq!(first.next_state.symbols.len(), 3);
+        assert_eq!(first.next_state.entry_cycle_selected_symbols.len(), 2);
+        assert_eq!(entered_symbols(&first.execution.effects).len(), 2);
+        assert!(matches!(
+            first.execution.effects.first(),
+            Some(Effect::PersistCheckpoint { .. })
+        ));
+
+        let same_cycle = reduce_batch(input(), first.next_state.clone(), &config)
+            .expect("ordinary same-cycle wake");
+        assert!(entered_symbols(&same_cycle.execution.effects).is_empty());
+        assert_eq!(same_cycle.next_state.symbols.len(), 3);
+
+        let restored: SleeveState =
+            serde_json::from_slice(&checkpoint_payload(&first.next_state)).expect("restore");
+        let boot = reduce_batch_with_mode(input(), restored, &config, ReplanMode::BootRecovery)
+            .expect("boot recovery");
+        assert_eq!(
+            entered_symbols(&boot.execution.effects),
+            first.next_state.entry_cycle_selected_symbols
+        );
+
+        let refused_symbol = first
+            .next_state
+            .entry_cycle_selected_symbols
+            .iter()
+            .next()
+            .expect("selected symbol")
+            .clone();
+        let mut refused = first.next_state;
+        refused.refused_entries.insert(refused_symbol.clone());
+        let refused_wake = reduce_batch(input(), refused, &config).expect("same-cycle refusal");
+        assert!(entered_symbols(&refused_wake.execution.effects).is_empty());
+        assert_eq!(refused_wake.next_state.symbols.len(), 3);
+
+        let mut next_cycle_input = input();
+        next_cycle_input.now_ms += ENTRY_CYCLE_MS;
+        for decision in &mut next_cycle_input.decisions {
+            decision.decision_ts_ms += ENTRY_CYCLE_MS;
+        }
+        let retried = reduce_batch(next_cycle_input, refused_wake.next_state, &config)
+            .expect("next-cycle refusal retry");
+        assert!(entered_symbols(&retried.execution.effects).contains(&refused_symbol));
+        assert!(retried.next_state.refused_entries.is_empty());
+    }
+
+    #[test]
+    fn future_attempted_signal_blocks_only_growth_and_resumes_at_its_clock() {
+        let now_ms = 20 * DAY_MS;
+        let attempted_signal_ts_ms = now_ms + ENTRY_CYCLE_MS;
+        let symbols = [
+            "OPENUSDT",
+            "GROWUSDT",
+            "REDUCEUSDT",
+            "RESTOPUSDT",
+            "EXITUSDT",
+        ];
+        let prior = |filled: bool, max_hold_deadline_ts_ms: i64| PriorState {
+            requested: true,
+            filled,
+            entry_ts_ms: if filled { now_ms - DAY_MS } else { 0 },
+            entry_price: if filled { 10.0 } else { 0.0 },
+            target_notional_usdt: 100.0,
+            stop_loss_fraction: 0.2,
+            stop_decay_after_ms: 0,
+            decayed_stop_loss_fraction: 0.0,
+            max_hold_deadline_ts_ms,
+            max_hold_duration_ms: 2 * DAY_MS,
+            entry_valid_until_ms: attempted_signal_ts_ms + HOUR_MS,
+            cooldown_until_ms: 0,
+            attempted_signal_ts_ms,
+            active_positions: 0,
+        };
+        let state = SleeveState {
+            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+            symbols: BTreeMap::from([
+                ("OPENUSDT".into(), prior(false, 0)),
+                ("GROWUSDT".into(), prior(true, now_ms + DAY_MS)),
+                ("REDUCEUSDT".into(), prior(true, now_ms + DAY_MS)),
+                ("RESTOPUSDT".into(), prior(true, now_ms + DAY_MS)),
+                ("EXITUSDT".into(), prior(true, now_ms)),
+            ]),
+            entry_cycle_started_ms: attempted_signal_ts_ms,
+            entry_cycle_selected_symbols: BTreeSet::from(["OPENUSDT".to_owned()]),
+            ..SleeveState::default()
+        };
+        let mut facts = entry_facts(&symbols);
+        for symbol in symbols {
+            facts.prices.insert(symbol.to_owned(), 10.0);
+        }
+        for (symbol, qty, stop_px) in [
+            ("GROWUSDT", 5.0, 8.0),
+            ("REDUCEUSDT", 15.0, 8.0),
+            ("RESTOPUSDT", 10.0, 5.0),
+            ("EXITUSDT", 10.0, 8.0),
+        ] {
+            facts.held.insert(
+                symbol.into(),
+                crate::position_plan::Held {
+                    side: engine_types::Side::Buy,
+                    qty,
+                    px: 10.0,
+                    entry_px: 10.0,
+                    stop_px,
+                },
+            );
+        }
+        let decisions = symbols
+            .iter()
+            .map(|symbol| DecisionInput {
+                decision_ts_ms: now_ms,
+                symbol: (*symbol).to_owned(),
+                signal_ts_ms: attempted_signal_ts_ms,
+                signal_close: 0.0,
+                market_price: Some(10.0),
+                observed_low: None,
+                equity_usdt: 1_000.0,
+                feature_row: None,
+            })
+            .collect::<Vec<_>>();
+        let input = BatchInput {
+            now_ms,
+            decisions,
+            facts,
+            owned_working_symbols: BTreeSet::new(),
+            owned_opening_order_ids: BTreeMap::new(),
+            checkpoint_fingerprint: None,
+            signal_receipt: None,
+        };
+
+        let boot = reduce_batch_with_mode(
+            input.clone(),
+            state,
+            &fixture_config(),
+            ReplanMode::BootRecovery,
+        )
+        .expect("backward-clock boot");
+        let steps = boot
+            .execution
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Order(order) => Some(&order.step),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!steps.iter().any(|step| matches!(
+            step,
+            crate::position_plan::Step::Enter { .. }
+                | crate::position_plan::Step::Resize {
+                    reduce_only: false,
+                    ..
+                }
+        )));
+        assert!(steps.iter().any(|step| matches!(
+            step,
+            crate::position_plan::Step::Resize {
+                symbol,
+                reduce_only: true,
+                ..
+            } if symbol == "REDUCEUSDT"
+        )));
+        assert!(steps.iter().any(|step| matches!(
+            step,
+            crate::position_plan::Step::Restop { symbol, .. } if symbol == "RESTOPUSDT"
+        )));
+        assert!(steps.iter().any(|step| matches!(
+            step,
+            crate::position_plan::Step::Exit { symbol, .. } if symbol == "EXITUSDT"
+        )));
+        assert!(!boot
+            .next_state
+            .entry_cycle_selected_symbols
+            .contains("OPENUSDT"));
+
+        let mut resumed_input = input;
+        resumed_input.now_ms = attempted_signal_ts_ms;
+        for decision in &mut resumed_input.decisions {
+            decision.decision_ts_ms = attempted_signal_ts_ms;
+        }
+        let resumed = reduce_batch(resumed_input, boot.next_state, &fixture_config())
+            .expect("clock recovery");
+        assert!(entered_symbols(&resumed.execution.effects).contains("OPENUSDT"));
+    }
+
+    #[test]
+    fn disabled_entries_never_top_up_a_partial_position_but_allow_reduction() {
+        let now_ms = 20 * DAY_MS;
+        let prior = PriorState {
+            requested: true,
+            filled: true,
+            entry_ts_ms: now_ms - DAY_MS,
+            entry_price: 10.0,
+            target_notional_usdt: 100.0,
+            stop_loss_fraction: 0.2,
+            stop_decay_after_ms: now_ms + HOUR_MS,
+            decayed_stop_loss_fraction: 0.1,
+            max_hold_deadline_ts_ms: now_ms + DAY_MS,
+            max_hold_duration_ms: 2 * DAY_MS,
+            entry_valid_until_ms: now_ms + HOUR_MS,
+            cooldown_until_ms: 0,
+            attempted_signal_ts_ms: now_ms - DAY_MS,
+            active_positions: 1,
+        };
+        let state = SleeveState {
+            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+            symbols: BTreeMap::from([("AUSDT".into(), prior)]),
+            ..SleeveState::default()
+        };
+        let mut config = fixture_config();
+        config.entries_enabled = false;
+        let run = |qty| {
+            let mut facts = entry_facts(&["AUSDT"]);
+            facts.held.insert(
+                "AUSDT".into(),
+                crate::position_plan::Held {
+                    qty,
+                    side: engine_types::Side::Buy,
+                    px: 10.0,
+                    entry_px: 10.0,
+                    stop_px: 8.0,
+                },
+            );
+            reduce_batch(
+                BatchInput {
+                    now_ms,
+                    decisions: Vec::new(),
+                    facts,
+                    owned_working_symbols: BTreeSet::new(),
+                    owned_opening_order_ids: BTreeMap::new(),
+                    checkpoint_fingerprint: None,
+                    signal_receipt: None,
+                },
+                state.clone(),
+                &config,
+            )
+            .expect("paused replan")
+        };
+
+        let partial = run(5.0);
+        assert!(!partial.execution.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Order(crate::native_common::OrderEffect {
+                step: crate::position_plan::Step::Resize {
+                    reduce_only: false,
+                    ..
+                },
+                ..
+            })
+        )));
+
+        let oversized = run(15.0);
+        assert!(oversized.execution.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Order(crate::native_common::OrderEffect {
+                step: crate::position_plan::Step::Resize {
+                    reduce_only: true,
+                    ..
+                },
+                ..
+            })
+        )));
+    }
+
+    #[test]
+    fn checkpoint_mismatch_cancels_a_flat_working_opening_order() {
+        let output = reduce_batch(
+            BatchInput {
+                now_ms: DAY_MS,
+                decisions: Vec::new(),
+                facts: PlannerFacts::default(),
+                owned_working_symbols: BTreeSet::from(["AUSDT".into()]),
+                owned_opening_order_ids: BTreeMap::from([(
+                    "AUSDT".into(),
+                    vec!["old-opening".into()],
+                )]),
+                checkpoint_fingerprint: Some("f".repeat(64)),
+                signal_receipt: None,
+            },
+            SleeveState::default(),
+            &fixture_config(),
+        )
+        .expect("mismatch recovery");
+
+        assert!(output.execution.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::CancelOwned {
+                symbol,
+                client_order_id,
+            } if symbol == "AUSDT" && client_order_id == "old-opening"
+        )));
+        assert!(!output
+            .execution
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Order(_))));
     }
 }

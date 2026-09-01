@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "deploy" / "fleet_manifest.tsv"
 SYSTEMD = ROOT / "deploy" / "systemd"
+INCUMBENT_V1 = ROOT / "tests" / "fixtures" / "fleet_manifest_incumbent_v1.tsv"
+CANDIDATE_V2 = ROOT / "tests" / "fixtures" / "fleet_manifest_candidate_v2.tsv"
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,27 @@ def _helper(command: str) -> list[str]:
         check=True,
     )
     return completed.stdout.splitlines()
+
+
+def _transition_helper(
+    incumbent: Path,
+    candidate: Path,
+    realm: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    command = (
+        "set -euo pipefail; . deploy/lib_sleeves.sh; "
+        f"lm_rollout_transition_inventory {shlex.quote(str(incumbent))} "
+        f"{shlex.quote(str(candidate))}"
+    )
+    if realm is not None:
+        command += f" {shlex.quote(realm)}"
+    return subprocess.run(
+        ["bash", "-c", command],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 def _duration_seconds(value: str) -> int:
@@ -160,6 +184,100 @@ def test_rollout_order_and_dependencies_are_manifest_derived() -> None:
     assert "done < <(lm_rollout_units downstream)" in deploy
     assert "done < <(lm_rollout_units owner)" in deploy
     assert "done < <(lm_realm_units mainnet)" in deploy
+
+
+def test_v1_to_v2_rollout_transition_is_a_validated_ordered_union() -> None:
+    completed = _transition_helper(INCUMBENT_V1, CANDIDATE_V2)
+    assert completed.returncode == 0, completed.stderr
+    rows = [row.split("|", 2) for row in completed.stdout.splitlines()]
+    units = [row[2] for row in rows]
+    downstream = [row[2] for row in rows if row[0] == "downstream"]
+    owners = [row[2] for row in rows if row[0] == "owner"]
+
+    assert len(units) == len(set(units)) == 26
+    assert len(downstream) == 24
+    assert owners == [
+        "liquidity-migration-engine.service",
+        "liquidity-migration-engine-mainnet.service",
+    ]
+    assert units == [
+        row[2]
+        for row in sorted(
+            rows,
+            key=lambda row: (row[0], int(row[1]), row[2]),
+        )
+    ]
+    assert {
+        "liquidity-migration-bybit-long-demo.service",
+        "liquidity-migration-bybit-long-mainnet.service",
+        "liquidity-migration-bybit-carry-demo.service",
+        "liquidity-migration-bybit-carry-mainnet.service",
+        "liquidity-migration-bybit-exodus-demo.service",
+        "liquidity-migration-bybit-exodus-mainnet.service",
+        "liquidity-migration-signal-worker-demo.service",
+        "liquidity-migration-signal-worker-mainnet.service",
+    } <= set(downstream)
+    assert "liquidity-migration-bybit-long-paper.service" not in units
+    assert max(index for index, row in enumerate(rows) if row[0] == "downstream") < min(
+        index for index, row in enumerate(rows) if row[0] == "owner"
+    )
+
+    mainnet = _transition_helper(INCUMBENT_V1, CANDIDATE_V2, "mainnet")
+    assert mainnet.returncode == 0, mainnet.stderr
+    mainnet_units = [row.split("|", 2)[2] for row in mainnet.stdout.splitlines()]
+    assert {
+        "liquidity-migration-bybit-long-mainnet.service",
+        "liquidity-migration-bybit-carry-mainnet.service",
+        "liquidity-migration-bybit-exodus-mainnet.service",
+        "liquidity-migration-signal-worker-mainnet.service",
+        "liquidity-migration-engine-mainnet.service",
+    } <= set(mainnet_units)
+    assert not any("-demo" in unit for unit in mainnet_units)
+
+
+def test_rollout_transition_rejects_an_unvalidated_candidate_or_changed_unit_identity(
+    tmp_path: Path,
+) -> None:
+    wrong_schema = _transition_helper(INCUMBENT_V1, INCUMBENT_V1)
+    assert wrong_schema.returncode != 0
+    assert "candidate fleet manifest is not schema v2" in wrong_schema.stderr
+
+    changed = tmp_path / "candidate-v2.tsv"
+    changed.write_text(
+        CANDIDATE_V2.read_text(encoding="utf-8").replace(
+            "liquidity-migration-engine.service|service|demo|owner|",
+            "liquidity-migration-engine.service|service|mainnet|owner|",
+        ),
+        encoding="utf-8",
+    )
+    identity = _transition_helper(INCUMBENT_V1, changed)
+    assert identity.returncode != 0
+    assert "unit identity changes across rollout" in identity.stderr
+
+
+def test_rollout_transition_topology_overrides_a_misleading_cross_generation_rank(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "candidate-v2.tsv"
+    text = CANDIDATE_V2.read_text(encoding="utf-8")
+    text = text.replace(
+        "liquidity-migration-forward-capture.service|service|shared|downstream|70|",
+        "liquidity-migration-forward-capture.service|service|shared|downstream|190|",
+    ).replace(
+        "liquidity-migration-signal-worker-demo.service|service|demo|downstream|140|always|direct|-|",
+        "liquidity-migration-signal-worker-demo.service|service|demo|downstream|180|always|direct|liquidity-migration-forward-capture.service|",
+    )
+    candidate.write_text(text, encoding="utf-8")
+
+    completed = _transition_helper(INCUMBENT_V1, candidate)
+    assert completed.returncode == 0, completed.stderr
+    units = [row.split("|", 2)[2] for row in completed.stdout.splitlines()]
+    assert units.index("liquidity-migration-signal-worker-demo.service") < units.index(
+        "liquidity-migration-forward-capture.service"
+    )
+    assert units.index("liquidity-migration-forward-upload.service") < units.index(
+        "liquidity-migration-forward-capture.service"
+    )
 
 
 def test_directional_runtime_units_are_manifest_derived() -> None:

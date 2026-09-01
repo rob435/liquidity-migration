@@ -88,6 +88,7 @@ impl FactsWire {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LongInputWire {
+    now_ms: i64,
     decisions: Vec<LongDecisionInput>,
     facts: FactsWire,
     owned_working_symbols: BTreeSet<String>,
@@ -189,6 +190,7 @@ fn execute(request: Request) -> Result<Value, String> {
             validate_schema(schema_version)?;
             reduce_long(
                 LongInput {
+                    now_ms: input.now_ms,
                     decisions: input.decisions,
                     facts: input.facts.into_facts(),
                     owned_working_symbols: input.owned_working_symbols,

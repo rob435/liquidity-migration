@@ -31,7 +31,7 @@
     "funding_cadence_ms": 60000,
     "kline_cadence_ms": 60000,
     "whale_cadence_ms": 3600000,
-    "max_parallel_requests": 16,
+    "max_parallel_requests": 4,
     "kline_page_limit": 1000,
     "funding_page_limit": 200,
     "whale_page_limit": 500,

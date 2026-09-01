@@ -10,6 +10,48 @@ use crate::worker::WorkerError;
 use crate::SCHEMA_VERSION;
 pub use engine_strategies::native_common::SignalConfigIdentity as ConfigIdentity;
 
+pub const MAX_LONG_COLD_START_LOOKBACK_DAYS: usize = 180;
+pub const MAX_CARRY_SOURCE_HISTORY_HOURS: i64 = 182 * 24;
+pub const MAX_WHALE_FEED_DAYS: usize = 30;
+const SOURCE_HISTORY_PADDING_HOURS: i64 = 48;
+
+pub(crate) fn carry_kline_feature_history_hours(carry: &CarryFeatureConfig) -> Option<i64> {
+    let volatility = carry
+        .vol_window_hours
+        .checked_add(carry.vol_return_lag_hours)?;
+    let trail = carry
+        .trail_change_lookback_hours
+        .checked_add(carry.trail_window_hours)?;
+    let turnover = carry
+        .turn_growth_lookback_hours
+        .checked_add(carry.adv_window_hours)?;
+    [
+        carry.momentum_lookback_hours,
+        carry.return_lookback_hours,
+        volatility,
+        trail,
+        turnover,
+    ]
+    .into_iter()
+    .max()
+}
+
+pub(crate) fn carry_source_history_hours(
+    carry: &CarryFeatureConfig,
+    include_replay: bool,
+) -> Option<i64> {
+    let replay_hours = if include_replay {
+        i64::try_from(carry.minimum_replay_days)
+            .ok()?
+            .checked_mul(24)?
+    } else {
+        0
+    };
+    replay_hours
+        .checked_add(carry_kline_feature_history_hours(carry)?)?
+        .checked_add(SOURCE_HISTORY_PADDING_HOURS)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LongFeatureConfig {
@@ -253,7 +295,8 @@ struct CarryFeaturePhysics {
     stale_whale: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SignalWorkerConfig {
     pub long: LongFeatureConfig,
     pub carry: CarryFeatureConfig,
@@ -670,7 +713,7 @@ fn validate_config(
         || carry.whale_change_lookback_hours <= 0
         || carry.whale_freshness_hours <= 0
         || carry.whale_feed_days == 0
-        || carry.whale_feed_days > 30
+        || carry.whale_feed_days > MAX_WHALE_FEED_DAYS
         || !carry.settlement_age_reset_threshold_hours.is_finite()
         || carry.settlement_age_reset_threshold_hours <= 0.0
         || carry.decision_phase_ms < 0
@@ -687,6 +730,7 @@ fn validate_config(
     {
         return Err(WorkerError::config("CARRY feature contract is invalid"));
     }
+    validate_source_history_bounds(long, carry)?;
     let source = &machine.sources;
     if source.bybit_category != "linear"
         || source.bybit_settle_coin != "USDT"
@@ -717,7 +761,7 @@ fn validate_config(
         || live.funding_cadence_ms == 0
         || live.kline_cadence_ms == 0
         || live.whale_cadence_ms == 0
-        || live.max_parallel_requests == 0
+        || !(1..=4).contains(&live.max_parallel_requests)
         || !(1..=1000).contains(&live.kline_page_limit)
         || !(1..=200).contains(&live.funding_page_limit)
         || !(1..=500).contains(&live.whale_page_limit)
@@ -741,6 +785,24 @@ fn validate_config(
                 "config fingerprint is not lowercase sha256",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_source_history_bounds(
+    long: &LongFeatureConfig,
+    carry: &CarryFeatureConfig,
+) -> Result<(), WorkerError> {
+    if long.cold_start_lookback_days > MAX_LONG_COLD_START_LOOKBACK_DAYS {
+        return Err(WorkerError::config(format!(
+            "LONG cold-start lookback exceeds {MAX_LONG_COLD_START_LOOKBACK_DAYS} days"
+        )));
+    }
+    let source_hours = carry_source_history_hours(carry, true);
+    if source_hours.is_none_or(|hours| hours > MAX_CARRY_SOURCE_HISTORY_HOURS) {
+        return Err(WorkerError::config(format!(
+            "CARRY replay and feature history exceeds {MAX_CARRY_SOURCE_HISTORY_HOURS} hours"
+        )));
     }
     Ok(())
 }
@@ -803,7 +865,11 @@ pub fn is_sha256(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{sha256_hex, SignalWorkerConfig};
+    use super::{
+        carry_source_history_hours, sha256_hex, validate_source_history_bounds, SignalWorkerConfig,
+        MAX_CARRY_SOURCE_HISTORY_HOURS, MAX_LONG_COLD_START_LOOKBACK_DAYS,
+        SOURCE_HISTORY_PADDING_HOURS,
+    };
     use engine_strategies::native_carry::plan::{
         ExecutionRules as CarryExecutionRules, StrategyConfig as CarryStrategyConfig,
     };
@@ -817,6 +883,93 @@ mod tests {
         for realm in ["demo", "mainnet"] {
             validate_realm(realm);
         }
+    }
+
+    #[test]
+    fn source_history_caps_accept_the_boundary_and_reject_the_next_unit() {
+        let config = checked_realm_config("demo");
+        let mut long = config.long;
+        let mut carry = config.carry;
+
+        long.cold_start_lookback_days = MAX_LONG_COLD_START_LOOKBACK_DAYS;
+        carry.minimum_replay_days = 149;
+        assert_eq!(
+            carry_source_history_hours(&carry, true),
+            Some(MAX_CARRY_SOURCE_HISTORY_HOURS)
+        );
+        validate_source_history_bounds(&long, &carry).unwrap();
+
+        long.cold_start_lookback_days = MAX_LONG_COLD_START_LOOKBACK_DAYS + 1;
+        assert!(validate_source_history_bounds(&long, &carry)
+            .unwrap_err()
+            .to_string()
+            .contains("LONG cold-start lookback"));
+        long.cold_start_lookback_days = MAX_LONG_COLD_START_LOOKBACK_DAYS;
+
+        carry.vol_window_hours += 1;
+        assert!(validate_source_history_bounds(&long, &carry)
+            .unwrap_err()
+            .to_string()
+            .contains("CARRY replay and feature history"));
+        carry.vol_window_hours -= 1;
+
+        let feature_boundary = MAX_CARRY_SOURCE_HISTORY_HOURS - 24 - SOURCE_HISTORY_PADDING_HOURS;
+        for arm in ["momentum", "return", "volatility", "trail", "turnover"] {
+            let mut candidate = carry.clone();
+            candidate.minimum_replay_days = 1;
+            candidate.momentum_lookback_hours = 1;
+            candidate.return_lookback_hours = 1;
+            candidate.vol_window_hours = 1;
+            candidate.vol_return_lag_hours = 1;
+            candidate.trail_change_lookback_hours = 1;
+            candidate.trail_window_hours = 1;
+            candidate.turn_growth_lookback_hours = 1;
+            candidate.adv_window_hours = 1;
+            match arm {
+                "momentum" => candidate.momentum_lookback_hours = feature_boundary,
+                "return" => candidate.return_lookback_hours = feature_boundary,
+                "volatility" => candidate.vol_window_hours = feature_boundary - 1,
+                "trail" => candidate.trail_change_lookback_hours = feature_boundary - 1,
+                "turnover" => candidate.turn_growth_lookback_hours = feature_boundary - 1,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                carry_source_history_hours(&candidate, true),
+                Some(MAX_CARRY_SOURCE_HISTORY_HOURS),
+                "{arm} boundary"
+            );
+            validate_source_history_bounds(&long, &candidate).unwrap();
+            match arm {
+                "momentum" => candidate.momentum_lookback_hours += 1,
+                "return" => candidate.return_lookback_hours += 1,
+                "volatility" => candidate.vol_window_hours += 1,
+                "trail" => candidate.trail_change_lookback_hours += 1,
+                "turnover" => candidate.turn_growth_lookback_hours += 1,
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_source_history_bounds(&long, &candidate).is_err(),
+                "{arm} boundary plus one"
+            );
+        }
+
+        carry.minimum_replay_days = usize::MAX;
+        assert!(validate_source_history_bounds(&long, &carry).is_err());
+    }
+
+    fn checked_realm_config(realm: &str) -> SignalWorkerConfig {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap();
+        SignalWorkerConfig::load(
+            root.join(format!("configs/signal-worker.{realm}.json")),
+            root.join("configs/long_native_v12.json"),
+            root.join("configs/lane2_carry_hold_v7.json"),
+            root.join(format!("configs/operational.{realm}.json")),
+            root.join(format!("deploy/engine.{realm}.toml.template")),
+        )
+        .unwrap()
     }
 
     fn validate_realm(realm: &str) {

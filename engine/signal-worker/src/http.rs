@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -9,10 +10,11 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use serde_json::Value;
+use tokio::sync::Semaphore;
 
 use crate::worker::WorkerError;
 
-const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct PublicHttpClient {
@@ -21,6 +23,7 @@ pub struct PublicHttpClient {
     timeout: Duration,
     retries: usize,
     retry_base: Duration,
+    request_budget: Arc<Semaphore>,
 }
 
 impl PublicHttpClient {
@@ -29,10 +32,16 @@ impl PublicHttpClient {
         timeout_ms: u64,
         retries: usize,
         retry_base_ms: u64,
+        request_budget: Arc<Semaphore>,
     ) -> Result<Self, WorkerError> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         if host.is_empty() || host.contains('/') {
             return Err(WorkerError::config("public HTTP host is invalid"));
+        }
+        if request_budget.available_permits() == 0 {
+            return Err(WorkerError::config(
+                "public HTTP request budget must be positive",
+            ));
         }
         let mut http = HttpConnector::new();
         http.set_nodelay(true);
@@ -53,6 +62,7 @@ impl PublicHttpClient {
             timeout: Duration::from_millis(timeout_ms),
             retries,
             retry_base: Duration::from_millis(retry_base_ms),
+            request_budget,
         })
     }
 
@@ -78,7 +88,15 @@ impl PublicHttpClient {
                     })?;
                 read_json(response).await
             };
-            match tokio::time::timeout(self.timeout, exchange).await {
+            let outcome = {
+                let _request_permit = self
+                    .request_budget
+                    .acquire()
+                    .await
+                    .map_err(|_| WorkerError::state("public HTTP request budget closed"))?;
+                tokio::time::timeout(self.timeout, exchange).await
+            };
+            match outcome {
                 Ok(Ok(value)) => {
                     if let Some(error) = public_api_error(&value) {
                         last = Some(error);
@@ -137,7 +155,7 @@ where
         )));
     }
     serde_json::from_slice(&bytes)
-        .map_err(|error| WorkerError::json("parse public response", error))
+        .map_err(|error| WorkerError::network(format!("parse public response: {error}")))
 }
 
 pub fn percent_encode(raw: &str) -> String {
@@ -163,7 +181,10 @@ pub fn wall_ms() -> Result<i64, WorkerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::public_api_error;
+    use super::{public_api_error, read_json, PublicHttpClient, MAX_RESPONSE_BYTES};
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::Response;
 
     #[test]
     fn bybit_application_failures_are_retryable_request_failures() {
@@ -175,5 +196,31 @@ mod tests {
         }))
         .expect("nonzero Bybit result must fail");
         assert!(error.to_string().contains("10006"));
+    }
+
+    #[tokio::test]
+    async fn clients_and_lane_clones_share_one_request_concurrency_budget() {
+        let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(2));
+        let client =
+            PublicHttpClient::new("example.com", 1_000, 1, 1, std::sync::Arc::clone(&budget))
+                .unwrap();
+        let other_source = PublicHttpClient::new("example.org", 1_000, 1, 1, budget).unwrap();
+        let clone = other_source.clone();
+        let first = client.request_budget.acquire().await.unwrap();
+        let second = clone.request_budget.acquire().await.unwrap();
+        assert!(client.request_budget.try_acquire().is_err());
+        drop(first);
+        assert!(clone.request_budget.try_acquire().is_ok());
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn response_body_cap_refuses_the_next_byte() {
+        let response = Response::builder()
+            .status(200)
+            .body(Full::new(Bytes::from(vec![b' '; MAX_RESPONSE_BYTES + 1])))
+            .unwrap();
+        let error = read_json(response).await.unwrap_err();
+        assert!(error.to_string().contains("public response body"));
     }
 }

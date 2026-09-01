@@ -91,6 +91,8 @@ pub struct MockCtx {
     /// What the engine would say is still working for this strategy. Empty
     /// unless a test seeds it.
     pub resting: Vec<RestingSeed>,
+    account_equity_usdt: f64,
+    account_available_margin_usdt: f64,
 }
 
 impl MockCtx {
@@ -117,6 +119,8 @@ impl MockCtx {
             timers: Vec::new(),
             arm_calls: Vec::new(),
             resting: Vec::new(),
+            account_equity_usdt: 1_000.0,
+            account_available_margin_usdt: 1_000.0,
         }
     }
 
@@ -144,6 +148,11 @@ impl MockCtx {
 
     pub fn set_now(&mut self, now_ns: u64) {
         self.now_ns = now_ns;
+    }
+
+    pub fn set_account_summary(&mut self, equity_usdt: f64, available_margin_usdt: f64) {
+        self.account_equity_usdt = equity_usdt;
+        self.account_available_margin_usdt = available_margin_usdt;
     }
 
     /// Seed what the account reading says is held, as this strategy's own.
@@ -237,8 +246,8 @@ impl MockCtx {
 impl StrategyCtx for MockCtx {
     fn account_summary(&self) -> StrategyAccountSummary {
         StrategyAccountSummary {
-            equity_usdt: 1_000.0,
-            available_margin_usdt: 1_000.0,
+            equity_usdt: self.account_equity_usdt,
+            available_margin_usdt: self.account_available_margin_usdt,
             observed_ns: self.now_ns,
         }
     }
@@ -261,6 +270,12 @@ impl StrategyCtx for MockCtx {
 
     fn symbol_id(&self, name: &str) -> Option<SymbolId> {
         self.symbols.get(name).copied()
+    }
+
+    fn symbol_name(&self, symbol: SymbolId) -> Option<&str> {
+        self.symbols
+            .iter()
+            .find_map(|(name, known)| (*known == symbol).then_some(name.as_str()))
     }
 
     fn now_ns(&self) -> u64 {
@@ -293,6 +308,34 @@ impl StrategyCtx for MockCtx {
 
     fn in_flight(&self, symbol: SymbolId) -> f64 {
         self.in_flight.get(&symbol).copied().unwrap_or(0.0)
+    }
+
+    fn my_position_facts(&self, symbol: SymbolId) -> Option<engine_types::StrategyPositionFacts> {
+        let attributed_signed_qty = self.my_position(symbol);
+        let in_flight_signed_qty = self.in_flight(symbol);
+        if attributed_signed_qty == 0.0 && in_flight_signed_qty == 0.0 {
+            return None;
+        }
+        Some(engine_types::StrategyPositionFacts {
+            symbol,
+            attributed_signed_qty,
+            venue: self.position(symbol),
+            in_flight_signed_qty,
+        })
+    }
+
+    fn my_positions(&self, out: &mut Vec<engine_types::StrategyPositionFacts>) {
+        let symbols = self
+            .mine
+            .keys()
+            .chain(self.in_flight.keys())
+            .map(|symbol| symbol.0)
+            .collect::<std::collections::BTreeSet<_>>();
+        out.extend(
+            symbols
+                .into_iter()
+                .filter_map(|symbol| self.my_position_facts(SymbolId(symbol))),
+        );
     }
 
     fn instrument(&self, symbol: SymbolId) -> Option<InstrumentRule> {
@@ -346,9 +389,19 @@ impl StrategyCtx for MockCtx {
         }
     }
 
-    // `order_facts` is left at the trait's default (`None`): this bench keeps
-    // no order ledger, and the cover bookkeeping that used to need the lookup
-    // lives in the engine now.
+    fn order_facts(&self, client_order_id: &str) -> Option<engine_types::OrderFacts> {
+        let order = self
+            .resting
+            .iter()
+            .find(|order| order.client_order_id == client_order_id)?;
+        Some(engine_types::OrderFacts {
+            symbol: order.symbol,
+            side: order.side,
+            qty: order.qty,
+            filled_qty: order.filled_qty,
+            reduce_only: order.reduce_only,
+        })
+    }
 }
 
 /// One strategy plus its context, with a verb for every event the engine can
