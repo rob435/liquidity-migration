@@ -6,6 +6,16 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-01 — Funded native takeover can use the installed execution
+  credential without copying secrets.** The account probe remains a read-only
+  Rust type with no order or account-mutation method. It prefers the optional
+  globally read-only attestor when present and otherwise selects the existing
+  funded environment explicitly. The armed rollout validates that selected
+  file before stopping the incumbent and passes the exclusive account ID into
+  every takeover command. Linux runtime-supervisor fixtures now substitute the
+  current ownership comparison syntax, and the frozen-topic WebSocket test no
+  longer assumes ordering between independently handed-off initial quotes.
+
 - **2026-09-01 — Directional sleeves become perpetual across source and restart
   boundaries.** The credential-free worker replaces cycle-owned Bybit clients
   with one persistent public WebSocket actor plus independent bounded

@@ -175,6 +175,9 @@ def test_flatness_control_uses_the_installed_rust_engine(tmp_path: Path) -> None
         'EnvironmentFile=$credential_file'
     )
     assert 'UnsetEnvironment=$unset_environment' in payload
+    assert "BYBIT_INVENTORY_CREDENTIAL_SET" in payload
+    assert "inventory_credential_set=execution" in payload
+    assert "inventory_credential_set=attestor" in payload
     for key in (
         "BYBIT_REAL_API_KEY",
         "BYBIT_REAL_API_SECRET",
@@ -184,7 +187,7 @@ def test_flatness_control_uses_the_installed_rust_engine(tmp_path: Path) -> None
     ):
         assert key in payload
     assert "/etc/liquidity-migration/bybit-mainnet-attestor.env" in payload
-    assert "/etc/liquidity-migration/bybit-mainnet.env" not in payload
+    assert "/etc/liquidity-migration/bybit-mainnet.env" in payload
     assert 'stat -c %a "$credential_file"' in payload
     for key in (
         "BYBIT_ATTEST_API_KEY",
@@ -199,7 +202,7 @@ def test_flatness_control_uses_the_installed_rust_engine(tmp_path: Path) -> None
 
     assert '"$engine_binary" "${engine_args[@]}"' in payload
     assert "/etc/liquidity-migration/bybit-mainnet-attestor.env" in payload
-    assert "/etc/liquidity-migration/bybit-mainnet.env" not in payload
+    assert "/etc/liquidity-migration/bybit-mainnet.env" in payload
 
 
 @pytest.mark.parametrize(

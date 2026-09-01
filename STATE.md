@@ -19,6 +19,11 @@ The funded engine starts only while the owner-controlled
 `REAL_MONEY=true` switch is present in the funded credential file and funded
 preflight passes. Git configuration cannot arm money.
 
+Stopped native-state takeover and credential-wide flatness checks run through a
+Rust inventory type with no order or account-mutation method. Mainnet prefers
+the optional globally read-only attestor credential and otherwise uses the
+existing execution credential from the funded environment file.
+
 ### Directional decisions
 
 Each realm has one credential-free Rust `signal-worker`. It acquires Bybit and

@@ -152,6 +152,13 @@ impl VenueRealm {
         Credentials::from_env_read_only(self.as_str(), self.is_real_money(), key_var, secret_var)
     }
 
+    /// Read the execution credential into the read-only inventory capability.
+    /// The resulting probe still exposes no order or account mutation method.
+    pub(crate) fn execution_inventory_credentials(self) -> Result<Credentials, VenueError> {
+        let (key_var, secret_var) = self.credential_vars();
+        Credentials::from_env_read_only(self.as_str(), self.is_real_money(), key_var, secret_var)
+    }
+
     /// Credentials for this realm, supplied rather than read. Tests and the
     /// mock venue only; the live path is [`VenueRealm::credentials`], which is
     /// the one that checks arming.

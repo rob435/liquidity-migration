@@ -83,6 +83,11 @@ engine — the execution loop
       adapter. Succeeds only when the credential-wide inventory is fresh and
       empty. Sends no orders and changes no venue state.
 
+  engine verify-account-identity --config engine.toml
+      Authenticate the narrow inventory reader and bind it to the config's
+      venue, realm, and EXPECTED_ENGINE_ACCOUNT_USER_ID. Reads no WAL or
+      account inventory and changes no venue state.
+
   engine canary-order --config engine.toml --symbol XRPUSDT
                       --expected-user-id 579580669 --execute
       On Bybit Demo only, take the account lease, rest one minimum-value
@@ -260,6 +265,14 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
                     .unwrap_or("engine.toml".into()),
             );
             runtime()?.block_on(engine_core::flatness::run(&config))
+        }
+        "verify-account-identity" => {
+            let config = PathBuf::from(
+                value(args, "--config")
+                    .or_else(|| std::env::var("ENGINE_CONFIG_FILE").ok())
+                    .unwrap_or("engine.toml".into()),
+            );
+            runtime()?.block_on(engine_core::flatness::verify_account_identity(&config))
         }
         "canary-order" => {
             let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));

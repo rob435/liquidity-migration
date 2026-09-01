@@ -1698,6 +1698,11 @@ ENGINE_ACTIVE_BUILDER_UNIT=""
 MAINNET_CREDENTIAL_ENV=/etc/liquidity-migration/bybit-mainnet.env
 MAINNET_ATTESTOR_ENV=/etc/liquidity-migration/bybit-mainnet-attestor.env
 MAINNET_ARMED_STATE=""
+MAINNET_INVENTORY_CREDENTIAL_ENV=""
+MAINNET_INVENTORY_CREDENTIAL_SET=""
+MAINNET_INVENTORY_CREDENTIAL_STAT=""
+MAINNET_INVENTORY_CREDENTIAL_SHA256=""
+MAINNET_IDENTITY_PREFLIGHT_BINARY=""
 ROLLOUT_FUNDED_AUTHORITY=0
 
 funded_configuration_present() {
@@ -1717,21 +1722,29 @@ funded_configuration_present() {
     return 1
 }
 
-preflight_mainnet_native_takeover() {
-    if ! mainnet_armed; then
-        echo "mainnet-takeover-preflight-ok result=skipped-disarmed"
-        return 0
+bind_mainnet_inventory_credential() {
+    local credential_env credential_set credential_stat credential_sha256
+    if [ -n "$MAINNET_INVENTORY_CREDENTIAL_ENV" ]; then
+        verify_mainnet_inventory_credential_binding
+        return
     fi
-    [ -f "$MAINNET_ATTESTOR_ENV" ] && [ ! -L "$MAINNET_ATTESTOR_ENV" ] \
-        || fail "armed mainnet native takeover credential is missing or linked: $MAINNET_ATTESTOR_ENV"
-    [ "$(stat -c %u "$MAINNET_ATTESTOR_ENV")" -eq 0 ] \
-        && [ "$(stat -c %g "$MAINNET_ATTESTOR_ENV")" -eq 0 ] \
-        && [ "$(stat -c %a "$MAINNET_ATTESTOR_ENV")" = 600 ] \
-        && [ "$(stat -c %h "$MAINNET_ATTESTOR_ENV")" -eq 1 ] \
-        && [ "$(stat -c %s "$MAINNET_ATTESTOR_ENV")" -gt 0 ] \
-        && [ "$(stat -c %s "$MAINNET_ATTESTOR_ENV")" -le 1048576 ] \
+    credential_env="$MAINNET_CREDENTIAL_ENV"
+    credential_set=execution
+    if [ -e "$MAINNET_ATTESTOR_ENV" ] || [ -L "$MAINNET_ATTESTOR_ENV" ]; then
+        credential_env="$MAINNET_ATTESTOR_ENV"
+        credential_set=attestor
+    fi
+    [ -f "$credential_env" ] && [ ! -L "$credential_env" ] \
+        || fail "armed mainnet native takeover credential is missing or linked: $credential_env"
+    [ "$(stat -c %u "$credential_env")" -eq 0 ] \
+        && [ "$(stat -c %g "$credential_env")" -eq 0 ] \
+        && [ "$(stat -c %a "$credential_env")" = 600 ] \
+        && [ "$(stat -c %h "$credential_env")" -eq 1 ] \
+        && [ "$(stat -c %s "$credential_env")" -gt 0 ] \
+        && [ "$(stat -c %s "$credential_env")" -le 1048576 ] \
         || fail "armed mainnet native takeover credential is not a single-link root:root mode-0600 file"
-    awk '
+    if [ "$credential_set" = attestor ]; then
+        awk '
 BEGIN {
   allowed["BYBIT_ATTEST_API_KEY"] = 1
   allowed["BYBIT_ATTEST_API_SECRET"] = 1
@@ -1752,9 +1765,129 @@ END {
       seen["BYBIT_ATTEST_API_KEY_IP"] != 1 ||
       seen["BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID"] != 1) exit 1
 }
-' "$MAINNET_ATTESTOR_ENV" \
-        || fail "armed mainnet native takeover credential has invalid assignments"
-    echo "mainnet-takeover-preflight-ok result=credential-boundary-present"
+' "$credential_env" \
+            || fail "armed mainnet native takeover credential has invalid assignments"
+    else
+        awk '
+BEGIN {
+  required["BYBIT_REAL_API_KEY"] = 1
+  required["BYBIT_REAL_API_SECRET"] = 1
+  required["BYBIT_REAL_API_KEY_IP"] = 1
+  required["BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID"] = 1
+}
+/^[[:space:]]*$/ || /^#/ { next }
+{
+  separator = index($0, "=")
+  if (separator < 2) exit 1
+  key = substr($0, 1, separator - 1)
+  value = substr($0, separator + 1)
+  if ((key in required) && (seen[key]++ || value == "")) exit 1
+}
+END {
+  if (seen["BYBIT_REAL_API_KEY"] != 1 ||
+      seen["BYBIT_REAL_API_SECRET"] != 1 ||
+      seen["BYBIT_REAL_API_KEY_IP"] != 1 ||
+      seen["BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID"] != 1) exit 1
+}
+' "$credential_env" \
+            || fail "armed mainnet native takeover execution credential has invalid assignments"
+    fi
+    credential_stat="$(stat -c '%d:%i:%u:%g:%a:%h:%s' -- "$credential_env")" \
+        || fail "cannot bind mainnet inventory credential metadata"
+    credential_sha256="$(sha256sum -- "$credential_env" | awk '{print $1}')" \
+        || fail "cannot bind mainnet inventory credential bytes"
+    [[ "$credential_sha256" =~ ^[0-9a-f]{64}$ ]] \
+        || fail "mainnet inventory credential digest is invalid"
+    MAINNET_INVENTORY_CREDENTIAL_ENV="$credential_env"
+    MAINNET_INVENTORY_CREDENTIAL_SET="$credential_set"
+    MAINNET_INVENTORY_CREDENTIAL_STAT="$credential_stat"
+    MAINNET_INVENTORY_CREDENTIAL_SHA256="$credential_sha256"
+}
+
+verify_mainnet_inventory_credential_binding() {
+    local credential_stat credential_sha256
+    [ -n "$MAINNET_INVENTORY_CREDENTIAL_ENV" ] \
+        && [ -n "$MAINNET_INVENTORY_CREDENTIAL_SET" ] \
+        && [ -n "$MAINNET_INVENTORY_CREDENTIAL_STAT" ] \
+        && [ -n "$MAINNET_INVENTORY_CREDENTIAL_SHA256" ] \
+        || fail "mainnet inventory credential was not bound"
+    [ -f "$MAINNET_INVENTORY_CREDENTIAL_ENV" ] \
+        && [ ! -L "$MAINNET_INVENTORY_CREDENTIAL_ENV" ] \
+        || fail "bound mainnet inventory credential moved or became linked"
+    credential_stat="$(stat -c '%d:%i:%u:%g:%a:%h:%s' -- \
+        "$MAINNET_INVENTORY_CREDENTIAL_ENV")" \
+        || fail "cannot revalidate mainnet inventory credential metadata"
+    [ "$credential_stat" = "$MAINNET_INVENTORY_CREDENTIAL_STAT" ] \
+        || fail "bound mainnet inventory credential metadata changed"
+    credential_sha256="$(sha256sum -- "$MAINNET_INVENTORY_CREDENTIAL_ENV" | awk '{print $1}')" \
+        || fail "cannot revalidate mainnet inventory credential bytes"
+    [ "$credential_sha256" = "$MAINNET_INVENTORY_CREDENTIAL_SHA256" ] \
+        || fail "bound mainnet inventory credential bytes changed"
+}
+
+stage_mainnet_identity_preflight_binary() {
+    local staged staged_digest
+    [ -z "$MAINNET_IDENTITY_PREFLIGHT_BINARY" ] \
+        || fail "mainnet identity preflight binary is already staged"
+    [ -d /opt/liquidity-migration-engine/bin ] \
+        && [ ! -L /opt/liquidity-migration-engine/bin ] \
+        && [ "$(stat -c %U /opt/liquidity-migration-engine/bin)" = root ] \
+        && [ "$(stat -c %G /opt/liquidity-migration-engine/bin)" = root ] \
+        && [ "$(stat -c %a /opt/liquidity-migration-engine/bin)" = 755 ] \
+        || fail "mainnet identity preflight directory is not trusted"
+    staged="$(mktemp /opt/liquidity-migration-engine/bin/.engine-identity.XXXXXX)" \
+        || fail "cannot create mainnet identity preflight binary"
+    MAINNET_IDENTITY_PREFLIGHT_BINARY="$staged"
+    [ -f "$staged" ] && [ ! -L "$staged" ] \
+        && [ "$(stat -c %h "$staged")" -eq 1 ] \
+        || fail "mainnet identity preflight path is unsafe"
+    install -o root -g "$RUNTIME_GROUP" -m 0750 \
+        "$ENGINE_CANDIDATE_BINARY" "$staged" \
+        || fail "cannot stage candidate engine for mainnet identity preflight"
+    staged_digest="$(sha256sum -- "$staged" | awk '{print $1}')" \
+        || fail "cannot digest staged mainnet identity preflight binary"
+    [ "$staged_digest" = "$ENGINE_PREFETCHED_DIGEST" ] \
+        && [ -f "$staged" ] && [ ! -L "$staged" ] && [ -x "$staged" ] \
+        && [ "$(stat -c %h "$staged")" -eq 1 ] \
+        && [ "$(stat -c %U "$staged")" = root ] \
+        && [ "$(stat -c %G "$staged")" = "$RUNTIME_GROUP" ] \
+        && [ "$(stat -c %a "$staged")" = 750 ] \
+        || fail "staged mainnet identity preflight binary differs from the exact candidate"
+}
+
+remove_mainnet_identity_preflight_binary() {
+    local staged="$MAINNET_IDENTITY_PREFLIGHT_BINARY"
+    [ -n "$staged" ] || return 0
+    case "$staged" in
+        /opt/liquidity-migration-engine/bin/.engine-identity.*) ;;
+        *) return 1 ;;
+    esac
+    rm -f -- "$staged" || return 1
+    MAINNET_IDENTITY_PREFLIGHT_BINARY=""
+}
+
+preflight_mainnet_native_takeover() {
+    local status=0
+    if ! mainnet_armed; then
+        echo "mainnet-takeover-preflight-ok result=skipped-disarmed"
+        return 0
+    fi
+    bind_mainnet_inventory_credential
+    verify_prefetched_engine_candidate "$EXPECTED_COMMIT"
+    stage_mainnet_identity_preflight_binary
+    if run_engine_inventory_command \
+        mainnet "$ENGINE_MAINNET_CONFIG" "$MAINNET_IDENTITY_PREFLIGHT_BINARY" \
+        verify-account-identity; then
+        status=0
+    else
+        status=$?
+    fi
+    if ! remove_mainnet_identity_preflight_binary && [ "$status" -eq 0 ]; then
+        status=1
+    fi
+    [ "$status" -eq 0 ] \
+        || fail "candidate engine cannot authenticate the bound mainnet account"
+    echo "mainnet-takeover-preflight-ok result=account-identity-verified credential_set=$MAINNET_INVENTORY_CREDENTIAL_SET"
 }
 
 native_entries_switch() {
@@ -1882,9 +2015,10 @@ install_mainnet_native_engine_config() {
         mainnet "$operational_config" "$ENGINE_MAINNET_CONFIG" "$action"
 }
 
-run_engine_takeover_command() {
-    local realm="$1" config="$2" runtime_user engine_env credential_env
-    shift 2
+run_engine_inventory_command() {
+    local realm="$1" config="$2" engine_binary="$3" runtime_user engine_env credential_env
+    local inventory_credential_set
+    shift 3
     case "$realm" in
         demo)
             runtime_user="$DEMO_ENGINE_USER"
@@ -1894,7 +2028,10 @@ run_engine_takeover_command() {
         mainnet)
             runtime_user="$MAINNET_ENGINE_USER"
             engine_env="$ENGINE_MAINNET_ENVIRONMENT"
-            credential_env="$MAINNET_ATTESTOR_ENV"
+            bind_mainnet_inventory_credential
+            verify_mainnet_inventory_credential_binding
+            credential_env="$MAINNET_INVENTORY_CREDENTIAL_ENV"
+            inventory_credential_set="$MAINNET_INVENTORY_CREDENTIAL_SET"
             ;;
         *) fail "unsupported strategy-state takeover realm: $realm" ;;
     esac
@@ -1909,7 +2046,7 @@ run_engine_takeover_command() {
             BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET \
             BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP \
             BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP \
-            BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY \
+            BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID BYBIT_INVENTORY_CREDENTIAL_SET REAL_MONEY \
             EXPECTED_ENGINE_ACCOUNT_USER_ID EXPECTED_ENGINE_VENUE EXPECTED_ENGINE_REALM
         case "$realm" in
             demo)
@@ -1917,8 +2054,21 @@ run_engine_takeover_command() {
                     BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET
                 ;;
             mainnet)
-                lm_load_private_systemd_environment "$PYTHON" "$credential_env" \
-                    BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP
+                if [ "$inventory_credential_set" = attestor ]; then
+                    lm_load_private_systemd_environment "$PYTHON" "$credential_env" \
+                        BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP \
+                        BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID
+                else
+                    lm_load_private_systemd_environment "$PYTHON" "$credential_env" \
+                        BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP \
+                        BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID
+                fi
+                # The first check binds what the loader opens; this second one
+                # rejects a replacement during that read. The command receives
+                # the already loaded values, so later path changes cannot alter it.
+                verify_mainnet_inventory_credential_binding
+                BYBIT_INVENTORY_CREDENTIAL_SET="$inventory_credential_set"
+                export BYBIT_INVENTORY_CREDENTIAL_SET
                 ;;
         esac
         lm_load_private_systemd_environment "$PYTHON" "$engine_env" \
@@ -1929,8 +2079,14 @@ run_engine_takeover_command() {
             || fail "$engine_env does not bind the $realm Bybit account"
         exec /usr/bin/setpriv \
             --reuid "$runtime_user" --regid "$RUNTIME_GROUP" --clear-groups \
-            "$ENGINE_BINARY" "$@" --config "$config"
+            "$engine_binary" "$@" --config "$config"
     )
+}
+
+run_engine_takeover_command() {
+    local realm="$1" config="$2"
+    shift 2
+    run_engine_inventory_command "$realm" "$config" "$ENGINE_BINARY" "$@"
 }
 
 remove_native_takeover_temps() {
@@ -4942,6 +5098,10 @@ deploy_cleanup() {
     trap - EXIT INT TERM HUP PIPE
     trap '' INT TERM HUP PIPE
     set +e
+    if ! remove_mainnet_identity_preflight_binary; then
+        cleanup_notice "cannot remove staged mainnet identity preflight binary"
+        [ "$status" -ne 0 ] || status=1
+    fi
     if ! stop_active_engine_builder_unit; then
         cleanup_notice "cannot stop tracked transient builder unit=$ENGINE_ACTIVE_BUILDER_UNIT"
         [ "$status" -ne 0 ] || status=1
@@ -4967,6 +5127,10 @@ rollout_cleanup() {
     # fail-closed handoff.
     trap '' INT TERM HUP PIPE
     set +e
+    if ! remove_mainnet_identity_preflight_binary; then
+        cleanup_notice "cannot remove staged mainnet identity preflight binary"
+        [ "$status" -ne 0 ] || status=1
+    fi
     if ! stop_active_engine_builder_unit; then
         cleanup_notice "cannot stop tracked transient builder unit=$ENGINE_ACTIVE_BUILDER_UNIT"
         [ "$status" -ne 0 ] || status=1

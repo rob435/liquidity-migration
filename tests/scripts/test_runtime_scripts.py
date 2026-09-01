@@ -493,8 +493,13 @@ def test_native_takeover_is_stopped_account_bound_complete_and_retry_safe() -> N
     deploy = DEPLOY.read_text(encoding="utf-8")
     runner = _function(
         deploy,
+        "run_engine_inventory_command",
         "run_engine_takeover_command",
-        "import_native_strategy_state",
+    )
+    takeover_runner = _function(
+        deploy,
+        "run_engine_takeover_command",
+        "remove_native_takeover_temps",
     )
     takeover = _function(
         deploy,
@@ -510,13 +515,19 @@ def test_native_takeover_is_stopped_account_bound_complete_and_retry_safe() -> N
     assert "BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET" in runner
     assert "BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET" in runner
     assert "BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET" in runner
+    assert "BYBIT_INVENTORY_CREDENTIAL_SET" in runner
+    assert "BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID" in runner
     assert "credential_env=/etc/liquidity-migration/bybit-demo.env" in runner
-    assert 'credential_env="$MAINNET_ATTESTOR_ENV"' in runner
+    assert "bind_mainnet_inventory_credential" in runner
+    assert runner.count("verify_mainnet_inventory_credential_binding") == 2
+    assert 'credential_env="$MAINNET_INVENTORY_CREDENTIAL_ENV"' in runner
+    assert 'inventory_credential_set="$MAINNET_INVENTORY_CREDENTIAL_SET"' in runner
     assert 'engine_env="$ENGINE_ENVIRONMENT"' in runner
     assert 'engine_env="$ENGINE_MAINNET_ENVIRONMENT"' in runner
     assert "EXPECTED_ENGINE_ACCOUNT_USER_ID" in runner
     assert "/usr/bin/setpriv" in runner
     assert '--reuid "$runtime_user" --regid "$RUNTIME_GROUP" --clear-groups' in runner
+    assert 'run_engine_inventory_command "$realm" "$config" "$ENGINE_BINARY" "$@"' in takeover_runner
 
     assert takeover.index("verify-native-strategy-state") < takeover.index("for source in")
     assert '[ "$required_present" -eq 0 ] && [ "$optional_present" -eq 0 ]' in takeover
@@ -1578,8 +1589,18 @@ def test_rollout_transition_union_is_prepared_before_snapshot_and_used_everywher
     assert "restore_prior_topology_snapshot" in restore
 
 
-def test_armed_rollout_preflights_attestor_before_stopping_any_unit() -> None:
+def test_armed_rollout_preflights_inventory_credential_before_stopping_any_unit() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
+    binding = _function(
+        text,
+        "bind_mainnet_inventory_credential",
+        "stage_mainnet_identity_preflight_binary",
+    )
+    staging = _function(
+        text,
+        "stage_mainnet_identity_preflight_binary",
+        "remove_mainnet_identity_preflight_binary",
+    )
     preflight = _function(
         text,
         "preflight_mainnet_native_takeover",
@@ -1591,17 +1612,300 @@ def test_armed_rollout_preflights_attestor_before_stopping_any_unit() -> None:
         "BYBIT_ATTEST_API_KEY",
         "BYBIT_ATTEST_API_SECRET",
         "BYBIT_ATTEST_API_KEY_IP",
+        "BYBIT_REAL_API_KEY",
+        "BYBIT_REAL_API_SECRET",
+        "BYBIT_REAL_API_KEY_IP",
         "BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID",
     ):
-        assert assignment in preflight
-    assert 'stat -c %u "$MAINNET_ATTESTOR_ENV"' in preflight
-    assert 'stat -c %g "$MAINNET_ATTESTOR_ENV"' in preflight
-    assert 'stat -c %a "$MAINNET_ATTESTOR_ENV"' in preflight
-    assert 'stat -c %h "$MAINNET_ATTESTOR_ENV"' in preflight
-    assert "credential has invalid assignments" in preflight
+        assert assignment in binding
+    assert 'credential_env="$MAINNET_CREDENTIAL_ENV"' in binding
+    assert 'credential_env="$MAINNET_ATTESTOR_ENV"' in binding
+    assert 'stat -c %u "$credential_env"' in binding
+    assert 'stat -c %g "$credential_env"' in binding
+    assert 'stat -c %a "$credential_env"' in binding
+    assert 'stat -c %h "$credential_env"' in binding
+    assert "credential has invalid assignments" in binding
+    assert 'verify_prefetched_engine_candidate "$EXPECTED_COMMIT"' in preflight
+    assert '"$ENGINE_CANDIDATE_BINARY" "$staged"' in staging
+    assert '"$staged_digest" = "$ENGINE_PREFETCHED_DIGEST"' in staging
+    assert "stage_mainnet_identity_preflight_binary" in preflight
+    assert '"$MAINNET_IDENTITY_PREFLIGHT_BINARY"' in preflight
+    assert "verify-account-identity" in preflight
+    assert preflight.index("verify_prefetched_engine_candidate") < preflight.index(
+        "stage_mainnet_identity_preflight_binary"
+    ) < preflight.index("run_engine_inventory_command") < preflight.index(
+        "verify-account-identity"
+    )
     assert rollout.index("preflight-mainnet-native-takeover") < rollout.index(
         "snapshot-prior-topology"
     ) < rollout.index("ROLLOUT_STOPPED=1") < rollout.index("stop-downstream-units")
+
+
+_VALID_ATTESTOR_CREDENTIAL = """\
+BYBIT_ATTEST_API_KEY=attest-key-one
+BYBIT_ATTEST_API_SECRET=attest-secret-one
+BYBIT_ATTEST_API_KEY_IP=127.0.0.1
+BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID=123456
+"""
+
+_CHANGED_ATTESTOR_CREDENTIAL = """\
+BYBIT_ATTEST_API_KEY=attest-key-two
+BYBIT_ATTEST_API_SECRET=attest-secret-two
+BYBIT_ATTEST_API_KEY_IP=127.0.0.1
+BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID=123456
+"""
+
+
+def _run_mainnet_inventory_credential_harness(
+    tmp_path: Path,
+    *,
+    attestor: str | None,
+    linked_attestor: bool = False,
+    changed_attestor: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    credential_functions = _function(
+        deploy,
+        "bind_mainnet_inventory_credential",
+        "native_entries_switch",
+    )
+    inventory_runner = _function(
+        deploy,
+        "run_engine_inventory_command",
+        "remove_native_takeover_temps",
+    )
+    privileged_exec = "exec /usr/bin/setpriv \\\n"
+    assert privileged_exec in inventory_runner
+    inventory_runner = inventory_runner.replace(
+        privileged_exec,
+        'exec "$TEST_SETPRIV" \\\n',
+        1,
+    )
+
+    execution = tmp_path / "bybit-mainnet.env"
+    execution.write_text(
+        """\
+BYBIT_REAL_API_KEY=execution-key
+BYBIT_REAL_API_SECRET=execution-secret
+BYBIT_REAL_API_KEY_IP=127.0.0.1
+BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID=123456
+REAL_MONEY=true
+""",
+        encoding="utf-8",
+    )
+    execution.chmod(0o600)
+
+    attestor_path = tmp_path / "bybit-mainnet-attestor.env"
+    if attestor is not None:
+        target = attestor_path
+        if linked_attestor:
+            target = tmp_path / "linked-attestor-target.env"
+        target.write_text(attestor, encoding="utf-8")
+        target.chmod(0o600)
+        if linked_attestor:
+            attestor_path.symlink_to(target)
+
+    changed_path = tmp_path / "changed-attestor.env"
+    if changed_attestor is not None:
+        changed_path.write_text(changed_attestor, encoding="utf-8")
+        changed_path.chmod(0o600)
+
+    engine_environment = tmp_path / "engine-mainnet.env"
+    engine_environment.write_text(
+        """\
+EXPECTED_ENGINE_ACCOUNT_USER_ID=123456
+EXPECTED_ENGINE_VENUE=bybit
+EXPECTED_ENGINE_REALM=mainnet
+""",
+        encoding="utf-8",
+    )
+    engine_environment.chmod(0o600)
+    engine_config = tmp_path / "engine-mainnet.toml"
+    engine_config.write_text("realm = \"mainnet\"\n", encoding="utf-8")
+
+    stat_shim = tmp_path / "stat"
+    stat_shim.write_text(
+        f"""\
+#!/bin/sh
+exec {shlex.quote(sys.executable)} - "$@" <<'PY'
+import os
+import sys
+
+if len(sys.argv) not in (4, 5) or sys.argv[1] != "-c":
+    raise SystemExit(2)
+format_string = sys.argv[2]
+path_index = 4 if sys.argv[3] == "--" else 3
+row = os.lstat(sys.argv[path_index])
+values = (
+    ("%d", str(row.st_dev)),
+    ("%i", str(row.st_ino)),
+    ("%u", "0"),
+    ("%g", "0"),
+    ("%a", "600"),
+    ("%h", str(row.st_nlink)),
+    ("%s", str(row.st_size)),
+)
+for token, value in values:
+    format_string = format_string.replace(token, value)
+print(format_string)
+PY
+""",
+        encoding="utf-8",
+    )
+    stat_shim.chmod(0o700)
+
+    setpriv_shim = tmp_path / "setpriv"
+    setpriv_shim.write_text(
+        """\
+#!/bin/sh
+printf 'identity-command credential_set=%s execution_key=%s attestor_key=%s argv=%s\\n' \
+    "${BYBIT_INVENTORY_CREDENTIAL_SET-}" \
+    "${BYBIT_REAL_API_KEY:+present}" \
+    "${BYBIT_ATTEST_API_KEY:+present}" \
+    "$*"
+""",
+        encoding="utf-8",
+    )
+    setpriv_shim.chmod(0o700)
+
+    action = "bind-change-during-load" if changed_attestor is not None else "preflight"
+    script = f"""
+set -euo pipefail
+PATH={shlex.quote(f"{tmp_path}:{os.environ['PATH']}")}
+PYTHON={shlex.quote(sys.executable)}
+MAINNET_CREDENTIAL_ENV={shlex.quote(str(execution))}
+MAINNET_ATTESTOR_ENV={shlex.quote(str(attestor_path))}
+ENGINE_MAINNET_ENVIRONMENT={shlex.quote(str(engine_environment))}
+ENGINE_MAINNET_CONFIG={shlex.quote(str(engine_config))}
+ENGINE_CANDIDATE_BINARY={shlex.quote(str(tmp_path / "candidate-engine"))}
+EXPECTED_COMMIT={'1' * 40}
+MAINNET_ENGINE_USER=test-engine
+RUNTIME_GROUP=test-runtime
+TEST_SETPRIV={shlex.quote(str(setpriv_shim))}
+TEST_ACTION={action}
+CHANGED_ATTESTOR_ENV={shlex.quote(str(changed_path))}
+MAINNET_INVENTORY_CREDENTIAL_ENV=""
+MAINNET_INVENTORY_CREDENTIAL_SET=""
+MAINNET_INVENTORY_CREDENTIAL_STAT=""
+MAINNET_INVENTORY_CREDENTIAL_SHA256=""
+MAINNET_IDENTITY_PREFLIGHT_BINARY=""
+
+fail() {{ printf 'FAIL: %s\\n' "$*" >&2; exit 70; }}
+mainnet_armed() {{ return 0; }}
+verify_prefetched_engine_candidate() {{ printf 'candidate-verified=%s\\n' "$1"; }}
+lm_load_private_systemd_environment() {{
+    local ignored_python="$1" path="$2" key value
+    shift 2
+    for key in "$@"; do
+        if value="$(awk -F= -v wanted="$key" '
+            $1 == wanted {{
+                print substr($0, length(wanted) + 2)
+                found = 1
+                exit
+            }}
+            END {{ if (!found) exit 1 }}
+        ' "$path")"; then
+            printf -v "$key" '%s' "$value"
+            export "$key"
+        else
+            unset "$key"
+        fi
+    done
+    if [ "$TEST_ACTION" = bind-change-during-load ] \
+        && [ "$path" = "$MAINNET_ATTESTOR_ENV" ]; then
+        /bin/cp "$CHANGED_ATTESTOR_ENV" "$MAINNET_ATTESTOR_ENV"
+    fi
+}}
+
+{credential_functions}
+{inventory_runner}
+
+stage_mainnet_identity_preflight_binary() {{
+    MAINNET_IDENTITY_PREFLIGHT_BINARY="$ENGINE_CANDIDATE_BINARY"
+}}
+remove_mainnet_identity_preflight_binary() {{
+    MAINNET_IDENTITY_PREFLIGHT_BINARY=""
+}}
+
+case "$TEST_ACTION" in
+    preflight)
+        preflight_mainnet_native_takeover
+        ;;
+    bind-change-during-load)
+        bind_mainnet_inventory_credential
+        run_engine_inventory_command \
+            mainnet "$ENGINE_MAINNET_CONFIG" "$ENGINE_CANDIDATE_BINARY" \
+            verify-account-identity
+        ;;
+esac
+"""
+    return subprocess.run(
+        ["bash"],
+        input=script,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_mainnet_takeover_uses_execution_credential_when_attestor_is_absent(
+    tmp_path: Path,
+) -> None:
+    completed = _run_mainnet_inventory_credential_harness(tmp_path, attestor=None)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "identity-command credential_set=execution execution_key=present attestor_key=" in completed.stdout
+    assert str(tmp_path / "candidate-engine") in completed.stdout
+    assert "verify-account-identity" in completed.stdout
+
+
+def test_mainnet_takeover_prefers_valid_attestor_credential(tmp_path: Path) -> None:
+    completed = _run_mainnet_inventory_credential_harness(
+        tmp_path,
+        attestor=_VALID_ATTESTOR_CREDENTIAL,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "identity-command credential_set=attestor execution_key= attestor_key=present" in completed.stdout
+
+
+@pytest.mark.parametrize(
+    ("attestor", "linked", "message"),
+    (
+        (_VALID_ATTESTOR_CREDENTIAL + "UNEXPECTED_ASSIGNMENT=refuse\n", False, "invalid assignments"),
+        (_VALID_ATTESTOR_CREDENTIAL, True, "missing or linked"),
+    ),
+    ids=("malformed", "linked"),
+)
+def test_mainnet_takeover_refuses_malformed_or_linked_attestor_credential(
+    tmp_path: Path,
+    attestor: str,
+    linked: bool,
+    message: str,
+) -> None:
+    completed = _run_mainnet_inventory_credential_harness(
+        tmp_path,
+        attestor=attestor,
+        linked_attestor=linked,
+    )
+
+    assert completed.returncode == 70
+    assert message in completed.stderr
+    assert "identity-command" not in completed.stdout
+
+
+def test_mainnet_takeover_credential_selection_is_bound_against_later_file_change(
+    tmp_path: Path,
+) -> None:
+    completed = _run_mainnet_inventory_credential_harness(
+        tmp_path,
+        attestor=_VALID_ATTESTOR_CREDENTIAL,
+        changed_attestor=_CHANGED_ATTESTOR_CREDENTIAL,
+    )
+
+    assert completed.returncode == 70
+    assert "bound mainnet inventory credential bytes changed" in completed.stderr
+    assert "identity-command" not in completed.stdout
 
 
 def test_transient_builder_is_bounded_tracked_and_cleaned_on_exit() -> None:
@@ -2476,6 +2780,17 @@ def _runtime_supervisor_fixture(
         '$(stat -c %u "${LAUNCHER%/*}")" -eq 0',
         '$(stat -c %u "$MARKER")" -eq 0',
         '$(stat -Lc %u "$descriptor_path")" -eq 0',
+        '$(stat -c %u "$REPOSITORY")" = 0',
+        '$(stat -c %u "$path")" = 0',
+        '$(stat -c %u "$rust_binary")" = 0',
+        '$(stat -c %u "$REPOSITORY/.git")" = 0',
+        '$(stat -c %u "$directory")" = 0',
+        '$(stat -c %u "${ENGINE%/*}")" = 0',
+        '$(stat -c %u "${ACTIVATION_PERMIT%/*}")" = 0',
+        '$(stat -c %u "$LAUNCHER")" = 0',
+        '$(stat -c %u "${LAUNCHER%/*}")" = 0',
+        '$(stat -c %u "$MARKER")" = 0',
+        '$(stat -Lc %u "$descriptor_path")" = 0',
     ):
         source = source.replace(expression, expression.removesuffix("0") + str(uid))
     for expression in (

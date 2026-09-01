@@ -237,12 +237,33 @@ pub struct BybitInventoryProbe {
     gateway: BybitGateway,
 }
 
+fn use_execution_inventory_credential(
+    realm: VenueRealm,
+    requested: Option<&str>,
+) -> Result<bool, VenueError> {
+    let requested = requested.map(str::trim).filter(|value| !value.is_empty());
+    match (realm, requested) {
+        (VenueRealm::Demo, None | Some("demo")) => Ok(false),
+        (VenueRealm::Mainnet, None | Some("attestor")) => Ok(false),
+        (VenueRealm::Mainnet, Some("execution")) => Ok(true),
+        (_, Some(other)) => Err(VenueError::Credentials(format!(
+            "BYBIT_INVENTORY_CREDENTIAL_SET is invalid for {realm}: {other:?}"
+        ))),
+    }
+}
+
 impl BybitInventoryProbe {
     pub fn new(realm: VenueRealm) -> Result<Self, VenueError> {
-        let credentials = realm.inventory_credentials()?;
+        let requested = std::env::var("BYBIT_INVENTORY_CREDENTIAL_SET").ok();
+        let execution = use_execution_inventory_credential(realm, requested.as_deref())?;
+        let credentials = if execution {
+            realm.execution_inventory_credentials()?
+        } else {
+            realm.inventory_credentials()?
+        };
         let mut gateway =
             BybitGateway::build(realm, realm.rest_base(), credentials, Vec::new(), None);
-        gateway.attestation_key = realm == VenueRealm::Mainnet;
+        gateway.attestation_key = realm == VenueRealm::Mainnet && !execution;
         Ok(Self { gateway })
     }
 
@@ -1806,6 +1827,21 @@ fn realm_name(realm: VenueRealm) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inventory_credential_selection_is_explicit_and_realm_bound() {
+        assert!(!use_execution_inventory_credential(VenueRealm::Demo, None).unwrap());
+        assert!(!use_execution_inventory_credential(VenueRealm::Demo, Some("demo")).unwrap());
+        assert!(!use_execution_inventory_credential(VenueRealm::Mainnet, None).unwrap());
+        assert!(
+            !use_execution_inventory_credential(VenueRealm::Mainnet, Some("attestor")).unwrap()
+        );
+        assert!(
+            use_execution_inventory_credential(VenueRealm::Mainnet, Some("execution")).unwrap()
+        );
+        assert!(use_execution_inventory_credential(VenueRealm::Demo, Some("execution")).is_err());
+        assert!(use_execution_inventory_credential(VenueRealm::Mainnet, Some("demo")).is_err());
+    }
+
     #[test]
     fn each_realm_reports_its_own_name_and_never_the_other() {
         // Found on the funded account's first shadow run: the engine

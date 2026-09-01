@@ -139,16 +139,27 @@ case "$realm" in
   demo)
     env_file=/etc/liquidity-migration/engine.env
     credential_file=/etc/liquidity-migration/bybit-demo.env
+    inventory_credential_set=demo
     runtime_user=liquidity-engine-demo
     state_dir=/var/lib/liquidity-migration-engine
     unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
     ;;
   mainnet)
     env_file=/etc/liquidity-migration/engine-mainnet.env
-    credential_file=/etc/liquidity-migration/bybit-mainnet-attestor.env
+    credential_file=/etc/liquidity-migration/bybit-mainnet.env
+    inventory_credential_set=execution
+    if [ -e /etc/liquidity-migration/bybit-mainnet-attestor.env ] \
+      || [ -L /etc/liquidity-migration/bybit-mainnet-attestor.env ]; then
+      credential_file=/etc/liquidity-migration/bybit-mainnet-attestor.env
+      inventory_credential_set=attestor
+    fi
     runtime_user=liquidity-engine-mainnet
     state_dir=/var/lib/liquidity-migration-engine-mainnet
-    unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+    if [ "$inventory_credential_set" = attestor ]; then
+      unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+    else
+      unset_environment="BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+    fi
     ;;
   *) echo "invalid engine-control realm: $realm" >&2; exit 2 ;;
 esac
@@ -231,8 +242,9 @@ if [ "$realm" = mainnet ]; then
   [ "$(stat -c %u "$credential_file")" -eq 0 ] \
     && [ "$(stat -c %g "$credential_file")" -eq 0 ] \
     && [ "$(stat -c %a "$credential_file")" = 600 ] \
-    || { echo "mainnet attestor environment must be root:root mode 0600" >&2; exit 3; }
-  awk "
+    || { echo "mainnet inventory environment must be root:root mode 0600" >&2; exit 3; }
+  if [ "$inventory_credential_set" = attestor ]; then
+    awk "
 BEGIN {
   allowed[\"BYBIT_ATTEST_API_KEY\"] = 1
   allowed[\"BYBIT_ATTEST_API_SECRET\"] = 1
@@ -254,7 +266,8 @@ END {
       seen[\"BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID\"] != 1) exit 1
 }
 " "$credential_file" \
-    || { echo "mainnet attestor environment has invalid assignments" >&2; exit 3; }
+      || { echo "mainnet attestor environment has invalid assignments" >&2; exit 3; }
+  fi
 fi
 
 engine_args=(attest-flat)
@@ -267,9 +280,10 @@ sandbox_properties=(
   --property=ProtectHome=true
   --property=UMask=0027
 )
-# systemd parses the private EnvironmentFiles, then drops privileges. Funded
-# controls receive only the dedicated read-only attestor key, never the live
-# order-writing key. Secrets never enter this router or its argv.
+# systemd parses the private EnvironmentFiles, then drops privileges. The
+# command receives one explicitly selected credential file. Even when that
+# is the execution file, the Rust inventory type exposes no mutation method.
+# Secrets never enter this router or its argv.
 control_status=0
 if systemd-run --quiet --wait --pipe --collect --service-type=exec \
     --unit="liquidity-migration-${action}-${realm}-$$" \
@@ -278,6 +292,7 @@ if systemd-run --quiet --wait --pipe --collect --service-type=exec \
     --property="WorkingDirectory=$state_dir" \
     --property="EnvironmentFile=$env_file" \
     --property="EnvironmentFile=$credential_file" \
+    --property="Environment=BYBIT_INVENTORY_CREDENTIAL_SET=$inventory_credential_set" \
     --property="UnsetEnvironment=$unset_environment" \
     "${sandbox_properties[@]}" \
     "$engine_binary" "${engine_args[@]}"; then

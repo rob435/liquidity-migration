@@ -9,10 +9,59 @@ use std::error::Error;
 use std::path::Path;
 
 use crate::{assembly, clock, config};
+use engine_types::AccountIdentity;
+use engine_venue::InventoryProbe;
 
 const MAX_LOCAL_SAMPLE_AGE_MS: i64 = 30_000;
 const MAX_LOCAL_FUTURE_SKEW_MS: i64 = 5_000;
 const MAX_DOUBLE_SCAN_AGE_MS: i64 = 60_000;
+
+async fn bound_probe(
+    config_path: &Path,
+) -> Result<(InventoryProbe, AccountIdentity), Box<dyn Error>> {
+    let loaded = config::load(config_path)?;
+    let chosen = assembly::venue_name(&loaded.config.engine.venue)?;
+    let mut venue = assembly::inventory_probe(chosen)?;
+
+    let who = venue.account_identity().await?;
+    if who.venue != chosen.venue() || who.realm != chosen.realm() {
+        return Err(format!(
+            "venue identity mismatch: config selects {}/{} but credentials answered as {}/{}",
+            chosen.venue(),
+            chosen.realm(),
+            who.venue,
+            who.realm
+        )
+        .into());
+    }
+    let expected = std::env::var("EXPECTED_ENGINE_ACCOUNT_USER_ID")
+        .map_err(|_| "EXPECTED_ENGINE_ACCOUNT_USER_ID is required for a bound account read")?;
+    let expected = expected.trim();
+    if expected.is_empty() {
+        return Err(
+            "EXPECTED_ENGINE_ACCOUNT_USER_ID is empty; account identity is not bound".into(),
+        );
+    }
+    if expected != who.user_id {
+        return Err(format!(
+            "account identity mismatch: expected {expected}, credentials answered as {}",
+            who.user_id
+        )
+        .into());
+    }
+    Ok((venue, who))
+}
+
+/// Authenticate the narrow inventory reader and bind it to the configured
+/// venue, realm, and expected account without reading the WAL or inventory.
+pub async fn verify_account_identity(config_path: &Path) -> Result<(), Box<dyn Error>> {
+    let (_, who) = bound_probe(config_path).await?;
+    println!(
+        "account-identity-ok account={} venue={} realm={}",
+        who.user_id, who.venue, who.realm
+    );
+    Ok(())
+}
 
 fn validate_sample(
     inventory: &engine_types::AccountInventory,
@@ -70,36 +119,7 @@ fn validate_sample(
 /// credential-wide inventory was fresh and empty.
 pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     let attestation_started_ms = clock::wall_ms();
-    let loaded = config::load(config_path)?;
-    let chosen = assembly::venue_name(&loaded.config.engine.venue)?;
-    let mut venue = assembly::inventory_probe(chosen)?;
-
-    let who = venue.account_identity().await?;
-    if who.venue != chosen.venue() || who.realm != chosen.realm() {
-        return Err(format!(
-            "venue identity mismatch: config selects {}/{} but credentials answered as {}/{}",
-            chosen.venue(),
-            chosen.realm(),
-            who.venue,
-            who.realm
-        )
-        .into());
-    }
-    let expected = std::env::var("EXPECTED_ENGINE_ACCOUNT_USER_ID")
-        .map_err(|_| "EXPECTED_ENGINE_ACCOUNT_USER_ID is required for a bound attestation")?;
-    let expected = expected.trim();
-    if expected.is_empty() {
-        return Err(
-            "EXPECTED_ENGINE_ACCOUNT_USER_ID is empty; flatness is not account-bound".into(),
-        );
-    }
-    if expected != who.user_id {
-        return Err(format!(
-            "account identity mismatch: expected {expected}, credentials answered as {}",
-            who.user_id
-        )
-        .into());
-    }
+    let (mut venue, who) = bound_probe(config_path).await?;
 
     // Two complete scans make a cross-endpoint race visible in either sample.
     // This is still an attestation, not an atomic venue snapshot; rollout

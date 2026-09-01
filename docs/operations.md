@@ -128,13 +128,16 @@ Install handles each realm while its owner is stopped:
 
 Takeover takes both the WAL lock and authenticated account lease and requires
 `EXPECTED_ENGINE_ACCOUNT_USER_ID`. Demo uses its demo account credential;
-mainnet uses the read-only attestor for stopped-state identity. An exact retry
-is a no-op. A partial bundle, another account, changed source bytes, or a
-conflicting checkpoint stops installation.
+mainnet prefers the optional globally read-only attestor and otherwise uses the
+existing execution credential inside the Rust inventory type, which exposes no
+order or account-mutation method. An exact retry is a no-op. A partial bundle,
+another account, changed source bytes, or a conflicting checkpoint stops
+installation.
 
-An armed rollout checks that the dedicated mainnet attestor file is a
-single-link `root:root` mode-`0600` file with exactly the four required
-assignments before it snapshots or stops any unit. Missing credentials therefore
+Before it snapshots or stops any unit, an armed rollout validates the selected
+credential as a single-link `root:root` mode-`0600` file, runs the exact
+candidate's read-only identity command, and matches the authenticated Bybit UID
+to the engine's expected account. Missing or mismatched credentials therefore
 leave the incumbent fleet untouched.
 
 The seven persistent stopped-state source roles are:

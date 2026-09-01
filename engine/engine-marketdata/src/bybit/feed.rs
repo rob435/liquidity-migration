@@ -2093,14 +2093,21 @@ mod tests {
         )
         .with_topic_timing(Duration::from_secs(1), Duration::from_millis(5));
 
-        assert!(matches!(
-            next(&mut feed).await,
-            MarketEvent::Quote { quote, .. } if quote.bid_px == 10.0
-        ));
-        assert!(matches!(
-            next(&mut feed).await,
-            MarketEvent::Quote { quote, .. } if quote.bid_px == 20.0
-        ));
+        let mut initial = Vec::with_capacity(2);
+        for _ in 0..2 {
+            match next(&mut feed).await {
+                MarketEvent::Quote { quote, .. } => initial.push(quote.bid_px),
+                other => panic!("expected an initial quote, got {other:?}"),
+            }
+        }
+        assert!(
+            initial.contains(&20.0),
+            "initial ETH quote was not delivered"
+        );
+        assert!(
+            initial.iter().any(|bid| *bid == 10.0 || *bid >= 1_000.0),
+            "initial or coalesced healthy BTC quote was not delivered"
+        );
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         let mut healthy_btc_updates = 0;
