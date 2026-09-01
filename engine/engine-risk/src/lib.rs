@@ -5,13 +5,14 @@
 //! deliberately stricter than the fleet it was ported from is written down in
 //! PORT_NOTES.md next to this file, and pinned by the tests beside it.
 //!
-//! Every threshold is supplied by [`KernelConfig`]; there are no numbers baked
-//! into the code.
+//! Every threshold is supplied by [`KernelConfig`]. The one number in the code
+//! is [`ROLLING_LOSS_WINDOW_MS`], which is a contract rather than a dial.
 
 mod config;
 mod envelope;
 mod exposure;
 mod kernel;
+mod loss_window;
 mod profile;
 
 pub use config::{ConfigError, EnvelopeConfig, KernelConfig};
@@ -19,3 +20,7 @@ pub use kernel::Kernel;
 pub use profile::{
     kernel_config_from_profile, ProfileInputs, PROFILE_KIND, PROFILE_SCHEMA_VERSION,
 };
+
+/// How far back the rolling loss window looks, in venue wall-clock
+/// milliseconds: one day.
+pub const ROLLING_LOSS_WINDOW_MS: i64 = 86_400_000;

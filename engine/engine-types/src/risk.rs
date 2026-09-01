@@ -59,6 +59,14 @@ pub enum DenyReason {
         additional_margin_usdt: f64,
         available_usdt: f64,
     },
+    /// This engine's own closed round trips, net of venue fees, lost more than
+    /// the limit inside the rolling window. Entries and growth wait for the
+    /// losing trades to age out; genuine exits still pass.
+    RollingLossTripped {
+        window_net_usdt: f64,
+        limit_usdt: f64,
+        window_ms: i64,
+    },
     /// Read from the log, never written. The per-sleeve capital partition
     /// that produced it is gone; the shape is frozen by the logs that already
     /// hold it, because a frame the reader cannot parse stops the engine at
@@ -97,6 +105,25 @@ pub enum RiskVerdict {
     Deny { reason: DenyReason },
 }
 
+/// One closed round trip, as the rolling loss window keeps it. `closed_ms` is
+/// the venue's wall clock at the closing fill; `net_usdt` is gross minus the
+/// venue's fees, with no funding in it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ClosedTradeRow {
+    pub closed_ms: i64,
+    pub net_usdt: f64,
+}
+
+/// What the rolling loss window holds right now, for the log and the operator.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct RollingLossView {
+    pub window_ms: i64,
+    pub trades: usize,
+    pub net_usdt: f64,
+    pub limit_usdt: f64,
+    pub tripped: bool,
+}
+
 /// The account-level capital controls. Unknown state refuses the order.
 pub trait RiskKernel {
     fn assess(&mut self, intent: &Intent, account: &AccountView) -> RiskVerdict;
@@ -119,6 +146,23 @@ pub trait RiskKernel {
     fn observe_price(&mut self, _symbol: SymbolId, _px: f64) {}
     /// Fold every fresh account reading into account-level capital state.
     fn observe_account_view(&mut self, _account: &AccountView) {}
+    /// Hand the kernel one closed round trip of its own, so the rolling loss
+    /// window can count it. Default: ignore.
+    fn observe_closed_trade(&mut self, _row: ClosedTradeRow) {}
+    /// Tell the kernel what the venue's wall clock reads, so the rolling loss
+    /// window ages out old trades even while nothing closes. Default: ignore.
+    fn observe_wall_clock_ms(&mut self, _wall_ms: i64) {}
+    /// What the rolling loss window holds, when the kernel keeps one.
+    fn rolling_loss(&self) -> Option<RollingLossView> {
+        None
+    }
+    /// The closed trades still inside the window, for the caller to persist.
+    fn rolling_loss_rows(&self) -> Vec<ClosedTradeRow> {
+        Vec::new()
+    }
+    /// Set the window's trades to these, which is how a restart reads its own
+    /// closed trades back. Default: ignore.
+    fn restore_rolling_loss_rows(&mut self, _rows: &[ClosedTradeRow]) {}
     /// Bind an engine-minted client order id to the intent it approved, so an
     /// order in flight is exposure the caps can see. Default: ignore.
     fn register_order(&mut self, _client_order_id: &str, _intent: &Intent, _approved_qty: f64) {}

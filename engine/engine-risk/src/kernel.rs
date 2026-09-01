@@ -2,16 +2,21 @@
 
 use engine_types::ids::SymbolId;
 use engine_types::orders::{Intent, OrderKind, OrderUpdate, Side};
-use engine_types::risk::{AccountView, DenyReason, RiskKernel, RiskVerdict};
+use engine_types::risk::{
+    AccountView, ClosedTradeRow, DenyReason, RiskKernel, RiskVerdict, RollingLossView,
+};
 
 use crate::config::{ConfigError, KernelConfig};
 use crate::envelope::Envelope;
 use crate::exposure::{Book, Pending};
+use crate::loss_window::LossWindow;
+use crate::ROLLING_LOSS_WINDOW_MS;
 
 pub struct Kernel {
     cfg: KernelConfig,
     envelope: Envelope,
     book: Book,
+    loss_window: LossWindow,
 }
 
 fn unknown(detail: impl Into<String>) -> DenyReason {
@@ -35,6 +40,7 @@ impl Kernel {
             cfg,
             envelope,
             book: Book::default(),
+            loss_window: LossWindow::default(),
         })
     }
 
@@ -105,6 +111,45 @@ impl Kernel {
 
     pub fn capital_reference_usdt(&self) -> f64 {
         self.envelope.reference_usdt()
+    }
+
+    /// Fold in one closed round trip of this engine's own, net of venue fees.
+    pub fn observe_closed_trade(&mut self, row: ClosedTradeRow) {
+        self.loss_window.observe(row);
+    }
+
+    /// Age the rolling loss window on against the venue's wall clock, so a
+    /// losing day drops out even while nothing closes.
+    pub fn observe_wall_clock_ms(&mut self, wall_ms: i64) {
+        self.loss_window.observe_clock(wall_ms);
+    }
+
+    pub fn rolling_loss(&self) -> RollingLossView {
+        let limit_usdt = self.rolling_loss_limit_usdt();
+        let net_usdt = self.loss_window.net_usdt();
+        RollingLossView {
+            window_ms: ROLLING_LOSS_WINDOW_MS,
+            trades: self.loss_window.trades(),
+            net_usdt: net_usdt.unwrap_or(0.0),
+            limit_usdt,
+            tripped: net_usdt.is_some_and(|net| net <= -limit_usdt),
+        }
+    }
+
+    pub fn rolling_loss_rows(&self) -> Vec<ClosedTradeRow> {
+        self.loss_window.rows()
+    }
+
+    /// Set the window's trades to these. A restart hands back what it closed
+    /// before it stopped, so a trip survives it.
+    pub fn restore_rolling_loss_rows(&mut self, rows: &[ClosedTradeRow]) {
+        self.loss_window.restore(rows);
+    }
+
+    /// The most the window may lose, against the reference the envelope
+    /// stands at now — so it contracts as equity falls.
+    fn rolling_loss_limit_usdt(&self) -> f64 {
+        self.cfg.max_rolling_loss_fraction * self.envelope.reference_usdt()
     }
 
     fn price_for(&self, symbol: SymbolId, view: &ViewFacts) -> Option<f64> {
@@ -209,6 +254,21 @@ impl Kernel {
 
         self.envelope.observe_equity(view.equity_usdt);
 
+        // 5. What this engine's own closed trades did inside the rolling
+        //    window. Genuine exits returned above and keep flowing.
+        let limit_usdt = self.rolling_loss_limit_usdt();
+        if let Some(window_net_usdt) = self
+            .loss_window
+            .net_usdt()
+            .filter(|net| *net <= -limit_usdt)
+        {
+            return Err(DenyReason::RollingLossTripped {
+                window_net_usdt,
+                limit_usdt,
+                window_ms: ROLLING_LOSS_WINDOW_MS,
+            });
+        }
+
         // An unflagged reduction is judged as an entry from here on, but must
         // not cross through flat to the other side.
         if reduces_settled {
@@ -218,7 +278,7 @@ impl Kernel {
             }
         }
 
-        // 5. Stop discipline. Every position carries one: an entry without a
+        // 6. Stop discipline. Every position carries one: an entry without a
         //    stop is refused before it reaches the venue, and a book already
         //    holding an unprotected position takes no new risk.
         if view.unprotected || intent.stop.is_none() {
@@ -232,7 +292,7 @@ impl Kernel {
         let notional = ask_qty * px;
         let projected = self.projected_book(notional, stop_fraction, account, &view)?;
 
-        // 6. The equity-anchored envelope.
+        // 7. The equity-anchored envelope.
         let allowance_usdt = self.envelope.allowance_usdt();
         if projected.worst_case_loss_usdt > allowance_usdt {
             return Err(DenyReason::EnvelopeBreached {
@@ -241,7 +301,7 @@ impl Kernel {
             });
         }
 
-        // 7. The account-wide capital caps.
+        // 8. The account-wide capital caps.
         self.account_caps(notional, &projected, &view)?;
         Ok(ask_qty)
     }
@@ -409,9 +469,12 @@ impl RiskKernel for Kernel {
     /// 3. exit or entry: a genuine exit is clamped to the position and stops
     ///    here — risk-reducing orders flow even under a stale reading;
     /// 4. entry freshness — too old is [`DenyReason::StaleAccountView`];
-    /// 5. stop discipline — [`DenyReason::MissingStop`];
-    /// 6. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];
-    /// 7. the account-wide capital caps, smallest scope first: the whole
+    /// 5. the rolling loss window — this engine's own closed trades, net of
+    ///    venue fees, against a limit that follows the capital reference
+    ///    ([`DenyReason::RollingLossTripped`]);
+    /// 6. stop discipline — [`DenyReason::MissingStop`];
+    /// 7. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];
+    /// 8. the account-wide capital caps, smallest scope first: the whole
     ///    book's gross ([`DenyReason::ComponentGrossBreached`]), the whole
     ///    book's margin ([`DenyReason::InitialMarginBreached`]), and whether
     ///    the account's spare margin funds the increase
@@ -495,6 +558,26 @@ impl RiskKernel for Kernel {
         if account.equity_usdt.is_finite() && account.equity_usdt > 0.0 {
             self.envelope.observe_equity(account.equity_usdt);
         }
+    }
+
+    fn observe_closed_trade(&mut self, row: ClosedTradeRow) {
+        Kernel::observe_closed_trade(self, row);
+    }
+
+    fn observe_wall_clock_ms(&mut self, wall_ms: i64) {
+        Kernel::observe_wall_clock_ms(self, wall_ms);
+    }
+
+    fn rolling_loss(&self) -> Option<RollingLossView> {
+        Some(Kernel::rolling_loss(self))
+    }
+
+    fn rolling_loss_rows(&self) -> Vec<ClosedTradeRow> {
+        Kernel::rolling_loss_rows(self)
+    }
+
+    fn restore_rolling_loss_rows(&mut self, rows: &[ClosedTradeRow]) {
+        Kernel::restore_rolling_loss_rows(self, rows);
     }
 
     fn register_order(&mut self, client_order_id: &str, intent: &Intent, approved_qty: f64) {
