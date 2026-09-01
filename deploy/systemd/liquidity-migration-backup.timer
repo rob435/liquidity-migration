@@ -1,10 +1,12 @@
 [Unit]
-Description=Nightly off-box backup of the state that cannot be rebuilt
+Description=Off-box backup of the state that cannot be rebuilt, four times a day
 
 [Timer]
-# Once a night, off the trading hours that matter least; Persistent so a box
-# that was down at 03:17 backs up on the next boot instead of skipping a day.
-OnCalendar=*-*-* 03:17:00 UTC
+# Every six hours: the account's log is the one thing on this box that cannot
+# be re-fetched, and a day of it is too much to have on one disk. Persistent so
+# a box that was down at a scheduled time backs up on the next boot instead of
+# skipping a slot.
+OnCalendar=*-*-* 03,09,15,21:17:00 UTC
 AccuracySec=5min
 Persistent=true
 
