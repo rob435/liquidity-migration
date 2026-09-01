@@ -33,6 +33,31 @@ impl RuntimeControlFeed for OneControl {
     }
 }
 
+struct QueueControls {
+    queue: VecDeque<RuntimeControlRequest>,
+    last: Option<String>,
+    rejected: Rc<RefCell<Vec<String>>>,
+}
+
+impl RuntimeControlFeed for QueueControls {
+    async fn next_request(&mut self) -> Result<RuntimeControlRequest, RuntimeControlError> {
+        match self.queue.pop_front() {
+            Some(request) => {
+                self.last = Some(request.request_id.clone());
+                Ok(request)
+            }
+            None => std::future::pending().await,
+        }
+    }
+
+    async fn reject_last(&mut self) -> Result<(), RuntimeControlError> {
+        if let Some(id) = self.last.take() {
+            self.rejected.lock().unwrap().push(id);
+        }
+        Ok(())
+    }
+}
+
 struct GateProbe {
     name: &'static str,
     symbol: &'static str,
@@ -276,6 +301,123 @@ async fn live_pause_is_barriered_before_apply_and_core_still_allows_exit() {
                 ..
             } if detail.contains("runtime entry permission")
         )));
+}
+
+#[tokio::test]
+async fn stale_control_request_is_rejected_without_stopping_the_engine() {
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let (done, stopped) = tokio::sync::oneshot::channel();
+    let (mut engine, harness) = build(
+        allow_all(),
+        vec![Box::new(PermissionActor {
+            seen: seen.clone(),
+            done: Some(done),
+        })],
+        &["BTCUSDT"],
+        &[],
+    )
+    .await;
+    // Names a strategy outside the configured table: a request from another
+    // generation, or one submitted with intentionally stale bytes.
+    let stale = request(
+        7,
+        "ghost",
+        "stale-1",
+        RuntimeControlCommand::SetEntriesEnabled {
+            entries_enabled: false,
+        },
+    );
+    let pause = request(
+        0,
+        "directional",
+        "pause-1",
+        RuntimeControlCommand::SetEntriesEnabled {
+            entries_enabled: false,
+        },
+    );
+    let rejected = Rc::new(RefCell::new(Vec::new()));
+    let mut controls = QueueControls {
+        queue: VecDeque::from([stale, pause]),
+        last: None,
+        rejected: rejected.clone(),
+    };
+    engine
+        .run_with_inputs(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::empty(),
+            &mut crate::signals::NoSignals,
+            &mut controls,
+            async {
+                let _ = stopped.await;
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(&*rejected.lock().unwrap(), &["stale-1"]);
+    assert_eq!(&*seen.lock().unwrap(), &[false]);
+    let accepted: Vec<String> = harness
+        .records
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|record| match record {
+            WalRecord::RuntimeControlAccepted { request, .. } => Some(request.request_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(accepted, vec!["pause-1".to_string()]);
+}
+
+#[tokio::test]
+async fn durable_stale_request_cannot_wedge_engine_boot() {
+    let spool = temp_path("engine-stale-control-spool");
+    std::fs::create_dir(spool.path()).unwrap();
+    let stale = request(
+        7,
+        "ghost",
+        "stale-1",
+        RuntimeControlCommand::SetEntriesEnabled {
+            entries_enabled: false,
+        },
+    );
+    let stale_path = crate::controls::submit(spool.path(), &stale).unwrap();
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let (mut engine, _harness) = build(
+        allow_all(),
+        vec![Box::new(GateProbe {
+            name: "directional",
+            symbol: "BTCUSDT",
+            seen: seen.clone(),
+        })],
+        &["BTCUSDT"],
+        &[],
+    )
+    .await;
+    let mut controls = crate::controls::SpoolRuntimeControlFeed::new(spool.path())
+        .with_poll_interval(Duration::from_millis(1));
+    let marker = spool
+        .path()
+        .join(format!("{}.json.rejected", stale.content_sha256));
+    let shutdown_marker = marker.clone();
+    engine
+        .run_with_inputs(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::empty(),
+            &mut crate::signals::NoSignals,
+            &mut controls,
+            async move {
+                while !shutdown_marker.exists() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!stale_path.exists());
+    assert!(marker.exists());
+    std::fs::remove_file(marker).unwrap();
+    std::fs::remove_file(spool.path().join(".submit.lock")).unwrap();
+    std::fs::remove_dir(spool.path()).unwrap();
 }
 
 struct FlattenActor {

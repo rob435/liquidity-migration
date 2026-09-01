@@ -119,6 +119,11 @@ Pause and resume submit one durable entry-permission command per directional
 sleeve. Pause blocks entries and growth while public observations, checkpoints,
 settlement clocks, cancels, and exits continue.
 
+A control request the engine will never accept — unreadable, from another
+schema generation, or semantically stale — is quarantined beside the spool as
+`<name>.rejected` and reported as rejected; it cannot stop or restart-loop the
+engine and never blocks a later command.
+
 Flatten first durably disables entries, then submits one replayable flatten
 request per directional sleeve. Completion requires no venue position, no
 attributed cover, no owned opening work, and no pending request. The signal

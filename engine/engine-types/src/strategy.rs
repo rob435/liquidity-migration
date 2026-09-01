@@ -251,6 +251,13 @@ pub enum RuntimeControlError {
 #[allow(async_fn_in_trait)]
 pub trait RuntimeControlFeed {
     async fn next_request(&mut self) -> Result<RuntimeControlRequest, RuntimeControlError>;
+
+    /// Retire the last returned request as refused instead of consumed. The
+    /// source must never return that request again; a durable source keeps
+    /// the refused bytes inspectable rather than deleting them.
+    async fn reject_last(&mut self) -> Result<(), RuntimeControlError> {
+        Ok(())
+    }
 }
 
 /// Account-wide capital facts exposed read-only to one strategy callback.

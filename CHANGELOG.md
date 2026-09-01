@@ -6,6 +6,23 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-01 — A refused runtime control retires instead of wedging the
+  engine.** The final control audit found that a durable control request the
+  engine would never accept — unreadable bytes, an envelope from another
+  schema generation surviving an upgrade, or a semantically stale command
+  such as one naming an unconfigured sleeve — stayed in the spool while the
+  refusal killed the process, so supervised restart re-read the same file and
+  the engine restarted forever. The spool now quarantines any unreadable file
+  as `<name>.rejected` and keeps polling, and the core refuses a semantically
+  stale request by retiring it through the feed's reject path and continuing
+  to run; the refused bytes stay on disk beside the spool for inspection.
+  Accepted requests keep the exact WAL-barrier-before-retire contract. The
+  operator CLI now reports a rejected request as an error naming the
+  quarantined file instead of printing "durable and applied", and
+  resubmitting the exact refused bytes clears the stale marker so the fresh
+  verdict is the one reported. WAL replay of already-accepted requests is
+  unchanged and strict.
+
 - **2026-09-01 — Signal-worker environment projections stay root-only.** The
   deploy writer installs each generated worker environment as `root:root`
   mode `0600`, matching the strict loader used during activation. Systemd

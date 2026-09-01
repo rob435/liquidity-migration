@@ -611,10 +611,28 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         Err(error) => return Err(EngineError::State(error.to_string())),
                     },
                     request = control_feed.next_request(), if controls_open => match request {
-                        Ok(request) => {
-                            self.accept_runtime_control(request)?;
-                            self.drain(clock::now_ns()).await?;
-                        }
+                        // A refused request is retired, never fatal: the spool
+                        // is durable, so a request the engine will never
+                        // accept would otherwise poison every restart.
+                        Ok(request) => match self.admit_runtime_control(&request) {
+                            Err(refusal) => {
+                                tracing::error!(
+                                    request_id = %request.request_id,
+                                    strategy = %request.strategy_name,
+                                    refusal,
+                                    "refusing durable runtime control request"
+                                );
+                                control_feed.reject_last().await.map_err(|error| {
+                                    EngineError::State(error.to_string())
+                                })?;
+                            }
+                            Ok(fresh) => {
+                                if fresh {
+                                    self.apply_runtime_control(request)?;
+                                }
+                                self.drain(clock::now_ns()).await?;
+                            }
+                        },
                         Err(engine_types::RuntimeControlError::Closed) => controls_open = false,
                         Err(error) => return Err(EngineError::State(error.to_string())),
                     }
@@ -738,10 +756,28 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     Err(error) => return Err(EngineError::State(error.to_string())),
                 },
                 request = control_feed.next_request(), if controls_open => match request {
-                    Ok(request) => {
-                        self.accept_runtime_control(request)?;
-                        self.drain(clock::now_ns()).await?;
-                    }
+                    // A refused request is retired, never fatal: the spool is
+                    // durable, so a request the engine will never accept
+                    // would otherwise poison every restart.
+                    Ok(request) => match self.admit_runtime_control(&request) {
+                        Err(refusal) => {
+                            tracing::error!(
+                                request_id = %request.request_id,
+                                strategy = %request.strategy_name,
+                                refusal,
+                                "refusing durable runtime control request"
+                            );
+                            control_feed.reject_last().await.map_err(|error| {
+                                EngineError::State(error.to_string())
+                            })?;
+                        }
+                        Ok(fresh) => {
+                            if fresh {
+                                self.apply_runtime_control(request)?;
+                            }
+                            self.drain(clock::now_ns()).await?;
+                        }
+                    },
                     Err(engine_types::RuntimeControlError::Closed) => controls_open = false,
                     Err(error) => return Err(EngineError::State(error.to_string())),
                 },

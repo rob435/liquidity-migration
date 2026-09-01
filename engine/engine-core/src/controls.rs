@@ -133,6 +133,34 @@ impl SpoolRuntimeControlFeed {
         }
         Ok(request)
     }
+
+    /// Move a refused request out of the served namespace without deleting
+    /// its bytes. A refused file left in place would be re-read on every
+    /// poll and on every supervised restart, forever.
+    fn quarantine(path: &Path, reason: &str) -> Result<(), RuntimeControlError> {
+        let target = rejected_path(path);
+        match std::fs::rename(path, &target) {
+            Ok(()) => {
+                tracing::error!(
+                    quarantined = %target.display(),
+                    reason,
+                    "rejected runtime control request"
+                );
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(RuntimeControlError::Source(format!(
+                "cannot quarantine rejected runtime control file {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+}
+
+fn rejected_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".rejected");
+    path.with_file_name(name)
 }
 
 impl RuntimeControlFeed for SpoolRuntimeControlFeed {
@@ -178,20 +206,53 @@ impl RuntimeControlFeed for SpoolRuntimeControlFeed {
             .map_err(|error| {
                 RuntimeControlError::Source(format!("runtime control spool task failed: {error}"))
             })??;
-            if let Some(path) = paths.into_iter().next() {
+            for path in paths {
                 let read_path = path.clone();
-                let request = tokio::task::spawn_blocking(move || Self::read_one(&read_path))
+                let outcome = tokio::task::spawn_blocking(move || Self::read_one(&read_path))
                     .await
                     .map_err(|error| {
                         RuntimeControlError::Source(format!(
                             "runtime control read task failed: {error}"
                         ))
-                    })??;
-                self.returned_path = Some(path);
-                return Ok(request);
+                    })?;
+                match outcome {
+                    Ok(request) => {
+                        self.returned_path = Some(path);
+                        return Ok(request);
+                    }
+                    // An unreadable file can never be served: a garbled write,
+                    // or a request from another generation surviving an
+                    // upgrade. Left in place it would fail identically on
+                    // every poll and every supervised restart.
+                    Err(error) => {
+                        let reason = error.to_string();
+                        tokio::task::spawn_blocking(move || {
+                            Self::quarantine(&path, &reason)
+                        })
+                        .await
+                        .map_err(|error| {
+                            RuntimeControlError::Source(format!(
+                                "runtime control quarantine task failed: {error}"
+                            ))
+                        })??;
+                    }
+                }
             }
             tokio::time::sleep(self.poll).await;
         }
+    }
+
+    async fn reject_last(&mut self) -> Result<(), RuntimeControlError> {
+        let Some(path) = self.returned_path.take() else {
+            return Ok(());
+        };
+        tokio::task::spawn_blocking(move || Self::quarantine(&path, "refused by the engine core"))
+            .await
+            .map_err(|error| {
+                RuntimeControlError::Source(format!(
+                    "runtime control reject task failed: {error}"
+                ))
+            })?
     }
 }
 
@@ -213,6 +274,19 @@ pub fn submit(directory: &Path, request: &RuntimeControlRequest) -> Result<PathB
     let _claim = engine_wal::lock(directory.join(".submit.lock")).map_err(|e| e.to_string())?;
     let raw = serde_json::to_vec(request).map_err(|e| e.to_string())?;
     let final_path = directory.join(format!("{}.json", request.content_sha256));
+    // Resubmitting exact bytes asks for a fresh verdict; a marker left from
+    // an earlier refusal of this hash must not be read as this submission's
+    // outcome.
+    match std::fs::remove_file(rejected_path(&final_path)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "cannot clear stale rejection marker {}: {error}",
+                rejected_path(&final_path).display()
+            ));
+        }
+    }
     for entry in std::fs::read_dir(directory).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
         if path
@@ -256,7 +330,19 @@ pub async fn submit_and_wait(
     tokio::time::timeout(timeout, async {
         loop {
             match std::fs::symlink_metadata(&path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // The engine retires a request one of two ways: consumed
+                    // (removed) or refused (renamed to a rejection marker).
+                    return if rejected_path(&path).exists() {
+                        Err(format!(
+                            "runtime control request was rejected by the engine; \
+                             the refused bytes remain at {}",
+                            rejected_path(&path).display()
+                        ))
+                    } else {
+                        Ok(())
+                    };
+                }
                 Err(error) => {
                     return Err(format!(
                         "cannot inspect submitted runtime control {}: {error}",
@@ -317,6 +403,95 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(!first_path.exists());
         wait.abort();
+        std::fs::remove_file(directory.path().join(".submit.lock")).unwrap();
+        std::fs::remove_dir(directory.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unreadable_spool_files_are_quarantined_not_fatal() {
+        let directory = crate::testpath::temp_path("runtime-control-poison");
+        std::fs::create_dir(directory.path()).unwrap();
+        // A request from another generation surviving an upgrade.
+        let mut stale = serde_json::to_value(request("pause-1", false)).unwrap();
+        stale["schema_version"] = serde_json::Value::from(u16::MAX);
+        let stale_name = format!("{}.json", "0".repeat(64));
+        std::fs::write(
+            directory.path().join(&stale_name),
+            serde_json::to_vec(&stale).unwrap(),
+        )
+        .unwrap();
+        // A garbled write that never was a request.
+        let garbage_name = format!("{}.json", "1".repeat(64));
+        std::fs::write(directory.path().join(&garbage_name), b"not a request").unwrap();
+        let mut feed = SpoolRuntimeControlFeed::new(directory.path())
+            .with_poll_interval(Duration::from_millis(1));
+        let served = tokio::spawn(async move { feed.next_request().await });
+        let stale_marker = directory.path().join(format!("{stale_name}.rejected"));
+        let garbage_marker = directory.path().join(format!("{garbage_name}.rejected"));
+        for _ in 0..1000 {
+            if stale_marker.exists() && garbage_marker.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(stale_marker.exists() && garbage_marker.exists());
+        let valid = request("resume-1", true);
+        let valid_path = submit(directory.path(), &valid).unwrap();
+        assert_eq!(served.await.unwrap().unwrap(), valid);
+        for path in [stale_marker, garbage_marker, valid_path] {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_file(directory.path().join(".submit.lock")).unwrap();
+        std::fs::remove_dir(directory.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_request_is_quarantined_and_unblocks_the_spool() {
+        let directory = crate::testpath::temp_path("runtime-control-reject");
+        std::fs::create_dir(directory.path()).unwrap();
+        let refused = request("flatten-1", false);
+        let refused_path = submit(directory.path(), &refused).unwrap();
+        let mut feed = SpoolRuntimeControlFeed::new(directory.path())
+            .with_poll_interval(Duration::from_millis(1));
+        assert_eq!(feed.next_request().await.unwrap(), refused);
+        feed.reject_last().await.unwrap();
+        let marker = rejected_path(&refused_path);
+        assert!(!refused_path.exists());
+        assert!(marker.exists());
+        // The refused request no longer blocks the spool.
+        let corrected = request("pause-1", false);
+        let corrected_path = submit(directory.path(), &corrected).unwrap();
+        std::fs::remove_file(corrected_path).unwrap();
+        // Resubmitting the exact refused bytes asks for a fresh verdict.
+        assert_eq!(submit(directory.path(), &refused).unwrap(), refused_path);
+        assert!(!marker.exists());
+        std::fs::remove_file(refused_path).unwrap();
+        std::fs::remove_file(directory.path().join(".submit.lock")).unwrap();
+        std::fs::remove_dir(directory.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn submit_and_wait_reports_a_rejected_request() {
+        let directory = crate::testpath::temp_path("runtime-control-wait-reject");
+        std::fs::create_dir(directory.path()).unwrap();
+        let refused = request("pause-1", false);
+        let spool = directory.path().to_path_buf();
+        let engine_stand_in = tokio::spawn(async move {
+            let mut feed =
+                SpoolRuntimeControlFeed::new(spool).with_poll_interval(Duration::from_millis(1));
+            feed.next_request().await.unwrap();
+            feed.reject_last().await.unwrap();
+        });
+        let error = submit_and_wait(directory.path(), &refused, Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert!(error.contains("rejected"), "{error}");
+        engine_stand_in.await.unwrap();
+        let marker = rejected_path(&directory.path().join(format!(
+            "{}.json",
+            refused.content_sha256
+        )));
+        std::fs::remove_file(marker).unwrap();
         std::fs::remove_file(directory.path().join(".submit.lock")).unwrap();
         std::fs::remove_dir(directory.path()).unwrap();
     }

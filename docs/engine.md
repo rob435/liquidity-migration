@@ -257,6 +257,16 @@ work, asks the reducer for reduction-only effects, and remains pending until
 the authenticated position, attributed cover, and owned opening orders are
 flat. Request IDs are idempotent; the same ID with different bytes is refused.
 
+A request the engine will never accept cannot block the account. An
+unreadable spool file — garbled bytes, or an envelope from another schema
+generation surviving an upgrade — and a semantically refused request — an
+unconfigured sleeve, a reused ID with different bytes, flatten without the
+entries-disabled override — are each retired by renaming the file to
+`<name>.rejected` beside the spool, and the engine keeps running. The refused
+bytes stay inspectable, a rejected request never reaches the WAL, and the
+submit helper reports the rejection instead of acknowledgement. Resubmitting
+the exact refused bytes clears the old marker and asks for a fresh verdict.
+
 ## Native state takeover
 
 Takeover commands run only with the realm stopped. They lock the WAL and the

@@ -83,35 +83,40 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 
-    fn accept_runtime_control(
-        &mut self,
-        request: engine_types::RuntimeControlRequest,
-    ) -> Result<(), EngineError> {
-        crate::controls::validate(&request).map_err(EngineError::State)?;
+    /// Semantic admission for one spooled runtime control request. `Err` is a
+    /// refusal of the request itself — a stale, misaddressed, or conflicting
+    /// command — never an engine fault; the caller retires the refused
+    /// request and keeps running. `Ok(false)` means this exact request was
+    /// already accepted and needs no new WAL record.
+    fn admit_runtime_control(
+        &self,
+        request: &engine_types::RuntimeControlRequest,
+    ) -> Result<bool, String> {
+        crate::controls::validate(request)?;
         let expected_name = self.names.get(request.strategy.0 as usize).ok_or_else(|| {
-            EngineError::State(format!(
+            format!(
                 "runtime control request {:?} names strategy {} outside {} configured sleeves",
                 request.request_id,
                 request.strategy.0,
                 self.names.len()
-            ))
+            )
         })?;
         if expected_name != &request.strategy_name {
-            return Err(EngineError::State(format!(
+            return Err(format!(
                 "runtime control request {:?} binds strategy {} to {:?}, expected {:?}",
                 request.request_id, request.strategy.0, request.strategy_name, expected_name
-            )));
+            ));
         }
         if let Some(known) = self.runtime_control_requests.iter().find(|known| {
             known.strategy == request.strategy && known.request_id == request.request_id
         }) {
-            if known == &request {
-                return Ok(());
+            if known == request {
+                return Ok(false);
             }
-            return Err(EngineError::State(format!(
+            return Err(format!(
                 "strategy {} reused runtime request id {:?} with different bytes",
                 request.strategy.0, request.request_id
-            )));
+            ));
         }
         if matches!(
             request.command,
@@ -122,12 +127,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .copied()
             != Some(false)
         {
-            return Err(EngineError::State(format!(
+            return Err(format!(
                 "strategy {} must have a durable entries-disabled override before flatten",
                 request.strategy_name
-            )));
+            ));
         }
+        Ok(true)
+    }
 
+    /// Journal and apply one admitted request. Errors here are engine faults.
+    fn apply_runtime_control(
+        &mut self,
+        request: engine_types::RuntimeControlRequest,
+    ) -> Result<(), EngineError> {
         self.wal.append(&WalRecord::RuntimeControlAccepted {
             wall_ts_ms: clock::wall_ms(),
             request: request.clone(),
