@@ -150,6 +150,7 @@ fi
 
 LM_FLEET_MANIFEST="$LOCAL_REPOSITORY/deploy/fleet_manifest.tsv"
 . "$LOCAL_REPOSITORY/deploy/lib_sleeves.sh"
+. "$LOCAL_REPOSITORY/deploy/lib_systemd_environment.sh"
 lm_validate_fleet_manifest
 # These arrays are the candidate baseline for direct install/activation modes.
 # Rollout replaces them with the exact installed-plus-candidate union before it
@@ -204,6 +205,7 @@ read -r -a SSH_ARGS <<< "$SSH_OPTS"
 	printf 'ENGINE_UNIT=%q\n' "$LOCAL_ENGINE_UNIT"
 	printf 'MAINNET_OWNER_UNIT=%q\n' "$LOCAL_MAINNET_OWNER_UNIT"
 	declare -f lm_rollout_transition_inventory
+	declare -f lm_load_private_systemd_environment
 	cat <<'REMOTE_SCRIPT'
 # `-E` propagates the ERR trap into shell functions so a strict phase can still
 # report which phase died; see run_strict_phase below.
@@ -2426,10 +2428,9 @@ mainnet_armed() {
         else
             # This status read is deliberately non-mutating. Provisioning and
             # disarm own permission changes; verify never repairs a credential.
-            # Early install stages read the switch before PYTHON or the bash
-            # env-loader helpers exist in their context, so this read stands
-            # entirely on its own: the checkout's interpreter and the strict
-            # parser module, nothing else.
+            # Early install stages read the switch before the deployed Python
+            # environment exists, so this read stands on the host interpreter
+            # and the trusted checkout's strict parser module.
             MAINNET_ARMED_STATE="$(
                 "${PYTHON:-/usr/bin/python3}" -c '
 import sys

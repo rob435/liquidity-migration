@@ -4,6 +4,7 @@ import os
 import shutil
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,7 @@ def _isolated_deploy_checkout(tmp_path: Path) -> tuple[Path, str]:
         Path("scripts/ops.sh"),
         Path("scripts/deploy_vps_live.sh"),
         Path("deploy/lib_sleeves.sh"),
+        Path("deploy/lib_systemd_environment.sh"),
         Path("deploy/fleet_manifest.tsv"),
     ):
         target = checkout / relative
@@ -522,6 +524,55 @@ def test_rollout_requires_and_serializes_an_explicit_profile(
     payload = capture.read_text(encoding="utf-8")
     assert "MODE=rollout" in payload
     assert "DEPLOY_PROFILE=operational" in payload
+
+
+def test_deploy_payload_bootstraps_private_environment_loader(tmp_path: Path) -> None:
+    checkout, _commit, capture, environment = _deploy_harness(tmp_path)
+    result = subprocess.run(
+        [
+            "bash",
+            str(checkout / "scripts/ops.sh"),
+            "deploy",
+            "rollout",
+            "--profile",
+            "operational",
+        ],
+        cwd=checkout,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text(encoding="utf-8")
+    bootstrap = payload[: payload.index("# `-E` propagates")]
+    private_environment = tmp_path / "private.env"
+    private_environment.write_text('TEST_VALUE="value with spaces"\n', encoding="utf-8")
+    private_environment.chmod(0o600)
+    loaded = subprocess.run(
+        ["bash"],
+        input=(
+            f"{bootstrap}\n"
+            "lm_load_private_systemd_environment \"$TEST_PYTHON\" \"$TEST_ENV\" "
+            "TEST_VALUE MISSING_VALUE\n"
+            "printf 'loaded=%s missing=%s\\n' \"$TEST_VALUE\" "
+            '"${MISSING_VALUE-unset}"\n'
+        ),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(ROOT),
+            "TEST_PYTHON": sys.executable,
+            "TEST_ENV": str(private_environment),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert loaded.returncode == 0, loaded.stderr
+    assert loaded.stdout == "loaded=value with spaces missing=unset\n"
+    assert loaded.stderr == ""
 
 
 def test_deploy_rejects_tree_object_before_ssh(tmp_path: Path) -> None:

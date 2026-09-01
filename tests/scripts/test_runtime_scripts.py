@@ -1569,7 +1569,10 @@ def test_rollout_transition_union_is_prepared_before_snapshot_and_used_everywher
     quarantine = _function(text, "stop_all_rollout_units_best_effort", "cleanup_notice")
     quiescent = _function(text, "require_quiescent", "git_fetch")
 
-    assert "declare -f lm_rollout_transition_inventory" in text[: text.index("REMOTE_SCRIPT")]
+    controller = text[: text.index("REMOTE_SCRIPT")]
+    assert "declare -f lm_rollout_transition_inventory" in controller
+    assert '. "$LOCAL_REPOSITORY/deploy/lib_systemd_environment.sh"' in controller
+    assert "declare -f lm_load_private_systemd_environment" in controller
     assert 'incumbent_manifest="$REPO_DIR/deploy/fleet_manifest.tsv"' in prepare
     assert 'candidate_manifest="$ENGINE_BUILD_DIR/deploy/fleet_manifest.tsv"' in prepare
     assert 'ENGINE_PREFETCHED_COMMIT" = "$EXPECTED_COMMIT' in prepare
@@ -1593,6 +1596,7 @@ def test_rollout_transition_union_is_prepared_before_snapshot_and_used_everywher
 
 def test_armed_rollout_preflights_inventory_credential_before_stopping_any_unit() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
+    controller = text[: text.index("REMOTE_SCRIPT")]
     binding = _function(
         text,
         "bind_mainnet_inventory_credential",
@@ -1610,6 +1614,8 @@ def test_armed_rollout_preflights_inventory_credential_before_stopping_any_unit(
     )
     rollout = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
 
+    assert '. "$LOCAL_REPOSITORY/deploy/lib_systemd_environment.sh"' in controller
+    assert "declare -f lm_load_private_systemd_environment" in controller
     for assignment in (
         "BYBIT_ATTEST_API_KEY",
         "BYBIT_ATTEST_API_SECRET",
