@@ -53,7 +53,11 @@ ProtectSystem=strict
 ProtectHome=true
 UMask=0027
 ReadWritePaths=/run/lock/liquidity-migration /var/lib/liquidity-migration-engine /var/lib/liquidity-migration/signals/demo /var/lib/liquidity-migration/controls/demo
-MemoryMax=256M
+# Boot replays the newest log segment and holds it decoded, about six times
+# the segment's bytes (measured 2026-09-01: a 53 MB segment peaks at 322 MB, a
+# 165 MB one at 522 MB). The engine config rotates segments at 256 MB, so a
+# segment at its largest needs about 1.5 GB; this cap leaves room above that.
+MemoryMax=2G
 LimitNOFILE=65536
 TasksMax=256
 
