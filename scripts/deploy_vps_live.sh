@@ -2017,8 +2017,10 @@ install_mainnet_native_engine_config() {
 
 run_engine_inventory_command() {
     local realm="$1" config="$2" engine_binary="$3" runtime_user engine_env credential_env
-    local inventory_credential_set
+    local inventory_credential_set loader_python="${PYTHON:-/usr/bin/python3}"
     shift 3
+    [ -x "$loader_python" ] \
+        || fail "private environment loader Python is missing: $loader_python"
     case "$realm" in
         demo)
             runtime_user="$DEMO_ENGINE_USER"
@@ -2050,16 +2052,16 @@ run_engine_inventory_command() {
             EXPECTED_ENGINE_ACCOUNT_USER_ID EXPECTED_ENGINE_VENUE EXPECTED_ENGINE_REALM
         case "$realm" in
             demo)
-                lm_load_private_systemd_environment "$PYTHON" "$credential_env" \
+                lm_load_private_systemd_environment "$loader_python" "$credential_env" \
                     BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET
                 ;;
             mainnet)
                 if [ "$inventory_credential_set" = attestor ]; then
-                    lm_load_private_systemd_environment "$PYTHON" "$credential_env" \
+                    lm_load_private_systemd_environment "$loader_python" "$credential_env" \
                         BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP \
                         BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID
                 else
-                    lm_load_private_systemd_environment "$PYTHON" "$credential_env" \
+                    lm_load_private_systemd_environment "$loader_python" "$credential_env" \
                         BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP \
                         BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID
                 fi
@@ -2071,7 +2073,7 @@ run_engine_inventory_command() {
                 export BYBIT_INVENTORY_CREDENTIAL_SET
                 ;;
         esac
-        lm_load_private_systemd_environment "$PYTHON" "$engine_env" \
+        lm_load_private_systemd_environment "$loader_python" "$engine_env" \
             EXPECTED_ENGINE_ACCOUNT_USER_ID EXPECTED_ENGINE_VENUE EXPECTED_ENGINE_REALM
         [ -n "${EXPECTED_ENGINE_ACCOUNT_USER_ID:-}" ] \
             || fail "$engine_env does not bind the exact account id"

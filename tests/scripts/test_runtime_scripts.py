@@ -517,6 +517,8 @@ def test_native_takeover_is_stopped_account_bound_complete_and_retry_safe() -> N
     assert "BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET" in runner
     assert "BYBIT_INVENTORY_CREDENTIAL_SET" in runner
     assert "BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID" in runner
+    assert 'loader_python="${PYTHON:-/usr/bin/python3}"' in runner
+    assert 'lm_load_private_systemd_environment "$loader_python"' in runner
     assert "credential_env=/etc/liquidity-migration/bybit-demo.env" in runner
     assert "bind_mainnet_inventory_credential" in runner
     assert runner.count("verify_mainnet_inventory_credential_binding") == 2

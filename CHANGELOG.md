@@ -11,8 +11,9 @@ edit STATE.md to match.
   Rust type with no order or account-mutation method. It prefers the optional
   globally read-only attestor when present and otherwise selects the existing
   funded environment explicitly. The armed rollout validates that selected
-  file before stopping the incumbent and passes the exclusive account ID into
-  every takeover command. Linux runtime-supervisor fixtures now substitute the
+  file before stopping the incumbent, uses the host Python for that early
+  private-environment read, and passes the exclusive account ID into every
+  takeover command. Linux runtime-supervisor fixtures now substitute the
   current ownership comparison syntax, and the frozen-topic WebSocket test no
   longer assumes ordering between independently handed-off initial quotes.
 
