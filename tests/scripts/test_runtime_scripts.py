@@ -35,7 +35,7 @@ def test_deployed_shell_entrypoints_are_executable() -> None:
         "deploy/telegram_control_helper.sh",
         "scripts/runtime/backup_state.sh",
         "scripts/runtime/chaos_drill.sh",
-        "scripts/runtime/upload_forward_capture.sh",
+        "scripts/runtime/pack_market_tape.py",
         "scripts/vps/flatten_account.sh",
     ):
         path = ROOT / relative
@@ -43,11 +43,11 @@ def test_deployed_shell_entrypoints_are_executable() -> None:
         assert os.access(path, os.X_OK), f"{relative} is not executable"
 
 
-def test_deploy_modes_are_exactly_the_four_operations() -> None:
+def test_deploy_modes_are_exactly_the_five_operations() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     match = re.search(r"case \"\$MODE\" in\n\s+(\S+)\)", text)
     assert match is not None
-    assert "deploy|verify|stop-mainnet|disarm-mainnet" in text
+    assert "deploy|rollback|verify|stop-mainnet|disarm-mainnet" in text
     for retired in ("install)", "activate)", "staged)", "rollout)", "--profile"):
         assert retired not in text
 
@@ -158,8 +158,36 @@ def test_control_helper_parses_and_keeps_the_fixed_action_surface() -> None:
     assert "activation.complete" not in text
 
 
-def test_ci_workflow_dispatch_covers_deploy_verify_and_disarm() -> None:
+def test_ci_workflow_dispatch_covers_deploy_rollback_verify_and_disarm() -> None:
     workflow = (ROOT / ".github" / "workflows" / "vps-deploy.yml").read_text(encoding="utf-8")
-    assert "options: [deploy, verify, disarm-mainnet]" in workflow
+    assert "options: [deploy, rollback, verify, disarm-mainnet]" in workflow
+    assert "deploy|rollback|verify) ;;" in workflow
     assert "disarm-mainnet" in workflow
     assert "rollout" not in workflow.replace("# pending slot", "")
+
+
+def test_a_realm_that_does_not_come_up_rolls_back_to_the_last_finished_deploy() -> None:
+    remote = _remote_script()
+    deploy_body = remote[remote.index("deploy_mode()") : remote.index("rollback_mode()")]
+    assert "seed_generation_record" in deploy_body
+    assert "if ! (start_realm demo); then\n        rollback_after_failure demo" in deploy_body
+    assert "if ! (start_realm mainnet); then\n            rollback_after_failure mainnet" in deploy_body
+    assert "record_generation" in deploy_body
+    rollback = remote[remote.index("rollback_after_failure()") : remote.index("# Every liquidity-migration unit")]
+    # A rolled-back generation that also fails stops the fleet instead of looping.
+    assert 'if [ "${AUTO_ROLLBACK:-0}" = 1 ]; then' in rollback
+    assert 'AUTO_ROLLBACK=1 EXPECTED_COMMIT="$target" deploy_mode' in rollback
+    assert "rollback) rollback_mode ;;" in remote
+
+
+def test_deploy_never_stops_an_independent_unit() -> None:
+    remote = _remote_script()
+    stop_fleet = remote[remote.index("stop_fleet()") : remote.index("install_units()")]
+    assert "lm_independent_units" in stop_fleet
+    assert "lm_host_liqmig_units" in stop_fleet
+    assert "list-unit-files" not in stop_fleet
+    deploy_body = remote[remote.index("deploy_mode()") : remote.index("rollback_mode()")]
+    assert "start_independent_units" in deploy_body
+    independent = remote[remote.index("start_independent_units()") : remote.index("# ------------------------------------------------------------ realm inputs")]
+    assert 'wait_fresh_heartbeat "$unit" "$CAPTURE_STATUS" "$since"' in independent
+    assert "result=unchanged-left-running" in independent

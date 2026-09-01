@@ -1,12 +1,14 @@
 # fleet-manifest-v2
 # unit|kind|realm|lifecycle|stop_order|activation|operator|depends_on|health|output_artifact|timer_service|first_delay_s|cadence_s|accuracy_s|runtime_s|input_artifact
-liquidity-migration-forward-upload.timer|timer|shared|downstream|10|always|direct|liquidity-migration-forward-upload.service|timer|-|liquidity-migration-forward-upload.service|3600|3600|60|1800|-
-liquidity-migration-forward-upload.service|service|shared|downstream|20|job|direct|liquidity-migration-forward-capture.service|none|-|-|-|-|-|-|-
-liquidity-migration-backup.timer|timer|shared|downstream|30|always|none|liquidity-migration-backup.service|timer|-|liquidity-migration-backup.service|86400|86400|300|900|-
-liquidity-migration-backup.service|service|shared|downstream|40|job|none|-|none|-|-|-|-|-|-|-
+liquidity-migration-market-tape-upload.timer|timer|shared|independent|10|always|direct|liquidity-migration-market-tape-upload.service|timer|-|liquidity-migration-market-tape-upload.service|600|3600|60|1800|-
+liquidity-migration-market-tape-upload.service|service|shared|independent|20|job|direct|liquidity-migration-forward-capture.service|none|-|-|-|-|-|-|-
+liquidity-migration-backup.timer|timer|shared|independent|30|always|none|liquidity-migration-backup.service|timer|-|liquidity-migration-backup.service|21600|21600|300|900|-
+liquidity-migration-backup.service|service|shared|independent|40|job|none|-|none|-|-|-|-|-|-|-
+liquidity-migration-host-liveness.timer|timer|shared|independent|50|always|direct|liquidity-migration-host-liveness.service|timer|-|liquidity-migration-host-liveness.service|60|180|15|120|-
+liquidity-migration-host-liveness.service|service|shared|independent|60|job|direct|-|none|-|-|-|-|-|-|-
+liquidity-migration-forward-capture.service|service|shared|independent|90|always|direct|-|active|/var/lib/liquidity-migration/forward-market/status.json|-|-|-|-|-|-
 liquidity-migration-chaos-drill.timer|timer|demo|downstream|50|always|none|liquidity-migration-chaos-drill.service|timer|-|liquidity-migration-chaos-drill.service|604800|604800|600|300|-
 liquidity-migration-chaos-drill.service|service|demo|downstream|60|job|none|liquidity-migration-engine.service|none|-|-|-|-|-|-|-
-liquidity-migration-forward-capture.service|service|shared|downstream|70|always|direct|-|active|-|-|-|-|-|-|-
 liquidity-migration-demo-liveness.timer|timer|demo|downstream|80|always|direct|liquidity-migration-demo-liveness.service|timer|-|liquidity-migration-demo-liveness.service|60|180|15|120|-
 liquidity-migration-mainnet-liveness.timer|timer|mainnet|downstream|90|mainnet|funded|liquidity-migration-mainnet-liveness.service|timer|-|liquidity-migration-mainnet-liveness.service|60|180|15|120|-
 liquidity-migration-llm-ledger.timer|timer|shared|downstream|100|always|direct|liquidity-migration-llm-ledger.service|timer|-|liquidity-migration-llm-ledger.service|3600|3600|120|600|-

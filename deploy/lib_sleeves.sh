@@ -61,7 +61,7 @@ BEGIN { expected_fields = 16 }
     if ($2 !~ /^(service|timer)$/) fail_at(NR, "invalid kind for " unit)
     if (unit !~ ("\\." $2 "$") ) fail_at(NR, "kind disagrees with unit suffix for " unit)
     if ($3 !~ /^(demo|mainnet|shared)$/) fail_at(NR, "invalid realm for " unit)
-    if ($4 !~ /^(downstream|owner)$/) fail_at(NR, "invalid lifecycle phase for " unit)
+    if ($4 !~ /^(downstream|owner|independent)$/) fail_at(NR, "invalid lifecycle phase for " unit)
     if (!is_uint($5)) fail_at(NR, "invalid stop order for " unit)
     order_key = $4 SUBSEP $5
     if (order_seen[order_key]++) fail_at(NR, "duplicate stop order in " $4 ": " $5)
@@ -93,9 +93,12 @@ BEGIN { expected_fields = 16 }
     }
     if ($7 == "funded" && $3 != "mainnet") fail_at(NR, "funded operator policy requires mainnet realm: " unit)
     if ($6 == "mainnet" && $3 != "mainnet") fail_at(NR, "mainnet activation requires mainnet realm: " unit)
+    if ($4 == "independent" && ($3 != "shared" || ($6 != "always" && $6 != "job") || $7 == "funded")) {
+        fail_at(NR, "an independent unit is shared, always-on or timer-driven, and never funded: " unit)
+    }
 
     if ($2 == "timer") {
-        if ($4 != "downstream" || $6 == "job" || $6 == "job-now" || $9 != "timer" || $10 != "-" || $11 == "-") {
+        if ($4 == "owner" || $6 == "job" || $6 == "job-now" || $9 != "timer" || $10 != "-" || $11 == "-") {
             fail_at(NR, "timer policy is incomplete for " unit)
         }
         if (!is_uint($12) || !is_uint($13) || !is_uint($14) || !is_uint($15)) {
@@ -137,6 +140,9 @@ END {
             if (phase[unit] == phase[dependency] && order[unit] >= order[dependency]) {
                 fail_at(row_line[unit], unit " must stop before dependency " dependency)
             }
+            if (phase[unit] == "independent" && phase[dependency] != "independent") {
+                fail_at(row_line[unit], "independent unit depends on a fleet unit: " unit)
+            }
         }
     }
     for (job in referenced_jobs) {
@@ -175,6 +181,17 @@ lm_realm_units() {
         ' \
         | sort -t '|' -k1,1n -k2,2n \
         | cut -d '|' -f3
+}
+
+# The units a deploy never stops: they run through fleet restarts, funded
+# stops, and disarms, and start again at boot. Highest stop order first, so a
+# recorder starts before the timer that ships its output.
+lm_independent_units() {
+    lm_validate_fleet_manifest || return 1
+    lm_fleet_manifest_rows \
+        | awk -F '|' '$4 == "independent" { print $5 "|" $1 }' \
+        | sort -t '|' -k1,1nr \
+        | cut -d '|' -f2
 }
 
 lm_activation_units() {

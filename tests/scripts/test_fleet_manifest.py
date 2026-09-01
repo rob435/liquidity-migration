@@ -188,3 +188,26 @@ def test_each_realm_has_one_credential_free_signal_worker() -> None:
         assert (
             "ExecStart=/opt/liquidity-migration-engine/bin/signal-worker live" in unit
         )
+
+
+def test_independent_units_are_shared_never_stopped_by_a_realm_and_recorder_first() -> None:
+    rows = _manifest()
+    independent = [row for row in rows if row.lifecycle == "independent"]
+    assert {row.realm for row in independent} == {"shared"}
+    assert {row.unit for row in independent} == {
+        "liquidity-migration-forward-capture.service",
+        "liquidity-migration-market-tape-upload.timer",
+        "liquidity-migration-market-tape-upload.service",
+        "liquidity-migration-backup.timer",
+        "liquidity-migration-backup.service",
+        "liquidity-migration-host-liveness.timer",
+        "liquidity-migration-host-liveness.service",
+    }
+    ordered = _helper("lm_independent_units")
+    assert ordered[0] == "liquidity-migration-forward-capture.service"
+    assert ordered == [
+        row.unit for row in sorted(independent, key=lambda row: row.stop_order, reverse=True)
+    ]
+    for realm in ("demo", "mainnet"):
+        assert not set(_helper(f"lm_activation_units {realm} start")) & set(ordered)
+        assert not set(_helper(f"lm_realm_units {realm}")) & set(ordered)

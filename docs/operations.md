@@ -27,7 +27,7 @@ scripts/ops.sh attest-flat --environment demo|mainnet
 scripts/ops.sh flatten --environment demo|mainnet [--reason TEXT] [--execute]
 scripts/ops.sh real-money preflight
 scripts/ops.sh real-money render-profile [--execute --output PATH]
-scripts/ops.sh deploy [deploy|verify|stop-mainnet|disarm-mainnet]
+scripts/ops.sh deploy [deploy|rollback|verify|stop-mainnet|disarm-mainnet]
 ```
 
 `start`, `stop`, `restart`, `flatten --execute`, profile rendering, and deploy
@@ -53,6 +53,12 @@ The signal worker has its own state and heartbeat under the public runtime
 tree. Each realm has distinct signal and control spools. Units absent from the
 manifest are disabled and removed during installation.
 
+Units the manifest marks `independent` — the market recorder, its hourly
+upload, the state backup, and the host watchdog — are outside the fleet
+lifecycle: no deploy, funded stop, or disarm stops them, and they start at
+boot. See [`deploy/systemd/README.md`](../deploy/systemd/README.md)
+§Independent units.
+
 ## Release layout
 
 The engine binary and signal worker are installed outside the checkout under
@@ -71,9 +77,17 @@ The deploy entry point accepts:
   still pending, and restart the fleet — worker first, then the account owner,
   then the downstream units, waiting for a fresh heartbeat at each step. The
   funded realm starts only while `REAL_MONEY=true` is present in the funded
-  credential file; otherwise its units stay stopped;
-- `verify`: read-only fleet summary — installed commit, arming state, unit
-  states, heartbeat ages, and disk;
+  credential file; otherwise its units stay stopped. If a realm's worker or
+  owner publishes no fresh heartbeat within three minutes, the deploy rolls
+  back on its own (below) and then fails, so the fleet runs the earlier
+  commit while the failure is visible;
+- `rollback`: deploy the last commit whose deploy finished. When the checkout
+  already sits at that commit, the one before it. The host keeps both under
+  `/opt/liquidity-migration-engine/{deployed,previous}-commit`; `verify`
+  prints them as `deployed` and `rollback-target`;
+- `verify`: read-only fleet summary — installed commit, the deployed and
+  rollback-target commits, arming state, unit states, heartbeat ages, and
+  disk;
 - `stop-mainnet`: stop the funded realm; and
 - `disarm-mainnet`: stop the funded realm and set `REAL_MONEY=false` in the
   credential file.
@@ -225,16 +239,33 @@ scripts/ops.sh logs engine.service 200
 scripts/ops.sh logs signal-worker-demo.service 200
 ```
 
-Status reports the installed commit, arming state, every manifest unit's
-active state, heartbeat ages, and disk. Do not replace a failed check with an
-interpretation of an old doc.
+Status reports the installed commit, the deployed and rollback-target
+commits, arming state, every manifest unit's active state, heartbeat ages,
+and disk. Do not replace a failed check with an interpretation of an old doc.
 
-Liveness separately pages on an inactive manifest unit, a stale or unreadable
-heartbeat, an engine that reports it cannot open positions, an engine whose
-rolling-loss trip is on, low disk, a stale off-box backup stamp, and (in one
-scope per box) an unsynchronised host clock.
-A systemd `active` state alone is not proof that either sleeve is producing
-decisions.
+Realm liveness pages on an inactive fleet unit in its realm, a stale or
+unreadable heartbeat, an engine that reports it cannot open positions, and an
+engine whose rolling-loss trip is on. Host liveness, which runs whether or not
+the fleet is up, pages on an inactive independent unit, a recorder that has
+received no market frame or is dropping frames, a stale market-tape upload
+receipt or a Drive short of space, a stale backup receipt, low disk, and an
+unsynchronised host clock. A systemd `active` state alone is not proof that
+either sleeve is producing decisions.
+
+## Off-box copies
+
+Two things leave the box for Google Drive, both through the rclone remote
+configured in `/etc/liquidity-migration/rclone.conf`:
+
+| What | When | Where on the Drive |
+| --- | --- | --- |
+| The engines' logs, closed trades, heartbeats, worker checkpoints, target books, spools, takeover sources, and the two rendered engine configs | every six hours (`backup.timer`) | `LiquidityMigration/engine-state/latest/` mirrors the host; a file that changed or vanished is moved to `engine-state/history/<run stamp>/`, kept 60 days |
+| The market tape, one archive per finished hour with a `MANIFEST.json` first | ten past every hour (`market-tape-upload.timer`) | `LiquidityMigration/market-tape/bybit-linear/YYYY/MM/DD/<day>T<HH>Z.tar` |
+
+Each job writes a receipt under `/var/lib/liquidity-migration/receipts/`
+only after the copy landed and was checked; host liveness reads the receipts'
+ages. No credential file is ever copied: the backup refuses a `*.env` source
+by name.
 
 ## Venue-confirmed trade accounting
 
@@ -258,27 +289,25 @@ python scripts/research/reconcile_venue_wal.py \
   --trade-execution-id "$REGISTERED_EXECUTION_ID" \
   --expected-realm mainnet \
   --expected-user-id "$BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID" \
-  --deployment-receipt "$DEPLOYED_ACTIVATION_RECEIPT" \
-  --engine-binary "$DEPLOYED_ENGINE_BINARY" \
-  --signal-worker-binary "$DEPLOYED_SIGNAL_WORKER_BINARY" \
   --engine-config "$DEPLOYED_ENGINE_CONFIG" \
-  --expected-commit "$ROLLOUT_COMMIT" \
-  --expected-binary-sha256 "$ROLLOUT_ENGINE_SHA256" \
-  --expected-signal-worker-sha256 "$ROLLOUT_SIGNAL_WORKER_SHA256" \
-  --expected-config-sha256 "$ROLLOUT_ENGINE_CONFIG_SHA256" \
+  --expected-commit "$DEPLOYED_COMMIT" \
+  --expected-config-sha256 "$DEPLOYED_ENGINE_CONFIG_SHA256" \
   --out "$ACCOUNTING_REPORT"
 ```
 
-The expected identities come from the reviewed rollout record and retained
-config bytes, not from the evidence being graded. The receipt is the exact
-seven-line `activation.complete` record for the engine, signal worker, launcher,
-and control boundary. The supplied engine, signal-worker, and config bytes are
-rehashed against independently retained digests. The report says
-`venue_confirmed` only when the complete
-WAL family, boot config identities, execution and order identities, fill fields,
-one-way position path, fees, closed profit and loss, account cash changes, and
-every crowd-fee settlement agree. A missing, duplicate, foreign, damaged,
-wrong-generation, or out-of-retention row withholds the label.
+The expected commit is the one the host was told to deploy (the deploy's
+`deployed-commit` record, or the CI run that dispatched it), and the config
+bytes are the rendered engine config the deploy installed; neither comes from
+the evidence being graded. Every Boot record in the log names the commit the
+running binary was built from and the SHA-256 of its config, and each graded
+fill's Boot — the one that recorded it and the one that sent its order — must
+name both expected values. The report says `venue_confirmed` only when the
+complete WAL family, those boot identities, execution and order identities,
+fill fields, one-way position path, fees, closed profit and loss, account cash
+changes, and every crowd-fee settlement agree. A missing, duplicate, foreign,
+damaged, wrong-generation, or out-of-retention row withholds the label, and so
+does a Boot with no commit: logs written by builds before commit stamping
+cannot reach the label.
 
 ## Recovery rules
 
@@ -288,8 +317,12 @@ wrong-generation, or out-of-retention row withholds the label.
   engine merely because the worker failed; the engine still owns exits.
 - A WAL/account mismatch is reconciled from authenticated venue state and WAL
   attribution. Do not edit the WAL or strategy checkpoint by hand.
-- A failed deploy leaves the fleet stopped. Repair the named check and rerun
-  the exact-commit flow.
+- A deploy whose realm never publishes a fresh heartbeat rolls back to the
+  last finished commit on its own and fails; a deploy that fails earlier (a
+  refused build, config, or state import) leaves the fleet stopped. Read the
+  named check, repair it, and rerun the exact-commit flow, or run `rollback`.
+- The independent units keep running through all of this. If the recorder
+  itself is the problem, `scripts/ops.sh restart forward-capture.service`.
 - A funded stop or disarm is not reversed by a demo command, resume action, or
   ordinary service restart.
 
