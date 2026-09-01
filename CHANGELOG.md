@@ -6,6 +6,13 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-01 — Exodus takeover preserves the retired Python tape bytes.**
+  The stopped-state codec keeps Python's exact finite-number spelling while it
+  checks the CARRY event ID and tape hash. The compatibility parser is confined
+  to this legacy source; ordinary engine and WAL JSON retain their existing
+  number representation. Compact layout, sorted keys, exact schemas, semantic
+  identities, and the full hash chain remain required.
+
 - **2026-09-01 — Funded native takeover can use the installed execution
   credential without copying secrets.** The account probe remains a read-only
   Rust type with no order or account-mutation method. It prefers the optional

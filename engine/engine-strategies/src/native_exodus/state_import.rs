@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use engine_types::{StrategyImportSource, TranslatedStrategyEvent, TranslatedStrategyState};
+use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 
 use super::plan::{OpenRecord, SleeveState, StrategyConfig};
@@ -436,10 +437,16 @@ fn parse_event_tape(
             continue;
         }
         let line = line_index + 1;
-        let value = parse_canonical_object(raw, &format!("CARRY event tape row {line}"))?;
+        let (value, raw_value) =
+            parse_legacy_tape_object(raw, &format!("CARRY event tape row {line}"))?;
         let row = value
             .as_object()
             .ok_or_else(|| format!("CARRY event tape row {line} is not an object"))?;
+        let raw_row = raw_object(&raw_value, "CARRY event tape row")?;
+        let raw_event = raw_row
+            .get("event")
+            .ok_or_else(|| format!("CARRY event tape row {line} has no event object"))?;
+        let raw_event_fields = raw_object(raw_event, "CARRY strategy event")?;
         require_keys(
             row,
             &["event", "prior_tape_hash", "schema_version", "tape_hash"],
@@ -480,17 +487,20 @@ fn parse_event_tape(
         {
             return Err(format!("CARRY strategy event at row {line} is invalid"));
         }
-        let id_material = json!({
-            "event_ts_ns": event_ts_ns,
-            "kind": kind,
-            "payload": event.get("payload").expect("required payload"),
-            "source": source,
-            "source_sequence": source_sequence,
-        });
-        let expected_event_id = format!(
-            "strategy-event-{}",
-            hex_digest(&serde_json::to_vec(&id_material).expect("strategy event id JSON"))
-        );
+        let raw_field = |name: &str| {
+            raw_event_fields
+                .get(name)
+                .map(Box::as_ref)
+                .ok_or_else(|| format!("CARRY strategy event has no {name}"))
+        };
+        let id_material = raw_object_material(&[
+            ("event_ts_ns", raw_field("event_ts_ns")?),
+            ("kind", raw_field("kind")?),
+            ("payload", raw_field("payload")?),
+            ("source", raw_field("source")?),
+            ("source_sequence", raw_field("source_sequence")?),
+        ])?;
+        let expected_event_id = format!("strategy-event-{}", hex_digest(&id_material));
         if event_id != expected_event_id || !generic_ids.insert(event_id.to_owned()) {
             return Err(format!("CARRY strategy event id is invalid at row {line}"));
         }
@@ -507,10 +517,8 @@ fn parse_event_tape(
             return Err(format!("CARRY event tape moves backward at row {line}"));
         }
         previous_order = Some(order);
-        let wrapper = json!({"event": Value::Object(event.clone())});
         let mut hash_material = prior_hash.as_bytes().to_vec();
-        hash_material
-            .extend_from_slice(&serde_json::to_vec(&wrapper).expect("strategy tape hash JSON"));
+        hash_material.extend_from_slice(&raw_object_material(&[("event", raw_event)])?);
         let next_hash = hex_digest(&hash_material);
         if exact_string(row, "tape_hash", "CARRY event tape row")? != next_hash {
             return Err(format!("CARRY event tape hash is invalid at row {line}"));
@@ -639,6 +647,85 @@ fn parse_canonical_object(bytes: &[u8], label: &str) -> Result<Value, String> {
     Ok(value)
 }
 
+fn parse_legacy_tape_object(bytes: &[u8], label: &str) -> Result<(Value, Box<RawValue>), String> {
+    if !bytes.ends_with(b"\n") {
+        return Err(format!("{label} is not newline-terminated canonical JSON"));
+    }
+    let raw: Box<RawValue> = serde_json::from_slice(&bytes[..bytes.len() - 1])
+        .map_err(|error| format!("{label}: {error}"))?;
+    if !raw.get().starts_with('{') {
+        return Err(format!("{label} must contain an object"));
+    }
+    let mut canonical = canonical_legacy_json(&raw, label)?;
+    canonical.push(b'\n');
+    if canonical != bytes {
+        return Err(format!("{label} is not canonical JSON"));
+    }
+    let value = serde_json::from_str(raw.get()).map_err(|error| format!("{label}: {error}"))?;
+    Ok((value, raw))
+}
+
+fn canonical_legacy_json(raw: &RawValue, label: &str) -> Result<Vec<u8>, String> {
+    let text = raw.get();
+    match text.as_bytes().first() {
+        Some(b'{') => {
+            let object = raw_object(raw, label)?;
+            let fields = object
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_ref()))
+                .collect::<Vec<_>>();
+            raw_object_material(&fields)
+        }
+        Some(b'[') => {
+            let values: Vec<Box<RawValue>> =
+                serde_json::from_str(text).map_err(|error| format!("{label}: {error}"))?;
+            let mut output = vec![b'['];
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                output.extend_from_slice(&canonical_legacy_json(value, label)?);
+            }
+            output.push(b']');
+            Ok(output)
+        }
+        Some(b'"') => {
+            let value: String =
+                serde_json::from_str(text).map_err(|error| format!("{label}: {error}"))?;
+            serde_json::to_vec(&value).map_err(|error| format!("{label}: {error}"))
+        }
+        Some(b't') | Some(b'f') => {
+            let value: bool =
+                serde_json::from_str(text).map_err(|error| format!("{label}: {error}"))?;
+            serde_json::to_vec(&value).map_err(|error| format!("{label}: {error}"))
+        }
+        Some(b'n') if text == "null" => Ok(b"null".to_vec()),
+        Some(b'-' | b'0'..=b'9') => Ok(text.as_bytes().to_vec()),
+        _ => Err(format!("{label} contains an unsupported JSON value")),
+    }
+}
+
+fn raw_object(raw: &RawValue, label: &str) -> Result<BTreeMap<String, Box<RawValue>>, String> {
+    serde_json::from_str(raw.get()).map_err(|error| format!("{label}: {error}"))
+}
+
+fn raw_object_material(fields: &[(&str, &RawValue)]) -> Result<Vec<u8>, String> {
+    if fields.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        return Err("legacy JSON object fields are not strictly ordered".to_owned());
+    }
+    let mut output = vec![b'{'];
+    for (index, (name, value)) in fields.iter().enumerate() {
+        if index > 0 {
+            output.push(b',');
+        }
+        output.extend_from_slice(&serde_json::to_vec(name).map_err(|error| error.to_string())?);
+        output.push(b':');
+        output.extend_from_slice(&canonical_legacy_json(value, "legacy JSON value")?);
+    }
+    output.push(b'}');
+    Ok(output)
+}
+
 fn require_keys(object: &Map<String, Value>, expected: &[&str], label: &str) -> Result<(), String> {
     if object.keys().map(String::as_str).collect::<BTreeSet<_>>()
         != expected.iter().copied().collect::<BTreeSet<_>>()
@@ -685,6 +772,25 @@ fn exact_f64(object: &Map<String, Value>, name: &str, label: &str) -> Result<f64
 mod tests {
     use super::*;
     use crate::native_exodus::plan::RuleConfig;
+
+    const PYTHON_SCIENTIFIC_TAPE: &str = concat!(
+        "{\"event\":{\"event_id\":\"strategy-event-c8bd61692e18fae19a100ee9b3fcf650",
+        "992c63dd8f233a563403d2e9ccbaa26c\",\"event_ts_ns\":1800000000000000000,",
+        "\"ingest_ts_ns\":1800000000000000001,\"kind\":\"presettlement_exit\",",
+        "\"payload\":{\"carry_avg_entry_px\":10.0,\"carry_qty\":3.25,",
+        "\"carry_side\":\"long\",\"decision_ts_ms\":1799971200000,",
+        "\"environment\":\"demo\",\"event_id\":\"carry-presettlement-",
+        "6a3b536fb0ff144fd2d452e5875c6383e771ba2c9d2894fc4633549c765a1309\",",
+        "\"fired_ts_ms\":1800000000000,\"mark_px\":10.0,",
+        "\"running_rate\":1.25e-05,\"schema_version\":1,",
+        "\"settlement_ts_ms\":1800000600000,",
+        "\"source_config_id\":\"lane2_carry_hold_v7\",",
+        "\"source_profile\":\"carry_hold_v7_live_v1\",\"symbol\":\"AUSDT\"},",
+        "\"source\":\"carry_hold:demo\",\"source_sequence\":1},",
+        "\"prior_tape_hash\":\"903aeb9284ba1c47632a147fff36c83d36e3dbfaf1ce7d1b",
+        "07df6ff093c43f0d\",\"schema_version\":1,\"tape_hash\":",
+        "\"3fedb48e248354d9bf8d0a75f98230c7167bb6bb50a70709d7f3a8e4a85564ab\"}\n",
+    );
 
     fn config() -> StrategyConfig {
         StrategyConfig {
@@ -795,6 +901,17 @@ mod tests {
         }))
     }
 
+    fn replace_once(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+        assert_eq!(needle.len(), replacement.len());
+        let index = bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("fixture token");
+        let mut changed = bytes.to_vec();
+        changed[index..index + needle.len()].copy_from_slice(replacement);
+        changed
+    }
+
     #[test]
     fn translates_empty_v4_with_a_verified_empty_tape() {
         let config = config();
@@ -840,6 +957,59 @@ mod tests {
             .expect("absent-is-empty staging bytes")
             .is_empty());
         assert!(parse_event_tape(b"{}\n", &config, "demo").is_err());
+    }
+
+    #[test]
+    fn imports_exact_python_scientific_numbers_without_weakening_tape_checks() {
+        let bytes = PYTHON_SCIENTIFIC_TAPE.as_bytes();
+        assert_eq!(bytes.len(), 875);
+        assert_eq!(
+            hex_digest(bytes),
+            "fd70debfc2a37e2308e0031de30af3c6bdf757401c2888041885dd3511b12c90",
+        );
+        let fires = parse_event_tape(bytes, &config(), "demo").expect("Python tape");
+        assert_eq!(fires.len(), 1);
+        assert_eq!(
+            fires[0].event_id,
+            "carry-presettlement-6a3b536fb0ff144fd2d452e5875c6383e771ba2c9d2894fc4633549c765a1309",
+        );
+
+        let event_marker = b"\"event\":{";
+        let mut spaced = bytes.to_vec();
+        let event_start = spaced
+            .windows(event_marker.len())
+            .position(|window| window == event_marker)
+            .expect("event marker")
+            + event_marker.len()
+            - 1;
+        spaced.insert(event_start, b' ');
+        assert!(parse_event_tape(&spaced, &config(), "demo")
+            .expect_err("spaced row")
+            .contains("not canonical JSON"));
+
+        let prior_marker = b",\"prior_tape_hash\":";
+        let prior_start = bytes
+            .windows(prior_marker.len())
+            .position(|window| window == prior_marker)
+            .expect("prior hash marker");
+        let mut reordered = vec![b'{'];
+        reordered.extend_from_slice(&bytes[prior_start + 1..bytes.len() - 2]);
+        reordered.push(b',');
+        reordered.extend_from_slice(&bytes[1..prior_start]);
+        reordered.extend_from_slice(b"}\n");
+        assert!(parse_event_tape(&reordered, &config(), "demo")
+            .expect_err("reordered row")
+            .contains("not canonical JSON"));
+
+        let changed_number = replace_once(bytes, b"1.25e-05", b"1.26e-05");
+        assert!(parse_event_tape(&changed_number, &config(), "demo")
+            .expect_err("changed number")
+            .contains("event id is invalid"));
+
+        let changed_hash = replace_once(bytes, b"\"3fedb48e", b"\"4fedb48e");
+        assert!(parse_event_tape(&changed_hash, &config(), "demo")
+            .expect_err("changed hash")
+            .contains("tape hash is invalid"));
     }
 
     #[test]
