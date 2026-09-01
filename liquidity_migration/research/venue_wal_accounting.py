@@ -34,15 +34,6 @@ CAPTURE_SOURCE_CONTRACT = {
         {"accountType": "UNIFIED", "category": "linear", "currency": "USDT", "limit": "50"},
     ),
 }
-ACTIVATION_RECEIPT_FIELDS = (
-    "commit",
-    "sha256",
-    "signal_worker_sha256",
-    "launcher_sha256",
-    "control_helper_sha256",
-    "controls_sudoers_sha256",
-    "telegram_bot_sha256",
-)
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -83,6 +74,7 @@ class EngineBoot:
     version: str
     config_sha256: str
     wall_ts_ms: int | None
+    commit: str = ""
 
 
 @dataclass(frozen=True)
@@ -161,18 +153,11 @@ class VenueCapture:
 
 @dataclass(frozen=True)
 class DeploymentEvidence:
-    receipt_path: str
-    receipt_sha256: str
-    receipt: Mapping[str, str]
-    engine_binary_path: str
-    engine_binary_sha256: str
-    signal_worker_binary_path: str
-    signal_worker_binary_sha256: str
+    """What the graded trades must have run on: a commit and a config, both retained independently."""
+
     engine_config_path: str
     engine_config_sha256: str
     expected_commit: str
-    expected_binary_sha256: str
-    expected_signal_worker_sha256: str
     expected_config_sha256: str
     issues: tuple[str, ...]
 
@@ -240,91 +225,32 @@ def _require_identity(label: str, value: str, pattern: re.Pattern[str]) -> str:
 
 
 def read_deployment_evidence(
-    receipt_path: Path,
-    engine_binary_path: Path,
-    signal_worker_binary_path: Path,
     engine_config_path: Path,
     *,
     expected_commit: str,
-    expected_binary_sha256: str,
-    expected_signal_worker_sha256: str,
     expected_config_sha256: str,
 ) -> DeploymentEvidence:
+    """Bind the expected commit and config to retained bytes, never to the evidence being graded.
+
+    The engine stamps every Boot record with the git commit it was built from
+    and the SHA-256 of its config; the commit is what the host was told to
+    deploy and the config bytes are the ones the deploy rendered. Each fill's
+    Boot is checked against both by `_fill_boot_issues`.
+    """
+
     expected_commit = _require_identity("expected commit", expected_commit, COMMIT_RE)
-    expected_binary_sha256 = _require_identity(
-        "expected engine binary SHA-256", expected_binary_sha256, SHA256_RE
-    )
-    expected_signal_worker_sha256 = _require_identity(
-        "expected signal-worker binary SHA-256", expected_signal_worker_sha256, SHA256_RE
-    )
     expected_config_sha256 = _require_identity(
         "expected engine config SHA-256", expected_config_sha256, SHA256_RE
     )
-
-    resolved_receipt = receipt_path.expanduser().resolve()
-    receipt_raw = resolved_receipt.read_bytes()
-    if not receipt_raw.endswith(b"\n") or b"\r" in receipt_raw:
-        raise EvidenceError(f"{resolved_receipt}: activation receipt is not exact newline text")
-    try:
-        lines = receipt_raw.decode("ascii").splitlines()
-    except UnicodeDecodeError as exc:
-        raise EvidenceError(f"{resolved_receipt}: activation receipt is not ASCII") from exc
-    if len(lines) != len(ACTIVATION_RECEIPT_FIELDS):
-        raise EvidenceError(
-            f"{resolved_receipt}: activation receipt must have exactly "
-            f"{len(ACTIVATION_RECEIPT_FIELDS)} lines"
-        )
-    receipt: dict[str, str] = {}
-    for line, field_name in zip(lines, ACTIVATION_RECEIPT_FIELDS, strict=True):
-        prefix = f"{field_name}="
-        if not line.startswith(prefix):
-            raise EvidenceError(
-                f"{resolved_receipt}: activation receipt field {field_name!r} is missing or out of order"
-            )
-        value = line.removeprefix(prefix)
-        pattern = COMMIT_RE if field_name == "commit" else SHA256_RE
-        receipt[field_name] = _require_identity(
-            f"activation receipt {field_name}", value, pattern
-        )
-
-    resolved_binary = engine_binary_path.expanduser().resolve()
-    resolved_signal_worker = signal_worker_binary_path.expanduser().resolve()
     resolved_config = engine_config_path.expanduser().resolve()
-    binary_sha256 = hashlib.sha256(resolved_binary.read_bytes()).hexdigest()
-    signal_worker_sha256 = hashlib.sha256(resolved_signal_worker.read_bytes()).hexdigest()
     config_sha256 = hashlib.sha256(resolved_config.read_bytes()).hexdigest()
     issues: list[str] = []
-    if receipt["commit"] != expected_commit:
-        issues.append("activation receipt commit differs from the expected exact commit")
-    if receipt["sha256"] != expected_binary_sha256:
-        issues.append("activation receipt engine digest differs from the expected binary SHA-256")
-    if binary_sha256 != receipt["sha256"]:
-        issues.append("engine binary SHA-256 differs from the activation receipt")
-    if binary_sha256 != expected_binary_sha256:
-        issues.append("engine binary SHA-256 differs from the expected binary SHA-256")
-    if receipt["signal_worker_sha256"] != expected_signal_worker_sha256:
-        issues.append(
-            "activation receipt signal-worker digest differs from the expected binary SHA-256"
-        )
-    if signal_worker_sha256 != receipt["signal_worker_sha256"]:
-        issues.append("signal-worker binary SHA-256 differs from the activation receipt")
-    if signal_worker_sha256 != expected_signal_worker_sha256:
-        issues.append("signal-worker binary SHA-256 differs from the expected binary SHA-256")
     if config_sha256 != expected_config_sha256:
         issues.append("engine config SHA-256 differs from the expected config SHA-256")
     return DeploymentEvidence(
-        receipt_path=str(resolved_receipt),
-        receipt_sha256=hashlib.sha256(receipt_raw).hexdigest(),
-        receipt=receipt,
-        engine_binary_path=str(resolved_binary),
-        engine_binary_sha256=binary_sha256,
-        signal_worker_binary_path=str(resolved_signal_worker),
-        signal_worker_binary_sha256=signal_worker_sha256,
         engine_config_path=str(resolved_config),
         engine_config_sha256=config_sha256,
         expected_commit=expected_commit,
-        expected_binary_sha256=expected_binary_sha256,
-        expected_signal_worker_sha256=expected_signal_worker_sha256,
         expected_config_sha256=expected_config_sha256,
         issues=tuple(issues),
     )
@@ -491,6 +417,7 @@ def parse_wal_accounting(wal: WalRead, sleeve: str = "long") -> WalAccounting:
                 version=str(record.get("version") or ""),
                 config_sha256=str(record.get("config_sha256") or ""),
                 wall_ts_ms=_integer(record.get("wall_ts_ms")),
+                commit=str(record.get("commit") or ""),
             )
             boots.append(active_boot)
             continue
@@ -884,13 +811,17 @@ def _boot_receipt(boot: EngineBoot | None) -> dict[str, Any] | None:
     return {
         "wal_sequence": boot.sequence,
         "version": boot.version,
+        "commit": boot.commit,
         "config_sha256": boot.config_sha256,
         "wall_ts_ms": boot.wall_ts_ms,
     }
 
 
 def _fill_boot_issues(
-    fills: Sequence[EngineFill], sleeve: str, expected_config_sha256: str
+    fills: Sequence[EngineFill],
+    sleeve: str,
+    expected_config_sha256: str,
+    expected_commit: str,
 ) -> list[str]:
     issues: list[str] = []
     for fill in fills:
@@ -923,6 +854,16 @@ def _fill_boot_issues(
                     f"{sleeve} fill {identity} uses Boot config "
                     f"{boot.config_sha256 or '<blank>'}, not the expected engine config "
                     f"SHA-256, for its {role}"
+                )
+            if not boot.commit:
+                issues.append(
+                    f"Boot at WAL sequence {boot.sequence} names no commit; the build that "
+                    "wrote it predates commit-stamped boots"
+                )
+            elif boot.commit != expected_commit:
+                issues.append(
+                    f"{sleeve} fill {identity} ran on commit {boot.commit}, not the expected "
+                    f"commit, for its {role}"
                 )
             if boot.wall_ts_ms is None or boot.wall_ts_ms <= 0:
                 issues.append(
@@ -1410,13 +1351,8 @@ def reconcile(
     *,
     expected_realm: str,
     expected_user_id: str,
-    deployment_receipt_path: Path,
-    engine_binary_path: Path,
-    signal_worker_binary_path: Path,
     engine_config_path: Path,
     expected_commit: str,
-    expected_binary_sha256: str,
-    expected_signal_worker_sha256: str,
     expected_config_sha256: str,
     trade_execution_id: str | None = None,
 ) -> dict[str, Any]:
@@ -1424,13 +1360,8 @@ def reconcile(
     accounting = parse_wal_accounting(wal, sleeve)
     venue = read_venue_capture(venue_path)
     deployment = read_deployment_evidence(
-        deployment_receipt_path,
-        engine_binary_path,
-        signal_worker_binary_path,
         engine_config_path,
         expected_commit=expected_commit,
-        expected_binary_sha256=expected_binary_sha256,
-        expected_signal_worker_sha256=expected_signal_worker_sha256,
         expected_config_sha256=expected_config_sha256,
     )
     scope_issues: list[str] = []
@@ -1469,6 +1400,7 @@ def reconcile(
             [fill for trade in selected_trades for fill in trade.fills],
             sleeve,
             expected_config_sha256,
+            expected_commit,
         )
     )
     trades = [
@@ -1477,7 +1409,7 @@ def reconcile(
     ]
     confirmed = sum(row["status"] == "venue_confirmed" for row in trades)
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
         "generated_at_utc": dt.datetime.now(tz=dt.timezone.utc).isoformat(),
         "claim": "closed sleeve trades are venue-confirmed only when immutable fills and all account cash legs reconcile",
         "validity": "valid" if trades and confirmed == len(trades) else "limited",
@@ -1492,19 +1424,11 @@ def reconcile(
         },
         "deployment_and_authorization": "read-only evidence; no trading or real-money authority",
         "deployment": {
-            "activation_receipt_path": deployment.receipt_path,
-            "activation_receipt_sha256": deployment.receipt_sha256,
-            "activation_receipt": deployment.receipt,
-            "engine_binary_path": deployment.engine_binary_path,
-            "engine_binary_sha256": deployment.engine_binary_sha256,
-            "signal_worker_binary_path": deployment.signal_worker_binary_path,
-            "signal_worker_binary_sha256": deployment.signal_worker_binary_sha256,
             "engine_config_path": deployment.engine_config_path,
             "engine_config_sha256": deployment.engine_config_sha256,
             "expected_commit": deployment.expected_commit,
-            "expected_binary_sha256": deployment.expected_binary_sha256,
-            "expected_signal_worker_sha256": deployment.expected_signal_worker_sha256,
             "expected_config_sha256": deployment.expected_config_sha256,
+            "boot_commits": sorted({boot.commit for boot in accounting.boots}),
             "issues": list(deployment.issues),
         },
         "wal": {
@@ -1537,9 +1461,9 @@ def reconcile(
             "This does not prove producer-to-target parity or point-in-time model validity.",
             "This does not authorize deployment, mainnet trading, or account ownership.",
             "A missing row is missing evidence, not a zero fee or zero funding payment.",
-            "A WAL Boot records config and package version, not commit or binary digest; "
-            "the deployment receipt proves the captured installed generation but cannot "
-            "cryptographically prove that an older historical Boot ran that binary.",
+            "A WAL Boot names the commit the binary was built from and its config hash, "
+            "not the binary's own digest; the host rebuilds that commit, so the commit is "
+            "the build's identity here. A Boot with no commit predates stamped builds.",
             "For a recovered fill, order_boot identifies the generation that wrote OrderSent "
             "and active_boot identifies the generation that recorded recovery; both configs "
             "are checked, without treating venue time as WAL sequence.",
@@ -1574,30 +1498,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--expected-realm", required=True, choices=("demo", "mainnet"))
     parser.add_argument("--expected-user-id", required=True, help="independently expected Bybit account user id")
+    parser.add_argument("--engine-config", required=True, type=Path, help="the retained rendered engine config bytes")
     parser.add_argument(
-        "--deployment-receipt",
+        "--expected-commit",
         required=True,
-        type=Path,
-        help="exact seven-line activation.complete receipt from the deployed host",
-    )
-    parser.add_argument("--engine-binary", required=True, type=Path, help="deployed engine binary")
-    parser.add_argument(
-        "--signal-worker-binary",
-        required=True,
-        type=Path,
-        help="deployed signal-worker binary",
-    )
-    parser.add_argument("--engine-config", required=True, type=Path, help="exact engine config bytes")
-    parser.add_argument("--expected-commit", required=True, help="independently retained full rollout commit")
-    parser.add_argument(
-        "--expected-binary-sha256",
-        required=True,
-        help="independently retained rollout engine binary SHA-256",
-    )
-    parser.add_argument(
-        "--expected-signal-worker-sha256",
-        required=True,
-        help="independently retained rollout signal-worker binary SHA-256",
+        help="the full commit the host was told to deploy; every graded fill's Boot must name it",
     )
     parser.add_argument(
         "--expected-config-sha256",
@@ -1617,13 +1522,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.sleeve,
             expected_realm=args.expected_realm,
             expected_user_id=args.expected_user_id,
-            deployment_receipt_path=args.deployment_receipt,
-            engine_binary_path=args.engine_binary,
-            signal_worker_binary_path=args.signal_worker_binary,
             engine_config_path=args.engine_config,
             expected_commit=args.expected_commit,
-            expected_binary_sha256=args.expected_binary_sha256,
-            expected_signal_worker_sha256=args.expected_signal_worker_sha256,
             expected_config_sha256=args.expected_config_sha256,
             trade_execution_id=args.trade_execution_id,
         )

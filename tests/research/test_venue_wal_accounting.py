@@ -22,19 +22,9 @@ from liquidity_migration.research.venue_wal_accounting import (
 )
 
 EXPECTED_COMMIT = "a" * 40
-ENGINE_BINARY_BYTES = b"fixture engine binary\n"
-SIGNAL_WORKER_BINARY_BYTES = b"fixture signal-worker binary\n"
+OTHER_COMMIT = "b" * 40
 ENGINE_CONFIG_BYTES = b"[engine]\nfixture = true\n"
-EXPECTED_BINARY_SHA256 = hashlib.sha256(ENGINE_BINARY_BYTES).hexdigest()
-EXPECTED_SIGNAL_WORKER_SHA256 = hashlib.sha256(SIGNAL_WORKER_BINARY_BYTES).hexdigest()
 EXPECTED_CONFIG_SHA256 = hashlib.sha256(ENGINE_CONFIG_BYTES).hexdigest()
-OTHER_ARTIFACT_SHA256 = {
-    "signal_worker_sha256": EXPECTED_SIGNAL_WORKER_SHA256,
-    "launcher_sha256": "1" * 64,
-    "control_helper_sha256": "2" * 64,
-    "controls_sudoers_sha256": "3" * 64,
-    "telegram_bot_sha256": "4" * 64,
-}
 
 
 def _frame(record: dict) -> bytes:
@@ -114,6 +104,7 @@ def _wal_records() -> list[dict]:
             "version": "engine-core 0.1.0",
             "config_sha256": EXPECTED_CONFIG_SHA256,
             "wall_ts_ms": 900,
+            "commit": EXPECTED_COMMIT,
         },
         {"kind": "names", "strategies": ["carry", "long"], "symbols": ["BTCUSDT"]},
         _order("long-entry", "Buy", 2.0, False),
@@ -288,48 +279,15 @@ def _write_capture(path: Path, rows: list[dict]) -> None:
 def _deployment_kwargs(
     tmp_path: Path,
     *,
-    receipt_commit: str = EXPECTED_COMMIT,
-    receipt_binary_sha256: str = EXPECTED_BINARY_SHA256,
-    receipt_signal_worker_sha256: str = EXPECTED_SIGNAL_WORKER_SHA256,
-    binary_bytes: bytes = ENGINE_BINARY_BYTES,
-    signal_worker_binary_bytes: bytes = SIGNAL_WORKER_BINARY_BYTES,
     config_bytes: bytes = ENGINE_CONFIG_BYTES,
     expected_commit: str = EXPECTED_COMMIT,
-    expected_binary_sha256: str = EXPECTED_BINARY_SHA256,
-    expected_signal_worker_sha256: str = EXPECTED_SIGNAL_WORKER_SHA256,
     expected_config_sha256: str = EXPECTED_CONFIG_SHA256,
 ) -> dict:
-    receipt = tmp_path / "activation.complete"
-    binary = tmp_path / "engine"
-    signal_worker_binary = tmp_path / "signal-worker"
     config = tmp_path / "engine.toml"
-    receipt.write_text(
-        "\n".join(
-            [
-                f"commit={receipt_commit}",
-                f"sha256={receipt_binary_sha256}",
-                f"signal_worker_sha256={receipt_signal_worker_sha256}",
-                *(
-                    f"{name}={value}"
-                    for name, value in OTHER_ARTIFACT_SHA256.items()
-                    if name != "signal_worker_sha256"
-                ),
-                "",
-            ]
-        ),
-        encoding="ascii",
-    )
-    binary.write_bytes(binary_bytes)
-    signal_worker_binary.write_bytes(signal_worker_binary_bytes)
     config.write_bytes(config_bytes)
     return {
-        "deployment_receipt_path": receipt,
-        "engine_binary_path": binary,
-        "signal_worker_binary_path": signal_worker_binary,
         "engine_config_path": config,
         "expected_commit": expected_commit,
-        "expected_binary_sha256": expected_binary_sha256,
-        "expected_signal_worker_sha256": expected_signal_worker_sha256,
         "expected_config_sha256": expected_config_sha256,
     }
 
@@ -366,7 +324,7 @@ def test_crc32c_matches_the_standard_check_value() -> None:
 def test_exact_ids_fills_cash_and_funding_make_one_venue_confirmed_trade(tmp_path: Path) -> None:
     report = _report(tmp_path)
 
-    assert report["schema_version"] == 3
+    assert report["schema_version"] == 4
     assert report["validity"] == "valid"
     assert report["summary"] == {
         "closed_trades": 1,
@@ -375,12 +333,7 @@ def test_exact_ids_fills_cash_and_funding_make_one_venue_confirmed_trade(tmp_pat
         "not_venue_confirmed": 0,
         "open_wal_positions": 0,
     }
-    assert report["deployment"]["signal_worker_binary_sha256"] == (
-        EXPECTED_SIGNAL_WORKER_SHA256
-    )
-    assert report["deployment"]["expected_signal_worker_sha256"] == (
-        EXPECTED_SIGNAL_WORKER_SHA256
-    )
+    assert report["deployment"]["boot_commits"] == [EXPECTED_COMMIT]
     trade = report["trades"][0]
     assert trade["status"] == "venue_confirmed"
     assert trade["wal_execution_ids"] == ["exec-entry", "exec-exit"]
@@ -393,6 +346,7 @@ def test_exact_ids_fills_cash_and_funding_make_one_venue_confirmed_trade(tmp_pat
     assert trade["fill_receipts"][0]["wal"]["active_boot"] == {
         "wal_sequence": 1,
         "version": "engine-core 0.1.0",
+        "commit": EXPECTED_COMMIT,
         "config_sha256": EXPECTED_CONFIG_SHA256,
         "wall_ts_ms": 900,
     }
@@ -403,8 +357,7 @@ def test_exact_ids_fills_cash_and_funding_make_one_venue_confirmed_trade(tmp_pat
     assert trade["fill_receipts"][0]["venue_transaction"]["transaction_id"] == "txn-entry"
     assert trade["settlement_receipts"][0]["funding"] == "-0.05"
     assert trade["closed_pnl_receipts"][0]["closed_pnl"] == "19.74"
-    assert report["deployment"]["activation_receipt"]["commit"] == EXPECTED_COMMIT
-    assert report["deployment"]["engine_binary_sha256"] == EXPECTED_BINARY_SHA256
+    assert report["deployment"]["expected_commit"] == EXPECTED_COMMIT
     assert report["deployment"]["engine_config_sha256"] == EXPECTED_CONFIG_SHA256
 
 
@@ -659,6 +612,7 @@ def test_each_fill_uses_its_active_preceding_boot_config(tmp_path: Path) -> None
             "version": "engine-core 0.1.0",
             "config_sha256": "b" * 64,
             "wall_ts_ms": 1_900,
+            "commit": EXPECTED_COMMIT,
         },
     )
 
@@ -683,6 +637,7 @@ def _recovered_entry_records(order_config_sha256: str) -> list[dict]:
             "version": "engine-core 0.1.0",
             "config_sha256": EXPECTED_CONFIG_SHA256,
             "wall_ts_ms": 10_000,
+            "commit": EXPECTED_COMMIT,
         },
         recovered,
     ]
@@ -735,69 +690,30 @@ def test_long_fill_with_missing_or_nonpositive_quantity_is_a_global_blocker(
     assert any("has no positive quantity" in issue for issue in trade["issues"])
 
 
-def test_wrong_expected_commit_withholds_confirmation(tmp_path: Path) -> None:
+def test_a_fill_on_another_commit_withholds_confirmation(tmp_path: Path) -> None:
     trade = _report(
         tmp_path,
-        deployment_options={"expected_commit": "b" * 40},
-    )["trades"][0]
-
-    assert trade["status"] == "not_venue_confirmed"
-    assert any("receipt commit differs" in issue for issue in trade["issues"])
-
-
-def test_wrong_receipt_and_actual_binary_digests_withhold_confirmation(tmp_path: Path) -> None:
-    receipt_mismatch = _report(
-        tmp_path,
-        deployment_options={"receipt_binary_sha256": "b" * 64},
-    )["trades"][0]
-
-    assert receipt_mismatch["status"] == "not_venue_confirmed"
-    assert any("receipt engine digest differs" in issue for issue in receipt_mismatch["issues"])
-    assert any("binary SHA-256 differs from the activation receipt" in issue for issue in receipt_mismatch["issues"])
-
-
-def test_wrong_actual_binary_digest_withholds_confirmation(tmp_path: Path) -> None:
-    trade = _report(
-        tmp_path,
-        deployment_options={"binary_bytes": b"different engine binary\n"},
-    )["trades"][0]
-
-    assert trade["status"] == "not_venue_confirmed"
-    assert any("binary SHA-256 differs from the activation receipt" in issue for issue in trade["issues"])
-    assert any("binary SHA-256 differs from the expected" in issue for issue in trade["issues"])
-
-
-def test_wrong_receipt_signal_worker_digest_withholds_confirmation(tmp_path: Path) -> None:
-    trade = _report(
-        tmp_path,
-        deployment_options={"receipt_signal_worker_sha256": "b" * 64},
-    )["trades"][0]
-
-    assert trade["status"] == "not_venue_confirmed"
-    assert any("receipt signal-worker digest differs" in issue for issue in trade["issues"])
-    assert any(
-        "signal-worker binary SHA-256 differs from the activation receipt" in issue
-        for issue in trade["issues"]
-    )
-
-
-def test_wrong_actual_signal_worker_digest_withholds_confirmation(tmp_path: Path) -> None:
-    trade = _report(
-        tmp_path,
-        deployment_options={
-            "signal_worker_binary_bytes": b"different signal-worker binary\n"
-        },
+        deployment_options={"expected_commit": OTHER_COMMIT},
     )["trades"][0]
 
     assert trade["status"] == "not_venue_confirmed"
     assert any(
-        "signal-worker binary SHA-256 differs from the activation receipt" in issue
+        f"ran on commit {EXPECTED_COMMIT}, not the expected commit" in issue
         for issue in trade["issues"]
     )
-    assert any(
-        "signal-worker binary SHA-256 differs from the expected" in issue
-        for issue in trade["issues"]
-    )
+
+
+def test_a_boot_without_a_commit_withholds_confirmation(tmp_path: Path) -> None:
+    records = _wal_records()
+    del records[0]["commit"]
+
+    report = _report(tmp_path, records=records)
+    trade = report["trades"][0]
+
+    assert trade["status"] == "not_venue_confirmed"
+    assert any("names no commit" in issue for issue in trade["issues"])
+    assert report["deployment"]["boot_commits"] == [""]
+    assert trade["fill_receipts"][0]["wal"]["active_boot"]["commit"] == ""
 
 
 def test_wrong_actual_config_digest_withholds_confirmation(tmp_path: Path) -> None:
@@ -810,51 +726,17 @@ def test_wrong_actual_config_digest_withholds_confirmation(tmp_path: Path) -> No
     assert any("config SHA-256 differs" in issue for issue in trade["issues"])
 
 
-def test_activation_receipt_schema_is_exact_and_ordered(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [("expected_commit", "A" * 40), ("expected_commit", "abc"), ("expected_config_sha256", "z" * 64)],
+)
+def test_expected_identities_must_be_exact_lowercase_hex(tmp_path: Path, field_name: str, value: str) -> None:
     arguments = _deployment_kwargs(tmp_path)
-    receipt = arguments["deployment_receipt_path"]
-    lines = receipt.read_text(encoding="ascii").splitlines()
-    receipt.write_text("\n".join([lines[1], lines[0], *lines[2:], ""]), encoding="ascii")
-
-    with pytest.raises(EvidenceError, match="missing or out of order"):
+    arguments[field_name] = value
+    with pytest.raises(EvidenceError, match="exact lowercase hexadecimal"):
         read_deployment_evidence(
-            receipt,
-            arguments["engine_binary_path"],
-            arguments["signal_worker_binary_path"],
             arguments["engine_config_path"],
             expected_commit=arguments["expected_commit"],
-            expected_binary_sha256=arguments["expected_binary_sha256"],
-            expected_signal_worker_sha256=arguments[
-                "expected_signal_worker_sha256"
-            ],
-            expected_config_sha256=arguments["expected_config_sha256"],
-        )
-
-
-@pytest.mark.parametrize("mutation", ("missing", "extra", "moved"))
-def test_signal_worker_receipt_field_is_exact(tmp_path: Path, mutation: str) -> None:
-    arguments = _deployment_kwargs(tmp_path)
-    receipt = arguments["deployment_receipt_path"]
-    lines = receipt.read_text(encoding="ascii").splitlines()
-    if mutation == "missing":
-        lines = [*lines[:2], *lines[3:]]
-    elif mutation == "extra":
-        lines.append(f"signal_worker_sha256={EXPECTED_SIGNAL_WORKER_SHA256}")
-    else:
-        lines = [lines[0], lines[2], lines[1], *lines[3:]]
-    receipt.write_text("\n".join([*lines, ""]), encoding="ascii")
-
-    with pytest.raises(EvidenceError, match="exactly 7 lines|missing or out of order"):
-        read_deployment_evidence(
-            receipt,
-            arguments["engine_binary_path"],
-            arguments["signal_worker_binary_path"],
-            arguments["engine_config_path"],
-            expected_commit=arguments["expected_commit"],
-            expected_binary_sha256=arguments["expected_binary_sha256"],
-            expected_signal_worker_sha256=arguments[
-                "expected_signal_worker_sha256"
-            ],
             expected_config_sha256=arguments["expected_config_sha256"],
         )
 

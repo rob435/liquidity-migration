@@ -137,8 +137,14 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             version,
             config_sha256,
             wall_ts_ms,
+            commit,
         } => format!(
-            "started    {version}, config {}, at {wall_ts_ms}",
+            "started    {version}, commit {}, config {}, at {wall_ts_ms}",
+            if commit.is_empty() {
+                "unknown"
+            } else {
+                &commit[..commit.len().min(12)]
+            },
             &config_sha256[..config_sha256.len().min(12)]
         ),
         WalRecord::Intent { intent } => format!(
@@ -584,6 +590,7 @@ mod tests {
                 version: "test".into(),
                 config_sha256: "abcdef1234567890".into(),
                 wall_ts_ms: 1,
+                commit: String::new(),
             },
             WalRecord::OrderSent {
                 request: request("a"),

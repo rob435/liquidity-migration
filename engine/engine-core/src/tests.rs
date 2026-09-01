@@ -1189,6 +1189,7 @@ fn replay_with_history_boundary(replayed: &[WalRecord]) -> Vec<WalRecord> {
         version: ENGINE_VERSION.into(),
         config_sha256: "test-fixture".into(),
         wall_ts_ms: recent_replay_ms(),
+        commit: String::new(),
     });
     bounded.extend_from_slice(replayed);
     bounded

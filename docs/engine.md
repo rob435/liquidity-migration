@@ -180,7 +180,8 @@ The module and replay contract for a new strategy is
 The WAL is a checksummed binary frame stream carrying human-readable typed
 records. It contains, among other things:
 
-- boot/config identity and the append-only name table;
+- boot identity — the engine version, the git commit the binary was built
+  from, and the config's SHA-256 — and the append-only name table;
 - signal observations and consumption receipts;
 - strategy checkpoints, imports, events, and event consumption;
 - accepted and consumed runtime controls;
@@ -197,7 +198,10 @@ answer was lost.
 Buffered records flush on `group_flush_ms`, which is constrained to 1–1000 ms.
 Order and state barriers do not wait for that group tick. When the active WAL
 passes `wal_rotate_mb`, rotation writes a complete segment base and archives
-the old segment in place. Retention is an operator action.
+the old segment in place. Retention is an operator action. Boot replays only
+the newest segment it can trust and holds it decoded, which costs about six
+times the segment's bytes in memory; at the configured 256 MB rotation size
+that is about 1.5 GB, and the engine units cap memory at 2 GB for it.
 
 A torn final frame is truncated only while holding the WAL lock. A corrupt
 interior frame or inconsistent replay refuses boot.

@@ -18,11 +18,14 @@ use crate::strategy::{
 #[allow(clippy::large_enum_variant)]
 pub enum WalRecord {
     /// Engine start: code identity and config identity, so every later
-    /// record is attributable.
+    /// record is attributable. `commit` is the git commit the binary was built
+    /// from; logs written before builds were stamped read back with it empty.
     Boot {
         version: String,
         config_sha256: String,
         wall_ts_ms: i64,
+        #[serde(default)]
+        commit: String,
     },
     Intent {
         intent: Intent,
@@ -886,5 +889,34 @@ mod tests {
                 ..
             } if strategy_checkpoints.is_empty() && rolling_loss_rows.is_empty()
         ));
+    }
+}
+
+#[cfg(test)]
+mod boot_shape_tests {
+    use super::WalRecord;
+
+    #[test]
+    fn a_boot_written_before_commit_stamping_reads_with_an_empty_commit() {
+        let old =
+            r#"{"kind":"boot","version":"engine-core 0.1.0","config_sha256":"abc","wall_ts_ms":7}"#;
+        let record: WalRecord = serde_json::from_str(old).expect("old boot shape decodes");
+        assert_eq!(
+            record,
+            WalRecord::Boot {
+                version: "engine-core 0.1.0".into(),
+                config_sha256: "abc".into(),
+                wall_ts_ms: 7,
+                commit: String::new(),
+            }
+        );
+        let stamped = serde_json::to_string(&WalRecord::Boot {
+            version: "v".into(),
+            config_sha256: "c".into(),
+            wall_ts_ms: 1,
+            commit: "0123abcd".into(),
+        })
+        .unwrap();
+        assert!(stamped.contains(r#""commit":"0123abcd""#));
     }
 }

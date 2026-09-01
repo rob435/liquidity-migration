@@ -40,7 +40,7 @@ use engine_types::risk::RollingLossView;
 use engine_types::{AccountIdentity, Side};
 
 use crate::clock;
-use crate::engine::ENGINE_VERSION;
+use crate::engine::{ENGINE_COMMIT, ENGINE_VERSION};
 use crate::execution::Costs;
 use crate::ledger::Quantiles;
 
@@ -288,6 +288,7 @@ impl Heartbeat {
                 "pending_flatten_requests",
                 pending_flatten_requests(facts.pending_flatten_requests),
             ),
+            ("engine_commit", quoted(ENGINE_COMMIT)),
             ("engine_version", quoted(ENGINE_VERSION)),
             ("fills", facts.costs.fills.to_string()),
             (
@@ -651,7 +652,7 @@ mod tests {
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 55] = [
+    const KEYS: [&str; 56] = [
         "account_available_usdt",
         "account_equity_usdt",
         "account_observed_wall_ts_ms",
@@ -671,6 +672,7 @@ mod tests {
         "durable_p99_ns",
         "end_to_end_p50_ns",
         "end_to_end_p99_ns",
+        "engine_commit",
         "engine_version",
         "entry_blockers",
         "fill_all_in_arrival_bps",
@@ -1063,6 +1065,7 @@ mod tests {
         assert_eq!(fields["wall_ts_ms"], 1_755_000_000_000i64);
         assert_eq!(fields["pid"].as_u64(), Some(u64::from(std::process::id())));
         assert_eq!(fields["engine_version"], ENGINE_VERSION);
+        assert_eq!(fields["engine_commit"], ENGINE_COMMIT);
         assert_eq!(fields["strategies"][0], "long");
         assert_eq!(fields["strategies"][1], "carry");
         assert_eq!(fields["decide_p50_ns"], 83);

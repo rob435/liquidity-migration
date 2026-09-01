@@ -394,6 +394,7 @@ fn prior_state(history_rows: usize, now_ms: i64) -> (Vec<WalRecord>, AccountView
             version: "account-state-soak".to_string(),
             config_sha256: "account-state-soak".to_string(),
             wall_ts_ms: now_ms - 1_000,
+            commit: String::new(),
         },
         WalRecord::Names {
             strategies: vec!["account-state-soak".to_string()],
