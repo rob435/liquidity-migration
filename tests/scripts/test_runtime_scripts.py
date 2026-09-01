@@ -1578,6 +1578,32 @@ def test_rollout_transition_union_is_prepared_before_snapshot_and_used_everywher
     assert "restore_prior_topology_snapshot" in restore
 
 
+def test_armed_rollout_preflights_attestor_before_stopping_any_unit() -> None:
+    text = DEPLOY.read_text(encoding="utf-8")
+    preflight = _function(
+        text,
+        "preflight_mainnet_native_takeover",
+        "native_entries_switch",
+    )
+    rollout = text[text.index("rollout_mode()") : text.index("acquire_maintenance_locks\n")]
+
+    for assignment in (
+        "BYBIT_ATTEST_API_KEY",
+        "BYBIT_ATTEST_API_SECRET",
+        "BYBIT_ATTEST_API_KEY_IP",
+        "BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID",
+    ):
+        assert assignment in preflight
+    assert 'stat -c %u "$MAINNET_ATTESTOR_ENV"' in preflight
+    assert 'stat -c %g "$MAINNET_ATTESTOR_ENV"' in preflight
+    assert 'stat -c %a "$MAINNET_ATTESTOR_ENV"' in preflight
+    assert 'stat -c %h "$MAINNET_ATTESTOR_ENV"' in preflight
+    assert "credential has invalid assignments" in preflight
+    assert rollout.index("preflight-mainnet-native-takeover") < rollout.index(
+        "snapshot-prior-topology"
+    ) < rollout.index("ROLLOUT_STOPPED=1") < rollout.index("stop-downstream-units")
+
+
 def test_transient_builder_is_bounded_tracked_and_cleaned_on_exit() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     stop = _function(text, "stop_active_engine_builder_unit", "run_engine_builder_step")

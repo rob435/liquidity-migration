@@ -43,7 +43,9 @@ edit STATE.md to match.
   Rollout stops the validated installed-plus-candidate fleet union, migrates
   reviewed universe bytes atomically, imports the exact retired CARRY and
   Exodus state formats, and binds root-owned takeover files to their checked
-  inode before import. Signed venue accounting binds every fill to its engine
+  inode before import. An armed rollout validates the separate mainnet attestor
+  file before it snapshots or stops the incumbent. Signed venue accounting
+  binds every fill to its engine
   boot and order boot, applies durable dropped claims, requires the exact
   seven-field activation receipt for the engine and signal-worker generation,
   rehashes both deployed binaries and the engine config against independent

@@ -1717,6 +1717,46 @@ funded_configuration_present() {
     return 1
 }
 
+preflight_mainnet_native_takeover() {
+    if ! mainnet_armed; then
+        echo "mainnet-takeover-preflight-ok result=skipped-disarmed"
+        return 0
+    fi
+    [ -f "$MAINNET_ATTESTOR_ENV" ] && [ ! -L "$MAINNET_ATTESTOR_ENV" ] \
+        || fail "armed mainnet native takeover credential is missing or linked: $MAINNET_ATTESTOR_ENV"
+    [ "$(stat -c %u "$MAINNET_ATTESTOR_ENV")" -eq 0 ] \
+        && [ "$(stat -c %g "$MAINNET_ATTESTOR_ENV")" -eq 0 ] \
+        && [ "$(stat -c %a "$MAINNET_ATTESTOR_ENV")" = 600 ] \
+        && [ "$(stat -c %h "$MAINNET_ATTESTOR_ENV")" -eq 1 ] \
+        && [ "$(stat -c %s "$MAINNET_ATTESTOR_ENV")" -gt 0 ] \
+        && [ "$(stat -c %s "$MAINNET_ATTESTOR_ENV")" -le 1048576 ] \
+        || fail "armed mainnet native takeover credential is not a single-link root:root mode-0600 file"
+    awk '
+BEGIN {
+  allowed["BYBIT_ATTEST_API_KEY"] = 1
+  allowed["BYBIT_ATTEST_API_SECRET"] = 1
+  allowed["BYBIT_ATTEST_API_KEY_IP"] = 1
+  allowed["BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID"] = 1
+}
+/^[[:space:]]*$/ || /^#/ { next }
+{
+  separator = index($0, "=")
+  if (separator < 2) exit 1
+  key = substr($0, 1, separator - 1)
+  value = substr($0, separator + 1)
+  if (!(key in allowed) || seen[key]++ || value == "") exit 1
+}
+END {
+  if (seen["BYBIT_ATTEST_API_KEY"] != 1 ||
+      seen["BYBIT_ATTEST_API_SECRET"] != 1 ||
+      seen["BYBIT_ATTEST_API_KEY_IP"] != 1 ||
+      seen["BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID"] != 1) exit 1
+}
+' "$MAINNET_ATTESTOR_ENV" \
+        || fail "armed mainnet native takeover credential has invalid assignments"
+    echo "mainnet-takeover-preflight-ok result=credential-boundary-present"
+}
+
 native_entries_switch() {
     case "${1:-off}" in
         on|ON|On|1|true|TRUE|yes|YES) printf 'true\n' ;;
@@ -5034,6 +5074,8 @@ rollout_mode() {
     run_strict_phase rollout-target-prefetch prefetch_rollout_target
     run_strict_phase prepare-rollout-transition-inventory \
         prepare_rollout_transition_inventory
+    run_strict_phase preflight-mainnet-native-takeover \
+        preflight_mainnet_native_takeover
     run_strict_phase snapshot-prior-topology snapshot_prior_topology
 
     ROLLOUT_STOPPED=1

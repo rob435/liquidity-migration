@@ -132,6 +132,11 @@ mainnet uses the read-only attestor for stopped-state identity. An exact retry
 is a no-op. A partial bundle, another account, changed source bytes, or a
 conflicting checkpoint stops installation.
 
+An armed rollout checks that the dedicated mainnet attestor file is a
+single-link `root:root` mode-`0600` file with exactly the four required
+assignments before it snapshots or stops any unit. Missing credentials therefore
+leave the incumbent fleet untouched.
+
 The seven persistent stopped-state source roles are:
 
 | Sleeve | Source roles |
