@@ -1,7 +1,10 @@
 [Unit]
-Description=Forward Bybit public market recorder
+Description=Bybit market recorder: books, trades, tickers, funding, liquidations, and instrument snapshots
 Wants=network-online.target
 After=network-online.target
+# Never gives up: the recorder is meant to run for months, and a venue outage
+# must not park it in the failed state.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -10,14 +13,19 @@ Group=liquidity-migration
 WorkingDirectory=/opt/liquidity-migration
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
 Environment=PYTHONDONTWRITEBYTECODE=1
+# The deep tier (full 50-level books) is the symbol file; the wide tier (top of
+# book, trades, tickers, liquidations) is every other USDT perpetual the venue
+# lists, re-read once a day with the instrument snapshot.
 ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/research/capture_bybit_forward.py \
     --root /var/lib/liquidity-migration/forward-market \
     --symbols-file deploy/forward-capture-symbols.txt \
+    --wide-universe linear-usdt \
     --depth 50 \
     --segment-max-mb 64 \
     --retention-days 30 \
     --max-disk-gb 60 \
-    --min-free-disk-gb 25
+    --min-free-disk-gb 25 \
+    --status-interval-seconds 30
 # 143 is a clean SIGTERM stop.
 SuccessExitStatus=143
 Restart=always
@@ -35,9 +43,11 @@ ProtectProc=invisible
 ProcSubset=pid
 ProtectSystem=strict
 ProtectHome=true
-MemoryMax=512M
+# systemd counts the page cache of the files this process writes against the
+# cap, and the recorder writes several gigabytes a day; 512M sat at the cap.
+MemoryMax=1G
 LimitNOFILE=65536
-TasksMax=128
+TasksMax=256
 Nice=12
 IOSchedulingClass=idle
 

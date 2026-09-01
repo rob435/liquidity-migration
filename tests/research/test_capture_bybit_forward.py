@@ -238,3 +238,72 @@ def test_retention_deletes_oldest_complete_segments_and_receipts_it(tmp_path: Pa
     receipt = json.loads((tmp_path / "manifest.jsonl").read_text(encoding="utf-8"))
     assert receipt["kind"] == "segment_deleted"
     assert receipt["reason"] == "age"
+
+
+def test_segments_roll_on_the_hour_and_idle_hours_close(tmp_path: Path) -> None:
+    from scripts.research.capture_bybit_forward import segment_identity, utc_day_hour
+
+    writer = SegmentWriter(tmp_path, max_bytes=1024 * 1024, fsync_every=1)
+    hour_10 = 1_788_256_800_000_000_000  # 2026-09-01T10:00:00Z
+    assert utc_day_hour(hour_10) == ("2026-09-01", "10")
+    row = {"kind": "public_trade", "symbol": "AGIUSDT", "local_receive_ts_ns": hour_10 + 5}
+    assert writer.append(row) == []
+    assert writer.append(dict(row, local_receive_ts_ns=hour_10 + 3_599_000_000_000)) == []
+    closed = writer.append(dict(row, local_receive_ts_ns=hour_10 + 3_600_000_000_000))
+    assert [(segment.day, segment.hour, segment.records) for segment in closed] == [("2026-09-01", "10", 2)]
+    assert closed[0].path == tmp_path / "2026-09-01" / "10" / "AGIUSDT" / "segment-000000.jsonl"
+    assert segment_identity(closed[0].path, tmp_path) == ("2026-09-01", "10", "AGIUSDT")
+    # A quiet symbol's open hour closes when the clock passes it, without a new row.
+    assert writer.roll_idle(hour_10 + 3_600_000_000_000 + 1) == []
+    idle = writer.roll_idle(hour_10 + 7_200_000_000_000)
+    assert [(segment.hour, segment.records) for segment in idle] == [("11", 1)]
+    assert writer.active == {}
+    legacy = tmp_path / "2026-08-30" / "BTCUSDT" / "segment-000003.jsonl.zst"
+    assert segment_identity(legacy, tmp_path) == ("2026-08-30", None, "BTCUSDT")
+
+
+def test_topics_are_sharded_and_the_wide_tier_skips_the_deep_book() -> None:
+    from scripts.research.capture_bybit_forward import shard_topics, wide_topics
+
+    assert wide_topics(["AGIUSDT"]) == [
+        "orderbook.1.AGIUSDT",
+        "publicTrade.AGIUSDT",
+        "tickers.AGIUSDT",
+        "allLiquidation.AGIUSDT",
+    ]
+    topics = subscription_topics(["A", "B", "C"], 50)
+    shards = shard_topics(topics, 7)
+    assert [len(shard) for shard in shards] == [7, 7, 1]
+    assert [topic for shard in shards for topic in shard] == topics
+    assert shard_topics([], 7) == []
+    with pytest.raises(ValueError):
+        shard_topics(topics, 0)
+
+
+def test_wide_universe_is_the_trading_usdt_perpetuals() -> None:
+    from scripts.research.capture_bybit_forward import linear_usdt_perpetuals
+
+    rows = [
+        {"symbol": "BTCUSDT", "status": "Trading", "quoteCoin": "USDT", "settleCoin": "USDT", "contractType": "LinearPerpetual"},
+        {"symbol": "ETHPERP", "status": "Trading", "quoteCoin": "USDC", "settleCoin": "USDC", "contractType": "LinearPerpetual"},
+        {"symbol": "BTC-26SEP26", "status": "Trading", "quoteCoin": "USDT", "settleCoin": "USDT", "contractType": "LinearFutures"},
+        {"symbol": "OLDUSDT", "status": "Closed", "quoteCoin": "USDT", "settleCoin": "USDT", "contractType": "LinearPerpetual"},
+        {"symbol": "solusdt", "status": "Trading", "quoteCoin": "USDT", "settleCoin": "USDT", "contractType": "LinearPerpetual"},
+        "not a row",
+    ]
+    assert linear_usdt_perpetuals(rows) == ["BTCUSDT", "SOLUSDT"]
+
+
+@pytest.mark.skipif(shutil.which("zstd") is None, reason="zstd is not installed")
+def test_restart_recovers_hourly_layout_partials_in_place(tmp_path: Path) -> None:
+    directory = tmp_path / "2027-01-15" / "13" / "AGIUSDT"
+    directory.mkdir(parents=True)
+    partial = directory / "segment-000002.jsonl.partial"
+    row = {"kind": "ticker", "symbol": "AGIUSDT", "local_receive_ts_ns": 1_800_000_000_000_000_000}
+    partial.write_bytes(json.dumps(row).encode() + b"\n" + b'{"torn":')
+    compressor = Compressor(tmp_path, Manifest(tmp_path))
+    compressor.start()
+    compressor.close()
+    assert (directory / "segment-000002.jsonl.zst").exists()
+    receipt = json.loads((tmp_path / "manifest.jsonl").read_text(encoding="utf-8"))
+    assert receipt["day"] == "2027-01-15" and receipt["hour"] == "13" and receipt["symbol"] == "AGIUSDT"

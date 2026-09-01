@@ -1,0 +1,38 @@
+[Unit]
+Description=Pack each finished hour of the market tape into one archive and upload it to Google Drive
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=RCLONE_CONFIG=/var/lib/liquidity-migration/market-tape-upload/rclone.conf
+Environment=RCLONE_CONFIG_SEED=/etc/liquidity-migration/rclone.conf
+ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/pack_market_tape.py \
+    --root /var/lib/liquidity-migration/forward-market \
+    --remote gdrive:LiquidityMigration/market-tape/bybit-linear \
+    --state-dir /var/lib/liquidity-migration/market-tape-upload \
+    --stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success
+KillMode=control-group
+# A legacy day repack can be several gigabytes; still bounded under the hourly
+# cadence so a hung run cannot stack.
+TimeoutStartSec=3000
+
+StateDirectory=liquidity-migration/market-tape-upload
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/liquidity-migration/market-tape-upload /var/lib/liquidity-migration/receipts
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=true
+MemoryMax=1G
+TasksMax=128
+Nice=15
+IOSchedulingClass=idle

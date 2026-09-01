@@ -1,4 +1,5 @@
-# Read by capture_bybit_forward.py via run_authorized_runtime.sh.
+# The deep tier of the market recorder (capture_bybit_forward.py): full 50-level
+# books plus everything the wide tier gets. Read once at start.
 # Membership: the maker canary and saved-L50 names, plus the LONG sleeve's
 # top 50 entry universe and a ten-rank buffer, all by 90-day median daily
 # turnover ranked 2026-08-30. Re-rank that leg when this list is next touched;
