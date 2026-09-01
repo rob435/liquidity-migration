@@ -276,7 +276,28 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // position is whose, or the other sleeve trades straight into it.
         let mut attribution = Attribution::from_records(effective);
         let mut fills = Fills::default();
-        fills.seed_lots(effective);
+        let already_closed = fills.seed_lots(effective);
+        // The rolling loss window, put back before anything can be assessed
+        // against it. The order is a contract with the kernel: the newest
+        // restatement SETS the window, this segment's own closes go on top,
+        // and the clock then drops whatever is older than the window.
+        if let Some(rows) = effective.iter().rev().find_map(|record| match record {
+            WalRecord::SegmentBase {
+                rolling_loss_rows, ..
+            } => Some(rolling_loss_rows),
+            _ => None,
+        }) {
+            risk.restore_rolling_loss_rows(rows);
+        }
+        for trade in &already_closed {
+            if let Some(round_trip) = &trade.round_trip {
+                risk.observe_closed_trade(engine_types::risk::ClosedTradeRow {
+                    closed_ms: trade.closed_ms,
+                    net_usdt: round_trip.net_usdt,
+                });
+            }
+        }
+        risk.observe_wall_clock_ms(clock::wall_ms());
         // Seeded by the same scans reconcile trusts and kept live from here
         // on, because a rotation restates them into the new segment's first
         // record and must say exactly what a replay would have said.

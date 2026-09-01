@@ -1,12 +1,24 @@
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
-    /// Write down what any position that just closed made.
+    /// Write down what any position that just closed made, and tell the risk
+    /// kernel what it lost.
     ///
     /// Drained whether or not a file was configured: the list would otherwise
-    /// grow for the life of a process nobody asked to report on itself.
+    /// grow for the life of a process nobody asked to report on itself. The
+    /// kernel hears every priced trip for the same reason — the rolling loss
+    /// window counts what this engine did, not what somebody chose to file.
+    /// An unpriced close carries no number to count.
     fn record_trades(&mut self) {
         let closed = self.fills.take_closed();
         if closed.is_empty() {
             return;
+        }
+        for trade in &closed {
+            if let Some(round_trip) = &trade.round_trip {
+                self.risk.observe_closed_trade(ClosedTradeRow {
+                    closed_ms: trade.closed_ms,
+                    net_usdt: round_trip.net_usdt,
+                });
+            }
         }
         if let Some(trades) = self.trades.as_mut() {
             trades.write(&closed);
@@ -36,6 +48,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             attribution,
             orders,
             covers,
+            risk,
             amends_confirmed,
             amends_pulled_unconfirmed,
             stream_resets,
@@ -182,6 +195,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 strategy_errors: &strategy_errors,
                 working_entries: &working_entries,
                 costs: &costs,
+                rolling_loss: risk.rolling_loss(),
             },
         );
     }

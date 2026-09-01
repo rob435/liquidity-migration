@@ -250,6 +250,7 @@ mod tests {
             runtime_control_requests: Vec::new(),
             runtime_control_consumed: Vec::new(),
             open_orders: Vec::new(),
+            rolling_loss_rows: Vec::new(),
         };
         let mut restored = ExecutionIds::from_records(&[record], 20).unwrap();
         assert_eq!(restored.can_insert("kept", 30), Ok(false));

@@ -9,6 +9,7 @@ use std::sync::{Arc as Rc, Mutex as RefCell};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use engine_types::risk::{ClosedTradeRow, RollingLossView};
 use engine_types::{
     AccountIdentity, AccountView, AmendSpec, DenyReason, EngineEvent, Feed, FeedError,
     InstrumentRule, Intent, MarketEvent, MarketFeed, OrderAck, OrderFeed, OrderKind, OrderRequest,
@@ -500,11 +501,45 @@ impl VenueGateway for MockVenue {
     }
 }
 
+/// One call on the rolling loss window's hooks, in the order it arrived.
+#[derive(Clone, Debug, PartialEq)]
+enum RollingLossCall {
+    Restored(Vec<ClosedTradeRow>),
+    Closed(ClosedTradeRow),
+    Clock(i64),
+}
+
+/// The rolling loss window's side of the mock: the tape of hook calls, the
+/// rows a rotation would be handed, and what the heartbeat is told.
+#[derive(Clone, Default)]
+struct MockRolling {
+    calls: Rc<RefCell<Vec<RollingLossCall>>>,
+    rows: Rc<RefCell<Vec<ClosedTradeRow>>>,
+    view: Rc<RefCell<Option<RollingLossView>>>,
+}
+
+impl MockRolling {
+    fn calls(&self) -> Vec<RollingLossCall> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn closes(&self) -> Vec<ClosedTradeRow> {
+        self.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                RollingLossCall::Closed(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 struct MockRisk {
     verdict: RiskVerdict,
     amend_verdict: Option<RiskVerdict>,
     seen: Rc<RefCell<Vec<OrderUpdate>>>,
     registered: Rc<RefCell<Vec<(String, f64)>>>,
+    rolling: MockRolling,
 }
 
 impl MockRisk {
@@ -517,6 +552,7 @@ impl MockRisk {
                 amend_verdict: None,
                 seen: seen.clone(),
                 registered: Rc::new(RefCell::new(Vec::new())),
+                rolling: MockRolling::default(),
             },
             seen,
         )
@@ -551,6 +587,40 @@ impl RiskKernel for MockRisk {
             .lock()
             .unwrap()
             .push((client_order_id.to_string(), approved_qty));
+    }
+
+    fn observe_closed_trade(&mut self, row: ClosedTradeRow) {
+        self.rolling
+            .calls
+            .lock()
+            .unwrap()
+            .push(RollingLossCall::Closed(row));
+        self.rolling.rows.lock().unwrap().push(row);
+    }
+
+    fn observe_wall_clock_ms(&mut self, wall_ms: i64) {
+        self.rolling
+            .calls
+            .lock()
+            .unwrap()
+            .push(RollingLossCall::Clock(wall_ms));
+    }
+
+    fn rolling_loss(&self) -> Option<RollingLossView> {
+        *self.rolling.view.lock().unwrap()
+    }
+
+    fn rolling_loss_rows(&self) -> Vec<ClosedTradeRow> {
+        self.rolling.rows.lock().unwrap().clone()
+    }
+
+    fn restore_rolling_loss_rows(&mut self, rows: &[ClosedTradeRow]) {
+        self.rolling
+            .calls
+            .lock()
+            .unwrap()
+            .push(RollingLossCall::Restored(rows.to_vec()));
+        *self.rolling.rows.lock().unwrap() = rows.to_vec();
     }
 }
 
@@ -860,6 +930,8 @@ struct Harness {
     stops: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     stop_failures_remaining: Rc<RefCell<usize>>,
     risk_saw: Rc<RefCell<Vec<OrderUpdate>>>,
+    /// The rolling loss window's hooks, as the kernel heard them.
+    risk_rolling: MockRolling,
     leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     /// Positions the venue's next account readings will report; see
     /// `MockVenue::account_readings`.
@@ -997,6 +1069,7 @@ async fn build_holding(
     let account_view_fails = venue.account_view_fails.clone();
     let executions = venue.executions.clone();
     let (risk, risk_saw) = MockRisk::with(verdict);
+    let risk_rolling = risk.rolling.clone();
     let replayed = replay_with_history_boundary(replayed);
     let engine = Engine::boot(
         settings,
@@ -1020,6 +1093,7 @@ async fn build_holding(
             stops,
             stop_failures_remaining,
             risk_saw,
+            risk_rolling,
             leverages,
             account_readings,
             account_view_fails,
@@ -1056,6 +1130,7 @@ async fn build_inner(
     let executions = venue.executions.clone();
     let (mut risk, risk_saw) = MockRisk::with(verdict);
     risk.amend_verdict = options.amend_verdict;
+    let risk_rolling = risk.rolling.clone();
     let replayed = replay_with_history_boundary(replayed);
     let engine = Engine::boot(
         settings,
@@ -1079,6 +1154,7 @@ async fn build_inner(
             stops,
             stop_failures_remaining,
             risk_saw,
+            risk_rolling,
             leverages,
             account_readings,
             account_view_fails,
@@ -1169,6 +1245,7 @@ mod order_path;
 mod quote_staleness;
 mod reconciliation;
 mod resting_orders;
+mod rolling_loss;
 mod rotation;
 mod runtime_controls;
 mod strategy_checkpoints;

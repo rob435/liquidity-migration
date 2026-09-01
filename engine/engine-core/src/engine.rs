@@ -38,6 +38,7 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::time::Duration;
 
+use engine_types::risk::ClosedTradeRow;
 use engine_types::{
     quantize, AccountView, Action, AmendSpec, DenyReason, EngineEvent, Feed, InstrumentRule,
     Intent, MarketEvent, MarketFeed, MarketState, OrderFeed, OrderKind, OrderRequest, OrderUpdate,
@@ -850,6 +851,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// cannot be done in one path and forgotten in the other.
     fn adopt_view(&mut self, view: AccountView) {
         self.risk.observe_account_view(&view);
+        // The wall clock, not the engine's monotonic one: the rolling loss
+        // window is stamped in the venue's milliseconds and has to age even
+        // when nothing closes.
+        self.risk.observe_wall_clock_ms(clock::wall_ms());
         self.confirmed_stop_moves.clear();
         match self.leverage_authority {
             crate::config::LeverageAuthority::Shared => {
@@ -1143,6 +1148,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     reservation_high_px: order.reservation_high_px,
                 })
                 .collect(),
+            rolling_loss_rows: self.risk.rolling_loss_rows(),
         }
     }
 }

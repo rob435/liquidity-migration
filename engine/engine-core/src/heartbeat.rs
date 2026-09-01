@@ -36,6 +36,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use engine_types::risk::RollingLossView;
 use engine_types::{AccountIdentity, Side};
 
 use crate::clock;
@@ -150,6 +151,10 @@ pub struct Facts<'a> {
     /// The full picture, per sleeve and symbol and at every horizon, is
     /// `engine fills --wal PATH` off the log. This is the glance.
     pub costs: &'a Costs,
+    /// What this engine's own closed round trips have made inside the rolling
+    /// window, and whether that has stopped it opening. `None` from a kernel
+    /// that keeps no such window.
+    pub rolling_loss: Option<RollingLossView>,
 }
 
 /// The heartbeat writer: where the file goes, how often, and the facts about
@@ -332,6 +337,42 @@ impl Heartbeat {
             (
                 "realm",
                 or_null(self.account.as_ref().map(|a| quoted(&a.realm))),
+            ),
+            // `scripts/runtime/check_fleet_liveness.py` reads these names to
+            // page the owner. `rolling_loss_tripped` is the only one that is
+            // never null: it answers whether entries are held back, and that
+            // has no unknown state.
+            (
+                "rolling_loss_limit_usdt",
+                or_null(facts.rolling_loss.map(|window| amount(window.limit_usdt))),
+            ),
+            (
+                "rolling_loss_net_usdt",
+                or_null(
+                    facts
+                        .rolling_loss
+                        .filter(|window| window.trades > 0)
+                        .map(|window| amount(window.net_usdt)),
+                ),
+            ),
+            (
+                "rolling_loss_trades",
+                or_null(facts.rolling_loss.map(|window| window.trades.to_string())),
+            ),
+            (
+                "rolling_loss_tripped",
+                facts
+                    .rolling_loss
+                    .is_some_and(|window| window.tripped)
+                    .to_string(),
+            ),
+            (
+                "rolling_loss_window_ms",
+                or_null(
+                    facts
+                        .rolling_loss
+                        .map(|window| window.window_ms.to_string()),
+                ),
             ),
             (
                 "venue",
@@ -610,7 +651,7 @@ mod tests {
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 50] = [
+    const KEYS: [&str; 55] = [
         "account_available_usdt",
         "account_equity_usdt",
         "account_observed_wall_ts_ms",
@@ -648,6 +689,11 @@ mod tests {
         "positions",
         "quota_hold_p99_ns",
         "realm",
+        "rolling_loss_limit_usdt",
+        "rolling_loss_net_usdt",
+        "rolling_loss_trades",
+        "rolling_loss_tripped",
+        "rolling_loss_window_ms",
         "strategies",
         "strategy_entries_enabled",
         "strategy_errors",
@@ -739,6 +785,7 @@ mod tests {
             entry_blockers: NO_BLOCKERS.get_or_init(Vec::new),
             strategy_errors: NO_STRATEGY_ERRORS.get_or_init(Vec::new),
             working_entries: NO_WORKING.get_or_init(Vec::new),
+            rolling_loss: None,
         }
     }
 
@@ -1023,6 +1070,76 @@ mod tests {
     }
 
     #[test]
+    fn the_rolling_loss_window_is_published_under_the_names_the_watchdog_reads() {
+        // `scripts/runtime/check_fleet_liveness.py` reads these three by
+        // name to tell the owner the engine has stopped opening.
+        let names = vec!["long".to_string()];
+        let held = one_holding();
+        let mut facts = facts(&names, &held);
+        facts.rolling_loss = Some(RollingLossView {
+            window_ms: 86_400_000,
+            trades: 3,
+            net_usdt: -25_500.5,
+            limit_usdt: 25_000.0,
+            tripped: true,
+        });
+
+        let fields =
+            parsed(&on_the_demo_account("unused.json".into()).render(&facts, 1_755_000_000_000));
+
+        assert_eq!(fields["rolling_loss_window_ms"], 86_400_000i64);
+        assert_eq!(fields["rolling_loss_trades"], 3);
+        assert_eq!(fields["rolling_loss_net_usdt"].as_f64(), Some(-25_500.5));
+        assert_eq!(fields["rolling_loss_limit_usdt"].as_f64(), Some(25_000.0));
+        assert_eq!(fields["rolling_loss_tripped"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn an_empty_window_says_null_rather_than_a_net_of_zero() {
+        // Nothing closed and nothing lost are different answers, and a zero
+        // here would read as the second.
+        let names = vec!["long".to_string()];
+        let held = one_holding();
+        let mut facts = facts(&names, &held);
+        facts.rolling_loss = Some(RollingLossView {
+            window_ms: 86_400_000,
+            trades: 0,
+            net_usdt: 0.0,
+            limit_usdt: 25_000.0,
+            tripped: false,
+        });
+
+        let fields =
+            parsed(&on_the_demo_account("unused.json".into()).render(&facts, 1_755_000_000_000));
+
+        assert_eq!(fields["rolling_loss_trades"], 0);
+        assert!(fields["rolling_loss_net_usdt"].is_null());
+        assert_eq!(fields["rolling_loss_limit_usdt"].as_f64(), Some(25_000.0));
+        assert_eq!(fields["rolling_loss_tripped"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn a_kernel_that_keeps_no_window_says_null_and_is_not_tripped() {
+        let names = vec!["long".to_string()];
+        let held = one_holding();
+
+        let fields = parsed(
+            &on_the_demo_account("unused.json".into())
+                .render(&facts(&names, &held), 1_755_000_000_000),
+        );
+
+        assert!(fields["rolling_loss_window_ms"].is_null());
+        assert!(fields["rolling_loss_trades"].is_null());
+        assert!(fields["rolling_loss_net_usdt"].is_null());
+        assert!(fields["rolling_loss_limit_usdt"].is_null());
+        assert_eq!(
+            fields["rolling_loss_tripped"].as_bool(),
+            Some(false),
+            "whether trading is held back has no unknown state"
+        );
+    }
+
+    #[test]
     fn the_keys_read_in_order_in_the_file_itself() {
         // Stable key order keeps a diff focused on values that changed.
         let names = vec!["long".to_string()];
@@ -1246,6 +1363,7 @@ mod fill_cost_tests {
             strategy_errors: &[],
             working_entries: &[],
             costs,
+            rolling_loss: None,
         };
         let beat = Heartbeat::new("unused".into(), None, None);
         serde_json::from_str(&beat.render(&facts, 1_700_000_000_000)).expect("valid json")

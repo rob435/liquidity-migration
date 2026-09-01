@@ -4,7 +4,7 @@ use crate::ids::{StrategyId, SymbolId};
 use crate::orders::{
     AmendSpec, ForcedClose, Intent, OrderRequest, OrderUpdate, QuoteFillFeatures, Side,
 };
-use crate::risk::RiskVerdict;
+use crate::risk::{ClosedTradeRow, RiskVerdict};
 use crate::strategy::{
     CheckpointProvenance, RuntimeControlRequest, SignalObservation, StrategyCheckpoint,
     StrategyEvent,
@@ -298,13 +298,12 @@ pub enum WalRecord {
         findings: Vec<String>,
     },
     /// Sleeve claims boot dropped because the venue held nothing in the
-    /// symbol: closes this log never got to charge (a venue stop firing with
-    /// no order id of ours, an inherited position wound down) leave a sleeve's
-    /// row standing forever, and the row locks every other sleeve out of the
-    /// name. Written durable so a later boot replays the drop instead of
-    /// rebuilding the residue from the old fills — by then another sleeve may
-    /// hold the symbol, and the venue no longer being flat would make the
-    /// residue undroppable.
+    /// symbol: a close this log never got to charge (a hand close, an
+    /// inherited position wound down) leaves a sleeve's row standing forever,
+    /// and the row locks every other sleeve out of the name. Written durable
+    /// so a later boot replays the drop instead of rebuilding the residue
+    /// from the old fills — by then another sleeve may hold the symbol, and
+    /// the venue no longer being flat would make the residue undroppable.
     ClaimsDropped {
         wall_ts_ms: i64,
         /// Exactly the rows as they stood when dropped, as the receipt.
@@ -410,9 +409,11 @@ pub enum WalRecord {
         /// Signed filled quantity per (strategy, symbol): whose fills built
         /// each position. Flat rows are absent.
         attribution: Vec<FilledTotal>,
-        /// Signed quantity per symbol summed over every fill the log ever
-        /// held, strangers' included — what reconcile compares the venue's
-        /// positions against.
+        /// Signed quantity per symbol summed over every fill this engine can
+        /// account for — one joined to an order the log sent, or a
+        /// venue-initiated close of a position one sleeve is holding. A
+        /// stranger's fill stays out of it. This is what reconcile compares
+        /// the venue's positions against.
         logged_exposure: Vec<SymbolTotal>,
         /// The stop each symbol's newest opening order asked for, so a stop
         /// the venue drops can still be put back after a rotation.
@@ -459,6 +460,11 @@ pub enum WalRecord {
         /// Every order still in flight, with the fields its own records
         /// carried.
         open_orders: Vec<OpenOrderState>,
+        /// The closed round trips the risk kernel's rolling loss window still
+        /// holds, so a boot from this segment keeps the window instead of
+        /// starting it empty. Older bases read back empty.
+        #[serde(default)]
+        rolling_loss_rows: Vec<ClosedTradeRow>,
     },
 }
 
@@ -842,6 +848,10 @@ mod tests {
             runtime_control_requests: Vec::new(),
             runtime_control_consumed: Vec::new(),
             open_orders: Vec::new(),
+            rolling_loss_rows: vec![ClosedTradeRow {
+                closed_ms: 1,
+                net_usdt: -4.0,
+            }],
         };
         let mut encoded = serde_json::to_value(&base).expect("serialize segment base");
         encoded
@@ -860,6 +870,7 @@ mod tests {
             "signal_subscriptions",
             "runtime_control_requests",
             "runtime_control_consumed",
+            "rolling_loss_rows",
         ] {
             encoded
                 .as_object_mut()
@@ -871,8 +882,9 @@ mod tests {
             WalRecord::SegmentBase {
                 execution_history_through_ms: None,
                 strategy_checkpoints,
+                rolling_loss_rows,
                 ..
-            } if strategy_checkpoints.is_empty()
+            } if strategy_checkpoints.is_empty() && rolling_loss_rows.is_empty()
         ));
     }
 }

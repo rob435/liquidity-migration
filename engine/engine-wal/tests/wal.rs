@@ -566,6 +566,7 @@ fn a_barrier_after_a_rotation_covers_the_new_segment() {
         runtime_control_requests: Vec::new(),
         runtime_control_consumed: Vec::new(),
         open_orders: Vec::new(),
+        rolling_loss_rows: Vec::new(),
     };
     assert!(wal.rotate(&base).unwrap(), "the file-backed log rotates");
 

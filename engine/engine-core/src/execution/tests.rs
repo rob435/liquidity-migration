@@ -1010,12 +1010,14 @@ fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
     // mean. A lot is keyed by name for exactly this reason — the id table is
     // rebuilt every boot and the names are what survive it.
     let mut fresh = Fills::default();
-    fresh.seed_lots(&opened);
+    let already_closed = fresh.seed_lots(&opened);
     fresh.learn(&names());
-    assert!(
-        fresh.take_closed().is_empty(),
-        "the trip the old run already closed must not be announced again"
+    assert_eq!(
+        already_closed.len(),
+        1,
+        "the trip the old run closed is handed back: {already_closed:?}"
     );
+    assert!(fresh.take_closed().is_empty(), "and never announced again");
 
     // Carry is still long 2 BTC at 100. Selling it here is the whole point:
     // without the seed this reads as opening a short and reports nothing.
@@ -1075,6 +1077,7 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
         runtime_control_requests: vec![],
         runtime_control_consumed: vec![],
         open_orders: vec![],
+        rolling_loss_rows: vec![],
     };
     fn order(id: &str) -> WalRecord {
         WalRecord::OrderSent {

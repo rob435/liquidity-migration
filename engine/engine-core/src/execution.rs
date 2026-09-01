@@ -633,17 +633,20 @@ impl Fills {
         &mut self.lots
     }
 
-    /// Adopt the open positions a log leaves behind, and nothing else from it.
+    /// Adopt the open positions a log leaves behind, and hand back what those
+    /// records already closed.
     ///
     /// The cost rows are this run's on purpose (struct note above), but a
     /// position is not: a sleeve that opened before a restart is still
     /// holding, and a close priced without its entry is a number about
-    /// nothing. The trips those records already closed are dropped rather
-    /// than announced a second time.
-    pub fn seed_lots(&mut self, records: &[WalRecord]) {
+    /// nothing. The trips those records already closed are returned rather
+    /// than left in the queue, so nothing announces them a second time and a
+    /// caller that has to count them can still see them.
+    pub fn seed_lots(&mut self, records: &[WalRecord]) -> Vec<roundtrip::ClosedTrade> {
         let mut rebuilt = Fills::from_records(records);
-        rebuilt.lots.take_closed();
+        let already_closed = rebuilt.lots.take_closed();
         self.lots = rebuilt.lots;
+        already_closed
     }
 
     /// Rebuild everything the log can account for.

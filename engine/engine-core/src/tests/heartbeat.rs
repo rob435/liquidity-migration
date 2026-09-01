@@ -402,3 +402,42 @@ fn no_configured_path_means_no_heartbeat_writer_at_all() {
         std::path::Path::new("var/engine-heartbeat.json")
     );
 }
+
+#[tokio::test]
+async fn the_beat_carries_the_kernels_rolling_loss_window() {
+    let path = temp_path("heartbeat-rolling-loss");
+    let (idle, _heard) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let (mut engine, h) = build_with(
+        &quick_tick(),
+        allow_all(),
+        vec![Box::new(idle)],
+        &["BTCUSDT"],
+        &[],
+        Vec::new(),
+    )
+    .await;
+    *h.risk_rolling.view.lock().unwrap() = Some(RollingLossView {
+        window_ms: 86_400_000,
+        trades: 2,
+        net_usdt: -140.0,
+        limit_usdt: 100.0,
+        tripped: true,
+    });
+    engine.write_heartbeat(every_tick(path.path()));
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut ScriptOrderFeed::empty(),
+            tokio::time::sleep(Duration::from_millis(40)),
+        )
+        .await
+        .unwrap();
+
+    let fields = heartbeat_at(path.path());
+    assert_eq!(fields["rolling_loss_window_ms"], 86_400_000i64);
+    assert_eq!(fields["rolling_loss_trades"], 2);
+    assert_eq!(fields["rolling_loss_net_usdt"].as_f64(), Some(-140.0));
+    assert_eq!(fields["rolling_loss_limit_usdt"].as_f64(), Some(100.0));
+    assert_eq!(fields["rolling_loss_tripped"].as_bool(), Some(true));
+}

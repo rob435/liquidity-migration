@@ -570,6 +570,7 @@ mod tests {
             runtime_control_requests: vec![],
             runtime_control_consumed: vec![],
             open_orders: vec![],
+            rolling_loss_rows: vec![],
         };
         assert_eq!(active_subscriptions(&[rotated]), expected);
     }
