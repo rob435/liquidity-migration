@@ -61,6 +61,60 @@ disagrees with its timestamps.
 Cross-venue research is bounded by the verified intersection of both venues'
 membership and data coverage.
 
+## Market tape
+
+The host records Bybit's public linear-perpetual tape around the clock, as an
+independent unit the trading fleet cannot stop
+(`liquidity-migration-forward-capture.service`). It is the raw material for
+execution research — spreads, queue depth, trade flow, funding and open
+interest at tick resolution, liquidation cascades — and for a point-in-time
+universe.
+
+Two tiers:
+
+| Tier | Symbols | Feeds |
+| --- | --- | --- |
+| deep | [`deploy/forward-capture-symbols.txt`](../deploy/forward-capture-symbols.txt): the sleeves' entry universe and the maker canary names | 50-level book snapshots and deltas, top of book, every public trade, the ticker, every liquidation |
+| wide | every other USDT perpetual the venue lists as trading, re-read once a day | top of book, every public trade, the ticker, every liquidation |
+
+The ticker carries last, mark, and index price, open interest and its value,
+the funding rate and next funding time, best bid and ask with sizes, and 24h
+turnover and volume; the venue pushes it on change. Once a day, and at start,
+the venue's full instrument list (tick size, lot size, funding interval,
+launch time, status) and ticker table are written as `_meta` snapshots, so
+the universe and each contract's terms are known as of that moment.
+
+Rows are JSON lines. Every row carries `local_receive_ts_ns`, the host's wall
+clock at receipt, plus the venue's own timestamps in nanoseconds; book rows
+carry the venue's update and cross sequences, `previous_*` for the row before,
+and `sequence_gap` when the recorder saw a gap (a fresh snapshot follows a
+reconnect). Trades carry the venue trade id, price, size, and aggressor side;
+liquidations the position side, size, and bankruptcy price.
+
+Layout on the host, under `/var/lib/liquidity-migration/forward-market`:
+
+```text
+<day>/<HH>/<SYMBOL>/segment-NNNNNN.jsonl.zst   one symbol, one UTC hour (rolled at 64 MB raw)
+<day>/<HH>/_meta/instruments-<stamp>.json.zst  the day's instrument snapshot
+<day>/<HH>/_meta/tickers-<stamp>.json.zst      the day's ticker snapshot
+manifest.jsonl                                 one receipt per compressed file: rows, span, bytes, SHA-256
+status.json                                    the recorder's own health, rewritten every 30 s
+```
+
+The host keeps 30 days or 60 GB, whichever binds first, and stops writing
+below 25 GB free. The lasting copy is on Google Drive: ten past every hour,
+each finished hour becomes one uncompressed tar of its compressed files with a
+`MANIFEST.json` first (every member's bytes, SHA-256, row count, and time
+span), uploaded to
+`LiquidityMigration/market-tape/bybit-linear/YYYY/MM/DD/<day>T<HH>Z.tar` and
+checked against the Drive's own hash before the hour is marked shipped. Days
+recorded before the hourly layout are shipped once, whole, as
+`<day>.legacy.tar`. Reading a range of hours is a listing of one folder per
+day; a symbol's hour is one member of one archive.
+
+The recorder is not a decision input. The signal workers acquire their own
+public history; nothing on a live decision path reads this tape.
+
 ## Timestamps
 
 Python research timestamps are Unix milliseconds and end in `_ms`. A kline
