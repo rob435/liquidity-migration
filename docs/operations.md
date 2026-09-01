@@ -254,6 +254,50 @@ readiness, controls, timers, host clock, latches, and native reducer errors.
 Symbol entry blockers remain trading state and do not page. A systemd `active`
 state alone is not proof that either sleeve is producing decisions.
 
+## Venue-confirmed trade accounting
+
+The account-history capture is authenticated but GET-only. Mainnet uses the
+separate `BYBIT_ATTEST_*` key by default; `--credential-set execution` selects
+the engine key explicitly. The capture window must have ended at the venue and
+remain inside Bybit's two-year account-history boundary. The capture checks the
+authenticated user and venue time before and after all three histories finish.
+
+```sh
+python scripts/research/capture_bybit_account_history.py \
+  --realm mainnet \
+  --start "$TRADE_START_UTC" \
+  --end "$TRADE_END_UTC" \
+  --out "$VENUE_CAPTURE"
+
+python scripts/research/reconcile_venue_wal.py \
+  --wal /var/lib/liquidity-migration-engine-mainnet/engine.wal \
+  --venue-history "$VENUE_CAPTURE" \
+  --sleeve long \
+  --trade-execution-id "$REGISTERED_EXECUTION_ID" \
+  --expected-realm mainnet \
+  --expected-user-id "$BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID" \
+  --deployment-receipt "$DEPLOYED_ACTIVATION_RECEIPT" \
+  --engine-binary "$DEPLOYED_ENGINE_BINARY" \
+  --signal-worker-binary "$DEPLOYED_SIGNAL_WORKER_BINARY" \
+  --engine-config "$DEPLOYED_ENGINE_CONFIG" \
+  --expected-commit "$ROLLOUT_COMMIT" \
+  --expected-binary-sha256 "$ROLLOUT_ENGINE_SHA256" \
+  --expected-signal-worker-sha256 "$ROLLOUT_SIGNAL_WORKER_SHA256" \
+  --expected-config-sha256 "$ROLLOUT_ENGINE_CONFIG_SHA256" \
+  --out "$ACCOUNTING_REPORT"
+```
+
+The expected identities come from the reviewed rollout record and retained
+config bytes, not from the evidence being graded. The receipt is the exact
+seven-line `activation.complete` record for the engine, signal worker, launcher,
+and control boundary. The supplied engine, signal-worker, and config bytes are
+rehashed against independently retained digests. The report says
+`venue_confirmed` only when the complete
+WAL family, boot config identities, execution and order identities, fill fields,
+one-way position path, fees, closed profit and loss, account cash changes, and
+every crowd-fee settlement agree. A missing, duplicate, foreign, damaged,
+wrong-generation, or out-of-retention row withholds the label.
+
 ## Recovery rules
 
 - A stale or unreadable engine heartbeat makes position state unknown. Keep

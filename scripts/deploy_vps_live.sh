@@ -129,6 +129,24 @@ if [ "$("${LOCAL_GIT[@]}" cat-file -t "$EXPECTED_COMMIT" 2>/dev/null || true)" !
     echo "EXPECTED_COMMIT is not a local commit object: $EXPECTED_COMMIT" >&2
     exit 1
 fi
+if [ "$MODE" = rollout ]; then
+    LOCAL_HEAD="$("${LOCAL_GIT[@]}" rev-parse --verify 'HEAD^{commit}')" || {
+        echo "cannot resolve the rollout controller checkout HEAD" >&2
+        exit 1
+    }
+    [ "$LOCAL_HEAD" = "$EXPECTED_COMMIT" ] || {
+        echo "rollout controller HEAD $LOCAL_HEAD is not EXPECTED_COMMIT $EXPECTED_COMMIT" >&2
+        exit 1
+    }
+    if ! LOCAL_DIRTY="$("${LOCAL_GIT[@]}" status --porcelain=v1 --untracked-files=all)"; then
+        echo "cannot inspect the rollout controller checkout" >&2
+        exit 1
+    fi
+    [ -z "$LOCAL_DIRTY" ] || {
+        echo "rollout controller checkout is dirty; use a clean full clone at EXPECTED_COMMIT" >&2
+        exit 1
+    }
+fi
 
 LM_FLEET_MANIFEST="$LOCAL_REPOSITORY/deploy/fleet_manifest.tsv"
 . "$LOCAL_REPOSITORY/deploy/lib_sleeves.sh"

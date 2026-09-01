@@ -34,14 +34,28 @@ from liquidity_migration.core.venue_realm import (  # noqa: E402
     VenueRealm,
     venue_realm,
 )
+from liquidity_migration.research.venue_wal_accounting import (  # noqa: E402
+    CAPTURE_MAX_WINDOW_MS,
+)
 
 RECV_WINDOW_MS = 5_000
-MAX_WINDOW_MS = 7 * 86_400_000
+MAX_WINDOW_MS = CAPTURE_MAX_WINDOW_MS
 MAX_PAGES = 10_000
 
 
 class CaptureError(RuntimeError):
     """The signed read did not produce complete, bounded evidence."""
+
+
+def retention_start_ms(server_time_ms: int) -> int:
+    server_time = dt.datetime.fromtimestamp(server_time_ms / 1000, tz=dt.timezone.utc)
+    if server_time.year <= 2:
+        return 0
+    try:
+        boundary = server_time.replace(year=server_time.year - 2)
+    except ValueError:
+        boundary = server_time.replace(year=server_time.year - 2, day=28)
+    return int(boundary.timestamp() * 1000)
 
 
 @dataclass(frozen=True)
@@ -135,8 +149,9 @@ class BybitReadClient:
         timestamp = str(self._clock_ms())
         signed = f"{timestamp}{self.api_key}{RECV_WINDOW_MS}{query}".encode()
         signature = hmac.new(self._secret.encode(), signed, hashlib.sha256).hexdigest()
+        url = f"{self.base_url}{path}" + (f"?{query}" if query else "")
         request = urllib.request.Request(
-            f"{self.base_url}{path}?{query}",
+            url,
             headers={
                 "X-BAPI-API-KEY": self.api_key,
                 "X-BAPI-TIMESTAMP": timestamp,
@@ -213,7 +228,11 @@ def fetch_source(
                 row["_kind"] = source.row_kind
                 row["_server_time_ms"] = server_time
                 rows.append(row)
-            next_cursor = result.get("nextPageCursor")
+            if "nextPageCursor" not in result:
+                raise CaptureError(f"{source.name}: nextPageCursor is missing")
+            next_cursor = result["nextPageCursor"]
+            if next_cursor is None:
+                next_cursor = ""
             if not isinstance(next_cursor, str):
                 raise CaptureError(f"{source.name}: nextPageCursor is not a string")
             pages += 1
@@ -231,11 +250,24 @@ def fetch_source(
     receipt = {
         "complete": True,
         "endpoint": source.path,
+        "params": dict(source.params),
         "slices": len(slices),
         "pages": pages,
         "rows": len(rows),
     }
     return rows, receipt
+
+
+def _venue_identity(client: BybitReadClient) -> tuple[str, int]:
+    envelope = client.get("/v5/user/query-api", {})
+    identity = envelope.get("result")
+    if not isinstance(identity, Mapping) or not str(identity.get("userID") or ""):
+        raise CaptureError("the venue did not identify the authenticated user")
+    try:
+        server_time_ms = int(str(envelope.get("time") or ""))
+    except ValueError:
+        raise CaptureError("the venue identity response has no server timestamp") from None
+    return str(identity["userID"]), server_time_ms
 
 
 def capture(
@@ -250,10 +282,12 @@ def capture(
         raise CaptureError("--end must be after --start")
     api_key, secret, variables = read_credentials(realm, credential_set)
     active_client = client or BybitReadClient(REALM_REST_ENDPOINTS[realm], api_key, secret)
-    identity_envelope = active_client.get("/v5/user/query-api", {})
-    identity = identity_envelope.get("result")
-    if not isinstance(identity, Mapping) or not str(identity.get("userID") or ""):
-        raise CaptureError("the venue did not identify the authenticated user")
+    venue_user_id, venue_query_start_time_ms = _venue_identity(active_client)
+    initial_retention_start = retention_start_ms(venue_query_start_time_ms)
+    if start_ms < initial_retention_start:
+        raise CaptureError("--start is outside the documented two-year account-history retention")
+    if end_ms > venue_query_start_time_ms:
+        raise CaptureError("--end must be no later than the venue server time")
 
     all_rows: list[dict[str, Any]] = []
     receipts: dict[str, dict[str, Any]] = {}
@@ -261,17 +295,34 @@ def capture(
         rows, receipt = fetch_source(active_client, source, start_ms, end_ms)
         all_rows.extend(rows)
         receipts[source.name] = receipt
+    final_user_id, venue_query_end_time_ms = _venue_identity(active_client)
+    if final_user_id != venue_user_id:
+        raise CaptureError("the authenticated venue user changed during pagination")
+    if venue_query_end_time_ms < venue_query_start_time_ms:
+        raise CaptureError("the venue server time moved backwards during pagination")
+    retention_start = retention_start_ms(venue_query_end_time_ms)
+    if start_ms < retention_start:
+        raise CaptureError(
+            "--start fell outside the documented two-year retention before pagination completed"
+        )
+    if end_ms > venue_query_end_time_ms:
+        raise CaptureError("--end must be no later than the final venue server time")
     manifest = {
         "_kind": "capture",
         "schema_version": 1,
         "complete": True,
         "captured_at_utc": dt.datetime.now(tz=dt.timezone.utc).isoformat(),
         "realm": realm.value,
-        "user_id": str(identity["userID"]),
+        "api_base_url": REALM_REST_ENDPOINTS[realm],
+        "user_id": venue_user_id,
         "api_key_sha256": hashlib.sha256(api_key.encode()).hexdigest(),
+        "credential_set": credential_set,
         "credential_variables": list(variables),
         "start_ms": start_ms,
         "end_ms_exclusive": end_ms,
+        "retention_start_ms": retention_start,
+        "venue_query_start_time_ms": venue_query_start_time_ms,
+        "venue_query_end_time_ms": venue_query_end_time_ms,
         "sources": receipts,
         "boundary": "[start_ms, end_ms_exclusive)",
     }

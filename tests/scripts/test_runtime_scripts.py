@@ -3277,13 +3277,94 @@ def test_one_click_deploy_pins_a_fetched_commit_and_uses_rollout() -> None:
     assert "git fetch --quiet origin main ||" not in script
     assert "deploy_commit=\"$(git rev-parse 'origin/main^{commit}')\"" in script
     assert 'ssh_target="${SSH_TARGET:-root@208.84.103.4}"' in script
-    assert 'git worktree add --quiet --detach "$controller_root" "$deploy_commit"' in script
+    assert 'git clone --quiet --no-local --no-checkout "$repo_root" "$controller_root"' in script
+    assert 'git -C "$controller_root" fetch --quiet --no-tags "$repo_root" "$deploy_commit"' in script
+    assert 'git -C "$controller_root" remote set-url origin "$origin_url"' in script
+    assert '[ -d "$controller_root/.git" ]' in script
+    assert "git worktree" not in script
     assert 'git -C "$controller_root" rev-parse HEAD' in script
     assert 'cd "$controller_root"' in script
     assert 'SSH_TARGET="$ssh_target" EXPECTED_COMMIT="$deploy_commit"' in script
     assert 'EXPECTED_COMMIT="$deploy_commit"' in script
     assert "scripts/ops.sh deploy rollout --profile operational" in script
     assert "deploy staged" not in script
+
+
+def test_rollout_controller_must_be_clean_and_at_expected_commit(tmp_path: Path) -> None:
+    repository = tmp_path / "controller"
+    (repository / "scripts").mkdir(parents=True)
+    shutil.copy2(DEPLOY, repository / "scripts" / DEPLOY.name)
+    shutil.copytree(ROOT / "deploy", repository / "deploy")
+    subprocess.run(["/usr/bin/git", "init", "--quiet", str(repository)], check=True)
+    commit = [
+        "/usr/bin/git",
+        "-C",
+        str(repository),
+        "-c",
+        "user.name=Rollout Controller Test",
+        "-c",
+        "user.email=rollout-controller@example.invalid",
+        "-c",
+        "core.autocrlf=false",
+        "commit",
+        "--quiet",
+        "-m",
+    ]
+    subprocess.run(["/usr/bin/git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run([*commit, "candidate one"], check=True)
+    first = subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    marker = repository / "tracked-marker"
+    marker.write_text("second\n", encoding="utf-8")
+    subprocess.run(["/usr/bin/git", "-C", str(repository), "add", marker.name], check=True)
+    subprocess.run([*commit, "candidate two"], check=True)
+    second = subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    environment = {
+        **os.environ,
+        "GITHUB_TOKEN": "test-only",
+        "REPO_URL": str(repository),
+        "SSH_TARGET": "unused.invalid",
+    }
+
+    mismatch = subprocess.run(
+        ["bash", "scripts/deploy_vps_live.sh", "rollout", "--profile", "operational"],
+        cwd=repository,
+        env={**environment, "EXPECTED_COMMIT": first},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert mismatch.returncode != 0
+    assert f"HEAD {second} is not EXPECTED_COMMIT {first}" in mismatch.stderr
+
+    (repository / "untracked-marker").write_text("dirty\n", encoding="utf-8")
+    dirty = subprocess.run(
+        ["bash", "scripts/deploy_vps_live.sh", "rollout", "--profile", "operational"],
+        cwd=repository,
+        env={**environment, "EXPECTED_COMMIT": second},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert dirty.returncode != 0
+    assert "rollout controller checkout is dirty" in dirty.stderr
+
+
+def test_rollout_controller_fence_precedes_local_manifest_loading() -> None:
+    script = DEPLOY.read_text(encoding="utf-8")
+
+    assert script.index('if [ "$MODE" = rollout ]; then') < script.index(
+        'LM_FLEET_MANIFEST="$LOCAL_REPOSITORY/deploy/fleet_manifest.tsv"'
+    )
 
 
 def test_ssh_recovery_never_claims_success_after_a_failed_restart() -> None:

@@ -43,7 +43,14 @@ edit STATE.md to match.
   Rollout stops the validated installed-plus-candidate fleet union, migrates
   reviewed universe bytes atomically, imports the exact retired CARRY and
   Exodus state formats, and binds root-owned takeover files to their checked
-  inode before import. Worker liveness pages producer, LONG, CARRY, spool,
+  inode before import. Signed venue accounting binds every fill to its engine
+  boot and order boot, applies durable dropped claims, requires the exact
+  seven-field activation receipt for the engine and signal-worker generation,
+  rehashes both deployed binaries and the engine config against independent
+  rollout digests, and rejects account-history captures whose endpoint,
+  parameters, user,
+  server-time window, or retention boundary is incomplete. Worker liveness
+  pages producer, LONG, CARRY, spool,
   transport, and memory faults independently, validates the exact heartbeat
   schema and feature hashes, and pages at spool refusal boundaries. This
   repository change does not deploy or arm either account.

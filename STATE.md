@@ -163,6 +163,13 @@ Authenticated venue state and the engine WAL are required for claims about
 live positions, fills, fees, P&L, or flatness. Projections and target decisions
 are not account evidence.
 
+Venue-confirmed trade accounting binds the complete WAL family, engine and
+order boot config hashes, exact execution and cash rows, the authenticated
+account-history window, and the seven-field activation receipt for the deployed
+engine and signal-worker generation. Both deployed binaries and the engine
+config are rehashed against independently retained digests. Missing or
+contradictory evidence withholds the venue-confirmed label.
+
 ## Deployment status
 
 This repository generation requires an operational rollout before it becomes
