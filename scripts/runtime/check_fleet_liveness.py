@@ -4,8 +4,9 @@
 Scope is ``demo`` or ``mainnet``. The checker reads the fleet manifest, requires
 every always-on unit in the scope to be active, requires each heartbeat-bearing
 unit's heartbeat file to be fresh, and alerts when an engine reports it can no
-longer open positions. It also watches disk space, an optional off-box backup
-stamp, and (in one scope per box) the host clock.
+longer open positions or that its rolling-loss trip is on. It also watches disk
+space, an optional off-box backup stamp, and (in one scope per box) the host
+clock.
 
 Alerts are de-duplicated with a cooldown state file: a new condition alerts
 immediately, a persisting one re-alerts at most every --cooldown-min, and a
@@ -156,18 +157,47 @@ def evaluate_heartbeats(
     return alerts
 
 
+def _number(value: object) -> float | None:
+    """The value as a float, or None where the engine sent null or a non-number."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _rolling_loss_detail(payload: dict[str, object]) -> str:
+    window_ms = _number(payload.get("rolling_loss_window_ms"))
+    window = "the window" if window_ms is None else f"{window_ms / 3_600_000:g}h"
+    net = _number(payload.get("rolling_loss_net_usdt"))
+    limit = _number(payload.get("rolling_loss_limit_usdt"))
+    if net is None or limit is None:
+        return f"own closed trades are past the limit inside {window}"
+    return f"own closed trades lost {abs(net):.2f} USDT inside {window} against a {limit:.2f} USDT limit"
+
+
 def evaluate_engine_heartbeat(unit: str, path: Path) -> list[Alert]:
     # A fresh engine heartbeat can still say the engine latched itself out of
-    # opening positions — a state every other check here reads as healthy.
+    # opening positions, or that its rolling-loss trip is on — states every
+    # other check here reads as healthy. A heartbeat carrying neither field is
+    # a worker's or an older engine's, and pages for neither.
     try:
         payload = json.loads(path.read_bytes())
     except (OSError, ValueError):
         return [Alert(f"heartbeat-parse:{unit}", "CRITICAL", f"{unit} heartbeat is not JSON")]
-    if not isinstance(payload, dict) or "may_open" not in payload:
+    if not isinstance(payload, dict):
         return []
-    if payload.get("may_open") is not True:
-        return [Alert(f"may-open:{unit}", "CRITICAL", f"{unit} cannot open positions")]
-    return []
+    alerts = []
+    if "may_open" in payload and payload.get("may_open") is not True:
+        alerts.append(Alert(f"may-open:{unit}", "CRITICAL", f"{unit} cannot open positions"))
+    if payload.get("rolling_loss_tripped") is True:
+        alerts.append(
+            Alert(
+                f"rolling-loss:{unit}",
+                "CRITICAL",
+                f"{unit} rolling-loss trip is on: {_rolling_loss_detail(payload)}; entries refused",
+            )
+        )
+    return alerts
 
 
 def evaluate_disk(*, path: str = "/var/lib", min_free_gb: float = 5.0) -> list[Alert]:

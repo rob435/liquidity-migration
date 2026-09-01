@@ -84,10 +84,23 @@ def test_templates_are_strict_and_ship_disarmed_without_secrets() -> None:
     assert "ACCOUNT_INTENT" not in keys
 
 
-def test_template_names_every_profile_dial() -> None:
+def test_dial_environment_keys_names_both_dials() -> None:
+    assert dial_environment_keys() == (
+        "RM_CARRY_STOP_LOSS_FRACTION",
+        "RM_ROLLING_LOSS_FRACTION",
+    )
+
+
+def test_template_names_every_profile_dial_and_its_lines_parse() -> None:
     body = CREDENTIAL_TEMPLATE.read_text(encoding="utf-8")
     for key in dial_environment_keys():
         assert f"{key}=" in body
+    # Parsing refuses any RM_ line that is not an accepted dial, so this also
+    # proves the template carries no retired one.
+    values = parse_systemd_environment_bytes(CREDENTIAL_TEMPLATE.read_bytes(), label="template")
+    dials = parse_real_money_dials(values)
+    assert dials.carry_stop_loss_fraction == 0.35
+    assert dials.rolling_loss_fraction == 0.10
 
 
 def test_profile_dials_are_parsed_and_proved() -> None:
@@ -97,6 +110,19 @@ def test_profile_dials_are_parsed_and_proved() -> None:
     assert profile.carry.declared_stop_loss_fraction == 0.25
     with pytest.raises(ValueError, match="must sit in"):
         render_real_money_profile(RealMoneyDials(carry_stop_loss_fraction=1.0))
+
+
+def test_rolling_loss_dial_reaches_the_profile() -> None:
+    dials = parse_real_money_dials({"RM_ROLLING_LOSS_FRACTION": "0.2"})
+    assert dials.rolling_loss_fraction == 0.2
+    _data, profile = render_real_money_profile(dials)
+    assert profile.account_risk.max_rolling_loss_fraction == 0.2
+
+
+@pytest.mark.parametrize("refused", (0.0, 1.5))
+def test_rolling_loss_dial_outside_zero_to_one_is_refused_by_name(refused: float) -> None:
+    with pytest.raises(ValueError, match="RM_ROLLING_LOSS_FRACTION"):
+        render_real_money_profile(RealMoneyDials(rolling_loss_fraction=refused))
 
 
 def test_preflight_accepts_exact_profile_and_neutral_signal_inputs(tmp_path: Path) -> None:

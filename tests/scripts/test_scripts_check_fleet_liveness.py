@@ -97,6 +97,80 @@ def test_engine_that_cannot_open_positions_pages(tmp_path: Path) -> None:
     assert liveness.evaluate_engine_heartbeat("worker", heartbeat) == []
 
 
+def test_rolling_loss_trip_pages_with_its_numbers(tmp_path: Path) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "may_open": True,
+                "rolling_loss_tripped": True,
+                "rolling_loss_net_usdt": 12.34,
+                "rolling_loss_limit_usdt": 10.0,
+                "rolling_loss_window_ms": 86_400_000,
+                "rolling_loss_trades": 3,
+            }
+        )
+    )
+    alerts = liveness.evaluate_engine_heartbeat("engine", heartbeat)
+    assert [alert.key for alert in alerts] == ["rolling-loss:engine"]
+    assert alerts[0].severity == "CRITICAL"
+    assert alerts[0].message == (
+        "engine rolling-loss trip is on: own closed trades lost 12.34 USDT "
+        "inside 24h against a 10.00 USDT limit; entries refused"
+    )
+
+
+def test_rolling_loss_trip_pages_with_no_numbers_to_report(tmp_path: Path) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "may_open": True,
+                "rolling_loss_tripped": True,
+                "rolling_loss_net_usdt": None,
+                "rolling_loss_limit_usdt": None,
+                "rolling_loss_window_ms": 86_400_000,
+                "rolling_loss_trades": 0,
+            }
+        )
+    )
+    alerts = liveness.evaluate_engine_heartbeat("engine", heartbeat)
+    assert [alert.key for alert in alerts] == ["rolling-loss:engine"]
+    assert "trip is on" in alerts[0].message
+    assert "entries refused" in alerts[0].message
+    assert "USDT" not in alerts[0].message
+
+
+def test_an_untripped_or_older_engine_stays_quiet(tmp_path: Path) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    heartbeat.write_text(json.dumps({"may_open": True, "rolling_loss_tripped": False}))
+    assert liveness.evaluate_engine_heartbeat("engine", heartbeat) == []
+    # An engine without the trip, and every worker, send no such field at all.
+    heartbeat.write_text(json.dumps({"may_open": True}))
+    assert liveness.evaluate_engine_heartbeat("engine", heartbeat) == []
+    heartbeat.write_text(json.dumps({"sequence": 12}))
+    assert liveness.evaluate_engine_heartbeat("worker", heartbeat) == []
+
+
+def test_a_latched_engine_and_a_trip_page_under_separate_keys(tmp_path: Path) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "may_open": False,
+                "rolling_loss_tripped": True,
+                "rolling_loss_net_usdt": 12.34,
+                "rolling_loss_limit_usdt": 10.0,
+                "rolling_loss_window_ms": 86_400_000,
+                "rolling_loss_trades": 3,
+            }
+        )
+    )
+    alerts = liveness.evaluate_engine_heartbeat("engine", heartbeat)
+    assert sorted(alert.key for alert in alerts) == ["may-open:engine", "rolling-loss:engine"]
+    assert {alert.severity for alert in alerts} == {"CRITICAL"}
+
+
 def test_cooldown_suppresses_repeats_and_reports_resolution() -> None:
     alert = liveness.Alert("unit:engine", "CRITICAL", "engine is inactive")
     now = 1_000_000.0

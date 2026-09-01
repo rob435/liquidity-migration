@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.core.operational_profile import load_operational_profile_bytes
+from liquidity_migration.core.operational_profile import (
+    OPERATIONAL_PROFILE_SCHEMA_VERSION,
+    load_operational_profile_bytes,
+)
 
 
 PROFILE_PATH = Path(__file__).resolve().parents[2] / "configs" / "operational.demo.json"
@@ -31,6 +34,48 @@ def test_tracked_operational_profile_is_coherent_and_feeds_account_owner() -> No
     assert profile.hedge.entry_leverage == 5.0
     assert profile.long.notional_multiplier == 6.0
     assert profile.carry.notional_multiplier == 3.0
+
+
+def test_schema_version_three_is_the_only_one_read() -> None:
+    assert OPERATIONAL_PROFILE_SCHEMA_VERSION == 3
+    payload = _payload()
+    assert payload["schema_version"] == 3
+    payload["schema_version"] = 2
+    with pytest.raises(ValueError, match="schema_version is unsupported"):
+        load_operational_profile_bytes(_bytes(payload))
+
+
+def test_rolling_loss_fraction_is_read_and_required() -> None:
+    profile = load_operational_profile_bytes(PROFILE_PATH.read_bytes())
+    assert profile.account_risk.max_rolling_loss_fraction == 0.1
+
+    payload = _payload()
+    risk = payload["account_risk"]
+    assert isinstance(risk, dict)
+    del risk["max_rolling_loss_fraction"]
+    with pytest.raises(ValueError, match="missing fields: max_rolling_loss_fraction"):
+        load_operational_profile_bytes(_bytes(payload))
+
+
+@pytest.mark.parametrize("bad", (0, 1.5, "a tenth"))
+def test_rolling_loss_fraction_refuses_a_value_outside_zero_to_one(bad: object) -> None:
+    payload = _payload()
+    risk = payload["account_risk"]
+    assert isinstance(risk, dict)
+    risk["max_rolling_loss_fraction"] = bad
+
+    with pytest.raises(ValueError, match="max_rolling_loss_fraction"):
+        load_operational_profile_bytes(_bytes(payload))
+
+
+def test_rolling_loss_fraction_may_be_the_whole_capital_reference() -> None:
+    payload = _payload()
+    risk = payload["account_risk"]
+    assert isinstance(risk, dict)
+    risk["max_rolling_loss_fraction"] = 1.0
+
+    profile = load_operational_profile_bytes(_bytes(payload))
+    assert profile.account_risk.max_rolling_loss_fraction == 1.0
 
 
 def test_retired_daily_loss_field_is_refused() -> None:
