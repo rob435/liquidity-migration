@@ -81,7 +81,9 @@ The registered profiles are:
 The operational profiles set LONG to 6.0 times its base sizing and CARRY to 3.0
 times, with entry leverage capped at 5.0. Exodus takes the exact abandoned
 CARRY quantity and has no independent notional multiplier. Account risk is
-shared; there is no per-sleeve capital allocation.
+shared; there is no per-sleeve capital allocation. Both profiles (schema 3)
+set the rolling-loss share to 0.1 of the capital reference; on the funded
+profile that reference follows equity, on demo it is pinned at $250,000.
 
 `deploy/sleeves.env` enables demo LONG and CARRY entries. A host override may
 only narrow either permission to off. A disabled entry permission does not
@@ -91,8 +93,14 @@ these repository ceilings.
 ### Risk and exits
 
 The engine applies account-wide gross, margin, leverage, instrument, quote-age,
-account-view-age, and stop-loss limits. Growth can be refused; genuine
-reductions continue. Each opening order carries a venue-native stop contract.
+account-view-age, and stop-loss limits, and the rolling-loss trip: when its own
+closed trades have lost a tenth of the capital reference, net of venue fees,
+inside any 24 hours, it refuses entries and growth until those trades age out.
+Growth can be refused; genuine reductions continue. A restart does not clear
+the trip. A close the venue itself started (stop, liquidation, auto-deleverage)
+is charged to the sleeve that held the position and counts in the window; a
+hand close on the same account is not the engine's and still latches it. Each
+opening order carries a venue-native stop contract.
 The engine tracks every required top-of-book topic separately. Forty-five
 seconds without that symbol's promised L1 snapshot triggers a same-socket
 re-subscription while healthy symbols continue.
@@ -154,6 +162,9 @@ class usage at its file cap or byte soft limit is independently critical even
 when aggregate spool usage is below its cap. The checker binds the exact Rust
 heartbeat schema, process ID, installed feature-contract hashes, and global-to-
 class spool totals.
+
+Fleet liveness also pages when an engine's heartbeat says its rolling-loss
+trip is on.
 
 Trade notifications derive entries from fresh engine-attributed venue
 positions and exits from the engine trade log. Target files are takeover

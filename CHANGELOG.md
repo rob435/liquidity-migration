@@ -6,6 +6,45 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-01 — The engine refuses new entries after a losing day of its own
+  trades.** On the owner's instruction, an emergency last resort replaces the
+  daily-loss halt retired on 2026-08-20, built without that halt's two faults.
+  It reads only this engine's own closed round trips, valued as exit against
+  entry minus venue fees, so the owner's hand trades on the same account
+  cannot trip it; and its limit is a share of the capital reference
+  (`account_risk.max_rolling_loss_fraction`, 0.1 in both profiles), so on the
+  funded account it follows equity instead of sitting at a flat dollar figure.
+  Once the trades closed inside any rolling 24 hours sum to that loss or
+  worse, every entry and growing resize is refused with `RollingLossTripped`;
+  exits and reductions pass, nothing needs resetting, and the trip clears on
+  its own as the losing trades pass 24 hours of age. A restart rebuilds the
+  window from the log's fills and a log rotation restates the in-window
+  trades in the new segment's base, so a restart never clears it. At today's
+  dials the limit is $10 on the funded account (reference $100) and $25,000
+  on demo (pinned reference $250,000, far above anything the demo book loses
+  in a day); the worst funded day in the log so far, 2026-08-28, lost $6.84.
+  Funding and open positions are not in the sum; a trade whose opening fills
+  are in a rotated-away segment cannot be priced and is not counted. Building
+  it exposed a second fault: a venue stop firing arrives as a fill with no
+  order id of ours, and the engine charged it to nobody, latched itself out
+  of opening, and never recorded the loss — the one loss a loss limit most
+  needs to see. Bybit rows now carry the venue's own reason (`createType`,
+  `stopOrderType`, `execType`: stop, take-profit, liquidation, auto-deleverage)
+  as `forced_close` on the fill, and such a fill is charged to the one sleeve
+  whose claim on the symbol it reduces, priced as that sleeve's exit, and does
+  not latch the engine; every other unowned fill stays a stranger's and
+  latches as before. The same rule runs on replay, in boot reconciliation, and
+  in gap recovery, so a restart after a stop-out reads it the same way. The
+  funded log holds no live unowned fill to date (its 377 blank-id rows are all
+  recovered hand trades), so the new path is exercised by fixtures built from
+  Bybit's documented rows, not yet by a real stop. The operational profile is
+  schema 3 with the new key, both templates are re-rendered to the new profile
+  hashes, the funded renderer gains the dial `RM_ROLLING_LOSS_FRACTION`
+  (default 0.10), the heartbeat reports the window (24-hour net, limit, trade
+  count, tripped), and fleet liveness pages when the trip is on. CI and
+  `dev.sh check` run rustfmt, clippy, and ShellCheck; both engine and Python
+  suites pass. Not a host change; the next deploy carries it.
+
 - **2026-09-01 — CI runs the Rust format and lint gates it documented.**
   `docs/engine.md` had told developers to run rustfmt, clippy with warnings
   denied, and the tests; the workflow and `scripts/dev.sh check` ran only the

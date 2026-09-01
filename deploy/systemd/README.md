@@ -40,7 +40,7 @@ The remaining current units do not decide directional exposure:
 
 | Unit family | Role |
 | --- | --- |
-| `*-liveness.service` and timers | Check engine and worker identity, hashes, clocks, sequence progress, service state, and host health |
+| `*-liveness.service` and timers | Page on inactive units, stale heartbeats, a latched engine, a rolling-loss trip, low disk, a stale backup stamp, and the host clock |
 | `trade-notify.service` and timer | Report actual engine-attributed positions and closed-trade P&L |
 | `telegram-controls.service` | Receive owner commands; the commit-bound helper submits Rust runtime controls |
 | `forward-capture.service` | Capture public market data for forward evidence |

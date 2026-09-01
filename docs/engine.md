@@ -208,8 +208,10 @@ reach the venue. Admission accounts for:
 
 - fresh authenticated equity and account state;
 - live and pending gross exposure;
-- account loss, margin, symbol, order, and notional caps from the installed
-  operational profile;
+- margin, symbol, order, and notional caps from the installed operational
+  profile;
+- what this engine's own closed trades made or lost over the last 24 hours,
+  against the profile's rolling-loss share of the capital reference;
 - current quote freshness;
 - instrument tick, quantity, and minimum-notional rules;
 - stop-loss charge and venue leverage; and
@@ -218,6 +220,23 @@ reach the venue. Admission accounts for:
 Stale or missing facts block new or growing risk. They do not block a genuine
 reduction. Rounding that turns a reduction into growth is refused.
 
+The rolling-loss trip is the account's emergency last resort. The kernel keeps
+every round trip this engine closed in the last 24 hours, valued as exit
+against entry minus venue fees (the crowd fee, funding, is not in it, and open
+positions are not in it). Once that sum is at or below minus
+`max_rolling_loss_fraction` times the current capital reference, every entry
+and growing resize is refused with `RollingLossTripped`; exits and reductions
+pass. Nothing resets it: it clears on its own as the losing trades pass 24
+hours of age. The reference follows equity on the funded profile, so the limit
+contracts as the account shrinks. Only the engine's own fills count, so the
+owner's hand trades on the same account cannot trip it. A close the venue
+itself started (a stop firing, a liquidation, auto-deleveraging) counts as the
+sleeve's own exit. A restart rebuilds the window from the log's fills, and a
+log rotation restates the in-window trades in the new segment's base record,
+so a restart never clears a trip. A trade whose opening fills are in a segment
+the log no longer holds cannot be priced and is not counted; that is the one
+way the window under-counts.
+
 Only one sleeve may own a venue symbol. The current owner can exit; another
 sleeve waits until the account is flat and attribution is complete. The engine
 serializes flat-first direction changes for one-way accounts.
@@ -225,7 +244,11 @@ serializes flat-first direction changes for one-way accounts.
 The execution registry tracks each client order ID through send, venue
 acknowledgement, fills, cancel/amend ambiguity, and terminal state. Pending
 orders remain charged until the venue resolves them. Fill attribution comes
-from the durable order owner, not from the latest desired state.
+from the durable order owner, not from the latest desired state. A fill with no
+order of ours that the venue marks as a close it started (a stop firing, a
+liquidation, auto-deleveraging) is charged to the one sleeve whose claim on the
+symbol it reduces; every other unowned fill is a stranger's and latches the
+engine out of opening until an operator looks.
 
 Venue-native stops are attached or repaired from the attributed position's
 rule. A position cannot borrow another sleeve's stop.
@@ -292,11 +315,13 @@ frame. Deployment runs verification before considering takeover complete.
 The heartbeat is an atomic one-line JSON snapshot. It reports process/config
 identity, authenticated account and lease, account freshness, replay and
 reconciliation state, latches, strategy attribution, effective entry
-permissions, pending flatten requests, positions, working orders, and recent
-input progress. Per-symbol entry blockers describe ordinary strategy choices;
+permissions, pending flatten requests, positions, working orders, the
+rolling-loss window (its 24-hour net, limit, trade count, and whether it has
+tripped), and recent input progress. Per-symbol entry blockers describe
+ordinary strategy choices;
 strategy errors name a sleeve whose reducer or input contract is broken.
-Liveness treats stale, unreadable, wrong-realm, latched, or strategy-error
-heartbeats as faults.
+Liveness treats stale, unreadable, wrong-realm, latched, tripped, or
+strategy-error heartbeats as faults.
 
 The trade log is append-only JSONL produced from attributed fills and closes.
 It contains entry, exit, fee, realized profit and loss, hold time, and strategy

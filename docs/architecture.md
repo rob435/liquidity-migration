@@ -183,10 +183,13 @@ admission.
 
 `engine-risk` applies the installed account-wide capital limits, margin and
 gross ceilings, stop-loss charge, instrument rules, quote freshness, account
-view freshness, and pending exposure. A limit can block new or growing risk;
-it cannot block a genuine reduction. The venue account is the fact about
-quantity. The WAL is the fact about which strategy opened that quantity.
-Unknown or contradictory attribution stops new exposure.
+view freshness, pending exposure, and the rolling-loss trip: once the engine's
+own closed trades have lost the profile's share of the capital reference inside
+24 hours, entries wait until those trades age out. A limit can block new or
+growing risk; it cannot block a genuine reduction. The venue account is the
+fact about quantity. The WAL is the fact about which strategy opened that
+quantity, and a close the venue itself started is charged to the sleeve whose
+claim it reduced. Unknown or contradictory attribution stops new exposure.
 
 ## Operator controls
 

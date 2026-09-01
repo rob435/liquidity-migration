@@ -61,6 +61,7 @@ The check derives its expected units and heartbeat artifacts from
 - an inactive unit the manifest says must be running;
 - a stale or unreadable engine or worker heartbeat;
 - an engine whose heartbeat says it cannot open positions;
+- an engine whose rolling-loss trip is on, with the 24-hour net and the limit;
 - low disk under `/var/lib`;
 - a stale off-box backup stamp where configured; and
 - an unsynchronised host clock (checked in one scope per box).

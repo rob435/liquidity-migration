@@ -197,7 +197,18 @@ state, and a deploy command do not substitute for it.
 `scripts/ops.sh real-money preflight` is read-only. It reports missing account,
 credential, profile, release, and topology requirements. Operational profile
 rendering reads the owner dials and writes a reviewed account-wide risk
-document only when `--execute` is explicit.
+document only when `--execute` is explicit. The funded credential file carries
+two dials, both ratios:
+
+| Dial | Default | Meaning |
+| --- | --- | --- |
+| `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | venue-native stop distance on CARRY entries |
+| `RM_ROLLING_LOSS_FRACTION` | 0.10 | share of the capital reference the engine's own closed trades may lose, net of fees, inside any 24 hours before it refuses new entries |
+
+A changed dial takes effect at the next deploy, which re-renders the profile.
+The demo profile carries the same rolling-loss share in
+`configs/operational.demo.json`; at its pinned reference that limit is far
+above anything the demo book can lose in a day.
 
 The signal worker never receives private credentials. The engine service gets
 only the credential family for its own realm. The notification and liveness
@@ -219,8 +230,9 @@ active state, heartbeat ages, and disk. Do not replace a failed check with an
 interpretation of an old doc.
 
 Liveness separately pages on an inactive manifest unit, a stale or unreadable
-heartbeat, an engine that reports it cannot open positions, low disk, a stale
-off-box backup stamp, and (in one scope per box) an unsynchronised host clock.
+heartbeat, an engine that reports it cannot open positions, an engine whose
+rolling-loss trip is on, low disk, a stale off-box backup stamp, and (in one
+scope per box) an unsynchronised host clock.
 A systemd `active` state alone is not proof that either sleeve is producing
 decisions.
 
