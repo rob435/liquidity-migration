@@ -164,7 +164,9 @@ heartbeat schema, process ID, installed feature-contract hashes, and global-to-
 class spool totals.
 
 Fleet liveness also pages when an engine's heartbeat says its rolling-loss
-trip is on.
+trip is on. A separate host scope, independent of the fleet, watches the
+market recorder, the hourly market-tape upload to Google Drive, the six-hourly
+state backup to Google Drive, disk, and the host clock.
 
 Trade notifications derive entries from fresh engine-attributed venue
 positions and exits from the engine trade log. Target files are takeover
@@ -184,18 +186,14 @@ Authenticated venue state and the engine WAL are required for claims about
 live positions, fills, fees, P&L, or flatness. Projections and target decisions
 are not account evidence.
 
-Venue-confirmed trade accounting binds the complete WAL family, engine and
-order boot config hashes, exact execution and cash rows, the authenticated
-account-history window, and a seven-field activation receipt for the deployed
-engine and signal-worker generation. Both deployed binaries and the engine
-config are rehashed against independently retained digests. Missing or
-contradictory evidence withholds the venue-confirmed label.
-
-`scripts/research/reconcile_venue_wal.py` still requires that receipt, and
-deployment no longer writes one. Trades executed by a generation installed
-after the receipt was retired therefore cannot reach the venue-confirmed
-label until the owner decides what binds a generation in its place. Trades
-from earlier generations with a retained receipt are unaffected.
+Venue-confirmed trade accounting binds the complete WAL family, the commit
+and config hash each Boot record names for the fill it recorded and the order
+it sent, exact execution and cash rows, and the authenticated account-history
+window. The expected commit is the one the deploy recorded and the expected
+config hash is that of the retained rendered config; both are independent of
+the graded log. Missing or contradictory evidence withholds the
+venue-confirmed label. Logs written by builds before boots carried a commit
+cannot reach it.
 
 ## Deployment status
 
