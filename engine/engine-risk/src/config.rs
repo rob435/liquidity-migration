@@ -1,6 +1,6 @@
 //! Every number the kernel judges against. Nothing is a constant in code: the
-//! Python defaults these were ported from are recorded in PORT_NOTES.md and
-//! must be supplied by the caller.
+//! caller supplies each one, from the operational profile or the `[risk]`
+//! block.
 
 /// A config the kernel refuses to run on. Raised at construction, so a bad
 /// number never reaches a decision.
@@ -137,9 +137,8 @@ impl KernelConfig {
                 "max_rolling_loss_fraction must be a fraction in (0, 1]",
             ));
         }
-        // operational_profile.py:409, the one load-time proof PORT_NOTES had
-        // recorded as not ported. It needs both blocks, which is why it lives
-        // here rather than in either one.
+        // This proof needs both blocks, which is why it lives here rather
+        // than in either one.
         //
         // Gross above the whole capital reference times leverage is gross
         // nobody can reach — that is the most book the account could carry if

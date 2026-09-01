@@ -1,9 +1,8 @@
 //! The equity-anchored envelope, account caps, and stop-attach discipline.
 //! Unknown state refuses the order.
 //!
-//! What each rule is, what was simplified, and where this kernel is
-//! deliberately stricter than the fleet it was ported from is written down in
-//! PORT_NOTES.md next to this file, and pinned by the tests beside it.
+//! What each rule is and where it refuses is written down on [`Kernel`] and
+//! pinned by the tests beside this crate.
 //!
 //! Every threshold is supplied by [`KernelConfig`]. The one number in the code
 //! is [`ROLLING_LOSS_WINDOW_MS`], which is a contract rather than a dial.

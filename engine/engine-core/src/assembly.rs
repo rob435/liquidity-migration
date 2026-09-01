@@ -169,8 +169,7 @@ pub fn trades(settings: &EngineSection) -> Option<Trades> {
 }
 
 /// The `[risk]` block, exactly as engine.toml spells it. There are no
-/// defaults for the capital controls: every number is written down, and the
-/// reference-model values are recorded in engine-risk/PORT_NOTES.md.
+/// defaults for the capital controls: every number is written down.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RiskSection {

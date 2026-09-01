@@ -73,8 +73,8 @@ account_view_max_age_ms = 5000
 # nanoseconds, and both null until an order has been through.
 # heartbeat_path = "var/engine-heartbeat.json"
 
-# The two capital controls. Nothing here has a default: every number is
-# written down, and what each one means is in engine-risk/PORT_NOTES.md.
+# The capital controls. Nothing here has a default: every number is written
+# down, and what each one means is on engine-risk's KernelConfig.
 #
 # THE OTHER WAY. Instead of writing the caps out, point at the shared
 # operational profile, and the caps come from it:
