@@ -51,20 +51,34 @@ trade logs. Demo and real-money sleeves stay separate in every subtotal.
 
 ## Liveness alerts
 
-Demo and mainnet liveness timers run their realm-specific checks. Alerts use
+Three liveness timers run: demo, mainnet, and host. Alerts use
 `TELEGRAM_ALERT_CHAT_ID`; if it is absent, the main chat is used so a fault is
 not silently dropped.
 
 The check derives its expected units and heartbeat artifacts from
-[`deploy/fleet_manifest.tsv`](../deploy/fleet_manifest.tsv). It pages on:
+[`deploy/fleet_manifest.tsv`](../deploy/fleet_manifest.tsv). A realm scope
+pages on:
 
-- an inactive unit the manifest says must be running;
+- an inactive fleet unit in its realm the manifest says must be running;
 - a stale or unreadable engine or worker heartbeat;
-- an engine whose heartbeat says it cannot open positions;
-- an engine whose rolling-loss trip is on, with the 24-hour net and the limit;
-- low disk under `/var/lib`;
-- a stale off-box backup stamp where configured; and
-- an unsynchronised host clock (checked in one scope per box).
+- an engine whose heartbeat says it cannot open positions; and
+- an engine whose rolling-loss trip is on, with the 24-hour net and the limit.
+
+The host scope is independent of the fleet — it keeps running through deploys
+and funded stops — and pages on:
+
+- an inactive independent unit (the recorder, the upload and backup timers);
+- a recorder status file that is stale, says storage is blocked, shows new
+  dropped frames, or reports no market frame for two minutes;
+- a market-tape upload receipt older than three hours, or a Drive with less
+  than 200 GB free;
+- a backup receipt older than eight hours;
+- low disk under `/var/lib`; and
+- an unsynchronised host clock.
+
+Each scope pings its own dead-man's-switch URL when healthy; the host scope's
+is optional and must differ from the demo scope's, or a dead demo fleet would
+be masked by a healthy recorder.
 
 One systemd process being `active` does not suppress a stale heartbeat or a
 latched engine.
@@ -168,6 +182,7 @@ Use the corresponding unit journal before changing state:
 scripts/ops.sh logs trade-notify.service 200
 scripts/ops.sh logs demo-liveness.service 200
 scripts/ops.sh logs mainnet-liveness.service 200
+scripts/ops.sh logs host-liveness.service 200
 scripts/ops.sh logs telegram-controls.service 200
 ```
 

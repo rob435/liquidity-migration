@@ -234,3 +234,77 @@ def test_watchdog_never_crashes_on_a_missing_manifest(tmp_path: Path, monkeypatc
     assert liveness.main() == 0
     output = capsys.readouterr().out
     assert "cannot read the fleet manifest" in output
+
+
+def test_host_scope_watches_only_independent_units_and_realms_skip_them() -> None:
+    rows = liveness.load_fleet_manifest()
+    host = {row.unit for row in liveness.scope_units("host", rows)}
+    demo = {row.unit for row in liveness.scope_units("demo", rows)}
+    assert "liquidity-migration-forward-capture.service" in host
+    assert "liquidity-migration-market-tape-upload.timer" in host
+    assert "liquidity-migration-backup.timer" in host
+    assert "liquidity-migration-host-liveness.timer" in host
+    assert not host & demo
+    assert all(row.lifecycle == "independent" for row in liveness.scope_units("host", rows))
+    assert "liquidity-migration-engine.service" not in host
+
+
+def test_recorder_status_pages_on_silence_blocked_storage_and_new_drops(tmp_path: Path) -> None:
+    status = tmp_path / "status.json"
+    now = 1_800_000_000.0
+    healthy = {
+        "last_receive_ns": int((now - 5) * 1e9),
+        "disk_blocked": False,
+        "dropped_frames": 3,
+        "disk_dropped_frames": 0,
+        "shards": [{"connected": True}, {"connected": True}],
+    }
+    status.write_text(json.dumps(healthy))
+    alerts, counters = liveness.evaluate_capture_status(status, now=now, max_silence_sec=120, counters={})
+    assert alerts == []
+    assert counters == {"dropped_frames": 3.0, "disk_dropped_frames": 0.0}
+
+    silent = dict(healthy, last_receive_ns=int((now - 600) * 1e9), disk_blocked=True, dropped_frames=5)
+    silent["shards"] = [{"connected": False}, {"connected": True}]
+    status.write_text(json.dumps(silent))
+    alerts, counters = liveness.evaluate_capture_status(status, now=now, max_silence_sec=120, counters=counters)
+    keys = {alert.key: alert for alert in alerts}
+    assert keys["capture-silent"].severity == "CRITICAL"
+    assert "no market frame for 600s" in keys["capture-silent"].message
+    assert keys["capture-disk"].severity == "CRITICAL"
+    assert "dropped 2 frames" in keys["capture-dropped_frames"].message
+    assert "1 of 2 venue connections down" in keys["capture-shards"].message
+    assert counters["dropped_frames"] == 5.0
+    # The same count again is not a new drop.
+    alerts, _ = liveness.evaluate_capture_status(status, now=now, max_silence_sec=120, counters=counters)
+    assert "capture-dropped_frames" not in {alert.key for alert in alerts}
+
+    status.write_text("not json")
+    alerts, _ = liveness.evaluate_capture_status(status, now=now, max_silence_sec=120, counters={})
+    assert [alert.key for alert in alerts] == ["capture-status"]
+
+
+def test_upload_receipt_ages_and_low_drive_space_warn(tmp_path: Path) -> None:
+    stamp = tmp_path / "market-tape-upload.last-success"
+    now = time.time()
+    stamp.write_text("uploaded_at=x\nremote_free_bytes=5481452011520\n")
+    assert liveness.evaluate_upload_stamp(stamp_path=stamp, now=now, max_age_hours=3, min_remote_free_gb=200) == []
+    stamp.write_text("uploaded_at=x\nremote_free_bytes=100000000000\n")
+    alerts = liveness.evaluate_upload_stamp(stamp_path=stamp, now=now, max_age_hours=3, min_remote_free_gb=200)
+    assert [alert.key for alert in alerts] == ["tape-remote-space"]
+    assert "100 GB free" in alerts[0].message
+    os.utime(stamp, (now - 5 * 3600, now - 5 * 3600))
+    alerts = liveness.evaluate_upload_stamp(stamp_path=stamp, now=now, max_age_hours=3, min_remote_free_gb=200)
+    assert {alert.key for alert in alerts} == {"tape-upload", "tape-remote-space"}
+    alerts = liveness.evaluate_upload_stamp(stamp_path=tmp_path / "absent", now=now, max_age_hours=3, min_remote_free_gb=200)
+    assert "missing" in alerts[0].message
+
+
+def test_host_liveness_unit_runs_the_host_scope_with_the_box_checks() -> None:
+    unit = (ROOT / "deploy" / "systemd" / "liquidity-migration-host-liveness.service").read_text(encoding="utf-8")
+    assert "--account-scope host" in unit
+    assert "--host-clock-check" in unit
+    assert "--capture-status-file /var/lib/liquidity-migration/forward-market/status.json" in unit
+    assert "--upload-stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success" in unit
+    demo = (ROOT / "deploy" / "systemd" / "liquidity-migration-demo-liveness.service").read_text(encoding="utf-8")
+    assert "--host-clock-check" not in demo, "one cause must page once: the clock is the host scope's"

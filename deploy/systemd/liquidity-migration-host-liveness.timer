@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the liquidity-migration host watchdog every 3 minutes
+
+[Timer]
+# Independent of the trading fleet: this timer keeps running through deploys,
+# funded stops, and disarms, so the recorder, the upload, the backup, disk, and
+# the clock are watched while the fleet is down.
+OnActiveSec=1min
+OnUnitActiveSec=3min
+AccuracySec=15s
+# Persistent applies only to calendar timers, not this monotonic schedule.
+
+[Install]
+WantedBy=timers.target
