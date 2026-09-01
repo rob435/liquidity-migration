@@ -2336,6 +2336,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
             version: "old".into(),
             config_sha256: "abc".into(),
             wall_ts_ms: recent_replay_ms(),
+            commit: String::new(),
         },
         WalRecord::OrderSent {
             request: finished.clone(),

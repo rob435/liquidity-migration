@@ -506,6 +506,7 @@ async fn execution_history_failure_aborts_boot() {
         version: ENGINE_VERSION.into(),
         config_sha256: "old".into(),
         wall_ts_ms: clock::wall_ms() - 1_000,
+        commit: String::new(),
     }];
 
     let result = Engine::boot(
@@ -565,6 +566,7 @@ async fn a_log_older_than_the_venue_history_window_aborts_boot() {
         version: ENGINE_VERSION.into(),
         config_sha256: "old".into(),
         wall_ts_ms: clock::wall_ms() - 8 * 24 * 60 * 60 * 1_000,
+        commit: String::new(),
     }];
 
     let result = Engine::boot(
@@ -619,6 +621,7 @@ async fn a_recent_checkpoint_keeps_a_quiet_old_log_restartable() {
             version: ENGINE_VERSION.into(),
             config_sha256: "old".into(),
             wall_ts_ms: now_ms - 8 * 24 * 60 * 60 * 1_000,
+            commit: String::new(),
         },
         WalRecord::ExecutionHistoryCheckpoint {
             through_wall_ts_ms: now_ms - 1_000,
@@ -654,6 +657,7 @@ async fn a_later_reconciliation_stamp_does_not_replace_a_history_checkpoint() {
             version: ENGINE_VERSION.into(),
             config_sha256: "old".into(),
             wall_ts_ms: now_ms - 8 * 24 * 60 * 60 * 1_000,
+            commit: String::new(),
         },
         WalRecord::Reconciled {
             wall_ts_ms: now_ms - 1_000,

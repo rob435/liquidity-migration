@@ -102,6 +102,9 @@ const AMEND_CONFIRM_NS: u64 = 25_000_000;
 include!("engine/free_helpers.inc.rs");
 
 pub const ENGINE_VERSION: &str = concat!("engine-core ", env!("CARGO_PKG_VERSION"));
+/// The git commit this binary was built from (build.rs), "-dirty" when the
+/// tree had uncommitted tracked changes.
+pub const ENGINE_COMMIT: &str = env!("ENGINE_GIT_COMMIT");
 
 /// How many recently journaled fills to remember for gap-recovery dedup.
 /// A gap plus its pads spans minutes; this covers hours of fills.

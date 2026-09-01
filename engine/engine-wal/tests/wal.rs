@@ -22,6 +22,7 @@ fn every_variant() -> Vec<WalRecord> {
             version: "0.1.0-test".to_string(),
             config_sha256: "a".repeat(64),
             wall_ts_ms: 1_770_000_000_000,
+            commit: String::new(),
         },
         WalRecord::Intent {
             intent: Intent {

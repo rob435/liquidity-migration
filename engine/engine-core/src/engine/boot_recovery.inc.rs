@@ -201,6 +201,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             version: ENGINE_VERSION.to_string(),
             config_sha256: config_sha256.to_string(),
             wall_ts_ms: boot_ms,
+            commit: ENGINE_COMMIT.to_string(),
         })?;
         wal.append(&WalRecord::Note {
             source: "engine".into(),
