@@ -46,7 +46,8 @@ Boot establishes identity before accepting risk:
 7. Reconcile WAL orders, fills, positions, stops, and attribution against the
    authenticated account snapshot.
 8. Restore current strategy checkpoints, pending strategy events, signal
-   receipts, runtime controls, covers, and working orders.
+   receipts, runtime controls, covers, working orders, and the rolling-loss
+   window.
 9. Wake every strategy once to re-plan restored state and re-arm its clocks.
 10. Start market, private-order, signal, and control inputs.
 
@@ -225,17 +226,19 @@ every round trip this engine closed in the last 24 hours, valued as exit
 against entry minus venue fees (the crowd fee, funding, is not in it, and open
 positions are not in it). Once that sum is at or below minus
 `max_rolling_loss_fraction` times the current capital reference, every entry
-and growing resize is refused with `RollingLossTripped`; exits and reductions
-pass. Nothing resets it: it clears on its own as the losing trades pass 24
-hours of age. The reference follows equity on the funded profile, so the limit
-contracts as the account shrinks. Only the engine's own fills count, so the
-owner's hand trades on the same account cannot trip it. A close the venue
-itself started (a stop firing, a liquidation, auto-deleveraging) counts as the
-sleeve's own exit. A restart rebuilds the window from the log's fills, and a
-log rotation restates the in-window trades in the new segment's base record,
-so a restart never clears a trip. A trade whose opening fills are in a segment
-the log no longer holds cannot be priced and is not counted; that is the one
-way the window under-counts.
+and growing resize is refused with `RollingLossTripped`; an order marked to the
+venue as a reduction still passes. Nothing resets it: it clears on its own as
+the losing trades pass 24 hours of age. The reference follows equity on the
+funded profile, so the limit contracts as the account shrinks. Only this
+engine's own trading counts, so the owner's hand orders on the same account
+cannot trip it. A close the venue itself started (a stop or take-profit
+firing, a liquidation, auto-deleveraging) on a position one sleeve holds counts
+as that sleeve's own exit. A restart rebuilds the window from the log's fills,
+and a log rotation restates the in-window trades in the new segment's base
+record, so a restart never clears a trip. A trade this log cannot price is not
+counted: one whose opening fills sit in a segment the log no longer holds, and
+one the venue stated no fee for on any of its fills. Those are the two ways the
+window under-counts.
 
 Only one sleeve may own a venue symbol. The current owner can exit; another
 sleeve waits until the account is flat and attribution is complete. The engine
@@ -245,10 +248,10 @@ The execution registry tracks each client order ID through send, venue
 acknowledgement, fills, cancel/amend ambiguity, and terminal state. Pending
 orders remain charged until the venue resolves them. Fill attribution comes
 from the durable order owner, not from the latest desired state. A fill with no
-order of ours that the venue marks as a close it started (a stop firing, a
-liquidation, auto-deleveraging) is charged to the one sleeve whose claim on the
-symbol it reduces; every other unowned fill is a stranger's and latches the
-engine out of opening until an operator looks.
+order of ours that the venue marks as a close it started (a stop or take-profit
+firing, a liquidation, auto-deleveraging) is charged to the one sleeve whose
+claim on the symbol it reduces; every other unowned fill is a stranger's and
+latches the engine out of opening until an operator looks.
 
 Venue-native stops are attached or repaired from the attributed position's
 rule. A position cannot borrow another sleeve's stop.

@@ -97,10 +97,10 @@ account-view-age, and stop-loss limits, and the rolling-loss trip: when its own
 closed trades have lost a tenth of the capital reference, net of venue fees,
 inside any 24 hours, it refuses entries and growth until those trades age out.
 Growth can be refused; genuine reductions continue. A restart does not clear
-the trip. A close the venue itself started (stop, liquidation, auto-deleverage)
-is charged to the sleeve that held the position and counts in the window; a
-hand close on the same account is not the engine's and still latches it. Each
-opening order carries a venue-native stop contract.
+the trip. A close the venue itself started (stop, take-profit, liquidation,
+auto-deleverage) is charged to the sleeve that held the position and counts in
+the window; a close the venue gives no reason for is not the engine's and still
+latches it. Each opening order carries a venue-native stop contract.
 The engine tracks every required top-of-book topic separately. Forty-five
 seconds without that symbol's promised L1 snapshot triggers a same-socket
 re-subscription while healthy symbols continue.

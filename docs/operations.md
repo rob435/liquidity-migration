@@ -207,8 +207,8 @@ two dials, both ratios:
 
 A changed dial takes effect at the next deploy, which re-renders the profile.
 The demo profile carries the same rolling-loss share in
-`configs/operational.demo.json`; at its pinned reference that limit is far
-above anything the demo book can lose in a day.
+`configs/operational.demo.json`; against its pinned $250,000 reference that
+limit is $25,000.
 
 The signal worker never receives private credentials. The engine service gets
 only the credential family for its own realm. The notification and liveness

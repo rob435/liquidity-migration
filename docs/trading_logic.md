@@ -185,7 +185,9 @@ are negative after fees and do not establish profitable quoting.
 All sleeves draw from the same account-wide caps. There is no private sleeve
 wallet. The engine charges pending and live exposure, verifies quote and
 account freshness, rounds to instrument rules, sets venue leverage and stops,
-and serializes one-way venue transitions.
+and serializes one-way venue transitions. Once its own closed trades have lost
+the profile's share of the capital reference inside 24 hours, it refuses every
+sleeve's entries until those trades age out.
 
 Two sleeves cannot own the same symbol at the same time. The current owner may
 reduce it; another sleeve waits for flat venue quantity and complete
