@@ -3,6 +3,7 @@
 # Systemd values are data, not Bash source. The Python reader opens one stable,
 # owner-matched, mode-0600 regular file and emits only caller-allowlisted values
 # as NUL-delimited pairs. No value is evaluated or passed through argv.
+# shellcheck shell=bash
 
 lm_load_private_systemd_environment() {
     if [ "$#" -lt 3 ]; then
@@ -74,7 +75,7 @@ lm_load_private_systemd_environment() {
         unset "$_lse_name"
         if [ "${_lse_seen[$_lse_name]+present}" = present ]; then
             printf -v "$_lse_name" '%s' "${_lse_values[$_lse_name]}"
-            export "$_lse_name"
+            export "${_lse_name?}"
         fi
     done
 }

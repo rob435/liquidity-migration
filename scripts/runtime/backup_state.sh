@@ -24,7 +24,7 @@ SOURCES="${BACKUP_SOURCES:?BACKUP_SOURCES is required once BACKUP_RSYNC_DEST is 
 
 # --relative keeps each source's full path under the destination, so two
 # fleets' files cannot collide; -az is archive + compress for a WAN hop.
-# shellcheck disable=SC2086 -- the env var is a deliberate space-separated list
+# shellcheck disable=SC2086 # the env var is a deliberate space-separated list
 rsync -az --relative $SOURCES "$DEST"
 
 # The stamp is the receipt the watchdog reads the age of. Written only after

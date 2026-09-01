@@ -65,7 +65,7 @@ does not move. Its presence is not deployment evidence.
 
 ```
 scripts/dev.sh doctor        # read-only Git/Python/dependency/skill diagnostic
-scripts/dev.sh check         # doctor, then ruff, mypy, pytest, engine tests
+scripts/dev.sh check         # doctor, then ruff, shellcheck, mypy, pytest, engine fmt/clippy/tests
 .venv/bin/python -m pytest -q
 ```
 

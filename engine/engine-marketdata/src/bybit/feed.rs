@@ -1420,7 +1420,7 @@ fn subscription_ack(message: &Message) -> Option<SubscriptionAck> {
 fn operation_ack(message: &Message, operation: &str) -> Option<SubscriptionAck> {
     let envelope = control_envelope(message)?;
     let success = envelope.success.unwrap_or(envelope.ret_code == Some(0))
-        && !envelope.ret_code.is_some_and(|code| code != 0);
+        && envelope.ret_code.is_none_or(|code| code == 0);
     (envelope.op == Some(operation)).then(|| SubscriptionAck {
         request_id: envelope.req_id.unwrap_or("").to_owned(),
         success,

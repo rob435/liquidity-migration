@@ -9,7 +9,7 @@ a group below, so moving a grouped script never edits a unit file.
 
 | Path | Who runs it | Contents |
 | --- | --- | --- |
-| `dev.sh` | you, before a push | `doctor`, `check` (ruff, mypy, pytest, the engine's Rust tests) |
+| `dev.sh` | you, before a push | `doctor`, `check` (ruff, shellcheck, mypy, pytest, the engine's rustfmt, clippy, and tests) |
 | `ops.sh` | you, against the host | the operator router; `ops.sh help`, and the verb table in [`docs/operations.md`](../docs/operations.md) |
 | `deploy_everything.command` | **the owner, by double-click** | the whole redeploy in one click: stop the fleet (funded units included), install GitHub main, activate — which starts the funded fleet when `REAL_MONEY` is armed — and verify. No prompts; clicking it is the decision. |
 | `deploy_vps_live.sh` | you (via `ops.sh deploy`) / GitHub Actions | the deploy engine; modes are tabulated in [`docs/operations.md`](../docs/operations.md) |

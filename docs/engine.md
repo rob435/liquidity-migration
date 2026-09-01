@@ -326,6 +326,11 @@ cargo clippy --manifest-path engine/Cargo.toml --workspace --all-targets -- -D w
 cargo test --manifest-path engine/Cargo.toml --workspace --all-targets
 ```
 
+CI runs the same three on the toolchain `rust-toolchain.toml` pins. A local
+cargo installed without rustup ignores that pin, so a newer local clippy can
+accept an expression the pinned one refuses; `scripts/dev.sh check` runs all
+three either way.
+
 Use `engine bench` for local-loop measurements, `engine wal-cost` for the
 storage barrier, and venue canaries only through their explicit realm and
 execution contracts. A local benchmark is not live venue evidence.

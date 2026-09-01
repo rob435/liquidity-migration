@@ -226,15 +226,13 @@ impl RuntimeControlFeed for SpoolRuntimeControlFeed {
                     // every poll and every supervised restart.
                     Err(error) => {
                         let reason = error.to_string();
-                        tokio::task::spawn_blocking(move || {
-                            Self::quarantine(&path, &reason)
-                        })
-                        .await
-                        .map_err(|error| {
-                            RuntimeControlError::Source(format!(
-                                "runtime control quarantine task failed: {error}"
-                            ))
-                        })??;
+                        tokio::task::spawn_blocking(move || Self::quarantine(&path, &reason))
+                            .await
+                            .map_err(|error| {
+                                RuntimeControlError::Source(format!(
+                                    "runtime control quarantine task failed: {error}"
+                                ))
+                            })??;
                     }
                 }
             }
@@ -249,9 +247,7 @@ impl RuntimeControlFeed for SpoolRuntimeControlFeed {
         tokio::task::spawn_blocking(move || Self::quarantine(&path, "refused by the engine core"))
             .await
             .map_err(|error| {
-                RuntimeControlError::Source(format!(
-                    "runtime control reject task failed: {error}"
-                ))
+                RuntimeControlError::Source(format!("runtime control reject task failed: {error}"))
             })?
     }
 }
@@ -487,10 +483,11 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("rejected"), "{error}");
         engine_stand_in.await.unwrap();
-        let marker = rejected_path(&directory.path().join(format!(
-            "{}.json",
-            refused.content_sha256
-        )));
+        let marker = rejected_path(
+            &directory
+                .path()
+                .join(format!("{}.json", refused.content_sha256)),
+        );
         std::fs::remove_file(marker).unwrap();
         std::fs::remove_file(directory.path().join(".submit.lock")).unwrap();
         std::fs::remove_dir(directory.path()).unwrap();

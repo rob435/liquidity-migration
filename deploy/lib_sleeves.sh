@@ -2,6 +2,7 @@
 # sleeve->units mapping and the on/off predicate, so deploy and verify cannot
 # drift. Toggles come from deploy/sleeves.env plus a host override that can only
 # narrow a repo-on sleeve to off. bash-3.2-safe (no associative arrays).
+# shellcheck shell=bash
 
 LM_HOST_SLEEVES_ENV="${LM_HOST_SLEEVES_ENV:-/etc/liquidity-migration/sleeves.env}"
 LM_RESOLVED_SLEEVES_ENV="${LM_RESOLVED_SLEEVES_ENV:-/etc/liquidity-migration/sleeves.resolved.env}"

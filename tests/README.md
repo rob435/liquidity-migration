@@ -31,5 +31,6 @@ no package counterpart:
 ```
 
 One group: `pytest -q tests/marketdata`. One file: `pytest -q tests/marketdata/test_bybit_market_data_boundary.py`.
-`scripts/dev.sh check` runs the full gate — ruff, mypy, the suite, and the
-engine's Rust tests — and is what the tracked `pre-push` hook calls.
+`scripts/dev.sh check` runs the full gate — ruff, shellcheck, mypy, the suite,
+and the engine's rustfmt, clippy, and tests — and is what the tracked
+`pre-push` hook calls.

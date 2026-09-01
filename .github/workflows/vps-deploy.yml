@@ -53,6 +53,8 @@ jobs:
       # runner's setup-python interpreter.
       - name: Ruff
         run: scripts/dev.sh lint
+      - name: ShellCheck
+        run: scripts/dev.sh shellcheck
       - name: Mypy
         run: scripts/dev.sh types
       - name: Pytest
@@ -68,7 +70,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # rust-toolchain.toml pins the compiler; Cargo.lock pins and checksums crates.
+      # rust-toolchain.toml pins the compiler, rustfmt, and clippy; Cargo.lock
+      # pins and checksums crates. The three gates docs/engine.md names for a
+      # developer machine run here on the pinned toolchain.
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+        working-directory: engine
+      - name: Clippy (locked, warnings denied)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        working-directory: engine
       # Test the optimized binary we actually deploy, not a debug-only build.
       - name: Release tests (locked)
         run: cargo test --workspace --all-targets --release --locked

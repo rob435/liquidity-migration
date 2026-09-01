@@ -252,10 +252,10 @@ PY
 
 wait_heartbeat_entries() {
     local heartbeat="$1" expected_long="$2" expected_carry="$3" expected_exodus="$4"
-    local expected observed attempt
+    local expected observed
     expected="$(printf 'long|%s\ncarry|%s\nexodus|%s\n' \
         "$expected_long" "$expected_carry" "$expected_exodus")"
-    for attempt in $(seq 1 200); do
+    for _ in $(seq 1 200); do
         observed="$(heartbeat_entries "$heartbeat" 2>/dev/null || true)"
         [ "$observed" = "$expected" ] && return 0
         sleep 0.1
@@ -358,7 +358,7 @@ resume_mainnet() {
 }
 
 status_fleet() {
-    local paused=false row unit realm role sleeve active demo_entries mainnet_entries
+    local paused=false unit realm role sleeve active demo_entries mainnet_entries
     lm_load_sleeve_toggles || refuse "cannot resolve demo sleeve state"
     demo_entries="$(heartbeat_entries "$DEMO_HEARTBEAT")" \
         || refuse "demo heartbeat has no exact strategy entry permissions"

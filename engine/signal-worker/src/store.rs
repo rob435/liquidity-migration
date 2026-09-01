@@ -304,10 +304,7 @@ impl SpoolWriter {
         {
             let entry = entry.map_err(|error| WorkerError::io("read signal spool entry", error))?;
             let path = entry.path();
-            if !path
-                .extension()
-                .is_some_and(|extension| extension == "json")
-            {
+            if path.extension().is_none_or(|extension| extension != "json") {
                 continue;
             }
             let metadata = match entry.metadata() {

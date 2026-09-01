@@ -6,6 +6,36 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-01 — CI runs the Rust format and lint gates it documented.**
+  `docs/engine.md` had told developers to run rustfmt, clippy with warnings
+  denied, and the tests; the workflow and `scripts/dev.sh check` ran only the
+  tests. Measured on the pinned 1.90.0 toolchain, rustfmt failed on three
+  hunks in the runtime-control spool and clippy failed on two boolean
+  expressions (`nonminimal_bool`) that the newer Homebrew clippy on the
+  development machine accepts — the local cargo has no rustup and ignores
+  `rust-toolchain.toml`. Both are fixed; the rewrites are semantic no-ops. The
+  `rust` CI job and `dev.sh check` now run rustfmt and clippy before the tests,
+  and the `ci` job and `dev.sh check` run ShellCheck at warning level over
+  every tracked shell file (new `dev.sh shellcheck`). ShellCheck found six
+  items: two sourced libraries without a shell directive, a mis-spelled
+  directive in the backup script that disabled nothing, two unused locals in
+  the Telegram helper, and a false-positive export warning; all are fixed
+  with no behaviour change. `cargo audit` over the lockfile reports no
+  advisories today; it is not a CI gate, because a new advisory in a
+  transitive crate would block an urgent deploy the same way the retired
+  activation machinery did. An outside review that prompted this pass also
+  asked for a bot-attributed multi-level loss circuit breaker, a signed
+  build-once artifact pipeline, Prometheus-style observability, a continuous
+  double-entry ledger service, explicit strategy UUIDs, infrastructure-as-code
+  for the host, and a pre-activation shadow comparison. None of those is
+  built: the loss halt was removed on the owner's instruction on 2026-08-20
+  and stays a proposal; the artifact pipeline re-creates the receipts and
+  digests cut this morning; the rest is operating surface out of proportion to
+  a one-host, two-account fleet. The same review noted that the venue
+  confirmed accounting tool still needs an activation receipt no deploy
+  writes; that remains the open owner decision recorded in `STATE.md`. Not a
+  host change; the next deploy carries the two Rust rewrites.
+
 - **2026-09-01 — The deploy machinery is cut to the operations it performs.**
   The audit found roughly twenty thousand lines of guards, gates, receipts,
   and proofs around a deploy whose real work is: fetch a commit, build, copy
