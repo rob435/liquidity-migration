@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Fleet liveness watchdog for the deployed demo and mainnet realms.
+"""Liveness watchdog for the deployed fleet and for the host itself.
 
-Scope is ``demo`` or ``mainnet``. The checker reads the fleet manifest, requires
-every always-on unit in the scope to be active, requires each heartbeat-bearing
-unit's heartbeat file to be fresh, and alerts when an engine reports it can no
-longer open positions or that its rolling-loss trip is on. It also watches disk
-space, an optional off-box backup stamp, and (in one scope per box) the host
-clock.
+Scope is ``demo``, ``mainnet``, or ``host``. The realm scopes read the fleet
+manifest, require every always-on unit in the realm to be active, require each
+heartbeat-bearing unit's heartbeat file to be fresh, and alert when an engine
+reports it can no longer open positions or that its rolling-loss trip is on.
+The ``host`` scope watches the units the manifest marks independent — the
+market recorder, its hourly upload, the state backup — plus disk space, the
+off-box backup stamp, the recorder's own status file, the upload receipt, and
+the host clock. It runs whether or not the trading fleet is up.
 
 Alerts are de-duplicated with a cooldown state file: a new condition alerts
 immediately, a persisting one re-alerts at most every --cooldown-min, and a
@@ -39,7 +41,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 from liquidity_migration.ops.telegram import as_block, send_telegram_message  # noqa: E402
 
 _MANIFEST = _REPO_ROOT / "deploy" / "fleet_manifest.tsv"
-_ACCOUNT_SCOPES = ("demo", "mainnet")
+_ACCOUNT_SCOPES = ("demo", "mainnet", "host")
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,7 @@ class FleetUnit:
     activation: str
     health: str
     output_artifact: str
+    lifecycle: str = "downstream"
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,7 @@ def load_fleet_manifest(path: Path = _MANIFEST) -> list[FleetUnit]:
                 unit=fields[0],
                 kind=fields[1],
                 realm=fields[2],
+                lifecycle=fields[3],
                 activation=fields[5],
                 health=fields[8],
                 output_artifact=fields[9],
@@ -84,12 +88,15 @@ def load_fleet_manifest(path: Path = _MANIFEST) -> list[FleetUnit]:
 
 
 def scope_units(scope: str, rows: list[FleetUnit]) -> list[FleetUnit]:
-    # Demo watches demo and shared units; mainnet watches only its own realm,
-    # so one cause cannot page both scopes.
+    # Host watches the independent units and nothing else. Demo watches demo
+    # and shared fleet units; mainnet watches only its own realm, so one cause
+    # cannot page two scopes.
+    if scope == "host":
+        return [row for row in rows if row.lifecycle == "independent"]
     realms = {"demo", "shared"} if scope == "demo" else {"mainnet"}
     wanted = []
     for row in rows:
-        if row.realm not in realms:
+        if row.lifecycle == "independent" or row.realm not in realms:
             continue
         if scope == "demo" and row.activation not in {"always", "job", "job-now"}:
             continue
@@ -179,7 +186,7 @@ def evaluate_engine_heartbeat(unit: str, path: Path) -> list[Alert]:
     # A fresh engine heartbeat can still say the engine latched itself out of
     # opening positions, or that its rolling-loss trip is on — states every
     # other check here reads as healthy. A heartbeat carrying neither field is
-    # a worker's or an older engine's, and pages for neither.
+    # a worker's, a recorder's, or an older engine's, and pages for neither.
     try:
         payload = json.loads(path.read_bytes())
     except (OSError, ValueError):
@@ -198,6 +205,75 @@ def evaluate_engine_heartbeat(unit: str, path: Path) -> list[Alert]:
             )
         )
     return alerts
+
+
+def evaluate_capture_status(
+    path: Path,
+    *,
+    now: float,
+    max_silence_sec: float,
+    counters: dict[str, float],
+) -> tuple[list[Alert], dict[str, float]]:
+    """The recorder's own status file: is data arriving, and is any being lost.
+
+    `counters` holds the drop counts seen on the previous run; the returned
+    copy holds this run's, so a drop pages once per increase, not forever.
+    """
+
+    try:
+        payload = json.loads(path.read_bytes())
+    except OSError:
+        return [Alert("capture-status", "CRITICAL", f"recorder status is unreadable: {path}")], counters
+    except ValueError:
+        return [Alert("capture-status", "CRITICAL", "recorder status is not JSON")], counters
+    if not isinstance(payload, dict):
+        return [Alert("capture-status", "CRITICAL", "recorder status is not a JSON object")], counters
+    alerts = []
+    last_receive_ns = _number(payload.get("last_receive_ns"))
+    if last_receive_ns is None or last_receive_ns <= 0:
+        alerts.append(Alert("capture-silent", "CRITICAL", "recorder has received no market frame yet"))
+    else:
+        silence = now - last_receive_ns / 1e9
+        if silence > max_silence_sec:
+            alerts.append(
+                Alert(
+                    "capture-silent",
+                    "CRITICAL",
+                    f"recorder has received no market frame for {silence:.0f}s (limit {max_silence_sec:.0f}s)",
+                )
+            )
+    if payload.get("disk_blocked") is True:
+        alerts.append(
+            Alert("capture-disk", "CRITICAL", "recorder storage is blocked; frames are counted but not written")
+        )
+    next_counters = dict(counters)
+    for field_name, reason in (
+        ("dropped_frames", "queue overran"),
+        ("disk_dropped_frames", "storage was blocked"),
+    ):
+        count = _number(payload.get(field_name))
+        if count is None:
+            continue
+        previous = counters.get(field_name)
+        next_counters[field_name] = count
+        if previous is not None and count > previous:
+            alerts.append(
+                Alert(
+                    f"capture-{field_name}",
+                    "WARNING",
+                    f"recorder dropped {count - previous:.0f} frames since the last check ({reason})",
+                )
+            )
+    shards = payload.get("shards")
+    if isinstance(shards, list):
+        down = [shard for shard in shards if isinstance(shard, dict) and shard.get("connected") is False]
+        if down and len(down) == len(shards):
+            alerts.append(Alert("capture-shards", "CRITICAL", "recorder has no live venue connection"))
+        elif down:
+            alerts.append(
+                Alert("capture-shards", "WARNING", f"recorder has {len(down)} of {len(shards)} venue connections down")
+            )
+    return alerts, next_counters
 
 
 def evaluate_disk(*, path: str = "/var/lib", min_free_gb: float = 5.0) -> list[Alert]:
@@ -241,6 +317,50 @@ def evaluate_backup_stamp(
             )
         ]
     return []
+
+
+def _stamp_values(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key.strip()] = value.strip()
+    return values
+
+
+def evaluate_upload_stamp(
+    *,
+    stamp_path: Path,
+    now: float,
+    max_age_hours: float,
+    min_remote_free_gb: float,
+) -> list[Alert]:
+    """The market-tape upload's receipt: recent, and the Drive still has room."""
+
+    try:
+        age_hours = (now - stamp_path.stat().st_mtime) / 3600
+        values = _stamp_values(stamp_path)
+    except OSError:
+        return [Alert("tape-upload", "WARNING", f"market-tape upload receipt is missing: {stamp_path}")]
+    alerts = []
+    if age_hours > max_age_hours:
+        alerts.append(
+            Alert(
+                "tape-upload",
+                "WARNING",
+                f"last completed market-tape upload is {age_hours:.1f}h old (limit {max_age_hours:.0f}h)",
+            )
+        )
+    free = values.get("remote_free_bytes", "")
+    if free.isdigit() and int(free) / 1e9 < min_remote_free_gb:
+        alerts.append(
+            Alert(
+                "tape-remote-space",
+                "WARNING",
+                f"the upload destination has {int(free) / 1e9:.0f} GB free (limit {min_remote_free_gb:.0f} GB)",
+            )
+        )
+    return alerts
 
 
 def load_state(path: Path) -> dict[str, float]:
@@ -291,7 +411,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--account-scope",
         choices=_ACCOUNT_SCOPES,
         default=os.environ.get("ACCOUNT_LIVENESS_SCOPE") or "demo",
-        help="which realm's units and heartbeats to check (default: environment or demo)",
+        help="which units and heartbeats to check: a realm, or the host itself (default: environment or demo)",
     )
     p.add_argument(
         "--max-heartbeat-age-sec",
@@ -326,13 +446,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--backup-stamp-file",
         default=os.environ.get("LIVENESS_BACKUP_STAMP_FILE") or "",
-        help="stamp the backup script touches after a completed copy ('' skips)",
+        help="stamp the backup script writes after a completed copy ('' skips)",
     )
     p.add_argument(
         "--max-backup-age-hours",
         type=float,
         default=26.0,
         help="alert when the last completed backup is older than this",
+    )
+    p.add_argument(
+        "--capture-status-file",
+        default=os.environ.get("LIVENESS_CAPTURE_STATUS_FILE") or "",
+        help="the market recorder's status.json ('' skips its data-flow checks)",
+    )
+    p.add_argument(
+        "--max-capture-silence-sec",
+        type=float,
+        default=120.0,
+        help="critical alert when the recorder has received no frame for this long",
+    )
+    p.add_argument(
+        "--upload-stamp-file",
+        default=os.environ.get("LIVENESS_UPLOAD_STAMP_FILE") or "",
+        help="receipt the market-tape upload writes after a completed run ('' skips)",
+    )
+    p.add_argument(
+        "--max-upload-age-hours",
+        type=float,
+        default=3.0,
+        help="alert when the last completed market-tape upload is older than this",
+    )
+    p.add_argument(
+        "--min-remote-free-gb",
+        type=float,
+        default=200.0,
+        help="alert when the upload destination reports less free space than this",
     )
     p.add_argument(
         "--state-file",
@@ -351,6 +499,10 @@ def main() -> int:
     args = build_arg_parser().parse_args()
     scope = args.account_scope
     now = time.time()
+    state_file = args.state_file or (
+        _REPO_ROOT / "data" / ".cache" / f"liveness-{scope}.json"
+    )
+    counters_file = state_file.with_name(state_file.stem + ".counters.json")
 
     alerts: list[Alert] = []
     try:
@@ -361,7 +513,8 @@ def main() -> int:
         )
     except (OSError, ValueError) as error:
         alerts.append(Alert("manifest", "CRITICAL", f"cannot read the fleet manifest: {error}"))
-    alerts.extend(evaluate_disk())
+    if scope == "host":
+        alerts.extend(evaluate_disk())
     if args.host_clock_check:
         alerts.extend(evaluate_host_clock())
     if args.backup_stamp_file:
@@ -372,10 +525,25 @@ def main() -> int:
                 max_age_hours=args.max_backup_age_hours,
             )
         )
+    if args.capture_status_file:
+        capture_alerts, counters = evaluate_capture_status(
+            Path(args.capture_status_file),
+            now=now,
+            max_silence_sec=args.max_capture_silence_sec,
+            counters=load_state(counters_file),
+        )
+        alerts.extend(capture_alerts)
+        save_state(counters_file, counters)
+    if args.upload_stamp_file:
+        alerts.extend(
+            evaluate_upload_stamp(
+                stamp_path=Path(args.upload_stamp_file),
+                now=now,
+                max_age_hours=args.max_upload_age_hours,
+                min_remote_free_gb=args.min_remote_free_gb,
+            )
+        )
 
-    state_file = args.state_file or (
-        _REPO_ROOT / "data" / ".cache" / f"liveness-{scope}.json"
-    )
     state = load_state(state_file)
     lines, next_state = select_alerts_to_send(
         alerts, state=state, now=now, cooldown_sec=args.cooldown_min * 60

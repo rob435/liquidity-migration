@@ -1,0 +1,47 @@
+[Unit]
+Description=liquidity-migration host watchdog: the market recorder, its upload, the backup, disk, and clock
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+KillMode=control-group
+# The oneshot default is TimeoutStartSec=infinity, and an OnUnitActiveSec timer
+# cannot re-trigger while its unit is activating, so one hung run would silence
+# this 3-minute watchdog forever. Bound it under the timer interval.
+TimeoutStartSec=120
+User=liquidity-observer
+Group=liquidity-migration
+WorkingDirectory=/opt/liquidity-migration
+# The Telegram token rides in the demo credential file; the API keys in it are
+# unset below. This watchdog reads files and systemd state, never the venue.
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+# Optional: a second dead-man's-switch URL of its own, LIVENESS_HEARTBEAT_URL=...
+# It must not share the demo scope's URL, or a dead demo fleet would be masked
+# by a healthy recorder.
+EnvironmentFile=-/etc/liquidity-migration/host-liveness.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY
+Environment=TELEGRAM_ENABLED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectProc=invisible
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=liquidity-migration/liveness-host
+Environment=LIVENESS_STATE_FILE=/var/lib/liquidity-migration/liveness-host/state.json
+ReadWritePaths=/var/lib/liquidity-migration/liveness-host
+MemoryMax=512M
+# An observer must not preempt the recorder it observes (Nice=12) or anything
+# that trades.
+Nice=10
+ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/check_fleet_liveness.py \
+    --account-scope host --cooldown-min 60 --host-clock-check --telegram \
+    --max-heartbeat-age-sec 120 \
+    --capture-status-file /var/lib/liquidity-migration/forward-market/status.json \
+    --upload-stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success \
+    --backup-stamp-file /var/lib/liquidity-migration/receipts/backup.last-success \
+    --max-backup-age-hours 8
+SuccessExitStatus=0
+StandardOutput=journal
+StandardError=journal

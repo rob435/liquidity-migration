@@ -42,7 +42,7 @@ MemoryMax=512M
 # the owners Nice=-5).
 Nice=10
 ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/check_fleet_liveness.py \
-    --account-scope demo --cooldown-min 60 --host-clock-check --telegram
+    --account-scope demo --cooldown-min 60 --telegram
 SuccessExitStatus=0
 StandardOutput=journal
 StandardError=journal
