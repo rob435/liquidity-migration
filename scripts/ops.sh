@@ -46,8 +46,9 @@ Operator commands:
   real-money render-profile [--execute --output PATH]
                                render the operational profile from the
                                RM_* dials in the funded credential file
-  deploy [MODE]                MODE is deploy (default)|verify|stop-mainnet|
-                               disarm-mainnet
+  deploy [MODE]                MODE is deploy (default)|rollback|verify|
+                               stop-mainnet|disarm-mainnet; rollback deploys
+                               the last commit whose deploy finished
   help                         show this help and do nothing else
 
 A UNIT that does not already start with `liquidity-migration-` gets the prefix:
@@ -276,8 +277,8 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
       shift
     fi
     case "${1:-deploy}" in
-      deploy|verify|stop-mainnet|disarm-mainnet) ;;
-      *) die_usage "deploy mode must be deploy, verify, stop-mainnet, or disarm-mainnet" ;;
+      deploy|rollback|verify|stop-mainnet|disarm-mainnet) ;;
+      *) die_usage "deploy mode must be deploy, rollback, verify, stop-mainnet, or disarm-mainnet" ;;
     esac
     exec "$ROOT_DIR/scripts/deploy_vps_live.sh" "${1:-deploy}"
     ;;

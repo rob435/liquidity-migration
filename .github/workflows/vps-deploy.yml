@@ -9,11 +9,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Deploy, read-only verification, or the funded safety disarm.
+        description: Deploy, roll back to the last finished deploy, read-only verification, or the funded safety disarm.
         required: true
         default: verify
         type: choice
-        options: [deploy, verify, disarm-mainnet]
+        options: [deploy, rollback, verify, disarm-mainnet]
 
 permissions:
   contents: read
@@ -200,7 +200,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$DEPLOY_MODE_INPUT" in
-            deploy|verify) ;;
+            deploy|rollback|verify) ;;
             *) exit 2 ;;
           esac
           EXPECTED_COMMIT="$GITHUB_SHA" \

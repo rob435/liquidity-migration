@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
-# One-command VPS deploy, read-only verify, and the funded safety stops.
+# One-command VPS deploy, rollback, read-only verify, and the funded safety stops.
 #
-# deploy: fetch the exact commit, build, install, restart the fleet.
+# deploy: fetch the exact commit, build, install, restart the fleet. A realm
+#   that does not publish a fresh heartbeat on the new commit is rolled back
+#   to the last commit that did.
+# rollback: deploy the last commit whose deploy finished (or, when the current
+#   one finished, the one before it).
 # verify: read-only fleet summary.
 # stop-mainnet: stop the funded units; exposure is unchanged.
 # disarm-mainnet: stop the funded units and set REAL_MONEY=false.
+#
+# Units the manifest marks independent (the market recorder, its upload, the
+# state backup, the host watchdog) are never stopped by any mode here; deploy
+# restarts the recorder only when its own inputs changed.
 set -euo pipefail
 
 deploy_usage() {
     cat >&2 <<'USAGE'
-usage: deploy_vps_live.sh {deploy|verify|stop-mainnet|disarm-mainnet}
+usage: deploy_vps_live.sh {deploy|rollback|verify|stop-mainnet|disarm-mainnet}
   EXPECTED_COMMIT=<40-hex>   exact commit to deploy (default: origin/main tip)
 USAGE
     exit 2
@@ -18,7 +26,7 @@ USAGE
 MODE="${1:-verify}"
 [ "$#" -le 1 ] || deploy_usage
 case "$MODE" in
-    deploy|verify|stop-mainnet|disarm-mainnet) ;;
+    deploy|rollback|verify|stop-mainnet|disarm-mainnet) ;;
     *) deploy_usage ;;
 esac
 
@@ -47,7 +55,7 @@ if [ -z "$EXPECTED_COMMIT" ]; then
     echo "EXPECTED_COMMIT defaulted to $EXPECTED_COMMIT" >&2
 fi
 
-if [ "$MODE" = deploy ] && [ -z "$GITHUB_TOKEN" ] \
+if { [ "$MODE" = deploy ] || [ "$MODE" = rollback ]; } && [ -z "$GITHUB_TOKEN" ] \
     && [[ "$REPO_URL" == https://github.com/* ]] && command -v gh >/dev/null 2>&1; then
     GITHUB_TOKEN="$(gh auth token --hostname github.com 2>/dev/null || true)"
 fi
@@ -81,9 +89,18 @@ OBSERVER_USER=liquidity-observer
 LLM_USER=liquidity-llm
 CAPTURE_USER=liquidity-capture
 
-ENGINE_BINARY=/opt/liquidity-migration-engine/bin/engine
-SIGNAL_WORKER_BINARY=/opt/liquidity-migration-engine/bin/signal-worker
-ENGINE_CONTROL_HELPER=/opt/liquidity-migration-engine/bin/telegram-control-helper
+RELEASE_DIR=/opt/liquidity-migration-engine
+ENGINE_BINARY=$RELEASE_DIR/bin/engine
+SIGNAL_WORKER_BINARY=$RELEASE_DIR/bin/signal-worker
+ENGINE_CONTROL_HELPER=$RELEASE_DIR/bin/telegram-control-helper
+# The commit whose deploy last finished, and the one before it: what rollback
+# returns to. Seeded from the checkout when no record exists yet.
+DEPLOYED_COMMIT_FILE=$RELEASE_DIR/deployed-commit
+PREVIOUS_COMMIT_FILE=$RELEASE_DIR/previous-commit
+# What the recorder was last started from; a deploy that changes none of it
+# leaves the recorder running.
+CAPTURE_FINGERPRINT_FILE=$RELEASE_DIR/forward-capture.fingerprint
+CAPTURE_STATUS=/var/lib/liquidity-migration/forward-market/status.json
 CONTROLS_SUDOERS=/etc/sudoers.d/liquidity-migration-controls
 CARGO_TARGET_ROOT=/opt/engine-build-target
 RUST_TOOLCHAIN_DIR=/opt/rust
@@ -184,6 +201,57 @@ start_unit() {
     systemctl enable --now "$1" || fail "cannot start $1"
 }
 
+# ------------------------------------------------------------- generations
+
+seed_generation_record() {
+    [ -f "$DEPLOYED_COMMIT_FILE" ] && return 0
+    local head
+    head="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
+    [ -n "$head" ] || return 0
+    install -d -o root -g root -m 0755 "$RELEASE_DIR"
+    printf '%s\n' "$head" > "$DEPLOYED_COMMIT_FILE"
+}
+
+record_generation() {
+    local deployed=""
+    [ -f "$DEPLOYED_COMMIT_FILE" ] && deployed="$(cat "$DEPLOYED_COMMIT_FILE")"
+    if [ -n "$deployed" ] && [ "$deployed" != "$EXPECTED_COMMIT" ]; then
+        printf '%s\n' "$deployed" > "$PREVIOUS_COMMIT_FILE"
+    fi
+    printf '%s\n' "$EXPECTED_COMMIT" > "$DEPLOYED_COMMIT_FILE"
+}
+
+# The commit a rollback returns to. A checkout that moved past the last
+# finished deploy is a deploy that failed: go back to the finished one. A
+# checkout at the last finished deploy goes back to the one before it.
+rollback_target() {
+    local deployed="" previous="" head
+    [ -f "$DEPLOYED_COMMIT_FILE" ] && deployed="$(cat "$DEPLOYED_COMMIT_FILE")"
+    [ -f "$PREVIOUS_COMMIT_FILE" ] && previous="$(cat "$PREVIOUS_COMMIT_FILE")"
+    head="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
+    if [ -n "$deployed" ] && [ "$deployed" != "$head" ]; then
+        printf '%s\n' "$deployed"
+    elif [ -n "$previous" ]; then
+        printf '%s\n' "$previous"
+    else
+        return 1
+    fi
+}
+
+rollback_after_failure() {
+    local realm="$1" failed="$EXPECTED_COMMIT" target
+    if [ "${AUTO_ROLLBACK:-0}" = 1 ]; then
+        fail "$realm did not come up on the rolled-back commit $failed either; the fleet is stopped"
+    fi
+    target="$(rollback_target)" \
+        || fail "$realm did not come up on $failed and no earlier finished deploy is recorded"
+    [ "$target" != "$failed" ] \
+        || fail "$realm did not come up on $failed and the only recorded generation is that commit"
+    echo "deploy failed: $realm did not come up on $failed; rolling back to $target" >&2
+    AUTO_ROLLBACK=1 EXPECTED_COMMIT="$target" deploy_mode
+    fail "$failed did not come up; the fleet runs $target again"
+}
+
 # ------------------------------------------------------- identities & dirs
 
 ensure_runtime_identities() {
@@ -224,6 +292,8 @@ ensure_runtime_identities() {
         /var/lib/liquidity-migration/llm-driver-ledger
     install -d -o "$CAPTURE_USER" -g "$RUNTIME_GROUP" -m 0750 \
         /var/lib/liquidity-migration/forward-market
+    # The backup and upload receipts; the host watchdog reads their ages.
+    install -d -o root -g root -m 0755 /var/lib/liquidity-migration/receipts
     install -d -o "$SIGNAL_WORKER_USER" -g "$RUNTIME_GROUP" -m 0750 \
         "$LONG_DEMO_ROOT" "$CARRY_DEMO_ROOT" "$EXODUS_DEMO_ROOT" \
         "$LONG_MAINNET_ROOT" "$CARRY_MAINNET_ROOT" "$EXODUS_MAINNET_ROOT"
@@ -279,20 +349,69 @@ install_release() {
         /opt/liquidity-migration-engine/bin/activation.complete
 }
 
+# Every liquidity-migration unit on the host except the independent ones. The
+# host inventory, not the manifest, so a unit the new manifest retired stops
+# too.
 stop_fleet() {
-    local unit
+    local unit independent
+    independent=" $(lm_independent_units | tr '\n' ' ') "
     while IFS= read -r unit; do
         [ -n "$unit" ] || continue
+        case "$independent" in *" $unit "*) continue ;; esac
         systemctl disable --now "$unit" 2>/dev/null || true
         systemctl reset-failed "$unit" 2>/dev/null || true
-    done < <(
-        systemctl list-unit-files --no-legend --no-pager 'liquidity-migration-*' \
-            | awk '{print $1}'
-    )
+    done < <(lm_host_liqmig_units)
 }
 
 install_units() {
     lm_install_current_systemd_units || fail "cannot install the fleet's systemd units"
+}
+
+capture_fingerprint() {
+    {
+        cat "$REPO_DIR/deploy/systemd/liquidity-migration-forward-capture.service" \
+            "$REPO_DIR/scripts/research/capture_bybit_forward.py" \
+            "$REPO_DIR/deploy/forward-capture-symbols.txt" \
+            "$REPO_DIR/requirements.lock" 2>/dev/null || true
+    } | sha256sum | cut -c1-64
+}
+
+# Independent units run through the deploy. Timers are (re)started so a
+# changed schedule applies; the recorder is restarted only when the unit, the
+# script, the symbol list, or the Python dependencies changed, and then this
+# waits for a status file the new process wrote.
+start_independent_units() {
+    local unit fingerprint recorded since
+    fingerprint="$(capture_fingerprint)"
+    recorded="$(cat "$CAPTURE_FINGERPRINT_FILE" 2>/dev/null || true)"
+    while IFS= read -r unit; do
+        [ -n "$unit" ] || continue
+        case "$unit" in
+            liquidity-migration-forward-capture.service)
+                if [ "$recorded" = "$fingerprint" ] && systemctl is-active --quiet "$unit"; then
+                    systemctl enable "$unit" 2>/dev/null || fail "cannot enable $unit"
+                    echo "capture-ok unit=$unit result=unchanged-left-running"
+                    continue
+                fi
+                since="$(date +%s)"
+                systemctl enable "$unit" 2>/dev/null || fail "cannot enable $unit"
+                if systemctl restart "$unit" \
+                    && (wait_fresh_heartbeat "$unit" "$CAPTURE_STATUS" "$since"); then
+                    printf '%s\n' "$fingerprint" > "$CAPTURE_FINGERPRINT_FILE"
+                    echo "capture-ok unit=$unit result=restarted"
+                else
+                    # Not fatal: the recorder is independent of the fleet in
+                    # both directions, and the host watchdog pages on it.
+                    echo "warning: $unit did not publish a fresh status file; the fleet deploy continues" >&2
+                fi
+                ;;
+            *.timer)
+                systemctl enable "$unit" 2>/dev/null || fail "cannot enable $unit"
+                systemctl restart "$unit" || fail "cannot start $unit"
+                ;;
+            *) ;;
+        esac
+    done < <(lm_independent_units)
 }
 
 # ------------------------------------------------------------ realm inputs
@@ -741,6 +860,8 @@ start_realm() {
 
 verify_mode() {
     echo "commit $(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+    echo "deployed $(cat "$DEPLOYED_COMMIT_FILE" 2>/dev/null || echo none)"
+    echo "rollback-target $(rollback_target 2>/dev/null || echo none)"
     if mainnet_armed; then echo "real-money armed"; else echo "real-money off"; fi
     local unit state heartbeat age now
     now="$(date +%s)"
@@ -827,28 +948,47 @@ PY
 # ------------------------------------------------------------------ deploy
 
 deploy_mode() {
+    seed_generation_record
     fetch_exact_commit
-    # Re-read the manifest helpers from the exact commit this run installs.
+    # Re-read the manifest helpers from the exact commit this run installs. A
+    # commit from before the independent lifecycle has no helper for it, and a
+    # rollback to one must still run.
     . "$REPO_DIR/deploy/lib_sleeves.sh"
     . "$REPO_DIR/deploy/lib_systemd_environment.sh"
+    type lm_independent_units >/dev/null 2>&1 || lm_independent_units() { :; }
     ensure_runtime_identities
     install_python_environment
     build_engine
     stop_fleet
     install_release
     install_units
+    start_independent_units
     prepare_demo_inputs
     import_native_strategy_state demo
-    start_realm demo
+    if ! (start_realm demo); then
+        rollback_after_failure demo
+    fi
     if mainnet_armed; then
         provision_mainnet
         import_native_strategy_state mainnet
-        start_realm mainnet
+        if ! (start_realm mainnet); then
+            rollback_after_failure mainnet
+        fi
     else
         echo "real-money off: funded units stay stopped"
     fi
+    record_generation
     echo "deploy-ok commit=$EXPECTED_COMMIT"
     verify_mode
+}
+
+rollback_mode() {
+    local target
+    target="$(rollback_target)" \
+        || fail "no earlier finished deploy is recorded; deploy an exact commit instead"
+    echo "rollback to $target"
+    EXPECTED_COMMIT="$target"
+    deploy_mode
 }
 
 # The manifest helpers come from the checkout this run installs or verifies.
@@ -857,6 +997,7 @@ deploy_mode() {
 
 case "$MODE" in
     deploy) deploy_mode ;;
+    rollback) rollback_mode ;;
     verify) verify_mode ;;
     stop-mainnet)
         stop_mainnet_units
