@@ -464,6 +464,7 @@ impl Decoder {
                 px: execution.px,
                 fee: execution.fee,
                 is_maker: execution.is_maker,
+                forced_close: execution.forced_close,
                 venue_ts_ms: execution.venue_ts_ms,
                 recv_ns: mono_ns(),
             });

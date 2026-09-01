@@ -7,7 +7,8 @@
 
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
-    AccountOrder, AccountPosition, InstrumentRule, OrderAck, VenueExecution, VenueOrder,
+    AccountOrder, AccountPosition, ForcedClose, InstrumentRule, OrderAck, VenueExecution,
+    VenueOrder,
 };
 use engine_types::risk::PositionView;
 use engine_types::{Side, VenueError};
@@ -1032,6 +1033,40 @@ fn is_supported_native_position_stop(row: &Value) -> Result<bool, VenueError> {
     Ok(stop_order_type == "StopLoss" && tpsl_mode == "Full" && reduce_only)
 }
 
+/// Why the venue closed the position, off one execution row.
+///
+/// Three fields carry it and any of them may be absent, so they are read in
+/// the order the venue is most specific: `createType` names what raised the
+/// order, `stopOrderType` names what kind of stop it was, and `execType` is
+/// the last word on the two closes no order precedes — the venue taking the
+/// position over, and the exchange handing it to the other side of the book.
+/// A row that matches none of them is ordinary trading.
+pub(crate) fn forced_close(row: &Value) -> Option<ForcedClose> {
+    let text = |name: &str| row.get(name).and_then(Value::as_str).unwrap_or_default();
+    let from_create = match text("createType") {
+        "CreateByStopLoss" | "CreateByPartialStopLoss" | "CreateByTrailingStop" => {
+            Some(ForcedClose::StopLoss)
+        }
+        "CreateByTakeProfit" | "CreateByPartialTakeProfit" | "CreateByTrailingProfit" => {
+            Some(ForcedClose::TakeProfit)
+        }
+        "CreateByLiq" | "CreateByTakeOver_PassThrough" => Some(ForcedClose::Liquidation),
+        "CreateByAdl_PassThrough" => Some(ForcedClose::AutoDeleverage),
+        _ => None,
+    };
+    let from_stop = || match text("stopOrderType") {
+        "StopLoss" | "PartialStopLoss" | "TrailingStop" => Some(ForcedClose::StopLoss),
+        "TakeProfit" | "PartialTakeProfit" => Some(ForcedClose::TakeProfit),
+        _ => None,
+    };
+    let from_exec = || match text("execType") {
+        "BustTrade" => Some(ForcedClose::Liquidation),
+        "AdlTrade" => Some(ForcedClose::AutoDeleverage),
+        _ => None,
+    };
+    from_create.or_else(from_stop).or_else(from_exec)
+}
+
 /// One page of `/v5/execution/list`. Only quantity-moving executions come
 /// back: a funding charge appears in this history too, and folding it into a
 /// position sum would corrupt the very number this read exists to repair.
@@ -1083,6 +1118,7 @@ pub(crate) fn parse_executions(
             px,
             fee: opt_num_field(row, "execFee")?,
             is_maker: row.get("isMaker").and_then(Value::as_bool).unwrap_or(false),
+            forced_close: forced_close(row),
             venue_ts_ms,
         });
     }
@@ -2018,6 +2054,83 @@ mod tests {
         assert_eq!(rows[1].client_order_id, "");
         assert_eq!(rows[1].fee, None, "an absent fee is not numeric zero");
         assert!(rows[1].is_maker);
+    }
+
+    #[test]
+    fn the_history_says_which_closes_the_venue_started_itself() {
+        let result = json!({
+            "list": [
+                // Our own entry: the venue raised it because we asked.
+                {"execId": "e-1", "orderLinkId": "eng-1", "orderId": "v-1",
+                 "symbol": "ACEUSDT", "side": "Buy", "execQty": "10",
+                 "execPrice": "0.05", "execFee": "0.001", "isMaker": false,
+                 "createType": "CreateByUser", "stopOrderType": "",
+                 "execTime": "1787176627876", "execType": "Trade"},
+                // The stop attached to the position firing under it.
+                {"execId": "e-2", "orderLinkId": "", "orderId": "v-2",
+                 "symbol": "ACEUSDT", "side": "Sell", "execQty": "10",
+                 "execPrice": "0.04", "execFee": "0.001", "isMaker": false,
+                 "createType": "CreateByStopLoss", "stopOrderType": "StopLoss",
+                 "closedSize": "10",
+                 "execTime": "1787176627877", "execType": "Trade"},
+                // The venue taking the position over.
+                {"execId": "e-3", "orderLinkId": "", "orderId": "v-3",
+                 "symbol": "ACEUSDT", "side": "Sell", "execQty": "5",
+                 "execPrice": "0.03", "execFee": "0.001", "isMaker": false,
+                 "execTime": "1787176627878", "execType": "BustTrade"},
+            ],
+            "nextPageCursor": ""
+        });
+        let (rows, _) = parse_executions(&result).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].forced_close, None, "an ordinary entry of ours");
+        assert_eq!(rows[1].forced_close, Some(ForcedClose::StopLoss));
+        assert_eq!(rows[2].forced_close, Some(ForcedClose::Liquidation));
+    }
+
+    #[test]
+    fn every_venue_reason_for_a_close_has_a_name() {
+        let row = |create: &str, stop: &str, exec: &str| json!({"createType": create, "stopOrderType": stop, "execType": exec});
+        for (create, want) in [
+            ("CreateByStopLoss", ForcedClose::StopLoss),
+            ("CreateByPartialStopLoss", ForcedClose::StopLoss),
+            ("CreateByTrailingStop", ForcedClose::StopLoss),
+            ("CreateByTakeProfit", ForcedClose::TakeProfit),
+            ("CreateByPartialTakeProfit", ForcedClose::TakeProfit),
+            ("CreateByTrailingProfit", ForcedClose::TakeProfit),
+            ("CreateByLiq", ForcedClose::Liquidation),
+            ("CreateByTakeOver_PassThrough", ForcedClose::Liquidation),
+            ("CreateByAdl_PassThrough", ForcedClose::AutoDeleverage),
+        ] {
+            assert_eq!(
+                forced_close(&row(create, "", "Trade")),
+                Some(want),
+                "{create}"
+            );
+        }
+        for (stop, want) in [
+            ("StopLoss", ForcedClose::StopLoss),
+            ("PartialStopLoss", ForcedClose::StopLoss),
+            ("TrailingStop", ForcedClose::StopLoss),
+            ("TakeProfit", ForcedClose::TakeProfit),
+            ("PartialTakeProfit", ForcedClose::TakeProfit),
+        ] {
+            assert_eq!(
+                forced_close(&row("CreateByUser", stop, "Trade")),
+                Some(want),
+                "{stop}"
+            );
+        }
+        assert_eq!(
+            forced_close(&row("", "", "AdlTrade")),
+            Some(ForcedClose::AutoDeleverage)
+        );
+        assert_eq!(forced_close(&json!({})), None, "a row saying nothing");
+        assert_eq!(
+            forced_close(&row("CreateByUser", "UNKNOWN", "Trade")),
+            None,
+            "an ordinary order of ours"
+        );
     }
 
     #[test]

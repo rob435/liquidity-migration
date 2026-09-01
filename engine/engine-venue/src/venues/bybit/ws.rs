@@ -738,6 +738,7 @@ pub(crate) fn map_execution_row(
         // absent one is a message shape we do not know — and the expensive
         // side is the safe thing to assume about a fill we cannot classify.
         is_maker: row.get("isMaker").and_then(Value::as_bool).unwrap_or(false),
+        forced_close: super::parse::forced_close(row),
         venue_ts_ms,
         recv_ns,
     }))
@@ -839,6 +840,7 @@ mod tests {
     }
 
     use super::*;
+    use engine_types::orders::ForcedClose;
     use serde_json::json;
 
     fn resolve(name: &str) -> Option<SymbolId> {
@@ -961,6 +963,7 @@ mod tests {
                 px,
                 fee,
                 is_maker,
+                forced_close,
                 venue_ts_ms,
                 recv_ns,
             } => {
@@ -972,8 +975,70 @@ mod tests {
                 assert_eq!(px, 95900.1);
                 assert_eq!(fee, Some(26.3725275));
                 assert!(!is_maker, "this row does not say it rested");
+                assert_eq!(forced_close, None, "an ordinary trade of ours");
                 assert_eq!(venue_ts_ms, 1_746_270_400_353);
                 assert_eq!(recv_ns, 99);
+            }
+            other => panic!("expected Fill, got {other:?}"),
+        }
+    }
+
+    /// The stream row this whole path exists for: the venue's own stop firing
+    /// under a position. It carries no `orderLinkId`, so the reason is the
+    /// only thing that says whose close it is.
+    #[test]
+    fn a_stop_firing_says_the_venue_started_the_close() {
+        let row = json!({
+            "execId": "0ab1bdf7-4219-438b-b30a-32ec863018f8",
+            "execPrice": "94000.0",
+            "execQty": "10",
+            "execFee": "0.5",
+            "execTime": "1746270400400",
+            "orderLinkId": "",
+            "orderId": "9aac161b-8ed6-450d-9cab-c5cc67c21785",
+            "symbol": "BTCUSDT",
+            "side": "Sell",
+            "createType": "CreateByStopLoss",
+            "stopOrderType": "StopLoss",
+            "execType": "Trade",
+            "closedSize": "10",
+            "isMaker": false
+        });
+        match map_execution_row(&row, &resolve, 99).unwrap().unwrap() {
+            OrderUpdate::Fill {
+                client_order_id,
+                side,
+                qty,
+                forced_close,
+                ..
+            } => {
+                assert!(client_order_id.is_empty(), "no order of ours asked for it");
+                assert_eq!(side, Side::Sell);
+                assert_eq!(qty, 10.0);
+                assert_eq!(forced_close, Some(ForcedClose::StopLoss));
+            }
+            other => panic!("expected Fill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_liquidation_says_the_venue_took_the_position_over() {
+        let row = json!({
+            "execId": "bust-1",
+            "execPrice": "90000.0",
+            "execQty": "10",
+            "execFee": "0.5",
+            "execTime": "1746270400500",
+            "orderLinkId": "",
+            "orderId": "9aac161b-8ed6-450d-9cab-c5cc67c21786",
+            "symbol": "BTCUSDT",
+            "side": "Sell",
+            "execType": "BustTrade",
+            "isMaker": false
+        });
+        match map_execution_row(&row, &resolve, 99).unwrap().unwrap() {
+            OrderUpdate::Fill { forced_close, .. } => {
+                assert_eq!(forced_close, Some(ForcedClose::Liquidation));
             }
             other => panic!("expected Fill, got {other:?}"),
         }

@@ -955,6 +955,31 @@ async fn build_with_venue_state_and_rule(
     held: Vec<engine_types::PositionView>,
     rule: Option<InstrumentRule>,
 ) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
+    build_holding(
+        &settings(),
+        verdict,
+        strategies,
+        symbols,
+        replayed,
+        working,
+        held,
+        rule,
+    )
+    .await
+}
+
+/// The same again, on settings the test chose — a trades file, say.
+#[allow(clippy::too_many_arguments)]
+async fn build_holding(
+    settings: &EngineSection,
+    verdict: RiskVerdict,
+    strategies: Vec<Box<dyn Strategy>>,
+    symbols: &[&str],
+    replayed: &[WalRecord],
+    working: Vec<VenueOrder>,
+    held: Vec<engine_types::PositionView>,
+    rule: Option<InstrumentRule>,
+) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
     let (mut venue, sends) = MockVenue::new(tape.clone(), symbols);
@@ -974,7 +999,7 @@ async fn build_with_venue_state_and_rule(
     let (risk, risk_saw) = MockRisk::with(verdict);
     let replayed = replay_with_history_boundary(replayed);
     let engine = Engine::boot(
-        &settings(),
+        settings,
         "0000000000000000",
         wal,
         risk,
@@ -1137,6 +1162,7 @@ mod boot_rules;
 mod covers;
 mod durable_signals;
 mod fill_costs;
+mod forced_close;
 mod gap_recovery;
 mod heartbeat;
 mod order_path;

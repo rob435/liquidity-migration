@@ -96,6 +96,7 @@ fn an_order_the_log_has_ended_stops_being_worked() {
                 px: 99.0,
                 fee: Some(0.0),
                 is_maker: false,
+                forced_close: None,
                 venue_ts_ms: 0,
                 recv_ns: 0,
             },

@@ -333,6 +333,8 @@ pub(crate) fn parse_executions(
                 opt_num_field(row, "fee")?
             },
             is_maker: we_made,
+            // Lighter states no reason for a close on this row.
+            forced_close: None,
             venue_ts_ms: int_field(row, "timestamp")?,
         });
     }

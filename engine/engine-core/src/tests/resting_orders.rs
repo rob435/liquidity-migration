@@ -833,6 +833,7 @@ async fn each_strategy_reads_only_its_own_working_orders() {
                 px: 29_000.0,
                 fee: Some(0.0),
                 is_maker: false,
+                forced_close: None,
                 venue_ts_ms: recent_replay_ms(),
                 recv_ns: 4,
             },

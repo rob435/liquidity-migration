@@ -648,6 +648,7 @@ pub(crate) fn parse_trades(rows: &Value) -> Result<Vec<(i64, VenueExecution)>, V
                 px,
                 fee,
                 is_maker,
+                forced_close: None,
                 venue_ts_ms,
             },
         ));

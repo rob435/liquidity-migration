@@ -47,7 +47,7 @@ use engine_types::{
     VenueError, VenueGateway, Wal, WalError, WalRecord, WorkPolicy,
 };
 
-use crate::attribution::Attribution;
+use crate::attribution::{self, Attribution};
 use crate::clock;
 use crate::config::EngineSection;
 use crate::covers::CoverBook;

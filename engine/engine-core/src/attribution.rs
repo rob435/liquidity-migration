@@ -20,23 +20,46 @@
 
 use std::collections::HashMap;
 
-use engine_types::{OrderUpdate, Side, StrategyId, SymbolId, WalRecord};
-
-/// The order id of a fill, and nothing else's.
-fn fill_id(update: &OrderUpdate) -> Option<&str> {
-    match update {
-        OrderUpdate::Fill {
-            client_order_id, ..
-        } => Some(client_order_id.as_str()),
-        _ => None,
-    }
-}
+use engine_types::{
+    FilledTotal, ForcedClose, OrderUpdate, Side, StrategyId, SymbolId, SymbolTotal, WalRecord,
+};
 
 /// Smaller than this is flat. A venue position is a whole number of quantity
 /// steps, so anything under it is this sum's own rounding rather than a
 /// holding — the same reasoning as `reconcile`'s tolerance, one order of
 /// magnitude coarser than nothing.
 const FLAT: f64 = 1e-9;
+
+/// Whether a fill on this side makes a signed claim smaller. Positive is long,
+/// so a sale reduces a long and a purchase reduces a short.
+pub fn reduces(claim: f64, side: Side) -> bool {
+    match side {
+        Side::Sell => claim > 0.0,
+        Side::Buy => claim < 0.0,
+    }
+}
+
+/// Whose position a close the venue itself started belongs to.
+///
+/// The venue closes a position, not an order: the row carries no
+/// `orderLinkId`, so the join every other fill uses is not there. The holding
+/// is the join instead — one sleeve claims the symbol, and the close reduces
+/// that claim. A symbol two sleeves claim, or a fill that would grow the
+/// claim rather than cut it, belongs to nobody here: guessing would charge one
+/// sleeve for another's stop.
+pub fn forced_close_owner(
+    attribution: &Attribution,
+    client_order_id: &str,
+    symbol: SymbolId,
+    side: Side,
+    forced_close: Option<ForcedClose>,
+) -> Option<StrategyId> {
+    if !client_order_id.is_empty() || forced_close.is_none() {
+        return None;
+    }
+    let owner = attribution.sole_owner(symbol)?;
+    reduces(attribution.signed(owner, symbol), side).then_some(owner)
+}
 
 #[derive(Debug, Default)]
 pub struct Attribution {
@@ -58,74 +81,62 @@ impl Attribution {
                 WalRecord::OrderSent { request, .. } => {
                     sender.insert(request.client_order_id.as_str(), request.strategy);
                 }
+                // A fill for an order this log never recorded sending belongs
+                // to somebody else on the account, unless the venue named it
+                // a close of a position one sleeve holds. Anything else is
+                // charged to nobody on purpose: the engine does not guess
+                // whose it is, and `reconcile` is what notices the account
+                // holds more than the log accounts for.
                 WalRecord::OrderUpdate { update } => {
-                    let Some(id) = fill_id(update) else { continue };
-                    // A fill for an order this log never recorded sending
-                    // belongs to somebody else on the account. Charged to
-                    // nobody on purpose: the engine does not guess whose it
-                    // is, and `reconcile` is what notices the account holds
-                    // more than the log accounts for.
-                    let strategy = sender.get(id).copied();
+                    let OrderUpdate::Fill {
+                        client_order_id,
+                        symbol,
+                        side,
+                        forced_close,
+                        ..
+                    } = update
+                    else {
+                        continue;
+                    };
+                    let strategy = sender.get(client_order_id.as_str()).copied().or_else(|| {
+                        forced_close_owner(&me, client_order_id, *symbol, *side, *forced_close)
+                    });
                     let Some(strategy) = strategy else {
                         continue;
                     };
                     me.on_update(strategy, update);
                 }
                 // A fill recovered from the venue's history joins the same
-                // way, through the order that produced it. One recovered
-                // without an order of ours — a hand trade, a venue stop with
-                // no id — is charged to nobody, exactly like a foreign fill.
+                // two ways: through the order that produced it, or through
+                // the position a venue-named close reduced.
                 WalRecord::RecoveredFill {
                     client_order_id,
                     symbol,
                     side,
                     qty,
+                    forced_close,
                     ..
                 } => {
-                    let strategy = sender.get(client_order_id.as_str()).copied();
+                    let strategy = sender.get(client_order_id.as_str()).copied().or_else(|| {
+                        forced_close_owner(&me, client_order_id, *symbol, *side, *forced_close)
+                    });
                     let Some(strategy) = strategy else {
                         continue;
                     };
                     me.note(strategy, *symbol, *side, *qty);
                 }
-                // Boot dropped these rows against a flat venue reading; the
-                // drop replays like everything else, or a restart would
-                // rebuild the residue from the old fills — and by then the
-                // symbol may be held by another sleeve, making it
-                // undroppable.
-                WalRecord::ClaimsDropped { rows, .. } => {
-                    for row in rows {
-                        me.filled.remove(&(row.strategy.0, row.symbol.0));
-                    }
-                }
-                // An operator restated the account (`engine reconcile-clear`)
-                // to the venue's own positions. A symbol that restatement
-                // reports flat is held by nobody, whatever the fills before
-                // it summed to — the claims on it die here, exactly as the
-                // exposure ledger's copy of this record is treated as "set".
+                WalRecord::ClaimsDropped { rows, .. } => me.forget(rows),
                 WalRecord::LatchCleared {
                     restated_exposure, ..
-                } => {
-                    me.filled.retain(|(_, symbol), _| {
-                        restated_exposure
-                            .iter()
-                            .any(|row| row.symbol.0 == *symbol && row.signed_qty.abs() >= FLAT)
-                    });
-                }
-                // A rotation restated the whole table. Set, not add: at its
-                // place in a chain read these rows are exactly what the fills
-                // before it summed to, and in a fresh segment they are all
-                // there is. Still-open orders arrive through the same record,
-                // so `sender` keeps resolving their later fills.
+                } => me.keep_held(restated_exposure),
+                // Still-open orders arrive through the same record, so
+                // `sender` keeps resolving their later fills.
                 WalRecord::SegmentBase {
                     attribution,
                     open_orders,
                     ..
                 } => {
-                    me.filled = attribution
-                        .iter()
-                        .map(|row| ((row.strategy.0, row.symbol.0), row.signed_qty))
-                        .collect();
+                    me.restate(attribution);
                     for open in open_orders {
                         sender.insert(open.request.client_order_id.as_str(), open.request.strategy);
                     }
@@ -134,6 +145,37 @@ impl Attribution {
             }
         }
         me
+    }
+
+    /// Replace every claim with a rotation's own account of them. Set, not
+    /// add: at its place in a chain read these rows are exactly what the fills
+    /// before them summed to, and in a fresh segment they are all there is.
+    pub fn restate(&mut self, rows: &[FilledTotal]) {
+        self.filled = rows
+            .iter()
+            .map(|row| ((row.strategy.0, row.symbol.0), row.signed_qty))
+            .collect();
+    }
+
+    /// Forget the claims a boot dropped against a flat venue reading. The drop
+    /// replays like everything else, or a restart would rebuild the residue
+    /// from the old fills — and by then the symbol may be held by another
+    /// sleeve, making it undroppable.
+    pub fn forget(&mut self, rows: &[FilledTotal]) {
+        for row in rows {
+            self.filled.remove(&(row.strategy.0, row.symbol.0));
+        }
+    }
+
+    /// Keep only the symbols an operator's restatement (`engine
+    /// reconcile-clear`) still shows held. A symbol it reports flat is held by
+    /// nobody, whatever the fills before it summed to.
+    pub fn keep_held(&mut self, restated: &[SymbolTotal]) {
+        self.filled.retain(|(_, symbol), _| {
+            restated
+                .iter()
+                .any(|row| row.symbol.0 == *symbol && row.signed_qty.abs() >= FLAT)
+        });
     }
 
     /// Every non-flat row, sorted, for a rotation to restate.
@@ -210,8 +252,8 @@ impl Attribution {
     ///
     /// The account reading is the only word on how much is actually there
     /// (module note above). A row surviving in a symbol the venue holds
-    /// nothing of is a close this log never got to charge — a venue stop
-    /// firing under our position, or an inherited position wound down — and
+    /// nothing of is a close this log never got to charge — a hand close, or
+    /// an inherited position wound down — and
     /// left in place it keeps [`Attribution::held_by_another`] claiming a
     /// holding that does not exist, locking every other sleeve out of the
     /// name for good. The caller decides what "flat" means; boot asks it
@@ -287,9 +329,50 @@ mod tests {
                 px: 100.0,
                 fee: Some(0.0),
                 is_maker: false,
+                forced_close: None,
                 venue_ts_ms: 1,
                 recv_ns: 1,
             },
+        }
+    }
+
+    /// A close the venue itself started: no `orderLinkId`, and a reason.
+    fn stop_fill(symbol: SymbolId, side: Side, qty: f64) -> WalRecord {
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                exec_id: "venue-stop".into(),
+                client_order_id: String::new(),
+                symbol,
+                side,
+                qty,
+                px: 99.0,
+                fee: Some(0.0),
+                is_maker: false,
+                forced_close: Some(ForcedClose::StopLoss),
+                venue_ts_ms: 2,
+                recv_ns: 2,
+            },
+        }
+    }
+
+    fn recovered(
+        forced_close: Option<ForcedClose>,
+        symbol: SymbolId,
+        side: Side,
+        qty: f64,
+    ) -> WalRecord {
+        WalRecord::RecoveredFill {
+            exec_id: "native-or-manual".into(),
+            client_order_id: String::new(),
+            symbol,
+            side,
+            qty,
+            px: 99.0,
+            fee: Some(0.0),
+            is_maker: false,
+            forced_close,
+            venue_ts_ms: 2,
+            recovered_wall_ts_ms: 3,
         }
     }
 
@@ -330,27 +413,96 @@ mod tests {
         assert!(!a.held_by_another(LONG, BTC));
     }
 
+    /// A blank id and no reason from the venue is a hand trade: somebody
+    /// closing by hand on the same account. Nobody's.
     #[test]
-    fn a_blank_fill_is_not_assigned_to_the_only_sleeve_in_the_symbol() {
+    fn a_blank_fill_with_no_venue_reason_is_not_assigned_to_the_only_sleeve() {
         let log = vec![
             sent("a", CARRY, BTC),
             fill("a", BTC, Side::Buy, 2.0),
-            WalRecord::RecoveredFill {
-                exec_id: "native-or-manual".into(),
-                client_order_id: String::new(),
-                symbol: BTC,
-                side: Side::Sell,
-                qty: 1.0,
-                px: 99.0,
-                fee: Some(0.0),
-                is_maker: false,
-                venue_ts_ms: 2,
-                recovered_wall_ts_ms: 3,
-            },
+            recovered(None, BTC, Side::Sell, 1.0),
         ];
         let a = Attribution::from_records(&log);
         assert_eq!(a.signed(CARRY, BTC), 2.0);
         assert_eq!(a.signed(LONG, BTC), 0.0);
+    }
+
+    #[test]
+    fn a_venue_stop_closes_the_position_of_the_sleeve_that_held_it() {
+        let a = Attribution::from_records(&[
+            sent("a", CARRY, BTC),
+            fill("a", BTC, Side::Buy, 10.0),
+            stop_fill(BTC, Side::Sell, 10.0),
+        ]);
+        assert_eq!(a.signed(CARRY, BTC), 0.0, "the stop closed carry's holding");
+        assert!(!a.held_by_another(LONG, BTC), "the name is free again");
+    }
+
+    #[test]
+    fn a_recovered_venue_stop_closes_the_same_position() {
+        let a = Attribution::from_records(&[
+            sent("a", CARRY, BTC),
+            fill("a", BTC, Side::Buy, 10.0),
+            recovered(Some(ForcedClose::Liquidation), BTC, Side::Sell, 10.0),
+        ]);
+        assert_eq!(a.signed(CARRY, BTC), 0.0);
+    }
+
+    #[test]
+    fn a_forced_close_in_a_symbol_nobody_holds_is_charged_to_nobody() {
+        let a = Attribution::from_records(&[stop_fill(BTC, Side::Sell, 10.0)]);
+        assert_eq!(a.signed(CARRY, BTC), 0.0);
+        assert_eq!(a.signed(LONG, BTC), 0.0);
+    }
+
+    #[test]
+    fn a_forced_close_that_would_grow_the_claim_is_charged_to_nobody() {
+        // A purchase against a long is not a close of it, whatever the venue
+        // calls the row.
+        let a = Attribution::from_records(&[
+            sent("a", CARRY, BTC),
+            fill("a", BTC, Side::Buy, 10.0),
+            stop_fill(BTC, Side::Buy, 5.0),
+        ]);
+        assert_eq!(a.signed(CARRY, BTC), 10.0);
+    }
+
+    #[test]
+    fn a_forced_close_in_a_symbol_two_sleeves_hold_is_charged_to_nobody() {
+        let a = Attribution::from_records(&[
+            sent("a", CARRY, BTC),
+            fill("a", BTC, Side::Buy, 10.0),
+            sent("b", LONG, BTC),
+            fill("b", BTC, Side::Buy, 4.0),
+            stop_fill(BTC, Side::Sell, 10.0),
+        ]);
+        assert_eq!(a.signed(CARRY, BTC), 10.0, "neither sleeve is charged");
+        assert_eq!(a.signed(LONG, BTC), 4.0);
+    }
+
+    #[test]
+    fn the_forced_close_rule_needs_a_blank_id_and_a_venue_reason() {
+        let held =
+            Attribution::from_records(&[sent("a", CARRY, BTC), fill("a", BTC, Side::Buy, 10.0)]);
+        assert_eq!(
+            forced_close_owner(&held, "", BTC, Side::Sell, Some(ForcedClose::StopLoss)),
+            Some(CARRY)
+        );
+        assert_eq!(
+            forced_close_owner(&held, "", BTC, Side::Sell, None),
+            None,
+            "no reason from the venue is a hand close"
+        );
+        assert_eq!(
+            forced_close_owner(&held, "eng-9", BTC, Side::Sell, Some(ForcedClose::StopLoss)),
+            None,
+            "an id names an order, and the order ledger answers for those"
+        );
+        assert_eq!(
+            forced_close_owner(&held, "", ETH, Side::Sell, Some(ForcedClose::StopLoss)),
+            None,
+            "nobody holds this one"
+        );
     }
 
     #[test]
@@ -386,8 +538,8 @@ mod tests {
     #[test]
     fn a_flat_symbol_loses_its_stale_claim() {
         // The residue case: carry bought, the position later closed by a
-        // fill this log never charged (a venue stop, a hand close), and the
-        // leftover row keeps every other sleeve out of the name.
+        // fill this log never charged (a hand close), and the leftover row
+        // keeps every other sleeve out of the name.
         let mut a =
             Attribution::from_records(&[sent("a", CARRY, BTC), fill("a", BTC, Side::Buy, 2.0)]);
         assert!(

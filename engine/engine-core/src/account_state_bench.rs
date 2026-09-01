@@ -451,6 +451,7 @@ fn history(rows: usize, now_ms: i64) -> Vec<VenueExecution> {
             px: 100.0,
             fee: Some(0.02),
             is_maker: true,
+            forced_close: None,
             venue_ts_ms: now_ms - 500 + (n % 100) as i64,
         })
         .collect()

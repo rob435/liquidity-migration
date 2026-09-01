@@ -290,13 +290,26 @@ impl Lots {
     /// boot found the venue holding nothing of.
     ///
     /// The same act as `attribution`'s own drop, and for the same reason: the
-    /// close happened somewhere this log cannot see — a venue stop firing
-    /// under the position, an inherited holding wound down — so there is no
-    /// exit price to report and inventing one would be worse than saying
-    /// nothing.
+    /// close happened somewhere this log cannot see — a hand close, an
+    /// inherited holding wound down — so there is no exit price to report and
+    /// inventing one would be worse than saying nothing.
     pub fn drop_symbols(&mut self, dropped: impl Fn(&str, &str) -> bool) {
         self.open
             .retain(|(sleeve, symbol), _| !dropped(sleeve, symbol));
+    }
+
+    /// The one sleeve holding this coin, and how much, signed. `None` when
+    /// nobody holds it or two sleeves do — which is what a close nobody
+    /// ordered has to be charged against.
+    pub fn sole_holder(&self, symbol: &str) -> Option<(&str, f64)> {
+        let mut held = self
+            .open
+            .iter()
+            .filter(|((_, coin), lot)| coin == symbol && lot.signed_qty.abs() >= FLAT);
+        let ((sleeve, _), lot) = held.next()?;
+        held.next()
+            .is_none()
+            .then_some((sleeve.as_str(), lot.signed_qty))
     }
 
     /// Every trip that has closed and not yet been taken.

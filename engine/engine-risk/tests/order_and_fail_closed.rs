@@ -111,6 +111,7 @@ fn a_fresh_fill_is_immediately_available_to_a_reduce_only_exit() {
         px: 10.0,
         fee: Some(0.0),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: 0,
         recv_ns: 2 * SEC,
     });
@@ -143,6 +144,7 @@ fn a_fresh_reduce_only_fill_does_not_poison_unrelated_admission() {
         px: 10.0,
         fee: Some(0.0),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: 0,
         recv_ns: NOW + 2,
     });
@@ -172,6 +174,7 @@ fn a_partial_reduce_fill_nets_the_view_and_keeps_only_the_unfilled_exit_covered(
         px: 10.0,
         fee: Some(0.0),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: 1,
         recv_ns: NOW + 2,
     });
@@ -205,6 +208,7 @@ fn a_full_reduce_fill_skips_the_closed_positions_stale_stop() {
         px: 11.0,
         fee: Some(0.0),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: 1,
         recv_ns: NOW + 2,
     });
@@ -225,6 +229,7 @@ fn an_unreserved_opening_fill_has_a_specific_durable_refusal() {
         px: 10.0,
         fee: Some(0.0),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: 1,
         recv_ns: NOW + 1,
     });
@@ -251,6 +256,7 @@ fn an_unreserved_full_close_does_not_require_an_unknown_stop() {
         px: 11.0,
         fee: Some(0.0),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: 1,
         recv_ns: NOW + 1,
     });
@@ -582,6 +588,7 @@ fn a_fill_from_a_flat_two_sided_pair_blocks_extra_opposite_admission() {
             px: 10.0,
             fee: Some(0.0),
             is_maker: true,
+            forced_close: None,
             venue_ts_ms: 1,
             recv_ns: NOW + 1,
         },
@@ -693,6 +700,7 @@ fn a_wide_stop_keeps_its_full_loss_charge_as_pending_filled_and_restarted() {
         px: 10.0,
         fee: Some(0.0),
         is_maker: true,
+        forced_close: None,
         venue_ts_ms: 1,
         recv_ns: NOW + 1,
     });
@@ -726,6 +734,7 @@ fn a_recent_reduction_preserves_a_wide_opening_fills_stop_charge() {
         px: 10.0,
         fee: Some(0.0),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: 1,
         recv_ns: NOW + 1,
     });
@@ -745,6 +754,7 @@ fn a_recent_reduction_preserves_a_wide_opening_fills_stop_charge() {
         px: 10.0,
         fee: Some(0.0),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: 2,
         recv_ns: NOW + 3,
     });

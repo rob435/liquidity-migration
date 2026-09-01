@@ -475,6 +475,8 @@ impl Decoder {
                     px,
                     fee,
                     is_maker,
+                    // Binance states no reason for a close on this row.
+                    forced_close: None,
                     venue_ts_ms,
                     recv_ns,
                 });

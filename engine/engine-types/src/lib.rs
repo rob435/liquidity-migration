@@ -27,9 +27,10 @@ pub use market::{
     Subscription, Ticker, TradeFlow, BOOK_DEPTH,
 };
 pub use orders::{
-    AccountInventory, AccountOrder, AccountPosition, Action, AmendSpec, InstrumentRule, Intent,
-    OrderAck, OrderFacts, OrderKind, OrderRequest, OrderUpdate, QuoteFillFeatures, RestingOrder,
-    Side, StopSpec, TimeInForce, VenueError, VenueExecution, VenueOrder, WorkPolicy,
+    AccountInventory, AccountOrder, AccountPosition, Action, AmendSpec, ForcedClose,
+    InstrumentRule, Intent, OrderAck, OrderFacts, OrderKind, OrderRequest, OrderUpdate,
+    QuoteFillFeatures, RestingOrder, Side, StopSpec, TimeInForce, VenueError, VenueExecution,
+    VenueOrder, WorkPolicy,
 };
 pub use risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
 pub use strategy::{

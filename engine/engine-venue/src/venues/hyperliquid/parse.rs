@@ -386,6 +386,8 @@ pub(crate) fn parse_execution(row: &Value) -> Result<VenueExecution, VenueError>
         fee: Some(num_field(row, "fee")?),
         // `crossed` says we took liquidity, so the maker share is its opposite.
         is_maker: !row.get("crossed").and_then(Value::as_bool).unwrap_or(true),
+        // Hyperliquid states no reason for a close on this row.
+        forced_close: None,
         venue_ts_ms: int_field(row, "time")?,
     })
 }

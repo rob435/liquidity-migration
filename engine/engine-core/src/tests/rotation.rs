@@ -203,6 +203,7 @@ fn fill(id: &str, symbol: u16, qty: f64) -> WalRecord {
             px: 100.0,
             fee: Some(0.01),
             is_maker: true,
+            forced_close: None,
             venue_ts_ms: recent_replay_ms(),
             recv_ns: 6,
         },

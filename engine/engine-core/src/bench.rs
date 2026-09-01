@@ -358,6 +358,7 @@ impl OrderFeed for FillingOrderFeed {
             // counterpart charges on most names.
             fee: Some((px * request.qty * 0.0002).abs()),
             is_maker: matches!(request.kind, OrderKind::Limit { .. }),
+            forced_close: None,
             venue_ts_ms: clock::wall_ms(),
             recv_ns: clock::now_ns(),
         })

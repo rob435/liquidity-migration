@@ -950,10 +950,25 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.private_stream_ready = false;
             self.account.observed_ns = 0;
         }
+        // Whose fill this is, answered once and used everywhere below. The
+        // order ledger first; then, for a close the venue itself started, the
+        // position it reduced. A fill that resolves to neither is a stranger's.
         let fill_owner = match &update {
             OrderUpdate::Fill {
-                client_order_id, ..
-            } => self.orders.owner_of(client_order_id),
+                client_order_id,
+                symbol,
+                side,
+                forced_close,
+                ..
+            } => self.orders.owner_of(client_order_id).or_else(|| {
+                attribution::forced_close_owner(
+                    &self.attribution,
+                    client_order_id,
+                    *symbol,
+                    *side,
+                    *forced_close,
+                )
+            }),
             _ => None,
         };
         let fill_request = match &update {
@@ -1127,7 +1142,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // boot's ids and the ones in flight when it started, and a fill can
         // still arrive for an order older than either.
         if let Some(id) = inflight::client_order_id(&update) {
-            match self.orders.owner_of(id) {
+            match self.orders.owner_of(id).or(fill_owner) {
                 Some(sid) => {
                     self.attribution.on_update(sid, &update);
                     self.price_fill(sid, &update);

@@ -42,7 +42,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use engine_types::{MarketState, OrderUpdate, Side, StrategyId, SymbolId, WalRecord};
+use engine_types::{ForcedClose, MarketState, OrderUpdate, Side, StrategyId, SymbolId, WalRecord};
 
 use crate::replay::LogNames;
 
@@ -591,6 +591,28 @@ impl Fills {
         total
     }
 
+    /// The sleeve a close the venue itself started belongs to: the one open
+    /// lot in that coin whose side this fill reduces. The same question
+    /// `attribution` answers off its claims, asked here of the positions,
+    /// because a lot is keyed by name rather than by id.
+    fn forced_close_owner(
+        &self,
+        client_order_id: &str,
+        symbol: SymbolId,
+        side: Side,
+        forced_close: Option<ForcedClose>,
+    ) -> Option<StrategyId> {
+        if !client_order_id.is_empty() || forced_close.is_none() {
+            return None;
+        }
+        let (sleeve, signed_qty) = self.lots.sole_holder(&self.names.symbol(symbol))?;
+        if !crate::attribution::reduces(signed_qty, side) {
+            return None;
+        }
+        let place = self.names.strategies.iter().position(|s| s == sleeve)?;
+        Some(StrategyId(place as u16))
+    }
+
     /// How many fills are still waiting for a mark.
     pub fn pending(&self) -> usize {
         self.pending.len()
@@ -661,15 +683,23 @@ impl Fills {
                             px,
                             fee,
                             is_maker,
+                            forced_close,
                             venue_ts_ms,
                             ..
                         },
                 } => {
                     // A fill for an order this log never sent belongs to
                     // somebody else on the account, exactly as `attribution`
-                    // reads it. Pricing it would be pricing a stranger's
-                    // trade.
-                    let Some((strategy, arrival_mid)) = sent.get(client_order_id.as_str()).copied()
+                    // reads it, unless the venue named it a close of a
+                    // position one sleeve holds. Pricing anything else would
+                    // be pricing a stranger's trade. A close nobody ordered
+                    // has no order to anchor it, so its arrival midpoint is
+                    // zero and yields no shortfall.
+                    let Some((strategy, arrival_mid)) =
+                        sent.get(client_order_id.as_str()).copied().or_else(|| {
+                            me.forced_close_owner(client_order_id, *symbol, *side, *forced_close)
+                                .map(|strategy| (strategy, 0.0))
+                        })
                     else {
                         continue;
                     };
@@ -725,8 +755,9 @@ impl Fills {
                     });
                 }
                 // What the stream missed, read back off the venue. The same
-                // join as a delivered fill -- through the order that produced
-                // it -- so one with no order of ours is priced for nobody.
+                // two joins as a delivered fill -- through the order that
+                // produced it, or through the position a venue-named close
+                // reduced -- so anything else is priced for nobody.
                 WalRecord::RecoveredFill {
                     client_order_id,
                     symbol,
@@ -735,10 +766,15 @@ impl Fills {
                     px,
                     fee,
                     is_maker,
+                    forced_close,
                     venue_ts_ms,
                     ..
                 } => {
-                    let Some((strategy, arrival_mid)) = sent.get(client_order_id.as_str()).copied()
+                    let Some((strategy, arrival_mid)) =
+                        sent.get(client_order_id.as_str()).copied().or_else(|| {
+                            me.forced_close_owner(client_order_id, *symbol, *side, *forced_close)
+                                .map(|strategy| (strategy, 0.0))
+                        })
                     else {
                         continue;
                     };

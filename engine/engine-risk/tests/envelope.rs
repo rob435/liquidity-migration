@@ -42,6 +42,7 @@ fn a_fill_newer_than_the_view_still_counts_against_the_envelope() {
         px: 10.0,
         fee: Some(0.0),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: 0,
         recv_ns: 2 * SEC,
     });

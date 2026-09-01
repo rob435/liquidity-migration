@@ -17,10 +17,13 @@
 //! does not guess whose it is, does not cancel it, and does not trade on top
 //! of it. It says so and stops opening.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
-use engine_types::{AccountView, OrderRequest, OrderUpdate, Side, SymbolId, VenueOrder, WalRecord};
+use engine_types::{
+    AccountView, OrderRequest, OrderUpdate, Side, StrategyId, SymbolId, VenueOrder, WalRecord,
+};
 
+use crate::attribution::{forced_close_owner, Attribution};
 use crate::inflight::LedgerOfOrders;
 
 /// The smallest difference worth calling a difference when nothing better is
@@ -331,38 +334,65 @@ pub fn reconcile(
 /// state. A clear accepts earlier account history; a segment base carries the
 /// durable latch and only keeps ids for orders still open at that boundary.
 fn foreign_fills(replayed: &[WalRecord]) -> Vec<Finding> {
-    let mut sent: HashSet<String> = HashSet::new();
+    let mut sent: HashMap<String, StrategyId> = HashMap::new();
+    let mut claims = Attribution::default();
     let mut findings = Vec::new();
     for record in replayed {
         match record {
             WalRecord::OrderSent { request, .. } => {
-                sent.insert(request.client_order_id.clone());
+                sent.insert(request.client_order_id.clone(), request.strategy);
             }
             WalRecord::OrderUpdate {
                 update:
                     OrderUpdate::Fill {
                         client_order_id,
                         symbol,
+                        side,
+                        qty,
+                        forced_close,
                         ..
                     },
             }
             | WalRecord::RecoveredFill {
                 client_order_id,
                 symbol,
+                side,
+                qty,
+                forced_close,
                 ..
             } => {
-                if client_order_id.is_empty() || !sent.contains(client_order_id) {
-                    findings.push(Finding::ForeignFill {
+                let owner = sent.get(client_order_id).copied().or_else(|| {
+                    forced_close_owner(&claims, client_order_id, *symbol, *side, *forced_close)
+                });
+                match owner {
+                    Some(owner) => claims.note(owner, *symbol, *side, *qty),
+                    None => findings.push(Finding::ForeignFill {
                         client_order_id: client_order_id.clone(),
                         symbol: *symbol,
-                    });
+                    }),
                 }
             }
-            WalRecord::LatchCleared { .. } => findings.clear(),
-            WalRecord::SegmentBase { open_orders, .. } => {
+            WalRecord::ClaimsDropped { rows, .. } => claims.forget(rows),
+            WalRecord::LatchCleared {
+                restated_exposure, ..
+            } => {
+                claims.keep_held(restated_exposure);
+                findings.clear();
+            }
+            WalRecord::SegmentBase {
+                open_orders,
+                attribution,
+                ..
+            } => {
+                claims.restate(attribution);
                 sent = open_orders
                     .iter()
-                    .map(|order| order.request.client_order_id.clone())
+                    .map(|order| {
+                        (
+                            order.request.client_order_id.clone(),
+                            order.request.strategy,
+                        )
+                    })
                     .collect();
                 findings.clear();
             }
@@ -486,6 +516,10 @@ fn position_state(
     let mut exposure = BTreeMap::new();
     let mut intended = BTreeMap::new();
     let mut sent: HashMap<String, OrderRequest> = HashMap::new();
+    // The claims a venue-initiated close is charged against, kept the way
+    // `attribution` keeps them, so this walk resolves the same owner the live
+    // path did and trusted exposure cannot drift across a restart.
+    let mut claims = Attribution::default();
 
     for record in replayed {
         match record {
@@ -499,6 +533,7 @@ fn position_state(
                         symbol,
                         side,
                         qty,
+                        forced_close,
                         ..
                     },
             }
@@ -507,17 +542,16 @@ fn position_state(
                 symbol,
                 side,
                 qty,
+                forced_close,
                 ..
             } => {
-                if let Some(request) = sent.get(client_order_id) {
-                    note_owned_fill(
-                        &mut exposure,
-                        &mut intended,
-                        Some(request),
-                        *symbol,
-                        *side,
-                        *qty,
-                    );
+                let request = sent.get(client_order_id);
+                let owner = request.map(|request| request.strategy).or_else(|| {
+                    forced_close_owner(&claims, client_order_id, *symbol, *side, *forced_close)
+                });
+                if let Some(owner) = owner {
+                    note_owned_fill(&mut exposure, &mut intended, request, *symbol, *side, *qty);
+                    claims.note(owner, *symbol, *side, *qty);
                 }
             }
             WalRecord::StopSet {
@@ -535,12 +569,15 @@ fn position_state(
                     }
                 }
             }
+            WalRecord::ClaimsDropped { rows, .. } => claims.forget(rows),
             WalRecord::SegmentBase {
                 logged_exposure,
                 intended_stops,
                 open_orders,
+                attribution,
                 ..
             } => {
+                claims.restate(attribution);
                 exposure = logged_exposure
                     .iter()
                     .filter(|row| row.signed_qty.is_finite() && row.signed_qty.abs() > QTY_EPS)
@@ -558,6 +595,7 @@ fn position_state(
             WalRecord::LatchCleared {
                 restated_exposure, ..
             } => {
+                claims.keep_held(restated_exposure);
                 exposure = restated_exposure
                     .iter()
                     .filter(|row| row.signed_qty.is_finite() && row.signed_qty.abs() > QTY_EPS)
@@ -636,6 +674,7 @@ mod tests {
                 px: 100.0,
                 fee: Some(0.0),
                 is_maker: false,
+                forced_close: None,
                 venue_ts_ms: 0,
                 recv_ns: 0,
             },
@@ -1086,6 +1125,7 @@ mod tests {
             px: 100.0,
             fee: Some(0.0),
             is_maker: false,
+            forced_close: None,
             venue_ts_ms: 5,
             recovered_wall_ts_ms: 6,
         }
@@ -1159,6 +1199,45 @@ mod tests {
                 if client_order_id.is_empty() && *symbol == SymbolId(3)
         )));
         assert!(out.must_not_open());
+    }
+
+    /// A close the venue itself started, replayed at the next boot. It must
+    /// read the way the live path read it: the sleeve's own close, squaring
+    /// trusted exposure and latching nothing. Otherwise every restart after a
+    /// stop-out stops the engine opening.
+    #[test]
+    fn a_venue_stop_squares_trusted_exposure_on_replay() {
+        let stop = WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                exec_id: "venue-stop".into(),
+                client_order_id: String::new(),
+                symbol: SymbolId(3),
+                side: Side::Sell,
+                qty: 2.0,
+                px: 100.0,
+                fee: Some(0.0),
+                is_maker: false,
+                forced_close: Some(engine_types::ForcedClose::StopLoss),
+                venue_ts_ms: 1,
+                recv_ns: 1,
+            },
+        };
+        let log = vec![
+            sent("eng-1", 3, Side::Buy, 2.0, Some(90.0)),
+            fill("eng-1", 3, Side::Buy, 2.0),
+            stop,
+        ];
+        let out = run(&log, &[], &account(vec![]));
+
+        assert_eq!(logged_exposure(&log).get(&3), None, "the stop closed it");
+        assert!(
+            !out.findings
+                .iter()
+                .any(|finding| matches!(finding, Finding::ForeignFill { .. })),
+            "our own position closing is not a stranger's fill: {:?}",
+            out.findings
+        );
+        assert!(!out.must_not_open());
     }
 
     #[test]

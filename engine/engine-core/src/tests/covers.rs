@@ -303,6 +303,7 @@ async fn a_cancel_releases_only_the_unfilled_remainder() {
                     px: 30_000.0,
                     fee: Some(0.0),
                     is_maker: false,
+                    forced_close: None,
                     venue_ts_ms: 1,
                     recv_ns: 1,
                 },

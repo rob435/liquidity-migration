@@ -321,6 +321,8 @@ pub(crate) fn parse_deals(
             px,
             fee,
             is_maker: !taker,
+            // MEXC states no reason for a close on this row.
+            forced_close: None,
             venue_ts_ms,
         });
     }

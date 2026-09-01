@@ -554,6 +554,7 @@ fn filled(id: &str, px: f64, is_maker: bool) -> WalRecord {
             px,
             fee: Some(0.5555),
             is_maker,
+            forced_close: None,
             venue_ts_ms: 1_700_000_000_000,
             recv_ns: 1,
         },
@@ -746,6 +747,7 @@ fn filled_for(id: &str, symbol: SymbolId, px: f64) -> WalRecord {
             px,
             fee: Some(0.0),
             is_maker: false,
+            forced_close: None,
             venue_ts_ms: 1_700_000_000_000,
             recv_ns: 1,
         },
@@ -828,6 +830,7 @@ fn recovered(id: &str, symbol: SymbolId, px: f64, venue_ts_ms: i64) -> WalRecord
         px,
         fee: Some(0.5),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms,
         recovered_wall_ts_ms: venue_ts_ms + 60_000,
     }
@@ -986,6 +989,7 @@ fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
                 px,
                 fee: Some(0.0),
                 is_maker: false,
+                forced_close: None,
                 venue_ts_ms: 1,
                 recv_ns: 1,
             },
@@ -1100,6 +1104,7 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
                 px,
                 fee: Some(0.0),
                 is_maker: false,
+                forced_close: None,
                 venue_ts_ms: 1,
                 recv_ns: 1,
             },
@@ -1122,4 +1127,140 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
         "priced from an entry this log never held: {:?}",
         closed[0].round_trip
     );
+}
+
+// ------------------------------------------- closes the venue starts itself
+
+/// One sleeve's own order, and the fill that answered it, both at `px`.
+fn entry(log: &mut Vec<WalRecord>, id: &str, strategy: StrategyId, side: Side, px: f64, qty: f64) {
+    log.push(WalRecord::OrderSent {
+        request: OrderRequest {
+            client_order_id: id.into(),
+            strategy,
+            symbol: BTC,
+            side,
+            qty,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: false,
+            close_position: false,
+        },
+        wire_ns: 1,
+        arrival_mid: px,
+    });
+    log.push(WalRecord::OrderUpdate {
+        update: OrderUpdate::Fill {
+            exec_id: format!("{id}-exec"),
+            client_order_id: id.into(),
+            symbol: BTC,
+            side,
+            qty,
+            px,
+            fee: Some(0.10),
+            is_maker: false,
+            forced_close: None,
+            venue_ts_ms: 1,
+            recv_ns: 1,
+        },
+    });
+}
+
+/// A close the venue itself started: no order id of ours, and a reason.
+fn venue_stop(side: Side, px: f64, qty: f64) -> WalRecord {
+    WalRecord::OrderUpdate {
+        update: OrderUpdate::Fill {
+            exec_id: "venue-stop".into(),
+            client_order_id: String::new(),
+            symbol: BTC,
+            side,
+            qty,
+            px,
+            fee: Some(0.10),
+            is_maker: false,
+            forced_close: Some(ForcedClose::StopLoss),
+            venue_ts_ms: 9,
+            recv_ns: 9,
+        },
+    }
+}
+
+/// The venue's own stop firing under a sleeve's position. It names no order,
+/// so replay charges it to the one open lot in that coin, and the trip closes
+/// with a price on it — a stop-out is a real trade and has to be one here.
+#[test]
+fn a_venue_stop_closes_and_prices_the_trip_it_ended() {
+    let mut log = vec![names()];
+    entry(&mut log, "eng-1", CARRY, Side::Buy, 100.0, 10.0);
+    log.push(venue_stop(Side::Sell, 110.0, 10.0));
+
+    let fills = Fills::from_records(&log);
+    let closed = fills.closed();
+    assert_eq!(closed.len(), 1, "the stop closed the trip");
+    assert_eq!(closed[0].sleeve, "carry");
+    assert_eq!(closed[0].symbol, "BTCUSDT");
+    let rt = closed[0].round_trip.as_ref().expect("both legs are here");
+    assert_eq!(rt.entry_px, 100.0);
+    // Ten lots of the ten the price rose, less the two charges of 0.10.
+    assert!((rt.net_usdt - 99.8).abs() < 1e-9, "{}", rt.net_usdt);
+    let costs = fills.total();
+    assert_eq!(costs.fills, 2, "the close is priced like any other fill");
+    assert_eq!(
+        costs.arrival_shortfall.weight, 1_000.0,
+        "only the entry had a midpoint to measure against"
+    );
+}
+
+#[test]
+fn a_recovered_venue_stop_closes_and_prices_the_same_trip() {
+    let mut log = vec![names()];
+    entry(&mut log, "eng-1", CARRY, Side::Buy, 100.0, 10.0);
+    log.push(WalRecord::RecoveredFill {
+        exec_id: "venue-stop".into(),
+        client_order_id: String::new(),
+        symbol: BTC,
+        side: Side::Sell,
+        qty: 10.0,
+        px: 110.0,
+        fee: Some(0.10),
+        is_maker: false,
+        forced_close: Some(ForcedClose::Liquidation),
+        venue_ts_ms: 9,
+        recovered_wall_ts_ms: 10,
+    });
+
+    let fills = Fills::from_records(&log);
+    let closed = fills.closed();
+    assert_eq!(closed.len(), 1);
+    let rt = closed[0].round_trip.as_ref().expect("both legs are here");
+    assert!((rt.net_usdt - 99.8).abs() < 1e-9, "{}", rt.net_usdt);
+}
+
+#[test]
+fn a_close_the_venue_named_in_a_coin_nobody_holds_is_priced_for_nobody() {
+    let fills = Fills::from_records(&[names(), venue_stop(Side::Sell, 110.0, 10.0)]);
+    assert_eq!(fills.total().fills, 0, "not ours to score");
+    assert!(fills.closed().is_empty());
+}
+
+#[test]
+fn a_close_the_venue_named_that_would_grow_the_lot_is_priced_for_nobody() {
+    let mut log = vec![names()];
+    entry(&mut log, "eng-1", CARRY, Side::Buy, 100.0, 10.0);
+    log.push(venue_stop(Side::Buy, 110.0, 5.0));
+
+    let fills = Fills::from_records(&log);
+    assert_eq!(fills.total().fills, 1, "only the entry was ours");
+    assert!(fills.closed().is_empty());
+}
+
+#[test]
+fn a_close_the_venue_named_in_a_coin_two_sleeves_hold_is_priced_for_nobody() {
+    let mut log = vec![names()];
+    entry(&mut log, "eng-1", CARRY, Side::Buy, 100.0, 10.0);
+    entry(&mut log, "eng-2", LONG, Side::Buy, 100.0, 4.0);
+    log.push(venue_stop(Side::Sell, 110.0, 10.0));
+
+    let fills = Fills::from_records(&log);
+    assert_eq!(fills.total().fills, 2, "only the two entries were ours");
+    assert!(fills.closed().is_empty());
 }

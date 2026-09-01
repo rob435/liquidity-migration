@@ -632,6 +632,7 @@ mod tests {
                     px: 100.0,
                     fee: None,
                     is_maker: false,
+                    forced_close: None,
                     venue_ts_ms: 1,
                     recv_ns: 2,
                 },

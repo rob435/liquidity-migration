@@ -409,9 +409,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let recovered = orders.in_flight().len();
 
         // A sleeve's claim on a symbol the venue holds nothing of is a close
-        // this log never got to charge (a venue stop firing, an inherited
-        // position wound down), and it would lock every other sleeve out of
-        // the name for good. The venue reading is the authority on what is
+        // this log never got to charge (a hand close, an inherited position
+        // wound down), and it would lock every other sleeve out of the name
+        // for good. The venue reading is the authority on what is
         // held, so flat clears the claim; a symbol with an order still in
         // flight is left alone.
         let in_flight_symbols: std::collections::HashSet<SymbolId> = orders
@@ -764,13 +764,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 px: exec.px,
                 fee: exec.fee,
                 is_maker: exec.is_maker,
+                forced_close: exec.forced_close,
                 venue_ts_ms: exec.venue_ts_ms,
                 recovered_wall_ts_ms: now_ms,
             };
             wal.append(&record)?;
             out.push(record.clone());
             execution_ids.insert(dedup_id, now_ms);
-            let owner = recovered_orders.owner_of(&client_order_id);
+            let owner = recovered_orders.owner_of(&client_order_id).or_else(|| {
+                attribution::forced_close_owner(
+                    &recovered_attribution,
+                    &client_order_id,
+                    symbol,
+                    exec.side,
+                    exec.forced_close,
+                )
+            });
             recovered_orders.apply(&record);
             if let Some(owner) = owner {
                 recovered_attribution.note(owner, symbol, exec.side, exec.qty);
@@ -1054,12 +1063,23 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 px: exec.px,
                 fee: exec.fee,
                 is_maker: exec.is_maker,
+                forced_close: exec.forced_close,
                 venue_ts_ms: exec.venue_ts_ms,
                 recovered_wall_ts_ms: now_ms,
             };
             self.wal.append(&record)?;
             self.recovered_exec_ids.insert(exec.exec_id.clone(), now_ms);
-            let owner = self.orders.owner_of(&exec.client_order_id);
+            // The order ledger first; then, for a close the venue itself
+            // started, the position it reduced.
+            let owner = self.orders.owner_of(&exec.client_order_id).or_else(|| {
+                attribution::forced_close_owner(
+                    &self.attribution,
+                    &exec.client_order_id,
+                    symbol,
+                    exec.side,
+                    exec.forced_close,
+                )
+            });
             let owned_request = self
                 .orders
                 .orders
@@ -1117,6 +1137,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 px: exec.px,
                 fee: exec.fee,
                 is_maker: exec.is_maker,
+                forced_close: exec.forced_close,
                 venue_ts_ms: exec.venue_ts_ms,
                 // The engine's own clock, not the venue's: `recv_ns` is what
                 // the kernel compares against the account view's stamp, and the

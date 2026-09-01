@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{StrategyId, SymbolId};
-use crate::orders::{AmendSpec, Intent, OrderRequest, OrderUpdate, QuoteFillFeatures, Side};
+use crate::orders::{
+    AmendSpec, ForcedClose, Intent, OrderRequest, OrderUpdate, QuoteFillFeatures, Side,
+};
 use crate::risk::RiskVerdict;
 use crate::strategy::{
     CheckpointProvenance, RuntimeControlRequest, SignalObservation, StrategyCheckpoint,
@@ -250,7 +252,8 @@ pub enum WalRecord {
         /// same history twice.
         exec_id: String,
         /// Empty when the venue reports none: a venue-attached stop firing,
-        /// or a hand trade.
+        /// or a hand trade. A blank id with a `forced_close` below is charged
+        /// to the sleeve the close reduces.
         client_order_id: String,
         symbol: SymbolId,
         side: Side,
@@ -261,6 +264,10 @@ pub enum WalRecord {
         #[serde(default)]
         fee: Option<f64>,
         is_maker: bool,
+        /// The venue's own reason for closing the position, when it says one.
+        /// Missing in an older WAL, which reads as no reason recorded.
+        #[serde(default)]
+        forced_close: Option<ForcedClose>,
         /// When it happened, by the venue's clock.
         venue_ts_ms: i64,
         /// When this engine learned of it.
@@ -731,6 +738,7 @@ mod tests {
             px: 4.0,
             fee: Some(0.25),
             is_maker: false,
+            forced_close: None,
             venue_ts_ms: 10,
             recovered_wall_ts_ms: 20,
         };
@@ -762,6 +770,7 @@ mod tests {
                 px: 100.0,
                 fee: Some(0.0),
                 is_maker: true,
+                forced_close: None,
                 venue_ts_ms: 30,
                 recv_ns: 40,
             },
@@ -776,6 +785,36 @@ mod tests {
             serde_json::from_value::<WalRecord>(encoded).expect("legacy stream fill reads"),
             WalRecord::OrderUpdate {
                 update: OrderUpdate::Fill { fee: None, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn a_recovered_fill_written_before_the_venue_reason_still_replays() {
+        let recovered = WalRecord::RecoveredFill {
+            exec_id: "exec-1".into(),
+            client_order_id: String::new(),
+            symbol: SymbolId(2),
+            side: Side::Sell,
+            qty: 10.0,
+            px: 4.0,
+            fee: Some(0.25),
+            is_maker: false,
+            forced_close: Some(ForcedClose::Liquidation),
+            venue_ts_ms: 10,
+            recovered_wall_ts_ms: 20,
+        };
+        let mut encoded = serde_json::to_value(&recovered).expect("serialize recovered fill");
+        assert_eq!(encoded["forced_close"], "Liquidation", "it round trips");
+        encoded
+            .as_object_mut()
+            .expect("tagged record is an object")
+            .remove("forced_close");
+        assert!(matches!(
+            serde_json::from_value::<WalRecord>(encoded).expect("an older recovered fill reads"),
+            WalRecord::RecoveredFill {
+                forced_close: None,
+                ..
             }
         ));
     }

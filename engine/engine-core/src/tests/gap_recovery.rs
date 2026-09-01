@@ -60,6 +60,7 @@ async fn recover_one_fill_with_fee(fee: Option<f64>) -> Recovered {
         px: 30_000.0,
         fee,
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: clock::wall_ms(),
     }]);
     engine
@@ -136,6 +137,7 @@ async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
                 px: 30_000.0,
                 fee: Some(0.18),
                 is_maker: false,
+                forced_close: None,
                 venue_ts_ms: clock::wall_ms(),
                 recv_ns: clock::now_ns(),
             }]),
@@ -164,6 +166,7 @@ async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
         px: 29_000.0,
         fee: Some(0.07),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: clock::wall_ms(),
     }]);
     engine
@@ -210,6 +213,7 @@ async fn a_repeated_live_exec_id_mutates_the_engine_once() {
         px: 100.0,
         fee: Some(0.0),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: clock::wall_ms(),
         recv_ns: 1,
     };
@@ -286,6 +290,7 @@ async fn a_known_live_fill_with_the_wrong_side_is_durable_but_mutates_nothing() 
                 px: 30_000.0,
                 fee: Some(0.1),
                 is_maker: false,
+                forced_close: None,
                 venue_ts_ms: clock::wall_ms(),
                 recv_ns: clock::now_ns(),
             }]),
@@ -360,6 +365,7 @@ async fn a_known_recovered_fill_with_the_wrong_symbol_preserves_the_order() {
         px: 3_000.0,
         fee: Some(0.1),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: clock::wall_ms(),
     }]);
 
@@ -459,6 +465,7 @@ async fn an_unmapped_gap_execution_is_durable_and_latches_entries() {
         px: 2.0,
         fee: Some(0.0),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: clock::wall_ms(),
     }]);
 
@@ -769,6 +776,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
         px: 30_000.0,
         fee: Some(0.18),
         is_maker: false,
+        forced_close: None,
         venue_ts_ms: clock::wall_ms() - 30_000,
         recv_ns: 1,
     };
@@ -798,6 +806,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
             px: 30_000.0,
             fee: Some(0.18),
             is_maker: false,
+            forced_close: None,
             venue_ts_ms,
         },
         // Same legacy tuple, distinct venue execution. The one delivered log
@@ -811,6 +820,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
             px: 30_000.0,
             fee: Some(0.18),
             is_maker: false,
+            forced_close: None,
             venue_ts_ms,
         },
         VenueExecution {
@@ -822,6 +832,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
             px: 30_000.0,
             fee: Some(0.36),
             is_maker: false,
+            forced_close: None,
             venue_ts_ms: clock::wall_ms(),
         },
     ]);

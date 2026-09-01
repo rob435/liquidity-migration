@@ -645,6 +645,7 @@ mod tests {
                 px: 100.0,
                 fee: Some(0.0),
                 is_maker: false,
+                forced_close: None,
                 venue_ts_ms: 0,
                 recv_ns: 0,
             },
@@ -679,6 +680,7 @@ mod tests {
             px: 100.0,
             fee: Some(0.0),
             is_maker: false,
+            forced_close: None,
             venue_ts_ms: 0,
             recovered_wall_ts_ms: 0,
         }

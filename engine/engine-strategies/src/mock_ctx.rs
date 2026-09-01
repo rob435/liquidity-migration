@@ -563,6 +563,7 @@ impl Harness {
             px,
             fee: Some(0.0),
             is_maker: true,
+            forced_close: None,
             venue_ts_ms: 0,
             recv_ns: self.ctx.now_ns,
         }));
@@ -591,6 +592,7 @@ impl Harness {
             px,
             fee: Some(0.0),
             is_maker,
+            forced_close: None,
             venue_ts_ms: 0,
             recv_ns: self.ctx.now_ns,
         }));

@@ -18,6 +18,16 @@ impl Side {
     }
 }
 
+/// A close the venue itself started on the position, named from the venue's
+/// own row. It carries no `orderLinkId`, because no order of ours asked for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForcedClose {
+    StopLoss,
+    TakeProfit,
+    Liquidation,
+    AutoDeleverage,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimeInForce {
     Gtc,
@@ -351,7 +361,8 @@ pub struct VenueExecution {
     /// dedup key against reading the same history twice.
     pub exec_id: String,
     /// The venue calls this `orderLinkId`. Empty for executions the engine
-    /// never ordered: a venue-attached stop firing, a hand trade.
+    /// never ordered: a venue-attached stop firing, a hand trade. A blank id
+    /// with a `forced_close` below is charged to the sleeve the close reduces.
     pub client_order_id: String,
     pub symbol: String,
     pub side: Side,
@@ -362,6 +373,8 @@ pub struct VenueExecution {
     /// was zero.
     pub fee: Option<f64>,
     pub is_maker: bool,
+    /// The venue's own reason for closing the position, when it says one.
+    pub forced_close: Option<ForcedClose>,
     pub venue_ts_ms: i64,
 }
 
@@ -480,7 +493,9 @@ pub enum OrderUpdate {
         #[serde(default)]
         exec_id: String,
         /// Empty for a venue-native position stop, which belongs to the
-        /// symbol's current position rather than to the entry order.
+        /// symbol's current position rather than to the entry order. A blank
+        /// id with a `forced_close` below is charged to the sleeve the close
+        /// reduces.
         client_order_id: String,
         symbol: SymbolId,
         side: Side,
@@ -502,6 +517,13 @@ pub enum OrderUpdate {
         /// every number computed from it.
         #[serde(default)]
         is_maker: bool,
+        /// The venue's own reason for closing the position, when it says one.
+        ///
+        /// Defaulted on the way in, so a log written before this field existed
+        /// still replays; `None` there reads as a fill no venue reason was
+        /// recorded for, which is what those records hold.
+        #[serde(default)]
+        forced_close: Option<ForcedClose>,
         venue_ts_ms: i64,
         recv_ns: u64,
     },
@@ -559,6 +581,47 @@ pub struct InstrumentRule {
     pub qty_step: f64,
     pub min_qty: f64,
     pub min_notional: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stop_fill() -> OrderUpdate {
+        OrderUpdate::Fill {
+            exec_id: "exec-1".to_string(),
+            client_order_id: String::new(),
+            symbol: SymbolId(3),
+            side: Side::Sell,
+            qty: 10.0,
+            px: 1.5,
+            fee: Some(0.01),
+            is_maker: false,
+            forced_close: Some(ForcedClose::StopLoss),
+            venue_ts_ms: 7,
+            recv_ns: 8,
+        }
+    }
+
+    #[test]
+    fn a_fill_written_before_the_venue_reason_still_replays() {
+        let mut encoded = serde_json::to_value(stop_fill()).expect("serialize a fill");
+        assert_eq!(
+            encoded["Fill"]["forced_close"], "StopLoss",
+            "it round trips"
+        );
+        encoded["Fill"]
+            .as_object_mut()
+            .expect("a fill is an object")
+            .remove("forced_close");
+        assert!(matches!(
+            serde_json::from_value::<OrderUpdate>(encoded).expect("an older fill reads"),
+            OrderUpdate::Fill {
+                forced_close: None,
+                ..
+            }
+        ));
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

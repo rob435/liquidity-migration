@@ -1188,6 +1188,7 @@ mod tests {
             px: limit_px(&plan.request),
             fee: Some(0.0),
             is_maker: true,
+            forced_close: None,
             venue_ts_ms: 1,
         };
         let mut gateway = FakeGateway {
@@ -1323,6 +1324,7 @@ mod tests {
             px: limit_px(&plan.request),
             fee: Some(0.0),
             is_maker: true,
+            forced_close: None,
             venue_ts_ms: 1,
         };
         let mut gateway = FakeGateway {
@@ -1376,6 +1378,7 @@ mod tests {
             px: limit_px(&plan.request),
             fee: Some(0.0),
             is_maker: true,
+            forced_close: None,
             venue_ts_ms: 1,
         };
         let mut gateway = FakeGateway {
