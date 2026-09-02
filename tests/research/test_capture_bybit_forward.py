@@ -307,3 +307,60 @@ def test_restart_recovers_hourly_layout_partials_in_place(tmp_path: Path) -> Non
     assert (directory / "segment-000002.jsonl.zst").exists()
     receipt = json.loads((tmp_path / "manifest.jsonl").read_text(encoding="utf-8"))
     assert receipt["day"] == "2027-01-15" and receipt["hour"] == "13" and receipt["symbol"] == "AGIUSDT"
+
+
+def test_funding_promotion_adds_only_the_deep_book_for_crowded_wide_names() -> None:
+    from scripts.research.capture_bybit_forward import funding_promoted, promoted_topics
+
+    tickers = [
+        {"symbol": "AGIUSDT", "fundingRate": "-0.0012"},  # -12 bp: crowded
+        {"symbol": "SOMIUSDT", "fundingRate": "-0.0010"},  # exactly -10 bp: crowded
+        {"symbol": "DOGEUSDT", "fundingRate": "-0.0009"},  # -9 bp: not deep enough
+        {"symbol": "BTCUSDT", "fundingRate": "0.0001"},
+        {"symbol": "ETHUSDT", "fundingRate": "-0.0050"},  # deep, but already in the deep tier
+        {"symbol": "BADUSDT", "fundingRate": "n/a"},
+        {"symbol": "NEWUSDT"},
+        "not a row",
+    ]
+    wide = ["AGIUSDT", "SOMIUSDT", "DOGEUSDT", "BTCUSDT", "BADUSDT", "NEWUSDT"]
+    assert funding_promoted(tickers, threshold_bp=10.0, universe=wide) == ["AGIUSDT", "SOMIUSDT"]
+    assert funding_promoted(tickers, threshold_bp=0.0, universe=wide) == []
+    assert promoted_topics(["AGIUSDT"], 50) == ["orderbook.50.AGIUSDT"]
+
+
+def test_promotion_is_sticky_for_two_days_and_drops_delisted_names(tmp_path: Path) -> None:
+    import argparse
+
+    from scripts.research.capture_bybit_forward import ForwardCapture
+
+    args = argparse.Namespace(
+        root=tmp_path, segment_max_mb=1.0, fsync_every_records=1, retention_days=30, max_disk_gb=60.0,
+        min_free_disk_gb=0.0, rest_base="http://unused", queue_frames=16, wide_universe="linear-usdt",
+        deep_funding_bp=10.0, depth=50, topics_per_connection=150, status_interval_seconds=30.0, ws_url="ws://unused",
+    )
+    capture = ForwardCapture(args, ["BTCUSDT"])
+    instruments = [
+        {"symbol": s, "status": "Trading", "quoteCoin": "USDT", "settleCoin": "USDT", "contractType": "LinearPerpetual"}
+        for s in ("BTCUSDT", "AGIUSDT", "SOMIUSDT")
+    ]
+    snapshots: list[list[dict[str, str]]] = [
+        [{"symbol": "AGIUSDT", "fundingRate": "-0.0020"}, {"symbol": "SOMIUSDT", "fundingRate": "0.0001"}],
+        [{"symbol": "AGIUSDT", "fundingRate": "0.0001"}, {"symbol": "SOMIUSDT", "fundingRate": "-0.0030"}],
+        [{"symbol": "AGIUSDT", "fundingRate": "0.0001"}, {"symbol": "SOMIUSDT", "fundingRate": "0.0001"}],
+    ]
+    day_ns = 86_400 * 1_000_000_000
+    base_ns = 1_800_000_000 * 1_000_000_000
+
+    def take(now_ns: int) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        return instruments, snapshots[(now_ns - base_ns) // day_ns]
+
+    capture.snapshots.take = take  # type: ignore[method-assign]
+    assert capture._refresh_universe(base_ns) == (True, True)
+    assert capture.promoted_symbols == ["AGIUSDT"]
+    # day two: SOMI qualifies, AGI recovered but stays through its second day
+    assert capture._refresh_universe(base_ns + day_ns) == (False, True)
+    assert capture.promoted_symbols == ["AGIUSDT", "SOMIUSDT"]
+    # day three: AGI ages out, SOMI keeps its second day; a delisted name drops at once
+    instruments.pop()  # SOMIUSDT delisted
+    assert capture._refresh_universe(base_ns + 2 * day_ns) == (True, True)
+    assert capture.promoted_symbols == []
