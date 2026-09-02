@@ -5,6 +5,156 @@ Evidence grading and promotion: [docs/research/governance.md](governance.md). Ev
 [AGENTS.md](../../AGENTS.md). Failure taxonomy: [docs/research/backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
 Data tiers, roots, and PIT membership: [docs/data.md](../data.md).
 
+## 2026-09-02 — The outside model hunt: fifty sources, thirty specifications on the Bybit panel, nothing new clears the bar
+
+**Question (owner).** With the exit program closed, the owner asked for the
+next step from outside the repository: Substacks, arXiv and SSRN, X, the
+trend-following canon, proper quantitative models. Scouts read about fifty
+sources with a stated rule and a number — 22 practitioner posts and 32
+papers, ranked by evidence, fit to hourly Bybit alt-perp data, independence
+from the two live sleeves, and effect on the worst dip. Every model with a
+replicable rule was then run on one panel: Bybit USDT perpetuals, daily bars
+from hourly closes, 2021-01-01 to 2026-08-30, 1,041 names including delisted
+ones, membership by trailing 30-day turnover rank (point-in-time), the crowd
+fee (funding) charged settlement by settlement, 7.78 bp per side. Lane 1
+throughout: seen data, so this record selects and grades nothing. Artifacts:
+`~/SHARED_DATA/bybit_full_pit/reports/external_model_hunt_2026-09-02/`.
+
+**What the literature ranks highest, and what the panel says.** The
+smoothness score (Sharpe), the worst dip (max drawdown) and the t-statistic
+of the daily mean are all after costs and funding, 2021–2026 unless stated.
+Placebo shares are the fraction of information-free controls (the same rule
+on shuffled names or random signs) that score at least as well.
+
+| model, and where it comes from | its published claim | on the Bybit panel | verdict |
+| --- | --- | --- | --- |
+| Nine-lookback breakout ensemble, trailing midpoint stop, 25% vol target, 20 most liquid (Zarattini, Pagani, Barbon 2025) | Sharpe above 1.5 net, spot, 2010–2025 | Sharpe 0.29, dip −73%; best single lookback (30d) 0.57; on BTC alone 0.36 against 0.38 for holding it | does not transfer |
+| Time-series trend on the 10 most liquid, vol-scaled, lookbacks 14–364d, long/flat and long/short (Moskowitz-Ooi-Pedersen family; Man AHL on crypto) | Sharpe near 1 across eras | 14d long/short 0.68, t 1.6, 2% of random-sign books beat it; every other lookback −0.33 to 0.39; every long/flat cell lost money in 2022 | below the bar |
+| EMA 20/100 and 50/200 crosses, Donchian 50/25, on the same names | — | −0.24 to 0.10 | dead |
+| BTC or ETH alone, long above its 200-day average, else cash | half the dip, same return | BTC 0.43 against 0.38 for holding, dip −38% against −80%; ETH 0.59 against 0.50, −39% against −80%; t about 1 | true but not a sleeve: same score, half the dip |
+| Cross-sectional momentum, quintiles, weekly, lookbacks 7–182d (Liu-Tsyvinski-Wu; Borri et al report two-week momentum at t 3.9) | 2–5% a week on large names | best cell 14d long/short 0.59, t 1.4, dip −54%; long-only every lookback negative | below the bar |
+| the same, inside the 20 most liquid against ranks 21–100 | momentum lives in large names | 0.56 against 0.37 | direction agrees, below the bar |
+| Long-only top quintile with a BTC 5/50 EMA gate (Starkiller 2023) | 93% a year, dip 45% | 0.00 to 0.17, dip −82% to −94% | dead |
+| 8–10 week reversal, long losers short winners, weekly (Kiefer-Nowotny 2026, Binance USDT 2021–2026, Sharpe 0.96–1.69) | Sharpe 1.7 excluding the largest | −0.2 to −1.2 in every variant; positive only in 2021–2022 | dead |
+| One-day continuation or reversal, daily quintiles (Zaremba et al) | liquid names continue | continuation is +20% a year before costs; turnover costs 83% a year; neither side nets | dead at cost |
+| Funding factor: long the lowest, short the highest weekly funding, quintiles (Chi et al; Aperiodic) | the basis is the strongest crypto-futures factor | long/short 0.55, t 1.3, dip −45%, −19% in 2026; long-only −0.12 | below the bar |
+| Short the crowded longs: day funding at or above +30 bp, held while above +10 bp | mirror of CARRY | 0.74, t 1.8, dip −45%, worst day −17%, average gross 0.12; the shorted name's next-day move has a 99th percentile of +49% and a maximum of +169% | below the bar; the squeeze tail the 2026-07-24 audit measured |
+| Low-volatility names, long low short high (Kaya-Mostowfi) | better Sharpe, less downside | −0.2 to −1.1 | dead |
+| Abnormal turnover, both directions | attention predicts returns | −0.6 to 0.0; 0% of shuffled placebos worse | dead |
+| Open-interest 7-day growth, OI to turnover | crowding predicts reversal | crowded longs keep going (+0.47); the mirror −1.11; OI on Bybit is survivorship-contaminated | below the bar |
+| Market-state gate: hold the alt market only when its 28-day return is in its own top tercile (Han-Kang-Ryu) | Sharpe 0.84 to 1.51, dip 89% to 62% | 0.32 to 0.66, t at most 1.6; the always-long alt market is −13% a year at dip −85%, the gate cuts the dip to −36% to −49% | the dip cut is real, the return is not |
+| LONG hedged with BTC in proportion to its beta | market-neutral | beta 0.11; Sharpe 1.47 to 1.52, dip −4.6% to −4.1% | nothing to hedge |
+
+**Sizing: the textbook lever is the wrong one for this book.** Volatility
+targeting (scale the book to a fixed realised volatility) is the
+best-evidenced drawdown tool in the literature (Bloomberg 2021: BTC dip
+−83% to −15%; Grobys et al 2025; Zarattini). On the desk's own replications it
+does the opposite. The registered LONG book earns 9.7% a year at a 6.4%
+volatility with a −4.6% worst dip and Sharpe 1.47; at its own volatility
+target the Sharpe falls to 1.32, and the higher-target rows (1.50–1.54) are
+leverage, not skill — mean scale 2.2× to 2.8×. CARRY is worse: it sits in
+cash for long stretches, so a trailing-volatility scaler reads the quiet as
+safety, levers up to its cap, and meets the next crowded-short event at full
+size. Sharpe 1.59 falls to 1.1–1.4, the worst dip goes from −17% to −30%, the
+worst day from −7.7% to −23%. Even holding BTC at a 25% volatility target
+scored 0.30 against 0.38 for holding it plainly over these years. The rule
+that does help is the plain fixed multiplier, and its trade-off is explicit
+on the combined replication (1,964 common days; LONG and CARRY correlate
+−0.002):
+
+| LONG × CARRY multipliers | Sharpe | worst dip | worst day |
+| --- | ---: | ---: | ---: |
+| 6.0 × 3.0 (the live dials) | 2.00 | −46% | −23% |
+| 3.0 × 1.5 | 2.00 | −25% | −12% |
+| 1.0 × 1.0 | 1.84 | −17% | −8% |
+| 6.0 × 3.0, then volatility-targeted to 20% | 1.42 | −76% | −69% |
+
+A rule that halves CARRY while its trailing 60-day dip exceeds 5% keeps its
+Sharpe (1.59) and cuts the worst dip from −17% to −14% at the cost of a
+quarter of the return; on LONG it never fires. Nothing here changes a dial;
+the dials are the owner's.
+
+**The one internal lead: LONG earns only in weeks when Bitcoin is rising.**
+Conditioning both sleeves on states known the day before, LONG's active days
+average +12.6 bp when Bitcoin is up over the trailing seven days and −1.6 bp
+when it is down (t 3.05 on the difference); +16.1 bp when Bitcoin's 30-day
+volatility is below its median against +1.8 bp above (t 2.74). CARRY is the
+mirror, earning 48 bp per active day below Bitcoin's 200-day average against
+11 above. On the v12 ledger itself, the state at the entry signal:
+
+| Bitcoin's 7-day return at the signal close | trades | total net (of +0.528) | hit rate | years positive | random subsets of the same size scoring this low |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| below 0% | 32 | −0.047 | 31% | 2 of 5 | 0% |
+| below +2% | 63 | +0.012 | 44% | 3 of 6 | 1% |
+| below +4% | 99 | +0.004 | 42% | 3 of 6 | 0% |
+| at or above +4% | 208 | +0.523 | 58% | 6 of 6 | — |
+
+It is a plateau, not a threshold: a third of the trades, entered in weeks
+when Bitcoin was up less than 4%, contributed nothing in 5.7 years, and the
+mirror rule (skip the trades where Bitcoin was up 4% or more) leaves a book
+worth −0.018. Bitcoin's 30-day volatility splits the same way (207 trades
+below 49% carry +0.499; 100 above carry +0.029). At book level, though, with
+slots, cooldowns and the Rust reducer's own exits in place, the change is
+small, because the excluded trades lose little:
+
+| LONG entry rule | trades | total net | daily Sharpe | worst dip | paired t against v12 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| v12 | 307 | +0.528 | 1.47 | −4.6% | — |
+| skip when Bitcoin's 7-day return is below 0 | 286 | +0.547 | 1.55 | −4.1% | 0.7 |
+| half size in that state | 307 | +0.551 | 1.56 | −4.3% | 1.8 |
+| skip when Bitcoin's 30-day volatility is 49% or more | 210 | +0.504 | 1.72 | −4.1% | −0.4 |
+| placebo: skip when Bitcoin's 28-day return is below 0 | 287 | +0.470 | 1.36 | −4.6% | −1.5 |
+| mirror: skip when Bitcoin's 7-day return is +4% or more | 125 | −0.018 | −0.14 | −8.1% | −3.8 |
+
+The volatility screen's higher Sharpe is less exposure, not better days (its
+paired mean is negative). The seven-day rule is a real description of where
+LONG's money comes from and a candidate Lane-2 entry state — skip or halve
+new LONG entries while Bitcoin is down on the week — worth +0.02 to +0.05
+book units over 5.7 years and below the t 2.5 bar as a change. It is
+recorded as a proposal for the owner, not adopted.
+
+**Funding, open interest and the clock: base rates the hunt asked for.**
+A day's summed funding has a one-day autocorrelation of 0.57 and a half-life
+of about 1.2 days; a name in the most negative decile is still there the
+next day 61% of the time, a name in the most positive decile 48%. The most
+negative decile's forward price return is −44 bp the next day (t −5.3) and
+−208 bp over seven, almost exactly the funding it receives, so the naive
+"long the most negative funding" trade nets zero before costs; CARRY's own
+cell (day funding at or below −10 bp) is different: −43 bp of price against
++68 bp of funding, +25 bp a day before costs, and inside that cell the day's
+mean premium index separates +65 bp a day (most negative tercile) from −7 bp
+(least negative), t 1.9, correlation 0.60 with the funding print — the same
+depth signal the registered depth ladder already sizes on. Crowded longs
+(day funding at or above +30 bp, 1,914 name-days) pay a short +45 bp a day,
+almost all of it funding; the price leg's t is −0.25. Open-interest growth
+predicts nothing (all t below 1.6). Two more of the scouts' leads were checked
+on the ledger and the BTC series: a LONG entered while its own perp traded at a
+rich premium (top tercile of the premium index at the signal) did no worse
+than one entered at a discount (+0.142 against +0.236 over 80 trades each,
+inside the random range), so the "paying to hold a reverting premium" story
+does not bind here; and the K33 regime — Bitcoin's 30-day average funding
+below zero — does replicate in direction on Bybit (136 days in 7 episodes;
+forward 30-day BTC return +11.5% with a 71% win rate against +2.0% and 52%
+on all days), but seven episodes, three of them in 2026, is a base rate for
+where CARRY deploys, not a rule. Hour of day: pooled over the top-100
+alts the 22:00 UTC bar averages +4.3 bp and the 01:00 UTC bar −3.3 bp, with
+t-statistics that look enormous only because the names move together; the
+three best hours sum to about 10 bp a day against a 15.6 bp round trip, the
+signs flip between years, and the effect is not tradeable. Weekday averages
+(Wednesday +28 bp, Thursday −39 bp) are noise of the same kind.
+
+**What the program says.** The desk's two registered sleeves — Sharpe 1.47
+and 1.59 on their replications, uncorrelated, 2.00 combined — sit at or
+above every published crypto model that could be reproduced here, and the
+famous ones (trend following on majors, cross-sectional momentum, reversal,
+funding factors, volatility targeting) either do not transfer to Bybit
+alt-perps 2021–2026 or lose to their own placebo. The levers that change
+what the owner loses are the two fixed multipliers, whose trade-off is now a
+table, and the fleet being up. What would change this verdict: a Lane-2
+forward grade of the seven-day Bitcoin entry state, or a source that
+publishes a costed, out-of-sample result on alt perpetuals rather than spot
+majors.
+
 ## 2026-09-02 — Eight exit ideas from an outside review, all tested: nothing beats its own control
 
 **Question (owner).** An outside review reframed exits around continuation
