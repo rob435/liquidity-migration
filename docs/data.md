@@ -86,8 +86,8 @@ On the host:
 | Venue | Tier | Symbols | Feeds |
 | --- | --- | --- | --- |
 | Bybit | pinned | [`deploy/forward-capture-symbols.txt`](../deploy/forward-capture-symbols.txt): the maker canary | 50-level book, top of book, every trade, the ticker, every liquidation |
-| Bybit | core | the 30 busiest USDT perpetuals by 24h turnover, live; a name leaves below rank 45 | the same |
-| Bybit | crowded | any listed USDT perpetual whose funding rate is at or below -8 bp, for 48 hours after it last was | 50-level book, top of book, every trade |
+| Bybit | core | the 30 busiest USDT perpetuals by 24h turnover, live; a name leaves below rank 45 | 50-level book, every trade, the ticker, every liquidation |
+| Bybit | crowded | any listed USDT perpetual whose funding rate is at or below -8 bp, for 48 hours after it last was | 50-level book, every trade |
 | Bybit | overheated | funding rate at or above +8 bp, for 48 hours after it last was | the same |
 | Bybit | surging | 24h turnover three times what the day's snapshot showed, for 24 hours | the same |
 | Bybit | movers | the ten biggest 24h price moves either way, live; a name leaves below rank 15 | the same |
@@ -95,8 +95,8 @@ On the host:
 | Bybit | flooding | an hour that traded three average hours more than the same hour a day earlier, for six hours | the same |
 | Bybit | levering | open interest up or down ten percent inside an hour, for six hours | the same |
 | Bybit | wide | every other USDT perpetual the venue lists as trading | the ticker, every liquidation |
-| Binance | core | the 20 busiest USDT perpetuals by 24h turnover, live; a name leaves below rank 30 | 1000-level book snapshots and diffs, top of book, aggregate trades, mark and index price with funding, the 24h ticker, every liquidation |
-| Binance | crowded, overheated, surging, movers, bursting, flooding | as Bybit's; no open-interest tier, since Binance pushes no open interest and a poll costs one REST call per name | the 1000-level book, top of book, aggregate trades |
+| Binance | core | the 15 busiest USDT perpetuals by 24h turnover, live; a name leaves below rank 22 | 1000-level book snapshots and diffs, aggregate trades, mark and index price with funding, the 24h ticker, every liquidation |
+| Binance | crowded, overheated, surging, movers, bursting, flooding | as Bybit's; no open-interest tier, since Binance pushes no open interest and a poll costs one REST call per name | the 1000-level book, aggregate trades |
 | Binance | wide | every other USDT perpetual the venue lists as trading | mark and index price with funding, the 24h ticker, every liquidation |
 
 Binance publishes the last settled funding rate where Bybit publishes the
@@ -108,12 +108,18 @@ are written as `_meta` snapshots, so the universe and each contract's terms are
 known as of that moment; the snapshot is also the baseline a turnover surge is
 measured against.
 
+The deep book streams carry the top of book (Bybit's 50 levels every 20 ms,
+Binance's diffs every 100 ms), so the venues' separate top-of-book streams are
+taken only for the pinned canary: Binance's fires on every change and cost
+434 KB/s for twenty names, more than that recorder's whole allowance.
+
 Each recorder meters every received byte by tier and by feed and carries an
-inbound allowance for the month (`[budget]` in its config: 1,300 GB for Bybit,
-1,000 GB for Binance, against the host's 4 TB line with the Drive uploads and
-backups on top). When its projection from the last day of bytes runs over, it
+inbound allowance for the month (`[budget]` in its config: 1,300 GB for each
+venue, against the host's 4 TB line with the Drive uploads and backups on
+top). When its projection from the last day of bytes runs over, it
 gives up the configured `tier:feed` pairs in order, one an hour, deep books of
-the short-lived tiers first and the wide ticker last, and restores them
+the short-lived tiers first, then their trades, then the core's trades, and
+the wide ticker last, and restores them
 in reverse once under pace; the host watchdog warns while a recorder is over.
 Measured on the host on 2026-09-02, the 81-name deep tier drew 40 to 80 GB a
 day inbound, and top of book plus trades for 660 quiet names about as much

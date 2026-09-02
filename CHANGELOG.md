@@ -6,6 +6,21 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-02 — The recorders are cut to fit their byte budgets.** Four
+  minutes after the Binance fix, the meters read 0.64 MB/s inbound on Bybit
+  (1.7 TB a month against 1.3) and 1.18 MB/s on Binance (3.0 TB against 1.0).
+  The single largest feed on the host was Binance's top-of-book stream for
+  twenty core names, 434 KB/s, more than that recorder's whole allowance, and
+  redundant: the 1000-level diff book carries the top of book every 100 ms, as
+  Bybit's 50-level book does every 20 ms. The top-of-book feed is dropped from
+  every tier but the pinned canary on both venues, Binance's core is fifteen
+  names (leaving below rank 22), Binance's allowance rises to 1,300 GB to match
+  Bybit's (2.6 TB inbound plus about a tenth of that in uploads, inside the
+  4 TB line), and the shed order becomes: the short-lived tiers' deep books,
+  then their trades, then the core's trades, then (Binance only) the wide
+  ticker. Expected after the change, from the same meters: Bybit about
+  1.5 TB, Binance about 1.3 TB before the budget acts; the controller sheds
+  the rest.
 - **2026-09-02 — The Binance recorder was hearing only its book streams.**
   Verifying the deploy by the bytes each feed received showed the Binance
   recorder taking depth and top-of-book frames and nothing else: no trades, no
