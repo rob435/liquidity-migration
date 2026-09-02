@@ -229,6 +229,19 @@ heartbeat_entries() {
     local heartbeat="$1"
     [ -f "$heartbeat" ] && [ ! -L "$heartbeat" ] \
         || return 1
+    if command -v jq >/dev/null 2>&1; then
+        jq -er '.strategy_entries_enabled as $rows |
+            ($rows | map({(.strategy): .entries_enabled}) | add) as $v |
+            if ($rows | length) == ($v | length) and
+               ($v.long | type == "boolean") and
+               ($v.carry | type == "boolean") and
+               ($v.exodus | type == "boolean")
+            then
+               "long|\($v.long)\ncarry|\($v.carry)\nexodus|\($v.exodus)"
+            else
+               empty
+            end' "$heartbeat" 2>/dev/null && return 0
+    fi
     /usr/bin/python3 - "$heartbeat" <<'PY'
 import json
 import sys

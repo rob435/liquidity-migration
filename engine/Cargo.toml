@@ -9,6 +9,7 @@ members = [
     "engine-strategies",
     "engine-core",
     "signal-worker",
+    "market-tape",
 ]
 
 [workspace.package]
@@ -18,7 +19,7 @@ license = "UNLICENSED"
 
 [profile.release]
 lto = "thin"
-codegen-units = 1
+codegen-units = 16
 
 [profile.bench]
 debug = true

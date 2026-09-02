@@ -131,7 +131,7 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         settings.control_spool_path.as_deref(),
     ) {
         (Some(signal_path), Some(control_path)) => {
-            let mut signals = crate::signals::SpoolSignalFeed::new(signal_path);
+            let mut signals = crate::signals::EngineSignalFeed::for_directory(signal_path);
             let mut controls = crate::controls::SpoolRuntimeControlFeed::new(control_path);
             engine
                 .run_with_inputs(
@@ -144,7 +144,7 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
                 .await?
         }
         (Some(signal_path), None) => {
-            let mut signals = crate::signals::SpoolSignalFeed::new(signal_path);
+            let mut signals = crate::signals::EngineSignalFeed::for_directory(signal_path);
             engine
                 .run_with_signals(
                     &mut market_feed,

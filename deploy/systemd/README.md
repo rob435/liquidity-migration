@@ -5,6 +5,10 @@ inventory. The files in this directory implement it exactly; tests reject a
 current manifest row without a file, an unregistered file, or an invalid
 dependency.
 
+## Host specification
+
+The fleet runs on a dedicated host (`ip-208-84-103-4.my-advin.com` / `208.84.103.4`, UUID `8d5f9972` - `Playful Rainbow`, 4 vCPU, 8 GB RAM, 127 GB disk, 4 TB bandwidth quota).
+
 ## Trading topology
 
 Each realm has two long-running Rust processes:

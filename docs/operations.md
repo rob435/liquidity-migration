@@ -34,6 +34,22 @@ scripts/ops.sh deploy [deploy|rollback|verify|stop-mainnet|disarm-mainnet]
 modes mutate the host. A unit name without the
 `liquidity-migration-` prefix is qualified automatically.
 
+## Host specification
+
+The fleet runs on a dedicated VPS host:
+
+| Property | Value |
+| --- | --- |
+| Hostname | `ip-208-84-103-4.my-advin.com` |
+| Primary IPv4 | `208.84.103.4` |
+| Assigned IPv6 | `2602:fb54:1d85::` |
+| Server UUID / Name | `8d5f9972` (`Playful Rainbow`) |
+| Cores | 4 vCPU |
+| Memory | 8 GB RAM |
+| Storage | 127 GB disk space |
+| Bandwidth quota | 4 TB / month |
+| Access user | `root` |
+
 ## What runs
 
 [`deploy/fleet_manifest.tsv`](../deploy/fleet_manifest.tsv) is the machine

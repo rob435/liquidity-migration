@@ -105,16 +105,29 @@ def scope_units(scope: str, rows: list[FleetUnit]) -> list[FleetUnit]:
 
 
 def unit_states(units: list[str]) -> dict[str, str]:
+    if not units:
+        return {}
     result = subprocess.run(
         ["systemctl", "is-active", *units],
         capture_output=True,
         text=True,
         check=False,
     )
-    states = result.stdout.split()
+    states = result.stdout.splitlines()
     if len(states) != len(units):
-        return {unit: "unknown" for unit in units}
-    return dict(zip(units, states, strict=True))
+        states = result.stdout.split()
+    if len(states) != len(units):
+        resolved: dict[str, str] = {}
+        for unit in units:
+            unit_res = subprocess.run(
+                ["systemctl", "is-active", unit],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            resolved[unit] = unit_res.stdout.strip() or "unknown"
+        return resolved
+    return dict(zip(units, [s.strip() for s in states], strict=True))
 
 
 def evaluate_units(scope: str, rows: list[FleetUnit]) -> list[Alert]:
@@ -591,8 +604,12 @@ def main() -> int:
                 print(f"CRITICAL telegram: cannot deliver alerts: {error}")
         else:
             print(message)
-    if not alerts:
-        print(f"ok scope={scope} units-and-heartbeats-healthy")
+    has_critical = any(alert.severity == "CRITICAL" for alert in alerts)
+    if not has_critical:
+        if not alerts:
+            print(f"ok scope={scope} units-and-heartbeats-healthy")
+        else:
+            print(f"ok scope={scope} warnings-present-no-critical")
         if args.heartbeat_url:
             ping_heartbeat(args.heartbeat_url)
     return 0

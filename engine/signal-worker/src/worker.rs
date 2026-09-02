@@ -3305,9 +3305,7 @@ impl DurableSignalWorker {
     }
 
     fn record_spool_write(&mut self, json: &str) -> Result<(), WorkerError> {
-        let path = self.spool.write_encoded(json.as_bytes())?;
-        let observation: NormalizedObservation = serde_json::from_str(json)
-            .map_err(|error| WorkerError::json("parse committed signal observation", error))?;
+        let (path, observation) = self.spool.write_encoded_observation(json.as_bytes())?;
         self.spool_files = self.spool_files.saturating_add(1);
         self.spool_bytes = self
             .spool_bytes

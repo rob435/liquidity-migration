@@ -228,6 +228,24 @@ impl SpoolSignalFeed {
         self
     }
 
+    pub async fn retire_last(&mut self) -> Result<(), SignalError> {
+        if let Some(path) = self.returned_path.take() {
+            tokio::task::spawn_blocking(move || match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(SignalError::Source(format!(
+                    "cannot retire durable signal file {}: {error}",
+                    path.display()
+                ))),
+            })
+            .await
+            .map_err(|error| {
+                SignalError::Source(format!("signal retire task failed: {error}"))
+            })??;
+        }
+        Ok(())
+    }
+
     fn read_one(path: &Path) -> Result<Option<SignalObservation>, SignalError> {
         let file_name = path
             .file_name()
@@ -280,21 +298,22 @@ impl SpoolSignalFeed {
 
 impl SignalFeed for SpoolSignalFeed {
     async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
-        if let Some(path) = self.returned_path.take() {
-            tokio::task::spawn_blocking(move || match std::fs::remove_file(&path) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(SignalError::Source(format!(
-                    "cannot retire durable signal file {}: {error}",
-                    path.display()
-                ))),
-            })
-            .await
-            .map_err(|error| {
-                SignalError::Source(format!("signal retire task failed: {error}"))
-            })??;
-        }
+        self.retire_last().await?;
         loop {
+            if let Some(path) = self.known_paths.pop_first() {
+                let read_path = path.clone();
+                let observation = tokio::task::spawn_blocking(move || Self::read_one(&read_path))
+                    .await
+                    .map_err(|error| {
+                        SignalError::Source(format!("signal read task failed: {error}"))
+                    })??;
+                let Some(observation) = observation else {
+                    continue;
+                };
+                self.returned_path = Some(path);
+                return Ok(observation);
+            }
+
             let directory = self.directory.clone();
             let discovered = tokio::task::spawn_blocking(move || {
                 let entries = std::fs::read_dir(&directory).map_err(|error| {
@@ -335,6 +354,168 @@ impl SignalFeed for SpoolSignalFeed {
                 return Ok(observation);
             }
             tokio::time::sleep(self.poll).await;
+        }
+    }
+}
+
+/// Streaming signal feed over an AF_UNIX domain socket.
+///
+/// Observations are framed as `[u32 length_le][raw JSON bytes of SignalObservation]`.
+pub struct UnixSignalFeed {
+    socket_path: PathBuf,
+    listener: tokio::net::UnixListener,
+    active_stream: Option<tokio::net::UnixStream>,
+}
+
+impl UnixSignalFeed {
+    pub fn bind(socket_path: impl Into<PathBuf>) -> std::io::Result<Self> {
+        let socket_path = socket_path.into();
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = tokio::net::UnixListener::bind(&socket_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o770));
+        }
+        Ok(Self {
+            socket_path,
+            listener,
+            active_stream: None,
+        })
+    }
+
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+}
+
+impl SignalFeed for UnixSignalFeed {
+    async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
+        use tokio::io::AsyncReadExt;
+        loop {
+            if let Some(stream) = self.active_stream.as_mut() {
+                let mut len_buf = [0u8; 4];
+                match stream.read_exact(&mut len_buf).await {
+                    Ok(_) => {
+                        let len = u32::from_le_bytes(len_buf) as usize;
+                        if len == 0 || len > MAX_SIGNAL_OBSERVATION_BYTES {
+                            self.active_stream = None;
+                            return Err(SignalError::Source(format!(
+                                "invalid signal frame size: {len} bytes (max: {MAX_SIGNAL_OBSERVATION_BYTES})"
+                            )));
+                        }
+                        let mut body = vec![0u8; len];
+                        if let Err(err) = stream.read_exact(&mut body).await {
+                            self.active_stream = None;
+                            tracing::warn!(error = %err, "signal client disconnected during frame read");
+                            continue;
+                        }
+                        let observation: SignalObservation = serde_json::from_slice(&body)
+                            .map_err(|err| {
+                                SignalError::Source(format!("malformed signal frame JSON: {err}"))
+                            })?;
+                        validate(&observation).map_err(SignalError::Source)?;
+                        return Ok(observation);
+                    }
+                    Err(err) => {
+                        self.active_stream = None;
+                        tracing::debug!(error = %err, "signal client disconnected; waiting for next connection");
+                    }
+                }
+            }
+
+            match self.listener.accept().await {
+                Ok((stream, _)) => {
+                    self.active_stream = Some(stream);
+                }
+                Err(err) => {
+                    return Err(SignalError::Source(format!(
+                        "cannot accept Unix signal socket connection on {}: {err}",
+                        self.socket_path.display()
+                    )));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for UnixSignalFeed {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+/// Dual-mode feed that receives signals over an AF_UNIX streaming socket with zero
+/// disk I/O, while draining offline spool files from disk during catch-up or recovery.
+pub struct HybridSignalFeed {
+    unix: UnixSignalFeed,
+    spool: SpoolSignalFeed,
+}
+
+impl HybridSignalFeed {
+    pub fn new(directory: impl Into<PathBuf>) -> std::io::Result<Self> {
+        let dir = directory.into();
+        let sock_path = dir.join("stream.sock");
+        let unix = UnixSignalFeed::bind(sock_path)?;
+        let spool = SpoolSignalFeed::new(dir);
+        Ok(Self { unix, spool })
+    }
+
+    pub fn with_poll_interval(mut self, poll: Duration) -> Self {
+        self.spool = self.spool.with_poll_interval(poll);
+        self
+    }
+}
+
+impl SignalFeed for HybridSignalFeed {
+    async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
+        self.spool.retire_last().await?;
+        if let Some(path) = self.spool.known_paths.pop_first() {
+            let read_path = path.clone();
+            let observation =
+                tokio::task::spawn_blocking(move || SpoolSignalFeed::read_one(&read_path))
+                    .await
+                    .map_err(|error| {
+                        SignalError::Source(format!("signal read task failed: {error}"))
+                    })??;
+            if let Some(observation) = observation {
+                self.spool.returned_path = Some(path);
+                return Ok(observation);
+            }
+        }
+
+        tokio::select! {
+            biased;
+            obs = self.unix.next_observation() => obs,
+            spool_obs = self.spool.next_observation() => spool_obs,
+        }
+    }
+}
+
+/// Unified signal feed selection for production runners.
+pub enum EngineSignalFeed {
+    Hybrid(HybridSignalFeed),
+    Spool(SpoolSignalFeed),
+}
+
+impl EngineSignalFeed {
+    pub fn for_directory(directory: impl Into<PathBuf>) -> Self {
+        let dir = directory.into();
+        match HybridSignalFeed::new(&dir) {
+            Ok(hybrid) => Self::Hybrid(hybrid),
+            Err(err) => {
+                tracing::warn!(error = %err, path = %dir.display(), "falling back to pure file spool signal feed");
+                Self::Spool(SpoolSignalFeed::new(dir))
+            }
+        }
+    }
+}
+
+impl SignalFeed for EngineSignalFeed {
+    async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
+        match self {
+            Self::Hybrid(feed) => feed.next_observation().await,
+            Self::Spool(feed) => feed.next_observation().await,
         }
     }
 }
@@ -573,5 +754,85 @@ mod tests {
             rolling_loss_rows: vec![],
         };
         assert_eq!(active_subscriptions(&[rotated]), expected);
+    }
+
+    fn short_test_dir(tag: &str) -> PathBuf {
+        let dir = PathBuf::from(format!("/tmp/lm-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn unix_signal_feed_streams_observations() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let directory = short_test_dir("ux-sig");
+        let sock_path = directory.join("stream.sock");
+
+        let mut feed = UnixSignalFeed::bind(&sock_path).unwrap();
+
+        let mut obs = observation();
+        obs.sequence = 42;
+        obs.content_sha256 = content_sha256(&obs);
+
+        let body = serde_json::to_vec(&obs).unwrap();
+        let len = (body.len() as u32).to_le_bytes();
+
+        let handle = tokio::spawn(async move { feed.next_observation().await });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let mut client = UnixStream::connect(&sock_path).unwrap();
+        client.write_all(&len).unwrap();
+        client.write_all(&body).unwrap();
+        client.flush().unwrap();
+
+        let received = handle.await.unwrap().unwrap();
+        assert_eq!(received, obs);
+
+        drop(client);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[tokio::test]
+    async fn hybrid_signal_feed_drains_spool_then_receives_socket() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let directory = short_test_dir("hy-sig");
+
+        let mut first = observation();
+        first.sequence = 1;
+        first.content_sha256 = content_sha256(&first);
+        let first_path = spool_path(&directory, &first);
+        std::fs::write(&first_path, serde_json::to_vec(&first).unwrap()).unwrap();
+
+        let mut feed = HybridSignalFeed::new(&directory)
+            .unwrap()
+            .with_poll_interval(Duration::from_millis(5));
+
+        let obs1 = feed.next_observation().await.unwrap();
+        assert_eq!(obs1, first);
+
+        let mut second = observation();
+        second.sequence = 2;
+        second.content_sha256 = content_sha256(&second);
+        let body = serde_json::to_vec(&second).unwrap();
+        let len = (body.len() as u32).to_le_bytes();
+
+        let sock_path = directory.join("stream.sock");
+        let mut client = UnixStream::connect(&sock_path).unwrap();
+        client.write_all(&len).unwrap();
+        client.write_all(&body).unwrap();
+        client.flush().unwrap();
+
+        let obs2 = feed.next_observation().await.unwrap();
+        assert_eq!(obs2, second);
+
+        assert!(!first_path.exists());
+
+        drop(client);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }
