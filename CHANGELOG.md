@@ -19,8 +19,13 @@ edit STATE.md to match.
   others, and a path-less URL is `/public`; the legacy path was retired on
   2026-04-23. The adapter now names each stream's path and the recorder gives
   every shard one path, filling live additions only into a shard of the same
-  path; the tests fail without the change. Bybit is untouched. Deployed the
-  same evening; STATE.md names the running commit.
+  path; the tests fail without the change. Bybit is untouched. Deployed as
+  `811e7335` at 21:38 UTC, one deploy, no rollback, both engines heartbeating
+  on the commit within seconds. Ninety seconds in, Binance had 14 of 14
+  shards connected and bytes on every feed class — trades, ticker,
+  liquidations included — and 527 symbol directories in the hour where the
+  earlier process had 30; Bybit 15 of 15 with 745. The host watchdog reports
+  only the missing backup receipt.
 - **2026-09-02 — Deployed `f17719d1` at 21:04 UTC: the tiered recorders on
   both venues, the live universe, the LLM gate on both realms, one profile.**
   The owner asked for the merge and the deploy in one go, and the freeze ended
