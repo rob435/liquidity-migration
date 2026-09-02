@@ -730,3 +730,123 @@ def test_stop_events_are_independent_per_shard(tmp_path: Path) -> None:
     first.close()
     assert first.stop.is_set() and not second.stop.is_set()
     assert isinstance(second.stop, threading.Event)
+
+
+# ---------------------------------------------------- the other live universes
+
+
+def test_positive_funding_promotes_into_an_overheated_tier(tmp_path: Path) -> None:
+    recorder = build(
+        tmp_path,
+        Tier("overheated", (Feed("book", "50"),), Universe("funding_above", threshold_bp=8.0, sticky_hours=1.0, quote="USDT")),
+    )
+    recorder.tables = {"instruments": [instrument("HOTUSDT"), instrument("COLDUSDT"), instrument("WARMUSDT")], "tickers": []}
+    recorder.live.observe("HOTUSDT", {"funding_rate": 0.0008}, BASE_NS)
+    recorder.live.observe("COLDUSDT", {"funding_rate": -0.0020}, BASE_NS)
+    recorder.live.observe("WARMUSDT", {"funding_rate": 0.00079}, BASE_NS)
+
+    assert recorder.resolve_tiers(BASE_NS + 1)["overheated"] == ["HOTUSDT"]
+
+    # The rate cools; the name keeps its tier for the sticky hour, then goes.
+    recorder.live.observe("HOTUSDT", {"funding_rate": 0.0001}, BASE_NS + 2)
+    assert recorder.resolve_tiers(BASE_NS + HOUR_NS)["overheated"] == ["HOTUSDT"]
+    assert recorder.resolve_tiers(BASE_NS + 1 + HOUR_NS)["overheated"] == []
+
+
+def test_top_movers_ranks_by_the_size_of_the_move_and_keeps_a_member_until_it_falls_below_leave_top(tmp_path: Path) -> None:
+    recorder = build(
+        tmp_path, Tier("movers", (Feed("book", "50"),), Universe("top_movers", top=2, leave_top=3, quote="USDT"))
+    )
+    names = ("AUSDT", "BUSDT", "CUSDT", "DUSDT")
+    recorder.tables = {"instruments": [instrument(name) for name in names], "tickers": []}
+    for name, change in zip(names, (0.20, -0.30, 0.05, 0.01)):
+        recorder.live.observe(name, {"price_change_24h_pct": change}, BASE_NS)
+    assert recorder.resolve_tiers(BASE_NS + 1)["movers"] == ["AUSDT", "BUSDT"]
+
+    # C overtakes A; A is now rank 3, inside leave_top, so it stays.
+    recorder.live.observe("CUSDT", {"price_change_24h_pct": -0.25}, BASE_NS + 2)
+    assert recorder.resolve_tiers(BASE_NS + 3)["movers"] == ["AUSDT", "BUSDT", "CUSDT"]
+    # D moves to rank 3: not a member and not in the top two, so it does not enter; A drops to rank 4 and leaves.
+    recorder.live.observe("DUSDT", {"price_change_24h_pct": 0.22}, BASE_NS + 4)
+    assert recorder.resolve_tiers(BASE_NS + 5)["movers"] == ["BUSDT", "CUSDT"]
+
+
+def test_a_price_burst_is_measured_against_the_sample_one_window_back(tmp_path: Path) -> None:
+    recorder = build(
+        tmp_path,
+        Tier("bursting", (Feed("book", "50"),), Universe("price_burst", pct=0.05, window_hours=1.0, sticky_hours=1.0, quote="USDT")),
+    )
+    recorder.tables = {"instruments": [instrument("POPUSDT")], "tickers": []}
+    recorder.live.observe("POPUSDT", {"mark_price": 1.00}, BASE_NS)
+
+    # Half an hour in, up six percent: the history does not reach an hour back yet, so nothing.
+    recorder.live.observe("POPUSDT", {"mark_price": 1.06}, BASE_NS + HOUR_NS // 2)
+    assert recorder.resolve_tiers(BASE_NS + HOUR_NS // 2 + 1)["bursting"] == []
+
+    # An hour and a minute in, still up six percent on the hour: promoted.
+    recorder.live.observe("POPUSDT", {"mark_price": 1.06}, BASE_NS + HOUR_NS + 60 * 10**9)
+    assert recorder.resolve_tiers(BASE_NS + HOUR_NS + 61 * 10**9)["bursting"] == ["POPUSDT"]
+
+    # Later the price is where it was an hour before, so it no longer qualifies; the name lingers its sticky hour, then goes.
+    recorder.live.observe("POPUSDT", {"mark_price": 1.06}, BASE_NS + HOUR_NS + 50 * 60 * 10**9)
+    assert recorder.resolve_tiers(BASE_NS + HOUR_NS + 50 * 60 * 10**9 + 1)["bursting"] == ["POPUSDT"]
+    assert recorder.resolve_tiers(BASE_NS + 2 * HOUR_NS + 2 * 60 * 10**9)["bursting"] == []
+
+
+def test_a_volume_burst_is_the_window_trading_beyond_the_same_window_a_day_earlier(tmp_path: Path) -> None:
+    recorder = build(
+        tmp_path,
+        Tier("flooding", (Feed("book", "50"),), Universe("volume_burst", ratio=3.0, window_hours=1.0, sticky_hours=1.0, quote="USDT")),
+    )
+    recorder.tables = {"instruments": [instrument("HNTUSDT"), instrument("DULLUSDT")], "tickers": []}
+    recorder.live.observe("HNTUSDT", {"turnover_24h": 24_000.0}, BASE_NS)
+    recorder.live.observe("DULLUSDT", {"turnover_24h": 24_000.0}, BASE_NS)
+
+    # An average hour of 28,000 is 1,167; three of them are 3,500. HNT grew 4,000, DULL 3,000.
+    recorder.live.observe("HNTUSDT", {"turnover_24h": 28_000.0}, BASE_NS + HOUR_NS + 60 * 10**9)
+    recorder.live.observe("DULLUSDT", {"turnover_24h": 27_000.0}, BASE_NS + HOUR_NS + 60 * 10**9)
+    assert recorder.resolve_tiers(BASE_NS + HOUR_NS + 61 * 10**9)["flooding"] == ["HNTUSDT"]
+
+
+def test_an_open_interest_jump_either_way_promotes(tmp_path: Path) -> None:
+    recorder = build(
+        tmp_path,
+        Tier("levering", (Feed("book", "50"),), Universe("oi_change", pct=0.10, window_hours=1.0, sticky_hours=1.0, quote="USDT")),
+    )
+    recorder.tables = {"instruments": [instrument("UPUSDT"), instrument("DOWNUSDT"), instrument("FLATUSDT")], "tickers": []}
+    for name in ("UPUSDT", "DOWNUSDT", "FLATUSDT"):
+        recorder.live.observe(name, {"open_interest": 100.0}, BASE_NS)
+    later = BASE_NS + HOUR_NS + 60 * 10**9
+    recorder.live.observe("UPUSDT", {"open_interest": 110.0}, later)
+    recorder.live.observe("DOWNUSDT", {"open_interest": 89.0}, later)
+    recorder.live.observe("FLATUSDT", {"open_interest": 109.0}, later)
+
+    assert recorder.resolve_tiers(later + 1)["levering"] == ["DOWNUSDT", "UPUSDT"]
+
+
+def test_the_live_history_keeps_one_sample_a_minute_and_only_as_far_back_as_the_longest_window(tmp_path: Path) -> None:
+    recorder = build(
+        tmp_path,
+        Tier("bursting", (Feed("book", "50"),), Universe("price_burst", pct=0.05, window_hours=1.0, quote="USDT")),
+        Tier("levering", (Feed("book", "50"),), Universe("oi_change", pct=0.10, window_hours=2.0, quote="USDT")),
+    )
+    live = recorder.live
+    assert live.history_ns == int(2.0 * 3600 * 1e9 * 1.25)
+    for second in range(0, 4 * 3600, 10):
+        live.observe("BTCUSDT", {"mark_price": 1.0 + second / 1e6}, BASE_NS + second * 10**9)
+    samples = live.history["BTCUSDT"]
+    spacing = {(b.ns - a.ns) // 10**9 for a, b in zip(samples, list(samples)[1:])}
+    assert spacing == {60}
+    assert len(samples) <= 2.5 * 60 + 2
+    # The oldest kept sample is the one just past the window, so a lookback at the window's edge resolves.
+    edge = samples[-1].ns - live.history_ns
+    assert samples[0].ns <= edge < samples[1].ns
+    assert live.earlier("BTCUSDT", edge) is samples[0]
+    assert live.earlier("BTCUSDT", samples[0].ns - 1) is None
+    assert live.earlier("ETHUSDT", edge) is None
+
+
+def test_without_a_windowed_universe_no_history_is_kept(tmp_path: Path) -> None:
+    recorder = build(tmp_path, Tier("deep", DEEP_FEEDS, Universe("symbols", symbols=("BTCUSDT",))))
+    recorder.live.observe("BTCUSDT", {"mark_price": 1.0}, BASE_NS)
+    assert recorder.live.history == {} and recorder.live.history_ns == 0

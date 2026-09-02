@@ -60,19 +60,34 @@ Universes:
 - `top_turnover`: the `top` names by 24h turnover. A member stays until it
   falls below rank `leave_top` (default one and a half times `top`), so a name
   on the boundary does not flap.
+- `top_movers`: the `top` names by the size of their 24h price change, up or
+  down, with the same `leave_top` hysteresis.
 - `funding_below`: names whose funding rate is at or below `-threshold_bp`.
+- `funding_above`: names whose funding rate is at or above `threshold_bp`.
 - `turnover_surge`: names whose 24h turnover is at least `ratio` times what
   the last table snapshot showed for them.
 - `price_move`: names whose 24h price change is at least `pct` (a fraction:
   0.2 is twenty percent) in either direction.
+- `price_burst`: names whose price moved at least `pct` either way over the
+  last `window_hours` (default 1), measured from the recorder's own ticker
+  history.
+- `volume_burst`: names whose 24h turnover grew, over the last `window_hours`
+  (default 1), by at least `ratio` times an average window's share of it —
+  the last hour traded `ratio` average hours more than the same hour a day
+  ago.
+- `oi_change`: names whose open interest moved at least `pct` either way over
+  the last `window_hours` (default 1). Bybit pushes open interest on the
+  ticker; on Binance the name must carry an `open_interest` poll feed.
 
-The last four are live: the recorder reads them off the ticker stream it is
-already recording and promotes a name within one maintenance tick of the
-observation, not at the next daily snapshot. A name that qualified stays for
-`sticky_hours` (default 48) after its last qualifying observation. The ticker
-feed on a `listed` tier is the sensor; without it, a live universe sees only
-the names some tier already records. `exclude_tiers` removes names already
-covered by the named tiers.
+All but the first three are live: the recorder reads them off the ticker
+stream it is already recording and promotes a name within one maintenance tick
+of the observation, not at the next daily snapshot. A name that qualified stays
+for `sticky_hours` (default 48) after its last qualifying observation; the two
+ranked kinds use `leave_top` instead. The windowed kinds compare against a
+ticker sample the recorder took `window_hours` earlier, so they see nothing
+until the recorder has run that long. The ticker feed on a `listed` tier is
+the sensor; without it, a live universe sees only the names some tier already
+records. `exclude_tiers` removes names already covered by the named tiers.
 
 Budget: `monthly_gb` is this recorder's inbound allowance. The recorder
 projects a month from its last 24 hours of received bytes; when the projection
@@ -94,8 +109,24 @@ from typing import Any, Iterable, Mapping
 CONFIG_SCHEMA = 1
 VENUES = ("bybit", "binance")
 FEED_NAMES = ("book", "trades", "ticker", "liquidations", "kline", "open_interest")
-UNIVERSE_KINDS = ("symbols", "file", "listed", "top_turnover", "funding_below", "turnover_surge", "price_move")
-LIVE_KINDS = ("top_turnover", "funding_below", "turnover_surge", "price_move")
+UNIVERSE_KINDS = (
+    "symbols",
+    "file",
+    "listed",
+    "top_turnover",
+    "top_movers",
+    "funding_below",
+    "funding_above",
+    "turnover_surge",
+    "price_move",
+    "price_burst",
+    "volume_burst",
+    "oi_change",
+)
+RANKED_KINDS = ("top_turnover", "top_movers")
+STICKY_KINDS = ("funding_below", "funding_above", "turnover_surge", "price_move", "price_burst", "volume_burst", "oi_change")
+WINDOWED_KINDS = ("price_burst", "volume_burst", "oi_change")
+LIVE_KINDS = RANKED_KINDS + STICKY_KINDS
 SNAPSHOT_CADENCES = ("day", "hour")
 DEFAULT_STICKY_HOURS = 48.0
 
@@ -137,6 +168,7 @@ class Universe:
     threshold_bp: float = 0.0
     ratio: float = 0.0
     pct: float = 0.0
+    window_hours: float = 0.0
     sticky_hours: float = DEFAULT_STICKY_HOURS
     exclude_tiers: tuple[str, ...] = ()
 
@@ -208,6 +240,12 @@ class CaptureConfig:
             if tier.name == name:
                 return tier
         raise KeyError(name)
+
+    @property
+    def history_hours(self) -> float:
+        """How far back the live state must remember ticker samples: the longest window any tier looks over."""
+
+        return max((tier.universe.window_hours for tier in self.tiers), default=0.0)
 
 
 # ------------------------------------------------------------------ parsing
@@ -294,29 +332,40 @@ def _universe(raw: Mapping[str, Any], *, tier: str, base_dir: Path) -> Universe:
         return Universe(kind, path=path, exclude_tiers=exclude)
     if kind == "listed":
         return Universe(kind, quote=_quote(raw), exclude_tiers=exclude)
-    if kind == "top_turnover":
+    if kind in RANKED_KINDS:
         top = int(raw.get("top") or 0)
         if top <= 0:
-            raise ConfigError(f"tier {tier!r}: top_turnover needs top > 0")
+            raise ConfigError(f"tier {tier!r}: {kind} needs top > 0")
         leave_top = int(raw.get("leave_top") or round(top * 1.5))
         if leave_top < top:
             raise ConfigError(f"tier {tier!r}: leave_top must be at least top")
         return Universe(kind, top=top, leave_top=leave_top, quote=_quote(raw), exclude_tiers=exclude)
     sticky = _sticky_hours(raw, tier=tier)
-    if kind == "funding_below":
+    window = 0.0
+    if kind in WINDOWED_KINDS:
+        window = float(raw.get("window_hours", 1.0))
+        if window <= 0:
+            raise ConfigError(f"tier {tier!r}: {kind} needs window_hours > 0")
+    common: dict[str, Any] = {"sticky_hours": sticky, "window_hours": window, "quote": _quote(raw), "exclude_tiers": exclude}
+    if kind in ("funding_below", "funding_above"):
         threshold = float(raw.get("threshold_bp") or 0.0)
         if threshold <= 0:
-            raise ConfigError(f"tier {tier!r}: funding_below needs threshold_bp > 0")
-        return Universe(kind, threshold_bp=threshold, sticky_hours=sticky, quote=_quote(raw), exclude_tiers=exclude)
+            raise ConfigError(f"tier {tier!r}: {kind} needs threshold_bp > 0")
+        return Universe(kind, threshold_bp=threshold, **common)
     if kind == "turnover_surge":
         ratio = float(raw.get("ratio") or 0.0)
         if ratio <= 1.0:
             raise ConfigError(f"tier {tier!r}: turnover_surge needs ratio > 1")
-        return Universe(kind, ratio=ratio, sticky_hours=sticky, quote=_quote(raw), exclude_tiers=exclude)
+        return Universe(kind, ratio=ratio, **common)
+    if kind == "volume_burst":
+        ratio = float(raw.get("ratio") or 0.0)
+        if ratio <= 0.0:
+            raise ConfigError(f"tier {tier!r}: volume_burst needs ratio > 0 (3 is three average windows of extra turnover)")
+        return Universe(kind, ratio=ratio, **common)
     pct = float(raw.get("pct") or 0.0)
     if pct <= 0:
-        raise ConfigError(f"tier {tier!r}: price_move needs pct > 0 (a fraction, 0.2 is twenty percent)")
-    return Universe(kind, pct=pct, sticky_hours=sticky, quote=_quote(raw), exclude_tiers=exclude)
+        raise ConfigError(f"tier {tier!r}: {kind} needs pct > 0 (a fraction, 0.2 is twenty percent)")
+    return Universe(kind, pct=pct, **common)
 
 
 def _positive(table: Mapping[str, Any], name: str, default: float, *, section: str) -> float:
