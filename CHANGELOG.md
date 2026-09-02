@@ -112,7 +112,14 @@ edit STATE.md to match.
   the hourly proxy calls 7 of 49 fires falsely and inflates the premature share
   from 2% to 16%, so the veto question grades forward from the live WAL and the
   tape, not from history. Execution of scheduled exits was tried on the one
-  hour of local book tape we hold (88 attempts) and grades nothing. Findings
+  hour of local book tape we hold (88 attempts) and grades nothing. Sixteen
+  further LONG exits driven by market state rather than the trade's own P&L
+  (BTC or ETH regime off, attention rank faded, name out of universe, funding
+  crowded long, a reverse shock, a weak close) were graded the same way against
+  a matched random-exit placebo: two cells, ETH regime off (20 trades) and
+  funding at or above +10 bp (13 trades), beat the placebo but rest on one to
+  three trades each, lose at the neighbouring threshold or with a one-day lag,
+  and sit below the t 2.5 bar; nothing is promoted. Findings
   row in `docs/research/research_findings.md`; scripts, ledgers, and results
   under `~/SHARED_DATA/bybit_full_pit/reports/exit_program_2026-09-02/`. The
   market recorder now promotes any listed USDT perpetual whose funding rate is
