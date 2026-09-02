@@ -92,6 +92,40 @@ edit STATE.md to match.
   `rclone purge` cannot remove the folder itself, because the remote is
   authorized with the `drive.file` scope and a folder delete needs write
   access to every child.
+- **2026-09-02 — The outside model hunt: fifty sources, thirty
+  specifications on the Bybit panel, nothing new clears the bar.** The owner
+  asked for the next step from outside the repository. Scouts read 22
+  practitioner posts and 32 papers with a stated rule and a number, and every
+  replicable model was run on one point-in-time panel of Bybit USDT perpetuals,
+  2021-01-01 to 2026-08-30, 1,041 names including delisted ones, funding
+  settlement-exact, 7.78 bp per side: nine-lookback breakout ensembles with
+  volatility targeting, time-series trend on the most liquid names at six
+  lookbacks, EMA and Donchian rules, cross-sectional momentum at six lookbacks,
+  8–10 week reversal, one-day reversal, funding factors both ways, a
+  crowded-long short book, low-volatility, attention, open-interest growth, a
+  market-state gate, and a BTC hedge on LONG. Best cells: 14-day trend Sharpe
+  0.68 (t 1.6) and 14-day cross-sectional momentum 0.59 (t 1.4); the rest are
+  dead or negative, and the published headline results (Sharpe above 1.5 on
+  spot majors) do not transfer. Volatility targeting, the literature's
+  drawdown tool, hurts both registered sleeves on their replications — CARRY's
+  worst dip goes from −17% to −30% and its worst day from −7.7% to −23%
+  because the scaler levers up in the quiet before each crowded-short event;
+  the fixed multipliers are the lever, and their trade-off is recorded (live
+  6.0 × 3.0: Sharpe 2.00, worst dip −46%, worst day −23%; half that: −25% and
+  −12%). One internal lead: all of LONG's return sits in weeks when Bitcoin
+  was up 4% or more (208 of 307 trades, +0.523 of +0.528; the 32 trades
+  entered with Bitcoin down on the week lost −0.047, a result 0% of random
+  subsets reproduce), yet the book-level gain from skipping or halving those
+  entries is +0.02 to +0.05 units at paired t 0.7–1.8 — recorded as a Lane-2
+  proposal for the owner, not adopted. Base rates recorded: funding half-life
+  1.2 days; the most negative funding decile's price fall equals its funding
+  received; CARRY's own cell nets +25 bp a day before costs; hour-of-day and
+  weekday effects are not tradeable at the desk's costs; the K33
+  negative-funding regime on Bitcoin replicates in direction over seven
+  episodes and stays a base rate. Findings row in
+  `docs/research/research_findings.md`; scripts, logs and the panel under
+  `~/SHARED_DATA/bybit_full_pit/reports/external_model_hunt_2026-09-02/`. No
+  dial, config or deploy changed.
 - **2026-09-02 — Eight exit ideas tested, none survives its control; the
   recorder promotes crowded names into the deep tier.** An outside review
   proposed exits framed around continuation value: replace a held position
