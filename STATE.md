@@ -217,7 +217,7 @@ cannot reach it.
 
 ## Deployment status
 
-The host (`ip-208-84-103-4.my-advin.com` / `208.84.103.4`, 4 vCPU, 8 GB RAM, 127 GB disk) runs `811e7335`: both engines and
+The host (`ip-208-84-103-4.my-advin.com` / `208.84.103.4`, 4 vCPU, 8 GB RAM, 127 GB disk) runs `76a8fc59` (deployed 2026-09-02 22:45 UTC): both engines and
 both signal workers report that commit, and both market recorders run the
 tiered configs under `deploy/capture/`. The host is otherwise frozen except for
 emergencies ([operations.md](docs/operations.md) §Host freeze): forward days of
