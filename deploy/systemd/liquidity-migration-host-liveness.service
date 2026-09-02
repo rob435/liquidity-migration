@@ -39,6 +39,7 @@ ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/check_fleet_
     --account-scope host --cooldown-min 60 --host-clock-check --telegram \
     --max-heartbeat-age-sec 120 \
     --capture-status-file /var/lib/liquidity-migration/forward-market/status.json \
+    --capture-status-file /var/lib/liquidity-migration/forward-market-binance/status.json \
     --upload-stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success \
     --backup-stamp-file /var/lib/liquidity-migration/receipts/backup.last-success \
     --max-backup-age-hours 8

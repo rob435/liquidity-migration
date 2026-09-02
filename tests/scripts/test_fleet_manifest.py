@@ -196,6 +196,7 @@ def test_independent_units_are_shared_never_stopped_by_a_realm_and_recorder_firs
     assert {row.realm for row in independent} == {"shared"}
     assert {row.unit for row in independent} == {
         "liquidity-migration-forward-capture.service",
+        "liquidity-migration-forward-capture-binance.service",
         "liquidity-migration-market-tape-upload.timer",
         "liquidity-migration-market-tape-upload.service",
         "liquidity-migration-backup.timer",

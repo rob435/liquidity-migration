@@ -218,3 +218,20 @@ def test_mainnet_takeover_reloads_the_owner_arming_switch() -> None:
     mainnet = mainnet[: mainnet.index(";;")]
     assert "REAL_MONEY" in mainnet
     assert "BYBIT_INVENTORY_CREDENTIAL_SET" in mainnet
+def test_the_systemd_unit_runs_the_packer_over_every_tape_and_receipts_it() -> None:
+    unit = (SYSTEMD / "liquidity-migration-market-tape-upload.service").read_text(encoding="utf-8")
+    assert "ExecStart=/opt/liquidity-migration/.venv/bin/python -m market_tape pack" in unit
+    assert "--tape bybit-linear=/var/lib/liquidity-migration/forward-market" in unit
+    assert "--remote-base gdrive:LiquidityMigration/market-tape" in unit
+    assert "--state-dir /var/lib/liquidity-migration/market-tape-upload" in unit
+    assert "--stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success" in unit
+    assert "Environment=RCLONE_CONFIG=/var/lib/liquidity-migration/market-tape-upload/rclone.conf" in unit
+    assert "Environment=RCLONE_CONFIG_SEED=/etc/liquidity-migration/rclone.conf" in unit
+    named = re.findall(r"--tape (\S+)", unit)
+    assert named
+    for text in named:
+        name, separator, root = text.partition("=")
+        assert separator and name and "/" not in name
+        assert Path(root).is_absolute()
+    timer = (SYSTEMD / "liquidity-migration-market-tape-upload.timer").read_text(encoding="utf-8")
+    assert "Persistent=true" in timer

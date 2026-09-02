@@ -97,10 +97,9 @@ ENGINE_CONTROL_HELPER=$RELEASE_DIR/bin/telegram-control-helper
 # returns to. Seeded from the checkout when no record exists yet.
 DEPLOYED_COMMIT_FILE=$RELEASE_DIR/deployed-commit
 PREVIOUS_COMMIT_FILE=$RELEASE_DIR/previous-commit
-# What the recorder was last started from; a deploy that changes none of it
-# leaves the recorder running.
-CAPTURE_FINGERPRINT_FILE=$RELEASE_DIR/forward-capture.fingerprint
-CAPTURE_STATUS=/var/lib/liquidity-migration/forward-market/status.json
+# Each recorder unit records what it was last started from in
+# $RELEASE_DIR/<unit>.fingerprint; a deploy that changes none of it leaves
+# that recorder running.
 CONTROLS_SUDOERS=/etc/sudoers.d/liquidity-migration-controls
 CARGO_TARGET_ROOT=/opt/engine-build-target
 RUST_TOOLCHAIN_DIR=/opt/rust
@@ -372,27 +371,34 @@ install_units() {
     lm_install_current_systemd_units || fail "cannot install the fleet's systemd units"
 }
 
+# What one recorder unit runs from: its unit file, the capture config the unit
+# names, the symbol file, the market_tape package, and the Python dependencies.
 capture_fingerprint() {
+    local unit="$1" config
+    config="$(sed -n 's/.*--config \([^ \\]*\).*/\1/p' "$REPO_DIR/deploy/systemd/$unit" | head -n 1)"
     {
-        cat "$REPO_DIR/deploy/systemd/liquidity-migration-forward-capture.service" \
-            "$REPO_DIR/scripts/research/capture_bybit_forward.py" \
-            "$REPO_DIR/deploy/forward-capture-symbols.txt" \
-            "$REPO_DIR/requirements.lock" 2>/dev/null || true
-    } | sha256sum | cut -c1-64
+        cat "$REPO_DIR/deploy/systemd/$unit"
+        if [ -n "$config" ]; then cat "$REPO_DIR/$config"; fi
+        cat "$REPO_DIR/deploy/forward-capture-symbols.txt"
+        find "$REPO_DIR/market_tape" -name '*.py' -print0 | sort -z | xargs -0 cat
+        cat "$REPO_DIR/requirements.lock"
+    } 2>/dev/null | sha256sum | cut -c1-64
 }
 
 # Independent units run through the deploy. Timers are (re)started so a
-# changed schedule applies; the recorder is restarted only when the unit, the
-# script, the symbol list, or the Python dependencies changed, and then this
-# waits for a status file the new process wrote.
+# changed schedule applies; a recorder is restarted only when its own inputs
+# changed, and then this waits for a status file the new process wrote.
 start_independent_units() {
-    local unit fingerprint recorded since
-    fingerprint="$(capture_fingerprint)"
-    recorded="$(cat "$CAPTURE_FINGERPRINT_FILE" 2>/dev/null || true)"
+    local unit fingerprint recorded since fingerprint_file
     while IFS= read -r unit; do
         [ -n "$unit" ] || continue
         case "$unit" in
-            liquidity-migration-forward-capture.service)
+            liquidity-migration-forward-capture*.service)
+                CAPTURE_STATUS="$(lm_output_artifact_for_unit "$unit")" \
+                    || fail "the fleet manifest names no status file for $unit"
+                fingerprint_file="$RELEASE_DIR/${unit%.service}.fingerprint"
+                fingerprint="$(capture_fingerprint "$unit")"
+                recorded="$(cat "$fingerprint_file" 2>/dev/null || true)"
                 if [ "$recorded" = "$fingerprint" ] && systemctl is-active --quiet "$unit"; then
                     systemctl enable "$unit" 2>/dev/null || fail "cannot enable $unit"
                     echo "capture-ok unit=$unit result=unchanged-left-running"
@@ -402,10 +408,10 @@ start_independent_units() {
                 systemctl enable "$unit" 2>/dev/null || fail "cannot enable $unit"
                 if systemctl restart "$unit" \
                     && (wait_fresh_heartbeat "$unit" "$CAPTURE_STATUS" "$since"); then
-                    printf '%s\n' "$fingerprint" > "$CAPTURE_FINGERPRINT_FILE"
+                    printf '%s\n' "$fingerprint" > "$fingerprint_file"
                     echo "capture-ok unit=$unit result=restarted"
                 else
-                    # Not fatal: the recorder is independent of the fleet in
+                    # Not fatal: a recorder is independent of the fleet in
                     # both directions, and the host watchdog pages on it.
                     echo "warning: $unit did not publish a fresh status file; the fleet deploy continues" >&2
                 fi

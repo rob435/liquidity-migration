@@ -13,10 +13,10 @@ a group below, so moving a grouped script never edits a unit file.
 | `ops.sh` | you, against the host | the operator router; `ops.sh help`, and the verb table in [`docs/operations.md`](../docs/operations.md) |
 | `deploy_everything.command` | **the owner, by double-click** | the whole redeploy in one click: deploy the tip of GitHub main — which restarts the fleet, funded units included when `REAL_MONEY` is armed, and rolls back on its own if a realm does not come up — then verify. No prompts; clicking it is the decision. |
 | `deploy_vps_live.sh` | you (via `ops.sh deploy`) / GitHub Actions | the deploy engine; modes are tabulated in [`docs/operations.md`](../docs/operations.md) |
-| `runtime/` | systemd | fleet and host liveness checks, engine position/trade notifications, the hourly market-tape packer and upload (`pack_market_tape.py`), the six-hourly state backup to Google Drive (`backup_state.sh`), and the weekly demo recovery drill |
+| `runtime/` | systemd | fleet and host liveness checks, engine position/trade notifications, the six-hourly state backup to Google Drive (`backup_state.sh`), and the weekly demo recovery drill; `pack_market_tape.py` is the old path of the market-tape packer, which lives in [`market_tape/`](../market_tape/README.md) |
 | `vps/` | you, when the host is broken | SSH recovery, rescue-boot restore, flatten |
 | `data/` | you or the refresh timer | point-in-time data-root and panel builders, candidate-window Bybit one-minute trade/mark tapes, residual-momentum precompute, and the Binance positioning-metrics refresh (`refresh_binance_metrics.py`, feeds the panel's `--metrics-root` columns) |
-| `research/` | you, offline | scorers, equity curves, deterministic quote-arm sweeps, the research-refresh workflow, and `daily_evidence_run.sh`; `llm_driver_ledger.py` is also run by the fleet timer |
+| `research/` | you, offline | scorers, equity curves, deterministic quote-arm sweeps, the research-refresh workflow, and `daily_evidence_run.sh`; `llm_driver_ledger.py` is also run by the fleet timer; `capture_bybit_forward.py` is the old command line of the Bybit recorder, which lives in [`market_tape/`](../market_tape/README.md) |
 | `devtools/` | `dev.sh` | `repo_doctor.py` |
 | `git-hooks/` | git, on push | the tracked `pre-push` gate, which runs `dev.sh check` before anything leaves |
 

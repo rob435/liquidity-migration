@@ -7,6 +7,7 @@ liquidity-migration-backup.service|service|shared|independent|40|job|none|-|none
 liquidity-migration-host-liveness.timer|timer|shared|independent|50|always|direct|liquidity-migration-host-liveness.service|timer|-|liquidity-migration-host-liveness.service|60|180|15|120|-
 liquidity-migration-host-liveness.service|service|shared|independent|60|job|direct|-|none|-|-|-|-|-|-|-
 liquidity-migration-forward-capture.service|service|shared|independent|90|always|direct|-|active|/var/lib/liquidity-migration/forward-market/status.json|-|-|-|-|-|-
+liquidity-migration-forward-capture-binance.service|service|shared|independent|85|always|direct|-|active|/var/lib/liquidity-migration/forward-market-binance/status.json|-|-|-|-|-|-
 liquidity-migration-chaos-drill.timer|timer|demo|downstream|50|always|none|liquidity-migration-chaos-drill.service|timer|-|liquidity-migration-chaos-drill.service|604800|604800|600|300|-
 liquidity-migration-chaos-drill.service|service|demo|downstream|60|job|none|liquidity-migration-engine.service|none|-|-|-|-|-|-|-
 liquidity-migration-demo-liveness.timer|timer|demo|downstream|80|always|direct|liquidity-migration-demo-liveness.service|timer|-|liquidity-migration-demo-liveness.service|60|180|15|120|-

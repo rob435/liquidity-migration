@@ -63,35 +63,57 @@ membership and data coverage.
 
 ## Market tape
 
-The host records Bybit's public linear-perpetual tape around the clock, as an
-independent unit the trading fleet cannot stop
-(`liquidity-migration-forward-capture.service`). It is the raw material for
+The host records the public tape of two venues around the clock, as
+independent units the trading fleet cannot stop: Bybit linear perpetuals
+(`liquidity-migration-forward-capture.service`) and Binance USD-M perpetuals
+(`liquidity-migration-forward-capture-binance.service`). The recorder, the
+hourly upload, and the reader are one standalone package,
+[`market_tape/`](../market_tape/README.md), which imports nothing from the
+rest of this repository; each recorder runs from one config file under
+[`deploy/capture/`](../deploy/capture/). The tape is the raw material for
 execution research — spreads, queue depth, trade flow, funding and open
-interest at tick resolution, liquidation cascades — and for a point-in-time
-universe.
+interest at tick resolution, liquidation cascades, cross-venue lead-lag at
+second resolution — and for a point-in-time universe.
 
-Two tiers:
+A recorder records tiers: each names a universe of symbols and the feeds to
+take for them, and a symbol in several tiers gets the union. On the host:
 
-| Tier | Symbols | Feeds |
-| --- | --- | --- |
-| deep | [`deploy/forward-capture-symbols.txt`](../deploy/forward-capture-symbols.txt): LONG's entry universe and the maker canary names; plus, for the day it qualifies and the next, any listed name whose funding rate is at or below -10 bp, the crowd CARRY enters on | 50-level book snapshots and deltas, top of book, every public trade, the ticker, every liquidation |
-| wide | every other USDT perpetual the venue lists as trading, re-read once a day with the funding promotion | top of book, every public trade, the ticker, every liquidation |
+| Venue | Tier | Symbols | Feeds |
+| --- | --- | --- | --- |
+| Bybit | deep | [`deploy/forward-capture-symbols.txt`](../deploy/forward-capture-symbols.txt): LONG's entry universe and the maker canary names | 50-level book snapshots and deltas, top of book, every public trade, the ticker, every liquidation |
+| Bybit | crowded | any listed USDT perpetual whose funding rate is at or below -10 bp, the crowd CARRY enters on, for the day it qualifies and the next | the 50-level book |
+| Bybit | wide | every other USDT perpetual the venue lists as trading | top of book, every public trade, the ticker, every liquidation |
+| Binance | deep | the 60 USDT perpetuals with the largest 24h turnover | 1000-level book snapshots and diffs, top of book, aggregate trades, mark and index price with funding, the 24h ticker, every liquidation |
+| Binance | crowded | as Bybit's crowded tier | the 1000-level book |
+| Binance | wide | every other USDT perpetual the venue lists as trading | top of book, aggregate trades, mark and index price with funding, the 24h ticker, every liquidation |
 
-The ticker carries last, mark, and index price, open interest and its value,
-the funding rate and next funding time, best bid and ask with sizes, and 24h
-turnover and volume; the venue pushes it on change. Once a day, and at start,
-the venue's full instrument list (tick size, lot size, funding interval,
-launch time, status) and ticker table are written as `_meta` snapshots, so
-the universe and each contract's terms are known as of that moment.
+Universes that depend on the venue's tables (`listed`, `top_turnover`,
+`funding_below`) are re-read once a day, and only the connections of a tier
+whose topic list changed reconnect. Once a day, and at start, each venue's
+full instrument list (tick size, lot size, funding interval, launch time,
+status) and ticker table are written as `_meta` snapshots, so the universe and
+each contract's terms are known as of that moment. The feed vocabulary and
+universe kinds a config may use — including venue candles (`kline:1m`) and a
+REST open-interest poll for venues that push none — are in
+[`market_tape/config.py`](../market_tape/config.py);
+`market_tape/examples/bybit-full-universe.toml` is the configuration for a
+machine with unbounded bandwidth and disk: one tier, every listed perpetual,
+every feed.
 
-Rows are JSON lines. Every row carries `local_receive_ts_ns`, the host's wall
+Rows are JSON lines under a frozen contract ([`market_tape/schema.py`](../market_tape/schema.py)).
+Every row carries `venue`, `symbol`, and `local_receive_ts_ns`, the host's wall
 clock at receipt, plus the venue's own timestamps in nanoseconds; book rows
-carry the venue's update and cross sequences, `previous_*` for the row before,
-and `sequence_gap` when the recorder saw a gap (a fresh snapshot follows a
-reconnect). Trades carry the venue trade id, price, size, and aggressor side;
-liquidations the position side, size, and bankruptcy price.
+carry the venue's sequence ids (`update_id`, `first_update_id`,
+`previous_update_id`, Bybit's `cross_sequence`) and `sequence_gap` when the
+recorder saw a break (a fresh snapshot follows a reconnect). Trades carry the
+venue trade id, price, size, and aggressor side; liquidations the position
+side, size, and bankruptcy price; the ticker carries whichever of last, mark,
+and index price, open interest, funding rate and next funding time, best bid
+and ask, and 24h turnover the venue pushed in that message. Rows recorded
+before the `venue` field existed read back with the venue of their archive.
 
-Layout on the host, under `/var/lib/liquidity-migration/forward-market`:
+Layout on the host, under `/var/lib/liquidity-migration/forward-market`
+(Bybit) and `/var/lib/liquidity-migration/forward-market-binance` (Binance):
 
 ```text
 <day>/<HH>/<SYMBOL>/segment-NNNNNN.jsonl.zst   one symbol, one UTC hour (rolled at 64 MB raw)
@@ -101,18 +123,36 @@ manifest.jsonl                                 one receipt per compressed file: 
 status.json                                    the recorder's own health, rewritten every 30 s
 ```
 
-The host keeps 30 days or 60 GB, whichever binds first, and stops writing
-below 25 GB free. The lasting copy is on Google Drive: ten past every hour,
-each finished hour becomes one uncompressed tar of its compressed files with a
-`MANIFEST.json` first (every member's bytes, SHA-256, row count, and time
-span), uploaded to
-`LiquidityMigration/market-tape/bybit-linear/YYYY/MM/DD/<day>T<HH>Z.tar` and
-checked against the Drive's own hash before the hour is marked shipped. Days
-recorded before the hourly layout are shipped once, whole, as
-`<day>.legacy.tar`. Reading a range of hours is a listing of one folder per
-day; a symbol's hour is one member of one archive.
+Each host root keeps 30 days or 60 GB, whichever binds first, and stops
+writing below 25 GB free. The lasting copy is on Google Drive: ten past every
+hour, each finished hour of each tape becomes one uncompressed tar of its
+compressed files with a `MANIFEST.json` first (every member's bytes, SHA-256,
+row count, and time span), uploaded to
+`LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/<day>T<HH>Z.tar` for the
+tapes `bybit-linear` and `binance-usdm`, and checked against the Drive's own
+hash before the hour is marked shipped. Bybit days recorded before the hourly
+layout are shipped once, whole, as `<day>.legacy.tar`. Reading a range of
+hours is a listing of one folder per day; a symbol's hour is one member of one
+archive.
 
-The recorder is not a decision input. The signal workers acquire their own
+Reading the tape is the same package:
+
+```bash
+python -m market_tape hours SOURCE
+python -m market_tape rows  SOURCE --hours 2026-09-01T00..2026-09-01T06 --symbols BTCUSDT --kinds public_trade
+python -m market_tape bars  SOURCE --hours 2026-09-01T00..2026-09-02T00 --interval 1 --out bars.parquet
+python -m market_tape book  SOURCE --hour 2026-09-01T00 --symbol BTCUSDT
+```
+
+where `SOURCE` is a host root, a directory laid out like the Drive folder, or
+`rclone:<remote:path>` to read the Drive through a local cache. `market_tape.load`
+streams typed rows across symbols in receive order, `market_tape.book`
+rebuilds one symbol's book with the venue's own chaining rule, and
+`market_tape.bars` turns any row stream into fixed-interval bars.
+`tests/market_tape/fixtures/` holds one small real hour in both layouts with
+its expected numbers; that test is the frozen-schema regression.
+
+The recorders are not a decision input. The signal workers acquire their own
 public history; nothing on a live decision path reads this tape.
 
 ## Timestamps

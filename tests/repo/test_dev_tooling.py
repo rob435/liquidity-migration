@@ -250,6 +250,7 @@ def test_dev_router_uses_selected_python_and_preserves_arguments(tmp_path: Path)
         "ruff",
         "check",
         "liquidity_migration",
+        "market_tape",
         "scripts",
         "tests",
         "--fix",

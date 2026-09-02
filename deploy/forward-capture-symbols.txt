@@ -1,7 +1,7 @@
-# The standing deep tier of the market recorder (capture_bybit_forward.py):
+# The standing deep tier of the Bybit market recorder (deploy/capture/bybit-linear.toml):
 # full 50-level books plus everything the wide tier gets. Read once at start.
 # Names whose funding rate is at or below -10 bp join the deep tier on their
-# own each day (--deep-funding-bp), so the crowded names need not be listed.
+# own each day (the config's crowded tier), so the crowded names need not be listed.
 # Membership: the maker canary and saved-L50 names, plus the LONG sleeve's
 # top 50 entry universe and a ten-rank buffer, all by 90-day median daily
 # turnover ranked 2026-08-30. Re-rank that leg when this list is next touched;

@@ -53,7 +53,8 @@ does not move. Its presence is not deployment evidence.
 | --- | --- |
 | [`liquidity_migration/`](liquidity_migration/README.md) | the Python research, evidence, policy, notification, and deployment-support plane; it has no live directional decision or order path |
 | [`engine/`](engine) | the Rust execution engine workspace — seven crates, from the shared types to the loop |
-| [`scripts/`](scripts/README.md) | `dev.sh` and `ops.sh` at the root; `runtime/`, `research/`, `data/`, `vps/`, `devtools/` below |
+| [`market_tape/`](market_tape/README.md) | the market tape: recorders for Bybit and Binance, the hourly Drive archives, and the reader (typed rows, book rebuild, bars); standalone, imports nothing from the rest of the repository |
+| [`scripts/`](scripts/README.md) | `dev.sh` and `ops.sh` at the root; `runtime/`, `research/`, `maintain/`, `data/`, `vps/`, `devtools/` below |
 | [`deploy/`](deploy) | the canonical fleet manifest, `sleeves.env`, systemd units, and environment handling |
 | [`configs/`](configs) | Lane-2 strategy registrations and operational profiles |
 | `data/` | per-sleeve event stores and reconciliation captures (runtime, not tracked) |
@@ -78,7 +79,8 @@ research and data CLI is `python -m liquidity_migration --help`. Python 3.11+.
 | --- | --- |
 | [STATE.md](STATE.md) | the operational snapshot: what runs now and what constrains it |
 | [CHANGELOG.md](CHANGELOG.md) | the dated operational log: deploys, incidents, repairs, change points |
-| [docs/operations.md](docs/operations.md) | `ops.sh` commands, deploy modes, unit topology |
+| [docs/operations.md](docs/operations.md) | `ops.sh` commands, deploy modes, unit topology, the host freeze |
+| [market_tape/README.md](market_tape/README.md) | the market tape: capture configs, the frozen row contract, layouts on the host and the Drive, reading it back |
 | [docs/notifications.md](docs/notifications.md) | the two Telegram channels, the pause/resume controls, watchdog alert cadence and escalation, the heartbeat dead-man's switch |
 | [docs/architecture.md](docs/architecture.md) | the Rust signal, reducer, WAL, control, takeover, and execution seams |
 | [docs/engine.md](docs/engine.md) | the Rust execution engine: crate contracts, latency budget, crash safety, safety posture |

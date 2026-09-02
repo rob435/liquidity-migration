@@ -13,22 +13,11 @@ Group=liquidity-migration
 WorkingDirectory=/opt/liquidity-migration
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
 Environment=PYTHONDONTWRITEBYTECODE=1
-# The deep tier (full 50-level books) is the symbol file plus, for the day and
-# the day after, any name whose funding rate sits at or below -10 bp (the crowd
-# CARRY and Exodus trade); the wide tier (top of book, trades, tickers,
-# liquidations) is every other USDT perpetual the venue lists. Both are re-read
-# once a day with the instrument and ticker snapshots.
-ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/research/capture_bybit_forward.py \
-    --root /var/lib/liquidity-migration/forward-market \
-    --symbols-file deploy/forward-capture-symbols.txt \
-    --wide-universe linear-usdt \
-    --deep-funding-bp 10 \
-    --depth 50 \
-    --segment-max-mb 64 \
-    --retention-days 30 \
-    --max-disk-gb 60 \
-    --min-free-disk-gb 25 \
-    --status-interval-seconds 30
+# The tiers, feeds, and retention are the config file; the recorder itself is
+# the market_tape package.
+ExecStart=/opt/liquidity-migration/.venv/bin/python -m market_tape record \
+    --config deploy/capture/bybit-linear.toml \
+    --root /var/lib/liquidity-migration/forward-market
 # 143 is a clean SIGTERM stop.
 SuccessExitStatus=143
 Restart=always
