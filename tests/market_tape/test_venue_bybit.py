@@ -247,7 +247,7 @@ def test_topics_are_subscribed_ten_at_a_time() -> None:
     assert {json.loads(text)["op"] for text in messages} == {"subscribe"}
     assert adapter.subscribe_messages([]) == []
     assert adapter.connection_url(topics) == PUBLIC_LINEAR_WS
-    assert adapter.on_connected(topics, lambda row: None, threading.Event()) is None
+    assert adapter.on_subscribed(topics, lambda row: None, threading.Event()) is None
     assert adapter.start_lanes({}, lambda row: None, threading.Event()) == []
 
 
@@ -280,3 +280,32 @@ def test_turnover_ranks_highest_first_and_funding_reads_as_a_fraction() -> None:
 
     assert adapter.turnover_ranked(tickers) == ["BTCUSDT", "AGIUSDT", "ETHUSDT", "NEWUSDT"]
     assert adapter.funding_rates(tickers) == {"AGIUSDT": -0.0012, "BTCUSDT": 0.0001}
+
+
+def test_live_subscription_changes_and_the_24h_change_field() -> None:
+    adapter = BybitAdapter()
+    topics = [f"publicTrade.S{index}" for index in range(12)]
+
+    added = [json.loads(text) for text in adapter.add_messages(topics)]
+    removed = [json.loads(text) for text in adapter.remove_messages(topics[:3])]
+
+    assert [message["op"] for message in added] == ["subscribe", "subscribe"]
+    assert [len(message["args"]) for message in added] == [10, 2]
+    assert removed == [{"op": "unsubscribe", "args": topics[:3]}]
+
+    rows = adapter.normalize(
+        json.dumps(
+            {
+                "topic": "tickers.AGIUSDT",
+                "type": "delta",
+                "ts": 1_800_000_000_000,
+                "data": {"symbol": "AGIUSDT", "price24hPcnt": "-0.1234", "turnover24h": "42"},
+            }
+        ),
+        7,
+    )
+    assert rows[0]["values"] == {"price_change_24h_pct": -0.1234, "turnover_24h": 42.0}
+    assert adapter.turnovers([{"symbol": "a", "turnover24h": "5"}, {"symbol": "b", "turnover24h": "x"}, {"symbol": "c"}]) == {
+        "A": 5.0,
+        "C": 0.0,
+    }

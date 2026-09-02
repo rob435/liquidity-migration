@@ -76,29 +76,51 @@ interest at tick resolution, liquidation cascades, cross-venue lead-lag at
 second resolution — and for a point-in-time universe.
 
 A recorder records tiers: each names a universe of symbols and the feeds to
-take for them, and a symbol in several tiers gets the union. On the host:
+take for them, and a symbol in several tiers gets the union. The ticker is the
+sensor: every listed name's funding rate, open interest, price, 24h turnover
+and change, and best bid and ask, as the venue pushes them. The deep feeds go
+only where a sleeve acts, and they follow the action live, off that ticker
+stream, within one maintenance tick rather than at the next daily snapshot.
+On the host:
 
 | Venue | Tier | Symbols | Feeds |
 | --- | --- | --- | --- |
-| Bybit | deep | [`deploy/forward-capture-symbols.txt`](../deploy/forward-capture-symbols.txt): LONG's entry universe and the maker canary names | 50-level book snapshots and deltas, top of book, every public trade, the ticker, every liquidation |
-| Bybit | crowded | any listed USDT perpetual whose funding rate is at or below -10 bp, the crowd CARRY enters on, for the day it qualifies and the next | the 50-level book |
-| Bybit | wide | every other USDT perpetual the venue lists as trading | top of book, every public trade, the ticker, every liquidation |
-| Binance | deep | the 60 USDT perpetuals with the largest 24h turnover | 1000-level book snapshots and diffs, top of book, aggregate trades, mark and index price with funding, the 24h ticker, every liquidation |
-| Binance | crowded | as Bybit's crowded tier | the 1000-level book |
-| Binance | wide | every other USDT perpetual the venue lists as trading | top of book, aggregate trades, mark and index price with funding, the 24h ticker, every liquidation |
+| Bybit | pinned | [`deploy/forward-capture-symbols.txt`](../deploy/forward-capture-symbols.txt): the maker canary | 50-level book, top of book, every trade, the ticker, every liquidation |
+| Bybit | core | the 30 busiest USDT perpetuals by 24h turnover, live; a name leaves below rank 45 | the same |
+| Bybit | crowded | any listed USDT perpetual whose funding rate is at or below -8 bp, for 48 hours after it last was | 50-level book, top of book, every trade |
+| Bybit | surging | 24h turnover three times what the day's snapshot showed, for 24 hours | the same |
+| Bybit | movers | a 24h price move of fifteen percent either way, for 24 hours | the same |
+| Bybit | wide | every other USDT perpetual the venue lists as trading | the ticker, every liquidation |
+| Binance | core | the 20 busiest USDT perpetuals by 24h turnover, live; a name leaves below rank 30 | 1000-level book snapshots and diffs, top of book, aggregate trades, mark and index price with funding, the 24h ticker, every liquidation |
+| Binance | crowded, surging, movers | as Bybit's | the 1000-level book, top of book, aggregate trades |
+| Binance | wide | every other USDT perpetual the venue lists as trading | mark and index price with funding, the 24h ticker, every liquidation |
 
-Universes that depend on the venue's tables (`listed`, `top_turnover`,
-`funding_below`) are re-read once a day, and only the connections of a tier
-whose topic list changed reconnect. Once a day, and at start, each venue's
-full instrument list (tick size, lot size, funding interval, launch time,
-status) and ticker table are written as `_meta` snapshots, so the universe and
-each contract's terms are known as of that moment. The feed vocabulary and
-universe kinds a config may use — including venue candles (`kline:1m`) and a
-REST open-interest poll for venues that push none — are in
-[`market_tape/config.py`](../market_tape/config.py);
+Binance publishes the last settled funding rate where Bybit publishes the
+upcoming one, so its crowded tier reacts one settlement later. Promotion adds
+and removes topics on the open connections; a connection only reconnects when
+the venue drops it. Once a day, and at start, each venue's full instrument list
+(tick size, lot size, funding interval, launch time, status) and ticker table
+are written as `_meta` snapshots, so the universe and each contract's terms are
+known as of that moment; the snapshot is also the baseline a turnover surge is
+measured against.
+
+Each recorder meters every received byte by tier and by feed and carries an
+inbound allowance for the month (`[budget]` in its config: 1,300 GB for Bybit,
+1,000 GB for Binance, against the host's 4 TB line with the Drive uploads and
+backups on top). When its projection from the last day of bytes runs over, it
+gives up the configured `tier:feed` pairs in order, one an hour, deep books of
+the movers and surging tiers first and the wide ticker last, and restores them
+in reverse once under pace; the host watchdog warns while a recorder is over.
+Measured on the host on 2026-09-02, the 81-name deep tier drew 40 to 80 GB a
+day inbound, and top of book plus trades for 660 quiet names about as much
+again.
+
+The feed vocabulary and universe kinds a config may use — including venue
+candles (`kline:1m`) and a REST open-interest poll for venues that push none
+— are in [`market_tape/config.py`](../market_tape/config.py);
 `market_tape/examples/bybit-full-universe.toml` is the configuration for a
 machine with unbounded bandwidth and disk: one tier, every listed perpetual,
-every feed.
+every feed, no budget.
 
 Rows are JSON lines under a frozen contract ([`market_tape/schema.py`](../market_tape/schema.py)).
 Every row carries `venue`, `symbol`, and `local_receive_ts_ns`, the host's wall

@@ -63,6 +63,8 @@ TICKER_VALUE_FIELDS = (
     "ask_size",
     "turnover_24h",
     "volume_24h",
+    # The 24h price change as a fraction: 0.05 is up five percent.
+    "price_change_24h_pct",
 )
 TICKER_INT_FIELDS = frozenset({"next_funding_time_ms"})
 

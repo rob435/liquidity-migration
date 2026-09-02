@@ -1,42 +1,70 @@
 """The recorder: tiers of symbols and feeds on one venue, written as the tape.
 
 One process records one venue. It reads the capture config, resolves each
-tier's universe from the venue's instrument and ticker tables, subscribes the
-union of the tiers' feeds over several websocket connections (shards), and
-writes every normalized row through `storage.SegmentWriter`. Universes that
-depend on the venue's tables (`listed`, `top_turnover`, `funding_below`) are
-re-read at the snapshot cadence, and only the shards of a tier whose topic
-list changed are restarted.
+tier's universe, subscribes the union of the tiers' feeds over several
+websocket connections (shards), and writes every normalized row through
+`storage.SegmentWriter`.
+
+Universes that change while the recorder runs are re-read on every maintenance
+tick. The `listed` kind follows the venue's table snapshots; the live kinds
+(`top_turnover`, `funding_below`, `turnover_surge`, `price_move`) follow the
+ticker stream the recorder is already writing, so a name whose funding rate
+collapses or whose turnover explodes gets its deep feeds within one tick, not
+at the next daily snapshot. Topics are added to and removed from the live
+connections in place; a connection only reconnects when the venue drops it.
+
+Every received byte is metered per tier and per feed. With a budget in the
+config, the recorder projects a month from its last day of bytes and, when the
+projection is over the allowance, gives up the configured `tier:feed` pairs in
+order, one an hour, restoring them in reverse once under pace.
 
 Threads: one per shard (websocket), one writer, one compressor, one
-maintainer (status, retention, snapshots), plus whatever side lanes the venue
-adapter starts. Frames cross from the shards to the writer through one
-bounded queue; when it overruns, the shard reconnects for fresh snapshots and
-the overrun is counted in the status file.
+maintainer (status, retention, snapshots, universes, budget), plus whatever
+side lanes the venue adapter starts and the short-lived threads that fetch
+REST book snapshots after a subscribe. Frames cross from the shards to the
+writer through one bounded queue; when it overruns, the shard reconnects for
+fresh snapshots and the overrun is counted in the status file.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import shutil
 import signal
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import websocket
 
-from market_tape.config import CaptureConfig, ConfigError, Feed, Tier, load_symbol_file, validate_symbols
-from market_tape.schema import SCHEMA_VERSION
-from market_tape.storage import Compressor, Manifest, Retention, SegmentWriter, Snapshots, atomic_json, utc_day
+from market_tape.config import BudgetSettings, CaptureConfig, ConfigError, Feed, Tier, load_symbol_file, validate_symbols
+from market_tape.schema import (
+    KIND_BOOK_DELTA,
+    KIND_BOOK_SNAPSHOT,
+    KIND_KLINE,
+    KIND_LIQUIDATION,
+    KIND_TICKER,
+    KIND_TRADE,
+    SCHEMA_VERSION,
+)
+from market_tape.storage import Compressor, Manifest, Retention, SegmentWriter, Snapshots, atomic_json
 from market_tape.venues import VenueAdapter, adapter_for
 
 RECONNECT_BACKOFF_MAX_SECONDS = 60.0
-QueueItem = tuple[str, Any, int]
+#: Binance accepts ten incoming messages a second; both venues get this spacing.
+LIVE_MESSAGE_SPACING_SECONDS = 0.12
+MINUTE_NS = 60 * 1_000_000_000
+DAY_NS = 24 * 60 * MINUTE_NS
+MONTH_SECONDS = 30 * 86_400
+#: An hour of received bytes before a monthly projection means anything.
+BUDGET_MIN_WINDOW_NS = 60 * MINUTE_NS
+LANES = "lanes"
+QueueItem = tuple[str, Any, int, str]
 
 
 def shard_topics(topics: list[str], per_connection: int) -> list[list[str]]:
@@ -45,9 +73,105 @@ def shard_topics(topics: list[str], per_connection: int) -> list[list[str]]:
     return [topics[start : start + per_connection] for start in range(0, len(topics), per_connection)]
 
 
+# ----------------------------------------------------------------- metering
+
+
+class ByteMeter:
+    """Bytes received, by key, per minute over the last day, plus lifetime totals."""
+
+    def __init__(self, started_ns: int) -> None:
+        self.started_ns = started_ns
+        self.lock = threading.Lock()
+        self.totals: dict[str, int] = {}
+        self.minutes: dict[str, deque[tuple[int, int]]] = {}
+
+    def add(self, key: str, count: int, now_ns: int) -> None:
+        minute = now_ns // MINUTE_NS
+        with self.lock:
+            self.totals[key] = self.totals.get(key, 0) + count
+            bucket = self.minutes.setdefault(key, deque())
+            if bucket and bucket[-1][0] == minute:
+                bucket[-1] = (minute, bucket[-1][1] + count)
+            else:
+                bucket.append((minute, count))
+            while bucket and bucket[0][0] <= minute - 1440:
+                bucket.popleft()
+
+    def last_day(self, key: str, now_ns: int) -> int:
+        minute = now_ns // MINUTE_NS
+        with self.lock:
+            bucket = self.minutes.get(key)
+            if not bucket:
+                return 0
+            return sum(count for stamp, count in bucket if stamp > minute - 1440)
+
+    def window_ns(self, now_ns: int) -> int:
+        """How much of the last day this meter has actually seen."""
+
+        return max(0, min(now_ns - self.started_ns, DAY_NS))
+
+    def keys(self, prefix: str) -> list[str]:
+        with self.lock:
+            return sorted(key for key in self.minutes if key.startswith(prefix))
+
+
+# --------------------------------------------------------------- live state
+
+
+@dataclass(slots=True)
+class SymbolLive:
+    funding_rate: float | None = None
+    turnover_24h: float | None = None
+    price_change_24h: float | None = None
+    updated_ns: int = 0
+
+
+class LiveState:
+    """What the ticker stream, and the last table snapshot, say about every symbol."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.symbols: dict[str, SymbolLive] = {}
+        self.baseline_turnover: dict[str, float] = {}
+        self.baseline_ns = 0
+
+    def observe(self, symbol: str, values: Mapping[str, Any], received_ns: int) -> None:
+        with self.lock:
+            live = self.symbols.setdefault(symbol, SymbolLive())
+            if "funding_rate" in values:
+                live.funding_rate = float(values["funding_rate"])
+            if "turnover_24h" in values:
+                live.turnover_24h = float(values["turnover_24h"])
+            if "price_change_24h_pct" in values:
+                live.price_change_24h = float(values["price_change_24h_pct"])
+            live.updated_ns = received_ns
+
+    def seed(self, funding: Mapping[str, float], turnovers: Mapping[str, float], now_ns: int) -> None:
+        """A table snapshot: current funding and turnover for every listed name,
+        and the turnover every later surge is measured against."""
+
+        with self.lock:
+            for symbol, rate in funding.items():
+                self.symbols.setdefault(symbol, SymbolLive()).funding_rate = rate
+            for symbol, turnover in turnovers.items():
+                self.symbols.setdefault(symbol, SymbolLive()).turnover_24h = turnover
+            self.baseline_turnover = dict(turnovers)
+            self.baseline_ns = now_ns
+
+    def view(self) -> tuple[dict[str, SymbolLive], dict[str, float]]:
+        with self.lock:
+            return (
+                {symbol: SymbolLive(live.funding_rate, live.turnover_24h, live.price_change_24h, live.updated_ns) for symbol, live in self.symbols.items()},
+                dict(self.baseline_turnover),
+            )
+
+
+# ------------------------------------------------------------------- shards
+
+
 @dataclass
 class Shard:
-    """One websocket connection carrying one slice of the topic list."""
+    """One websocket connection carrying one slice of a tier's topic list."""
 
     index: int
     tier: str
@@ -58,6 +182,7 @@ class Shard:
     on_overrun: Any
     emit: Any
     stop: threading.Event = field(default_factory=threading.Event)
+    send_lock: threading.Lock = field(default_factory=threading.Lock)
     socket: websocket.WebSocketApp | None = None
     thread: threading.Thread | None = None
     connected: bool = False
@@ -92,6 +217,50 @@ class Shard:
             "last_message_ns": self.last_message_ns,
         }
 
+    def update(self, topics: list[str]) -> tuple[list[str], list[str]]:
+        """Make this shard carry exactly `topics`, changing the live subscription
+        in place; a shard that is not connected picks the list up when it connects."""
+
+        current = set(self.topics)
+        wanted = set(topics)
+        added = [topic for topic in topics if topic not in current]
+        removed = [topic for topic in self.topics if topic not in wanted]
+        self.topics = list(topics)
+        if (added or removed) and self.connected and self.socket is not None:
+            self._send_all(self.adapter.remove_messages(removed))
+            self._send_all(self.adapter.add_messages(added))
+            if added:
+                self._after_subscribe(added)
+        return added, removed
+
+    def _send_all(self, messages: list[str]) -> None:
+        for position, text in enumerate(messages):
+            if position:
+                time.sleep(LIVE_MESSAGE_SPACING_SECONDS)
+            socket = self.socket
+            if socket is None:
+                return
+            try:
+                with self.send_lock:
+                    socket.send(text)
+            except Exception as exc:  # noqa: BLE001 - the reconnect resubscribes from self.topics
+                logging.warning("shard %d could not send a subscription change: %s", self.index, exc)
+                return
+
+    def _after_subscribe(self, topics: list[str]) -> None:
+        threading.Thread(
+            target=self._run_subscribed,
+            args=(list(topics),),
+            name=f"tape-shard-{self.index}-subscribed",
+            daemon=True,
+        ).start()
+
+    def _run_subscribed(self, topics: list[str]) -> None:
+        try:
+            self.adapter.on_subscribed(topics, self.emit, self.stop)
+        except Exception:  # noqa: BLE001 - a failed side task must not drop the stream
+            logging.exception("shard %d post-subscribe work failed", self.index)
+
     def _run(self) -> None:
         while not self.stop.is_set():
             opened_ns = time.time_ns()
@@ -109,22 +278,20 @@ class Shard:
             self.stop.wait(self.backoff_seconds)
 
     def _connect_once(self) -> None:
+        topics = list(self.topics)
+
         def opened(socket: websocket.WebSocketApp) -> None:
-            for text in self.adapter.subscribe_messages(self.topics):
-                socket.send(text)
             self.connected = True
-            logging.info("shard %d connected with %d topics", self.index, len(self.topics))
-            try:
-                self.adapter.on_connected(self.topics, self.emit, self.stop)
-            except Exception:  # noqa: BLE001 - a failed side task must not drop the stream
-                logging.exception("shard %d post-connect work failed", self.index)
+            self._send_all(self.adapter.subscribe_messages(topics))
+            logging.info("shard %d connected with %d topics", self.index, len(topics))
+            self._after_subscribe(topics)
 
         def message(socket: websocket.WebSocketApp, raw: str | bytes) -> None:
             received = time.time_ns()
             self.last_message_ns = received
             self.on_frame(received)
             try:
-                self.frames.put_nowait(("frame", raw, received))
+                self.frames.put_nowait(("frame", raw, received, self.tier))
             except queue.Full:
                 self.on_overrun()
                 logging.error("shard %d overran the capture queue; reconnecting for fresh snapshots", self.index)
@@ -134,9 +301,7 @@ class Shard:
             if not self.stop.is_set():
                 logging.warning("shard %d stream error: %s", self.index, exc)
 
-        self.socket = websocket.WebSocketApp(
-            self.adapter.connection_url(self.topics), on_open=opened, on_message=message, on_error=error
-        )
+        self.socket = websocket.WebSocketApp(self.adapter.connection_url(topics), on_open=opened, on_message=message, on_error=error)
         try:
             self.socket.run_forever(ping_interval=20, ping_timeout=10)
         except Exception as exc:  # noqa: BLE001 - one shard's teardown noise must not stop the others
@@ -144,6 +309,68 @@ class Shard:
                 logging.warning("shard %d run loop ended: %s", self.index, exc)
         finally:
             self.socket = None
+
+
+# ------------------------------------------------------------------- budget
+
+
+class BudgetController:
+    """Sheds and restores `tier:feed` pairs to keep the month's inbound bytes under the allowance."""
+
+    def __init__(self, settings: BudgetSettings, meter: ByteMeter) -> None:
+        self.settings = settings
+        self.meter = meter
+        self.shed_active: list[tuple[str, str]] = []
+        self.last_action_ns = 0
+        self.projected_gb: float | None = None
+
+    def projection_gb(self, now_ns: int) -> float | None:
+        window_ns = self.meter.window_ns(now_ns)
+        if window_ns < BUDGET_MIN_WINDOW_NS:
+            return None
+        received = self.meter.last_day("all", now_ns)
+        return received / (window_ns / 1e9) * MONTH_SECONDS / 1e9
+
+    @property
+    def over(self) -> bool:
+        return (
+            self.settings.monthly_gb is not None and self.projected_gb is not None and self.projected_gb > self.settings.monthly_gb
+        )
+
+    def step(self, now_ns: int) -> bool:
+        """Re-project; shed or restore one pair when due. Returns whether the shed set changed."""
+
+        self.projected_gb = self.projection_gb(now_ns)
+        limit = self.settings.monthly_gb
+        if limit is None or self.projected_gb is None:
+            return False
+        if self.last_action_ns and now_ns - self.last_action_ns < self.settings.act_every_minutes * MINUTE_NS:
+            return False
+        if self.projected_gb > limit and len(self.shed_active) < len(self.settings.shed):
+            pair = self.settings.shed[len(self.shed_active)]
+            self.shed_active.append(pair)
+            self.last_action_ns = now_ns
+            logging.warning("over budget (%.0f GB/month projected, %.0f allowed): shedding %s:%s", self.projected_gb, limit, *pair)
+            return True
+        if self.projected_gb < limit * self.settings.restore_below and self.shed_active:
+            pair = self.shed_active.pop()
+            self.last_action_ns = now_ns
+            logging.info("under budget (%.0f GB/month projected, %.0f allowed): restoring %s:%s", self.projected_gb, limit, *pair)
+            return True
+        return False
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "monthly_gb": self.settings.monthly_gb,
+            "projected_month_gb": None if self.projected_gb is None else round(self.projected_gb, 1),
+            "over": self.over,
+            "shed": [f"{tier}:{feed}" for tier, feed in self.shed_active],
+            "shed_order": [f"{tier}:{feed}" for tier, feed in self.settings.shed],
+            "last_action_ns": self.last_action_ns,
+        }
+
+
+# ----------------------------------------------------------------- recorder
 
 
 class Recorder:
@@ -193,7 +420,11 @@ class Recorder:
                     raise ConfigError(f"tier {tier.name!r}: {tier.universe.path} names no symbols")
                 self.static_symbols[tier.name] = symbols
         self.tables: dict[str, list[dict[str, Any]]] | None = None
-        self.sticky: dict[str, dict[str, str]] = {tier.name: {} for tier in config.tiers}
+        self.live = LiveState()
+        self.meter = ByteMeter(time.time_ns())
+        self.budget = BudgetController(config.budget, self.meter)
+        self.members: dict[str, set[str]] = {tier.name: set() for tier in config.tiers}
+        self.qualified_ns: dict[str, dict[str, int]] = {tier.name: {} for tier in config.tiers}
         self.tier_symbols: dict[str, list[str]] = {tier.name: [] for tier in config.tiers}
         self.tier_topics: dict[str, list[str]] = {tier.name: [] for tier in config.tiers}
         self.tier_shards: dict[str, list[Shard]] = {tier.name: [] for tier in config.tiers}
@@ -219,8 +450,7 @@ class Recorder:
         self.worker.start()
         self._install_signals()
         self._refresh(time.time_ns(), restart=False)
-        for tier in self.config.tiers:
-            self.tier_shards[tier.name] = self._start_shards(tier.name, self.tier_topics[tier.name])
+        self._reconcile_shards()
         self._start_lanes()
         self.maintainer.start()
         try:
@@ -253,35 +483,56 @@ class Recorder:
         with self.shard_lock:
             return [shard for tier in self.config.tiers for shard in self.tier_shards[tier.name]]
 
-    def _start_shards(self, tier: str, topics: list[str]) -> list[Shard]:
-        shards = []
-        for chunk in shard_topics(topics, self.config.topics_per_connection):
-            with self.shard_lock:
-                index = self.next_shard_index
-                self.next_shard_index += 1
-            shard = Shard(
-                index=index,
-                tier=tier,
-                topics=chunk,
-                adapter=self.adapter,
-                frames=self.frames,
-                on_frame=self._on_frame,
-                on_overrun=self._on_overrun,
-                emit=self.emit,
-            )
-            shard.start()
-            shards.append(shard)
-        return shards
-
-    def _restart_tier(self, tier: str) -> None:
-        old = self.tier_shards[tier]
-        for shard in old:
-            shard.close()
-        for shard in old:
-            shard.join()
+    def _new_shard(self, tier: str, topics: list[str]) -> Shard:
         with self.shard_lock:
-            self.tier_shards[tier] = []
-        self.tier_shards[tier] = self._start_shards(tier, self.tier_topics[tier])
+            index = self.next_shard_index
+            self.next_shard_index += 1
+        shard = Shard(
+            index=index,
+            tier=tier,
+            topics=list(topics),
+            adapter=self.adapter,
+            frames=self.frames,
+            on_frame=self._on_frame,
+            on_overrun=self._on_overrun,
+            emit=self.emit,
+        )
+        shard.start()
+        return shard
+
+    def _reconcile_shards(self) -> None:
+        for tier in self.config.tiers:
+            self._reconcile_tier(tier.name, self.tier_topics[tier.name])
+
+    def _reconcile_tier(self, tier: str, desired: list[str]) -> None:
+        """Make the tier's shards carry exactly `desired`, keeping every topic on
+        the connection it already has, filling free room, opening new shards only
+        for what does not fit, and closing shards left with nothing."""
+
+        wanted = set(desired)
+        room = self.config.topics_per_connection
+        shards = list(self.tier_shards[tier])
+        plans: list[list[str]] = [[topic for topic in shard.topics if topic in wanted] for shard in shards]
+        placed = {topic for plan in plans for topic in plan}
+        leftover = [topic for topic in desired if topic not in placed]
+        for plan in plans:
+            take = leftover[: max(0, room - len(plan))]
+            plan.extend(take)
+            leftover = leftover[len(take) :]
+        kept: list[Shard] = []
+        for shard, plan in zip(shards, plans):
+            if plan:
+                shard.update(plan)
+                kept.append(shard)
+            else:
+                shard.close()
+        for chunk in shard_topics(leftover, room):
+            kept.append(self._new_shard(tier, chunk))
+        with self.shard_lock:
+            self.tier_shards[tier] = kept
+        for shard in shards:
+            if shard not in kept:
+                shard.join()
 
     def _start_lanes(self) -> None:
         self.lane_stop = threading.Event()
@@ -306,18 +557,21 @@ class Recorder:
         received = int(row.get("local_receive_ts_ns") or time.time_ns())
         self._on_frame(received)
         try:
-            self.frames.put_nowait(("rows", [dict(row)], received))
+            self.frames.put_nowait(("rows", [dict(row)], received, LANES))
         except queue.Full:
             self._on_overrun()
 
     # ------------------------------------------------------------- universe
 
-    def resolve_tiers(self, now_ns: int, tables: Mapping[str, list[dict[str, Any]]] | None) -> dict[str, list[str]]:
-        """Each tier's symbols from the venue tables, in config order; a dynamic
-        universe with no tables yet resolves empty."""
+    def resolve_tiers(self, now_ns: int, tables: Mapping[str, list[dict[str, Any]]] | None = None) -> dict[str, list[str]]:
+        """Each tier's symbols, in config order. With `tables` given they seed the
+        live state first; otherwise the last snapshot and the ticker stream decide."""
 
-        instruments = list((tables or {}).get("instruments") or [])
-        tickers = list((tables or {}).get("tickers") or [])
+        if tables is not None:
+            self.tables = dict(tables)
+            self._seed_live(tables, now_ns)
+        instruments = list((self.tables or {}).get("instruments") or [])
+        live, baseline = self.live.view()
         listed_cache: dict[str | None, list[str]] = {}
 
         def listed(quote: str | None) -> list[str]:
@@ -325,48 +579,94 @@ class Recorder:
                 listed_cache[quote] = self.adapter.listed_symbols(instruments, quote=quote) if instruments else []
             return listed_cache[quote]
 
-        today = utc_day(now_ns)
+        def allowed(quote: str | None) -> set[str]:
+            return set(listed(quote)) if instruments else set(live)
+
         resolved: dict[str, list[str]] = {}
         for tier in self.config.tiers:
             universe = tier.universe
             if universe.kind in ("symbols", "file"):
-                symbols = list(self.static_symbols[tier.name])
+                symbols = set(self.static_symbols[tier.name])
             elif universe.kind == "listed":
-                symbols = list(listed(universe.quote))
+                symbols = set(listed(universe.quote))
             elif universe.kind == "top_turnover":
-                allowed = set(listed(universe.quote))
-                ranked = [symbol for symbol in self.adapter.turnover_ranked(tickers) if symbol in allowed]
-                symbols = ranked[: universe.top]
+                symbols = self._top_turnover(tier, live, allowed(universe.quote))
             else:
-                allowed = set(listed(universe.quote))
-                sticky = self.sticky[tier.name]
-                if tables is not None:
-                    for symbol, rate in self.adapter.funding_rates(tickers).items():
-                        if symbol in allowed and rate * 10_000.0 <= -universe.threshold_bp:
-                            sticky[symbol] = today
-                cutoff = (datetime.fromisoformat(today) - timedelta(days=universe.sticky_days - 1)).date().isoformat()
-                for symbol in list(sticky):
-                    if sticky[symbol] < cutoff or (instruments and symbol not in allowed):
-                        del sticky[symbol]
-                symbols = sorted(sticky)
+                symbols = self._sticky(tier, now_ns, live, baseline, allowed(universe.quote), instruments_known=bool(instruments))
             excluded: set[str] = set()
             for name in universe.exclude_tiers:
                 excluded.update(resolved.get(name, []))
-            resolved[tier.name] = sorted(symbol for symbol in symbols if symbol not in excluded)
+            resolved[tier.name] = sorted(symbols - excluded)
         return resolved
 
-    def plan_topics(self, resolved: Mapping[str, list[str]]) -> tuple[dict[str, list[str]], dict[str, tuple[Feed, ...]]]:
-        """Topics per tier with each venue topic claimed once, and each symbol's
-        union of feeds for the side lanes."""
+    def _top_turnover(self, tier: Tier, live: Mapping[str, SymbolLive], allowed: set[str]) -> set[str]:
+        universe = tier.universe
+        ranked = sorted(
+            (symbol for symbol in allowed if live.get(symbol) is not None and live[symbol].turnover_24h is not None),
+            key=lambda symbol: (-(live[symbol].turnover_24h or 0.0), symbol),
+        )
+        rank = {symbol: position + 1 for position, symbol in enumerate(ranked)}
+        leave = max(universe.leave_top, universe.top)
+        current = self.members[tier.name]
+        members = {symbol for symbol, position in rank.items() if position <= universe.top or (symbol in current and position <= leave)}
+        self.members[tier.name] = members
+        return members
 
+    def _sticky(
+        self,
+        tier: Tier,
+        now_ns: int,
+        live: Mapping[str, SymbolLive],
+        baseline: Mapping[str, float],
+        allowed: set[str],
+        *,
+        instruments_known: bool,
+    ) -> set[str]:
+        universe = tier.universe
+        stamps = self.qualified_ns[tier.name]
+        for symbol in allowed:
+            state = live.get(symbol)
+            if state is None:
+                continue
+            if universe.kind == "funding_below":
+                qualifies = state.funding_rate is not None and state.funding_rate * 10_000.0 <= -universe.threshold_bp
+            elif universe.kind == "turnover_surge":
+                base = baseline.get(symbol)
+                qualifies = (
+                    state.turnover_24h is not None and base is not None and base > 0.0 and state.turnover_24h >= universe.ratio * base
+                )
+            else:
+                qualifies = state.price_change_24h is not None and abs(state.price_change_24h) >= universe.pct
+            if qualifies:
+                stamps[symbol] = now_ns
+        sticky_ns = int(universe.sticky_hours * 3600 * 1e9)
+        for symbol in list(stamps):
+            if now_ns - stamps[symbol] >= sticky_ns or (instruments_known and symbol not in allowed):
+                del stamps[symbol]
+        members = set(stamps)
+        self.members[tier.name] = members
+        return members
+
+    def _seed_live(self, tables: Mapping[str, list[dict[str, Any]]], now_ns: int) -> None:
+        tickers = list(tables.get("tickers") or [])
+        self.live.seed(self.adapter.funding_rates(tickers), self.adapter.turnovers(tickers), now_ns)
+
+    def plan_topics(
+        self, resolved: Mapping[str, list[str]], shed: Iterable[tuple[str, str]] | None = None
+    ) -> tuple[dict[str, list[str]], dict[str, tuple[Feed, ...]]]:
+        """Topics per tier with each venue topic claimed once, and each symbol's
+        union of feeds for the side lanes. `shed` names tier:feed pairs to leave out."""
+
+        left_out = set(self.budget.shed_active if shed is None else shed)
         claimed: set[str] = set()
         topics: dict[str, list[str]] = {}
         feeds: dict[str, set[Feed]] = {}
         for tier in self.config.tiers:
+            active = tuple(feed for feed in tier.feeds if (tier.name, feed.text) not in left_out)
             mine: list[str] = []
             for symbol in resolved.get(tier.name, []):
-                feeds.setdefault(symbol, set()).update(tier.feeds)
-                for topic in self.adapter.topics(symbol, tier.feeds):
+                feeds.setdefault(symbol, set()).update(active)
+                for topic in self.adapter.topics(symbol, active):
                     if topic in claimed:
                         continue
                     claimed.add(topic)
@@ -374,25 +674,37 @@ class Recorder:
             topics[tier.name] = mine
         return topics, {symbol: tuple(sorted(found, key=lambda feed: feed.text)) for symbol, found in feeds.items()}
 
-    def _refresh(self, now_ns: int, *, restart: bool) -> None:
+    def _take_tables(self, now_ns: int, *, first: bool) -> None:
         try:
             tables = self.adapter.fetch_tables()
             self.snapshots.write(now_ns, tables)
             self.tables = tables
+            self._seed_live(tables, now_ns)
         except Exception as exc:  # noqa: BLE001 - the venue's REST is optional to the tape
             self.snapshot_failures += 1
             logging.warning("venue tables unavailable; keeping the last universe: %s", exc)
-            if not restart:
-                # First start: hold the snapshot clock so the next maintenance
-                # pass tries again instead of waiting a whole cadence.
+            if first:
+                # Hold the snapshot clock so the next maintenance pass tries
+                # again instead of waiting a whole cadence.
                 self.snapshots.last_key = None
-        resolved = self.resolve_tiers(now_ns, self.tables)
+
+    def _refresh(self, now_ns: int, *, restart: bool) -> None:
+        """Take the tables if due, then re-resolve every tier; with `restart`
+        the live connections and lanes follow the new plan."""
+
+        if self.snapshots.due(now_ns):
+            self._take_tables(now_ns, first=self.tables is None)
+        self._replan(now_ns, apply=restart)
+
+    def _replan(self, now_ns: int, *, apply: bool) -> list[str]:
+        resolved = self.resolve_tiers(now_ns)
         topics, feeds_by_symbol = self.plan_topics(resolved)
+        changed: list[str] = []
         for tier in self.config.tiers:
-            changed = topics[tier.name] != self.tier_topics[tier.name]
-            if changed:
+            if topics[tier.name] != self.tier_topics[tier.name]:
+                changed.append(tier.name)
                 logging.info(
-                    "tier %s has %d symbols and %d topics (was %d symbols)",
+                    "tier %s: %d symbols, %d topics (was %d symbols)",
                     tier.name,
                     len(resolved[tier.name]),
                     len(topics[tier.name]),
@@ -400,14 +712,39 @@ class Recorder:
                 )
             self.tier_symbols[tier.name] = resolved[tier.name]
             self.tier_topics[tier.name] = topics[tier.name]
-            if changed and restart:
-                self._restart_tier(tier.name)
         lanes_changed = feeds_by_symbol != self.feeds_by_symbol
         self.feeds_by_symbol = feeds_by_symbol
-        if lanes_changed and restart:
-            self._restart_lanes()
+        if apply:
+            for name in changed:
+                self._reconcile_tier(name, self.tier_topics[name])
+            if lanes_changed:
+                self._restart_lanes()
+        return changed
 
     # -------------------------------------------------------------- writing
+
+    @staticmethod
+    def feed_class(rows: list[dict[str, Any]]) -> str:
+        if not rows:
+            return "control"
+        row = rows[0]
+        kind = row.get("kind")
+        if kind in (KIND_BOOK_SNAPSHOT, KIND_BOOK_DELTA):
+            return f"book:{row.get('depth')}"
+        if kind == KIND_TRADE:
+            return "trades"
+        if kind == KIND_TICKER:
+            return "ticker"
+        if kind == KIND_LIQUIDATION:
+            return "liquidations"
+        if kind == KIND_KLINE:
+            return f"kline:{row.get('interval')}"
+        return "other"
+
+    def _meter(self, tier: str, rows: list[dict[str, Any]], count: int, now_ns: int) -> None:
+        self.meter.add("all", count, now_ns)
+        self.meter.add(f"tier:{tier}", count, now_ns)
+        self.meter.add(f"feed:{tier}:{self.feed_class(rows)}", count, now_ns)
 
     def _write_loop(self) -> None:
         while True:
@@ -418,16 +755,23 @@ class Recorder:
                 continue
             if item is None:
                 return
-            kind, payload, received_ns = item
+            kind, payload, received_ns, tier = item
             if self.disk_blocked:
                 self.disk_dropped_frames += 1
                 continue
             try:
-                rows = self.adapter.normalize(payload, received_ns) if kind == "frame" else payload
+                if kind == "frame":
+                    rows = self.adapter.normalize(payload, received_ns)
+                    self._meter(tier, rows, len(payload), received_ns)
+                else:
+                    rows = payload
+                    self._meter(tier, rows, sum(len(json.dumps(row, separators=(",", ":"))) for row in rows), received_ns)
                 for row in rows:
                     for segment in self.writer.append(row):
                         self.compressor.submit(segment)
                     self.written_rows += 1
+                    if row.get("kind") == KIND_TICKER:
+                        self.live.observe(str(row.get("symbol")), row.get("values") or {}, received_ns)
             except OSError as exc:
                 first = not self.disk_blocked
                 self.disk_blocked = True
@@ -454,8 +798,11 @@ class Recorder:
     def _maintenance(self) -> None:
         self.disk_blocked = not self.retention.writable()
         now_ns = time.time_ns()
-        if self.snapshots.due(now_ns) and not self.stop.is_set():
-            self._refresh(now_ns, restart=True)
+        if self.stop.is_set():
+            return
+        self._refresh(now_ns, restart=True)
+        if self.budget.step(now_ns):
+            self._replan(now_ns, apply=True)
         self._write_status()
 
     def tier_status(self, tier: Tier) -> dict[str, Any]:
@@ -463,7 +810,9 @@ class Recorder:
         status: dict[str, Any] = {
             "name": tier.name,
             "universe": tier.universe.kind,
+            "live": tier.universe.live,
             "feeds": [feed.text for feed in tier.feeds],
+            "shed": [feed for name, feed in self.budget.shed_active if name == tier.name],
             "symbols": len(symbols),
             "topics": len(self.tier_topics[tier.name]),
         }
@@ -471,18 +820,31 @@ class Recorder:
             status["names"] = list(symbols)
         return status
 
+    def bytes_status(self, now_ns: int) -> dict[str, Any]:
+        return {
+            "received_total": self.meter.totals.get("all", 0),
+            "received_24h": self.meter.last_day("all", now_ns),
+            "window_seconds": self.meter.window_ns(now_ns) // 1_000_000_000,
+            "by_tier_24h": {key[len("tier:") :]: self.meter.last_day(key, now_ns) for key in self.meter.keys("tier:")},
+            "by_feed_24h": {key[len("feed:") :]: self.meter.last_day(key, now_ns) for key in self.meter.keys("feed:")},
+        }
+
     def _write_status(self) -> None:
+        now_ns = time.time_ns()
+        budget = self.budget.status()
         payload = {
             "kind": "forward_capture_status",
             "schema_version": SCHEMA_VERSION,
             "venue": self.adapter.name,
             "market": self.adapter.market,
             "config": str(self.config.source_path) if self.config.source_path else None,
-            "recorded_at_ns": time.time_ns(),
+            "recorded_at_ns": now_ns,
             "status_interval_seconds": self.config.storage.status_interval_seconds,
             "tiers": [self.tier_status(tier) for tier in self.config.tiers],
             "shards": [shard.status() for shard in self._all_shards()],
             "lanes": len(self.lanes),
+            "bytes": self.bytes_status(now_ns),
+            "budget": budget,
             "received_frames": self.received_frames,
             "written_rows": self.written_rows,
             "dropped_frames": self.dropped_frames,
@@ -497,13 +859,14 @@ class Recorder:
         }
         atomic_json(self.root / "status.json", payload)
         logging.info(
-            "capture status frames=%d rows=%d dropped=%d disk_dropped=%d queued=%d disk_blocked=%s tiers=%s",
+            "capture status frames=%d rows=%d dropped=%d disk_dropped=%d queued=%d disk_blocked=%s projected_gb=%s tiers=%s",
             self.received_frames,
             self.written_rows,
             self.dropped_frames,
             self.disk_dropped_frames,
             self.frames.qsize(),
             self.disk_blocked,
+            budget["projected_month_gb"],
             " ".join(f"{name}:{len(symbols)}" for name, symbols in self.tier_symbols.items()),
         )
 

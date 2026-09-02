@@ -1,6 +1,13 @@
 # The Binance USD-M market recorder on the host. Read by
 # liquidity-migration-forward-capture-binance.service, which passes --root;
 # `python -m market_tape check --config deploy/capture/binance-usdm.toml` validates it.
+#
+# Same shape as the Bybit config: the ticker (mark and index with funding every
+# second, the 24h ticker) is the sensor for every listed name; the deep book, the
+# fast top of book, and the trades follow the action live. Binance's diff book is
+# heavier than Bybit's 50-level stream, so the core is twenty names, not thirty.
+# Binance publishes the last settled funding rate, not a prediction, so the
+# crowded tier reacts one settlement later than Bybit's.
 schema = 1
 
 [venue]
@@ -22,26 +29,33 @@ topics_per_connection = 200
 [snapshots]
 cadence = "day"
 
-# The standing deep tier: the 60 busiest USDT perpetuals by 24h turnover, with
-# the diff book (`book:1000`) anchored by a 1000-level REST snapshot on every
-# connect. Binance names its own symbols, so the Bybit symbol file does not
-# apply here and turnover picks the universe instead.
-[[tier]]
-name = "deep"
-feeds = ["book:1000", "book:1", "trades", "ticker", "liquidations"]
-universe = { kind = "top_turnover", top = 60, quote = "USDT" }
+[budget]
+monthly_gb = 1000
+shed = ["movers:book:1000", "surging:book:1000", "movers:trades", "surging:trades", "core:book:1", "wide:ticker"]
 
-# Names whose last settled funding rate sits at or below -10 bp (the crowd CARRY
-# and Exodus trade) get the deep book for the day they qualify and the next.
-# Binance publishes the settled rate, not a prediction, so this tier reacts one
-# settlement later than Bybit's.
+# The twenty busiest USDT perpetuals by 24h turnover, live, with the diff book
+# anchored by a 1000-level REST snapshot on every connect.
+[[tier]]
+name = "core"
+feeds = ["book:1000", "book:1", "trades", "ticker", "liquidations"]
+universe = { kind = "top_turnover", top = 20, leave_top = 30, quote = "USDT" }
+
 [[tier]]
 name = "crowded"
-feeds = ["book:1000"]
-universe = { kind = "funding_below", threshold_bp = 10, sticky_days = 2, quote = "USDT", exclude_tiers = ["deep"] }
+feeds = ["book:1000", "book:1", "trades"]
+universe = { kind = "funding_below", threshold_bp = 8, sticky_hours = 48, quote = "USDT", exclude_tiers = ["core"] }
 
-# Every other USDT perpetual the venue lists as trading, re-read once a day.
+[[tier]]
+name = "surging"
+feeds = ["book:1000", "book:1", "trades"]
+universe = { kind = "turnover_surge", ratio = 3, sticky_hours = 24, quote = "USDT", exclude_tiers = ["core", "crowded"] }
+
+[[tier]]
+name = "movers"
+feeds = ["book:1000", "book:1", "trades"]
+universe = { kind = "price_move", pct = 0.15, sticky_hours = 24, quote = "USDT", exclude_tiers = ["core", "crowded", "surging"] }
+
 [[tier]]
 name = "wide"
-feeds = ["book:1", "trades", "ticker", "liquidations"]
-universe = { kind = "listed", quote = "USDT", exclude_tiers = ["deep"] }
+feeds = ["ticker", "liquidations"]
+universe = { kind = "listed", quote = "USDT", exclude_tiers = ["core"] }

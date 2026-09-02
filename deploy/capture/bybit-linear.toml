@@ -1,5 +1,14 @@
-# The Bybit market recorder on the host. Read by liquidity-migration-forward-capture.service;
-# `python -m market_tape check --config deploy/capture/bybit-linear.toml` validates it.
+# The Bybit market recorder on the host. Read by liquidity-migration-forward-capture.service,
+# which passes --root; `python -m market_tape check --config deploy/capture/bybit-linear.toml`
+# validates it.
+#
+# The ticker is the sensor: every listed name's funding rate, open interest, price,
+# 24h turnover and 24h change, and best bid and ask, pushed as they change. The
+# deep feeds (the 50-level book, the fast top of book, every trade) go only where a
+# sleeve acts, and they follow the action live: a name enters a tier within one
+# maintenance tick of the ticker showing why. The budget keeps the month's inbound
+# bytes under the host's share of its 4 TB line; the order of `shed` says what is
+# given up first when the projection runs over.
 schema = 1
 
 [venue]
@@ -7,7 +16,6 @@ name = "bybit"
 market = "linear"
 
 [storage]
-# The unit passes --root; the retention figures bound what widening the tiers costs.
 segment_max_mb = 64
 retention_days = 30
 max_disk_gb = 60
@@ -20,22 +28,47 @@ topics_per_connection = 150
 [snapshots]
 cadence = "day"
 
-# The standing deep tier: full 50-level books for LONG's entry universe and the
-# maker canary names, read from the symbol file once at start.
+[budget]
+# Measured 2026-09-02: the 81-name deep tier alone drew 40-80 GB a day inbound.
+monthly_gb = 1300
+shed = ["movers:book:50", "surging:book:50", "movers:trades", "surging:trades", "core:book:1", "crowded:book:1"]
+
+# Names that always get the full treatment whatever their rank: the maker canary.
 [[tier]]
-name = "deep"
-feeds = ["book:1", "book:50", "trades", "ticker", "liquidations"]
+name = "pinned"
+feeds = ["book:50", "book:1", "trades", "ticker", "liquidations"]
 universe = { kind = "file", path = "deploy/forward-capture-symbols.txt" }
 
-# Names whose funding rate sits at or below -10 bp (the crowd CARRY and Exodus
-# trade) get the deep book for the day they qualify and the next.
+# LONG's universe: the thirty busiest USDT perpetuals by 24h turnover, live. A
+# name stays until it falls below rank 45, so the boundary does not flap.
+[[tier]]
+name = "core"
+feeds = ["book:50", "book:1", "trades", "ticker", "liquidations"]
+universe = { kind = "top_turnover", top = 30, leave_top = 45, quote = "USDT", exclude_tiers = ["pinned"] }
+
+# The crowd fee (funding) at or below -8 bp: CARRY enters at -10 bp settled, so
+# capture starts as the crowd forms and keeps the book two days after it thins.
 [[tier]]
 name = "crowded"
-feeds = ["book:50"]
-universe = { kind = "funding_below", threshold_bp = 10, sticky_days = 2, quote = "USDT", exclude_tiers = ["deep"] }
+feeds = ["book:50", "book:1", "trades"]
+universe = { kind = "funding_below", threshold_bp = 8, sticky_hours = 48, quote = "USDT", exclude_tiers = ["pinned", "core"] }
 
-# Every other USDT perpetual the venue lists as trading, re-read once a day.
+# Turnover three times what the day's snapshot showed: the pump LONG's trigger
+# family looks for, in a name that was not in the top thirty when it started.
+[[tier]]
+name = "surging"
+feeds = ["book:50", "book:1", "trades"]
+universe = { kind = "turnover_surge", ratio = 3, sticky_hours = 24, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded"] }
+
+# A 24h move of fifteen percent either way.
+[[tier]]
+name = "movers"
+feeds = ["book:50", "book:1", "trades"]
+universe = { kind = "price_move", pct = 0.15, sticky_hours = 24, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded", "surging"] }
+
+# Every other USDT perpetual the venue lists as trading: the ticker and the
+# liquidations, nothing heavier.
 [[tier]]
 name = "wide"
-feeds = ["book:1", "trades", "ticker", "liquidations"]
-universe = { kind = "listed", quote = "USDT", exclude_tiers = ["deep"] }
+feeds = ["ticker", "liquidations"]
+universe = { kind = "listed", quote = "USDT", exclude_tiers = ["pinned", "core"] }

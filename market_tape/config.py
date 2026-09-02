@@ -23,40 +23,65 @@ topics_per_connection = 150
 
 [snapshots]
 cadence = "day"                # how often the instrument and ticker tables are
-                               # written and the universes re-read: day | hour
+                               # written: day | hour
+
+[budget]
+monthly_gb = 1300              # inbound allowance for this recorder
+shed = ["crowded:trades", "core:book:1"]   # what to give up first when over pace
 
 [[tier]]
-name = "deep"
+name = "core"
 feeds = ["book:50", "book:1", "trades", "ticker", "liquidations"]
-universe = { kind = "file", path = "deploy/forward-capture-symbols.txt" }
+universe = { kind = "top_turnover", top = 30, leave_top = 45, quote = "USDT" }
 
 [[tier]]
 name = "crowded"
-feeds = ["book:50"]
-universe = { kind = "funding_below", threshold_bp = 10, sticky_days = 2, exclude_tiers = ["deep"] }
+feeds = ["book:50", "trades"]
+universe = { kind = "funding_below", threshold_bp = 8, sticky_hours = 48, quote = "USDT", exclude_tiers = ["core"] }
 
 [[tier]]
 name = "wide"
-feeds = ["book:1", "trades", "ticker", "liquidations"]
-universe = { kind = "listed", quote = "USDT", exclude_tiers = ["deep"] }
+feeds = ["ticker", "liquidations"]
+universe = { kind = "listed", quote = "USDT", exclude_tiers = ["core"] }
 ```
 
 Feeds: `book:<levels>` (the venue says which level counts it offers; `book:1`
 is the top of book), `trades`, `ticker` (last, mark, index, funding, open
-interest, best bid and ask, 24h turnover, as the venue pushes them),
-`liquidations`, `kline:<interval>` (venue candles, e.g. `kline:1m`), and
+interest, best bid and ask, 24h turnover and price change, as the venue pushes
+them), `liquidations`, `kline:<interval>` (venue candles, e.g. `kline:1m`), and
 `open_interest:<seconds>` (a REST poll, for venues that push no open interest).
 
-Universes: `symbols` (an inline list), `file` (one symbol per line, `#`
-comments), `listed` (every perpetual the venue lists as trading, optionally
-filtered by `quote`), `top_turnover` (the `top` names by 24h turnover from the
-ticker table), and `funding_below` (names whose funding rate is at or below
-`-threshold_bp`, kept for `sticky_days` days). `exclude_tiers` removes names
-already covered by the named tiers. The `listed`, `top_turnover`, and
-`funding_below` kinds are re-read at the snapshot cadence.
+Universes:
 
-The full-universe configuration for a machine with unbounded bandwidth and
-disk is one tier: `listed` with every feed. See `examples/`.
+- `symbols` (an inline list) and `file` (one symbol per line, `#` comments)
+  are fixed for the life of the process.
+- `listed`: every perpetual the venue lists as trading, optionally filtered by
+  `quote`; re-read with each table snapshot.
+- `top_turnover`: the `top` names by 24h turnover. A member stays until it
+  falls below rank `leave_top` (default one and a half times `top`), so a name
+  on the boundary does not flap.
+- `funding_below`: names whose funding rate is at or below `-threshold_bp`.
+- `turnover_surge`: names whose 24h turnover is at least `ratio` times what
+  the last table snapshot showed for them.
+- `price_move`: names whose 24h price change is at least `pct` (a fraction:
+  0.2 is twenty percent) in either direction.
+
+The last four are live: the recorder reads them off the ticker stream it is
+already recording and promotes a name within one maintenance tick of the
+observation, not at the next daily snapshot. A name that qualified stays for
+`sticky_hours` (default 48) after its last qualifying observation. The ticker
+feed on a `listed` tier is the sensor; without it, a live universe sees only
+the names some tier already records. `exclude_tiers` removes names already
+covered by the named tiers.
+
+Budget: `monthly_gb` is this recorder's inbound allowance. The recorder
+projects a month from its last 24 hours of received bytes; when the projection
+is over the allowance it gives up the first entry of `shed` (a `tier:feed`
+pair), then the next an hour later, and restores them in reverse once the
+projection is under `restore_below` (default 0.8) of the allowance. Without a
+budget the recorder only measures. The full-universe configuration for a
+machine with unbounded bandwidth and disk is one tier: `listed` with every feed
+and no budget. See `examples/`.
 """
 
 from __future__ import annotations
@@ -69,8 +94,10 @@ from typing import Any, Iterable, Mapping
 CONFIG_SCHEMA = 1
 VENUES = ("bybit", "binance")
 FEED_NAMES = ("book", "trades", "ticker", "liquidations", "kline", "open_interest")
-UNIVERSE_KINDS = ("symbols", "file", "listed", "top_turnover", "funding_below")
+UNIVERSE_KINDS = ("symbols", "file", "listed", "top_turnover", "funding_below", "turnover_surge", "price_move")
+LIVE_KINDS = ("top_turnover", "funding_below", "turnover_surge", "price_move")
 SNAPSHOT_CADENCES = ("day", "hour")
+DEFAULT_STICKY_HOURS = 48.0
 
 
 class ConfigError(ValueError):
@@ -106,15 +133,24 @@ class Universe:
     path: Path | None = None
     quote: str | None = None
     top: int = 0
+    leave_top: int = 0
     threshold_bp: float = 0.0
-    sticky_days: int = 1
+    ratio: float = 0.0
+    pct: float = 0.0
+    sticky_hours: float = DEFAULT_STICKY_HOURS
     exclude_tiers: tuple[str, ...] = ()
 
     @property
     def dynamic(self) -> bool:
-        """Re-read at every snapshot, so its shards may restart."""
+        """Changes while the recorder runs, so its topics are added and removed live."""
 
-        return self.kind in ("listed", "top_turnover", "funding_below")
+        return self.kind in LIVE_KINDS or self.kind == "listed"
+
+    @property
+    def live(self) -> bool:
+        """Decided from the ticker stream, not from a table snapshot."""
+
+        return self.kind in LIVE_KINDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,12 +181,25 @@ class StorageSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class BudgetSettings:
+    monthly_gb: float | None = None
+    shed: tuple[tuple[str, str], ...] = ()
+    restore_below: float = 0.8
+    act_every_minutes: float = 60.0
+
+    @property
+    def enforced(self) -> bool:
+        return self.monthly_gb is not None
+
+
+@dataclass(frozen=True, slots=True)
 class CaptureConfig:
     venue: VenueSettings
     storage: StorageSettings
     tiers: tuple[Tier, ...]
     topics_per_connection: int = 150
     snapshot_cadence: str = "day"
+    budget: BudgetSettings = field(default_factory=BudgetSettings)
     source_path: Path | None = None
     extra: Mapping[str, Any] = field(default_factory=dict)
 
@@ -204,6 +253,25 @@ def validate_symbols(symbols: Iterable[str]) -> tuple[str, ...]:
     return result
 
 
+def _sticky_hours(raw: Mapping[str, Any], *, tier: str) -> float:
+    if "sticky_hours" in raw and "sticky_days" in raw:
+        raise ConfigError(f"tier {tier!r}: give sticky_hours or sticky_days, not both")
+    if "sticky_days" in raw:
+        days = float(raw["sticky_days"])
+        if days <= 0:
+            raise ConfigError(f"tier {tier!r}: sticky_days must be positive")
+        return days * 24.0
+    hours = float(raw.get("sticky_hours", DEFAULT_STICKY_HOURS))
+    if hours <= 0:
+        raise ConfigError(f"tier {tier!r}: sticky_hours must be positive")
+    return hours
+
+
+def _quote(raw: Mapping[str, Any]) -> str | None:
+    quote = raw.get("quote")
+    return str(quote).upper() if quote else None
+
+
 def _universe(raw: Mapping[str, Any], *, tier: str, base_dir: Path) -> Universe:
     if not isinstance(raw, Mapping):
         raise ConfigError(f"tier {tier!r}: universe must be a table")
@@ -225,28 +293,30 @@ def _universe(raw: Mapping[str, Any], *, tier: str, base_dir: Path) -> Universe:
             path = base_dir / path
         return Universe(kind, path=path, exclude_tiers=exclude)
     if kind == "listed":
-        quote = raw.get("quote")
-        return Universe(kind, quote=str(quote).upper() if quote else None, exclude_tiers=exclude)
+        return Universe(kind, quote=_quote(raw), exclude_tiers=exclude)
     if kind == "top_turnover":
         top = int(raw.get("top") or 0)
         if top <= 0:
             raise ConfigError(f"tier {tier!r}: top_turnover needs top > 0")
-        quote = raw.get("quote")
-        return Universe(kind, top=top, quote=str(quote).upper() if quote else None, exclude_tiers=exclude)
-    threshold = float(raw.get("threshold_bp") or 0.0)
-    if threshold <= 0:
-        raise ConfigError(f"tier {tier!r}: funding_below needs threshold_bp > 0")
-    sticky = int(raw.get("sticky_days", 1))
-    if sticky <= 0:
-        raise ConfigError(f"tier {tier!r}: sticky_days must be positive")
-    quote = raw.get("quote")
-    return Universe(
-        kind,
-        threshold_bp=threshold,
-        sticky_days=sticky,
-        quote=str(quote).upper() if quote else None,
-        exclude_tiers=exclude,
-    )
+        leave_top = int(raw.get("leave_top") or round(top * 1.5))
+        if leave_top < top:
+            raise ConfigError(f"tier {tier!r}: leave_top must be at least top")
+        return Universe(kind, top=top, leave_top=leave_top, quote=_quote(raw), exclude_tiers=exclude)
+    sticky = _sticky_hours(raw, tier=tier)
+    if kind == "funding_below":
+        threshold = float(raw.get("threshold_bp") or 0.0)
+        if threshold <= 0:
+            raise ConfigError(f"tier {tier!r}: funding_below needs threshold_bp > 0")
+        return Universe(kind, threshold_bp=threshold, sticky_hours=sticky, quote=_quote(raw), exclude_tiers=exclude)
+    if kind == "turnover_surge":
+        ratio = float(raw.get("ratio") or 0.0)
+        if ratio <= 1.0:
+            raise ConfigError(f"tier {tier!r}: turnover_surge needs ratio > 1")
+        return Universe(kind, ratio=ratio, sticky_hours=sticky, quote=_quote(raw), exclude_tiers=exclude)
+    pct = float(raw.get("pct") or 0.0)
+    if pct <= 0:
+        raise ConfigError(f"tier {tier!r}: price_move needs pct > 0 (a fraction, 0.2 is twenty percent)")
+    return Universe(kind, pct=pct, sticky_hours=sticky, quote=_quote(raw), exclude_tiers=exclude)
 
 
 def _positive(table: Mapping[str, Any], name: str, default: float, *, section: str) -> float:
@@ -258,6 +328,29 @@ def _positive(table: Mapping[str, Any], name: str, default: float, *, section: s
     if number <= 0:
         raise ConfigError(f"{section}.{name} must be positive")
     return number
+
+
+def _budget(raw: Mapping[str, Any], tiers: Iterable[Tier]) -> BudgetSettings:
+    if not isinstance(raw, Mapping):
+        raise ConfigError("[budget] must be a table")
+    monthly = raw.get("monthly_gb")
+    monthly_gb = None if monthly is None else _positive(raw, "monthly_gb", 0.0, section="budget")
+    restore_below = float(raw.get("restore_below", 0.8))
+    if not 0.0 < restore_below < 1.0:
+        raise ConfigError("budget.restore_below must be between 0 and 1")
+    act_every = _positive(raw, "act_every_minutes", 60.0, section="budget")
+    feeds_by_tier = {tier.name: {feed.text for feed in tier.feeds} for tier in tiers}
+    shed: list[tuple[str, str]] = []
+    for text in raw.get("shed", ()):
+        tier_name, separator, feed_text = str(text).partition(":")
+        if not separator or tier_name not in feeds_by_tier or feed_text not in feeds_by_tier[tier_name]:
+            raise ConfigError(f"budget.shed entry {text!r} must be tier:feed for a tier and feed in this config")
+        if (tier_name, feed_text) in shed:
+            raise ConfigError(f"budget.shed repeats {text!r}")
+        shed.append((tier_name, feed_text))
+    if shed and monthly_gb is None:
+        raise ConfigError("budget.shed needs budget.monthly_gb")
+    return BudgetSettings(monthly_gb=monthly_gb, shed=tuple(shed), restore_below=restore_below, act_every_minutes=act_every)
 
 
 def parse_config(data: Mapping[str, Any], *, base_dir: Path, source_path: Path | None = None) -> CaptureConfig:
@@ -314,8 +407,8 @@ def parse_config(data: Mapping[str, Any], *, base_dir: Path, source_path: Path |
         if not isinstance(raw, Mapping):
             raise ConfigError("each [[tier]] must be a table")
         tier_name = str(raw.get("name") or "")
-        if not tier_name or tier_name in seen:
-            raise ConfigError(f"tier names must be unique and non-empty, got {tier_name!r}")
+        if not tier_name or tier_name in seen or ":" in tier_name:
+            raise ConfigError(f"tier names must be unique, non-empty, and free of ':', got {tier_name!r}")
         seen.add(tier_name)
         feeds_raw = raw.get("feeds")
         if not isinstance(feeds_raw, list) or not feeds_raw:
@@ -329,13 +422,16 @@ def parse_config(data: Mapping[str, Any], *, base_dir: Path, source_path: Path |
                 raise ConfigError(f"tier {tier_name!r} excludes {excluded!r}, which is not an earlier tier")
         tiers.append(Tier(tier_name, feeds, universe))
 
-    extra = {key: value for key, value in data.items() if key not in {"schema", "venue", "storage", "connection", "snapshots", "tier"}}
+    budget = _budget(data.get("budget") or {}, tiers)
+    known = {"schema", "venue", "storage", "connection", "snapshots", "budget", "tier"}
+    extra = {key: value for key, value in data.items() if key not in known}
     return CaptureConfig(
         venue=venue,
         storage=storage,
         tiers=tuple(tiers),
         topics_per_connection=topics_per_connection,
         snapshot_cadence=cadence,
+        budget=budget,
         source_path=source_path,
         extra=extra,
     )

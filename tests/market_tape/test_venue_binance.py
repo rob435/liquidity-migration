@@ -554,13 +554,13 @@ def depth_reply(url: str) -> Any:
 SHARD_TOPICS = ["btcusdt@depth@100ms", "btcusdt@aggTrade", "ethusdt@depth@100ms", "ethusdt@bookTicker"]
 
 
-def test_on_connected_anchors_every_diff_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_on_subscribed_anchors_every_diff_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(venue, "SNAPSHOT_PAUSE_SECONDS", 0.05)
     calls = fake_rest(monkeypatch, depth_reply)
     adapter = BinanceAdapter()
     rows: list[dict[str, Any]] = []
     started = time.monotonic()
-    adapter.on_connected(SHARD_TOPICS, rows.append, threading.Event())
+    adapter.on_subscribed(SHARD_TOPICS, rows.append, threading.Event())
     elapsed = time.monotonic() - started
 
     assert calls == [
@@ -578,10 +578,10 @@ def test_on_connected_anchors_every_diff_symbol(monkeypatch: pytest.MonkeyPatch)
     assert parse_row(rows[0], default_venue="binance").update_id == 77
 
 
-def test_on_connected_does_nothing_for_a_shard_with_no_diff_book(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_on_subscribed_does_nothing_for_a_shard_with_no_diff_book(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = fake_rest(monkeypatch, depth_reply)
     rows: list[dict[str, Any]] = []
-    BinanceAdapter().on_connected(["btcusdt@bookTicker", "btcusdt@aggTrade"], rows.append, threading.Event())
+    BinanceAdapter().on_subscribed(["btcusdt@bookTicker", "btcusdt@aggTrade"], rows.append, threading.Event())
     assert (calls, rows) == ([], [])
 
 
@@ -590,7 +590,7 @@ def test_a_set_stop_event_ends_the_pacing_early(monkeypatch: pytest.MonkeyPatch)
     stop = threading.Event()
     stop.set()
     rows: list[dict[str, Any]] = []
-    BinanceAdapter().on_connected(SHARD_TOPICS, rows.append, stop)
+    BinanceAdapter().on_subscribed(SHARD_TOPICS, rows.append, stop)
     assert (calls, rows) == ([], [])
 
 
@@ -604,7 +604,7 @@ def test_stopping_part_way_leaves_the_rest_unfetched(monkeypatch: pytest.MonkeyP
         rows.append(row)
         stop.set()
 
-    BinanceAdapter().on_connected(SHARD_TOPICS, emit, stop)
+    BinanceAdapter().on_subscribed(SHARD_TOPICS, emit, stop)
     assert len(calls) == 1 and [row["symbol"] for row in rows] == ["BTCUSDT"]
 
 
@@ -614,7 +614,7 @@ def test_connecting_again_restarts_the_diff_chain(monkeypatch: pytest.MonkeyPatc
     adapter = BinanceAdapter()
     adapter.normalize(diff_frame(100, 105, 95), RECEIVED)
     assert adapter.normalize(diff_frame(106, 110, 105), RECEIVED)[0]["sequence_gap"] is False
-    adapter.on_connected(SHARD_TOPICS, lambda row: None, threading.Event())
+    adapter.on_subscribed(SHARD_TOPICS, lambda row: None, threading.Event())
     assert adapter.normalize(diff_frame(111, 115, 110), RECEIVED)[0]["sequence_gap"] is True
 
 
@@ -651,3 +651,23 @@ def test_lanes_run_only_for_the_symbols_that_ask_for_a_poll(monkeypatch: pytest.
     assert calls == []
 
     assert adapter.start_lanes({"BTCUSDT": feeds("trades")}, lambda row: None, stop) == []
+
+
+def test_live_subscription_requests_carry_ids_and_the_24h_change_is_a_fraction() -> None:
+    adapter = BinanceAdapter()
+    topics = [f"s{index}@aggTrade" for index in range(60)]
+
+    added = [json.loads(text) for text in adapter.add_messages(topics)]
+    removed = [json.loads(text) for text in adapter.remove_messages(topics[:2])]
+
+    assert [message["method"] for message in added] == ["SUBSCRIBE", "SUBSCRIBE"]
+    assert [len(message["params"]) for message in added] == [50, 10]
+    assert [message["id"] for message in added] == [1, 2]
+    assert removed == [{"method": "UNSUBSCRIBE", "params": topics[:2], "id": 3}]
+
+    rows = adapter.normalize(
+        json.dumps({"stream": "btcusdt@ticker", "data": {"e": "24hrTicker", "E": 1700000000000, "s": "BTCUSDT", "c": "60000", "q": "5e9", "v": "80000", "P": "-2.5"}}),
+        9,
+    )
+    assert rows[0]["values"] == {"last_price": 60000.0, "turnover_24h": 5e9, "volume_24h": 80000.0, "price_change_24h_pct": -0.025}
+    assert adapter.turnovers([{"symbol": "BTCUSDT", "quoteVolume": "5e9"}, {"symbol": "BAD", "quoteVolume": "n/a"}]) == {"BTCUSDT": 5e9}

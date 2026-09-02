@@ -52,17 +52,19 @@ def test_the_documented_example_parses() -> None:
     assert config.storage.retention_days == 30
     assert config.topics_per_connection == 150
     assert config.snapshot_cadence == "day"
-    assert [tier.name for tier in config.tiers] == ["deep", "crowded", "wide"]
-    assert [feed.text for feed in config.tier("crowded").feeds] == ["book:50"]
+    assert [tier.name for tier in config.tiers] == ["core", "crowded", "wide"]
+    core = config.tier("core").universe
+    assert (core.kind, core.top, core.leave_top, core.quote) == ("top_turnover", 30, 45, "USDT")
+    assert core.live and core.dynamic
     crowded = config.tier("crowded").universe
     assert crowded.kind == "funding_below"
-    assert (crowded.threshold_bp, crowded.sticky_days, crowded.exclude_tiers) == (10.0, 2, ("deep",))
-    assert crowded.dynamic
-    deep = config.tier("deep").universe
-    assert deep.kind == "file"
-    assert deep.path == ROOT / "deploy" / "forward-capture-symbols.txt"
-    assert not deep.dynamic
-    assert config.tier("wide").universe.quote == "USDT"
+    assert (crowded.threshold_bp, crowded.sticky_hours, crowded.exclude_tiers) == (8.0, 48.0, ("core",))
+    assert [feed.text for feed in config.tier("crowded").feeds] == ["book:50", "trades"]
+    wide = config.tier("wide")
+    assert [feed.text for feed in wide.feeds] == ["ticker", "liquidations"]
+    assert wide.universe.quote == "USDT" and wide.universe.dynamic and not wide.universe.live
+    assert config.budget.monthly_gb == 1300.0
+    assert config.budget.shed == (("crowded", "trades"), ("core", "book:1"))
 
 
 def test_a_config_file_is_read_and_relative_paths_take_the_base_directory(tmp_path: Path) -> None:
@@ -206,7 +208,7 @@ def test_a_dynamic_universe_needs_its_own_dial() -> None:
     default_sticky = parse(
         MINIMAL.replace('{ kind = "symbols", symbols = ["BTCUSDT"] }', '{ kind = "funding_below", threshold_bp = 10 }')
     )
-    assert default_sticky.tiers[0].universe.sticky_days == 1
+    assert default_sticky.tiers[0].universe.sticky_hours == 48.0
     with pytest.raises(ConfigError, match="top"):
         parse(MINIMAL.replace('{ kind = "symbols", symbols = ["BTCUSDT"] }', '{ kind = "top_turnover" }'))
     with pytest.raises(ConfigError, match="top"):
@@ -236,3 +238,54 @@ def test_the_shipped_example_configs_parse() -> None:
     for path in sorted((ROOT / "market_tape" / "examples").glob("*.toml")):
         config = load_config(path, base_dir=ROOT)
         assert config.tiers
+
+
+def _with_universe(universe: str) -> str:
+    return MINIMAL.replace('{ kind = "symbols", symbols = ["BTCUSDT"] }', universe)
+
+
+def test_the_live_universes_take_their_dials_and_refuse_the_senseless() -> None:
+    surge = parse(_with_universe('{ kind = "turnover_surge", ratio = 3, sticky_hours = 24 }')).tiers[0].universe
+    assert (surge.kind, surge.ratio, surge.sticky_hours, surge.live, surge.dynamic) == ("turnover_surge", 3.0, 24.0, True, True)
+    with pytest.raises(ConfigError, match="ratio"):
+        parse(_with_universe('{ kind = "turnover_surge", ratio = 1 }'))
+
+    move = parse(_with_universe('{ kind = "price_move", pct = 0.15 }')).tiers[0].universe
+    assert (move.pct, move.sticky_hours) == (0.15, 48.0)
+    with pytest.raises(ConfigError, match="pct"):
+        parse(_with_universe('{ kind = "price_move" }'))
+
+    top = parse(_with_universe('{ kind = "top_turnover", top = 30 }')).tiers[0].universe
+    assert (top.top, top.leave_top, top.live) == (30, 45, True)
+    with pytest.raises(ConfigError, match="leave_top"):
+        parse(_with_universe('{ kind = "top_turnover", top = 30, leave_top = 10 }'))
+
+    days = parse(_with_universe('{ kind = "funding_below", threshold_bp = 10, sticky_days = 2 }')).tiers[0].universe
+    assert days.sticky_hours == 48.0
+    with pytest.raises(ConfigError, match="not both"):
+        parse(_with_universe('{ kind = "funding_below", threshold_bp = 10, sticky_days = 2, sticky_hours = 1 }'))
+    listed = parse(_with_universe('{ kind = "listed" }')).tiers[0].universe
+    assert (listed.live, listed.dynamic) == (False, True)
+
+
+def test_the_budget_names_a_monthly_allowance_and_pairs_that_exist() -> None:
+    config = parse(MINIMAL + '\n[budget]\nmonthly_gb = 1300\nshed = ["deep:book:50"]\nrestore_below = 0.7\n')
+    assert config.budget.enforced
+    assert config.budget.monthly_gb == 1300.0
+    assert config.budget.restore_below == 0.7
+    assert config.budget.act_every_minutes == 60.0
+    assert config.budget.shed == (("deep", "book:50"),)
+
+    assert not parse(MINIMAL).budget.enforced
+    with pytest.raises(ConfigError, match="tier:feed"):
+        parse(MINIMAL + '\n[budget]\nmonthly_gb = 10\nshed = ["nope:trades"]\n')
+    with pytest.raises(ConfigError, match="tier:feed"):
+        parse(MINIMAL + '\n[budget]\nmonthly_gb = 10\nshed = ["deep:trades"]\n')
+    with pytest.raises(ConfigError, match="repeats"):
+        parse(MINIMAL + '\n[budget]\nmonthly_gb = 10\nshed = ["deep:book:50", "deep:book:50"]\n')
+    with pytest.raises(ConfigError, match="needs budget.monthly_gb"):
+        parse(MINIMAL + '\n[budget]\nshed = ["deep:book:50"]\n')
+    with pytest.raises(ConfigError, match="restore_below"):
+        parse(MINIMAL + '\n[budget]\nmonthly_gb = 10\nrestore_below = 1.5\n')
+    with pytest.raises(ConfigError, match="positive"):
+        parse(MINIMAL + '\n[budget]\nmonthly_gb = 0\n')

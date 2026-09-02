@@ -308,3 +308,25 @@ def test_host_liveness_unit_runs_the_host_scope_with_the_box_checks() -> None:
     assert "--upload-stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success" in unit
     demo = (ROOT / "deploy" / "systemd" / "liquidity-migration-demo-liveness.service").read_text(encoding="utf-8")
     assert "--host-clock-check" not in demo, "one cause must page once: the clock is the host scope's"
+
+
+def test_a_recorder_over_its_byte_budget_warns_once_with_what_it_shed(tmp_path: Path) -> None:
+    now = time.time()
+    status = tmp_path / "status.json"
+    payload = {
+        "last_receive_ns": int((now - 5) * 1e9),
+        "disk_blocked": False,
+        "dropped_frames": 0,
+        "disk_dropped_frames": 0,
+        "shards": [{"connected": True}],
+        "budget": {"monthly_gb": 1300, "projected_month_gb": 1710.4, "over": True, "shed": ["movers:book:50"]},
+    }
+    status.write_text(json.dumps(payload))
+    alerts, _ = liveness.evaluate_capture_status(status, now=now, max_silence_sec=120, counters={})
+    assert [(alert.key, alert.severity) for alert in alerts] == [("capture-budget", "WARNING")]
+    assert "1710.4 GB" in alerts[0].message and "1300" in alerts[0].message and "movers:book:50" in alerts[0].message
+
+    payload["budget"] = {"monthly_gb": 1300, "projected_month_gb": 900.0, "over": False, "shed": ["movers:book:50"]}
+    status.write_text(json.dumps(payload))
+    alerts, _ = liveness.evaluate_capture_status(status, now=now, max_silence_sec=120, counters={}, label="forward-market-binance")
+    assert alerts == []

@@ -1,16 +1,18 @@
-"""The recorder's pure parts: tier universes, topic planning, shards, the status file."""
+"""The recorder's pure parts: universes, live promotion, topic planning, shards, bytes, budget, status."""
 
 from __future__ import annotations
 
 import json
-import queue
 import shutil
+import threading
+import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from market_tape.config import (
+    BudgetSettings,
     CaptureConfig,
     ConfigError,
     Feed,
@@ -20,17 +22,18 @@ from market_tape.config import (
     VenueSettings,
     parse_config,
 )
-from market_tape.record import Recorder, Shard, shard_topics
+from market_tape.record import BudgetController, ByteMeter, Recorder, Shard, shard_topics
 from market_tape.schema import SCHEMA_VERSION
 from market_tape.venues.bybit import BybitAdapter
 
 needs_zstd = pytest.mark.skipif(shutil.which("zstd") is None, reason="zstd is not installed")
 
-DAY_NS = 86_400 * 1_000_000_000
+HOUR_NS = 3_600 * 1_000_000_000
+DAY_NS = 24 * HOUR_NS
 BASE_NS = 1_800_000_000 * 1_000_000_000  # 2027-01-15T08:00:00Z
 
 DEEP_FEEDS = (Feed("book", "50"), Feed("book", "1"), Feed("trades"), Feed("ticker"), Feed("liquidations"))
-WIDE_FEEDS = (Feed("book", "1"), Feed("trades"), Feed("ticker"), Feed("liquidations"))
+WIDE_FEEDS = (Feed("ticker"), Feed("liquidations"))
 
 
 def instrument(symbol: str, quote: str = "USDT") -> dict[str, Any]:
@@ -43,16 +46,30 @@ def instrument(symbol: str, quote: str = "USDT") -> dict[str, Any]:
     }
 
 
-def build(tmp_path: Path, *tiers: Tier, cadence: str = "day", per_connection: int = 150) -> Recorder:
+def build(
+    tmp_path: Path,
+    *tiers: Tier,
+    cadence: str = "day",
+    per_connection: int = 150,
+    budget: BudgetSettings | None = None,
+) -> Recorder:
     config = CaptureConfig(
         venue=VenueSettings("bybit", "linear"),
         storage=StorageSettings(root=tmp_path, queue_frames=16, status_interval_seconds=30.0),
         tiers=tiers,
         topics_per_connection=per_connection,
         snapshot_cadence=cadence,
+        budget=budget or BudgetSettings(),
         source_path=Path("deploy/capture/bybit-linear.toml"),
     )
     return Recorder(config, adapter=BybitAdapter(rest_url="http://unused"))
+
+
+def ticker(symbol: str, **values: float) -> dict[str, Any]:
+    return {"kind": "ticker", "symbol": symbol, "values": values}
+
+
+# ---------------------------------------------------------------- building
 
 
 def test_a_recorder_needs_a_root_and_a_feed_the_venue_publishes(tmp_path: Path) -> None:
@@ -80,6 +97,9 @@ def test_a_symbol_file_that_names_nothing_is_refused(tmp_path: Path) -> None:
     assert recorder.static_symbols["deep"] == ("BTCUSDT", "ETHUSDT")
 
 
+# ---------------------------------------------------------------- universes
+
+
 def test_static_universes_resolve_without_the_venue_tables(tmp_path: Path) -> None:
     recorder = build(tmp_path, Tier("deep", DEEP_FEEDS, Universe("symbols", symbols=("BTCUSDT", "AGIUSDT"))))
 
@@ -91,6 +111,7 @@ def test_the_listed_universe_takes_the_quote_and_a_dynamic_tier_without_tables_i
     tables = {"instruments": [instrument("BTCUSDT"), instrument("ETHPERP", "USDC")], "tickers": []}
 
     assert recorder.resolve_tiers(BASE_NS, tables) == {"wide": ["BTCUSDT"]}
+    recorder.tables = None
     assert recorder.resolve_tiers(BASE_NS, None) == {"wide": []}
 
 
@@ -110,6 +131,26 @@ def test_top_turnover_takes_the_ranked_head_of_the_listed_names(tmp_path: Path) 
     assert recorder.resolve_tiers(BASE_NS, tables) == {"busy": ["BTCUSDT", "ETHUSDT"]}
 
 
+def test_top_turnover_follows_the_ticker_live_and_leaves_only_below_the_wider_rank(tmp_path: Path) -> None:
+    recorder = build(
+        tmp_path, Tier("core", (Feed("trades"),), Universe("top_turnover", top=2, leave_top=3, quote="USDT"))
+    )
+    names = ["AUSDT", "BUSDT", "CUSDT", "DUSDT"]
+    tables = {
+        "instruments": [instrument(name) for name in names],
+        "tickers": [{"symbol": name, "turnover24h": str(turnover)} for name, turnover in zip(names, (400, 300, 200, 100))],
+    }
+    assert recorder.resolve_tiers(BASE_NS, tables)["core"] == ["AUSDT", "BUSDT"]
+
+    # D's turnover explodes on the ticker: it enters at once, B slips to rank 3 and stays.
+    recorder.live.observe("DUSDT", {"turnover_24h": 350.0}, BASE_NS + 1)
+    assert recorder.resolve_tiers(BASE_NS + 2)["core"] == ["AUSDT", "BUSDT", "DUSDT"]
+
+    # C overtakes both: C enters at rank 2, D holds rank 3, B is rank 4, past leave_top, and goes.
+    recorder.live.observe("CUSDT", {"turnover_24h": 360.0}, BASE_NS + 3)
+    assert recorder.resolve_tiers(BASE_NS + 4)["core"] == ["AUSDT", "CUSDT", "DUSDT"]
+
+
 def test_an_exclude_tiers_universe_drops_the_names_an_earlier_tier_holds(tmp_path: Path) -> None:
     recorder = build(
         tmp_path,
@@ -121,14 +162,14 @@ def test_an_exclude_tiers_universe_drops_the_names_an_earlier_tier_holds(tmp_pat
     assert recorder.resolve_tiers(BASE_NS, tables) == {"deep": ["BTCUSDT"], "wide": ["AGIUSDT"]}
 
 
-def test_a_crowded_name_keeps_its_tier_for_two_days_and_a_delisted_one_drops_at_once(tmp_path: Path) -> None:
+def test_a_crowded_name_keeps_its_tier_for_its_sticky_hours_and_a_delisted_one_drops_at_once(tmp_path: Path) -> None:
     recorder = build(
         tmp_path,
         Tier("deep", DEEP_FEEDS, Universe("symbols", symbols=("BTCUSDT",))),
         Tier(
             "crowded",
             (Feed("book", "50"),),
-            Universe("funding_below", threshold_bp=10.0, sticky_days=2, quote="USDT", exclude_tiers=("deep",)),
+            Universe("funding_below", threshold_bp=10.0, sticky_hours=48.0, quote="USDT", exclude_tiers=("deep",)),
         ),
     )
     instruments = [instrument(symbol) for symbol in ("BTCUSDT", "AGIUSDT", "SOMIUSDT")]
@@ -141,11 +182,11 @@ def test_a_crowded_name_keeps_its_tier_for_two_days_and_a_delisted_one_drops_at_
     first = recorder.resolve_tiers(BASE_NS, {"instruments": instruments, "tickers": days[0]})
     assert first["crowded"] == ["AGIUSDT"]
 
-    # Day two: SOMI qualifies, AGI recovered but stays through its second day.
+    # Day two: SOMI qualifies, AGI recovered but is inside its 48 hours.
     second = recorder.resolve_tiers(BASE_NS + DAY_NS, {"instruments": instruments, "tickers": days[1]})
     assert second["crowded"] == ["AGIUSDT", "SOMIUSDT"]
 
-    # Day three: AGI ages out, SOMI keeps its second day, and a delisted name drops.
+    # Day three: AGI's 48 hours are up; SOMI is inside its own, but delisted, so it drops.
     instruments.pop()
     third = recorder.resolve_tiers(BASE_NS + 2 * DAY_NS, {"instruments": instruments, "tickers": days[2]})
     assert third["crowded"] == []
@@ -154,7 +195,7 @@ def test_a_crowded_name_keeps_its_tier_for_two_days_and_a_delisted_one_drops_at_
 def test_a_crowded_name_at_exactly_the_threshold_qualifies_and_a_shallower_one_does_not(tmp_path: Path) -> None:
     recorder = build(
         tmp_path,
-        Tier("crowded", (Feed("book", "50"),), Universe("funding_below", threshold_bp=10.0, sticky_days=1, quote="USDT")),
+        Tier("crowded", (Feed("book", "50"),), Universe("funding_below", threshold_bp=10.0, quote="USDT")),
     )
     tables = {
         "instruments": [instrument(symbol) for symbol in ("AGIUSDT", "SOMIUSDT", "DOGEUSDT", "BADUSDT", "NEWUSDT")],
@@ -168,6 +209,65 @@ def test_a_crowded_name_at_exactly_the_threshold_qualifies_and_a_shallower_one_d
     }
 
     assert recorder.resolve_tiers(BASE_NS, tables)["crowded"] == ["AGIUSDT", "SOMIUSDT"]
+
+
+def test_a_funding_collapse_on_the_ticker_promotes_within_the_tick_and_expires_after_sticky_hours(tmp_path: Path) -> None:
+    recorder = build(
+        tmp_path,
+        Tier("crowded", (Feed("book", "50"),), Universe("funding_below", threshold_bp=8.0, sticky_hours=2.0, quote="USDT")),
+    )
+    tables = {"instruments": [instrument("AGIUSDT"), instrument("BTCUSDT")], "tickers": [{"symbol": "AGIUSDT", "fundingRate": "0.0001"}]}
+    assert recorder.resolve_tiers(BASE_NS, tables)["crowded"] == []
+
+    # 14:00: the ticker shows -12 bp; the next tick promotes.
+    recorder.live.observe("AGIUSDT", {"funding_rate": -0.0012, "mark_price": 0.42}, BASE_NS + 6 * HOUR_NS)
+    assert recorder.resolve_tiers(BASE_NS + 6 * HOUR_NS + 30 * 10**9)["crowded"] == ["AGIUSDT"]
+
+    # The rate recovers; the name stays for its two sticky hours, then goes.
+    recorder.live.observe("AGIUSDT", {"funding_rate": 0.0001}, BASE_NS + 7 * HOUR_NS)
+    assert recorder.resolve_tiers(BASE_NS + 7 * HOUR_NS)["crowded"] == ["AGIUSDT"]
+    assert recorder.resolve_tiers(BASE_NS + 8 * HOUR_NS + 30 * 10**9)["crowded"] == []
+
+    # A ticker for a name the instrument table does not list never promotes it.
+    recorder.live.observe("GHOSTUSDT", {"funding_rate": -0.0050}, BASE_NS + 9 * HOUR_NS)
+    assert recorder.resolve_tiers(BASE_NS + 9 * HOUR_NS)["crowded"] == []
+
+
+def test_a_turnover_surge_is_measured_against_the_last_snapshot(tmp_path: Path) -> None:
+    recorder = build(
+        tmp_path,
+        Tier("surging", (Feed("book", "50"),), Universe("turnover_surge", ratio=3.0, sticky_hours=1.0, quote="USDT")),
+    )
+    tables = {
+        "instruments": [instrument("HNTUSDT"), instrument("BTCUSDT")],
+        "tickers": [{"symbol": "HNTUSDT", "turnover24h": "1000000"}, {"symbol": "BTCUSDT", "turnover24h": "9e9"}],
+    }
+    assert recorder.resolve_tiers(BASE_NS, tables)["surging"] == []
+
+    recorder.live.observe("HNTUSDT", {"turnover_24h": 2_999_999.0}, BASE_NS + 1)
+    assert recorder.resolve_tiers(BASE_NS + 2)["surging"] == []
+    recorder.live.observe("HNTUSDT", {"turnover_24h": 3_000_000.0}, BASE_NS + 3)
+    assert recorder.resolve_tiers(BASE_NS + 4)["surging"] == ["HNTUSDT"]
+
+    # The next snapshot raises the baseline to the new level; the surge is over, the name lingers an hour.
+    recorder.resolve_tiers(BASE_NS + 5, {"instruments": tables["instruments"], "tickers": [{"symbol": "HNTUSDT", "turnover24h": "3000000"}]})
+    assert recorder.resolve_tiers(BASE_NS + 6)["surging"] == ["HNTUSDT"]
+    assert recorder.resolve_tiers(BASE_NS + 4 + HOUR_NS)["surging"] == []
+
+
+def test_a_price_move_promotes_either_direction(tmp_path: Path) -> None:
+    recorder = build(
+        tmp_path, Tier("movers", (Feed("book", "50"),), Universe("price_move", pct=0.15, sticky_hours=1.0, quote="USDT"))
+    )
+    recorder.tables = {"instruments": [instrument("UPUSDT"), instrument("DOWNUSDT"), instrument("FLATUSDT")], "tickers": []}
+    recorder.live.observe("UPUSDT", {"price_change_24h_pct": 0.151}, BASE_NS)
+    recorder.live.observe("DOWNUSDT", {"price_change_24h_pct": -0.20}, BASE_NS)
+    recorder.live.observe("FLATUSDT", {"price_change_24h_pct": 0.149}, BASE_NS)
+
+    assert recorder.resolve_tiers(BASE_NS + 1)["movers"] == ["DOWNUSDT", "UPUSDT"]
+
+
+# ------------------------------------------------------------------- topics
 
 
 def test_a_topic_an_earlier_tier_claimed_is_not_subscribed_twice(tmp_path: Path) -> None:
@@ -190,6 +290,21 @@ def test_a_topic_an_earlier_tier_claimed_is_not_subscribed_twice(tmp_path: Path)
     assert [feed.text for feed in feeds_by_symbol["ETHUSDT"]] == ["book:50"]
 
 
+def test_a_shed_pair_leaves_its_topics_out_of_the_plan(tmp_path: Path) -> None:
+    recorder = build(
+        tmp_path,
+        Tier("deep", (Feed("book", "50"), Feed("trades")), Universe("symbols", symbols=("BTCUSDT",))),
+        Tier("wide", (Feed("book", "1"), Feed("ticker")), Universe("listed", quote="USDT", exclude_tiers=("deep",))),
+    )
+    tables = {"instruments": [instrument("BTCUSDT"), instrument("ETHUSDT")], "tickers": []}
+    resolved = recorder.resolve_tiers(BASE_NS, tables)
+
+    topics, feeds = recorder.plan_topics(resolved, shed=[("wide", "book:1")])
+
+    assert topics == {"deep": ["orderbook.50.BTCUSDT", "publicTrade.BTCUSDT"], "wide": ["tickers.ETHUSDT"]}
+    assert [feed.text for feed in feeds["ETHUSDT"]] == ["ticker"]
+
+
 def test_topics_are_sharded_in_order(tmp_path: Path) -> None:
     recorder = build(
         tmp_path,
@@ -205,6 +320,96 @@ def test_topics_are_sharded_in_order(tmp_path: Path) -> None:
     assert shard_topics([], 7) == []
     with pytest.raises(ValueError):
         shard_topics(topics, 0)
+
+
+# ------------------------------------------------------------------- shards
+
+
+class FakeSocket:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def send(self, text: str) -> None:
+        self.sent.append(text)
+
+    def close(self) -> None:
+        return None
+
+
+def unstarted_shard(recorder: Recorder, tier: str, topics: list[str], index: int = 0) -> Shard:
+    return Shard(
+        index=index,
+        tier=tier,
+        topics=list(topics),
+        adapter=recorder.adapter,
+        frames=recorder.frames,
+        on_frame=recorder._on_frame,
+        on_overrun=recorder._on_overrun,
+        emit=recorder.emit,
+    )
+
+
+def test_a_live_shard_changes_its_subscription_in_place(tmp_path: Path) -> None:
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+    shard = unstarted_shard(recorder, "deep", ["publicTrade.BTCUSDT", "publicTrade.ETHUSDT"])
+    socket = FakeSocket()
+    shard.socket = socket  # type: ignore[assignment]
+    shard.connected = True
+
+    added, removed = shard.update(["publicTrade.BTCUSDT", "publicTrade.AGIUSDT"])
+
+    assert (added, removed) == (["publicTrade.AGIUSDT"], ["publicTrade.ETHUSDT"])
+    assert shard.topics == ["publicTrade.BTCUSDT", "publicTrade.AGIUSDT"]
+    assert [json.loads(text) for text in socket.sent] == [
+        {"op": "unsubscribe", "args": ["publicTrade.ETHUSDT"]},
+        {"op": "subscribe", "args": ["publicTrade.AGIUSDT"]},
+    ]
+    # Nothing to change sends nothing.
+    assert shard.update(["publicTrade.BTCUSDT", "publicTrade.AGIUSDT"]) == ([], [])
+    assert len(socket.sent) == 2
+
+
+def test_a_shard_that_is_not_connected_only_records_the_new_list(tmp_path: Path) -> None:
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+    shard = unstarted_shard(recorder, "deep", ["publicTrade.BTCUSDT"])
+
+    added, removed = shard.update(["publicTrade.ETHUSDT"])
+
+    assert (added, removed) == (["publicTrade.ETHUSDT"], ["publicTrade.BTCUSDT"])
+    assert shard.topics == ["publicTrade.ETHUSDT"]
+
+
+def test_reconciling_a_tier_keeps_placement_fills_room_and_closes_empty_shards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))), per_connection=2)
+    created: list[Shard] = []
+
+    def quiet_shard(tier: str, topics: list[str]) -> Shard:
+        shard = unstarted_shard(recorder, tier, topics, index=len(created))
+        created.append(shard)
+        return shard
+
+    monkeypatch.setattr(recorder, "_new_shard", quiet_shard)
+
+    recorder._reconcile_tier("deep", ["t1", "t2", "t3"])
+    assert [shard.topics for shard in recorder.tier_shards["deep"]] == [["t1", "t2"], ["t3"]]
+
+    # t2 leaves, t4 arrives: t4 takes t2's room; nobody reconnects.
+    recorder._reconcile_tier("deep", ["t1", "t3", "t4"])
+    assert [shard.topics for shard in recorder.tier_shards["deep"]] == [["t1", "t4"], ["t3"]]
+    assert len(created) == 2
+
+    # Only t3 is left: the first shard empties and is closed; the second keeps t3 on its own connection.
+    recorder._reconcile_tier("deep", ["t3"])
+    assert [shard.topics for shard in recorder.tier_shards["deep"]] == [["t3"]]
+    assert created[0].stop.is_set() and not created[1].stop.is_set()
+
+    # More than the room left opens a new shard for the overflow only.
+    recorder._reconcile_tier("deep", ["t3", "t5", "t6", "t7"])
+    assert [shard.topics for shard in recorder.tier_shards["deep"]] == [["t3", "t5"], ["t6", "t7"]]
+    assert len(created) == 3
+
+
+# ---------------------------------------------------------------- refreshes
 
 
 @needs_zstd
@@ -252,30 +457,126 @@ def test_a_venue_that_will_not_answer_leaves_the_snapshot_clock_open(tmp_path: P
     assert recorder.tier_symbols == {"deep": ["BTCUSDT"], "wide": []}
 
 
+@needs_zstd
+def test_a_replan_reconciles_only_the_tiers_whose_topics_changed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = build(
+        tmp_path,
+        Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))),
+        Tier("crowded", (Feed("book", "50"),), Universe("funding_below", threshold_bp=8.0, quote="USDT")),
+    )
+    tables = {"instruments": [instrument("BTCUSDT"), instrument("AGIUSDT")], "tickers": []}
+    recorder.adapter.fetch_tables = lambda: tables  # type: ignore[method-assign]
+    reconciled: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(recorder, "_reconcile_tier", lambda name, topics: reconciled.append((name, list(topics))))
+
+    recorder._refresh(BASE_NS, restart=True)
+    assert reconciled == [("deep", ["publicTrade.BTCUSDT"])]
+
+    recorder.live.observe("AGIUSDT", {"funding_rate": -0.0011}, BASE_NS + 1)
+    changed = recorder._replan(BASE_NS + 2, apply=True)
+    assert changed == ["crowded"]
+    assert reconciled[-1] == ("crowded", ["orderbook.50.AGIUSDT"])
+
+
+# ---------------------------------------------------------------- the bytes
+
+
+def test_the_byte_meter_keeps_a_day_per_key_and_the_window_it_has_seen() -> None:
+    meter = ByteMeter(BASE_NS)
+    meter.add("all", 100, BASE_NS)
+    meter.add("all", 50, BASE_NS + 30 * 10**9)
+    meter.add("tier:wide", 50, BASE_NS + 30 * 10**9)
+    assert meter.last_day("all", BASE_NS + 60 * 10**9) == 150
+    assert meter.last_day("tier:wide", BASE_NS + 60 * 10**9) == 50
+
+    # A day later the old minutes fall out of the window as new bytes arrive.
+    meter.add("all", 7, BASE_NS + DAY_NS + 60 * 10**9)
+    assert meter.totals["all"] == 157
+    assert meter.last_day("all", BASE_NS + DAY_NS + 60 * 10**9) == 7
+    assert meter.last_day("missing", BASE_NS) == 0
+    assert meter.window_ns(BASE_NS + 60 * 10**9) == 60 * 10**9
+    assert meter.window_ns(BASE_NS + 3 * DAY_NS) == DAY_NS
+    assert meter.keys("tier:") == ["tier:wide"]
+
+
+def test_frames_are_metered_by_tier_and_feed_class(tmp_path: Path) -> None:
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+    trade = {"kind": "public_trade", "symbol": "BTCUSDT"}
+    book = {"kind": "orderbook_delta", "symbol": "BTCUSDT", "depth": 50}
+
+    recorder._meter("deep", [trade], 120, BASE_NS)
+    recorder._meter("deep", [book], 800, BASE_NS)
+    recorder._meter("wide", [], 40, BASE_NS)
+
+    assert Recorder.feed_class([book]) == "book:50"
+    assert Recorder.feed_class([{"kind": "kline", "interval": "1m"}]) == "kline:1m"
+    status = recorder.bytes_status(BASE_NS + 1)
+    assert status["received_total"] == 960
+    assert status["by_tier_24h"] == {"deep": 920, "wide": 40}
+    assert status["by_feed_24h"] == {"deep:book:50": 800, "deep:trades": 120, "wide:control": 40}
+
+
+def test_the_budget_sheds_in_order_one_an_hour_and_restores_in_reverse_when_under_pace() -> None:
+    meter = ByteMeter(BASE_NS)
+    settings = BudgetSettings(monthly_gb=1.0, shed=(("wide", "book:1"), ("movers", "book:50")), restore_below=0.8, act_every_minutes=60)
+    budget = BudgetController(settings, meter)
+
+    # Less than an hour of history: no projection, no action.
+    meter.add("all", 10**9, BASE_NS + 60 * 10**9)
+    assert budget.step(BASE_NS + 60 * 10**9) is False
+    assert budget.projected_gb is None
+
+    # One hour in, 1 GB received: 720 GB a month against a 1 GB allowance.
+    assert budget.step(BASE_NS + HOUR_NS) is True
+    assert budget.shed_active == [("wide", "book:1")]
+    assert budget.over is True
+    # Still over, but the hour has not passed.
+    assert budget.step(BASE_NS + HOUR_NS + 10 * 60 * 10**9) is False
+    assert budget.step(BASE_NS + 2 * HOUR_NS) is True
+    assert budget.shed_active == [("wide", "book:1"), ("movers", "book:50")]
+    # Nothing left to shed.
+    assert budget.step(BASE_NS + 3 * HOUR_NS) is False
+
+    # A day later the meter shows almost nothing: restore the last pair first.
+    late = BASE_NS + 2 * DAY_NS
+    meter.add("all", 1, late)
+    assert budget.step(late) is True
+    assert budget.shed_active == [("wide", "book:1")]
+    assert budget.step(late + HOUR_NS) is True
+    assert budget.shed_active == []
+    assert budget.over is False
+    status = budget.status()
+    assert status["monthly_gb"] == 1.0 and status["shed"] == [] and status["shed_order"] == ["wide:book:1", "movers:book:50"]
+
+
+def test_without_a_budget_the_controller_only_projects() -> None:
+    meter = ByteMeter(BASE_NS)
+    budget = BudgetController(BudgetSettings(), meter)
+    meter.add("all", 5 * 10**8, BASE_NS + HOUR_NS)
+
+    assert budget.step(BASE_NS + HOUR_NS) is False
+    assert budget.projected_gb == pytest.approx(360.0)
+    assert budget.over is False
+
+
+# ------------------------------------------------------------------- status
+
+
 def test_the_status_file_carries_what_the_host_watchdog_reads(tmp_path: Path) -> None:
     recorder = build(
         tmp_path,
         Tier("deep", (Feed("book", "50"), Feed("trades")), Universe("symbols", symbols=("BTCUSDT",))),
         Tier("wide", (Feed("ticker"),), Universe("listed", quote="USDT", exclude_tiers=("deep",))),
+        budget=BudgetSettings(monthly_gb=1300.0, shed=(("wide", "ticker"),)),
     )
     recorder.tier_symbols = {"deep": ["BTCUSDT"], "wide": ["AGIUSDT"]}
     recorder.tier_topics = {"deep": ["orderbook.50.BTCUSDT", "publicTrade.BTCUSDT"], "wide": ["tickers.AGIUSDT"]}
-    recorder.tier_shards["deep"] = [
-        Shard(
-            index=0,
-            tier="deep",
-            topics=recorder.tier_topics["deep"],
-            adapter=recorder.adapter,
-            frames=queue.Queue(),
-            on_frame=recorder._on_frame,
-            on_overrun=recorder._on_overrun,
-            emit=recorder.emit,
-        )
-    ]
+    recorder.tier_shards["deep"] = [unstarted_shard(recorder, "deep", recorder.tier_topics["deep"])]
     recorder._on_frame(BASE_NS)
     recorder._on_overrun()
     recorder.disk_dropped_frames = 3
     recorder.disk_blocked = True
+    recorder.budget.shed_active = [("wide", "ticker")]
 
     recorder._write_status()
     payload = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
@@ -298,7 +599,9 @@ def test_the_status_file_carries_what_the_host_watchdog_reads(tmp_path: Path) ->
         {
             "name": "deep",
             "universe": "symbols",
+            "live": False,
             "feeds": ["book:50", "trades"],
+            "shed": [],
             "symbols": 1,
             "topics": 2,
             "names": ["BTCUSDT"],
@@ -306,12 +609,18 @@ def test_the_status_file_carries_what_the_host_watchdog_reads(tmp_path: Path) ->
         {
             "name": "wide",
             "universe": "listed",
+            "live": False,
             "feeds": ["ticker"],
+            "shed": ["ticker"],
             "symbols": 1,
             "topics": 1,
             "names": ["AGIUSDT"],
         },
     ]
+    assert payload["budget"]["monthly_gb"] == 1300.0
+    assert payload["budget"]["shed"] == ["wide:ticker"]
+    assert payload["budget"]["over"] is False
+    assert set(payload["bytes"]) == {"received_total", "received_24h", "window_seconds", "by_tier_24h", "by_feed_24h"}
 
 
 def test_a_wide_tier_lists_its_count_and_not_every_name(tmp_path: Path) -> None:
@@ -329,12 +638,40 @@ def test_a_row_handed_in_by_a_side_lane_reaches_the_writer_queue(tmp_path: Path)
 
     recorder.emit({"kind": "ticker", "symbol": "BTCUSDT", "local_receive_ts_ns": BASE_NS})
 
-    kind, payload, received_ns = recorder.frames.get_nowait()
+    kind, payload, received_ns, tier = recorder.frames.get_nowait()
     assert kind == "rows"
     assert payload == [{"kind": "ticker", "symbol": "BTCUSDT", "local_receive_ts_ns": BASE_NS}]
     assert received_ns == BASE_NS
+    assert tier == "lanes"
     assert recorder.received_frames == 1
     assert recorder.last_receive_ns == BASE_NS
+
+
+@needs_zstd
+def test_the_writer_feeds_the_live_state_from_ticker_rows(tmp_path: Path) -> None:
+    recorder = build(tmp_path, Tier("wide", (Feed("ticker"),), Universe("listed", quote="USDT")))
+    frame = json.dumps(
+        {
+            "topic": "tickers.AGIUSDT",
+            "type": "delta",
+            "ts": 1_800_000_000_000,
+            "data": {"symbol": "AGIUSDT", "fundingRate": "-0.0015", "turnover24h": "123456", "price24hPcnt": "0.21"},
+        }
+    )
+    recorder.frames.put(("frame", frame, BASE_NS, "wide"))
+    recorder.frames.put(None)
+
+    recorder._write_loop()
+
+    live, _ = recorder.live.view()
+    assert live["AGIUSDT"].funding_rate == pytest.approx(-0.0015)
+    assert live["AGIUSDT"].turnover_24h == pytest.approx(123456.0)
+    assert live["AGIUSDT"].price_change_24h == pytest.approx(0.21)
+    assert live["AGIUSDT"].updated_ns == BASE_NS
+    assert recorder.written_rows == 1
+    assert recorder.meter.totals["feed:wide:ticker"] == len(frame)
+    for segment in recorder.writer.close():
+        recorder.compressor.submit(segment)
 
 
 def test_the_host_config_drives_the_same_recorder(tmp_path: Path) -> None:
@@ -346,6 +683,10 @@ market = "linear"
 [snapshots]
 cadence = "hour"
 
+[budget]
+monthly_gb = 100
+shed = ["wide:book:1"]
+
 [[tier]]
 name = "deep"
 feeds = ["book:50", "trades"]
@@ -356,8 +697,6 @@ name = "wide"
 feeds = ["book:1"]
 universe = { kind = "listed", quote = "USDT", exclude_tiers = ["deep"] }
 """
-    import tomllib
-
     config = parse_config(tomllib.loads(text), base_dir=tmp_path)
     recorder = Recorder(config, root=tmp_path, adapter=BybitAdapter(rest_url="http://unused"))
     tables = {"instruments": [instrument("BTCUSDT"), instrument("AGIUSDT")], "tickers": []}
@@ -365,4 +704,29 @@ universe = { kind = "listed", quote = "USDT", exclude_tiers = ["deep"] }
     topics = recorder.plan_topics(recorder.resolve_tiers(BASE_NS, tables))[0]
 
     assert recorder.snapshots.cadence == "hour"
+    assert recorder.budget.settings.monthly_gb == 100.0
     assert topics == {"deep": ["orderbook.50.BTCUSDT", "publicTrade.BTCUSDT"], "wide": ["orderbook.1.AGIUSDT"]}
+
+
+def test_the_shipped_host_configs_plan_every_tier(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    for name in ("bybit-linear", "binance-usdm"):
+        with (root / "deploy" / "capture" / f"{name}.toml").open("rb") as handle:
+            config = parse_config(tomllib.load(handle), base_dir=root)
+        assert config.budget.enforced
+        assert [tier.name for tier in config.tiers][-1] == "wide"
+        assert config.tier("wide").feeds == (Feed("ticker"), Feed("liquidations"))
+        assert config.tier("crowded").universe.kind == "funding_below"
+        assert config.tier("crowded").universe.threshold_bp == 8.0
+        for tier_name, feed in config.budget.shed:
+            assert feed in {f.text for f in config.tier(tier_name).feeds}
+        assert not any(name == "wide" and feed == "ticker" for name, feed in config.budget.shed[:-1])
+
+
+def test_stop_events_are_independent_per_shard(tmp_path: Path) -> None:
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+    first = unstarted_shard(recorder, "deep", ["a"], index=0)
+    second = unstarted_shard(recorder, "deep", ["b"], index=1)
+    first.close()
+    assert first.stop.is_set() and not second.stop.is_set()
+    assert isinstance(second.stop, threading.Event)

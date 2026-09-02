@@ -43,6 +43,7 @@ TICKER_FIELDS = {
     "ask1Size": "ask_size",
     "turnover24h": "turnover_24h",
     "volume24h": "volume_24h",
+    "price24hPcnt": "price_change_24h_pct",
 }
 
 
@@ -128,7 +129,13 @@ class BybitAdapter:
     def subscribe_messages(self, topics: list[str]) -> list[str]:
         return [json.dumps({"op": "subscribe", "args": topics[start : start + 10]}) for start in range(0, len(topics), 10)]
 
-    def on_connected(self, topics: list[str], emit: Emit, stop: threading.Event) -> None:
+    def add_messages(self, topics: list[str]) -> list[str]:
+        return self.subscribe_messages(topics)
+
+    def remove_messages(self, topics: list[str]) -> list[str]:
+        return [json.dumps({"op": "unsubscribe", "args": topics[start : start + 10]}) for start in range(0, len(topics), 10)]
+
+    def on_subscribed(self, topics: list[str], emit: Emit, stop: threading.Event) -> None:
         return None
 
     def start_lanes(self, feeds_by_symbol: Mapping[str, tuple[Feed, ...]], emit: Emit, stop: threading.Event) -> list[threading.Thread]:
@@ -160,8 +167,8 @@ class BybitAdapter:
                 symbols.add(symbol)
         return sorted(symbols)
 
-    def turnover_ranked(self, tickers: Iterable[Mapping[str, Any]]) -> list[str]:
-        ranked = []
+    def turnovers(self, tickers: Iterable[Mapping[str, Any]]) -> dict[str, float]:
+        result: dict[str, float] = {}
         for row in tickers:
             if not isinstance(row, Mapping):
                 continue
@@ -171,9 +178,12 @@ class BybitAdapter:
             except (TypeError, ValueError):
                 continue
             if symbol:
-                ranked.append((turnover, symbol))
-        ranked.sort(key=lambda item: (-item[0], item[1]))
-        return [symbol for _, symbol in ranked]
+                result[symbol] = turnover
+        return result
+
+    def turnover_ranked(self, tickers: Iterable[Mapping[str, Any]]) -> list[str]:
+        turnovers = self.turnovers(tickers)
+        return sorted(turnovers, key=lambda symbol: (-turnovers[symbol], symbol))
 
     def funding_rates(self, tickers: Iterable[Mapping[str, Any]]) -> dict[str, float]:
         rates: dict[str, float] = {}

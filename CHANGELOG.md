@@ -92,6 +92,38 @@ edit STATE.md to match.
   `rclone purge` cannot remove the folder itself, because the remote is
   authorized with the `drive.file` scope and a folder delete needs write
   access to every child.
+- **2026-09-02 — The recorders follow the action live and keep to a byte
+  budget.** The owner asked why deep capture waited for a daily snapshot to
+  notice a crowded name, and pointed at the host's 4 TB a month line. Read on
+  the host: inbound had been running at 74 GB a day (2.2 TB a month) with the
+  81-name deep tier alone drawing 40 to 80 GB a day, and the wide tier's top
+  of book and trades for 660 names, live for nine hours, had already written
+  3.6 GB compressed — about the deep tier's whole day. Both recorders are now
+  shaped around the ticker as the sensor: every listed name's funding, open
+  interest, price, 24h turnover and change, and best bid and ask, pushed as
+  they change, and cheap; the deep feeds go only where a sleeve acts. Four
+  live universe kinds read that stream as it is written and promote within
+  one maintenance tick, not at midnight: `top_turnover` (LONG's universe, the
+  30 busiest names on Bybit and 20 on Binance, leaving only below rank 45 or
+  30 so the boundary does not flap), `funding_below` (the crowd fee at or
+  below -8 bp, kept 48 hours after it last was, so capture starts as the crowd
+  forms before CARRY's -10 bp settled entry), `turnover_surge` (three times
+  the day's snapshot, the HNT case, kept 24 hours), and `price_move` (fifteen
+  percent either way, 24 hours). Promotion adds and removes topics on the open
+  connections; a connection reconnects only when the venue drops it, and a
+  REST book snapshot follows each live add on Binance in its own thread rather
+  than inside the socket callback. The wide tier keeps the ticker and the
+  liquidations and nothing heavier; the old symbol file becomes the pinned tier
+  and names only the maker canary. Every received byte is metered per tier and
+  per feed, and each recorder carries an inbound allowance for the month
+  (1,300 GB Bybit, 1,000 GB Binance): when the projection from its last day of
+  bytes runs over, it gives up the configured `tier:feed` pairs in order, one
+  an hour — the movers' and surging names' deep books first, the wide ticker
+  last — and restores them in reverse once under pace; the status file shows
+  the bytes, the projection, and what is shed, the packer's receipt shows the
+  month's upload bytes, and the host watchdog warns while a recorder is over.
+  The ticker contract gains the 24h price change as a fraction. Not a host
+  change until the next deploy.
 - **2026-09-02 — The market tape becomes its own package, records Binance
   too, reads back as typed rows, and the host is frozen.** The owner's
   direction: stop mining the exhausted candle panel and build forward data

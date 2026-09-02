@@ -23,6 +23,8 @@ topics_per_connection = 100
 [snapshots]
 cadence = "hour"
 
+# No [budget]: this configuration measures its bytes and sheds nothing.
+
 [[tier]]
 name = "everything"
 feeds = ["book:1000", "book:50", "book:1", "trades", "ticker", "liquidations", "kline:1m"]
