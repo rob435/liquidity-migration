@@ -95,7 +95,8 @@ edit STATE.md to match.
 - **2026-09-02 — The outside model hunt: fifty sources, thirty
   specifications on the Bybit panel, nothing new clears the bar.** The owner
   asked for the next step from outside the repository. Scouts read 22
-  practitioner posts and 32 papers with a stated rule and a number, and every
+  practitioner posts, 32 papers and 11 X threads with a stated rule and a
+  number, and every
   replicable model was run on one point-in-time panel of Bybit USDT perpetuals,
   2021-01-01 to 2026-08-30, 1,041 names including delisted ones, funding
   settlement-exact, 7.78 bp per side: nine-lookback breakout ensembles with
