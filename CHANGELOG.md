@@ -92,6 +92,65 @@ edit STATE.md to match.
   `rclone purge` cannot remove the folder itself, because the remote is
   authorized with the `drive.file` scope and a folder delete needs write
   access to every child.
+- **2026-09-02 — The market tape becomes its own package, records Binance
+  too, reads back as typed rows, and the host is frozen.** The owner's
+  direction: stop mining the exhausted candle panel and build forward data
+  capture we can make a strategy from. The recorder, the hourly Drive packer,
+  and a new reader are now one standalone package, `market_tape/`, which
+  imports nothing from the rest of the repository (a test enforces it) and can
+  move to its own repository unchanged. A recorder runs from one TOML config
+  (`deploy/capture/<venue>.toml`): a list of tiers, each a universe of symbols
+  (`symbols`, `file`, `listed`, `top_turnover`, `funding_below`) and the feeds
+  to take for them (`book:<levels>`, `trades`, `ticker`, `liquidations`,
+  `kline:<interval>`, `open_interest:<seconds>`); a symbol in several tiers
+  gets the union, each venue topic is subscribed once, and only the connections
+  of a tier whose topic list changed reconnect. The Bybit host config
+  reproduces the running recorder exactly — the symbol-file deep tier with
+  50-level books, the crowded tier for names at or below -10 bp of funding, the
+  wide tier of every other USDT perpetual — and
+  `market_tape/examples/bybit-full-universe.toml` is the configuration for a
+  machine with unbounded bandwidth and disk: one tier, every perpetual, every
+  feed. The row contract is frozen in `market_tape/schema.py` (schema 2: every
+  row carries `venue`; book rows carry the venue's own first and previous
+  update ids); rows recorded before that read back with the venue of their
+  archive. A Binance USD-M recorder joins as
+  `liquidity-migration-forward-capture-binance.service`: the 60 busiest USDT
+  perpetuals get the 1000-level diff book anchored by a paced REST snapshot on
+  every connect, plus top of book, aggregate trades, mark and index with
+  funding, the 24h ticker, and the all-market liquidation stream; the crowded
+  and wide tiers mirror Bybit's. Binance publishes the last settled funding
+  rate where Bybit publishes the upcoming one, so its crowded tier reacts one
+  settlement later. The packer ships every tape in one run
+  (`--tape NAME=ROOT`, landing under `LiquidityMigration/market-tape/<tape>/`)
+  and skips a tape whose recorder has not started; the host watchdog reads
+  both recorders' status files, the second one's alerts suffixed with its state
+  directory; deploy fingerprints each recorder separately and restarts only the
+  one whose inputs changed. Reading is the same package: `market_tape hours |
+  rows | bars | book` over a host root, a directory laid out like the Drive
+  folder, or `rclone:<remote:path>` through a cache; `market_tape.load`
+  streams typed rows across symbols in receive order, `market_tape.book`
+  rebuilds a book with each venue's own chaining rule (Binance's buffered
+  snapshot recipe included), and `market_tape.bars` turns any row stream into
+  fixed-interval bars. One small real hour of Bybit tape sits in
+  `tests/market_tape/fixtures/` in both layouts with its expected numbers; that
+  test is the frozen-schema regression. The study harness the closed programs
+  used comes into the repository as `liquidity_migration/research/lab/`: the
+  one-time input dumps, the daily panel, the fast numpy backtester, the
+  per-trade overlay against a matched random-exit placebo, the five plateau
+  checks, and the evidence-note renderer, plus `lab/tape.py`, which builds
+  bars from either venue's tape and measures cross-venue lead-lag at any
+  bucket size. The port was checked against the real artifacts: the
+  backtester is bit-identical to the original on the 2,067 × 1,041 panel,
+  the panel rebuild matches the original column for column, and the overlay
+  reproduces every published exit-study cell (ETH-regime-off 20 trades
+  +0.0183 t 1.95; funding ≥ 10 bp 13 trades +0.0186 t 1.53). Old script paths
+  (`scripts/research/capture_bybit_forward.py`,
+  `scripts/runtime/pack_market_tape.py`) still run the new code. And the host is
+  frozen except for emergencies (`docs/operations.md` §Host freeze): every
+  forward day of tape and of Lane-2 evidence is the scarce resource, and both
+  fleet-down incidents of the previous two days came from deploy changes. Not a
+  host change until the next deploy, which the owner runs; that deploy starts
+  the Binance recorder.
 - **2026-09-02 — The outside model hunt: fifty sources, thirty
   specifications on the Bybit panel, nothing new clears the bar.** The owner
   asked for the next step from outside the repository. Scouts read 22

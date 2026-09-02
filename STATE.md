@@ -180,9 +180,13 @@ heartbeat schema, process ID, installed feature-contract hashes, and global-to-
 class spool totals.
 
 Fleet liveness also pages when an engine's heartbeat says its rolling-loss
-trip is on. A separate host scope, independent of the fleet, watches the
-market recorder, the hourly market-tape upload to Google Drive, the six-hourly
-state backup to Google Drive, disk, and the host clock.
+trip is on. A separate host scope, independent of the fleet, watches the two
+market recorders (Bybit and Binance), the hourly market-tape upload to Google
+Drive, the six-hourly state backup to Google Drive, disk, and the host clock.
+
+The market recorders are the standalone `market_tape` package, one config file
+per venue under `deploy/capture/`; the Binance recorder exists in this
+generation and starts at the next deploy.
 
 Trade notifications derive entries from fresh engine-attributed venue
 positions and exits from the engine trade log. Target files are takeover
@@ -213,7 +217,10 @@ cannot reach it.
 
 ## Deployment status
 
-This repository generation requires a deploy before it becomes host state.
+The host is frozen except for emergencies
+([operations.md](docs/operations.md) §Host freeze): forward days of tape and
+of Lane-2 evidence are the scarce resource. This repository generation requires
+a deploy before it becomes host state, and the owner chooses when.
 Run:
 
 ```text

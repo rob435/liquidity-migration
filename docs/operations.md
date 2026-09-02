@@ -53,11 +53,33 @@ The signal worker has its own state and heartbeat under the public runtime
 tree. Each realm has distinct signal and control spools. Units absent from the
 manifest are disabled and removed during installation.
 
-Units the manifest marks `independent` — the market recorder, its hourly
-upload, the state backup, and the host watchdog — are outside the fleet
-lifecycle: no deploy, funded stop, or disarm stops them, and they start at
-boot. See [`deploy/systemd/README.md`](../deploy/systemd/README.md)
-§Independent units.
+Units the manifest marks `independent` — the two market recorders (Bybit and
+Binance), their hourly upload, the state backup, and the host watchdog — are
+outside the fleet lifecycle: no deploy, funded stop, or disarm stops them, and
+they start at boot. See [`deploy/systemd/README.md`](../deploy/systemd/README.md)
+§Independent units. A deploy restarts a recorder only when its own inputs
+changed: its unit file, its capture config under `deploy/capture/`, the symbol
+file, the `market_tape` package, or the Python dependencies.
+
+## Host freeze
+
+The host is frozen except for emergencies. Every forward day of tape, and every
+forward day of the registered LONG and CARRY configs' Lane-2 record, is the
+scarce resource, and nothing built on the laptop speeds that clock up; the two
+fleet-down incidents of 2026-09-01 and 2026-09-02 were both caused by deploy
+changes, not by markets.
+
+While the freeze holds:
+
+- No deploy, unit restart, config edit, or state change on the host, unless an
+  emergency needs one. An emergency is the fleet or a recorder being down, data
+  being lost, a security problem, or the funded account needing a stop.
+- Repository work continues and lands through pull requests; it becomes host
+  state only at the next deploy the owner chooses to run.
+- The Binance recorder in this generation starts at that next deploy. A deploy
+  restarts the trading fleet, so choose a moment when the engines hold little.
+
+The owner ends the freeze by running the deploy.
 
 ## Release layout
 
@@ -255,7 +277,7 @@ configured in `/etc/liquidity-migration/rclone.conf`:
 | What | When | Where on the Drive |
 | --- | --- | --- |
 | The engines' logs, closed trades, heartbeats, worker checkpoints, target books, spools, takeover sources, and the two rendered engine configs | every six hours (`backup.timer`) | `LiquidityMigration/engine-state/latest/` mirrors the host; a file that changed or vanished is moved to `engine-state/history/<run stamp>/`, kept 60 days |
-| The market tape, one archive per finished hour with a `MANIFEST.json` first | ten past every hour (`market-tape-upload.timer`) | `LiquidityMigration/market-tape/bybit-linear/YYYY/MM/DD/<day>T<HH>Z.tar` |
+| The market tapes, one archive per finished hour per venue with a `MANIFEST.json` first | ten past every hour (`market-tape-upload.timer`) | `LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/<day>T<HH>Z.tar` for `bybit-linear` and `binance-usdm` |
 
 Each job writes a receipt under `/var/lib/liquidity-migration/receipts/`
 only after the copy landed and was checked; host liveness reads the receipts'
@@ -316,8 +338,9 @@ cannot reach the label.
   last finished commit on its own and fails; a deploy that fails earlier (a
   refused build, config, or state import) leaves the fleet stopped. Read the
   named check, repair it, and rerun the exact-commit flow, or run `rollback`.
-- The independent units keep running through all of this. If the recorder
-  itself is the problem, `scripts/ops.sh restart forward-capture.service`.
+- The independent units keep running through all of this. If a recorder
+  itself is the problem, `scripts/ops.sh restart forward-capture.service` or
+  `scripts/ops.sh restart forward-capture-binance.service`.
 - A funded stop or disarm is not reversed by a demo command, resume action, or
   ordinary service restart.
 
