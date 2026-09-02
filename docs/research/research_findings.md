@@ -5,6 +5,140 @@ Evidence grading and promotion: [docs/research/governance.md](governance.md). Ev
 [AGENTS.md](../../AGENTS.md). Failure taxonomy: [docs/research/backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
 Data tiers, roots, and PIT membership: [docs/data.md](../data.md).
 
+## 2026-09-02 — Eight exit ideas from an outside review, all tested: nothing beats its own control
+
+**Question (owner).** An outside review reframed exits around continuation
+value — "is holding still the best use of this risk?" — and proposed eight
+mechanisms: (1) replace a held position when a blocked candidate is worth
+more, (2) LONG horizons chosen by entry thesis, (3) renew a LONG hold on a
+fresh signal, (4) expire LONG on the signal clock rather than the fill clock,
+(5) a CARRY continuation band, (6) an Exodus microstructure cover, (7) a veto
+of premature Exodus fires before entry, (8) maker-first execution of
+scheduled exits. The owner asked for all eight to be tested, and asked how
+the recorder's deep tier helps a book that trades crowded small names.
+Artifacts (scripts, ledgers, results): `~/SHARED_DATA/bybit_full_pit/reports/exit_program_2026-09-02/`.
+
+**LONG (ideas 2, 3, 4).** The registered v12 ledger rebuilt on the full PIT
+root 2021-01→2026-08-29: 307 trades, +0.5278 book units, 253 clock exits,
+54 stops; each trade labelled with its trigger legs (199 one-day, 166
+three-day, 75 seven-day, 108 with two or more), its source strength, and its
+entry route (243 retrace, 64 six-hour deadline). Per-trade overlays replay
+each trade's hourly path under the registered stop geometry with a different
+hard clock (the simulator reproduced all 307 recorded exits to the tick
+before any variant ran), 45 bp round trip, settlement-exact funding:
+
+| clock rule | total Δ vs v12 | trades changed | paired t | years worse (of 6) |
+| --- | ---: | ---: | ---: | ---: |
+| expiry at signal + 72h (idea 4) | −0.050 | 253 | −2.5 | 6 |
+| unconditional 48h / 60h / 84h / 96h / 120h | −0.127 / −0.086 / −0.055 / −0.134 / −0.048 | 253–288 | −0.6 to −2.3 | 5–6 |
+| thesis 48/72/96 (1d-only deadline entries 48h, multi-day or multi-leg 96h; idea 2) | −0.098 | 188 | −1.7 | 4 |
+| thesis, the two halves alone (short-only 48 / long-only 96) | −0.029 / −0.069 | 27 / 161 | −1.5 / −1.3 | 4 / 4 |
+| renewal to 96h on a fresh accepted signal at the day-2 / day-3 / either close (idea 3) | −0.060 / −0.042 / −0.061 | 83 / 58 / 94 | −1.5 / −1.9 / −1.5 | 5 / 4 / 5 |
+
+The controls decide it. The thesis assignment dealt at random 200 times
+averages −0.098 — identical to the real assignment (49.5% of random deals
+beat it): the thesis carries no information. Random extensions matched to
+the renewal counts average −0.033 / −0.028 / −0.041, and 72–83% of them beat
+the real renewal: a fresh signal on a held name selects the trades that give
+back *more*, not less. Seventy-two hours after the fill is the measured
+optimum among unconditional horizons on both sides. Book-level reruns of the
+registered pipeline (slots, cooldowns, the Rust reducer's own exit decisions)
+confirm the sign and size:
+
+| book-level | total net | daily Sharpe | worst dip |
+| --- | ---: | ---: | ---: |
+| v12 (fill + 72h) | +0.528 | 1.47 | −4.6% |
+| signal clock | +0.484 | 1.40 | −5.1% |
+| renewal at day 2 or 3 (99 renewals) | +0.460 | 1.19 | −4.3% |
+| thesis 48/72/96 | +0.444 | 1.10 | −5.2% |
+| unconditional 96h | +0.393 | 0.93 | −5.9% |
+
+**Slot replacement (idea 1).** The mechanism needs a binding constraint. The
+ten LONG slots refused **one** candidate in 5.7 years (724 candidates; 205
+refused by cooldown, 211 already held), and the carry book's gross cap
+binds on none of its bars (2026-08-07 program). There is nothing to replace
+into; the idea is dead by counting, before any value model.
+
+**CARRY continuation band (idea 5).** For every v7 held name-day whose
+funding interval is at least 4h (1,206 name-days, 2023→2026-08; shorter
+intervals have no valid running-rate proxy from hourly premium bars), every
+hour from 1 to 23 is a state: the reconstructed running rate and its 2h
+slope, hours to settlement, last print, trailing funding, the day's return so
+far, 3h return, 4h open-interest change, vol, persistence, 3d return,
+turnover growth — 23,523 states. A ridge model of the remaining-day net
+(price plus settlements to the next decision), fit walk-forward by year,
+reaches out-of-sample correlation 0.01 (2024), 0.10 (2025), −0.04 (2026),
+0.04 pooled. The proposed policy — exit when the model's upper bound is below
+zero two hours running — never fires at one sigma; at half a sigma it exits
+0.2–1.5% of name-days for +44…+148 weighted bp per year at paired t ≈ 1.0;
+the point estimate exits 45–86% of name-days and loses 300–1,500 weighted bp
+per year, worse than a random exit at the same rate in 2026. The state has
+nothing to say about the rest of the day; this extends the 2026-08-07 and
+2026-08-24 closures to model-based continuation.
+
+**Exodus pre-entry veto (idea 7) — not gradeable on the data we hold.** The
+fire population was rebuilt from the v7 book (2023-01→2026-07-27, where 1m
+bars end): the running rate one hour before each settlement from hourly
+premium closes plus Bybit's interest clamp, fire when it reads −3 bp or
+better, priced short S−10 → S+60 on 1m opens, 15.56 bp fees, the print paid
+when deep. 70% of the settlements inside held days sit in intervals under 4h
+and were excluded (no proxy); 560 fires remain. Against the venue's own
+displayed rate at S−15 on the 44 tardis free days (168 settlement pairs at
+≥4h): the proxy's fire verdict agrees 92% of the time, but 7 of its 49 fires
+are false (the display was still deep) — and among the 48 displayed fires the
+print stayed deep **once (2.1%)**, against 16% among the proxy's fires and 27%
+in the full reconstruction. The premature label the idea wants to predict is
+therefore mostly reconstruction error here, not a live phenomenon. The model
+result is reported for completeness and reads accordingly: walk-forward ridge
+on 18 pre-fire features, out-of-sample correlation with the event's net
+−0.00 (n 403); vetoing predicted losers does not beat a random veto at the
+same rate (24% of random vetoes beat it in 2025, 90% in 2026); the one
+monotone in-sample pattern — fires that barely cleared −3 bp are premature
+more often (27% → 9% as the margin rises to 4 bp) — is exactly what proxy
+noise produces. Per-year mean net of the reconstructed events: 2023 +21,
+2024 −20, 2025 −8, 2026 +6 bp, against the registration's +95 clean mean.
+The venue's S−15 rate exists only in the live engine's WAL fires and in the
+tape's ticker stream: the veto question grades forward, from those.
+
+**Exodus microstructure cover (idea 6) and maker-first exits (idea 8).**
+Both need tick data around real exits. The local tape is one hour of
+2026-08-03 on 22 names: 22 scheduled sells per notional, posted at the ask
+from T−30m and re-pegged, queue-aware, remainder crossed at T — fully passive
+fills, and −21 bp mean against crossing at T (t −1.9) because that hour
+drifted +23 bp; the 5-minute buy-to-cover variant +4.5 / +3.6 bp at $100 /
+$1,000 (t ≈ 1.0, 78% / 53% filled). Eighty-eight attempts on one hour grade
+nothing about either mechanism. The hourly market tape on Google Drive
+(ticker funding at tick cadence for every listed name, full books on the
+promoted crowded names, every trade and liquidation) is the data both need;
+at the registration's ~15 fires a month, a first read of idea 6 is a
+quarter away.
+
+**On the recorder's deep tier (the owner's question).** The 81-name file is
+LONG's entry universe plus the maker canary; the names CARRY and Exodus trade
+are the crowded ones, which change daily and were in the wide tier (no
+50-level book). The recorder now promotes any listed name whose funding rate
+is at or below −10 bp into the deep tier for that day and the next
+(`--deep-funding-bp`), so settlement-window books exist for exactly the names
+the two money-making sleeves hold.
+
+**What the program says about the approach.** On the research panel the
+registered book earns from the crowd fee: v7 carry +17.2 bp/day mean over
+2021-10→2026-08 (raw Sharpe 1.59, +2,193% compounded on the raw daily
+series), LONG +64.5% marked daily over 5.7 years at gross 1.0 (Sharpe 1.47),
+Exodus a 2025–26 overlay. Every exit family this desk has tried — now
+twenty-odd mechanism families and roughly eighty cells including this
+program — loses to the registered clocks or to its own placebo. The lever
+that remains is entry and size, not exit. One population caveat carries
+forward: the carry panel is the both-venue intersection, so Bybit-only names
+such as AGIUSDT (last week's biggest carry loser) are outside every
+historical carry and Exodus number.
+
+**Boundary.** Lane-1 on seen data throughout. Overlays re-simulate exits on
+recorded trades; the book-level reruns are the registered pipeline at hourly
+resolution with next-open entries and flat costs. The Exodus population is a
+proxy population with a measured 14% false-fire rate. The execution test is
+one hour of one day.
+
 ## 2026-08-30 — The gate's 4/12/24h triggers, unjudged: paid per trade, capped by the book
 
 **Question (owner).** How does the LLM gate's mechanical trigger family
