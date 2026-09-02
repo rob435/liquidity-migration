@@ -5,14 +5,13 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use signal_worker::live::{LiveRunOptions, LiveRunner};
-use signal_worker::universe::load_candidate_universe;
 use signal_worker::{SignalWorker, SignalWorkerConfig, WireEvent, WorkerError};
 
 const USAGE: &str = "\
 usage:
-  signal-worker check-config --signal-config PATH --long-rule PATH --carry-config PATH --operational-config PATH --engine-config PATH --universe PATH
-  signal-worker replay --signal-config PATH --long-rule PATH --carry-config PATH --operational-config PATH --engine-config PATH --universe PATH --input PATH|- --output PATH|-
-  signal-worker live --signal-config PATH --long-rule PATH --carry-config PATH --operational-config PATH --engine-config PATH --universe PATH --spool-dir PATH --state-dir PATH --heartbeat PATH";
+  signal-worker check-config --signal-config PATH --long-rule PATH --carry-config PATH --operational-config PATH --engine-config PATH
+  signal-worker replay --signal-config PATH --long-rule PATH --carry-config PATH --operational-config PATH --engine-config PATH --input PATH|- --output PATH|-
+  signal-worker live --signal-config PATH --long-rule PATH --carry-config PATH --operational-config PATH --engine-config PATH --spool-dir PATH --state-dir PATH --heartbeat PATH";
 
 #[derive(Clone, Debug)]
 struct CommonArgs {
@@ -21,7 +20,6 @@ struct CommonArgs {
     carry_config: PathBuf,
     operational_config: PathBuf,
     engine_config: PathBuf,
-    universe: PathBuf,
 }
 
 #[derive(Debug)]
@@ -54,7 +52,8 @@ struct ConfigCheck<'a> {
     live_long_source_pattern: String,
     live_carry_source_pattern: String,
     config: &'a signal_worker::ConfigIdentity,
-    universe: &'a signal_worker::model::UniverseIdentity,
+    universe_rules: &'a signal_worker::universe::UniverseRules,
+    llm_gate: &'a signal_worker::config::LlmGateConfig,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -69,7 +68,7 @@ async fn run() -> Result<(), WorkerError> {
     let command = parse_args(std::env::args().skip(1))?;
     match command {
         Command::Check(common) => {
-            let (config, universe) = load_common(&common)?;
+            let config = load_common(&common)?;
             let check = ConfigCheck {
                 schema_version: signal_worker::SCHEMA_VERSION,
                 kind: "liquidity_migration_signal_worker_config_check",
@@ -89,7 +88,8 @@ async fn run() -> Result<(), WorkerError> {
                     config.routing.source
                 ),
                 config: &config.identity,
-                universe: &universe,
+                universe_rules: &config.universe,
+                llm_gate: &config.llm_gate,
             };
             println!(
                 "{}",
@@ -103,8 +103,8 @@ async fn run() -> Result<(), WorkerError> {
             input,
             output,
         } => {
-            let (config, universe) = load_common(&common)?;
-            replay(config, universe, &input, &output)
+            let config = load_common(&common)?;
+            replay(config, &input, &output)
         }
         Command::Live {
             common,
@@ -112,11 +112,10 @@ async fn run() -> Result<(), WorkerError> {
             state_dir,
             heartbeat,
         } => {
-            let (config, universe) = load_common(&common)?;
+            let config = load_common(&common)?;
             reject_overlapping_paths(&spool_dir, &state_dir, &heartbeat)?;
             let runner = LiveRunner::open_responsive(
                 config,
-                universe,
                 LiveRunOptions {
                     state_dir,
                     spool_dir,
@@ -132,26 +131,19 @@ async fn run() -> Result<(), WorkerError> {
     }
 }
 
-fn load_common(
-    args: &CommonArgs,
-) -> Result<(SignalWorkerConfig, signal_worker::model::UniverseIdentity), WorkerError> {
-    let config = SignalWorkerConfig::load(
+fn load_common(args: &CommonArgs) -> Result<SignalWorkerConfig, WorkerError> {
+    SignalWorkerConfig::load(
         &args.signal_config,
         &args.long_rule,
         &args.carry_config,
         &args.operational_config,
         &args.engine_config,
-    )?;
-    let universe = load_candidate_universe(&args.universe, &config.live.environment)?;
-    Ok((config, universe))
+    )
 }
 
-fn replay(
-    config: SignalWorkerConfig,
-    universe: signal_worker::model::UniverseIdentity,
-    input: &str,
-    output: &str,
-) -> Result<(), WorkerError> {
+/// Replays a wire journal. The first line must be the universe snapshot the
+/// live worker derived, exactly as the live worker itself requires.
+fn replay(config: SignalWorkerConfig, input: &str, output: &str) -> Result<(), WorkerError> {
     let reader: Box<dyn BufRead> = if input == "-" {
         Box::new(BufReader::new(io::stdin().lock()))
     } else {
@@ -166,7 +158,7 @@ fn replay(
             WorkerError::io("create replay output", error)
         })?))
     };
-    let mut worker = SignalWorker::new(config, universe)?;
+    let mut worker = SignalWorker::new(config)?;
     for (index, line) in reader.lines().enumerate() {
         let line = line.map_err(|error| WorkerError::io("read replay input", error))?;
         if line.trim().is_empty() {
@@ -218,7 +210,6 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, WorkerE
         carry_config: take_path(&mut values, "--carry-config")?,
         operational_config: take_path(&mut values, "--operational-config")?,
         engine_config: take_path(&mut values, "--engine-config")?,
-        universe: take_path(&mut values, "--universe")?,
     };
     let command = match mode.as_str() {
         "check-config" => Command::Check(common),
@@ -287,8 +278,6 @@ mod tests {
             "o",
             "--engine-config",
             "e",
-            "--universe",
-            "u",
             "--spool-dir",
             "spool",
             "--state-dir",

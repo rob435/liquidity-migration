@@ -434,15 +434,14 @@ from pathlib import Path
 from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
 source = Path(sys.argv[1])
 target = Path(sys.argv[2])
-allowed = {"CANDIDATE_UNIVERSE_FILE", "OPERATIONAL_PROFILE_FILE", "SIGNAL_WORKER_REALM"}
+allowed = {"OPERATIONAL_PROFILE_FILE", "SIGNAL_WORKER_REALM"}
 values = load_private_systemd_environment(source)
 filtered = {key: value for key, value in values.items() if key in allowed}
 if filtered.get("SIGNAL_WORKER_REALM") not in {"demo", "mainnet"}:
     raise SystemExit(f"{source}: SIGNAL_WORKER_REALM must be demo or mainnet")
-for required in ("CANDIDATE_UNIVERSE_FILE", "OPERATIONAL_PROFILE_FILE"):
-    value = str(filtered.get(required) or "")
-    if not value or not Path(value).is_absolute():
-        raise SystemExit(f"{source}: {required} must be an absolute path")
+value = str(filtered.get("OPERATIONAL_PROFILE_FILE") or "")
+if not value or not Path(value).is_absolute():
+    raise SystemExit(f"{source}: OPERATIONAL_PROFILE_FILE must be an absolute path")
 target.parent.mkdir(parents=True, exist_ok=True)
 fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
 try:
@@ -459,18 +458,30 @@ except BaseException:
 PY
     chown root:root "$target" && chmod 0600 "$target" \
         || fail "cannot secure signal-worker environment $target"
-    unset OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE
-    lm_load_private_systemd_environment "$PYTHON" "$source" \
-        OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE
-    local input directory
-    for input in "$OPERATIONAL_PROFILE_FILE" "$CANDIDATE_UNIVERSE_FILE"; do
-        [ -f "$input" ] || fail "signal-worker input is missing: $input"
-        chown root:"$RUNTIME_GROUP" "$input" && chmod 0640 "$input"
-        directory="$(dirname "$input")"
-        chown root:"$RUNTIME_GROUP" "$directory" && chmod 0750 "$directory"
-    done
+    unset OPERATIONAL_PROFILE_FILE
+    lm_load_private_systemd_environment "$PYTHON" "$source" OPERATIONAL_PROFILE_FILE
+    local directory
+    [ -f "$OPERATIONAL_PROFILE_FILE" ] \
+        || fail "signal-worker input is missing: $OPERATIONAL_PROFILE_FILE"
+    chown root:"$RUNTIME_GROUP" "$OPERATIONAL_PROFILE_FILE" \
+        && chmod 0640 "$OPERATIONAL_PROFILE_FILE"
+    directory="$(dirname "$OPERATIONAL_PROFILE_FILE")"
+    chown root:"$RUNTIME_GROUP" "$directory" && chmod 0750 "$directory"
     chgrp "$RUNTIME_GROUP" /etc/liquidity-migration \
         && chmod 0750 /etc/liquidity-migration
+}
+
+# One operational profile for both realms, rendered from the dials in the
+# funded credential file when that file exists and from the committed defaults
+# otherwise. The same bytes land in each realm's signal-worker source directory.
+render_operational_profile() {
+    local output="$1"
+    local dial_env=""
+    [ -f "$MAINNET_CREDENTIAL_ENV" ] && dial_env="$MAINNET_CREDENTIAL_ENV"
+    install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$(dirname "$output")"
+    "$PYTHON" -m liquidity_migration.policy.real_money_arming render-profile \
+        --from-env "$dial_env" --execute --overwrite --output "$output" \
+        || fail "operational dials do not render a loadable profile"
 }
 
 render_engine_config() {
@@ -532,16 +543,12 @@ prepare_demo_inputs() {
     lm_write_resolved_sleeve_toggles
     chown root:root /etc/liquidity-migration/sleeves.resolved.env
     chmod 0600 /etc/liquidity-migration/sleeves.resolved.env
-    unset SIGNAL_WORKER_REALM OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE
+    unset SIGNAL_WORKER_REALM OPERATIONAL_PROFILE_FILE
     lm_load_private_systemd_environment "$PYTHON" "$DEMO_SIGNAL_SOURCE_ENV" \
-        SIGNAL_WORKER_REALM OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE
+        SIGNAL_WORKER_REALM OPERATIONAL_PROFILE_FILE
     [ "$SIGNAL_WORKER_REALM" = demo ] \
         || fail "demo signal-worker source must declare SIGNAL_WORKER_REALM=demo"
-    install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$(dirname "$OPERATIONAL_PROFILE_FILE")"
-    install -o root -g "$RUNTIME_GROUP" -m 0640 \
-        "$REPO_DIR/configs/operational.demo.json" "$OPERATIONAL_PROFILE_FILE"
-    [ -f "$CANDIDATE_UNIVERSE_FILE" ] \
-        || fail "demo candidate universe is missing: $CANDIDATE_UNIVERSE_FILE"
+    render_operational_profile "$OPERATIONAL_PROFILE_FILE"
     write_signal_worker_environment "$DEMO_SIGNAL_SOURCE_ENV" "$SIGNAL_WORKER_DEMO_ENV"
     render_engine_config demo "$OPERATIONAL_PROFILE_FILE" "$ENGINE_DEMO_CONFIG"
 }
@@ -789,17 +796,12 @@ provision_mainnet() {
     "$PYTHON" -m liquidity_migration.policy.real_money_arming default-telegram \
         --from-env /etc/liquidity-migration/bybit-demo.env --execute \
         || fail "cannot default the mainnet Telegram pair"
-    unset SIGNAL_WORKER_REALM OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE
+    unset SIGNAL_WORKER_REALM OPERATIONAL_PROFILE_FILE
     lm_load_private_systemd_environment "$PYTHON" "$MAINNET_SIGNAL_SOURCE_ENV" \
-        SIGNAL_WORKER_REALM OPERATIONAL_PROFILE_FILE CANDIDATE_UNIVERSE_FILE
+        SIGNAL_WORKER_REALM OPERATIONAL_PROFILE_FILE
     [ "$SIGNAL_WORKER_REALM" = mainnet ] \
         || fail "funded signal-worker source must declare SIGNAL_WORKER_REALM=mainnet"
-    install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$(dirname "$OPERATIONAL_PROFILE_FILE")"
-    "$PYTHON" -m liquidity_migration.policy.real_money_arming render-profile \
-        --execute --overwrite --output "$OPERATIONAL_PROFILE_FILE" \
-        || fail "mainnet dials do not render a loadable profile"
-    [ -f "$CANDIDATE_UNIVERSE_FILE" ] \
-        || fail "mainnet candidate universe is missing: $CANDIDATE_UNIVERSE_FILE"
+    render_operational_profile "$OPERATIONAL_PROFILE_FILE"
     write_signal_worker_environment "$MAINNET_SIGNAL_SOURCE_ENV" "$SIGNAL_WORKER_MAINNET_ENV"
     "$PYTHON" - "$MAINNET_CREDENTIAL_ENV" "$MAINNET_TELEGRAM_ENV" <<'PY'
 import os

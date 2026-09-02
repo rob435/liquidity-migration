@@ -197,6 +197,7 @@ fn execute(request: Request) -> Result<Value, String> {
                     owned_opening_order_ids: input.owned_opening_order_ids,
                     checkpoint_fingerprint: input.checkpoint_fingerprint,
                     signal_receipt: input.signal_receipt,
+                    replace_gate_pending: false,
                 },
                 prior,
                 &config,

@@ -15,7 +15,6 @@ a group below, so moving a grouped script never edits a unit file.
 | `deploy_vps_live.sh` | you (via `ops.sh deploy`) / GitHub Actions | the deploy engine; modes are tabulated in [`docs/operations.md`](../docs/operations.md) |
 | `runtime/` | systemd | fleet and host liveness checks, engine position/trade notifications, the hourly market-tape packer and upload (`pack_market_tape.py`), the six-hourly state backup to Google Drive (`backup_state.sh`), and the weekly demo recovery drill |
 | `vps/` | you, when the host is broken | SSH recovery, rescue-boot restore, flatten |
-| `maintain/` | you, one-shot | candidate-universe freeze |
 | `data/` | you or the refresh timer | point-in-time data-root and panel builders, candidate-window Bybit one-minute trade/mark tapes, residual-momentum precompute, and the Binance positioning-metrics refresh (`refresh_binance_metrics.py`, feeds the panel's `--metrics-root` columns) |
 | `research/` | you, offline | scorers, equity curves, deterministic quote-arm sweeps, the research-refresh workflow, and `daily_evidence_run.sh`; `llm_driver_ledger.py` is also run by the fleet timer |
 | `devtools/` | `dev.sh` | `repo_doctor.py` |

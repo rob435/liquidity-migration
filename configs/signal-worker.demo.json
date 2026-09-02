@@ -37,6 +37,45 @@
     "whale_page_limit": 500,
     "instrument_max_pages": 10
   },
+  "universe": {
+    "exclude_symbols": [
+      "BUSDUSDT",
+      "DAIUSDT",
+      "FDUSDUSDT",
+      "FRAXUSDT",
+      "GUSDUSDT",
+      "LUSDUSDT",
+      "PYUSDUSDT",
+      "SUSDUSDT",
+      "TUSDUSDT",
+      "USD1USDT",
+      "USDCUSDT",
+      "USDDUSDT",
+      "USDEUSDT",
+      "USDPUSDT",
+      "USDYUSDT",
+      "USTCUSDT"
+    ],
+    "long": {
+      "min_turnover_24h_usdt": 2000000.0,
+      "min_listing_age_days": 30,
+      "enter_rank": 120,
+      "leave_rank": 160
+    },
+    "carry": {
+      "min_turnover_24h_usdt": 0.0,
+      "min_listing_age_days": 7,
+      "enter_rank": 150,
+      "leave_rank": 200
+    }
+  },
+  "llm_gate": {
+    "enabled": true,
+    "candidates_path": "/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json",
+    "poll_cadence_ms": 60000,
+    "trigger_max_age_ms": 3600000,
+    "min_score": 6.0
+  },
   "long": {
     "profile_name": "v12",
     "features": {

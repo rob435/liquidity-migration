@@ -775,8 +775,8 @@ mod tests {
                 std::fs::read(root.join("configs/lane2_carry_hold_v7.json")).expect("CARRY rule");
             let exodus = std::fs::read(root.join("configs/lane2_exodus_short_v1.json"))
                 .expect("Exodus rule");
-            let operational = std::fs::read(root.join(format!("configs/operational.{realm}.json")))
-                .expect("operational config");
+            let operational =
+                std::fs::read(root.join("configs/operational.json")).expect("operational config");
             let rendered = render_native_config(NativeConfigSources {
                 realm,
                 signal_config: &signal,

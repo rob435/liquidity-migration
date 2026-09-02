@@ -26,9 +26,9 @@ pub const LONG: StrategyId = StrategyId(1);
 pub const BUSDT: SymbolId = SymbolId(0);
 pub const CUSDT: SymbolId = SymbolId(1);
 
-/// A fixed 250_000 capital reference and a gross cap twice it. The reference
-/// is the demo profile's; the multiple is this file's own, kept low so the
-/// tables here reach their caps.
+/// A fixed 250_000 capital reference and a gross cap twice it: a synthetic
+/// fixture, not a shipped profile, kept low so the tables here reach their
+/// caps.
 pub fn demo_config() -> KernelConfig {
     KernelConfig {
         max_account_view_age_ns: MAX_VIEW_AGE_NS,

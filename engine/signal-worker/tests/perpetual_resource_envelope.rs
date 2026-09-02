@@ -38,7 +38,7 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
         repo.join("configs/signal-worker.mainnet.json"),
         repo.join("configs/long_native_v12.json"),
         repo.join("configs/lane2_carry_hold_v7.json"),
-        repo.join("configs/operational.mainnet.json"),
+        repo.join("configs/operational.json"),
         repo.join("deploy/engine.mainnet.toml.template"),
     )?;
     assert_eq!(config.long.cold_start_lookback_days, 100);
@@ -70,8 +70,12 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
         long_symbols: long_symbols.clone(),
         carry_symbols: carry_symbols.clone(),
     };
-    let mut durable =
-        DurableSignalWorker::open(config.clone(), universe.clone(), &state_dir, &spool_dir)?;
+    let mut durable = DurableSignalWorker::open_with_universe(
+        config.clone(),
+        universe.clone(),
+        &state_dir,
+        &spool_dir,
+    )?;
 
     commit(
         &mut durable,
@@ -201,8 +205,12 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
     let cold_restart_identity = state_identity(durable.worker().state())?;
     drop(durable);
 
-    let mut durable =
-        DurableSignalWorker::open(config.clone(), universe.clone(), &state_dir, &spool_dir)?;
+    let mut durable = DurableSignalWorker::open_with_universe(
+        config.clone(),
+        universe.clone(),
+        &state_dir,
+        &spool_dir,
+    )?;
     assert_eq!(durable.worker().state().last_input_sequence, 426);
     assert_eq!(
         state_identity(durable.worker().state())?,
@@ -282,7 +290,8 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
 
     let final_identity = state_identity(durable.worker().state())?;
     drop(durable);
-    let reopened = DurableSignalWorker::open(config, universe, &state_dir, &spool_dir)?;
+    let reopened =
+        DurableSignalWorker::open_with_universe(config, universe, &state_dir, &spool_dir)?;
     assert_eq!(reopened.worker().state().last_input_sequence, 3_306);
     assert_eq!(state_identity(reopened.worker().state())?, final_identity);
     let reopened_metrics = reopened.durability_metrics()?;
@@ -371,6 +380,7 @@ fn set_sequence(event: &mut WireEvent, sequence: u64) {
         | WireEvent::BybitTickerSnapshot { sequence: slot, .. }
         | WireEvent::BinanceWhaleBatch { sequence: slot, .. }
         | WireEvent::UniverseSnapshot { sequence: slot, .. }
+        | WireEvent::LlmGateCandidates { sequence: slot, .. }
         | WireEvent::BootstrapComplete { sequence: slot, .. }
         | WireEvent::Watermark { sequence: slot, .. }
         | WireEvent::LongWatermark { sequence: slot, .. }

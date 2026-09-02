@@ -475,7 +475,7 @@ def _source_snapshot(repo: Path) -> tuple[bytes, dict[str, object]]:
 def resolve_live_physics_configuration(
     *,
     profile_name: str = "v12",
-    operational_profile_path: str | Path = "configs/operational.mainnet.json",
+    operational_profile_path: str | Path = "configs/operational.json",
     taker_fee_bps: float = DEFAULT_TAKER_FEE_BPS,
     slippage_bps: float = DEFAULT_SLIPPAGE_BPS,
 ) -> ResolvedLivePhysicsConfiguration:
@@ -1371,7 +1371,7 @@ def run_long_live_physics_research(
     data_root: str | Path,
     *,
     profile_name: str = "v12",
-    operational_profile_path: str | Path = "configs/operational.mainnet.json",
+    operational_profile_path: str | Path = "configs/operational.json",
     start: str,
     end: str,
     report_dir: str | Path | None = None,

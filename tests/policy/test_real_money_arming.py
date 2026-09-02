@@ -47,20 +47,15 @@ def _credential(tmp_path: Path, **overrides: str) -> Path:
 
 
 def _signal_source(tmp_path: Path, profile: Path, *, realm: str = "mainnet") -> Path:
-    candidate = _private_file(tmp_path / "candidate.json", "{}\n")
     return _private_file(
         tmp_path / "signal-worker-mainnet-source.env",
-        (
-            f"SIGNAL_WORKER_REALM={realm}\n"
-            f"CANDIDATE_UNIVERSE_FILE={candidate.as_posix()}\n"
-            f"OPERATIONAL_PROFILE_FILE={profile.as_posix()}\n"
-        ),
+        f"SIGNAL_WORKER_REALM={realm}\nOPERATIONAL_PROFILE_FILE={profile.as_posix()}\n",
     )
 
 
 def test_committed_profile_is_the_default_render() -> None:
     data, profile = render_real_money_profile()
-    assert data == (REPO / "configs" / "operational.mainnet.json").read_bytes()
+    assert data == (REPO / "configs" / "operational.json").read_bytes()
     assert profile.schema_version == 3
 
 
@@ -75,10 +70,8 @@ def test_templates_are_strict_and_ship_disarmed_without_secrets() -> None:
     assert credentials["BYBIT_REAL_API_KEY"] == ""
     assert credentials["BYBIT_REAL_API_SECRET"] == ""
     assert signal["SIGNAL_WORKER_REALM"] == "mainnet"
-    assert {
-        "CANDIDATE_UNIVERSE_FILE",
-        "OPERATIONAL_PROFILE_FILE",
-    } <= signal.keys()
+    assert "OPERATIONAL_PROFILE_FILE" in signal
+    assert "CANDIDATE_UNIVERSE_FILE" not in signal
     keys = "\n".join(signal)
     assert "ACCOUNT_EXECUTION" not in keys
     assert "ACCOUNT_INTENT" not in keys
@@ -151,14 +144,14 @@ def test_preflight_accepts_a_distinct_backup_execution_ip(tmp_path: Path) -> Non
 
 def test_preflight_rejects_wrong_realm_missing_input_and_profile_drift(tmp_path: Path) -> None:
     credential = _credential(tmp_path)
-    profile = _private_file(tmp_path / "profile.json", "{}\n")
-    signal = _signal_source(tmp_path, profile, realm="demo")
-    (tmp_path / "candidate.json").unlink()
+    # A relative profile path is not an installed input, and nothing at it can
+    # match the dials either.
+    signal = _signal_source(tmp_path, Path("relative/profile.json"), realm="demo")
 
     rows = preflight(credential_env=credential, signal_env=signal)
 
     failed = {row.name for row in rows if not row.ok}
-    assert {"SIGNAL_WORKER_REALM", "CANDIDATE_UNIVERSE_FILE", "profile matches dials"} <= failed
+    assert {"SIGNAL_WORKER_REALM", "OPERATIONAL_PROFILE_FILE", "profile matches dials"} <= failed
 
 
 @pytest.mark.parametrize("bad_ip", ("", "*", "0.0.0.0", "127.0.0.1", "203.0.113.0/24"))

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::universe::UniverseRules;
 use crate::worker::WorkerError;
 use crate::SCHEMA_VERSION;
 pub use engine_strategies::native_common::SignalConfigIdentity as ConfigIdentity;
@@ -127,7 +128,7 @@ pub struct SourceContract {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LiveAcquisitionConfig {
-    /// Realm whose reviewed universe and strategy state this process serves.
+    /// Realm whose venue, derived universe, and strategy state this process serves.
     pub environment: String,
     /// Public market-data realm. Demo execution deliberately observes mainnet.
     pub public_market_realm: String,
@@ -154,6 +155,71 @@ pub struct SignalRouting {
     pub carry_sleeve: String,
 }
 
+/// The LLM entry gate's file lane. The ledger unit judges intraday triggers
+/// and publishes score-at-least-`min_score` events to `candidates_path`; the
+/// worker reads that file every `poll_cadence_ms` and hands a changed
+/// publication to the LONG reducer as one observation.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LlmGateConfig {
+    pub enabled: bool,
+    pub candidates_path: PathBuf,
+    pub poll_cadence_ms: u64,
+    /// A trigger older than this at read time is not handed on.
+    pub trigger_max_age_ms: i64,
+    pub min_score: f64,
+}
+
+impl Default for LlmGateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            candidates_path: PathBuf::from(
+                "/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json",
+            ),
+            poll_cadence_ms: 60_000,
+            trigger_max_age_ms: 3_600_000,
+            min_score: 6.0,
+        }
+    }
+}
+
+impl LlmGateConfig {
+    pub fn validate(&self) -> Result<(), WorkerError> {
+        if self.poll_cadence_ms == 0
+            || self.trigger_max_age_ms <= 0
+            || !self.min_score.is_finite()
+            || !(0.0..=10.0).contains(&self.min_score)
+            || (self.enabled && !self.candidates_path.is_absolute())
+        {
+            return Err(WorkerError::config("LLM gate lane contract is invalid"));
+        }
+        Ok(())
+    }
+}
+
+/// The universe a fresh checkout ships with; `Default` exists only so an older
+/// journal entry without these blocks still replays.
+impl Default for UniverseRules {
+    fn default() -> Self {
+        Self {
+            exclude_symbols: Vec::new(),
+            long: crate::universe::SleeveUniverseRule {
+                min_turnover_24h_usdt: 0.0,
+                min_listing_age_days: 0,
+                enter_rank: 1,
+                leave_rank: 1,
+            },
+            carry: crate::universe::SleeveUniverseRule {
+                min_turnover_24h_usdt: 0.0,
+                min_listing_age_days: 0,
+                enter_rank: 1,
+                leave_rank: 1,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct MachineSignalConfig {
@@ -163,6 +229,8 @@ struct MachineSignalConfig {
     routing: SignalRouting,
     sources: SourceContract,
     live: LiveAcquisitionConfig,
+    universe: UniverseRules,
+    llm_gate: LlmGateConfig,
     long: LongMachineRule,
     carry_profile_name: String,
     carry_feature_physics: CarryFeaturePhysics,
@@ -303,6 +371,10 @@ pub struct SignalWorkerConfig {
     pub routing: SignalRouting,
     pub sources: SourceContract,
     pub live: LiveAcquisitionConfig,
+    #[serde(default)]
+    pub universe: UniverseRules,
+    #[serde(default)]
+    pub llm_gate: LlmGateConfig,
     pub identity: ConfigIdentity,
     pub long_destination: u16,
     pub carry_destination: u16,
@@ -463,6 +535,8 @@ impl SignalWorkerConfig {
             routing: machine.routing,
             sources: machine.sources,
             live: machine.live,
+            universe: machine.universe,
+            llm_gate: machine.llm_gate,
             identity,
             long_destination,
             carry_destination,
@@ -731,6 +805,8 @@ fn validate_config(
         return Err(WorkerError::config("CARRY feature contract is invalid"));
     }
     validate_source_history_bounds(long, carry)?;
+    machine.universe.validate()?;
+    machine.llm_gate.validate()?;
     let source = &machine.sources;
     if source.bybit_category != "linear"
         || source.bybit_settle_coin != "USDT"
@@ -966,7 +1042,7 @@ mod tests {
             root.join(format!("configs/signal-worker.{realm}.json")),
             root.join("configs/long_native_v12.json"),
             root.join("configs/lane2_carry_hold_v7.json"),
-            root.join(format!("configs/operational.{realm}.json")),
+            root.join("configs/operational.json"),
             root.join(format!("deploy/engine.{realm}.toml.template")),
         )
         .unwrap()
@@ -977,7 +1053,7 @@ mod tests {
             .parent()
             .and_then(std::path::Path::parent)
             .unwrap();
-        let operational = root.join(format!("configs/operational.{realm}.json"));
+        let operational = root.join("configs/operational.json");
         let operational_bytes = std::fs::read(&operational).unwrap();
         let operational_sha = sha256_hex(&operational_bytes);
         let carry_path = root.join("configs/lane2_carry_hold_v7.json");
@@ -1133,7 +1209,7 @@ mod tests {
             root.join(format!("configs/signal-worker.{realm}.json")),
             root.join("configs/long_native_v12.json"),
             root.join("configs/lane2_carry_hold_v7.json"),
-            root.join(format!("configs/operational.{realm}.json")),
+            root.join("configs/operational.json"),
             template,
         )
         .unwrap();

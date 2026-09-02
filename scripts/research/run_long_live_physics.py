@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", choices=LONG_STRATEGY_PROFILE_CHOICES, default="v12")
     parser.add_argument(
         "--operational-profile",
-        default="configs/operational.mainnet.json",
+        default="configs/operational.json",
         help="Typed fleet profile supplying current LONG sizing and throttle",
     )
     parser.add_argument(

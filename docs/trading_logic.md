@@ -51,9 +51,12 @@ Source of truth:
 
 ### Signal and admission
 
-The worker builds a 50-name universe from trailing 90-day quote volume, subject
-to listing history and the registered exclusions. A candidate must satisfy all
-of these conditions:
+The worker derives the eligible population live: every trading USDT crypto
+perpetual in the top 120 by 24-hour turnover with at least $2M of turnover and
+30 days of listing, kept until it falls past rank 160. From that population the
+rule builds its 50-name universe from trailing 90-day quote volume, subject to
+listing history and the registered exclusions. A candidate must satisfy all of
+these conditions:
 
 - BTC and ETH regimes are on;
 - its current volume rank is at most 10;
@@ -81,6 +84,31 @@ three days. There is no take-profit rule.
 New entries below $6 notional are skipped. A live resize must be at least $1
 and at least 5% of current notional. These are execution thresholds in the
 native reducer, not a second Python rule.
+
+### The LLM entry gate
+
+The second trigger. `scripts/research/llm_driver_ledger.py` runs hourly,
+detects intraday trigger events on 4, 12, and 24-hour windows (a move of at
+least 2.5 daily standard deviations scaled to the window, closing in the top
+30% of its range, BTC and ETH above their 30-day averages, ATR at most 12%) on
+the top 30 names by 24-hour turnover, asks the language model to judge the
+driver of each, and publishes every event scoring at least 6 to
+`/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json`,
+valid for one hour. Ranks 1-10 are the core band, 11-30 the wide band; a name
+flagged on two or more earlier days in the last four is vetoed. A run with the
+regime off publishes an empty file, which withdraws the standing candidates.
+
+The signal worker reads that file every minute and hands each new publication
+to LONG as one observation, filtered to the tradable universe and to triggers
+under an hour old. LONG enters a judged name at market as soon as it has a
+price: no entry delay and no retrace wait. Sizing, the 3-times-ATR stop, its
+decay, the three-day time exit, the cooldown, the capacity of 10, and the
+one-minute admission budget are the native rule's. A name without a measured
+30-day volatility is refused, because vol parity would size it at the ceiling.
+Gate entries carry the order-log tags `long-native-llm-gate` and
+`long-native-llm-gate-wide`, so the two bands grade apart from native
+`long-native` entries. Turning the gate off is `llm_gate.enabled: false` in
+the realm's signal-worker config; it needs a worker restart, not an engine one.
 
 ## CARRY
 

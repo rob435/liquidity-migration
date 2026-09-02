@@ -6,6 +6,61 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-02 — Both realms run one thing: a live universe, the LLM entry
+  gate on the native LONG sleeve, and one equity-following profile.** The
+  owner's directive was that demo and the funded account run exactly the same
+  strategies, that nothing is frozen or pinned, and that the LLM entry gate
+  with its 4/12/24-hour triggers comes back. Three changes, one deploy.
+  First, the frozen candidate-universe artifact is gone. The signal worker now
+  derives the tradable universe itself on its hourly instrument cadence, from
+  the realm venue's whole instrument list and the public ticker page: every
+  trading USDT crypto perpetual is tradable; LONG's eligible set is the top 120
+  by 24-hour turnover with a $2M turnover floor and a 30-day listing age,
+  CARRY's the top 150 with a 7-day age; a member stays until it falls past rank
+  160 or 200, so a name at the edge does not flap. Those dials live in
+  `configs/signal-worker.<realm>.json`. A changed membership is one universe
+  snapshot in the worker's input journal; the worker prunes what left, fetches
+  history for what entered, and the engine keeps every held name's market
+  subscription. The two hosts' frozen files had drifted nine days apart (demo
+  frozen 2026-08-18, funded 2026-08-27; the LONG-eligible lists differed by 32
+  names each way), which is exactly the divergence this removes. The freeze
+  script, `liquidity_migration/data/candidate_universe.py`, the
+  `--universe` argument, and `CANDIDATE_UNIVERSE_FILE` are deleted; a worker
+  with no derived universe yet refuses every other input and resolves it before
+  its lanes start. Second, the LLM entry gate is a live LONG trigger on both
+  realms. The ledger's hourly publication (score at least 6 on the 4/12/24-hour
+  windows, core ranks 1-10, wide 11-30, freshness veto, empty on regime off) is
+  read by each worker every minute and handed to `long_native` as one
+  `llm_gate_candidates` observation on the LONG source; the reducer enters a
+  judged name at market as soon as it has a price, through the native sizing
+  (BTC vol targeting from the worker's own daily bars, vol parity from the
+  event's 30-day sigma), the 3-times-ATR stop and its decay, the three-day time
+  exit, the cooldown, the capacity, and the one-minute admission budget. A name
+  without measured volatility is refused; a trigger older than an hour or past
+  the publication's validity is refused; a new publication replaces every gate
+  candidate still waiting for a price or a slot. Entries carry the order-log
+  tags `long-native-llm-gate` and `long-native-llm-gate-wide`, so the bands
+  grade apart from native entries in the WAL's intent records. Gate settings
+  sit outside the LONG decision fingerprint: the running checkpoints are kept.
+  Third, `configs/operational.json` is the one profile for both realms
+  (`operational.demo.json` and `operational.mainnet.json` are gone). Deploy
+  renders it once from the dials in the funded credential file and installs the
+  same bytes for each engine and worker; both engine templates now point at
+  the rendered file. Demo's capital reference therefore follows its own equity
+  (about $1,620 today) instead of a pinned $250,000: its gross cap becomes 5
+  times equity, its margin cap equity itself, and its rolling-loss limit a
+  tenth of equity, about $162, where it was $25,000 — one LONG stop-out can now
+  trip demo for a day, exactly as it does the funded account. LONG and CARRY
+  order sizes do not change on either realm; only the caps and the trip do.
+  Nineteen new Rust tests cover the derivation, the hysteresis, the unresolved
+  worker, the gate lane, the gate reducer path, and the single profile; the
+  demo template's carry block now carries a zero capital reference like the
+  funded one. Not a host change until the next deploy. That deploy is not
+  reversible by `rollback` alone: the old worker binary refuses a checkpoint
+  whose universe is not its frozen artifact, so a rollback of this generation
+  must first move both signal-worker state roots aside
+  (`/var/lib/liquidity-migration-signal-worker-{demo,mainnet}`) and let the
+  old worker cold-start.
 - **2026-09-02 — The fleet is back on the exact commit, after the deploy
   machinery refused it three times.** The fleet had been down 21h 40m, from
   2026-09-01 12:24 UTC to 2026-09-02 10:05 UTC. Deploying `5fc9d9e2` took

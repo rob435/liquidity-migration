@@ -71,9 +71,10 @@ leverage_authority = "sole"
 # ---------------------------------------------------------------------------
 # Capital limits: the fleet's own document, not a copy of its numbers
 # ---------------------------------------------------------------------------
-# Deployment renders one host profile from the reviewed base and operator
-# dials. Rust config rendering and the engine read those identical bytes, so a
-# cap or declared stop change reaches sizing and account admission together.
+# Deployment renders one profile for both realms from the reviewed base and the
+# operator dials, and installs the same bytes here and for the demo engine.
+# Rust config rendering and the engine read those identical bytes, so a cap or
+# declared stop change reaches sizing and account admission together.
 #
 # Nothing else may be written in this block. An [risk.envelope] section or a
 # stray `leverage` is refused, because two documents that both claim to set the

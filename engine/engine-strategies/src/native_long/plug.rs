@@ -12,7 +12,8 @@ use serde::Deserialize;
 
 use super::plan::{
     reduce_batch, reduce_batch_with_mode, BatchInput, BatchOutput, DataRejection, DecisionInput,
-    FeatureRow, LongSignalBatch, MarketMark, ReplanMode, SleeveState, StrategyConfig,
+    FeatureRow, GateSignal, LongSignalBatch, MarketMark, ReplanMode, SleeveState, StrategyConfig,
+    GATE_TRIGGER_MAX_AGE_MS,
 };
 use crate::native_common::{
     attributed_exposure_is_flat, attributed_symbols, checkpoint_payload,
@@ -64,6 +65,28 @@ enum SignalPayload {
         cold_start_fallback_count: usize,
         rejections: Vec<DataRejection>,
     },
+    /// One publication of the LLM entry gate, byte-compatible with the
+    /// worker's `llm_gate_candidates` payload.
+    LlmGateCandidates {
+        decision_ts_ms: i64,
+        valid_until_ms: i64,
+        btc_rv_30: Option<f64>,
+        rows: Vec<GateCandidateRow>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateCandidateRow {
+    symbol: String,
+    score: f64,
+    band: String,
+    trigger_ts_ms: i64,
+    trigger_price: f64,
+    atr_pct: f64,
+    sigma_daily_30d: Option<f64>,
+    turnover_rank: Option<f64>,
+    trigger_window_h: Option<i64>,
 }
 
 pub struct NativeLong {
@@ -212,6 +235,7 @@ impl NativeLong {
                     observed_low: None,
                     equity_usdt: equity,
                     feature_row: None,
+                    gate: None,
                 },
             );
         }
@@ -226,7 +250,8 @@ impl NativeLong {
                     market_price: Self::mark(ctx, symbol),
                     observed_low: None,
                     equity_usdt: equity,
-                    feature_row: Some(pending.feature_row.clone()),
+                    feature_row: pending.feature_row.clone(),
+                    gate: pending.gate.clone(),
                 },
             );
         }
@@ -251,6 +276,7 @@ impl NativeLong {
             owned_opening_order_ids: opening,
             checkpoint_fingerprint: self.checkpoint_fingerprint.clone(),
             signal_receipt,
+            replace_gate_pending: false,
         }
     }
 
@@ -420,11 +446,20 @@ impl NativeLong {
             }
         }
         for pending in self.state.pending_signals.values() {
-            for wake in [
-                pending.signal_ts_ms + self.config.rule.entry_delay_hours.max(1) * 3_600_000,
-                pending.signal_ts_ms + self.config.rule.fc_sniper_deadline_hours * 3_600_000,
-                pending.signal_ts_ms + self.config.signal_freshness_ms,
-            ] {
+            let clocks = if let Some(gate) = pending.gate.as_ref() {
+                [
+                    pending.signal_ts_ms + GATE_TRIGGER_MAX_AGE_MS,
+                    gate.valid_until_ms,
+                    pending.signal_ts_ms + self.config.signal_freshness_ms,
+                ]
+            } else {
+                [
+                    pending.signal_ts_ms + self.config.rule.entry_delay_hours.max(1) * 3_600_000,
+                    pending.signal_ts_ms + self.config.rule.fc_sniper_deadline_hours * 3_600_000,
+                    pending.signal_ts_ms + self.config.signal_freshness_ms,
+                ]
+            };
+            for wake in clocks {
                 if wake > now_ms {
                     wakes.push(wake);
                 }
@@ -490,6 +525,7 @@ impl NativeLong {
         }
         let kind = match &envelope.payload {
             SignalPayload::LongFeatureBatch { .. } => "long_feature_batch",
+            SignalPayload::LlmGateCandidates { .. } => "llm_gate_candidates",
         };
         if observation.kind != kind {
             return Err("LONG outer and inner signal kinds disagree".to_owned());
@@ -525,14 +561,39 @@ impl NativeLong {
         {
             return Err("LONG signal config does not bind this reducer".to_owned());
         }
-        let SignalPayload::LongFeatureBatch {
-            decision_ts_ms,
-            feature_ts_ms,
-            rows,
-            marks,
-            cold_start_fallback_count,
-            rejections,
-        } = envelope.payload;
+        let (decision_ts_ms, feature_ts_ms, rows, marks, cold_start_fallback_count, rejections) =
+            match envelope.payload {
+                SignalPayload::LlmGateCandidates {
+                    decision_ts_ms,
+                    valid_until_ms,
+                    btc_rv_30,
+                    rows,
+                } => {
+                    return self.accept_gate_candidates(
+                        observation,
+                        decision_ts_ms,
+                        valid_until_ms,
+                        btc_rv_30,
+                        rows,
+                        ctx,
+                    );
+                }
+                SignalPayload::LongFeatureBatch {
+                    decision_ts_ms,
+                    feature_ts_ms,
+                    rows,
+                    marks,
+                    cold_start_fallback_count,
+                    rejections,
+                } => (
+                    decision_ts_ms,
+                    feature_ts_ms,
+                    rows,
+                    marks,
+                    cold_start_fallback_count,
+                    rejections,
+                ),
+            };
         let batch = LongSignalBatch {
             decision_ts_ms,
             feature_ts_ms,
@@ -601,6 +662,7 @@ impl NativeLong {
                 observed_low: None,
                 equity_usdt: equity,
                 feature_row: Some(row),
+                gate: None,
             });
         }
         let receipt = Some((
@@ -612,6 +674,90 @@ impl NativeLong {
         for (symbol, mark) in mark_by_symbol {
             input.facts.prices.insert(symbol, mark);
         }
+        let config = self.effective_config(ctx);
+        let output = reduce_batch(input, self.state.clone(), &config).map_err(str::to_owned)?;
+        self.apply(output, ctx);
+        if self.flatten_request_id.is_some() {
+            self.flatten_now(ctx);
+        }
+        Ok(())
+    }
+}
+
+impl NativeLong {
+    /// The gate's judged events become entry inputs: each row is one
+    /// candidate priced at its trigger, entered at market through the native
+    /// sizing and exits. The publication replaces every gate candidate still
+    /// waiting, so an empty one withdraws them.
+    fn accept_gate_candidates(
+        &mut self,
+        observation: &SignalObservation,
+        decision_ts_ms: i64,
+        valid_until_ms: i64,
+        btc_rv_30: Option<f64>,
+        rows: Vec<GateCandidateRow>,
+        ctx: &mut dyn StrategyCtx,
+    ) -> Result<(), String> {
+        if decision_ts_ms <= 0
+            || decision_ts_ms > observation.available_wall_ts_ms
+            || valid_until_ms <= decision_ts_ms
+            || btc_rv_30.is_some_and(|value| !value.is_finite() || value <= 0.0)
+        {
+            return Err("LLM gate publication timing is invalid".to_owned());
+        }
+        let received_ts_ms = observation.available_wall_ts_ms;
+        if entry_window_is_closed(
+            ctx.wall_ms(),
+            received_ts_ms,
+            self.config.book_validity_ms,
+            self.config.engine_entry_cutoff_ms,
+        ) {
+            self.consume_only(observation, ctx);
+            return Ok(());
+        }
+        let (_, equity) = Self::account(ctx);
+        let mut seen = BTreeSet::new();
+        let mut decisions = Vec::with_capacity(rows.len());
+        for row in rows {
+            if !crate::native_common::valid_symbol(&row.symbol) || !seen.insert(row.symbol.clone())
+            {
+                return Err("LLM gate candidates repeat or malform a symbol".to_owned());
+            }
+            if row.trigger_ts_ms <= 0
+                || row.trigger_ts_ms > received_ts_ms
+                || !row.trigger_price.is_finite()
+                || row.trigger_price <= 0.0
+            {
+                return Err("LLM gate candidate trigger is invalid".to_owned());
+            }
+            decisions.push(DecisionInput {
+                decision_ts_ms: received_ts_ms,
+                symbol: row.symbol.clone(),
+                signal_ts_ms: row.trigger_ts_ms,
+                signal_close: row.trigger_price,
+                market_price: Self::mark(ctx, &row.symbol),
+                observed_low: None,
+                equity_usdt: equity,
+                feature_row: None,
+                gate: Some(GateSignal {
+                    score: row.score,
+                    band: row.band,
+                    atr_pct: row.atr_pct,
+                    sigma_daily_30d: row.sigma_daily_30d.unwrap_or(0.0),
+                    turnover_rank: row.turnover_rank,
+                    trigger_window_h: row.trigger_window_h,
+                    btc_rv_30,
+                    valid_until_ms,
+                }),
+            });
+        }
+        let receipt = Some((
+            observation.source.clone(),
+            observation.sequence,
+            observation.observation_id.clone(),
+        ));
+        let mut input = self.make_input(decisions, receipt, ctx);
+        input.replace_gate_pending = true;
         let config = self.effective_config(ctx);
         let output = reduce_batch(input, self.state.clone(), &config).map_err(str::to_owned)?;
         self.apply(output, ctx);

@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::native_common::{
-    checkpoint_payload, config_fingerprint, order_effects, valid_sha256, valid_symbol, Effect,
-    ExecutionOutput, PlannedTarget, PlannerFacts, DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+    checkpoint_payload, config_fingerprint, order_effects_tagged, valid_sha256, valid_symbol,
+    Effect, ExecutionOutput, PlannedTarget, PlannerFacts, DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
 };
 use crate::position_plan::{plan as plan_targets, PlanRules, Target};
 
@@ -15,6 +15,9 @@ const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 // Admission cycles are one minute, matching the registered live-physics clock.
 pub const ENTRY_CYCLE_MS: i64 = 60_000;
+/// A judged gate trigger older than this at decision time is not entered; the
+/// ledger republishes hourly and its own validity window is the other clock.
+pub const GATE_TRIGGER_MAX_AGE_MS: i64 = 3_600_000;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -287,6 +290,58 @@ pub struct LongSignalBatch {
     pub rejections: Vec<DataRejection>,
 }
 
+/// The LLM entry gate's judged event for one symbol. It is an alternative
+/// trigger and nothing else: the stop, the hold clock, the decay contract, and
+/// the vol-parity weight all come from the registered rule, so a gate entry is
+/// indistinguishable from a native one downstream of selection.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GateSignal {
+    pub score: f64,
+    /// `core` for turnover ranks 1-10, `wide` for 11-30; graded apart.
+    pub band: String,
+    pub atr_pct: f64,
+    pub sigma_daily_30d: f64,
+    pub turnover_rank: Option<f64>,
+    pub trigger_window_h: Option<i64>,
+    pub btc_rv_30: Option<f64>,
+    /// The ledger publication's own expiry.
+    pub valid_until_ms: i64,
+}
+
+impl GateSignal {
+    pub fn pattern(&self) -> &'static str {
+        if self.band == "wide" {
+            "llm_gate_wide"
+        } else {
+            "llm_gate"
+        }
+    }
+
+    /// The order-log tag an opening order from this trigger carries.
+    pub fn order_tag(&self) -> &'static str {
+        if self.band == "wide" {
+            "long-native-llm-gate-wide"
+        } else {
+            "long-native-llm-gate"
+        }
+    }
+
+    fn is_sane(&self) -> bool {
+        self.score.is_finite()
+            && matches!(self.band.as_str(), "core" | "wide")
+            && self.atr_pct.is_finite()
+            && self.atr_pct > 0.0
+            && self.atr_pct < 1.0
+            && self.sigma_daily_30d.is_finite()
+            && self.sigma_daily_30d >= 0.0
+            && self.turnover_rank.is_none_or(|v| v.is_finite() && v >= 1.0)
+            && self.trigger_window_h.is_none_or(|v| v > 0)
+            && self.btc_rv_30.is_none_or(|v| v.is_finite() && v > 0.0)
+            && self.valid_until_ms > 0
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionInput {
@@ -298,6 +353,8 @@ pub struct DecisionInput {
     pub observed_low: Option<f64>,
     pub equity_usdt: f64,
     pub feature_row: Option<FeatureRow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<GateSignal>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -385,6 +442,9 @@ pub fn decide(
     validate_input(input)?;
     if prior.requested {
         return Ok(decide_existing(input, prior, config));
+    }
+    if let Some(gate) = input.gate.as_ref() {
+        return Ok(decide_gate(input, gate, prior, config));
     }
     let Some(row) = input.feature_row.as_ref() else {
         return Ok(DecisionOutput::empty(
@@ -483,30 +543,13 @@ pub fn decide(
         output.wake_at_or_below = Some(retrace);
         return Ok(output);
     };
-    let base = if config.order_notional_pct_equity > 0.0 {
-        config.order_notional_pct_equity
-    } else {
-        config.rule.gross_exposure / config.rule.max_concurrent_positions as f64
-            * config.notional_multiplier
-    };
-    let rv = safe(row.btc_rv_30).filter(|value| *value != 0.0);
-    let vol_scale = (config.rule.vol_target_annual
-        / rv.unwrap_or(config.rule.vol_target_annual).max(1e-6))
-    .clamp(
-        config.rule.vol_target_min_scale,
-        config.rule.vol_target_max_scale,
+    let (position_weight, target_fraction, target_notional) = size_entry(
+        config,
+        input.decision_ts_ms,
+        input.equity_usdt,
+        safe(row.btc_rv_30),
+        safe(row.realized_vol),
     );
-    let realized = safe(row.realized_vol).unwrap_or(config.rule.vol_floor_annual);
-    let notional_weight = config.rule.gross_exposure / config.rule.max_concurrent_positions as f64;
-    let mut position_weight = (config.rule.vol_floor_annual
-        / realized.max(config.rule.vol_floor_annual))
-    .min(config.rule.max_position_weight / notional_weight)
-    .max(0.25);
-    if config.rule.weekend_size_mult != 1.0 && is_weekend(input.decision_ts_ms) {
-        position_weight *= config.rule.weekend_size_mult;
-    }
-    let target_fraction = config.wallet_balance_fraction * base * vol_scale * position_weight;
-    let target_notional = input.equity_usdt * target_fraction;
     if !target_fraction.is_finite()
         || target_fraction <= 0.0
         || !target_notional.is_finite()
@@ -520,18 +563,7 @@ pub fn decide(
         return Ok(output);
     }
     let atr = safe(row.atr_14d_pct).unwrap_or(0.0);
-    let (stop_decay_after_ms, decayed_stop_loss_fraction) = if config.rule.fc_stop_time_decay_hours
-        > 0
-        && config.rule.fc_stop_time_decay_atr_mult > 0.0
-        && atr > 0.0
-    {
-        (
-            config.rule.fc_stop_time_decay_hours * HOUR_MS,
-            config.rule.fc_stop_time_decay_atr_mult * atr,
-        )
-    } else {
-        (0, 0.0)
-    };
+    let (stop_decay_after_ms, decayed_stop_loss_fraction) = stop_decay(config, atr);
     Ok(DecisionOutput {
         schema_version: CONTRACT_SCHEMA_VERSION,
         action: DecisionAction::Enter,
@@ -552,6 +584,157 @@ pub fn decide(
             .min(signal_ts_ms + config.signal_freshness_ms),
         wake_at_or_below: None,
     })
+}
+
+/// LONG's position size: the registered slot weight and multiplier, BTC
+/// volatility targeting, the name's own volatility parity, and the weekend
+/// multiplier. Both entry triggers size through here.
+fn size_entry(
+    config: &StrategyConfig,
+    decision_ts_ms: i64,
+    equity_usdt: f64,
+    btc_rv_30: Option<f64>,
+    realized_vol: Option<f64>,
+) -> (f64, f64, f64) {
+    let base = if config.order_notional_pct_equity > 0.0 {
+        config.order_notional_pct_equity
+    } else {
+        config.rule.gross_exposure / config.rule.max_concurrent_positions as f64
+            * config.notional_multiplier
+    };
+    let rv = btc_rv_30.filter(|value| *value != 0.0);
+    let vol_scale = (config.rule.vol_target_annual
+        / rv.unwrap_or(config.rule.vol_target_annual).max(1e-6))
+    .clamp(
+        config.rule.vol_target_min_scale,
+        config.rule.vol_target_max_scale,
+    );
+    let realized = realized_vol.unwrap_or(config.rule.vol_floor_annual);
+    let notional_weight = config.rule.gross_exposure / config.rule.max_concurrent_positions as f64;
+    let mut position_weight = (config.rule.vol_floor_annual
+        / realized.max(config.rule.vol_floor_annual))
+    .min(config.rule.max_position_weight / notional_weight)
+    .max(0.25);
+    if config.rule.weekend_size_mult != 1.0 && is_weekend(decision_ts_ms) {
+        position_weight *= config.rule.weekend_size_mult;
+    }
+    let target_fraction = config.wallet_balance_fraction * base * vol_scale * position_weight;
+    let target_notional = equity_usdt * target_fraction;
+    (position_weight, target_fraction, target_notional)
+}
+
+fn stop_decay(config: &StrategyConfig, atr: f64) -> (i64, f64) {
+    if config.rule.fc_stop_time_decay_hours > 0
+        && config.rule.fc_stop_time_decay_atr_mult > 0.0
+        && atr > 0.0
+    {
+        (
+            config.rule.fc_stop_time_decay_hours * HOUR_MS,
+            config.rule.fc_stop_time_decay_atr_mult * atr,
+        )
+    } else {
+        (0, 0.0)
+    }
+}
+
+/// A gate trigger enters at market as soon as a price is known: no entry
+/// delay and no retrace wait, because the judgment already waited for the
+/// move to be judged. Everything after selection is the native contract.
+fn decide_gate(
+    input: &DecisionInput,
+    gate: &GateSignal,
+    prior: &PriorState,
+    config: &StrategyConfig,
+) -> DecisionOutput {
+    let signal_ts_ms = input.signal_ts_ms;
+    let signal_close = input.signal_close;
+    let reject = |reason: &str| {
+        let mut output = DecisionOutput::empty(DecisionAction::Reject, reason, input);
+        output.signal_ts_ms = signal_ts_ms;
+        output
+    };
+    if signal_ts_ms <= 0 || !signal_close.is_finite() || signal_close <= 0.0 || !gate.is_sane() {
+        return reject("invalid_signal_identity");
+    }
+    if gate.sigma_daily_30d <= 0.0 {
+        // The vol-parity rule reads an absent reading as the floor, which is
+        // its ceiling weight: the name known least about would take the
+        // largest position. A young listing sits here routinely.
+        return reject("no_vol");
+    }
+    let age_ms = input.decision_ts_ms - signal_ts_ms;
+    if age_ms < 0 {
+        let mut output = DecisionOutput::empty(DecisionAction::Wait, "signal_not_available", input);
+        output.signal_ts_ms = signal_ts_ms;
+        return output;
+    }
+    for (condition, reason) in [
+        (
+            age_ms >= GATE_TRIGGER_MAX_AGE_MS || input.decision_ts_ms >= gate.valid_until_ms,
+            "signal_stale",
+        ),
+        (prior.cooldown_until_ms > input.decision_ts_ms, "cooldown"),
+        (
+            signal_ts_ms <= prior.attempted_signal_ts_ms,
+            "signal_already_attempted",
+        ),
+        (
+            prior.active_positions >= config.rule.max_concurrent_positions,
+            "capacity",
+        ),
+    ] {
+        if condition {
+            return reject(reason);
+        }
+    }
+    if safe(input.market_price)
+        .filter(|value| *value > 0.0)
+        .is_none()
+    {
+        let mut output = DecisionOutput::empty(DecisionAction::Wait, "no_market_price", input);
+        output.signal_ts_ms = signal_ts_ms;
+        return output;
+    }
+    let realized_vol = gate.sigma_daily_30d * 365.0_f64.sqrt();
+    let (position_weight, target_fraction, target_notional) = size_entry(
+        config,
+        input.decision_ts_ms,
+        input.equity_usdt,
+        gate.btc_rv_30,
+        Some(realized_vol),
+    );
+    let stop_loss_fraction = gate.atr_pct * config.rule.fc_atr_stop_mult;
+    let hold_days = config.rule.fc_max_hold_days;
+    if !target_fraction.is_finite()
+        || target_fraction <= 0.0
+        || !target_notional.is_finite()
+        || target_notional <= 0.0
+        || !(0.0..1.0).contains(&stop_loss_fraction)
+        || stop_loss_fraction == 0.0
+        || hold_days <= 0
+    {
+        return reject("invalid_entry_plan");
+    }
+    let (stop_decay_after_ms, decayed_stop_loss_fraction) = stop_decay(config, gate.atr_pct);
+    DecisionOutput {
+        schema_version: CONTRACT_SCHEMA_VERSION,
+        action: DecisionAction::Enter,
+        reason: "llm_gate_score".to_owned(),
+        decision_ts_ms: input.decision_ts_ms,
+        symbol: input.symbol.clone(),
+        signal_ts_ms,
+        entry_reason: "llm_gate_score".to_owned(),
+        position_weight,
+        target_fraction_of_equity: target_fraction,
+        target_notional_usdt: target_notional,
+        entry_leverage: config.entry_leverage,
+        stop_loss_fraction,
+        stop_decay_after_ms,
+        decayed_stop_loss_fraction,
+        max_hold_duration_ms: hold_days * DAY_MS,
+        entry_valid_until_ms: input.decision_ts_ms + config.book_validity_ms,
+        wake_at_or_below: None,
+    }
 }
 
 fn decide_existing(
@@ -729,12 +912,17 @@ pub struct SleeveState {
     pub entry_cycle_selected_symbols: BTreeSet<String>,
 }
 
+/// A signal not yet resolved into an entry. Exactly one trigger is present:
+/// the native feature row, or the gate's judged event.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PendingSignal {
     pub signal_ts_ms: i64,
     pub signal_close: f64,
-    pub feature_row: FeatureRow,
+    #[serde(default)]
+    pub feature_row: Option<FeatureRow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<GateSignal>,
 }
 
 impl SleeveState {
@@ -779,13 +967,20 @@ impl SleeveState {
             }
         }
         for (symbol, pending) in &self.pending_signals {
-            if symbol != &pending.feature_row.symbol
-                || !valid_symbol(symbol)
+            let trigger_ok = match (&pending.feature_row, &pending.gate) {
+                (Some(row), None) => {
+                    symbol == &row.symbol
+                        && row.ts_ms == pending.signal_ts_ms
+                        && safe(row.close) == Some(pending.signal_close)
+                }
+                (None, Some(gate)) => gate.is_sane(),
+                _ => false,
+            };
+            if !valid_symbol(symbol)
                 || pending.signal_ts_ms <= 0
-                || pending.feature_row.ts_ms != pending.signal_ts_ms
                 || !pending.signal_close.is_finite()
                 || pending.signal_close <= 0.0
-                || safe(pending.feature_row.close) != Some(pending.signal_close)
+                || !trigger_ok
             {
                 return Err("LONG pending signal is invalid");
             }
@@ -825,6 +1020,9 @@ pub struct BatchInput {
     pub owned_opening_order_ids: BTreeMap<String, Vec<String>>,
     pub checkpoint_fingerprint: Option<String>,
     pub signal_receipt: Option<(String, u64, String)>,
+    /// A gate publication replaces every gate candidate still waiting; an
+    /// empty publication is how the ledger withdraws them.
+    pub replace_gate_pending: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -841,6 +1039,20 @@ pub enum ReplanMode {
 }
 
 fn remember_pending_signal(state: &mut SleeveState, input: &DecisionInput) {
+    if let Some(gate) = input.gate.clone() {
+        if input.signal_ts_ms > 0 && input.signal_close.is_finite() && input.signal_close > 0.0 {
+            state.pending_signals.insert(
+                input.symbol.clone(),
+                PendingSignal {
+                    signal_ts_ms: input.signal_ts_ms,
+                    signal_close: input.signal_close,
+                    feature_row: None,
+                    gate: Some(gate),
+                },
+            );
+        }
+        return;
+    }
     let Some(feature_row) = input.feature_row.clone() else {
         return;
     };
@@ -859,7 +1071,8 @@ fn remember_pending_signal(state: &mut SleeveState, input: &DecisionInput) {
         PendingSignal {
             signal_ts_ms,
             signal_close,
-            feature_row,
+            feature_row: Some(feature_row),
+            gate: None,
         },
     );
 }
@@ -892,6 +1105,11 @@ pub fn reduce_batch_with_mode(
         state.schema_version = DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION;
     }
     state.validate()?;
+    if input.replace_gate_pending {
+        state
+            .pending_signals
+            .retain(|_, pending| pending.gate.is_none());
+    }
     if input.now_ms <= 0
         || input
             .decisions
@@ -931,6 +1149,7 @@ pub fn reduce_batch_with_mode(
     let mut targets = Vec::new();
     let mut outputs = Vec::new();
     let mut entry_effect_symbols = BTreeSet::new();
+    let mut gate_tags: BTreeMap<String, &'static str> = BTreeMap::new();
     let mut next = state.clone();
     if mismatch {
         let recovery_symbols = input
@@ -1031,10 +1250,28 @@ pub fn reduce_batch_with_mode(
                     .filter(|number| number.is_finite())
                     .unwrap_or(f64::INFINITY)
             };
+            let gate_score = |value: &DecisionInput| {
+                value
+                    .gate
+                    .as_ref()
+                    .map(|gate| gate.score)
+                    .filter(|number| number.is_finite())
+                    .unwrap_or(f64::NEG_INFINITY)
+            };
+            let gate_rank = |value: &DecisionInput| {
+                value
+                    .gate
+                    .as_ref()
+                    .and_then(|gate| gate.turnover_rank)
+                    .filter(|number| number.is_finite())
+                    .unwrap_or(f64::INFINITY)
+            };
             generation(right)
                 .cmp(&generation(left))
                 .then_with(|| score(right).total_cmp(&score(left)))
                 .then_with(|| rank(left).total_cmp(&rank(right)))
+                .then_with(|| gate_score(right).total_cmp(&gate_score(left)))
+                .then_with(|| gate_rank(left).total_cmp(&gate_rank(right)))
                 .then_with(|| left.symbol.cmp(&right.symbol))
         });
         let mut active = next
@@ -1098,6 +1335,9 @@ pub fn reduce_batch_with_mode(
                     {
                         remember_pending_signal(&mut next, &decision_input);
                         continue;
+                    }
+                    if let Some(gate) = decision_input.gate.as_ref() {
+                        gate_tags.insert(decision_input.symbol.clone(), gate.order_tag());
                     }
                     if !config.entries_enabled || mismatch {
                         remember_pending_signal(&mut next, &decision_input);
@@ -1314,7 +1554,9 @@ pub fn reduce_batch_with_mode(
                     || matches!(step, crate::position_plan::Step::Restop { .. }))
         })
         .collect();
-    effects.extend(order_effects(steps, &targets, "long-native"));
+    effects.extend(order_effects_tagged(steps, &targets, |symbol| {
+        gate_tags.get(symbol).copied().unwrap_or("long-native")
+    }));
     Ok(BatchOutput {
         decisions: outputs,
         next_state: next,
@@ -1409,6 +1651,7 @@ mod tests {
                 eth_regime_on: true,
                 ..FeatureRow::default()
             }),
+            gate: None,
         }
     }
 
@@ -1541,6 +1784,7 @@ mod tests {
             observed_low: None,
             equity_usdt: 1.0,
             feature_row: Some(row),
+            gate: None,
         };
         assert_ne!(
             decide(&input, &PriorState::default(), &config)
@@ -1569,6 +1813,7 @@ mod tests {
                 owned_opening_order_ids: BTreeMap::new(),
                 checkpoint_fingerprint: Some("f".repeat(64)),
                 signal_receipt: None,
+                replace_gate_pending: false,
             },
             SleeveState::default(),
             &config,
@@ -1601,6 +1846,7 @@ mod tests {
                 owned_opening_order_ids: BTreeMap::new(),
                 checkpoint_fingerprint: None,
                 signal_receipt: Some(("worker".into(), 1, "future-observation".into())),
+                replace_gate_pending: false,
             },
             SleeveState::default(),
             &fixture_config(),
@@ -1641,13 +1887,15 @@ mod tests {
                     market_price: Some(98.0),
                     observed_low: Some(98.0),
                     equity_usdt: 1_000.0,
-                    feature_row: Some(pending.feature_row),
+                    feature_row: pending.feature_row,
+                    gate: pending.gate,
                 }],
                 facts: entry_facts(&["BTCUSDT"]),
                 owned_working_symbols: BTreeSet::new(),
                 owned_opening_order_ids: BTreeMap::new(),
                 checkpoint_fingerprint: None,
                 signal_receipt: None,
+                replace_gate_pending: false,
             },
             restored,
             &fixture_config(),
@@ -1673,6 +1921,7 @@ mod tests {
                 owned_opening_order_ids: BTreeMap::new(),
                 checkpoint_fingerprint: None,
                 signal_receipt: Some(("worker".into(), 1, "obs".into())),
+                replace_gate_pending: false,
             },
             SleeveState::default(),
             &disabled,
@@ -1694,6 +1943,7 @@ mod tests {
                 owned_opening_order_ids: BTreeMap::new(),
                 checkpoint_fingerprint: None,
                 signal_receipt: None,
+                replace_gate_pending: false,
             },
             first.next_state,
             &enabled,
@@ -1727,6 +1977,7 @@ mod tests {
                 owned_opening_order_ids: BTreeMap::new(),
                 checkpoint_fingerprint: None,
                 signal_receipt: None,
+                replace_gate_pending: false,
             },
             restored,
             &enabled,
@@ -1768,6 +2019,7 @@ mod tests {
             owned_opening_order_ids: BTreeMap::new(),
             checkpoint_fingerprint: None,
             signal_receipt: None,
+            replace_gate_pending: false,
         };
 
         let before = reduce_batch(make_input(deadline - 1), SleeveState::default(), &config)
@@ -1801,6 +2053,7 @@ mod tests {
             owned_opening_order_ids: BTreeMap::new(),
             checkpoint_fingerprint: None,
             signal_receipt: None,
+            replace_gate_pending: false,
         };
 
         let mut seed_config = fixture_config();
@@ -1931,6 +2184,7 @@ mod tests {
                 observed_low: None,
                 equity_usdt: 1_000.0,
                 feature_row: None,
+                gate: None,
             })
             .collect::<Vec<_>>();
         let input = BatchInput {
@@ -1941,6 +2195,7 @@ mod tests {
             owned_opening_order_ids: BTreeMap::new(),
             checkpoint_fingerprint: None,
             signal_receipt: None,
+            replace_gate_pending: false,
         };
 
         let boot = reduce_batch_with_mode(
@@ -2045,6 +2300,7 @@ mod tests {
                     owned_opening_order_ids: BTreeMap::new(),
                     checkpoint_fingerprint: None,
                     signal_receipt: None,
+                    replace_gate_pending: false,
                 },
                 state.clone(),
                 &config,
@@ -2091,6 +2347,7 @@ mod tests {
                 )]),
                 checkpoint_fingerprint: Some("f".repeat(64)),
                 signal_receipt: None,
+                replace_gate_pending: false,
             },
             SleeveState::default(),
             &fixture_config(),
@@ -2109,5 +2366,230 @@ mod tests {
             .effects
             .iter()
             .any(|effect| matches!(effect, Effect::Order(_))));
+    }
+
+    fn gate_input(symbol: &str, trigger_ts_ms: i64, decision_ts_ms: i64) -> DecisionInput {
+        DecisionInput {
+            decision_ts_ms,
+            symbol: symbol.into(),
+            signal_ts_ms: trigger_ts_ms,
+            signal_close: 100.0,
+            market_price: Some(98.0),
+            observed_low: None,
+            equity_usdt: 1_000.0,
+            feature_row: None,
+            gate: Some(GateSignal {
+                score: 7.0,
+                band: "core".into(),
+                atr_pct: 0.05,
+                sigma_daily_30d: 0.04,
+                turnover_rank: Some(4.0),
+                trigger_window_h: Some(4),
+                btc_rv_30: Some(0.6),
+                valid_until_ms: decision_ts_ms + HOUR_MS,
+            }),
+        }
+    }
+
+    fn gate_batch(decisions: Vec<DecisionInput>, now_ms: i64, replace: bool) -> BatchInput {
+        BatchInput {
+            now_ms,
+            decisions,
+            facts: entry_facts(&["BTCUSDT", "ETHUSDT"]),
+            owned_working_symbols: BTreeSet::new(),
+            owned_opening_order_ids: BTreeMap::new(),
+            checkpoint_fingerprint: None,
+            signal_receipt: None,
+            replace_gate_pending: replace,
+        }
+    }
+
+    fn entry_tag(effects: &[Effect], symbol: &str) -> Option<&'static str> {
+        effects.iter().find_map(|effect| match effect {
+            Effect::Order(crate::native_common::OrderEffect {
+                step: crate::position_plan::Step::Enter { symbol: name, .. },
+                tag,
+                ..
+            }) if name == symbol => Some(*tag),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_gate_trigger_enters_at_market_through_native_sizing_with_its_own_tag() {
+        // Day 12 since the epoch is a Monday, so the weekend multiplier stays out.
+        let decision_ts_ms = 12 * DAY_MS + HOUR_MS;
+        let trigger_ts_ms = decision_ts_ms - 10 * 60_000;
+        let config = fixture_config();
+        let output = reduce_batch(
+            gate_batch(
+                vec![
+                    gate_input("BTCUSDT", trigger_ts_ms, decision_ts_ms),
+                    entry_input("ETHUSDT", decision_ts_ms - HOUR_MS),
+                ],
+                decision_ts_ms,
+                true,
+            ),
+            SleeveState::default(),
+            &config,
+        )
+        .expect("gate batch reduces");
+        let gate = output
+            .decisions
+            .iter()
+            .find(|row| row.symbol == "BTCUSDT")
+            .expect("gate decision");
+        assert_eq!(gate.action, DecisionAction::Enter);
+        assert_eq!(gate.reason, "llm_gate_score");
+        assert_eq!(gate.entry_reason, "llm_gate_score");
+        assert_eq!(gate.signal_ts_ms, trigger_ts_ms);
+        // Native sizing: slot weight 0.1 x multiplier 6.0, BTC vol scale
+        // 0.6/0.6 = 1, vol parity 0.3 / (0.04 x sqrt 365) = 0.3926, no weekend.
+        let realized = 0.04 * 365.0_f64.sqrt();
+        let expected_weight = (0.3 / realized).clamp(0.25, 3.0);
+        assert!((gate.position_weight - expected_weight).abs() < 1e-12);
+        assert!((gate.target_notional_usdt - 1_000.0 * 0.6 * expected_weight).abs() < 1e-9);
+        assert!((gate.stop_loss_fraction - 0.15).abs() < 1e-12);
+        assert_eq!(gate.stop_decay_after_ms, 48 * HOUR_MS);
+        assert!((gate.decayed_stop_loss_fraction - 0.075).abs() < 1e-12);
+        assert_eq!(gate.max_hold_duration_ms, 3 * DAY_MS);
+        assert_eq!(
+            gate.entry_valid_until_ms,
+            decision_ts_ms + config.book_validity_ms
+        );
+        assert_eq!(
+            entry_tag(&output.execution.effects, "BTCUSDT"),
+            Some("long-native-llm-gate")
+        );
+        assert_eq!(
+            entry_tag(&output.execution.effects, "ETHUSDT"),
+            Some("long-native")
+        );
+        assert!(output.next_state.symbols["BTCUSDT"].requested);
+        assert_eq!(
+            output.next_state.attempted_signal_ts_ms["BTCUSDT"],
+            trigger_ts_ms
+        );
+    }
+
+    #[test]
+    fn a_wide_band_gate_entry_is_tagged_apart() {
+        let decision_ts_ms = 12 * DAY_MS + HOUR_MS;
+        let mut input = gate_input("BTCUSDT", decision_ts_ms - 60_000, decision_ts_ms);
+        input.gate.as_mut().unwrap().band = "wide".into();
+        let output = reduce_batch(
+            gate_batch(vec![input], decision_ts_ms, true),
+            SleeveState::default(),
+            &fixture_config(),
+        )
+        .unwrap();
+        assert_eq!(
+            entry_tag(&output.execution.effects, "BTCUSDT"),
+            Some("long-native-llm-gate-wide")
+        );
+    }
+
+    #[test]
+    fn a_gate_trigger_that_is_stale_unmeasured_or_repeated_is_rejected() {
+        let decision_ts_ms = 12 * DAY_MS + HOUR_MS;
+        let config = fixture_config();
+        let prior = PriorState::default();
+
+        let stale = gate_input(
+            "BTCUSDT",
+            decision_ts_ms - GATE_TRIGGER_MAX_AGE_MS,
+            decision_ts_ms,
+        );
+        let output = decide(&stale, &prior, &config).unwrap();
+        assert_eq!(
+            (output.action, output.reason.as_str()),
+            (DecisionAction::Reject, "signal_stale")
+        );
+
+        let mut expired = gate_input("BTCUSDT", decision_ts_ms - 60_000, decision_ts_ms);
+        expired.gate.as_mut().unwrap().valid_until_ms = decision_ts_ms;
+        let output = decide(&expired, &prior, &config).unwrap();
+        assert_eq!(
+            (output.action, output.reason.as_str()),
+            (DecisionAction::Reject, "signal_stale")
+        );
+
+        let mut unmeasured = gate_input("BTCUSDT", decision_ts_ms - 60_000, decision_ts_ms);
+        unmeasured.gate.as_mut().unwrap().sigma_daily_30d = 0.0;
+        let output = decide(&unmeasured, &prior, &config).unwrap();
+        assert_eq!(
+            (output.action, output.reason.as_str()),
+            (DecisionAction::Reject, "no_vol")
+        );
+
+        let repeated = gate_input("BTCUSDT", decision_ts_ms - 60_000, decision_ts_ms);
+        let attempted = PriorState {
+            attempted_signal_ts_ms: decision_ts_ms - 60_000,
+            ..PriorState::default()
+        };
+        let output = decide(&repeated, &attempted, &config).unwrap();
+        assert_eq!(
+            (output.action, output.reason.as_str()),
+            (DecisionAction::Reject, "signal_already_attempted")
+        );
+
+        let mut unpriced = gate_input("BTCUSDT", decision_ts_ms - 60_000, decision_ts_ms);
+        unpriced.market_price = None;
+        let output = decide(&unpriced, &prior, &config).unwrap();
+        assert_eq!(
+            (output.action, output.reason.as_str()),
+            (DecisionAction::Wait, "no_market_price")
+        );
+    }
+
+    #[test]
+    fn a_gate_publication_replaces_waiting_gate_candidates_and_survives_a_checkpoint() {
+        let decision_ts_ms = 12 * DAY_MS + HOUR_MS;
+        let config = fixture_config();
+        let mut unpriced = gate_input("BTCUSDT", decision_ts_ms - 60_000, decision_ts_ms);
+        unpriced.market_price = None;
+        let waiting = reduce_batch(
+            gate_batch(
+                vec![unpriced, entry_input("ETHUSDT", decision_ts_ms - HOUR_MS)],
+                decision_ts_ms,
+                true,
+            ),
+            SleeveState::default(),
+            &config,
+        )
+        .unwrap();
+        let pending = &waiting.next_state.pending_signals["BTCUSDT"];
+        assert!(pending.feature_row.is_none());
+        assert_eq!(pending.gate.as_ref().map(|gate| gate.score), Some(7.0));
+        let restored: SleeveState =
+            serde_json::from_slice(&checkpoint_payload(&waiting.next_state)).unwrap();
+        restored
+            .validate()
+            .expect("a waiting gate candidate is a valid checkpoint");
+        assert_eq!(restored, waiting.next_state);
+        // ETH entered natively in the same batch; a pending native signal would
+        // be kept by the replacement, so seed one to prove that.
+        let mut state = restored;
+        let mut native = entry_input("SOLUSDT", decision_ts_ms - HOUR_MS);
+        native.market_price = None;
+        remember_pending_signal(&mut state, &native);
+        assert_eq!(state.pending_signals.len(), 2);
+
+        let withdrawn = reduce_batch(
+            gate_batch(Vec::new(), decision_ts_ms + 60_000, true),
+            state.clone(),
+            &config,
+        )
+        .unwrap();
+        assert!(!withdrawn.next_state.pending_signals.contains_key("BTCUSDT"));
+        assert!(withdrawn.next_state.pending_signals.contains_key("SOLUSDT"));
+
+        let untouched = reduce_batch(
+            gate_batch(Vec::new(), decision_ts_ms + 60_000, false),
+            state,
+            &config,
+        )
+        .unwrap();
+        assert!(untouched.next_state.pending_signals.contains_key("BTCUSDT"));
     }
 }

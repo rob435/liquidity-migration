@@ -154,7 +154,7 @@ def _run_carry(
         if presettlement_event_tape
         else ()
     )
-    operational = load_operational_profile(REPO / "configs" / "operational.mainnet.json")
+    operational = load_operational_profile(REPO / "configs" / "operational.json")
     carry = operational.carry
     replay_settings = CarryReplaySettings(
         environment="mainnet",
