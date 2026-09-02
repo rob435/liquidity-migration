@@ -5,6 +5,26 @@ Evidence grading and promotion: [docs/research/governance.md](governance.md). Ev
 [AGENTS.md](../../AGENTS.md). Failure taxonomy: [docs/research/backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
 Data tiers, roots, and PIT membership: [docs/data.md](../data.md).
 
+---
+
+## Executive Findings Index (Decision-Useful Summary)
+
+| Strategy / Hypothesis | Evaluation Window | Net Sharpe | Max Drawdown | Verdict | Summary & Core Physics |
+| :--- | :--- | :---: | :---: | :---: | :--- |
+| **LONG (`long_native_v12`)** | 2021–2026 Bybit PIT | **1.47** | **-4.6%** | **PROMOTED** | Momentum breakouts on top turnover USDT perps; decaying ATR stop; 3d hold. |
+| **CARRY (`carry_hold_v7`)** | 2021–2026 Bybit PIT | **1.59** | **-17.0%** | **PROMOTED** | Sticky 48h hold on extreme negative funding crowd fees ($\le -10\text{ bp}$). |
+| **EXODUS (`exodus_short_v1`)** | Event-driven | - | - | **PROMOTED** | Pre-settlement short on distressed CARRY pairs ($S+5\text{m} \to S+60\text{m}$). |
+| **MAKER (`quoter_v1`)** | 2-day live tape | Negative | - | **DISABLED** | Microstructural quoter; negative net of fees on seen tape. |
+| **Time-Series Trend (MOP)** | 10 liquid perps | 0.68 | -54.0% | **REJECTED** | 14d L/S fails significance bar ($t = 1.6$); long/flat lost money in 2022. |
+| **Cross-Sectional Momentum** | Alt perps 7–182d | 0.59 | -54.0% | **REJECTED** | Large-name direction agrees, but decays below $t \ge 2.5$ after costs. |
+| **Funding Factor (Quintiles)** | Weekly basis | 0.55 | -45.0% | **REJECTED** | Long lowest, short highest funding; below bar ($t = 1.3$). |
+| **Short Overcrowded Longs** | Funding $\ge +30\text{ bp}$ | 0.74 | -45.0% | **REJECTED** | Mirror of CARRY; severe short squeeze tail risk (max move $+169\%$). |
+| **Low-Volatility Factor** | Long low, short high | Negative | - | **DEAD** | Net Sharpe -0.2 to -1.1 across eras. |
+| **Abnormal Volume / Attention** | Turnover surges | Negative | - | **DEAD** | Net Sharpe -0.6 to 0.0; fails 100% of placebo checks. |
+| **Vol-Targeting Scaler** | Book-wide | Degraded | Worse | **REJECTED** | Levers into crashes during quiet periods; increases drawdowns on CARRY. |
+
+---
+
 ## 2026-09-02 — The outside model hunt: fifty sources, thirty specifications on the Bybit panel, nothing new clears the bar
 
 **Question (owner).** With the exit program closed, the owner asked for the
