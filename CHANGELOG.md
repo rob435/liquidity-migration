@@ -6,6 +6,37 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-02 — The fleet is back on the exact commit, after the deploy
+  machinery refused it three times.** The fleet had been down 21h 40m, from
+  2026-09-01 12:24 UTC to 2026-09-02 10:05 UTC. Deploying `5fc9d9e2` took
+  three attempts, because cutting the deploy to the operations it performs had
+  taken three things with it. The remote body runs over `bash -s`, whose
+  working directory is the ssh login directory, and the environment installs
+  `requirements.lock` without the project and sets no `PYTHONPATH`, so every
+  `python -m liquidity_migration.*` in the deploy failed to resolve the
+  package; the deploy now enters `REPO_DIR` once the checkout is at the exact
+  commit. The funded takeover unsets `REAL_MONEY` and its reload allowlist no
+  longer named it back, so the engine refused every funded state import, and
+  the same allowlist had lost `BYBIT_INVENTORY_CREDENTIAL_SET`, which the
+  Bybit gateway reads to choose its credential; both are named again, and a
+  key absent from the credential file stays unset, so an unarmed account still
+  refuses. Two tests in `tests/scripts/test_runtime_scripts.py` hold the
+  working directory, the call order, and the allowlist, and both fail without
+  the change. The engines now cap at 2 GB and report 217 MB and 303 MB in use,
+  with no kernel kill and no restart; the funded engine's heartbeat names the
+  installed commit. The account cost of the outage was one venue stop:
+  HNTUSDT closed itself at 09:53 UTC, eleven minutes before the engine came
+  up, for -14.97 USDT, which is -16.14 net of fees against a 12.72 limit and
+  latched the rolling-loss trip until 2026-09-03 09:54 UTC — entries and
+  growth refused, exits and cancels unaffected. Equity 127.18 USDT. The host
+  gave back 115.9 MB of journals, about 30 MB of rotated logs, and 75 stale
+  pre-activation heartbeats. The market tape's four recorded days moved into
+  the hourly layout as `<day>.legacy.tar` under
+  `LiquidityMigration/market-tape/bybit-linear/`, each archive verified
+  against its source day, and the retired `forward-market` folder was emptied;
+  `rclone purge` cannot remove the folder itself, because the remote is
+  authorized with the `drive.file` scope and a folder delete needs write
+  access to every child.
 - **2026-09-01 — The market recorder, its upload, and the backup stand apart
   from the trading fleet, and the fleet can roll itself back.** The fleet had
   been down since 13:32 UTC: the 13:30 deploy's demo engine was killed by the

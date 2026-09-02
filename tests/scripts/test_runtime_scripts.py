@@ -191,3 +191,30 @@ def test_deploy_never_stops_an_independent_unit() -> None:
     independent = remote[remote.index("start_independent_units()") : remote.index("# ------------------------------------------------------------ realm inputs")]
     assert 'wait_fresh_heartbeat "$unit" "$CAPTURE_STATUS" "$since"' in independent
     assert "result=unchanged-left-running" in independent
+
+
+def _function_body(remote: str, name: str) -> str:
+    body = remote[remote.index(f"{name}() {{") :]
+    return body[: body.index("\n}\n") + 3]
+
+
+def test_remote_deploy_enters_the_checkout_before_it_imports_the_package() -> None:
+    # The remote body runs from the ssh login directory, and the venv installs
+    # requirements.lock without the project, so every
+    # `python -m liquidity_migration.*` resolves from the working directory.
+    remote = _remote_script()
+    assert 'cd "$REPO_DIR"' in _function_body(remote, "fetch_exact_commit")
+    order = _function_body(remote, "deploy_mode")
+    assert order.index("fetch_exact_commit") < order.index("install_python_environment")
+
+
+def test_mainnet_takeover_reloads_the_owner_arming_switch() -> None:
+    # The takeover unsets REAL_MONEY, so its allowlist must name it back or the
+    # engine refuses every funded import. The gateway still reads
+    # BYBIT_INVENTORY_CREDENTIAL_SET.
+    body = _function_body(_remote_script(), "run_engine_takeover_command")
+    subshell = body[body.index("unset BYBIT_DEMO_API_KEY") :]
+    mainnet = subshell[subshell.index("mainnet)") :]
+    mainnet = mainnet[: mainnet.index(";;")]
+    assert "REAL_MONEY" in mainnet
+    assert "BYBIT_INVENTORY_CREDENTIAL_SET" in mainnet

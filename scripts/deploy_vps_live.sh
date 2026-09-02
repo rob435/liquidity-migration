@@ -166,6 +166,11 @@ fetch_exact_commit() {
         || fail "cannot check out $EXPECTED_COMMIT"
     [ "$(git -C "$REPO_DIR" rev-parse HEAD)" = "$EXPECTED_COMMIT" ] \
         || fail "checkout is not at EXPECTED_COMMIT"
+    # The remote body runs from the ssh login directory. Every
+    # `python -m liquidity_migration.*` below resolves the package from the
+    # working directory alone: the venv installs requirements.lock with
+    # --no-deps and never the project, and there is no PYTHONPATH.
+    cd "$REPO_DIR" || fail "cannot enter $REPO_DIR"
 }
 
 # ----------------------------------------------------------------- helpers
@@ -564,6 +569,7 @@ run_engine_takeover_command() {
             BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET \
             BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP \
             BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY \
+            BYBIT_INVENTORY_CREDENTIAL_SET \
             EXPECTED_ENGINE_ACCOUNT_USER_ID EXPECTED_ENGINE_VENUE EXPECTED_ENGINE_REALM
         case "$realm" in
             demo)
@@ -571,9 +577,13 @@ run_engine_takeover_command() {
                     BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET
                 ;;
             mainnet)
+                # REAL_MONEY comes from the owner's credential file and is read,
+                # never written, here: the engine refuses a funded takeover
+                # without it, and an unarmed file still refuses.
                 lm_load_private_systemd_environment "$PYTHON" "$credential_env" \
                     BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP \
-                    BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID
+                    BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID \
+                    REAL_MONEY BYBIT_INVENTORY_CREDENTIAL_SET
                 ;;
         esac
         lm_load_private_systemd_environment "$PYTHON" "$engine_env" \
