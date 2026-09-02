@@ -92,6 +92,7 @@ CAPTURE_USER=liquidity-capture
 RELEASE_DIR=/opt/liquidity-migration-engine
 ENGINE_BINARY=$RELEASE_DIR/bin/engine
 SIGNAL_WORKER_BINARY=$RELEASE_DIR/bin/signal-worker
+MARKET_TAPE_BINARY=$RELEASE_DIR/bin/market-tape
 ENGINE_CONTROL_HELPER=$RELEASE_DIR/bin/telegram-control-helper
 # The commit whose deploy last finished, and the one before it: what rollback
 # returns to. Seeded from the checkout when no record exists yet.
@@ -314,6 +315,24 @@ install_python_environment() {
 }
 
 build_engine() {
+    local staged_tar="/opt/liquidity-migration-engine/staged/${EXPECTED_COMMIT}.tar.gz"
+    if [ -f "$staged_tar" ]; then
+        echo "deploy: installing pre-built release binaries from CI artifact $staged_tar"
+        install -d -o root -g root -m 0755 "$CARGO_TARGET_ROOT/release"
+        tar -xzf "$staged_tar" -C "$CARGO_TARGET_ROOT/release"
+        if [ -f "$CARGO_TARGET_ROOT/release/binaries.sha256" ]; then
+            (cd "$CARGO_TARGET_ROOT/release" && sha256sum -c binaries.sha256 >/dev/null) \
+                || fail "pre-built binary sha256 checksum verification failed"
+        fi
+        test -x "$CARGO_TARGET_ROOT/release/engine" || fail "staged engine binary is missing or not executable"
+        test -x "$CARGO_TARGET_ROOT/release/signal-worker" || fail "staged signal-worker binary is missing or not executable"
+        echo "deploy: pre-built release binaries verified successfully; skipping host compilation"
+        return 0
+    fi
+    if [ "${AUTO_ROLLBACK:-0}" = 1 ] && [ -f "$ENGINE_BINARY.previous" ] && [ -f "$SIGNAL_WORKER_BINARY.previous" ]; then
+        echo "rollback: using cached previous release binaries; skipping compilation"
+        return 0
+    fi
     local toolchain
     toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$REPO_DIR/rust-toolchain.toml")"
     [ -n "$toolchain" ] || fail "cannot read the pinned Rust toolchain"
@@ -325,19 +344,52 @@ build_engine() {
         CARGO_HOME="$RUST_TOOLCHAIN_DIR/cargo" \
         RUSTUP_HOME="$RUST_TOOLCHAIN_DIR/rustup" \
         RUSTUP_TOOLCHAIN="$toolchain" \
-        cargo build --release --locked --workspace --bins \
+        nice -n 10 cargo build --release --locked --workspace --bins \
+            --jobs 2 \
             --target-dir "$CARGO_TARGET_ROOT"
     ) || fail "cannot build the engine workspace"
 }
 
+stop_realm_units() {
+    local realm="$1" unit
+    while IFS= read -r unit; do
+        [ -n "$unit" ] || continue
+        systemctl disable --now "$unit" 2>/dev/null || true
+        systemctl reset-failed "$unit" 2>/dev/null || true
+    done < <(lm_realm_units "$realm")
+}
+
 install_release() {
     install -d -o root -g root -m 0755 "${ENGINE_BINARY%/*}"
-    install -o root -g "$RUNTIME_GROUP" -m 0755 \
-        "$CARGO_TARGET_ROOT/release/engine" "$ENGINE_BINARY" \
-        || fail "cannot install the engine binary"
-    install -o root -g "$RUNTIME_GROUP" -m 0755 \
-        "$CARGO_TARGET_ROOT/release/signal-worker" "$SIGNAL_WORKER_BINARY" \
-        || fail "cannot install the signal-worker binary"
+    if [ "${AUTO_ROLLBACK:-0}" = 1 ] && [ -f "$ENGINE_BINARY.previous" ] && [ -f "$SIGNAL_WORKER_BINARY.previous" ]; then
+        echo "rollback: restoring previous release binaries"
+        cp -pf "$ENGINE_BINARY.previous" "$ENGINE_BINARY" || fail "cannot restore engine binary"
+        cp -pf "$SIGNAL_WORKER_BINARY.previous" "$SIGNAL_WORKER_BINARY" || fail "cannot restore signal-worker binary"
+        if [ -f "$MARKET_TAPE_BINARY.previous" ]; then
+            cp -pf "$MARKET_TAPE_BINARY.previous" "$MARKET_TAPE_BINARY" 2>/dev/null || true
+        fi
+    else
+        if [ -f "$ENGINE_BINARY" ]; then
+            cp -pf "$ENGINE_BINARY" "$ENGINE_BINARY.previous" 2>/dev/null || true
+        fi
+        if [ -f "$SIGNAL_WORKER_BINARY" ]; then
+            cp -pf "$SIGNAL_WORKER_BINARY" "$SIGNAL_WORKER_BINARY.previous" 2>/dev/null || true
+        fi
+        if [ -f "$MARKET_TAPE_BINARY" ]; then
+            cp -pf "$MARKET_TAPE_BINARY" "$MARKET_TAPE_BINARY.previous" 2>/dev/null || true
+        fi
+        install -o root -g "$RUNTIME_GROUP" -m 0755 \
+            "$CARGO_TARGET_ROOT/release/engine" "$ENGINE_BINARY" \
+            || fail "cannot install the engine binary"
+        install -o root -g "$RUNTIME_GROUP" -m 0755 \
+            "$CARGO_TARGET_ROOT/release/signal-worker" "$SIGNAL_WORKER_BINARY" \
+            || fail "cannot install the signal-worker binary"
+        if [ -f "$CARGO_TARGET_ROOT/release/market-tape" ]; then
+            install -o root -g "$RUNTIME_GROUP" -m 0755 \
+                "$CARGO_TARGET_ROOT/release/market-tape" "$MARKET_TAPE_BINARY" \
+                || fail "cannot install the market-tape binary"
+        fi
+    fi
     install -o root -g root -m 0755 \
         "$REPO_DIR/deploy/telegram_control_helper.sh" "$ENGINE_CONTROL_HELPER" \
         || fail "cannot install the Telegram control helper"
@@ -977,7 +1029,8 @@ deploy_mode() {
     ensure_runtime_identities
     install_python_environment
     build_engine
-    stop_fleet
+    # Decoupled deployment: stop Demo units only. Mainnet stays live and trading.
+    stop_realm_units demo
     install_release
     install_units
     start_independent_units
@@ -987,7 +1040,10 @@ deploy_mode() {
         rollback_after_failure demo
     fi
     if mainnet_armed; then
+        echo "staging mainnet configuration while live engine continues trading"
         provision_mainnet
+        echo "atomic mainnet handover: swapping binaries and state"
+        stop_realm_units mainnet
         import_native_strategy_state mainnet
         if ! (start_realm mainnet); then
             rollback_after_failure mainnet

@@ -95,7 +95,7 @@ class SegmentWriter:
             raise ValueError("capture row has no receive timestamp")
         if not symbol:
             raise ValueError("capture row has no symbol")
-        payload = json.dumps(row, separators=(",", ":"), sort_keys=True).encode() + b"\n"
+        payload = json.dumps(row, separators=(",", ":")).encode() + b"\n"
         day, hour = utc_day_hour(received_ns)
         closed: list[ClosedSegment] = []
         segment = self.active.get(symbol)
@@ -115,6 +115,7 @@ class SegmentWriter:
         segment.last_receive_ns = received_ns
         segment.unsynced += 1
         if segment.unsynced >= self.fsync_every:
+            segment.handle.flush()
             os.fsync(segment.handle.fileno())
             segment.unsynced = 0
         return closed
@@ -136,7 +137,7 @@ class SegmentWriter:
                 continue
         index = max(indices, default=-1) + 1
         path = directory / f"segment-{index:06d}.jsonl.partial"
-        handle = path.open("xb", buffering=0)
+        handle = path.open("xb", buffering=65536)
         os.chmod(path, 0o640)
         segment = ActiveSegment(symbol=symbol, day=day, hour=hour, path=path, handle=handle)
         self.active[symbol] = segment
@@ -144,6 +145,7 @@ class SegmentWriter:
 
     def _close(self, symbol: str) -> ClosedSegment:
         segment = self.active.pop(symbol)
+        segment.handle.flush()
         os.fsync(segment.handle.fileno())
         segment.handle.close()
         final = segment.path.with_suffix("")
@@ -184,16 +186,25 @@ def inspect_jsonl(path: Path, root: Path | None = None) -> ClosedSegment | None:
         day, hour, symbol = segment_identity(path, root)
     else:
         day, hour, symbol = path.parent.parent.name, None, path.parent.name.upper()
+    last_line: bytes | None = None
     with path.open("rb") as handle:
         for raw in handle:
             if not raw.endswith(b"\n"):
                 break
-            row = json.loads(raw)
-            received = int(row.get("local_receive_ts_ns") or 0)
+            if records == 0:
+                try:
+                    row = json.loads(raw)
+                    first = int(row.get("local_receive_ts_ns") or 0)
+                except (ValueError, TypeError):
+                    return None
             records += 1
-            first = first or received
-            last = received
-    if records == 0:
+            last_line = raw
+    if records == 0 or last_line is None:
+        return None
+    try:
+        last_row = json.loads(last_line)
+        last = int(last_row.get("local_receive_ts_ns") or 0)
+    except (ValueError, TypeError):
         return None
     return ClosedSegment(path, symbol, day, records, first, last, hour)
 

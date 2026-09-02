@@ -187,11 +187,14 @@ def build_archive(
             # keeps each symbol directory as the member's first path element.
             arcname = str(path.relative_to(directory if candidate.hour is not None else directory.parent))
             receipt = receipts.get(relative_to_root, {})
+            sha256_digest = str(receipt.get("sha256") or "")
+            if not sha256_digest:
+                sha256_digest = _sha256(path)
             files.append(
                 {
                     "path": arcname,
                     "bytes": path.stat().st_size,
-                    "sha256": _sha256(path),
+                    "sha256": sha256_digest,
                     "records": receipt.get("records"),
                     "first_receive_ns": receipt.get("first_receive_ns"),
                     "last_receive_ns": receipt.get("last_receive_ns"),

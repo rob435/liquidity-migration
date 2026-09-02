@@ -105,10 +105,22 @@ jobs:
         working-directory: engine
       - name: Build and smoke-test deploy artifact (locked)
         run: |
-          cargo build --release --locked
-          sha256sum target/release/engine | tee target/release/engine.sha256
-          target/release/engine --help >/dev/null
+          cargo build --release --locked --workspace --bins
+          (
+            cd target/release
+            sha256sum engine signal-worker market-tape > binaries.sha256
+            ./engine --help >/dev/null
+            ./signal-worker --help >/dev/null
+            ./market-tape help >/dev/null 2>&1 || true
+            tar -czf "$RUNNER_TEMP/engine-binaries-${GITHUB_SHA}.tar.gz" engine signal-worker market-tape binaries.sha256
+          )
         working-directory: engine
+      - name: Upload compiled release binaries
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb99ba841c # v4.6.1
+        with:
+          name: engine-binaries-${{ github.sha }}
+          path: ${{ runner.temp }}/engine-binaries-${{ github.sha }}.tar.gz
+          retention-days: 14
 
   # Safety action: stopping and persistently disarming funded units must remain
   # available even when a build or test is red. It still uses the exact pinned
@@ -194,6 +206,19 @@ jobs:
           test "$host_fingerprints" = "$VPS_ED25519_FINGERPRINT"
           mv ~/.ssh/known_hosts.candidate ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
+      - name: Download compiled release binaries
+        if: inputs.mode == 'deploy'
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
+        with:
+          name: engine-binaries-${{ github.sha }}
+          path: staged-binaries
+      - name: Stage compiled release binaries onto VPS
+        if: inputs.mode == 'deploy'
+        run: |
+          set -euo pipefail
+          test -f "staged-binaries/engine-binaries-${GITHUB_SHA}.tar.gz"
+          ssh -i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" "$VPS_USER@$VPS_HOST" "mkdir -p /opt/liquidity-migration-engine/staged"
+          scp -i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" "staged-binaries/engine-binaries-${GITHUB_SHA}.tar.gz" "$VPS_USER@$VPS_HOST:/opt/liquidity-migration-engine/staged/${GITHUB_SHA}.tar.gz"
       - name: Run VPS mode
         env:
           DEPLOY_MODE_INPUT: ${{ inputs.mode }}

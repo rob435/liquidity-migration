@@ -567,11 +567,14 @@ def trades_of_day(day: str) -> list[dict]:
                         trade = json.loads(line)
                     except Exception:
                         continue
-                    if start <= int(trade.get("closed_ms", 0)) < end:
+                    closed_ms = int(trade.get("closed_ms", 0))
+                    if start <= closed_ms < end:
                         # Which account it was is known only here, by which
                         # file the line came out of; the line does not say.
                         trade["account_tag"] = account.tag
                         out.append(trade)
+                    elif closed_ms >= end + 60_000:
+                        break
         except OSError:
             continue
     return out

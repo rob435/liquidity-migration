@@ -3,6 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use serde::{de::DeserializeOwned, Serialize};
@@ -264,6 +265,7 @@ fn finish_journal_append(path: &Path, mut file: File) -> Result<(), WorkerError>
 #[derive(Clone, Debug)]
 pub struct SpoolWriter {
     directory: PathBuf,
+    socket_stream: Arc<std::sync::Mutex<Option<std::os::unix::net::UnixStream>>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -288,7 +290,50 @@ impl SpoolWriter {
         fs::create_dir_all(&directory)
             .map_err(|error| WorkerError::io("create signal spool", error))?;
         cleanup_spool_temporary_files(&directory)?;
-        Ok(Self { directory })
+        Ok(Self {
+            directory,
+            socket_stream: Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
+    fn try_send_socket(&self, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let sock_path = self.directory.join("stream.sock");
+        let mut guard = self
+            .socket_stream
+            .lock()
+            .map_err(|_| std::io::Error::other("socket stream mutex poisoned"))?;
+
+        if guard.is_none() {
+            if !sock_path.exists() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "socket file absent",
+                ));
+            }
+            let stream = UnixStream::connect(&sock_path)?;
+            stream.set_write_timeout(Some(Duration::from_millis(50)))?;
+            *guard = Some(stream);
+        }
+
+        if let Some(stream) = guard.as_mut() {
+            let len = (bytes.len() as u32).to_le_bytes();
+            if stream
+                .write_all(&len)
+                .and_then(|_| stream.write_all(bytes))
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+
+        *guard = None;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "unix socket write failed",
+        ))
     }
 
     pub fn write(&self, observation: &NormalizedObservation) -> Result<PathBuf, WorkerError> {
@@ -360,7 +405,10 @@ impl SpoolWriter {
         Ok(inventory)
     }
 
-    pub fn write_encoded(&self, bytes: &[u8]) -> Result<PathBuf, WorkerError> {
+    pub fn write_encoded_observation(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(PathBuf, NormalizedObservation), WorkerError> {
         let observation: NormalizedObservation = serde_json::from_slice(bytes)
             .map_err(|error| WorkerError::json("parse pending signal observation", error))?;
         if observation.payload.len() > MAX_SIGNAL_OBSERVATION_BYTES {
@@ -379,11 +427,16 @@ impl SpoolWriter {
             observation.sequence, observation.content_sha256
         );
         let path = self.directory.join(name);
+
+        if self.try_send_socket(bytes).is_ok() {
+            return Ok((path, observation));
+        }
+
         if path.exists() {
             let existing = fs::read(&path)
                 .map_err(|error| WorkerError::io("read existing signal observation", error))?;
             if existing == bytes {
-                return Ok(path);
+                return Ok((path, observation));
             }
             return Err(WorkerError::state(format!(
                 "signal spool path {} already contains different bytes",
@@ -391,7 +444,11 @@ impl SpoolWriter {
             )));
         }
         atomic_write(&path, bytes)?;
-        Ok(path)
+        Ok((path, observation))
+    }
+
+    pub fn write_encoded(&self, bytes: &[u8]) -> Result<PathBuf, WorkerError> {
+        self.write_encoded_observation(bytes).map(|(path, _)| path)
     }
 }
 

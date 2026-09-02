@@ -1,0 +1,21 @@
+[package]
+name = "market-tape"
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+
+[[bin]]
+name = "market-tape"
+path = "src/main.rs"
+
+[dependencies]
+engine-types = { path = "../engine-types" }
+engine-marketdata = { path = "../engine-marketdata" }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "time", "io-util", "macros", "sync", "signal"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.4"
+sha2 = "0.11.0"
+hex = "0.4.3"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

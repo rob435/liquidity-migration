@@ -91,6 +91,7 @@ fi
 # files cannot collide; --delete drops what the host no longer has, and the
 # remote history keeps what that removed.
 "$RSYNC" -a --relative --delete --exclude='*.env' --exclude='*.env.*' \
+    --exclude='*.tmp' --exclude='*.tmp.*' \
     "${present[@]}" "$STAGE/"
 
 REMOTE="${REMOTE%/}"
