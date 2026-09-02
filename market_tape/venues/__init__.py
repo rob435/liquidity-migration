@@ -30,8 +30,12 @@ class VenueAdapter(Protocol):
     def topics(self, symbol: str, feeds: Iterable[Feed]) -> list[str]:
         """The venue's stream names for one symbol's feeds, in a stable order."""
 
+    def connection_group(self, topic: str) -> str:
+        """Which connection a topic must ride: venues that route streams by URL
+        path return the path; a shard carries one group only. "" when all share one."""
+
     def connection_url(self, topics: list[str]) -> str:
-        """The websocket URL for one shard's topics."""
+        """The websocket URL for one shard's topics (all of one connection group)."""
 
     def subscribe_messages(self, topics: list[str]) -> list[str]:
         """Text frames to send once the socket is open; empty when the URL subscribes."""

@@ -6,6 +6,21 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-02 — The Binance recorder was hearing only its book streams.**
+  Verifying the deploy by the bytes each feed received showed the Binance
+  recorder taking depth and top-of-book frames and nothing else: no trades, no
+  mark price or funding, no 24h ticker, no liquidations, on any tier, so the
+  wide tier wrote no rows and the live universes there saw only what the REST
+  tables seeded. Probed from the host with the recorder's own URL, the venue
+  confirmed it: Binance now routes its market streams by URL path, `/public`
+  for the high-frequency streams (depth, `bookTicker`, `trade`) and `/market`
+  for the rest (`aggTrade`, `markPrice`, `ticker`, `kline`, `!forceOrder@arr`),
+  a connection receives only its own path's streams and silently drops the
+  others, and a path-less URL is `/public`; the legacy path was retired on
+  2026-04-23. The adapter now names each stream's path and the recorder gives
+  every shard one path, filling live additions only into a shard of the same
+  path; the tests fail without the change. Bybit is untouched. Deployed the
+  same evening; STATE.md names the running commit.
 - **2026-09-02 — Deployed `f17719d1` at 21:04 UTC: the tiered recorders on
   both venues, the live universe, the LLM gate on both realms, one profile.**
   The owner asked for the merge and the deploy in one go, and the freeze ended

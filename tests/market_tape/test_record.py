@@ -409,6 +409,48 @@ def test_reconciling_a_tier_keeps_placement_fills_room_and_closes_empty_shards(t
     assert len(created) == 3
 
 
+def test_shard_topics_never_mixes_connection_groups() -> None:
+    group = lambda topic: "market" if topic.startswith("m") else "public"  # noqa: E731
+    assert shard_topics(["p1", "m1", "p2", "m2", "p3"], 2, group) == [["p1", "p2"], ["p3"], ["m1", "m2"]]
+    assert shard_topics(["p1", "m1", "p2"], 2) == [["p1", "m1"], ["p2"]]
+
+
+def test_binance_shards_carry_one_path_each_and_live_adds_stay_on_their_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = CaptureConfig(
+        venue=VenueSettings("binance", "usdm"),
+        storage=StorageSettings(root=tmp_path, queue_frames=16, status_interval_seconds=30.0),
+        tiers=(Tier("core", (Feed("book", "1"), Feed("trades"), Feed("ticker")), Universe("symbols", symbols=("BTCUSDT", "ETHUSDT"))),),
+        topics_per_connection=3,
+    )
+    recorder = Recorder(config)
+    created: list[Shard] = []
+
+    def quiet_shard(tier: str, topics: list[str]) -> Shard:
+        shard = unstarted_shard(recorder, tier, topics, index=len(created))
+        created.append(shard)
+        return shard
+
+    monkeypatch.setattr(recorder, "_new_shard", quiet_shard)
+    topics, _ = recorder.plan_topics({"core": ["BTCUSDT"]})
+    recorder._reconcile_tier("core", topics["core"])
+    plans = [shard.topics for shard in recorder.tier_shards["core"]]
+    assert plans == [["btcusdt@bookTicker"], ["btcusdt@aggTrade", "btcusdt@markPrice@1s", "btcusdt@ticker"]]
+    for shard in recorder.tier_shards["core"]:
+        recorder.adapter.connection_url(shard.topics)  # one path each, or this raises
+
+    # ETH arrives live: its top of book joins the public shard, its market streams open a new market shard.
+    topics, _ = recorder.plan_topics({"core": ["BTCUSDT", "ETHUSDT"]})
+    recorder._reconcile_tier("core", topics["core"])
+    plans = [shard.topics for shard in recorder.tier_shards["core"]]
+    assert plans == [
+        ["btcusdt@bookTicker", "ethusdt@bookTicker"],
+        ["btcusdt@aggTrade", "btcusdt@markPrice@1s", "btcusdt@ticker"],
+        ["ethusdt@aggTrade", "ethusdt@markPrice@1s", "ethusdt@ticker"],
+    ]
+    for shard in recorder.tier_shards["core"]:
+        recorder.adapter.connection_url(shard.topics)
+
+
 # ---------------------------------------------------------------- refreshes
 
 

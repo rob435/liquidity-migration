@@ -89,12 +89,27 @@ def test_ticker_takes_two_streams_and_liquidations_one_for_the_market() -> None:
     assert adapter.topics("BTCUSDT", feeds("liquidations")) == ["!forceOrder@arr"]
 
 
-def test_connection_url_combines_the_streams() -> None:
+def test_connection_url_combines_the_streams_under_their_path() -> None:
     adapter = BinanceAdapter()
-    assert adapter.connection_url(["btcusdt@bookTicker", "btcusdt@aggTrade"]) == (
-        "wss://fstream.binance.com/stream?streams=btcusdt@bookTicker/btcusdt@aggTrade"
+    assert adapter.connection_url(["btcusdt@bookTicker", "btcusdt@depth@100ms"]) == (
+        "wss://fstream.binance.com/public/stream?streams=btcusdt@bookTicker/btcusdt@depth@100ms"
+    )
+    assert adapter.connection_url(["btcusdt@aggTrade", "btcusdt@markPrice@1s", "!forceOrder@arr"]) == (
+        "wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade/btcusdt@markPrice@1s/!forceOrder@arr"
     )
     assert adapter.subscribe_messages(["btcusdt@bookTicker"]) == []
+
+
+def test_streams_route_by_path_and_one_connection_carries_one_path() -> None:
+    # Measured on the host 2026-09-02: a path-less or /public connection delivers
+    # only the depth, bookTicker and trade streams; the rest flow on /market only.
+    adapter = BinanceAdapter()
+    public = ["btcusdt@depth@100ms", "btcusdt@depth20@100ms", "btcusdt@bookTicker", "btcusdt@trade"]
+    market = ["btcusdt@aggTrade", "btcusdt@markPrice@1s", "btcusdt@ticker", "btcusdt@kline_1m", "!forceOrder@arr"]
+    assert {adapter.connection_group(topic) for topic in public} == {"public"}
+    assert {adapter.connection_group(topic) for topic in market} == {"market"}
+    with pytest.raises(ValueError, match="one path"):
+        adapter.connection_url(["btcusdt@bookTicker", "btcusdt@aggTrade"])
 
 
 def test_validate_feeds_refuses_what_the_venue_does_not_offer() -> None:
