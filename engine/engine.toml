@@ -80,7 +80,7 @@ account_view_max_age_ms = 5000
 # operational profile, and the caps come from it:
 #
 #   [risk]
-#   operational_profile_path = "configs/operational.mainnet.json"
+#   operational_profile_path = "configs/operational.json"
 #   max_account_view_age_s = 120
 #   disaster_stop_fraction = 0.35
 #

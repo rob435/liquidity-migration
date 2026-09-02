@@ -278,6 +278,16 @@ pub fn order_effects(
     targets: &[PlannedTarget],
     tag: &'static str,
 ) -> Vec<Effect> {
+    order_effects_tagged(steps, targets, |_| tag)
+}
+
+/// `order_effects` with the log tag chosen per symbol, so an entry that came
+/// through a different trigger is graded apart in the order log.
+pub fn order_effects_tagged(
+    steps: Vec<Step>,
+    targets: &[PlannedTarget],
+    tag_for: impl Fn(&str) -> &'static str,
+) -> Vec<Effect> {
     let leverage_by_symbol: BTreeMap<&str, f64> = targets
         .iter()
         .map(|target| (target.target.symbol.as_str(), target.leverage))
@@ -298,6 +308,7 @@ pub fn order_effects(
                 }
                 | Step::Restop { .. } => None,
             };
+            let tag = tag_for(step.symbol());
             Effect::Order(OrderEffect {
                 step,
                 leverage,

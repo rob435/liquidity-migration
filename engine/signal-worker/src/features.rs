@@ -384,6 +384,31 @@ fn long_row(
     })
 }
 
+/// BTC's realized 30-day volatility at the latest complete daily bar, the
+/// same number a LONG feature row carries as `btc_rv_30`, for an entry that
+/// arrives outside the hourly feature batch.
+pub fn current_btc_rv_30(
+    klines: &KlineHistory,
+    observed_ts_ms: i64,
+    cfg: &LongFeatureConfig,
+) -> Option<f64> {
+    let history = klines.get(&cfg.regime_symbol)?;
+    let bars = daily_bars(history, observed_ts_ms, cfg.daily_min_hourly_bars);
+    let feature_ts_ms = bars
+        .last()
+        .map(|row| row.ts_ms)
+        .filter(|ts| *ts <= observed_ts_ms)?;
+    let (_, rv) = regime_features(
+        Some(&bars),
+        feature_ts_ms,
+        cfg.regime_sma_days,
+        cfg.btc_rv_window_days,
+        cfg.btc_rv_min_samples,
+        cfg.btc_rv_null_value,
+    );
+    (rv.is_finite() && rv > 0.0).then_some(rv)
+}
+
 fn regime_features(
     bars: Option<&Vec<DailyBar>>,
     ts_ms: i64,

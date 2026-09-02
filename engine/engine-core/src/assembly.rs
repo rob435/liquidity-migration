@@ -203,7 +203,7 @@ struct EnvelopeSection {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileRiskSection {
-    /// The operational profile to read, e.g. `configs/operational.mainnet.json`.
+    /// The operational profile to read, e.g. `configs/operational.json`.
     operational_profile_path: PathBuf,
     max_account_view_age_s: u64,
     /// How far a position may move against it before its stop ends it. Not in
@@ -501,7 +501,7 @@ disaster_stop_fraction = 0.35
 
     #[test]
     fn the_shipped_mainnet_profile_builds_a_kernel() {
-        risk(&profile_risk("operational.mainnet.json"))
+        risk(&profile_risk("operational.json"))
             .expect("the funded account's own profile must build a kernel");
     }
 
@@ -510,7 +510,7 @@ disaster_stop_fraction = 0.35
         // An [envelope] block left in the file when the profile took over
         // would be a set of limits nobody is enforcing, sitting somewhere an
         // operator would read them.
-        let mut block = profile_risk("operational.mainnet.json");
+        let mut block = profile_risk("operational.json");
         block.insert("leverage".into(), toml::Value::Float(2.0));
         let err = refusal(risk(&block), "a stray cap beside a profile was accepted");
         assert!(err.to_string().contains("leverage"), "{err}");
@@ -629,6 +629,10 @@ mod deployed_templates {
             .replace(
                 "/etc/liquidity-migration/signal-worker-mainnet-source/operational-profile.json",
                 &profile_path,
+            )
+            .replace(
+                "/etc/liquidity-migration/signal-worker-demo-source/operational-profile.json",
+                &profile_path,
             );
         toml::from_str::<Config>(&text).unwrap_or_else(|e| panic!("{template} must parse: {e}"))
     }
@@ -643,7 +647,7 @@ mod deployed_templates {
 
     #[test]
     fn the_demo_template_assembles_whole() {
-        let config = assemble("engine.demo.toml.template", "operational.demo.json");
+        let config = assemble("engine.demo.toml.template", "operational.json");
         assert_eq!(config.engine.venue, "bybit_demo");
         assert!(
             config.engine.heartbeat_path.is_some(),
@@ -653,7 +657,7 @@ mod deployed_templates {
 
     #[test]
     fn the_mainnet_template_assembles_whole() {
-        let config = assemble("engine.mainnet.toml.template", "operational.mainnet.json");
+        let config = assemble("engine.mainnet.toml.template", "operational.json");
         assert_eq!(config.engine.venue, "bybit_mainnet");
     }
 
@@ -663,21 +667,21 @@ mod deployed_templates {
         // of whose position is whose is keyed on it and rebuilt from the log.
         // Reordering these blocks hands one sleeve's fill history to the other.
         // Every new sleeve appends; nothing is ever inserted.
-        let config = config_from("engine.demo.toml.template", "operational.demo.json");
+        let config = config_from("engine.demo.toml.template", "operational.json");
         let sleeves: Vec<&str> = config.strategies.iter().map(|s| s.sleeve_name()).collect();
         assert_eq!(sleeves, ["carry", "long", "exodus"]);
     }
 
     #[test]
     fn the_mainnet_template_appends_the_maker_canary_after_existing_sleeves() {
-        let config = config_from("engine.mainnet.toml.template", "operational.mainnet.json");
+        let config = config_from("engine.mainnet.toml.template", "operational.json");
         let sleeves: Vec<&str> = config.strategies.iter().map(|s| s.sleeve_name()).collect();
         assert_eq!(sleeves, ["carry", "long", "exodus", "maker_canary"]);
     }
 
     #[test]
     fn demo_directional_sleeves_use_current_native_inputs() {
-        let config = config_from("engine.demo.toml.template", "operational.demo.json");
+        let config = config_from("engine.demo.toml.template", "operational.json");
         let built = strategies(&config.strategies).unwrap();
         assert_eq!(
             built

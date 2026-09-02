@@ -137,12 +137,6 @@ Deployment also generates the Exodus `legacy_paths` source from the exact
 installed event, target, and engine-heartbeat paths. These are takeover inputs
 only. The running native reducers do not read them.
 
-The reviewed candidate-universe file is copied byte-for-byte from an incumbent
-producer source path only when the native path is absent. Its schema, realm,
-endpoint, populations, counts, self-hash, ownership, and mode are checked both
-before and after the atomic copy. An existing native file wins and must pass the
-same checks.
-
 ## Runtime pause and resume
 
 Pause is a durable engine control, not a process stop. The helper submits
@@ -210,9 +204,10 @@ state, and a deploy command do not substitute for it.
 
 `scripts/ops.sh real-money preflight` is read-only. It reports missing account,
 credential, profile, release, and topology requirements. Operational profile
-rendering reads the owner dials and writes a reviewed account-wide risk
-document only when `--execute` is explicit. The funded credential file carries
-two dials, both ratios:
+rendering reads the owner dials and writes the account-wide risk document only
+when `--execute` is explicit; deploy renders it once and installs the same
+bytes for both realms, so the funded dials govern demo too. The funded
+credential file carries two dials, both ratios:
 
 | Dial | Default | Meaning |
 | --- | --- | --- |
@@ -220,9 +215,9 @@ two dials, both ratios:
 | `RM_ROLLING_LOSS_FRACTION` | 0.10 | share of the capital reference the engine's own closed trades may lose, net of fees, inside any 24 hours before it refuses new entries |
 
 A changed dial takes effect at the next deploy, which re-renders the profile.
-The demo profile carries the same rolling-loss share in
-`configs/operational.demo.json`; against its pinned $250,000 reference that
-limit is $25,000.
+The capital reference follows each account's own equity, floored at $100, so
+the rolling-loss limit is a tenth of the current reference on demo and on the
+funded account alike.
 
 The signal worker never receives private credentials. The engine service gets
 only the credential family for its own realm. The notification and liveness

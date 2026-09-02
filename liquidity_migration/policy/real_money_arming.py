@@ -30,10 +30,7 @@ MAINNET_SIGNAL_SOURCE_ENV = Path(
 )
 
 _CREDENTIAL_KEYS = ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET")
-_SIGNAL_PATH_KEYS = (
-    "CANDIDATE_UNIVERSE_FILE",
-    "OPERATIONAL_PROFILE_FILE",
-)
+_SIGNAL_PATH_KEYS = ("OPERATIONAL_PROFILE_FILE",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,7 +251,7 @@ def _signal_checks(values: Mapping[str, str]) -> list[CheckResult]:
                 key,
                 valid,
                 f"{path} is present" if valid else f"{raw or '<empty>'} is not a regular absolute file",
-                f"install the reviewed {key.lower()} artifact",
+                f"render and install the {key.lower()}",
             )
         )
     return results

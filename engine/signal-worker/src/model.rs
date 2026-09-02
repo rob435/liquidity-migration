@@ -161,6 +161,16 @@ pub enum WireEvent {
         sequence: u64,
         universe: UniverseIdentity,
     },
+    /// One publication of the LLM entry gate's candidates file, read whole.
+    LlmGateCandidates {
+        schema_version: u32,
+        sequence: u64,
+        observed_ts_ms: i64,
+        available_at_ms: i64,
+        decision_ts_ms: i64,
+        valid_until_ms: i64,
+        rows: Vec<LlmGateCandidate>,
+    },
     BootstrapComplete {
         schema_version: u32,
         sequence: u64,
@@ -206,6 +216,7 @@ impl WireEvent {
             | Self::BybitTickerSnapshot { schema_version, .. }
             | Self::BinanceWhaleBatch { schema_version, .. }
             | Self::UniverseSnapshot { schema_version, .. }
+            | Self::LlmGateCandidates { schema_version, .. }
             | Self::BootstrapComplete { schema_version, .. }
             | Self::Watermark { schema_version, .. } => *schema_version,
             Self::LongWatermark { schema_version, .. }
@@ -222,6 +233,7 @@ impl WireEvent {
             | Self::BybitTickerSnapshot { sequence, .. }
             | Self::BinanceWhaleBatch { sequence, .. }
             | Self::UniverseSnapshot { sequence, .. }
+            | Self::LlmGateCandidates { sequence, .. }
             | Self::BootstrapComplete { sequence, .. }
             | Self::Watermark { sequence, .. } => *sequence,
             Self::LongWatermark { sequence, .. }
@@ -392,6 +404,23 @@ pub struct DataRejection {
     pub first_missing_ts_ms: Option<i64>,
 }
 
+/// One judged pump event the ledger published for the LONG sleeve. The same
+/// bytes travel in the wire journal and in the observation to the reducer.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LlmGateCandidate {
+    pub symbol: String,
+    pub score: f64,
+    /// `core` for turnover ranks 1-10, `wide` for 11-30.
+    pub band: String,
+    pub trigger_ts_ms: i64,
+    pub trigger_price: f64,
+    pub atr_pct: f64,
+    pub sigma_daily_30d: Option<f64>,
+    pub turnover_rank: Option<f64>,
+    pub trigger_window_h: Option<i64>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Readiness {
@@ -438,6 +467,14 @@ pub enum ObservationPayload {
     FundingUpdate {
         decision_ts_ms: i64,
         settled_funding: Vec<SettledFunding>,
+    },
+    LlmGateCandidates {
+        decision_ts_ms: i64,
+        valid_until_ms: i64,
+        /// BTC 30-day realized volatility from the worker's latest daily bars,
+        /// so a gate entry is vol-targeted like a native one.
+        btc_rv_30: Option<f64>,
+        rows: Vec<LlmGateCandidate>,
     },
     UniverseChanged,
     Readiness {

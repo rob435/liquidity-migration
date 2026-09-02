@@ -11,7 +11,7 @@ from liquidity_migration.core.operational_profile import (
 )
 
 
-PROFILE_PATH = Path(__file__).resolve().parents[2] / "configs" / "operational.demo.json"
+PROFILE_PATH = Path(__file__).resolve().parents[2] / "configs" / "operational.json"
 
 
 def _payload() -> dict[str, object]:

@@ -397,7 +397,11 @@ impl SpoolWriter {
 
 pub fn spool_class(kind: &str) -> &'static str {
     match kind {
-        "market_snapshot" | "readiness" | "long_feature_batch" | "carry_feature_batch" => "current",
+        "market_snapshot"
+        | "readiness"
+        | "long_feature_batch"
+        | "carry_feature_batch"
+        | "llm_gate_candidates" => "current",
         "funding_update" => "lifecycle",
         "carry_scorer_catchup" => "catchup",
         _ => "other",

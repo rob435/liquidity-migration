@@ -22,12 +22,13 @@ use crate::model::{
 };
 use crate::normalize::{
     normalize_funding_rows, normalize_instruments, normalize_kline_rows, normalize_tickers,
-    normalize_whales, validate_universe,
+    normalize_whales, normalized_symbol, validate_universe,
 };
 use crate::store::{
     cleanup_atomic_temporary_files, json_size, spool_class, AppendJournal, AtomicJsonStore,
     SpoolClassInventory, SpoolWriter,
 };
+use crate::universe::{same_membership, universe_is_resolved, unresolved_universe};
 use crate::{DAY_MS, HOUR_MS, SCHEMA_VERSION};
 
 pub(crate) fn required_carry_history_hours(
@@ -262,8 +263,26 @@ pub struct SignalWorker {
     suppressed_output_kinds: BTreeSet<&'static str>,
 }
 
+/// The venue host whose instrument list bounds what this realm's account may
+/// trade. Demo observes mainnet market data but can only trade what the demo
+/// venue lists.
+pub fn realm_endpoint(config: &SignalWorkerConfig) -> &str {
+    match config.live.environment.as_str() {
+        "demo" => config.sources.bybit_demo_host.as_str(),
+        _ => config.sources.bybit_mainnet_host.as_str(),
+    }
+}
+
 impl SignalWorker {
-    pub fn new(
+    /// A worker that has not derived its universe yet. It refuses every input
+    /// until the universe snapshot that resolves it arrives.
+    pub fn new(config: SignalWorkerConfig) -> Result<Self, WorkerError> {
+        let universe = unresolved_universe(&config.live.environment, realm_endpoint(&config));
+        Self::new_with_source_generation(config, universe, REPLAY_SOURCE_GENERATION.to_owned())
+    }
+
+    /// A worker that starts from an already derived universe.
+    pub fn with_universe(
         config: SignalWorkerConfig,
         universe: UniverseIdentity,
     ) -> Result<Self, WorkerError> {
@@ -275,8 +294,12 @@ impl SignalWorker {
         universe: UniverseIdentity,
         source_generation: String,
     ) -> Result<Self, WorkerError> {
-        let observed = universe.available_at_ms;
-        let universe = validate_universe(universe, observed)?;
+        let universe = if universe_is_resolved(&universe) {
+            let observed = universe.available_at_ms;
+            validate_universe(universe, observed)?
+        } else {
+            universe
+        };
         if universe.environment != config.live.environment {
             return Err(WorkerError::config(
                 "candidate universe environment disagrees with signal config",
@@ -292,17 +315,13 @@ impl SignalWorker {
         })
     }
 
-    pub fn restore(
-        config: SignalWorkerConfig,
-        universe: UniverseIdentity,
-        state: WorkerState,
-    ) -> Result<Self, WorkerError> {
+    pub fn restore(config: SignalWorkerConfig, state: WorkerState) -> Result<Self, WorkerError> {
         if state.schema_version != SCHEMA_VERSION {
             return Err(WorkerError::state("checkpoint schema has drifted"));
         }
-        if state.universe != universe {
+        if state.universe.environment != config.live.environment {
             return Err(WorkerError::state(
-                "checkpoint belongs to a different reviewed universe artifact",
+                "checkpoint universe belongs to another realm",
             ));
         }
         let current_source = source_history_hash(&config);
@@ -474,6 +493,13 @@ impl SignalWorker {
                 "wire sequence gap: expected {expected}, got {}",
                 event.sequence()
             )));
+        }
+        if !universe_is_resolved(&self.state.universe)
+            && !matches!(event, WireEvent::UniverseSnapshot { .. })
+        {
+            return Err(WorkerError::input(
+                "universe is unresolved; the first input must be a universe snapshot",
+            ));
         }
         let mut observations = Vec::new();
         let event_sequence = event.sequence();
@@ -762,15 +788,91 @@ impl SignalWorker {
                         "universe event environment disagrees with config",
                     ));
                 }
-                if universe.file_sha256 != self.state.universe.file_sha256
-                    || universe.artifact_sha256 != self.state.universe.artifact_sha256
-                {
-                    return Err(WorkerError::input(
-                        "live universe cannot replace the reviewed artifact",
-                    ));
-                }
+                let changed = !same_membership(&self.state.universe, &universe);
                 self.state.universe = universe;
-                self.retain_owned_tickers();
+                if changed {
+                    self.retain_owned_tickers();
+                    if self.state.last_observed_ts_ms > 0 {
+                        let prune_clock_ms = self.state.last_observed_ts_ms;
+                        self.prune(prune_clock_ms);
+                    }
+                }
+            }
+            WireEvent::LlmGateCandidates {
+                observed_ts_ms,
+                available_at_ms,
+                decision_ts_ms,
+                valid_until_ms,
+                rows,
+                ..
+            } => {
+                if observed_ts_ms <= 0
+                    || available_at_ms < observed_ts_ms
+                    || decision_ts_ms <= 0
+                    || valid_until_ms <= decision_ts_ms
+                {
+                    return Err(WorkerError::input("LLM gate publication clock is invalid"));
+                }
+                let tradable: BTreeSet<&str> = self
+                    .state
+                    .universe
+                    .symbols
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                let gate = &self.config.llm_gate;
+                let mut accepted = Vec::new();
+                let mut seen = BTreeSet::new();
+                for row in rows {
+                    let symbol = normalized_symbol(&row.symbol)?;
+                    if !tradable.contains(symbol.as_str()) || !seen.insert(symbol.clone()) {
+                        continue;
+                    }
+                    let usable = row.score.is_finite()
+                        && row.score >= gate.min_score
+                        && matches!(row.band.as_str(), "core" | "wide")
+                        && row.trigger_ts_ms > 0
+                        && row.trigger_ts_ms <= available_at_ms
+                        && available_at_ms - row.trigger_ts_ms <= gate.trigger_max_age_ms
+                        && row.trigger_price.is_finite()
+                        && row.trigger_price > 0.0
+                        && row.atr_pct.is_finite()
+                        && row.atr_pct > 0.0
+                        && row.atr_pct < 1.0
+                        && row
+                            .sigma_daily_30d
+                            .is_none_or(|value| value.is_finite() && value >= 0.0)
+                        && row
+                            .turnover_rank
+                            .is_none_or(|value| value.is_finite() && value >= 1.0)
+                        && row.trigger_window_h.is_none_or(|value| value > 0);
+                    if usable {
+                        accepted.push(crate::model::LlmGateCandidate { symbol, ..row });
+                    }
+                }
+                accepted.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+                if !self.suppressed_output_kinds.contains("llm_gate_candidates") {
+                    let symbols: Vec<String> =
+                        accepted.iter().map(|row| row.symbol.clone()).collect();
+                    let subscriptions = market_subscriptions(&symbols)?;
+                    let btc_rv_30 = crate::features::current_btc_rv_30(
+                        &self.state.klines,
+                        available_at_ms,
+                        &self.config.long,
+                    );
+                    observations.push(self.long_observation(
+                        "llm_gate_candidates",
+                        observed_ts_ms,
+                        available_at_ms,
+                        ObservationPayload::LlmGateCandidates {
+                            decision_ts_ms,
+                            valid_until_ms,
+                            btc_rv_30,
+                            rows: accepted,
+                        },
+                        subscriptions,
+                    )?);
+                }
             }
             WireEvent::BootstrapComplete { coverage, .. } => {
                 if coverage.completed_at_ms <= 0
@@ -1180,7 +1282,7 @@ impl SignalWorker {
             let readiness = Readiness {
                 long_ready,
                 carry_ready,
-                universe_ready: true,
+                universe_ready: universe_is_resolved(&self.state.universe),
                 reason: if long_ready && carry_ready {
                     "ready_no_new_decision".to_owned()
                 } else {
@@ -2605,6 +2707,17 @@ pub struct DurableSignalWorker {
 impl DurableSignalWorker {
     pub fn open(
         config: SignalWorkerConfig,
+        state_dir: impl AsRef<Path>,
+        spool_dir: impl AsRef<Path>,
+    ) -> Result<Self, WorkerError> {
+        let universe = unresolved_universe(&config.live.environment, realm_endpoint(&config));
+        Self::open_with_universe(config, universe, state_dir, spool_dir)
+    }
+
+    /// Seeds a missing checkpoint with `universe`. An existing checkpoint keeps
+    /// the universe it recorded; the live runner refreshes it from the venue.
+    pub fn open_with_universe(
+        config: SignalWorkerConfig,
         universe: UniverseIdentity,
         state_dir: impl AsRef<Path>,
         spool_dir: impl AsRef<Path>,
@@ -2675,11 +2788,7 @@ impl DurableSignalWorker {
                 let state = checkpoint_state
                     .take()
                     .ok_or_else(|| WorkerError::state("journal replay lost checkpoint"))?;
-                replay_worker = Some(SignalWorker::restore(
-                    entry.replay_config.clone(),
-                    universe.clone(),
-                    state,
-                )?);
+                replay_worker = Some(SignalWorker::restore(entry.replay_config.clone(), state)?);
             }
             let worker = replay_worker
                 .as_mut()
@@ -2697,6 +2806,7 @@ impl DurableSignalWorker {
                     "readiness" => Some("readiness"),
                     "long_feature_batch" => Some("long_feature_batch"),
                     "carry_feature_batch" => Some("carry_feature_batch"),
+                    "llm_gate_candidates" => Some("llm_gate_candidates"),
                     _ => None,
                 })
                 .collect();
@@ -2724,11 +2834,11 @@ impl DurableSignalWorker {
             let state = checkpoint_state
                 .take()
                 .ok_or_else(|| WorkerError::state("checkpoint state is absent"))?;
-            SignalWorker::restore(config.clone(), universe.clone(), state)?
+            SignalWorker::restore(config.clone(), state)?
         };
         let needs_adoption = checkpoint_needs_adoption || historical_worker.config != config;
         let worker = if needs_adoption {
-            SignalWorker::restore(config, universe, historical_worker.state)?
+            SignalWorker::restore(config, historical_worker.state)?
         } else {
             historical_worker
         };
@@ -3363,6 +3473,7 @@ fn event_may_emit(event: &WireEvent) -> bool {
         WireEvent::BybitFundingBatch { .. }
             | WireEvent::BybitTickerSnapshot { .. }
             | WireEvent::UniverseSnapshot { .. }
+            | WireEvent::LlmGateCandidates { .. }
             | WireEvent::Watermark { .. }
             | WireEvent::LongWatermark { .. }
             | WireEvent::CarryWatermark { .. }
@@ -3562,6 +3673,8 @@ mod tests {
                 whale_page_limit: 500,
                 instrument_max_pages: 10,
             },
+            universe: crate::universe::UniverseRules::default(),
+            llm_gate: crate::config::LlmGateConfig::default(),
             identity: ConfigIdentity {
                 schema_version: SCHEMA_VERSION,
                 signal_config_id: "test".into(),
@@ -3824,7 +3937,7 @@ mod tests {
 
     fn worker_with_newer_prunable_state() -> SignalWorker {
         let newer_at_ms = 200 * DAY_MS;
-        let mut worker = SignalWorker::new(test_config(), test_universe()).unwrap();
+        let mut worker = SignalWorker::with_universe(test_config(), test_universe()).unwrap();
         worker.state.last_observed_ts_ms = newer_at_ms;
         let kline_ts_ms = newer_at_ms - HOUR_MS;
         worker
@@ -3936,7 +4049,7 @@ mod tests {
     fn disjoint_kline_windows_survive_restart_without_claiming_the_gap() {
         let config = test_config();
         let universe = test_universe();
-        let mut worker = SignalWorker::new(config.clone(), universe.clone()).unwrap();
+        let mut worker = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
         for (sequence, checked_from_ms) in [(1, 10 * DAY_MS), (2, 100 * DAY_MS)] {
             worker
                 .apply(WireEvent::BybitKlineBatch {
@@ -3958,7 +4071,7 @@ mod tests {
             .kline_checked_through_ms
             .contains_key("BTCUSDT"));
 
-        let restored = SignalWorker::restore(config, universe, worker.state.clone()).unwrap();
+        let restored = SignalWorker::restore(config, worker.state.clone()).unwrap();
         let intervals = &restored.state.kline_coverage_intervals["BTCUSDT"];
         assert_eq!(intervals.len(), 2);
         assert_eq!(intervals[0].checked_through_ms, 11 * DAY_MS);
@@ -3969,7 +4082,7 @@ mod tests {
     fn fragmented_source_coverage_survives_and_repeated_fetch_converges() {
         let config = test_config();
         let universe = test_universe();
-        let mut worker = SignalWorker::new(config.clone(), universe.clone()).unwrap();
+        let mut worker = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
         let base = 10 * DAY_MS;
         let available_at_ms = 11 * DAY_MS;
         let mut sequence = 1;
@@ -4096,7 +4209,7 @@ mod tests {
             )
         );
 
-        let restored = SignalWorker::restore(config, universe, worker.state.clone()).unwrap();
+        let restored = SignalWorker::restore(config, worker.state.clone()).unwrap();
         assert_eq!(restored.state.last_input_sequence, sequence - 1);
         assert_eq!(restored.state.whale_coverage_intervals["BTCUSDT"].len(), 6);
     }
@@ -4105,7 +4218,7 @@ mod tests {
     fn prune_splits_source_coverage_and_restart_cannot_overclaim_the_gap() {
         let config = test_config();
         let universe = test_universe();
-        let mut worker = SignalWorker::new(config.clone(), universe.clone()).unwrap();
+        let mut worker = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
         worker.state.last_carry_decision_ts_ms = Some(10 * DAY_MS);
         let broad = vec![CoverageInterval {
             checked_from_ms: DAY_MS,
@@ -4133,7 +4246,7 @@ mod tests {
         assert!(!worker.state.funding_checked_from_ms.contains_key("BTCUSDT"));
         assert!(!worker.state.whale_checked_from_ms.contains_key("BTCUSDT"));
 
-        let restored = SignalWorker::restore(config, universe, worker.state.clone()).unwrap();
+        let restored = SignalWorker::restore(config, worker.state.clone()).unwrap();
         assert_eq!(
             restored.state.funding_coverage_intervals["BTCUSDT"].len(),
             2
@@ -4219,7 +4332,7 @@ mod tests {
         universe.symbols = vec!["AAAUSDT".into(), "BTCUSDT".into()];
         universe.long_symbols = vec!["AAAUSDT".into()];
         universe.carry_symbols = vec!["AAAUSDT".into()];
-        let mut worker = SignalWorker::new(config.clone(), universe.clone()).unwrap();
+        let mut worker = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
         let mut sequence = 1_u64;
         for day in 1..=180_i64 {
             let start = day * DAY_MS;
@@ -4302,7 +4415,7 @@ mod tests {
         assert!(worker.state.whale_coverage_intervals["AAAUSDT"].len() <= 2);
         assert!(!worker.state.klines.contains_key("BTCUSDT"));
 
-        let restored = SignalWorker::restore(config, universe, worker.state.clone()).unwrap();
+        let restored = SignalWorker::restore(config, worker.state.clone()).unwrap();
         assert_eq!(
             restored.state.klines["AAAUSDT"].len(),
             worker.state.klines["AAAUSDT"].len()
@@ -4321,7 +4434,7 @@ mod tests {
     fn restore_rejects_noncanonical_source_coverage_intervals() {
         let config = test_config();
         let universe = test_universe();
-        let mut state = SignalWorker::new(config.clone(), universe.clone())
+        let mut state = SignalWorker::with_universe(config.clone(), universe.clone())
             .unwrap()
             .state
             .clone();
@@ -4338,12 +4451,12 @@ mod tests {
                 },
             ],
         );
-        assert!(SignalWorker::restore(config, universe, state).is_err());
+        assert!(SignalWorker::restore(config, state).is_err());
     }
 
     #[test]
     fn long_fast_forward_records_the_exact_skipped_range() {
-        let mut worker = SignalWorker::new(test_config(), test_universe()).unwrap();
+        let mut worker = SignalWorker::with_universe(test_config(), test_universe()).unwrap();
         worker.state.last_long_feature_ts_ms = Some(10 * DAY_MS);
         worker.record_long_fast_forward(14 * DAY_MS);
         assert_eq!(worker.state.long_skipped_generation_count, 3);
@@ -4367,7 +4480,7 @@ mod tests {
         let checkpoint = AtomicJsonStore::new(state_dir.join("checkpoint.json"));
         let spool = SpoolWriter::new(&spool_dir).unwrap();
 
-        let mut seeded = SignalWorker::new(config.clone(), universe.clone()).unwrap();
+        let mut seeded = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
         install_compact_history(&mut seeded, 9);
         let long = seeded
             .apply(WireEvent::LongWatermark {
@@ -4395,9 +4508,13 @@ mod tests {
         let old_long_path = spool.write(&long[0]).unwrap();
         let old_carry_path = spool.write(&carry[0]).unwrap();
 
-        let mut durable =
-            DurableSignalWorker::open(config.clone(), universe.clone(), &state_dir, &spool_dir)
-                .unwrap();
+        let mut durable = DurableSignalWorker::open_with_universe(
+            config.clone(),
+            universe.clone(),
+            &state_dir,
+            &spool_dir,
+        )
+        .unwrap();
         let mut sequence = 3;
         for day in [9, 10] {
             durable
@@ -4476,7 +4593,8 @@ mod tests {
         drop(durable);
 
         let mut durable =
-            DurableSignalWorker::open(config, universe, &state_dir, &spool_dir).unwrap();
+            DurableSignalWorker::open_with_universe(config, universe, &state_dir, &spool_dir)
+                .unwrap();
         assert_eq!(durable.worker.state.last_input_sequence, 10);
         assert_eq!(
             durable.worker.state.last_carry_decision_ts_ms,
@@ -4566,9 +4684,13 @@ mod tests {
         let root = temporary_root("class-backpressure");
         let state_dir = root.join("state");
         let spool_dir = root.join("spool");
-        let mut durable =
-            DurableSignalWorker::open(test_config(), test_universe(), &state_dir, &spool_dir)
-                .unwrap();
+        let mut durable = DurableSignalWorker::open_with_universe(
+            test_config(),
+            test_universe(),
+            &state_dir,
+            &spool_dir,
+        )
+        .unwrap();
         durable.spool_classes.insert(
             "lifecycle".into(),
             SpoolClassInventory {
@@ -4630,7 +4752,7 @@ mod tests {
     #[test]
     fn batch_receipt_exposes_the_uncommitted_suffix_for_exact_retry() {
         let root = temporary_root("batch-backpressure-receipt");
-        let mut durable = DurableSignalWorker::open(
+        let mut durable = DurableSignalWorker::open_with_universe(
             test_config(),
             test_universe(),
             root.join("state"),
@@ -4694,9 +4816,13 @@ mod tests {
         let spool_dir = root.join("spool");
         let config = test_config();
         let universe = test_universe();
-        let mut durable =
-            DurableSignalWorker::open(config.clone(), universe.clone(), &state_dir, &spool_dir)
-                .unwrap();
+        let mut durable = DurableSignalWorker::open_with_universe(
+            config.clone(),
+            universe.clone(),
+            &state_dir,
+            &spool_dir,
+        )
+        .unwrap();
         for sequence in 1..=2 {
             let observation = make_observation(
                 &config,
@@ -4758,9 +4884,13 @@ mod tests {
         let root = temporary_root("carry-class-preflight-current");
         let state_dir = root.join("state");
         let spool_dir = root.join("spool");
-        let mut durable =
-            DurableSignalWorker::open(test_config(), test_universe(), &state_dir, &spool_dir)
-                .unwrap();
+        let mut durable = DurableSignalWorker::open_with_universe(
+            test_config(),
+            test_universe(),
+            &state_dir,
+            &spool_dir,
+        )
+        .unwrap();
         durable.pending_replaceable_paths.insert(
             "carry_feature_batch".into(),
             state_dir.join("checkpoint.json"),
@@ -4792,7 +4922,7 @@ mod tests {
 
         let blocked_root = temporary_root("carry-class-preflight-catchup");
         let blocked_state = blocked_root.join("state");
-        let mut blocked = DurableSignalWorker::open(
+        let mut blocked = DurableSignalWorker::open_with_universe(
             test_config(),
             test_universe(),
             &blocked_state,
@@ -4833,7 +4963,7 @@ mod tests {
     #[test]
     fn projected_class_caps_do_not_overshoot_at_the_file_or_byte_edge() {
         let root = temporary_root("projected-class-file-cap");
-        let mut durable = DurableSignalWorker::open(
+        let mut durable = DurableSignalWorker::open_with_universe(
             test_config(),
             test_universe(),
             root.join("state"),
@@ -4883,7 +5013,7 @@ mod tests {
         );
 
         let byte_root = temporary_root("projected-class-byte-cap");
-        let mut byte_blocked = DurableSignalWorker::open(
+        let mut byte_blocked = DurableSignalWorker::open_with_universe(
             test_config(),
             test_universe(),
             byte_root.join("state"),
@@ -4929,7 +5059,7 @@ mod tests {
     #[test]
     fn small_lifecycle_and_catchup_items_reach_real_thresholds_not_file_worst_cases() {
         let lifecycle_root = temporary_root("small-lifecycle-spool-items");
-        let mut lifecycle = DurableSignalWorker::open(
+        let mut lifecycle = DurableSignalWorker::open_with_universe(
             test_config(),
             test_universe(),
             lifecycle_root.join("state"),
@@ -4971,7 +5101,7 @@ mod tests {
 
         let catchup_root = temporary_root("small-catchup-spool-items");
         let config = compact_feature_config();
-        let mut catchup = DurableSignalWorker::open(
+        let mut catchup = DurableSignalWorker::open_with_universe(
             config,
             test_universe(),
             catchup_root.join("state"),
@@ -5019,7 +5149,7 @@ mod tests {
     fn pending_replaceable_watermarks_do_not_reserve_files_they_cannot_emit() {
         let root = temporary_root("suppressed-watermark-preflight");
         let state_dir = root.join("state");
-        let mut durable = DurableSignalWorker::open(
+        let mut durable = DurableSignalWorker::open_with_universe(
             compact_feature_config(),
             test_universe(),
             &state_dir,
@@ -5100,7 +5230,7 @@ mod tests {
 
     #[test]
     fn feature_marks_keep_the_ticker_clock_and_expire() {
-        let mut worker = SignalWorker::new(test_config(), test_universe()).unwrap();
+        let mut worker = SignalWorker::with_universe(test_config(), test_universe()).unwrap();
         worker.state.tickers.insert(
             "BTCUSDT".into(),
             TickerObservation {
@@ -5136,7 +5266,7 @@ mod tests {
 
     #[test]
     fn presettlement_expiry_uses_the_older_schedule_clock() {
-        let worker = SignalWorker::new(test_config(), test_universe()).unwrap();
+        let worker = SignalWorker::with_universe(test_config(), test_universe()).unwrap();
         let schedule_clock = 10 * DAY_MS;
         let observed_ts_ms = schedule_clock + worker.config.sources.mark_max_age_ms - 1;
         let row = TickerObservation {
@@ -5181,7 +5311,7 @@ mod tests {
 
     #[test]
     fn late_rest_ticker_cannot_roll_back_ws_state_or_output_clock() {
-        let mut worker = SignalWorker::new(test_config(), test_universe()).unwrap();
+        let mut worker = SignalWorker::with_universe(test_config(), test_universe()).unwrap();
         let mut ws = ticker_wire("BTCUSDT", 110.0);
         ws.mark_observed_ts_ms = Some(3_000);
         let first = worker
@@ -5219,7 +5349,7 @@ mod tests {
 
     #[test]
     fn ticker_snapshot_already_expired_at_delivery_is_not_sequenced() {
-        let mut worker = SignalWorker::new(test_config(), test_universe()).unwrap();
+        let mut worker = SignalWorker::with_universe(test_config(), test_universe()).unwrap();
         let observed_ts_ms = 2 * DAY_MS;
         let output = worker
             .apply(WireEvent::BybitTickerSnapshot {
@@ -5239,7 +5369,7 @@ mod tests {
     fn duplicate_funding_is_stored_once_and_not_reemitted() {
         let config = test_config();
         let universe = test_universe();
-        let mut worker = SignalWorker::new(config, universe).unwrap();
+        let mut worker = SignalWorker::with_universe(config, universe).unwrap();
         worker.state.last_carry_decision_ts_ms = Some(DAY_MS - 1);
         let wire = BybitFundingWire {
             funding_rate_timestamp: serde_json::Value::from(DAY_MS),
@@ -5293,7 +5423,7 @@ mod tests {
 
     #[test]
     fn funding_lifecycle_emits_only_rows_after_the_bound_decision() {
-        let mut worker = SignalWorker::new(test_config(), test_universe()).unwrap();
+        let mut worker = SignalWorker::with_universe(test_config(), test_universe()).unwrap();
         worker.state.last_carry_decision_ts_ms = Some(2 * DAY_MS);
         let observations = worker
             .apply(WireEvent::BybitFundingBatch {
@@ -5341,7 +5471,7 @@ mod tests {
     fn carry_scorer_catchup_is_bounded_ordered_and_has_no_market_payload() {
         let mut config = test_config();
         config.carry.minimum_decision_symbols = 1;
-        let mut worker = SignalWorker::new(config, test_universe()).unwrap();
+        let mut worker = SignalWorker::with_universe(config, test_universe()).unwrap();
         install_trading_instrument(&mut worker, "BTCUSDT");
         worker.state.last_carry_decision_ts_ms = Some(40 * DAY_MS);
         let history = worker.state.klines.entry("BTCUSDT".into()).or_default();
@@ -5407,7 +5537,8 @@ mod tests {
 
     #[test]
     fn optional_whale_absence_keeps_carry_live_with_a_null_feature() {
-        let mut worker = SignalWorker::new(compact_feature_config(), test_universe()).unwrap();
+        let mut worker =
+            SignalWorker::with_universe(compact_feature_config(), test_universe()).unwrap();
         install_compact_history(&mut worker, 10);
         assert!(worker.state.whales.is_empty());
         let observations = worker
@@ -5438,7 +5569,7 @@ mod tests {
         let mut universe = test_universe();
         universe.symbols = vec!["BTCUSDT".into(), "ETHUSDT".into()];
         universe.carry_symbols = universe.symbols.clone();
-        let mut worker = SignalWorker::new(config, universe).unwrap();
+        let mut worker = SignalWorker::with_universe(config, universe).unwrap();
         worker
             .apply(WireEvent::BybitInstrumentSnapshot {
                 schema_version: SCHEMA_VERSION,
@@ -5557,7 +5688,7 @@ mod tests {
     fn missing_then_recovered_instrument_preserves_the_unknown_historical_gap() {
         let config = compact_feature_config();
         let universe = test_universe();
-        let mut worker = SignalWorker::new(config.clone(), universe.clone()).unwrap();
+        let mut worker = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
         worker
             .apply(WireEvent::BybitInstrumentSnapshot {
                 schema_version: SCHEMA_VERSION,
@@ -5593,8 +5724,7 @@ mod tests {
             .get_mut("BTCUSDT")
             .unwrap()[0]
             .trading_through_ms = None;
-        let restored_legacy =
-            SignalWorker::restore(config.clone(), universe.clone(), legacy_state).unwrap();
+        let restored_legacy = SignalWorker::restore(config.clone(), legacy_state).unwrap();
         assert_eq!(
             restored_legacy.state.instrument_trading_intervals["BTCUSDT"][0].trading_through_ms,
             Some(5 * DAY_MS)
@@ -5630,7 +5760,7 @@ mod tests {
         assert!(worker.was_trading_instrument_at("BTCUSDT", 7 * DAY_MS));
         assert!(worker.is_trading_instrument("BTCUSDT"));
 
-        let restored = SignalWorker::restore(config, universe, worker.state.clone()).unwrap();
+        let restored = SignalWorker::restore(config, worker.state.clone()).unwrap();
         assert!(!restored.was_trading_instrument_at("BTCUSDT", 6 * DAY_MS));
         assert!(restored.was_trading_instrument_at("BTCUSDT", 7 * DAY_MS));
     }
@@ -5639,7 +5769,7 @@ mod tests {
     fn repeated_instrument_omission_recovery_survives_past_the_old_cap_and_restart() {
         let config = compact_feature_config();
         let universe = test_universe();
-        let mut worker = SignalWorker::new(config.clone(), universe.clone()).unwrap();
+        let mut worker = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
         let base = 10 * DAY_MS;
         worker
             .apply(WireEvent::BybitInstrumentSnapshot {
@@ -5685,7 +5815,7 @@ mod tests {
         assert_eq!(expected[40].trading_from_ms, base + 80 * HOUR_MS);
         assert_eq!(expected[40].trading_through_ms, None);
 
-        let mut restored = SignalWorker::restore(config, universe, worker.state.clone()).unwrap();
+        let mut restored = SignalWorker::restore(config, worker.state.clone()).unwrap();
         assert_eq!(
             restored.state.instrument_trading_intervals["BTCUSDT"],
             expected
@@ -5723,7 +5853,7 @@ mod tests {
     fn restore_preserves_history_across_operational_changes_and_resets_only_changed_physics() {
         let config = test_config();
         let universe = test_universe();
-        let mut state = SignalWorker::new(config.clone(), universe.clone())
+        let mut state = SignalWorker::with_universe(config.clone(), universe.clone())
             .unwrap()
             .state
             .clone();
@@ -5737,7 +5867,7 @@ mod tests {
         let mut operational = config.clone();
         operational.identity.operational_profile_sha256 = "3".repeat(64);
         operational.identity.engine_config_sha256 = "4".repeat(64);
-        let restored = SignalWorker::restore(operational, universe.clone(), state.clone()).unwrap();
+        let restored = SignalWorker::restore(operational, state.clone()).unwrap();
         assert_eq!(restored.state.last_input_sequence, 17);
         assert_eq!(restored.state.long_output_sequence, 3);
         assert_eq!(restored.state.carry_output_sequence, 5);
@@ -5750,8 +5880,7 @@ mod tests {
         mark_physics.sources.mark_max_age_ms += 1;
         mark_physics.identity.long_decision_fingerprint = "1".repeat(64);
         mark_physics.identity.carry_decision_fingerprint = "2".repeat(64);
-        let restored =
-            SignalWorker::restore(mark_physics, universe.clone(), state.clone()).unwrap();
+        let restored = SignalWorker::restore(mark_physics, state.clone()).unwrap();
         assert_eq!(restored.state.last_input_sequence, 17);
         assert_eq!(restored.state.long_output_sequence, 3);
         assert_eq!(restored.state.carry_output_sequence, 5);
@@ -5762,8 +5891,7 @@ mod tests {
 
         let mut long_changed = config.clone();
         long_changed.long.regime_sma_days += 1;
-        let restored =
-            SignalWorker::restore(long_changed, universe.clone(), state.clone()).unwrap();
+        let restored = SignalWorker::restore(long_changed, state.clone()).unwrap();
         assert_eq!(restored.state.last_long_feature_ts_ms, None);
         assert_eq!(restored.state.last_carry_decision_ts_ms, Some(9 * DAY_MS));
         assert_eq!(restored.state.last_carry_scorer_ts_ms, Some(9 * DAY_MS));
@@ -5771,7 +5899,7 @@ mod tests {
 
         let mut carry_changed = config;
         carry_changed.identity.carry_decision_fingerprint = "0".repeat(64);
-        let restored = SignalWorker::restore(carry_changed, universe, state.clone()).unwrap();
+        let restored = SignalWorker::restore(carry_changed, state.clone()).unwrap();
         assert_eq!(restored.state.last_long_feature_ts_ms, Some(9 * DAY_MS));
         assert_eq!(restored.state.last_carry_decision_ts_ms, None);
         assert_eq!(restored.state.last_carry_scorer_ts_ms, None);
@@ -5780,7 +5908,7 @@ mod tests {
 
         let mut source_changed = test_config();
         source_changed.routing.source = "different_source".into();
-        let error = match SignalWorker::restore(source_changed, test_universe(), state) {
+        let error = match SignalWorker::restore(source_changed, state) {
             Ok(_) => panic!("a new source cannot inherit another source's sequence"),
             Err(error) => error,
         };
@@ -5791,7 +5919,7 @@ mod tests {
     fn pending_multi_output_transaction_recovers_every_crash_boundary() {
         let config = test_config();
         let universe = test_universe();
-        let initial = SignalWorker::new(config.clone(), universe.clone()).unwrap();
+        let initial = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
         let prior_json = serde_json::to_vec(initial.state()).unwrap();
         let mut next_state = initial.state().clone();
         next_state.last_input_sequence = 1;
@@ -5863,9 +5991,13 @@ mod tests {
                 checkpoint.replace_from(&pending_next).unwrap();
             }
 
-            let durable =
-                DurableSignalWorker::open(config.clone(), universe.clone(), &state_dir, &spool_dir)
-                    .unwrap();
+            let durable = DurableSignalWorker::open_with_universe(
+                config.clone(),
+                universe.clone(),
+                &state_dir,
+                &spool_dir,
+            )
+            .unwrap();
             if phase <= 1 {
                 assert_eq!(durable.worker.state.last_input_sequence, 0);
                 assert_eq!(std::fs::read_dir(&spool_dir).unwrap().count(), 0);
@@ -5878,7 +6010,7 @@ mod tests {
                 assert!(!pending.path().exists());
                 assert_eq!(checkpoint.load_bytes().unwrap().unwrap(), next_json);
                 drop(durable);
-                let reopened = DurableSignalWorker::open(
+                let reopened = DurableSignalWorker::open_with_universe(
                     config.clone(),
                     universe.clone(),
                     &state_dir,
@@ -5901,9 +6033,13 @@ mod tests {
         let spool_dir = root.join("spool");
         let checkpoint = AtomicJsonStore::new(state_dir.join("checkpoint.json"));
 
-        let mut durable =
-            DurableSignalWorker::open(config.clone(), universe.clone(), &state_dir, &spool_dir)
-                .unwrap();
+        let mut durable = DurableSignalWorker::open_with_universe(
+            config.clone(),
+            universe.clone(),
+            &state_dir,
+            &spool_dir,
+        )
+        .unwrap();
         let initial = durable.durability_metrics().unwrap();
         let checkpoint_hash = checkpoint.sha256().unwrap().unwrap();
         for sequence in 1..=12_u64 {
@@ -5938,7 +6074,9 @@ mod tests {
         );
         drop(durable);
 
-        let restored = DurableSignalWorker::open(config, universe, &state_dir, &spool_dir).unwrap();
+        let restored =
+            DurableSignalWorker::open_with_universe(config, universe, &state_dir, &spool_dir)
+                .unwrap();
         assert_eq!(restored.worker.state.last_input_sequence, 12);
         assert_eq!(restored.durability_metrics().unwrap().journal_bytes, 0);
         assert_eq!(std::fs::read_dir(&spool_dir).unwrap().count(), 1);
@@ -5972,9 +6110,13 @@ mod tests {
         let mut wire = ticker_wire("BTCUSDT", 100.0);
         wire.mark_observed_ts_ms = Some(field_ts);
         {
-            let mut durable =
-                DurableSignalWorker::open(config.clone(), universe.clone(), &state_dir, &spool_dir)
-                    .unwrap();
+            let mut durable = DurableSignalWorker::open_with_universe(
+                config.clone(),
+                universe.clone(),
+                &state_dir,
+                &spool_dir,
+            )
+            .unwrap();
             durable
                 .apply_and_commit(WireEvent::BybitTickerSnapshot {
                     schema_version: SCHEMA_VERSION,
@@ -5985,7 +6127,9 @@ mod tests {
                 })
                 .unwrap();
         }
-        let restored = DurableSignalWorker::open(config, universe, &state_dir, &spool_dir).unwrap();
+        let restored =
+            DurableSignalWorker::open_with_universe(config, universe, &state_dir, &spool_dir)
+                .unwrap();
         let symbols = vec!["BTCUSDT".to_owned()];
         assert_eq!(
             restored
@@ -6009,7 +6153,8 @@ mod tests {
         let state_dir = root.join("state");
         let spool_dir = root.join("spool");
         let mut durable =
-            DurableSignalWorker::open(config, universe, &state_dir, &spool_dir).unwrap();
+            DurableSignalWorker::open_with_universe(config, universe, &state_dir, &spool_dir)
+                .unwrap();
         let initial_writes = durable
             .durability_metrics()
             .unwrap()
@@ -6059,9 +6204,13 @@ mod tests {
         let state_dir = root.join("state");
         let spool_dir = root.join("spool");
 
-        let mut first =
-            DurableSignalWorker::open(config.clone(), universe.clone(), &state_dir, &spool_dir)
-                .unwrap();
+        let mut first = DurableSignalWorker::open_with_universe(
+            config.clone(),
+            universe.clone(),
+            &state_dir,
+            &spool_dir,
+        )
+        .unwrap();
         let generation = first.worker.state.source_generation.clone();
         let first_rows = first
             .apply_and_commit(WireEvent::Watermark {
@@ -6075,9 +6224,13 @@ mod tests {
         assert!(first_rows[0].source.contains(&generation));
         drop(first);
 
-        let mut restored =
-            DurableSignalWorker::open(config.clone(), universe.clone(), &state_dir, &spool_dir)
-                .unwrap();
+        let mut restored = DurableSignalWorker::open_with_universe(
+            config.clone(),
+            universe.clone(),
+            &state_dir,
+            &spool_dir,
+        )
+        .unwrap();
         assert_eq!(restored.worker.state.source_generation, generation);
         let restored_rows = restored
             .apply_and_commit(WireEvent::Watermark {
@@ -6093,7 +6246,8 @@ mod tests {
         std::fs::remove_dir_all(&state_dir).unwrap();
         std::fs::remove_dir_all(&spool_dir).unwrap();
         let mut replacement =
-            DurableSignalWorker::open(config, universe, &state_dir, &spool_dir).unwrap();
+            DurableSignalWorker::open_with_universe(config, universe, &state_dir, &spool_dir)
+                .unwrap();
         let replacement_generation = replacement.worker.state.source_generation.clone();
         assert_ne!(replacement_generation, generation);
         let replacement_rows = replacement
@@ -6119,7 +6273,7 @@ mod tests {
         let state_dir = root.join("state");
         let spool_dir = root.join("spool");
         let checkpoint = AtomicJsonStore::new(state_dir.join("checkpoint.json"));
-        let mut state = SignalWorker::new(config.clone(), universe.clone())
+        let mut state = SignalWorker::with_universe(config.clone(), universe.clone())
             .unwrap()
             .state
             .clone();
@@ -6133,7 +6287,9 @@ mod tests {
         legacy.as_object_mut().unwrap().remove("source_generation");
         checkpoint.save(&legacy).unwrap();
 
-        let durable = DurableSignalWorker::open(config, universe, &state_dir, &spool_dir).unwrap();
+        let durable =
+            DurableSignalWorker::open_with_universe(config, universe, &state_dir, &spool_dir)
+                .unwrap();
         assert_ne!(
             durable.worker.state.source_generation,
             REPLAY_SOURCE_GENERATION
@@ -6205,5 +6361,204 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("16777216 bytes"));
+    }
+
+    fn gate_row(symbol: &str, score: f64, trigger_ts_ms: i64) -> crate::model::LlmGateCandidate {
+        crate::model::LlmGateCandidate {
+            symbol: symbol.into(),
+            score,
+            band: "core".into(),
+            trigger_ts_ms,
+            trigger_price: 100.0,
+            atr_pct: 0.05,
+            sigma_daily_30d: Some(0.04),
+            turnover_rank: Some(4.0),
+            trigger_window_h: Some(4),
+        }
+    }
+
+    #[test]
+    fn an_unresolved_worker_refuses_every_input_until_a_universe_snapshot_arrives() {
+        let mut worker = SignalWorker::new(test_config()).unwrap();
+        assert!(!crate::universe::universe_is_resolved(
+            &worker.state.universe
+        ));
+        assert_eq!(worker.state.universe.environment, "demo");
+        assert_eq!(worker.state.universe.endpoint, "api-demo.bybit.com");
+        let refused = worker.apply(WireEvent::BybitTickerSnapshot {
+            schema_version: SCHEMA_VERSION,
+            sequence: 1,
+            observed_ts_ms: DAY_MS,
+            available_at_ms: DAY_MS,
+            rows: vec![ticker_wire("BTCUSDT", 100.0)],
+        });
+        assert!(refused.is_err());
+        let resolved = worker
+            .apply(WireEvent::UniverseSnapshot {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                universe: test_universe(),
+            })
+            .unwrap();
+        assert!(resolved.is_empty());
+        assert!(crate::universe::universe_is_resolved(
+            &worker.state.universe
+        ));
+        let accepted = worker
+            .apply(WireEvent::BybitTickerSnapshot {
+                schema_version: SCHEMA_VERSION,
+                sequence: 2,
+                observed_ts_ms: DAY_MS + 2,
+                available_at_ms: DAY_MS + 2,
+                rows: vec![ticker_wire("BTCUSDT", 100.0)],
+            })
+            .unwrap();
+        assert_eq!(accepted.len(), 1);
+    }
+
+    #[test]
+    fn a_universe_with_new_membership_replaces_the_old_one_and_drops_its_symbols() {
+        let mut first = test_universe();
+        first.symbols = vec!["AAAUSDT".into(), "BTCUSDT".into()];
+        first.long_symbols = vec!["AAAUSDT".into(), "BTCUSDT".into()];
+        first.carry_symbols = vec!["AAAUSDT".into(), "BTCUSDT".into()];
+        let mut worker = SignalWorker::with_universe(test_config(), first).unwrap();
+        worker
+            .apply(WireEvent::BybitInstrumentSnapshot {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                observed_ts_ms: DAY_MS + 1,
+                available_at_ms: DAY_MS + 1,
+                rows: vec![
+                    trading_instrument_wire("AAAUSDT", 1),
+                    trading_instrument_wire("BTCUSDT", 1),
+                    trading_instrument_wire("ETHUSDT", 1),
+                ],
+            })
+            .unwrap();
+        worker
+            .apply(WireEvent::BybitTickerSnapshot {
+                schema_version: SCHEMA_VERSION,
+                sequence: 2,
+                observed_ts_ms: DAY_MS + 2,
+                available_at_ms: DAY_MS + 2,
+                rows: vec![ticker_wire("AAAUSDT", 1.0), ticker_wire("BTCUSDT", 100.0)],
+            })
+            .unwrap();
+        assert!(worker.state.tickers.contains_key("AAAUSDT"));
+        assert!(worker.state.instruments.contains_key("AAAUSDT"));
+
+        let mut second = test_universe();
+        second.snapshot_ts_ms = DAY_MS + 3;
+        second.available_at_ms = DAY_MS + 3;
+        second.artifact_sha256 = "3".repeat(64);
+        let out = worker
+            .apply(WireEvent::UniverseSnapshot {
+                schema_version: SCHEMA_VERSION,
+                sequence: 3,
+                universe: second.clone(),
+            })
+            .unwrap();
+        assert!(out.is_empty());
+        assert_eq!(worker.state.universe, second);
+        assert!(!worker.state.tickers.contains_key("AAAUSDT"));
+        assert!(!worker.state.instruments.contains_key("AAAUSDT"));
+        assert!(worker.state.tickers.contains_key("BTCUSDT"));
+
+        // The same membership with a newer clock is installed without pruning
+        // work, and a checkpoint from it restores under a config that names no
+        // universe at all.
+        let mut third = second.clone();
+        third.snapshot_ts_ms = DAY_MS + 4;
+        third.available_at_ms = DAY_MS + 4;
+        worker
+            .apply(WireEvent::UniverseSnapshot {
+                schema_version: SCHEMA_VERSION,
+                sequence: 4,
+                universe: third.clone(),
+            })
+            .unwrap();
+        assert_eq!(worker.state.universe.snapshot_ts_ms, DAY_MS + 4);
+        let restored = SignalWorker::restore(test_config(), worker.state.clone()).unwrap();
+        assert_eq!(restored.state.universe, third);
+    }
+
+    #[test]
+    fn a_gate_publication_becomes_one_long_observation_over_the_tradable_set() {
+        let mut worker = SignalWorker::with_universe(test_config(), test_universe()).unwrap();
+        let read_at_ms = 10 * DAY_MS;
+        let decision_ts_ms = read_at_ms - 60_000;
+        let out = worker
+            .apply(WireEvent::LlmGateCandidates {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                observed_ts_ms: decision_ts_ms,
+                available_at_ms: read_at_ms,
+                decision_ts_ms,
+                valid_until_ms: decision_ts_ms + HOUR_MS,
+                rows: vec![
+                    gate_row("BTCUSDT", 7.0, read_at_ms - 20 * 60_000),
+                    // Not in the tradable set: dropped, never an error.
+                    gate_row("OTHERUSDT", 9.0, read_at_ms - 60_000),
+                    // Below the score bar.
+                    gate_row("BTCUSDT", 5.0, read_at_ms - 60_000),
+                ],
+            })
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        let observation = &out[0];
+        assert_eq!(observation.kind, "llm_gate_candidates");
+        assert_eq!(
+            observation.destination,
+            StrategyId(test_config().long_destination)
+        );
+        assert_eq!(observation.observed_wall_ts_ms, decision_ts_ms);
+        assert_eq!(observation.available_wall_ts_ms, read_at_ms);
+        assert_eq!(observation.sequence, 1);
+        assert_eq!(
+            observation
+                .subscriptions
+                .iter()
+                .map(|row| row.symbol.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["BTCUSDT"])
+        );
+        let envelope: SignalPayloadEnvelope = serde_json::from_slice(&observation.payload).unwrap();
+        let ObservationPayload::LlmGateCandidates {
+            decision_ts_ms: published,
+            valid_until_ms,
+            rows,
+            ..
+        } = envelope.payload
+        else {
+            panic!("expected gate candidates");
+        };
+        assert_eq!(published, decision_ts_ms);
+        assert_eq!(valid_until_ms, decision_ts_ms + HOUR_MS);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol, "BTCUSDT");
+        assert_eq!(rows[0].score, 7.0);
+        assert_eq!(worker.state.long_output_sequence, 1);
+
+        // A stale trigger is filtered, and an empty publication still travels:
+        // it is how the ledger withdraws standing candidates.
+        let out = worker
+            .apply(WireEvent::LlmGateCandidates {
+                schema_version: SCHEMA_VERSION,
+                sequence: 2,
+                observed_ts_ms: decision_ts_ms + 60_000,
+                available_at_ms: read_at_ms + 60_000,
+                decision_ts_ms: decision_ts_ms + 60_000,
+                valid_until_ms: decision_ts_ms + 60_000 + HOUR_MS,
+                rows: vec![gate_row("BTCUSDT", 8.0, read_at_ms - 2 * HOUR_MS)],
+            })
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        let envelope: SignalPayloadEnvelope = serde_json::from_slice(&out[0].payload).unwrap();
+        let ObservationPayload::LlmGateCandidates { rows, .. } = envelope.payload else {
+            panic!("expected gate candidates");
+        };
+        assert!(rows.is_empty());
+        assert_eq!(out[0].sequence, 2);
     }
 }

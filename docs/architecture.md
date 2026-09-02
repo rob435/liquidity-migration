@@ -46,7 +46,7 @@ Its machine inputs are:
 - the registered CARRY rule;
 - the installed operational profile;
 - the engine config;
-- the reviewed candidate universe.
+- the LLM entry gate's candidates file, read every minute.
 
 The worker normalizes inputs, computes the registered features, and publishes
 immutable sequence-numbered observations. Frequent inputs enter an fsynced,
@@ -88,9 +88,13 @@ range, unique-row count, and immutable history are checked before durable
 mutation. A venue or normalization fault pauses only that lane and opens repair
 where needed. A sequence, state, spool, serialization, or disk fault remains a
 process error; it is never recast as ordinary source degradation.
-responses. The reviewed LONG and CARRY populations are the worker generation's
-ceiling. The live WebSocket follows both the top-of-book quote and ticker for
-their current trading members plus BTC, ETH, and the registered regime symbol.
+responses. The worker derives the tradable universe on its hourly instrument
+cadence from the realm venue's instrument list and the public ticker page, with
+rank hysteresis so a name at the edge does not flap; the LONG and CARRY
+eligible sets are that refresh's populations, and a changed membership is
+recorded as a universe snapshot in the input journal. The live WebSocket
+follows both the top-of-book quote and ticker for their current trading members
+plus BTC, ETH, and the registered regime symbol.
 The engine execution feed also keeps a separate clock for each L1 quote topic.
 A promised L1 snapshot that stays silent for 45 seconds is re-subscribed on the
 live socket without interrupting healthy topics.
@@ -114,17 +118,18 @@ fresh REST fallback; the separate sleeve clocks prove whether it actually does.
 
 ## Native directional reducers
 
-The engine records a signal observation before waking a strategy. The reviewed
-universe is the exact runtime ceiling for one worker generation, not a
-compile-time list. An observation may ask the engine to add market subscriptions
-for accepted symbols inside that artifact; the engine persists those admissions
-in the WAL. The artifact identity cannot change in place.
+The engine records a signal observation before waking a strategy. Each
+observation carries the universe identity it was built under, and an
+observation may ask the engine to add market subscriptions for its accepted
+symbols; the engine persists those admissions in the WAL and never removes a
+held name's subscription when the universe moves on.
 
 The three directional sleeves have typed pure reducers under
 `engine/engine-strategies/src/native_*`:
 
 - `long_native` owns LONG signal interpretation, sizing, admission, entry,
-  stop decay, cooldown, and time exit.
+  stop decay, cooldown, and time exit, for both of its triggers: the hourly
+  feature batch and the LLM entry gate's judged events.
 - `carry_native` owns the daily score, sizing anchors, ordinary and
   pre-settlement exits, drop exits, admission, resize boundaries, and current
   target state.

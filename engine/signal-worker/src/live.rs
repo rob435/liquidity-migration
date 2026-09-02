@@ -64,6 +64,13 @@ pub struct WorkerHeartbeat {
     pub engine_config_sha256: String,
     pub universe_artifact_sha256: String,
     pub universe_file_sha256: String,
+    pub universe_snapshot_ts_ms: i64,
+    pub universe_symbols: usize,
+    pub universe_long_symbols: usize,
+    pub universe_carry_symbols: usize,
+    pub llm_gate_enabled: bool,
+    pub llm_gate_last_decision_ts_ms: Option<i64>,
+    pub llm_gate_last_candidates: usize,
     pub source_generation: String,
     pub last_input_sequence: u64,
     pub long_output_sequence: u64,
@@ -119,8 +126,14 @@ pub struct LiveRunner {
     config: SignalWorkerConfig,
     durable: DurableSignalWorker,
     bybit: PublicHttpClient,
+    /// The realm's own venue host, whose instrument list bounds what the
+    /// account may trade. Mainnet's is the public host; demo's is the demo
+    /// venue.
+    bybit_instruments: PublicHttpClient,
     binance: PublicHttpClient,
     heartbeat_path: PathBuf,
+    last_gate_decision_ts_ms: Option<i64>,
+    last_gate_candidates: usize,
     last_long_cycle_completed_wall_ts_ms: Option<i64>,
     last_carry_cycle_completed_wall_ts_ms: Option<i64>,
     rest_ticker_last_success_wall_ts_ms: Option<i64>,
@@ -133,6 +146,7 @@ pub struct LiveRunner {
 struct LaneState {
     instruments: bool,
     tickers: bool,
+    gate: bool,
     funding: bool,
     whales: bool,
     repair: bool,
@@ -143,8 +157,9 @@ struct LaneState {
 }
 
 enum LaneCompletion {
-    Instruments(Result<FetchedInstruments, WorkerError>),
+    Instruments(Result<FetchedUniverseInputs, WorkerError>),
     Tickers(Result<FetchedTickers, WorkerError>),
+    Gate(Result<Option<FetchedGate>, WorkerError>),
     FundingChunk {
         result: Result<FetchedFunding, WorkerError>,
         resume: oneshot::Sender<bool>,
@@ -171,6 +186,22 @@ struct FetchedInstruments {
     observed_ts_ms: i64,
     available_at_ms: i64,
     rows: Vec<BybitInstrumentWire>,
+}
+
+/// The venue's whole instrument list from the realm host plus the whole
+/// ticker page from the public host: everything the universe is derived from.
+struct FetchedUniverseInputs {
+    instruments: FetchedInstruments,
+    tickers: FetchedTickers,
+}
+
+/// One read of the LLM gate's candidates file.
+#[derive(Debug)]
+struct FetchedGate {
+    read_at_ms: i64,
+    decision_ts_ms: i64,
+    valid_until_ms: i64,
+    rows: Vec<crate::model::LlmGateCandidate>,
 }
 
 struct FetchedWhales {
@@ -406,24 +437,17 @@ fn same_kline_value(left: &crate::model::HourlyKline, right: &crate::model::Hour
 impl LiveRunner {
     pub async fn open_responsive(
         config: SignalWorkerConfig,
-        universe: crate::model::UniverseIdentity,
         options: LiveRunOptions,
     ) -> Result<Option<Self>, WorkerError> {
-        write_provisional_heartbeat(&config, &universe, &options.heartbeat, "starting")?;
+        write_provisional_heartbeat(&config, None, &options.heartbeat, "starting")?;
         let state_dir = options.state_dir.clone();
         let spool_dir = options.spool_dir.clone();
         let recovery_config = config.clone();
-        let recovery_universe = universe.clone();
         let (recovery_tx, mut recovery_rx) = tokio::sync::oneshot::channel();
         std::thread::Builder::new()
             .name("signal-worker-recovery".to_owned())
             .spawn(move || {
-                let result = DurableSignalWorker::open(
-                    recovery_config,
-                    recovery_universe,
-                    state_dir,
-                    spool_dir,
-                );
+                let result = DurableSignalWorker::open(recovery_config, state_dir, spool_dir);
                 let _ = recovery_tx.send(result);
             })
             .map_err(|error| WorkerError::io("spawn signal-worker recovery", error))?;
@@ -438,11 +462,11 @@ impl LiveRunner {
                         .map_err(|_| WorkerError::state("signal-worker recovery task stopped"))??;
                 }
                 _ = heartbeat_tick.tick() => {
-                    write_provisional_heartbeat(&config, &universe, &options.heartbeat, "starting")?;
+                    write_provisional_heartbeat(&config, None, &options.heartbeat, "starting")?;
                 }
                 signal = &mut shutdown => {
                     signal?;
-                    write_provisional_heartbeat(&config, &universe, &options.heartbeat, "stopped")?;
+                    write_provisional_heartbeat(&config, None, &options.heartbeat, "stopped")?;
                     return Ok(None);
                 }
             }
@@ -459,6 +483,13 @@ impl LiveRunner {
             config.live.retry_base_ms,
             Arc::clone(&request_budget),
         )?;
+        let bybit_instruments = PublicHttpClient::new(
+            crate::worker::realm_endpoint(&config),
+            config.live.request_timeout_ms,
+            config.live.request_retries,
+            config.live.retry_base_ms,
+            Arc::clone(&request_budget),
+        )?;
         let binance = PublicHttpClient::new(
             &config.sources.binance_host,
             config.live.request_timeout_ms,
@@ -470,8 +501,11 @@ impl LiveRunner {
             config,
             durable,
             bybit,
+            bybit_instruments,
             binance,
             heartbeat_path: options.heartbeat,
+            last_gate_decision_ts_ms: None,
+            last_gate_candidates: 0,
             last_long_cycle_completed_wall_ts_ms: None,
             last_carry_cycle_completed_wall_ts_ms: None,
             rest_ticker_last_success_wall_ts_ms: None,
@@ -481,7 +515,16 @@ impl LiveRunner {
         }))
     }
 
-    pub fn new(
+    pub fn new(config: SignalWorkerConfig, options: LiveRunOptions) -> Result<Self, WorkerError> {
+        let universe = crate::universe::unresolved_universe(
+            &config.live.environment,
+            crate::worker::realm_endpoint(&config),
+        );
+        Self::new_with_universe(config, universe, options)
+    }
+
+    /// Seeds a missing checkpoint with `universe`; the live lanes refresh it.
+    pub fn new_with_universe(
         config: SignalWorkerConfig,
         universe: crate::model::UniverseIdentity,
         options: LiveRunOptions,
@@ -498,6 +541,13 @@ impl LiveRunner {
             config.live.retry_base_ms,
             Arc::clone(&request_budget),
         )?;
+        let bybit_instruments = PublicHttpClient::new(
+            crate::worker::realm_endpoint(&config),
+            config.live.request_timeout_ms,
+            config.live.request_retries,
+            config.live.retry_base_ms,
+            Arc::clone(&request_budget),
+        )?;
         let binance = PublicHttpClient::new(
             &config.sources.binance_host,
             config.live.request_timeout_ms,
@@ -505,7 +555,7 @@ impl LiveRunner {
             config.live.retry_base_ms,
             request_budget,
         )?;
-        let durable = DurableSignalWorker::open(
+        let durable = DurableSignalWorker::open_with_universe(
             config.clone(),
             universe,
             options.state_dir,
@@ -515,8 +565,11 @@ impl LiveRunner {
             config,
             durable,
             bybit,
+            bybit_instruments,
             binance,
             heartbeat_path: options.heartbeat,
+            last_gate_decision_ts_ms: None,
+            last_gate_candidates: 0,
             last_long_cycle_completed_wall_ts_ms: None,
             last_carry_cycle_completed_wall_ts_ms: None,
             rest_ticker_last_success_wall_ts_ms: None,
@@ -575,8 +628,31 @@ impl LiveRunner {
         Ok(())
     }
 
+    /// A worker with no derived universe cannot own a symbol or publish an
+    /// observation, so the first refresh happens before the lanes start. A
+    /// venue fault here is retried with backoff rather than left to systemd.
+    async fn resolve_universe(&mut self) -> Result<(), WorkerError> {
+        let mut delay_ms = self.config.live.retry_base_ms.max(500);
+        loop {
+            if crate::universe::universe_is_resolved(&self.durable.worker().state().universe) {
+                return Ok(());
+            }
+            match self.refresh_instruments().await {
+                Ok(()) => {}
+                Err(error) if error.is_lane_local_source_failure() => {
+                    eprintln!("signal-worker: universe refresh failed, retrying: {error}");
+                    self.write_heartbeat("starting", None)?;
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms = delay_ms.saturating_mul(2).min(60_000);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     pub async fn run(mut self) -> Result<(), WorkerError> {
         self.write_heartbeat("starting", None)?;
+        self.resolve_universe().await?;
         let run_started_at_ms = wall_ms()?;
         let symbols = self.kline_symbols();
         let pending_limit = pending_kline_limit(symbols.len());
@@ -597,12 +673,14 @@ impl LiveRunner {
         let mut funding_tick = cadence(self.config.live.funding_cadence_ms);
         let mut kline_tick = cadence(self.config.live.kline_cadence_ms);
         let mut whale_tick = cadence(self.config.live.whale_cadence_ms);
+        let mut gate_tick = cadence(self.config.llm_gate.poll_cadence_ms);
         let mut heartbeat_tick = cadence(self.config.live.ticker_cadence_ms.min(5_000));
         ticker_tick.tick().await;
         instrument_tick.tick().await;
         funding_tick.tick().await;
         kline_tick.tick().await;
         whale_tick.tick().await;
+        gate_tick.tick().await;
         heartbeat_tick.tick().await;
         let shutdown = shutdown_signal();
         tokio::pin!(shutdown);
@@ -610,10 +688,10 @@ impl LiveRunner {
         lanes.instruments = true;
         spawn_instrument_lane(
             lane_tx.clone(),
+            self.bybit_instruments.clone(),
             self.bybit.clone(),
             self.config.sources.bybit_category.clone(),
             self.config.live.instrument_max_pages,
-            self.owned_symbols().into_iter().collect(),
         );
         lanes.tickers = true;
         self.spawn_ticker_lane(lane_tx.clone())?;
@@ -661,11 +739,17 @@ impl LiveRunner {
                         lanes.instruments = true;
                         spawn_instrument_lane(
                             lane_tx.clone(),
+                            self.bybit_instruments.clone(),
                             self.bybit.clone(),
                             self.config.sources.bybit_category.clone(),
                             self.config.live.instrument_max_pages,
-                            self.owned_symbols().into_iter().collect(),
                         );
+                    }
+                }
+                _ = gate_tick.tick() => {
+                    if self.config.llm_gate.enabled && !lanes.gate && lanes.instruments_ready {
+                        lanes.gate = true;
+                        spawn_gate_lane(lane_tx.clone(), self.config.llm_gate.candidates_path.clone());
                     }
                 }
                 _ = funding_tick.tick() => {
@@ -849,22 +933,12 @@ impl LiveRunner {
                 lanes.instruments = false;
                 match result {
                     Ok(fetched) => {
-                        if let Err(error) = validate_instrument_source_against_state(
-                            self.durable.worker().state(),
-                            &fetched,
-                        ) {
+                        if let Err(error) = self.commit_universe_inputs(fetched) {
                             lane_source_failure("instrument lane", error)?;
                             lanes.instruments_ready =
                                 !self.durable.worker().state().instruments.is_empty();
                             return Ok(());
                         }
-                        self.commit(WireEvent::BybitInstrumentSnapshot {
-                            schema_version: SCHEMA_VERSION,
-                            sequence: self.next_sequence()?,
-                            observed_ts_ms: fetched.observed_ts_ms,
-                            available_at_ms: fetched.available_at_ms,
-                            rows: fetched.rows,
-                        })?;
                         if let Err(error) = self.validate_candidate_instruments() {
                             eprintln!("signal-worker: instrument inventory degraded: {error}");
                         }
@@ -887,6 +961,30 @@ impl LiveRunner {
                         lanes.instruments_ready =
                             !self.durable.worker().state().instruments.is_empty();
                     }
+                }
+            }
+            LaneCompletion::Gate(result) => {
+                lanes.gate = false;
+                match result {
+                    Ok(Some(fetched)) => {
+                        if self.last_gate_decision_ts_ms == Some(fetched.decision_ts_ms) {
+                            return Ok(());
+                        }
+                        let candidates = fetched.rows.len();
+                        self.commit(WireEvent::LlmGateCandidates {
+                            schema_version: SCHEMA_VERSION,
+                            sequence: self.next_sequence()?,
+                            observed_ts_ms: fetched.decision_ts_ms.min(fetched.read_at_ms),
+                            available_at_ms: fetched.read_at_ms,
+                            decision_ts_ms: fetched.decision_ts_ms,
+                            valid_until_ms: fetched.valid_until_ms,
+                            rows: fetched.rows,
+                        })?;
+                        self.last_gate_decision_ts_ms = Some(fetched.decision_ts_ms);
+                        self.last_gate_candidates = candidates;
+                    }
+                    Ok(None) => {}
+                    Err(error) => lane_source_failure("LLM gate lane", error)?,
                 }
             }
             LaneCompletion::Tickers(result) => {
@@ -1584,22 +1682,79 @@ impl LiveRunner {
     }
 
     async fn refresh_instruments(&mut self) -> Result<(), WorkerError> {
-        let allowed = self.owned_symbols().into_iter().collect();
-        let fetched = fetch_instrument_snapshot(
+        let fetched = fetch_universe_inputs(
+            self.bybit_instruments.clone(),
             self.bybit.clone(),
             self.config.sources.bybit_category.clone(),
             self.config.live.instrument_max_pages,
-            allowed,
         )
         .await?;
+        self.commit_universe_inputs(fetched)?;
+        self.validate_candidate_instruments()
+    }
+
+    /// Derive the universe from a fresh venue page pair, install it when its
+    /// membership moved, then record the instrument snapshot the owned symbols
+    /// are read from. The universe goes first so a symbol that just entered has
+    /// instrument facts in the same commit.
+    fn commit_universe_inputs(
+        &mut self,
+        fetched: FetchedUniverseInputs,
+    ) -> Result<(), WorkerError> {
+        validate_instrument_source_against_state(
+            self.durable.worker().state(),
+            &fetched.instruments,
+        )?;
+        validate_fetched_tickers(&fetched.tickers)?;
+        let instruments = normalize_instruments(
+            fetched.instruments.observed_ts_ms,
+            fetched.instruments.available_at_ms,
+            &fetched.instruments.rows,
+        )?;
+        let tickers = normalize_tickers(
+            fetched.tickers.observed_ts_ms,
+            fetched.tickers.available_at_ms,
+            &fetched.tickers.rows,
+        )?;
+        let (current_resolved, previous) = {
+            let state = self.durable.worker().state();
+            (
+                crate::universe::universe_is_resolved(&state.universe),
+                state.universe.clone(),
+            )
+        };
+        let derived = crate::universe::derive_universe(
+            &self.config.universe,
+            crate::universe::UniverseInputs {
+                environment: &self.config.live.environment,
+                endpoint: crate::worker::realm_endpoint(&self.config),
+                snapshot_ts_ms: fetched
+                    .instruments
+                    .observed_ts_ms
+                    .min(fetched.tickers.observed_ts_ms),
+                available_at_ms: fetched
+                    .instruments
+                    .available_at_ms
+                    .max(fetched.tickers.available_at_ms),
+                instruments: &instruments,
+                tickers: &tickers,
+                previous: current_resolved.then_some(&previous),
+            },
+        )?;
+        if !current_resolved || !crate::universe::same_membership(&previous, &derived) {
+            self.commit(WireEvent::UniverseSnapshot {
+                schema_version: SCHEMA_VERSION,
+                sequence: self.next_sequence()?,
+                universe: derived,
+            })?;
+        }
         self.commit(WireEvent::BybitInstrumentSnapshot {
             schema_version: SCHEMA_VERSION,
             sequence: self.next_sequence()?,
-            observed_ts_ms: fetched.observed_ts_ms,
-            available_at_ms: fetched.available_at_ms,
-            rows: fetched.rows,
-        })?;
-        self.validate_candidate_instruments()
+            observed_ts_ms: fetched.instruments.observed_ts_ms,
+            available_at_ms: fetched.instruments.available_at_ms,
+            rows: fetched.instruments.rows,
+        })
     }
 
     async fn refresh_tickers(&mut self) -> Result<(), WorkerError> {
@@ -2286,8 +2441,11 @@ impl LiveRunner {
     fn validate_candidate_instruments(&self) -> Result<(), WorkerError> {
         let state = self.durable.worker().state();
         let mut invalid = Vec::new();
-        for symbol in &state.universe.symbols {
-            let Some(row) = state.instruments.get(symbol) else {
+        for symbol in self.owned_symbols() {
+            if symbol == self.config.long.regime_symbol || symbol == "ETHUSDT" {
+                continue;
+            }
+            let Some(row) = state.instruments.get(&symbol) else {
                 invalid.push(format!("{symbol}:absent"));
                 continue;
             };
@@ -2307,7 +2465,7 @@ impl LiveRunner {
                 .collect::<Vec<_>>()
                 .join(", ");
             Err(WorkerError::network(format!(
-                "{} reviewed candidates lack recognized Bybit metadata; {samples}",
+                "{} universe members lack recognized Bybit metadata; {samples}",
                 invalid.len()
             )))
         }
@@ -2343,6 +2501,13 @@ impl LiveRunner {
             engine_config_sha256: self.config.identity.engine_config_sha256.clone(),
             universe_artifact_sha256: state.universe.artifact_sha256.clone(),
             universe_file_sha256: state.universe.file_sha256.clone(),
+            universe_snapshot_ts_ms: state.universe.snapshot_ts_ms,
+            universe_symbols: state.universe.symbols.len(),
+            universe_long_symbols: state.universe.long_symbols.len(),
+            universe_carry_symbols: state.universe.carry_symbols.len(),
+            llm_gate_enabled: self.config.llm_gate.enabled,
+            llm_gate_last_decision_ts_ms: self.last_gate_decision_ts_ms,
+            llm_gate_last_candidates: self.last_gate_candidates,
             source_generation: state.source_generation.clone(),
             last_input_sequence: state.last_input_sequence,
             long_output_sequence: state.long_output_sequence,
@@ -2401,18 +2566,20 @@ impl LiveRunner {
 
 fn write_provisional_heartbeat(
     config: &SignalWorkerConfig,
-    universe: &crate::model::UniverseIdentity,
+    universe: Option<&crate::model::UniverseIdentity>,
     path: &Path,
     status: &str,
 ) -> Result<(), WorkerError> {
-    let ticker_capacity = universe
-        .long_symbols
-        .iter()
-        .chain(&universe.carry_symbols)
-        .map(String::as_str)
-        .chain([config.long.regime_symbol.as_str(), "ETHUSDT"])
-        .collect::<BTreeSet<_>>()
-        .len();
+    let ticker_capacity = universe.map_or(0, |universe| {
+        universe
+            .long_symbols
+            .iter()
+            .chain(&universe.carry_symbols)
+            .map(String::as_str)
+            .chain([config.long.regime_symbol.as_str(), "ETHUSDT"])
+            .collect::<BTreeSet<_>>()
+            .len()
+    });
     let heartbeat = WorkerHeartbeat {
         schema_version: SCHEMA_VERSION,
         kind: "liquidity_migration_signal_worker_heartbeat".to_owned(),
@@ -2429,8 +2596,17 @@ fn write_provisional_heartbeat(
         carry_feature_contract_sha256: config.identity.carry_feature_contract_sha256.clone(),
         operational_config_sha256: config.identity.operational_profile_sha256.clone(),
         engine_config_sha256: config.identity.engine_config_sha256.clone(),
-        universe_artifact_sha256: universe.artifact_sha256.clone(),
-        universe_file_sha256: universe.file_sha256.clone(),
+        universe_artifact_sha256: universe
+            .map(|u| u.artifact_sha256.clone())
+            .unwrap_or_default(),
+        universe_file_sha256: universe.map(|u| u.file_sha256.clone()).unwrap_or_default(),
+        universe_snapshot_ts_ms: universe.map_or(0, |u| u.snapshot_ts_ms),
+        universe_symbols: universe.map_or(0, |u| u.symbols.len()),
+        universe_long_symbols: universe.map_or(0, |u| u.long_symbols.len()),
+        universe_carry_symbols: universe.map_or(0, |u| u.carry_symbols.len()),
+        llm_gate_enabled: config.llm_gate.enabled,
+        llm_gate_last_decision_ts_ms: None,
+        llm_gate_last_candidates: 0,
         source_generation: String::new(),
         last_input_sequence: 0,
         long_output_sequence: 0,
@@ -2573,15 +2749,129 @@ fn carry_required_lanes_pending(lanes: &LaneState) -> bool {
 
 fn spawn_instrument_lane(
     lane_tx: mpsc::Sender<LaneCompletion>,
-    client: PublicHttpClient,
+    instrument_client: PublicHttpClient,
+    ticker_client: PublicHttpClient,
     category: String,
     max_pages: usize,
-    allowed: BTreeSet<String>,
 ) {
     tokio::spawn(async move {
-        let result = fetch_instrument_snapshot(client, category, max_pages, allowed).await;
+        let result =
+            fetch_universe_inputs(instrument_client, ticker_client, category, max_pages).await;
         let _ = lane_tx.send(LaneCompletion::Instruments(result)).await;
     });
+}
+
+fn spawn_gate_lane(lane_tx: mpsc::Sender<LaneCompletion>, path: PathBuf) {
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || read_gate_candidates(&path))
+            .await
+            .map_err(|error| WorkerError::state(format!("LLM gate read task stopped: {error}")))
+            .and_then(|result| result);
+        let _ = lane_tx.send(LaneCompletion::Gate(result)).await;
+    });
+}
+
+/// Read the ledger's publication whole. An absent file is the steady state
+/// before the ledger's first run and reads as nothing; a malformed one is a
+/// source fault for the lane, never a worker error.
+fn read_gate_candidates(path: &Path) -> Result<Option<FetchedGate>, WorkerError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(WorkerError::io("read LLM gate candidates", error)),
+    };
+    let read_at_ms = wall_ms()?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| WorkerError::input(format!("LLM gate candidates JSON: {error}")))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| WorkerError::input("LLM gate candidates must be an object"))?;
+    let clock = |key: &str| -> Result<i64, WorkerError> {
+        object
+            .get(key)
+            .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+            .filter(|v| *v > 0)
+            .ok_or_else(|| WorkerError::input(format!("LLM gate candidates lack {key}")))
+    };
+    let decision_ts_ms = clock("decision_ts_ms")?;
+    let valid_until_ms = clock("valid_until_ms")?;
+    let number = |row: &serde_json::Map<String, Value>, key: &str| -> Option<f64> {
+        row.get(key)
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite())
+    };
+    let mut rows = Vec::new();
+    for event in object
+        .get("events")
+        .and_then(Value::as_array)
+        .ok_or_else(|| WorkerError::input("LLM gate candidates lack events"))?
+    {
+        let Some(row) = event.as_object() else {
+            return Err(WorkerError::input("LLM gate event is not an object"));
+        };
+        let symbol = row
+            .get("symbol")
+            .and_then(Value::as_str)
+            .ok_or_else(|| WorkerError::input("LLM gate event lacks a symbol"))?;
+        rows.push(crate::model::LlmGateCandidate {
+            symbol: symbol.trim().to_ascii_uppercase(),
+            score: number(row, "score").unwrap_or(0.0),
+            band: row
+                .get("band")
+                .and_then(Value::as_str)
+                .unwrap_or("core")
+                .to_owned(),
+            trigger_ts_ms: number(row, "trigger_ts_ms").map_or(0, |v| v as i64),
+            trigger_price: number(row, "trigger_price").unwrap_or(0.0),
+            atr_pct: number(row, "atr_pct").unwrap_or(0.0),
+            sigma_daily_30d: number(row, "sigma_daily_30d"),
+            turnover_rank: number(row, "turnover_rank"),
+            trigger_window_h: number(row, "trigger_window_h").map(|v| v as i64),
+        });
+    }
+    Ok(Some(FetchedGate {
+        read_at_ms,
+        decision_ts_ms,
+        valid_until_ms,
+        rows,
+    }))
+}
+
+async fn fetch_universe_inputs(
+    instrument_client: PublicHttpClient,
+    ticker_client: PublicHttpClient,
+    category: String,
+    max_pages: usize,
+) -> Result<FetchedUniverseInputs, WorkerError> {
+    let instruments =
+        fetch_instrument_snapshot(instrument_client, category.clone(), max_pages).await?;
+    let tickers = fetch_ticker_page(ticker_client, category).await?;
+    Ok(FetchedUniverseInputs {
+        instruments,
+        tickers,
+    })
+}
+
+/// The whole ticker page, unfiltered: the universe ranks every listed name.
+async fn fetch_ticker_page(
+    client: PublicHttpClient,
+    category: String,
+) -> Result<FetchedTickers, WorkerError> {
+    let request_started_at_ms = wall_ms()?;
+    let query = format!("category={}", percent_encode(&category));
+    let (payload, available_at_ms) = client.get("/v5/market/tickers", &query).await?;
+    let rows = result_list(bybit_result(&payload)?)?
+        .iter()
+        .map(ticker_wire)
+        .collect::<Result<Vec<_>, _>>()?;
+    let fetched = FetchedTickers {
+        request_started_at_ms,
+        observed_ts_ms: available_at_ms,
+        available_at_ms,
+        rows,
+    };
+    validate_fetched_tickers(&fetched)?;
+    Ok(fetched)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2728,7 +3018,6 @@ async fn fetch_instrument_snapshot(
     client: PublicHttpClient,
     category: String,
     max_pages: usize,
-    allowed: BTreeSet<String>,
 ) -> Result<FetchedInstruments, WorkerError> {
     let observed_ts_ms = wall_ms()?;
     let mut by_symbol = BTreeMap::new();
@@ -2749,9 +3038,7 @@ async fn fetch_instrument_snapshot(
             let result = bybit_result(&payload)?;
             for value in result_list(result)? {
                 let row = instrument_wire(value)?;
-                if allowed.contains(&row.symbol.to_ascii_uppercase()) {
-                    by_symbol.insert(row.symbol.to_ascii_uppercase(), row);
-                }
+                by_symbol.insert(row.symbol.to_ascii_uppercase(), row);
             }
             let next = result
                 .get("nextPageCursor")
@@ -2773,9 +3060,6 @@ async fn fetch_instrument_snapshot(
             return Err(WorkerError::network(format!(
                 "Bybit {status} instruments pagination exceeded configured page bound"
             )));
-        }
-        if by_symbol.len() == allowed.len() && status == "Trading" {
-            break;
         }
     }
     let fetched = FetchedInstruments {
@@ -3802,9 +4086,10 @@ mod tests {
         startup_runtime_status, trading_intervals_contain, validate_source_grid_timestamp,
         validate_source_page_rows, whale_fetch_bounds, whale_job_chunks, FetchedFunding,
         FetchedFundingBatch, FetchedInstruments, FetchedKlineBatch, FetchedKlineJobs,
-        FetchedTickers, FetchedWhales, LaneCompletion, LaneState, LiveRunOptions, LiveRunner,
-        StreamEvent, StreamHealth, TickerSample, FUNDING_FETCH_CHUNK_SIZE, KLINE_FETCH_CHUNK_SIZE,
-        LANE_COMPLETION_QUEUE_CAPACITY, WHALE_FETCH_CHUNK_SIZE,
+        FetchedTickers, FetchedUniverseInputs, FetchedWhales, LaneCompletion, LaneState,
+        LiveRunOptions, LiveRunner, StreamEvent, StreamHealth, TickerSample,
+        FUNDING_FETCH_CHUNK_SIZE, KLINE_FETCH_CHUNK_SIZE, LANE_COMPLETION_QUEUE_CAPACITY,
+        WHALE_FETCH_CHUNK_SIZE,
     };
     use crate::bybit_ws::BybitPublicStream;
     use crate::config::SignalWorkerConfig;
@@ -4155,7 +4440,8 @@ mod tests {
             spool_dir: root.join("spool"),
             heartbeat: root.join("heartbeat.json"),
         };
-        let mut runner = LiveRunner::new(checked_demo_config(), universe, options).unwrap();
+        let mut runner =
+            LiveRunner::new_with_universe(checked_demo_config(), universe, options).unwrap();
         let mut stream =
             BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap();
         let mut pending = BTreeMap::new();
@@ -4172,15 +4458,23 @@ mod tests {
 
         runner
             .handle_lane_completion(
-                LaneCompletion::Instruments(Ok(FetchedInstruments {
-                    observed_ts_ms: available_at_ms,
-                    available_at_ms,
-                    rows: vec![instrument_wire(
-                        "BTCUSDT",
-                        "Trading",
-                        DAY_MS,
-                        Some(50 * DAY_MS),
-                    )],
+                LaneCompletion::Instruments(Ok(FetchedUniverseInputs {
+                    instruments: FetchedInstruments {
+                        observed_ts_ms: available_at_ms,
+                        available_at_ms,
+                        rows: vec![instrument_wire(
+                            "BTCUSDT",
+                            "Trading",
+                            DAY_MS,
+                            Some(50 * DAY_MS),
+                        )],
+                    },
+                    tickers: FetchedTickers {
+                        request_started_at_ms: available_at_ms,
+                        observed_ts_ms: available_at_ms,
+                        available_at_ms,
+                        rows: Vec::new(),
+                    },
                 })),
                 &mut stream,
                 &mut pending,
@@ -4349,7 +4643,8 @@ mod tests {
             spool_dir: root.join("spool"),
             heartbeat: root.join("heartbeat.json"),
         };
-        let mut runner = LiveRunner::new(checked_demo_config(), test_universe(), options).unwrap();
+        let mut runner =
+            LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
         let mut stream =
             BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap();
         let available_at_ms = 100 * DAY_MS;
@@ -4417,7 +4712,8 @@ mod tests {
             spool_dir: root.join("spool"),
             heartbeat: root.join("heartbeat.json"),
         };
-        let mut runner = LiveRunner::new(checked_demo_config(), test_universe(), options).unwrap();
+        let mut runner =
+            LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
         let available_at_ms = 100 * DAY_MS;
         let open_ts_ms = available_at_ms - HOUR_MS;
         runner
@@ -4604,7 +4900,8 @@ mod tests {
             spool_dir: root.join("spool"),
             heartbeat: root.join("heartbeat.json"),
         };
-        let mut runner = LiveRunner::new(checked_demo_config(), test_universe(), options).unwrap();
+        let mut runner =
+            LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
         let mut stream =
             BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap();
         let mut pending = BTreeMap::new();
@@ -4801,7 +5098,7 @@ mod tests {
             long_symbols: vec!["BTCUSDT".into(), "ETHUSDT".into()],
             carry_symbols: vec!["BTCUSDT".into(), "ETHUSDT".into()],
         };
-        let mut worker = SignalWorker::new(config.clone(), universe.clone()).unwrap();
+        let mut worker = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
         worker
             .apply(WireEvent::BybitInstrumentSnapshot {
                 schema_version: SCHEMA_VERSION,
@@ -4894,7 +5191,8 @@ mod tests {
             heartbeat: root.join("heartbeat.json"),
         };
         let mut runner =
-            super::LiveRunner::new(config.clone(), universe.clone(), options.clone()).unwrap();
+            super::LiveRunner::new_with_universe(config.clone(), universe.clone(), options.clone())
+                .unwrap();
         assert!(runner.kline_repair_jobs(212 * DAY_MS).is_empty());
         assert!(!runner.needs_cold_bootstrap());
 
@@ -4935,7 +5233,7 @@ mod tests {
         assert!(seen[&(210 * DAY_MS)].1.contains(&"BTCUSDT".into()));
 
         drop(runner);
-        let reopened = super::LiveRunner::new(config, universe, options).unwrap();
+        let reopened = super::LiveRunner::new_with_universe(config, universe, options).unwrap();
         assert_eq!(
             reopened.durable.worker().state().last_carry_scorer_ts_ms,
             Some(210 * DAY_MS)
@@ -4954,7 +5252,7 @@ mod tests {
             root.join("configs/signal-worker.demo.json"),
             root.join("configs/long_native_v12.json"),
             root.join("configs/lane2_carry_hold_v7.json"),
-            root.join("configs/operational.demo.json"),
+            root.join("configs/operational.json"),
             root.join("deploy/engine.demo.toml.template"),
         )
         .unwrap()
@@ -5039,5 +5337,52 @@ mod tests {
             std::process::id(),
             SEQUENCE.fetch_add(1, Ordering::Relaxed),
         ))
+    }
+
+    #[test]
+    fn the_gate_file_is_read_whole_and_an_absent_one_is_nothing() {
+        let root = temporary_root("gate-file");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("llm-gate-candidates.json");
+        assert!(super::read_gate_candidates(&path).unwrap().is_none());
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "decision_ts_ms": 1_787_000_000_000_i64,
+                "valid_until_ms": 1_787_003_600_000_i64,
+                "events": [{
+                    "symbol": "aaausdt",
+                    "score": 7,
+                    "band": "wide",
+                    "trigger_ts_ms": 1_786_999_400_000_i64,
+                    "trigger_price": 10.0,
+                    "atr_pct": 0.05,
+                    "sigma_daily_30d": 0.03,
+                    "turnover_rank": 14,
+                    "trigger_window_h": 4,
+                    "a_future_field": "is ignored"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let fetched = super::read_gate_candidates(&path).unwrap().unwrap();
+        assert_eq!(fetched.decision_ts_ms, 1_787_000_000_000);
+        assert_eq!(fetched.valid_until_ms, 1_787_003_600_000);
+        assert!(fetched.read_at_ms > fetched.decision_ts_ms);
+        assert_eq!(fetched.rows.len(), 1);
+        let row = &fetched.rows[0];
+        assert_eq!(row.symbol, "AAAUSDT");
+        assert_eq!(row.score, 7.0);
+        assert_eq!(row.band, "wide");
+        assert_eq!(row.trigger_ts_ms, 1_786_999_400_000);
+        assert_eq!(row.sigma_daily_30d, Some(0.03));
+        assert_eq!(row.turnover_rank, Some(14.0));
+        assert_eq!(row.trigger_window_h, Some(4));
+        std::fs::write(&path, b"{not json").unwrap();
+        let error = super::read_gate_candidates(&path).unwrap_err();
+        assert!(error.is_lane_local_source_failure());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

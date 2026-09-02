@@ -1,7 +1,7 @@
 """The candidates publisher's contract, tested pure.
 
-The ledger writes a research candidates file containing judged pump events.
-The native LONG runtime does not consume it.
+The ledger writes the candidates file of judged pump events that both realms'
+signal workers read and hand to the native LONG reducer.
 """
 
 from __future__ import annotations

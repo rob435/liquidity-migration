@@ -3,8 +3,8 @@ Description=Run the LLM driver-judgment ledger hourly
 
 [Timer]
 # Hourly at :05, right after each hourly close: the trigger scan judges
-# fresh 1/2/4/12/24h window events while the mover pass self-suppresses to
-# roughly twice a day. Calendar cadence so Persistent can backfill a missed
+# fresh 4/12/24h window events and publishes the LONG sleeve's candidates
+# while the mover pass self-suppresses to roughly twice a day. Calendar cadence so Persistent can backfill a missed
 # run; :05 sits clear of the 00:00 daily close and the 00:20 entry work.
 OnCalendar=*-*-* *:05:00
 AccuracySec=2min

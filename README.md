@@ -53,7 +53,7 @@ does not move. Its presence is not deployment evidence.
 | --- | --- |
 | [`liquidity_migration/`](liquidity_migration/README.md) | the Python research, evidence, policy, notification, and deployment-support plane; it has no live directional decision or order path |
 | [`engine/`](engine) | the Rust execution engine workspace — seven crates, from the shared types to the loop |
-| [`scripts/`](scripts/README.md) | `dev.sh` and `ops.sh` at the root; `runtime/`, `research/`, `maintain/`, `data/`, `vps/`, `devtools/` below |
+| [`scripts/`](scripts/README.md) | `dev.sh` and `ops.sh` at the root; `runtime/`, `research/`, `data/`, `vps/`, `devtools/` below |
 | [`deploy/`](deploy) | the canonical fleet manifest, `sleeves.env`, systemd units, and environment handling |
 | [`configs/`](configs) | Lane-2 strategy registrations and operational profiles |
 | `data/` | per-sleeve event stores and reconciliation captures (runtime, not tracked) |

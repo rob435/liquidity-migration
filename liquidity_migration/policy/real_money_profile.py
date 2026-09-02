@@ -1,15 +1,16 @@
-"""Render the real-money operational profile.
+"""Render the operational profile both realms run under.
 
 Entry sizing, leverage, cycle caps, and account caps come from the installed
 typed operational profile. LONG and CARRY resolve that file once at process
 start. Exodus copies CARRY's exact filled quantity and has no size dial. This
-module builds that account document; the committed
-``configs/operational.mainnet.json`` is its exact output, held to that by a
-test.
+module builds that account document once per deploy and installs the same
+bytes for the demo and the funded realm; the committed
+``configs/operational.json`` is its exact output at the default dials, held to
+that by a test.
 
-The capital reference tracks observed venue equity, so every cap below is a
-ratio of the wallet and the declared 100 USDT scale is only a floor. The two
-live dials here are ``RM_CARRY_STOP_LOSS_FRACTION`` and
+The capital reference tracks observed venue equity on both accounts, so every
+cap below is a ratio of the wallet and the declared 100 USDT scale is only a
+floor. The two live dials here are ``RM_CARRY_STOP_LOSS_FRACTION`` and
 ``RM_ROLLING_LOSS_FRACTION``; any other ``RM_*`` line in an env file is refused
 by name.
 """

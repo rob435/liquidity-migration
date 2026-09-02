@@ -79,7 +79,7 @@ engine render-native-config \
   --long-rule configs/long_native_v12.json \
   --carry-rule configs/lane2_carry_hold_v7.json \
   --exodus-rule configs/lane2_exodus_short_v1.json \
-  --operational-config configs/operational.demo.json \
+  --operational-config configs/operational.json \
   --long-entries-enabled true \
   --carry-entries-enabled true \
   --exodus-entries-enabled true \
@@ -113,8 +113,9 @@ generation used in both LONG and CARRY source names. Restore and ordinary
 compaction keep that source and its sequences; only a genuinely new state root
 creates a distinct source at sequence one. The heartbeat binds that generation
 alongside the source config,
-rules, feature contracts, operational profile, engine config, universe, input
-sequence, output sequences, and feature watermarks.
+rules, feature contracts, operational profile, engine config, the current
+derived universe and its population sizes, the gate lane's last publication,
+input sequence, output sequences, and feature watermarks.
 
 The public transport is continuous rather than cycle-owned. A persistent
 WebSocket actor reconnects forever through explicit gap epochs; bounded REST
@@ -142,7 +143,7 @@ a hard error. This prevents one valid pre-cutover spool row from pinning the new
 generation.
 
 Subscriptions are restored from the WAL. Signal-requested market subscriptions
-inside the reviewed artifact become durable in the WAL. The symbol table is
+become durable in the WAL and survive a later universe refresh. The symbol table is
 append-only and its full mapping is restated in the WAL. Every directional
 symbol requests a top-of-book quote for the engine's entry-freshness gate and a
 ticker for mark, index, funding, and settlement fields. The market feed tracks
@@ -232,8 +233,8 @@ positions are not in it). Once that sum is at or below minus
 `max_rolling_loss_fraction` times the current capital reference, every entry
 and growing resize is refused with `RollingLossTripped`; an order marked to the
 venue as a reduction still passes. Nothing resets it: it clears on its own as
-the losing trades pass 24 hours of age. The reference follows equity on the
-funded profile, so the limit contracts as the account shrinks. Only this
+the losing trades pass 24 hours of age. The reference follows equity on both
+accounts, so the limit contracts as an account shrinks. Only this
 engine's own trading counts, so the owner's hand orders on the same account
 cannot trip it. A close the venue itself started (a stop or take-profit
 firing, a liquidation, auto-deleveraging) on a position one sleeve holds counts

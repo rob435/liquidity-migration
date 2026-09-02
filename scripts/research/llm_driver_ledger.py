@@ -17,12 +17,13 @@ So this script does exactly two things, and never trades:
              ask the model to walk a fixed
              methodology, and append facts + judgment to a JSONL ledger,
              timestamped, before the outcome exists.
-  --triggers run hourly: detect fresh intraday deep-trigger events (rolling
-             24h window, the 2.5-sigma family, regime and ATR gates
+  --triggers run hourly: detect fresh intraday deep-trigger events (the
+             4/12/24h windows, the 2.5-sigma family, regime and ATR gates
              approximated from public data), judge each, journal the event,
-             and publish every score >= 6 judgment to a research candidates
-             file. It is not an input to the native LONG runtime and holds no
-             venue credentials.
+             and publish every score >= 6 judgment to the LONG sleeve's
+             candidates file. The signal worker on each realm reads that file
+             and the native LONG reducer enters what it accepts, through its
+             own sizing and exits. This script holds no venue credentials.
   --grade    for ledger rows at least 3 days old, fetch what actually happened
              (public klines) and print forward return by prompt version, row
              type, and judged driver kind.
@@ -564,10 +565,10 @@ def _daily_regime_on(symbol: str) -> bool | None:
 
 
 def cmd_triggers(ledger_dir: Path) -> None:
-    """The shadow entry gate: the exact flow a live gate would run, pointed at
-    the ledger. Universe and regime gates are public-data approximations of
-    the registered daily rule; the promotion math re-derives on the journaled
-    candidates, so an approximate nominator only costs coverage, never truth.
+    """The entry gate's hourly pass: detect, judge, journal, publish. Universe
+    and regime gates are public-data approximations of the registered daily
+    rule; the grading re-derives on the journaled candidates, so an
+    approximate nominator only costs coverage, never truth.
     """
 
     ledger_dir.mkdir(parents=True, exist_ok=True)
@@ -723,14 +724,15 @@ def cmd_triggers(ledger_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The candidates file (owner-directed integration, demo fleet only).
+# The candidates file, read by both realms' signal workers.
 #
-# Every score >= 6 trigger event is published to the research candidates file.
-# The native LONG runtime does not read it. This script stays credential-free
-# and order-free. Every run that reaches a verdict publishes,
-# including the empty verdict: a fresh file saying "no candidates" is what
-# stops the previous run's names being entered for the rest of their validity.
-# Research consumers treat a missing or stale file as "no signal".
+# Every score >= 6 trigger event is published here; the worker hands a new
+# publication to the native LONG reducer as one observation and the reducer
+# enters what passes its own checks. This script stays credential-free and
+# order-free. Every run that reaches a verdict publishes, including the empty
+# verdict: a fresh file saying "no candidates" is what withdraws the previous
+# run's names for the rest of their validity. A missing or stale file reads as
+# "no signal".
 # ---------------------------------------------------------------------------
 
 GATE_CANDIDATES_PATH = (

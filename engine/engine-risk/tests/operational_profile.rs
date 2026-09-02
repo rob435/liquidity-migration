@@ -1,8 +1,7 @@
-//! The engine reads the deployed profile documents.
+//! The engine reads the deployed profile document.
 //!
-//! These load `configs/operational.mainnet.json` and
-//! `configs/operational.demo.json` from the repository — the real files, the
-//! ones the native config renderer installs — rather than a copy. A cap that changes in
+//! These load `configs/operational.json` from the repository — the real file
+//! both realms are rendered from — rather than a copy. A cap that changes in
 //! the file changes here, and if a change makes the profile unloadable this
 //! suite says so before a deploy does.
 
@@ -29,14 +28,13 @@ fn repo_config(name: &str) -> String {
 }
 
 #[test]
-fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
-    let cfg = kernel_config_from_profile(&repo_config("operational.mainnet.json"), &inputs())
-        .expect("the shipped mainnet profile must load");
+fn the_committed_profile_loads_and_says_what_the_file_says() {
+    let cfg = kernel_config_from_profile(&repo_config("operational.json"), &inputs())
+        .expect("the shipped profile must load");
 
     // Every assertion below is the literal number in the file. If the owner
-    // changes a cap, this test is where the engine finds out.
-    // 2026-08-21: a static document — entry leverage 5x, gross cap = what the
-    // reference funds at that leverage, multipliers living in the env dials.
+    // changes a cap, this test is where the engine finds out. The declared
+    // 100 is the floor the caps are written at; the reference follows equity.
     assert_eq!(cfg.envelope.reference_usdt, 100.0);
     assert_eq!(cfg.envelope.max_component_gross_notional_usdt, 500.0);
     assert_eq!(cfg.envelope.max_initial_margin_usdt, 100.0);
@@ -47,7 +45,7 @@ fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
     assert_eq!(cfg.envelope.gross_notional_multiple, 5.0);
     assert_eq!(cfg.envelope.account_gross_cap_usdt(), 500.0);
 
-    // The funded account's reference follows the wallet, floored at 100.
+    // Both accounts' reference follows the wallet, floored at 100.
     assert!(cfg.envelope.tracks_equity);
     assert_eq!(cfg.envelope.equity_fraction, 1.0);
     assert_eq!(cfg.envelope.floor_usdt, 100.0);
@@ -55,21 +53,27 @@ fn the_committed_mainnet_profile_loads_and_says_what_the_file_says() {
 }
 
 #[test]
-fn the_committed_demo_profile_loads_pinned() {
-    let cfg = kernel_config_from_profile(&repo_config("operational.demo.json"), &inputs())
-        .expect("the shipped demo profile must load");
-    assert_eq!(cfg.envelope.reference_usdt, 250_000.0);
-    // 1,250,000 gross over the 250,000 reference: the 2026-08-21 risk-on dials.
-    assert_eq!(cfg.envelope.gross_notional_multiple, 5.0);
-    // No capital_reference block: the reference is pinned and never follows
-    // the wallet.
-    assert!(!cfg.envelope.tracks_equity);
+fn nothing_in_the_profile_is_pinned_to_a_dollar_figure() {
+    // The two numbers that look like amounts are ratios of the reference: the
+    // gross cap is what the wallet funds at entry leverage and the margin cap
+    // is the wallet itself. Both scale with equity through the envelope.
+    let cfg = kernel_config_from_profile(&repo_config("operational.json"), &inputs()).unwrap();
+    assert!(cfg.envelope.tracks_equity);
+    assert_eq!(
+        cfg.envelope.max_component_gross_notional_usdt,
+        cfg.envelope.reference_usdt * cfg.leverage
+    );
+    assert_eq!(
+        cfg.envelope.max_initial_margin_usdt,
+        cfg.envelope.reference_usdt
+    );
+    assert_eq!(cfg.envelope.floor_usdt, cfg.envelope.reference_usdt);
 }
 
 #[test]
 fn a_rendered_carry_stop_widens_the_kernel_ceiling() {
     let mut doc: serde_json::Value =
-        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+        serde_json::from_str(&repo_config("operational.json")).unwrap();
     doc["carry"]["declared_stop_loss_fraction"] = serde_json::json!(0.4);
     let cfg = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap();
     assert_eq!(cfg.envelope.disaster_stop_fraction, 0.4);
@@ -86,7 +90,7 @@ fn a_rendered_carry_stop_widens_the_kernel_ceiling() {
 fn an_invalid_rendered_carry_stop_is_refused() {
     for value in [0.0, 1.0] {
         let mut doc: serde_json::Value =
-            serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+            serde_json::from_str(&repo_config("operational.json")).unwrap();
         doc["carry"]["declared_stop_loss_fraction"] = serde_json::json!(value);
         let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
         assert!(
@@ -99,7 +103,7 @@ fn an_invalid_rendered_carry_stop_is_refused() {
 #[test]
 fn a_cap_the_engine_does_not_read_is_refused_rather_than_ignored() {
     let mut doc: serde_json::Value =
-        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+        serde_json::from_str(&repo_config("operational.json")).unwrap();
     doc["account_risk"]["max_overnight_notional_usdt"] = serde_json::json!(25.0);
     let err = kernel_config_from_profile(&doc.to_string(), &inputs())
         .expect_err("an unread cap was accepted");
@@ -112,7 +116,7 @@ fn a_cap_the_engine_does_not_read_is_refused_rather_than_ignored() {
 #[test]
 fn a_profile_still_declaring_the_retired_daily_loss_guard_is_refused() {
     let mut doc: serde_json::Value =
-        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+        serde_json::from_str(&repo_config("operational.json")).unwrap();
     doc["account_risk"]["max_daily_loss_usdt"] = serde_json::json!(10.0);
     let err = kernel_config_from_profile(&doc.to_string(), &inputs())
         .expect_err("a retired daily-loss field was accepted");
@@ -126,7 +130,7 @@ fn a_profile_still_declaring_sleeve_shares_is_refused_rather_than_ignored() {
     // shares, enforces none of them, and lets the operator believe two sleeves
     // are fenced from each other.
     let mut doc: serde_json::Value =
-        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+        serde_json::from_str(&repo_config("operational.json")).unwrap();
     doc["account_risk"]["sleeve_limits"] = serde_json::json!({
         "carry": {"max_gross_notional_usdt": 200.0, "max_initial_margin_usdt": 40.0},
         "long": {"max_gross_notional_usdt": 300.0, "max_initial_margin_usdt": 60.0},
@@ -139,7 +143,7 @@ fn a_profile_still_declaring_sleeve_shares_is_refused_rather_than_ignored() {
 #[test]
 fn a_profile_from_the_future_is_refused() {
     let mut doc: serde_json::Value =
-        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+        serde_json::from_str(&repo_config("operational.json")).unwrap();
     doc["schema_version"] = serde_json::json!(4);
     let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
     assert!(err.to_string().contains("schema_version"), "{err}");
@@ -164,7 +168,7 @@ fn a_profile_whose_caps_do_not_nest_is_refused_at_load() {
     // A second gross ceiling above the account gross cap describes a book
     // nobody can reach, and the outer cap would never bind.
     let mut doc: serde_json::Value =
-        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+        serde_json::from_str(&repo_config("operational.json")).unwrap();
     doc["account_risk"]["max_component_gross_notional_usdt"] = serde_json::json!(1_000.0);
     let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
     assert!(
@@ -181,30 +185,12 @@ fn a_profile_whose_caps_do_not_nest_is_refused_at_load() {
 // enforces.
 fn a_profile_still_carrying_the_retired_symbol_cap_is_refused() {
     let mut doc: serde_json::Value =
-        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+        serde_json::from_str(&repo_config("operational.json")).unwrap();
     doc["account_risk"]["max_symbol_notional_usdt"] = serde_json::json!(50.0);
     let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
     assert!(
         err.to_string().contains("max_symbol_notional_usdt"),
         "{err}"
-    );
-}
-
-#[test]
-fn the_two_profiles_are_not_accidentally_the_same_shape() {
-    // The demo profile is pinned; the funded one follows the wallet. If a
-    // change ever made them load identically, the funded account would be
-    // running under demo limits, and every other assertion here would still
-    // pass.
-    let demo =
-        kernel_config_from_profile(&repo_config("operational.demo.json"), &inputs()).unwrap();
-    let main =
-        kernel_config_from_profile(&repo_config("operational.mainnet.json"), &inputs()).unwrap();
-    assert_ne!(demo, main);
-    assert!(!demo.envelope.tracks_equity && main.envelope.tracks_equity);
-    assert!(
-        main.envelope.account_gross_cap_usdt() < demo.envelope.account_gross_cap_usdt(),
-        "the funded account should be the smaller book of the two"
     );
 }
 
@@ -215,7 +201,7 @@ fn a_gross_cap_no_amount_of_margin_could_fund_is_refused() {
     // nobody can reach, so a cap set up there is scenery -- an operator
     // tightening it would watch nothing change.
     let mut doc: serde_json::Value =
-        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+        serde_json::from_str(&repo_config("operational.json")).unwrap();
     // 100 of reference at leverage 5 funds 500 of book. Ask for 501.
     doc["account_risk"]["max_account_gross_notional_usdt"] = serde_json::json!(501.0);
     doc["account_risk"]["max_component_gross_notional_usdt"] = serde_json::json!(501.0);
@@ -229,8 +215,7 @@ fn the_shipped_mainnet_profile_sits_inside_what_its_capital_can_fund() {
     // exactly that. The full book posts 100 of margin — the declared margin
     // cap to the last decimal — so a change that ate the headroom would
     // otherwise show up only as a refusal to boot.
-    let cfg =
-        kernel_config_from_profile(&repo_config("operational.mainnet.json"), &inputs()).unwrap();
+    let cfg = kernel_config_from_profile(&repo_config("operational.json"), &inputs()).unwrap();
     let reachable = cfg.envelope.reference_usdt * cfg.leverage;
     assert_eq!(reachable, 500.0);
     assert_eq!(cfg.envelope.account_gross_cap_usdt(), 500.0);
@@ -250,7 +235,7 @@ fn a_profile_whose_numbers_do_not_survive_a_round_trip_still_loads() {
     // back as 112.99999999999999, just *under* the number the profile stated,
     // which is the direction that gets a profile refused.
     let mut doc: serde_json::Value =
-        serde_json::from_str(&repo_config("operational.mainnet.json")).unwrap();
+        serde_json::from_str(&repo_config("operational.json")).unwrap();
     doc["account_risk"]["max_account_gross_notional_usdt"] = serde_json::json!(113.0);
     doc["account_risk"]["max_component_gross_notional_usdt"] = serde_json::json!(113.0);
     let cfg = kernel_config_from_profile(&doc.to_string(), &inputs())

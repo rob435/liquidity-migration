@@ -34,23 +34,33 @@ namespaces. Restart and ordinary checkpoint compaction keep that generation and
 its sequences. Only a genuinely new state root creates a new source at sequence
 one. The engine puts each observation in its WAL before waking a strategy.
 
-The worker keeps one persistent Bybit WebSocket actor and separate bounded REST
-lanes for instruments, funding, ticker fallback, candle repair, and optional
-whale data. A disconnect opens a new source epoch, clears transient ticker
-state, and reconnects forever with capped backoff. Exact subscription replies
-separate topic faults from transient and request-wide faults. Quarantined topics
-retry on the same healthy socket every minute; accepted topics stay live while
-REST fills missing ticker fields and candle intervals. Only accepted market data
-resets the retry and idle clocks. Each ticker field keeps its own receipt clock.
-Cold history is acquired in bounded chunks while heartbeat and shutdown remain
-responsive. Accepted lookbacks and response grids place a hard row ceiling on
-each fetch. Kline, funding, and whale lanes retain one job at a time and wait
-for its durable commit result before fetching the next. Venue network,
-normalization, range, and history-rewrite faults pause and retry only that lane
-before mutation. Sequence, state, spool, serialization, and disk faults stop
-the process. A bounded input journal absorbs frequent source deltas and
-compacts to an atomic checkpoint. Current outputs coalesce while the engine is
-behind; ordered lifecycle and scorer catch-up rows keep separate spool quotas.
+The worker derives the tradable universe itself, on its hourly instrument
+cadence, from the realm venue's instrument list and the public ticker page:
+every trading USDT crypto perpetual is tradable; LONG's eligible set is the top
+120 by 24-hour turnover with a $2M turnover floor and a 30-day listing age,
+CARRY's the top 150 with a 7-day age; a member stays until it falls past rank
+160 (LONG) or 200 (CARRY). Those ranks, floors, ages, and the stablecoin
+exclusions are dials in `configs/signal-worker.<realm>.json`; nothing is frozen
+and no file is reviewed by hand. The worker also reads the LLM entry gate's
+candidates file every minute and hands each new publication to LONG as one
+observation. The worker keeps one persistent Bybit WebSocket actor and separate
+bounded REST lanes for instruments, funding, ticker fallback, candle repair,
+and optional whale data. A disconnect opens a new source epoch, clears
+transient ticker state, and reconnects forever with capped backoff. Exact
+subscription replies separate topic faults from transient and request-wide
+faults. Quarantined topics retry on the same healthy socket every minute;
+accepted topics stay live while REST fills missing ticker fields and candle
+intervals. Only accepted market data resets the retry and idle clocks. Each
+ticker field keeps its own receipt clock. Cold history is acquired in bounded
+chunks while heartbeat and shutdown remain responsive. Accepted lookbacks and
+response grids place a hard row ceiling on each fetch. Kline, funding, and
+whale lanes retain one job at a time and wait for its durable commit result
+before fetching the next. Venue network, normalization, range, and
+history-rewrite faults pause and retry only that lane before mutation.
+Sequence, state, spool, serialization, and disk faults stop the process. A
+bounded input journal absorbs frequent source deltas and compacts to an atomic
+checkpoint. Current outputs coalesce while the engine is behind; ordered
+lifecycle and scorer catch-up rows keep separate spool quotas.
 
 The engine runs three native directional reducers in fixed WAL order:
 
@@ -78,12 +88,15 @@ The registered profiles are:
 | Exodus | `configs/lane2_exodus_short_v1.json` |
 | maker canary | `configs/lane2_toxic_flow_quoter_v1.json` |
 
-The operational profiles set LONG to 6.0 times its base sizing and CARRY to 3.0
-times, with entry leverage capped at 5.0. Exodus takes the exact abandoned
-CARRY quantity and has no independent notional multiplier. Account risk is
-shared; there is no per-sleeve capital allocation. Both profiles (schema 3)
-set the rolling-loss share to 0.1 of the capital reference; on the funded
-profile that reference follows equity, on demo it is pinned at $250,000.
+One operational profile (`configs/operational.json`, schema 3) serves both
+realms; deploy renders it once from the dials in the funded credential file and
+installs the same bytes for each engine and worker. It sets LONG to 6.0 times
+its base sizing and CARRY to 3.0 times, with entry leverage capped at 5.0.
+Exodus takes the exact abandoned CARRY quantity and has no independent notional
+multiplier. Account risk is shared; there is no per-sleeve capital allocation.
+The capital reference follows each account's own equity, floored at $100, and
+every cap is a ratio of it: gross 5 times, initial margin 1 time, rolling-loss
+share 0.1. Nothing is pinned to a dollar figure on either realm.
 
 `deploy/sleeves.env` enables demo LONG and CARRY entries. A host override may
 only narrow either permission to off. A disabled entry permission does not
@@ -106,20 +119,23 @@ seconds without that symbol's promised L1 snapshot triggers a same-socket
 re-subscription while healthy symbols continue.
 
 LONG owns signal admission, sizing, stop decay, cooldown, and time exit. It has
-no take-profit. CARRY owns daily sizing anchors, settled and pre-settlement
-exits, next-day drop exits, admission, and the $6 entry plus $1/5% resize
-boundaries. Exodus covers on its registered settlement clock and retains a
-durable retry until its attributed exposure and owned opening work are flat.
-LONG and CARRY keep their one-minute entry-admission budget in their checkpoint;
-extra market, retry, control, or boot wakes cannot reset it. Exodus keeps a
-temporarily blocked handoff pending through account-health recovery. A CARRY
-candidate consumes an admission slot only when the shared planner can emit its
-opening order; missing planner facts remain retryable. An explicitly invalidated
-private account view and a future durable opening timestamp block growth but do
-not block reductions. The maker cancels recovered opening quotes and drains its
-attributed inventory when quoting is globally disabled or that symbol is
-retired. A configured enabled symbol is not flattened. Refused drains retry on
-a bounded timer.
+no take-profit. It has two entry triggers: the native feature batch, and the
+LLM entry gate's judged events (score at least 6 on 4/12/24-hour triggers, core
+ranks 1-10 and wide ranks 11-30), which enter at market through the same
+sizing, stop, and time exit and carry their own order-log tag. CARRY owns daily
+sizing anchors, settled and pre-settlement exits, next-day drop exits,
+admission, and the $6 entry plus $1/5% resize boundaries. Exodus covers on its
+registered settlement clock and retains a durable retry until its attributed
+exposure and owned opening work are flat. LONG and CARRY keep their one-minute
+entry-admission budget in their checkpoint; extra market, retry, control, or
+boot wakes cannot reset it. Exodus keeps a temporarily blocked handoff pending
+through account-health recovery. A CARRY candidate consumes an admission slot
+only when the shared planner can emit its opening order; missing planner facts
+remain retryable. An explicitly invalidated private account view and a future
+durable opening timestamp block growth but do not block reductions. The maker
+cancels recovered opening quotes and drains its attributed inventory when
+quoting is globally disabled or that symbol is retired. A configured enabled
+symbol is not flattened. Refused drains retry on a bounded timer.
 
 ### Runtime controls
 

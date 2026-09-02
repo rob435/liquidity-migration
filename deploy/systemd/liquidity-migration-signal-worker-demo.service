@@ -26,7 +26,6 @@ ExecStart=/opt/liquidity-migration-engine/bin/signal-worker live \
     --carry-config ${CARRY_SIGNAL_CONFIG_FILE} \
     --operational-config ${OPERATIONAL_PROFILE_FILE} \
     --engine-config ${ENGINE_CONFIG_FILE} \
-    --universe ${CANDIDATE_UNIVERSE_FILE} \
     --spool-dir ${SIGNAL_WORKER_SPOOL_DIR} \
     --state-dir ${SIGNAL_WORKER_STATE_DIR} \
     --heartbeat ${SIGNAL_WORKER_HEARTBEAT_FILE}
