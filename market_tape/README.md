@@ -34,14 +34,37 @@ universe of symbols and the feeds to take for them. A symbol in several tiers
 gets the union of their feeds; each venue topic is subscribed once. The config
 format, the feed vocabulary (`book:<levels>`, `trades`, `ticker`,
 `liquidations`, `kline:<interval>`, `open_interest:<seconds>`), and the
-universe kinds (`symbols`, `file`, `listed`, `top_turnover`, `funding_below`)
-are documented in [`config.py`](config.py). Universes that depend on the
-venue's tables are re-read at the snapshot cadence, and only the shards of a
-tier whose topic list changed reconnect.
+universe kinds are documented in [`config.py`](config.py).
+
+The ticker is the sensor. It carries every listed name's funding rate, open
+interest, price, 24h turnover and change, and best bid and ask, as the venue
+pushes them, and it is cheap. The live universes read it as it is written:
+
+| Kind | Promotes a name when | Meant for |
+| --- | --- | --- |
+| `top_turnover` | its 24h turnover ranks in the top `top`; it leaves below rank `leave_top` | LONG's liquid universe, following the action |
+| `funding_below` | its funding rate is at or below `-threshold_bp` | the crowd fee (funding) CARRY and Exodus trade |
+| `turnover_surge` | its 24h turnover is `ratio` times what the day's table snapshot showed | a pump starting in a name outside the top |
+| `price_move` | its 24h price change is at least `pct` either way | large moves, up or down |
+
+A name that qualified stays for `sticky_hours` after its last qualifying
+observation. Promotion changes the live subscription in place: topics are
+added to and removed from the open connections, and a connection only
+reconnects when the venue drops it. `listed` follows the daily table snapshot;
+`symbols` and `file` are fixed.
+
+Every received byte is metered per tier and per feed (`status.json` →
+`bytes`). With a `[budget]` the recorder projects a month from its last day of
+bytes and, when the projection is over `monthly_gb`, gives up the configured
+`tier:feed` pairs in order, one an hour, restoring them in reverse once under
+`restore_below` of the allowance. The host watchdog warns while a recorder is
+over budget. Measured on the host on 2026-09-02: one Bybit deep book costs
+0.5 to 1 GB a day inbound for a liquid name, and top of book plus trades for
+660 quiet names cost about as much as the deep books of the eighty busiest.
 
 The host configs are under `deploy/capture/`. `examples/bybit-full-universe.toml`
 is the configuration for a machine with unbounded bandwidth and disk: one
-tier, every listed perpetual, every feed.
+tier, every listed perpetual, every feed, no budget.
 
 ## The row contract
 
@@ -106,6 +129,8 @@ regression. Rebuild it with `fixtures/build_fixture.py`.
 ## Status file
 
 `status.json` is what the host watchdog reads: `last_receive_ns`,
-`disk_blocked`, `dropped_frames`, `disk_dropped_frames`, and
-`shards[].connected`. It also lists each tier's symbol count (and names when
-few), the feeds, the shards with their reconnect counts, and the venue.
+`disk_blocked`, `dropped_frames`, `disk_dropped_frames`,
+`shards[].connected`, and `budget.over`. It also lists each tier's symbol
+count (and names when few), its feeds and whatever the budget has shed from
+it, the shards with their reconnect counts, the bytes received in the last day
+by tier and by feed, the month's projection, and the venue.

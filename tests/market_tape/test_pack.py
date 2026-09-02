@@ -371,3 +371,15 @@ def test_a_ledger_row_without_a_remote_path_still_counts(tmp_path: Path) -> None
 
     assert sorted(ledger) == ["2026-09-02T10Z", f"{REMOTE}/2026/09/02/2026-09-02T11Z.tar"]
     assert pack.load_ledger(tmp_path / "absent.jsonl") == {}
+
+
+def test_the_stamp_sums_the_last_thirty_days_of_uploads() -> None:
+    ledger = {
+        "r/a": {"uploaded_at": "2026-09-01T10:00:00Z", "bytes": 100},
+        "r/b": {"uploaded_at": "2026-08-01T10:00:00Z", "bytes": 1000},
+        "r/c": {"uploaded_at": "2026-09-02T00:00:00Z", "bytes": 5},
+        "r/d": {"uploaded_at": "garbage", "bytes": 7},
+    }
+    since = datetime(2026, 8, 3, tzinfo=timezone.utc).timestamp()
+    assert pack.bytes_uploaded_since(ledger, since) == 105
+    assert pack.bytes_uploaded_since({}, since) == 0

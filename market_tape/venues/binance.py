@@ -19,6 +19,7 @@ Open interest is a REST poll: nothing pushes it.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import threading
@@ -50,7 +51,11 @@ SNAPSHOT_PAUSE_SECONDS = 60.0 * DEPTH_REQUEST_WEIGHT / SNAPSHOT_WEIGHT_BUDGET
 OPEN_INTEREST_PAUSE_SECONDS = 0.05
 
 MARK_PRICE_FIELDS = {"p": "mark_price", "i": "index_price", "r": "funding_rate", "T": "next_funding_time_ms"}
-DAY_TICKER_FIELDS = {"c": "last_price", "q": "turnover_24h", "v": "volume_24h"}
+DAY_TICKER_FIELDS = {"c": "last_price", "q": "turnover_24h", "v": "volume_24h", "P": "price_change_24h_pct"}
+#: Binance states the 24h change in percent; the contract stores a fraction.
+PERCENT_FIELDS = frozenset({"price_change_24h_pct"})
+#: Live subscribe and unsubscribe requests carry at most this many streams each.
+LIVE_REQUEST_STREAMS = 50
 PREMIUM_TABLE_FIELDS = ("markPrice", "indexPrice", "lastFundingRate", "nextFundingTime")
 DAY_TABLE_FIELDS = ("lastPrice", "quoteVolume", "volume")
 BOOK_TABLE_FIELDS = ("bidPrice", "bidQty", "askPrice", "askQty")
@@ -169,6 +174,7 @@ class BinanceAdapter:
         self.snapshot_lock = threading.Lock()
         # Latest mark per symbol, for the open-interest poll to price its count.
         self.marks: dict[str, float] = {}
+        self.request_ids = itertools.count(1)
 
     # ---------------------------------------------------------------- feeds
 
@@ -210,9 +216,23 @@ class BinanceAdapter:
     def subscribe_messages(self, topics: list[str]) -> list[str]:
         return []
 
+    def add_messages(self, topics: list[str]) -> list[str]:
+        return self._live_requests("SUBSCRIBE", topics)
+
+    def remove_messages(self, topics: list[str]) -> list[str]:
+        return self._live_requests("UNSUBSCRIBE", topics)
+
+    def _live_requests(self, method: str, topics: list[str]) -> list[str]:
+        messages = []
+        for start in range(0, len(topics), LIVE_REQUEST_STREAMS):
+            messages.append(
+                json.dumps({"method": method, "params": topics[start : start + LIVE_REQUEST_STREAMS], "id": next(self.request_ids)})
+            )
+        return messages
+
     # ------------------------------------------------------- book anchoring
 
-    def on_connected(self, topics: list[str], emit: Emit, stop: threading.Event) -> None:
+    def on_subscribed(self, topics: list[str], emit: Emit, stop: threading.Event) -> None:
         symbols = diff_book_symbols(topics)
         if not symbols:
             return
@@ -332,6 +352,17 @@ class BinanceAdapter:
             if symbol and symbol.isalnum():
                 symbols.add(symbol)
         return sorted(symbols)
+
+    def turnovers(self, tickers: Iterable[Mapping[str, Any]]) -> dict[str, float]:
+        result: dict[str, float] = {}
+        for row in tickers:
+            if not isinstance(row, Mapping):
+                continue
+            symbol = str(row.get("symbol") or "").upper()
+            turnover = _float(row.get("quoteVolume"))
+            if symbol and turnover is not None:
+                result[symbol] = turnover
+        return result
 
     def turnover_ranked(self, tickers: Iterable[Mapping[str, Any]]) -> list[str]:
         ranked = []
@@ -462,6 +493,8 @@ class BinanceAdapter:
         if not symbol:
             return []
         values = _ticker_values(data, fields)
+        for name in PERCENT_FIELDS & values.keys():
+            values[name] = float(values[name]) / 100.0
         mark = values.get("mark_price")
         if mark is not None:
             self.marks[symbol] = float(mark)

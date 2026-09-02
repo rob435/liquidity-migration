@@ -280,6 +280,17 @@ def evaluate_capture_status(
             alerts.append(
                 Alert(key("capture-shards"), "WARNING", f"{who} has {len(down)} of {len(shards)} venue connections down")
             )
+    budget = payload.get("budget")
+    if isinstance(budget, dict) and budget.get("over") is True:
+        shed = budget.get("shed") or []
+        alerts.append(
+            Alert(
+                key("capture-budget"),
+                "WARNING",
+                f"{who} projects {budget.get('projected_month_gb')} GB inbound this month against {budget.get('monthly_gb')} allowed; "
+                + (f"shedding {', '.join(str(item) for item in shed)}" if shed else "nothing shed yet"),
+            )
+        )
     return alerts, next_counters
 
 

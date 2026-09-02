@@ -1,11 +1,11 @@
 """What a venue must provide for the recorder to record it.
 
-The recorder (`record.py`) knows tiers, shards, files, and retention. It knows
-nothing about a venue's stream names or message shapes; that is the adapter's
-job. One adapter instance serves one recorder process. `normalize` is called
-from the single writer thread, so an adapter may keep per-topic sequence state
-without locks; `on_connected` and any side lanes run in their own threads and
-must only hand rows to the `emit` callable they were given.
+The recorder (`record.py`) knows tiers, shards, files, bytes, and retention.
+It knows nothing about a venue's stream names or message shapes; that is the
+adapter's job. One adapter instance serves one recorder process. `normalize`
+is called from the single writer thread, so an adapter may keep per-topic
+sequence state without locks; `on_subscribed` and any side lanes run in their
+own threads and must only hand rows to the `emit` callable they were given.
 """
 
 from __future__ import annotations
@@ -36,12 +36,18 @@ class VenueAdapter(Protocol):
     def subscribe_messages(self, topics: list[str]) -> list[str]:
         """Text frames to send once the socket is open; empty when the URL subscribes."""
 
+    def add_messages(self, topics: list[str]) -> list[str]:
+        """Text frames that subscribe more topics on a live socket."""
+
+    def remove_messages(self, topics: list[str]) -> list[str]:
+        """Text frames that unsubscribe topics on a live socket."""
+
     def normalize(self, raw: str | bytes, received_ns: int) -> list[dict[str, Any]]:
         """Tape rows for one websocket frame; empty for control frames."""
 
-    def on_connected(self, topics: list[str], emit: Emit, stop: threading.Event) -> None:
-        """Called on each (re)connect of a shard, in the shard thread; may start
-        work such as a REST book snapshot per symbol."""
+    def on_subscribed(self, topics: list[str], emit: Emit, stop: threading.Event) -> None:
+        """Called in its own thread after a shard connects (with all its topics)
+        or adds topics live (with the added ones); may fetch REST book snapshots."""
 
     def start_lanes(self, feeds_by_symbol: Mapping[str, tuple[Feed, ...]], emit: Emit, stop: threading.Event) -> list[threading.Thread]:
         """Long-running side lanes (REST polls) for the feeds that need one."""
@@ -51,6 +57,9 @@ class VenueAdapter(Protocol):
 
     def listed_symbols(self, instruments: Iterable[Mapping[str, Any]], *, quote: str | None) -> list[str]:
         """Perpetuals the venue lists as trading, filtered by quote asset when given."""
+
+    def turnovers(self, tickers: Iterable[Mapping[str, Any]]) -> dict[str, float]:
+        """24h quote turnover per symbol from the ticker table."""
 
     def turnover_ranked(self, tickers: Iterable[Mapping[str, Any]]) -> list[str]:
         """Symbols by 24h quote turnover, highest first."""

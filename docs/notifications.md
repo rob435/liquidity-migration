@@ -72,6 +72,8 @@ and funded stops — and pages on:
 - a recorder status file that is stale, says storage is blocked, shows new
   dropped frames, or reports no market frame for two minutes — each recorder
   separately, the Binance one's alerts suffixed with its state directory;
+- a recorder whose projected month of inbound bytes is over its allowance,
+  with what it has shed so far (a warning, not a page);
 - a market-tape upload receipt older than three hours, or a Drive with less
   than 200 GB free;
 - a backup receipt older than eight hours;

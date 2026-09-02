@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 HOUR_RE = re.compile(r"^\d{2}$")
@@ -116,6 +116,21 @@ def load_ledger(path: Path) -> dict[str, dict[str, Any]]:
         row = json.loads(line)
         rows[str(row.get("remote_path") or row["name"])] = row
     return rows
+
+
+def bytes_uploaded_since(ledger: Mapping[str, Mapping[str, Any]], since: float) -> int:
+    """Outbound bytes the ledger records after `since` (Unix seconds): the month's upload cost."""
+
+    total = 0
+    for row in ledger.values():
+        stamp = str(row.get("uploaded_at") or "")
+        try:
+            uploaded = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+        if uploaded >= since:
+            total += int(row.get("bytes") or 0)
+    return total
 
 
 def append_ledger(path: Path, row: dict[str, Any]) -> None:
@@ -450,6 +465,7 @@ def main(argv: list[str] | None = None) -> int:
                 "archives": ",".join(f"{row['tape']}/{row['name']}" if row.get("tape") else row["name"] for row in shipped) or "none",
                 "file_count": sum(int(row["file_count"]) for row in shipped),
                 "bytes": sum(int(row["bytes"]) for row in shipped),
+                "bytes_30d": bytes_uploaded_since(load_ledger(ledger_path), now - 30 * 86_400),
                 "destination": destination,
                 "tapes": ",".join(tape.name for tape in present),
                 "remote_free_bytes": free,
