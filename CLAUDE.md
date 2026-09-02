@@ -6,8 +6,8 @@ Bybit.
 @AGENTS.md
 
 CLAUDE.md is navigation and commands. AGENTS.md, imported above and read by
-non-Claude agents too, is conduct — including the rule that everything is said
-simply, without jargon.
+non-Claude agents too, is conduct — including the rule that everything is written
+in the token-efficient, Spec-First structured format without narrative padding.
 
 ## Read by purpose
 
