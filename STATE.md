@@ -186,7 +186,7 @@ Drive, the six-hourly state backup to Google Drive, disk, and the host clock.
 
 The market recorders are the standalone `market_tape` package, one config file
 per venue under `deploy/capture/`; the Binance recorder exists in this
-generation and starts at the next deploy.
+generation and both recorders are running.
 
 Trade notifications derive entries from fresh engine-attributed venue
 positions and exits from the engine trade log. Target files are takeover
@@ -217,10 +217,12 @@ cannot reach it.
 
 ## Deployment status
 
-The host is frozen except for emergencies
-([operations.md](docs/operations.md) §Host freeze): forward days of tape and
-of Lane-2 evidence are the scarce resource. This repository generation requires
-a deploy before it becomes host state, and the owner chooses when.
+The host runs `f17719d1` (deployed 2026-09-02 21:04 UTC): both engines and
+both signal workers report that commit, and both market recorders run the
+tiered configs under `deploy/capture/`. The host is otherwise frozen except for
+emergencies ([operations.md](docs/operations.md) §Host freeze): forward days of
+tape and of Lane-2 evidence are the scarce resource, and the owner chooses when
+the next deploy runs.
 Run:
 
 ```text

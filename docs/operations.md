@@ -75,11 +75,10 @@ While the freeze holds:
   emergency needs one. An emergency is the fleet or a recorder being down, data
   being lost, a security problem, or the funded account needing a stop.
 - Repository work continues and lands through pull requests; it becomes host
-  state only at the next deploy the owner chooses to run.
-- The Binance recorder in this generation starts at that next deploy. A deploy
-  restarts the trading fleet, so choose a moment when the engines hold little.
+  state only at the next deploy the owner chooses to run. A deploy restarts the
+  trading fleet, so choose a moment when the engines hold little.
 
-The owner ends the freeze by running the deploy.
+The owner ends a freeze by running the deploy, and it holds again afterwards.
 
 ## Release layout
 
