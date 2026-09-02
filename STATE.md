@@ -217,7 +217,7 @@ cannot reach it.
 
 ## Deployment status
 
-The host runs `f17719d1` (deployed 2026-09-02 21:04 UTC): both engines and
+The host runs `811e7335` (deployed 2026-09-02 21:38 UTC): both engines and
 both signal workers report that commit, and both market recorders run the
 tiered configs under `deploy/capture/`. The host is otherwise frozen except for
 emergencies ([operations.md](docs/operations.md) §Host freeze): forward days of
