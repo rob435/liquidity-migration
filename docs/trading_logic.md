@@ -1,236 +1,116 @@
-# Trading logic
+# Strategy & Trading Logic Specification
 
-The live decision path is Rust. The public-signal worker publishes normalized
-facts; the account-owning engine records those facts in its write-ahead log
-(WAL) and runs the native reducer for the affected sleeve. Python uses the same
-Rust contracts for research replay. It does not decide live positions.
+Mathematical models, entry/exit criteria, sizing rules, and collision invariants for the native strategy sleeves.
 
-The deployed strategy order is load-bearing:
+---
 
-| Strategy ID | Rust strategy | Sleeve | Realm |
-| ---: | --- | --- | --- |
-| 0 | `carry_native` | CARRY | demo and mainnet |
-| 1 | `long_native` | LONG | demo and mainnet |
-| 2 | `exodus_native` | Exodus | demo and mainnet |
-| 3 | `quoter` | `maker_canary` | mainnet, disabled |
+## 1. Strategy Sleeve Registry
 
-An ID owns its fills, positions, orders, covers, checkpoints, and controls in
-the WAL. Reordering these blocks is a state migration, not a config edit.
+Strategy blocks are declared in `engine.toml`. Strategy ID order is immutable identity in the WAL:
 
-## Common live contract
+| ID | Crate / Reducer | Sleeve | Deployed State | Core Mandate |
+| :---: | :--- | :--- | :--- | :--- |
+| **0** | `carry_native` | **CARRY** | Active | Captures extreme negative funding crowd fees (sticky 48h hold). |
+| **1** | `long_native` | **LONG** | Active | Momentum breakouts on top turnover liquid perpetuals. |
+| **2** | `exodus_native` | **EXODUS** | Active | Short entry on distressed CARRY pairs prior to settlement. |
+| **3** | `quoter` | **MAKER** | Disabled | High-frequency two-sided liquidity provision around fair mid. |
 
-Every directional sleeve follows the same sequence:
+---
 
-1. The signal worker writes one immutable, sequence-numbered observation.
-2. The engine appends the exact observation bytes and crosses a WAL barrier.
-3. A typed pure reducer receives that observation, its prior checkpoint, the
-   attributed account facts, instrument rules, and the engine clock.
-4. The reducer returns its next checkpoint, typed effects, and any durable
-   cross-sleeve event.
-5. The engine records state and intent before an opening order can reach the
-   venue. Account-wide risk and venue rules remain the final authority.
+## 2. Common Execution Lifecycle
 
-The reducer cannot read a file, call a venue, inspect credentials, or ask for
-the time. Its config fingerprint covers the registered rule and public-feature
-contract. Restore requires the exact schema, fingerprint, and payload.
+Every directional sleeve executes via the same deterministic state loop:
+1. **Signal Stream**: Signal worker publishes immutable observation over `stream.sock`.
+2. **WAL Barrier**: Engine syncs observation to disk *before* triggering reducers.
+3. **Pure Reducer**: Evaluates current checkpoint + observation $\to$ outputs target state & effects (zero I/O).
+4. **Risk Admission**: Kernel validates gross exposure, quote freshness, and 24h loss ceiling.
+5. **Order Dispatch**: Dispatches signed orders over Bybit private WebSocket.
 
-The venue position is the fact about quantity. WAL attribution is the fact
-about sleeve ownership. A target held in reducer state is never treated as an
-account position by itself.
+---
 
-Entry permission is a runtime input. Turning it off blocks entries and growing
-resizes while the reducer continues to process signals, exits, settlement
-clocks, checkpoints, and flatten requests.
+## 3. `LONG` Sleeve Specification
 
-## LONG
+* **Rule**: `configs/long_native_v12.json`
+* **Reducer**: `engine/engine-strategies/src/native_long/`
 
-Source of truth:
+### Universe & Candidate Admission
+* **Eligible Universe**: Top 120 USDT perpetuals by 24h quote turnover ($\ge \$2\text{M}$ volume, $\ge 30\text{d}$ listing history). Symbol leaves below rank 160.
+* **Top-50 Filter**: Sub-selected by trailing 90-day volume.
+* **Admission Criteria**:
+  * **Regime Gate**: BTC and ETH above their 30-day moving averages.
+  * **Turnover Rank**: Volume rank $\le 10$.
+  * **Price Velocity**: Price move $\ge 15\%$ and $\ge 2.5$ standard deviations.
+  * **Range Close Location**: Close in top 30% of bar range ($\text{Close Location} \ge 0.70$; $\ge 0.60$ for multi-day).
+  * **Volatility Boundary**: 30-day daily volatility $\le 12\%$.
+  * **Capacity & Cooldown**: Maximum 10 concurrent positions; symbol must be outside 7-day cooldown.
 
-- rule: [`configs/long_native_v12.json`](../configs/long_native_v12.json)
-- reducer: [`engine/engine-strategies/src/native_long`](../engine/engine-strategies/src/native_long)
+### Order Timing & Sizing
+* **Entry Execution**: Arms 1 hour after signal. Executes on a 1% price retrace or at 6-hour deadline. Late entries are cancelled.
+* **Sizing Formula**: $\text{Target Weight} = \min\left(0.30, \frac{\text{Gross Capital}}{\text{Open Slots}}\right) \times \text{Vol Target} \times \text{Weekend Mult (1.5)}$.
+* **Stop Loss**: Initial stop set at $3 \times \text{ATR}$. Decays to $1.5 \times \text{ATR}$ after 48 hours.
+* **Time Exit**: Unconditional exit after 3 days. No take-profit order.
+* **Order Limits**: Skip entries $<\$6$ notional; minimum resize $\ge \$1$ and $\ge 5\%$ notional.
 
-### Signal and admission
+### LLM Entry Gate (Secondary Trigger)
+* **Ingestion**: Reads `/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json` every minute.
+* **Execution**: Candidates scoring $\ge 6$ enter immediately at market (no retrace wait).
+* **Tags**: Tagged as `long-native-llm-gate` (ranks 1–10) or `long-native-llm-gate-wide` (ranks 11–30).
 
-The worker derives the eligible population live: every trading USDT crypto
-perpetual in the top 120 by 24-hour turnover with at least $2M of turnover and
-30 days of listing, kept until it falls past rank 160. From that population the
-rule builds its 50-name universe from trailing 90-day quote volume, subject to
-listing history and the registered exclusions. A candidate must satisfy all of
-these conditions:
+---
 
-- BTC and ETH regimes are on;
-- its current volume rank is at most 10;
-- its move clears both 15% and 2.5 recent standard deviations;
-- close location is at least 0.70, or 0.60 for the registered multi-day form;
-- 30-day daily volatility is positive and no more than 12%;
-- the sleeve has fewer than 10 positions; and
-- the symbol is outside its seven-day cooldown.
+## 4. `CARRY` Sleeve Specification
 
-The entry arms one hour after the signal. It fires on a 1% retrace or, if that
-does not happen, at the six-hour deadline. A late or stale entry is refused.
+* **Rule**: `configs/lane2_carry_hold_v7.json`
+* **Reducer**: `engine/engine-strategies/src/native_carry/`
 
-### Size and exits
+### Universe & Funding Selection
+* **Candidate Pool**: Top 100 Bybit perpetuals by trailing 24h turnover.
+* **Hysteresis Boundary**:
+  * **Entry**: Last settled funding rate $\le -10\text{ bp}$ ($-0.0010$).
+  * **Exit**: Settled funding rate rises above $-3\text{ bp}$ ($-0.0003$).
+  * **Recovery Exit**: 2-day trailing funding recovery $> 30\text{ bp}$.
+* **Toxic Asset Filter**: Excludes symbols with 3-day returns outside $[-30\%, 0\%]$ or 30-day volatility $< 5\%$.
 
-Base weight is gross exposure divided across the available position slots,
-capped at 30% per name. Size is adjusted by BTC volatility targeting, the
-name's own volatility, the registered operational multiplier, and a 1.5
-weekend multiplier. The live reducer anchors its clocks and stop to the
-attributed fill rather than to an assumed fill.
+### Sizing Multipliers
+Base allocation is 10% per symbol up to 100% gross capital, modulated by four multipliers:
+$$\text{Size} = \text{Base} \times M_{\text{depth}} \times M_{\text{persistence}} \times M_{\text{flow}} \times M_{\text{whale}}$$
+1. **Depth Multiplier**: $M_{\text{depth}} = \text{clip}\left(\left(\frac{|\text{Funding}_{24\text{h}}|}{120\text{ bp}}\right)^{1.5}, 0.25, 1.0\right)$.
+2. **Persistence Multiplier**: Deep-settlement share $\le 10\% \implies M_{\text{persistence}} = 0$.
+3. **Turnover Growth Multiplier**: 3-day turnover growth $\le 40\% \implies M_{\text{flow}} = 0.5$.
+4. **Whale Positioning Multiplier**: Binance top-trader long/short change $\le -26\% \implies M_{\text{whale}} = 0.5$.
 
-The initial stop distance is three times daily average true range (ATR). After
-48 hours it tightens to 1.5 times ATR. A position leaves at its stop or after
-three days. There is no take-profit rule.
+### Operational Limits & Pre-Settlement Fire
+* **Leverage & Stop**: $5\times$ leverage, $3\times$ notional scaling, $35\%$ catastrophe stop.
+* **Pre-Settlement Exit**: Held positions that no longer meet exit criteria within the final 15 minutes before funding settlement are exited.
+* **Exodus Handoff**: Pre-settlement trigger emits a typed `CarryPresettlementFire` event to the engine WAL.
 
-New entries below $6 notional are skipped. A live resize must be at least $1
-and at least 5% of current notional. These are execution thresholds in the
-native reducer, not a second Python rule.
+---
 
-### The LLM entry gate
+## 5. `EXODUS` Sleeve Specification
 
-The second trigger. `scripts/research/llm_driver_ledger.py` runs hourly,
-detects intraday trigger events on 4, 12, and 24-hour windows (a move of at
-least 2.5 daily standard deviations scaled to the window, closing in the top
-30% of its range, BTC and ETH above their 30-day averages, ATR at most 12%) on
-the top 30 names by 24-hour turnover, asks the language model to judge the
-driver of each, and publishes every event scoring at least 6 to
-`/var/lib/liquidity-migration/llm-driver-ledger/llm-gate-candidates.json`,
-valid for one hour. Ranks 1-10 are the core band, 11-30 the wide band; a name
-flagged on two or more earlier days in the last four is vetoed. A run with the
-regime off publishes an empty file, which withdraws the standing candidates.
+* **Rule**: `configs/lane2_exodus_short_v1.json`
+* **Reducer**: `engine/engine-strategies/src/native_exodus/`
 
-The signal worker reads that file every minute and hands each new publication
-to LONG as one observation, filtered to the tradable universe and to triggers
-under an hour old. LONG enters a judged name at market as soon as it has a
-price: no entry delay and no retrace wait. Sizing, the 3-times-ATR stop, its
-decay, the three-day time exit, the cooldown, the capacity of 10, and the
-one-minute admission budget are the native rule's. A name without a measured
-30-day volatility is refused, because vol parity would size it at the ceiling.
-Gate entries carry the order-log tags `long-native-llm-gate` and
-`long-native-llm-gate-wide`, so the two bands grade apart from native
-`long-native` entries. Turning the gate off is `llm_gate.enabled: false` in
-the realm's signal-worker config; it needs a worker restart, not an engine one.
+* **Trigger**: Consumes `CarryPresettlementFire` event emitted by `carry_native`. Has no independent universe or scoring loop.
+* **Short Entry**: Sells short an exact quantity equal to the CARRY position. Entry window valid from fire time until Settlement + 5 minutes ($S+5\text{m}$).
+* **Cover Exit**: Hard time cover executed unconditionally at Settlement + 60 minutes ($S+60\text{m}$).
+* **Disaster Fence**: $35\%$ stop-loss.
 
-## CARRY
+---
 
-Source of truth:
+## 6. `MAKER` (Quoter Canary) Specification
 
-- rule: [`configs/lane2_carry_hold_v7.json`](../configs/lane2_carry_hold_v7.json)
-- reducer: [`engine/engine-strategies/src/native_carry`](../engine/engine-strategies/src/native_carry)
+* **Rule**: `configs/lane2_toxic_flow_quoter_v1.json`
+* **Reducer**: `engine/engine-strategies/src/quoter/`
+* **Status**: Deployed in strategy slot 3 on Mainnet; **disabled by default** (`quote_enabled = false`).
+* **Model Inputs**: Level-50 order book, microprice, volume imbalance, volatility, queue position, fast/slow flow toxicity.
+* **Canary Parameters**: Quotes `AGIUSDT` at $\$5.25$/side, $\$6$ max inventory, $6.5\text{ bp}$ half-spread, requiring $\ge 4\text{ bp}$ net edge.
 
-### Daily book
+---
 
-The worker supplies the full causal envelope; the reducer ranks the top 100
-Bybit names by trailing 24-hour quote turnover. Per-name hysteresis enters
-when the last settled funding rate is below -10 basis points and leaves when
-it is no longer below -3 basis points. A two-day trailing funding recovery of
-more than 30 basis points also exits.
+## 7. Account Risk & Collision Rules
 
-The reducer rejects a name whose three-day return is outside the registered
--30% to 0% toxic band or whose 30-day daily volatility is below 5%.
-
-Each eligible name starts from a 10% cap inside a 100% gross cap. Four
-multipliers then shape it:
-
-- depth: `clip((abs(trailing 24h funding) / 120bp)^1.5, 0.25, 1)`;
-- persistence: deep-settlement share at or below 10% sets size to zero;
-- flow: three-day turnover growth at or below 40% halves size; and
-- whale positioning: fresh Binance top-trader long/short change at or below
-  -26% halves size.
-
-Missing or stale whale data contributes no multiplier. The feature contract,
-including its freshness window, is part of the decision fingerprint.
-
-The installed operational profile supplies account sizing. The native config
-applies the registered 3x notional multiplier, 5x entry leverage, 35% disaster
-stop, $6 entry floor, and the same $1/5% resize boundary used by LONG.
-
-### Settlement lifecycle
-
-CARRY owns all ordinary exits, settled-funding exits, drop exits, and the
-pre-settlement exit:
-
-- in the final 15 minutes before the next settlement, a held name whose live
-  rate no longer clears the exit threshold is closed;
-- a confirmed settlement observation provides the fallback exit;
-- a name absent from a healthy absolute decision is reduced to zero; and
-- an unhealthy or incomplete observation cannot turn absence into an exit.
-
-When the pre-settlement condition fires, the reducer emits one typed
-`CarryPresettlementFire`. Its stable event ID binds the symbol, quantity,
-source rule and profile, fire time, and settlement time. The event is durable
-before the CARRY checkpoint records it as fired.
-
-## Exodus
-
-Source of truth:
-
-- rule: [`configs/lane2_exodus_short_v1.json`](../configs/lane2_exodus_short_v1.json)
-- reducer: [`engine/engine-strategies/src/native_exodus`](../engine/engine-strategies/src/native_exodus)
-
-Exodus has no independent universe, score, polling clock, or size model. It
-consumes only a durable CARRY pre-settlement event with the exact accepted
-source rule and profile.
-
-For an accepted event it asks for a short equal to the CARRY-attributed venue
-quantity at the fire. The entry crosses immediately. The registered 20-minute
-post-settlement validity and the engine's 15-minute entry cutoff make S+5 the
-last opening time. A retry keeps the same event identity and cannot create a
-second record.
-
-The cover is a hard clock at settlement plus 60 minutes. The 35% stop is a
-venue disaster fence, not the strategy exit. Pause blocks a new Exodus short
-but never blocks a due cover. An event is retired only after its entry window
-is closed and both attributed position and owned entry work are conclusively
-absent.
-
-## `maker_canary`
-
-Source of truth:
-
-- rule: [`configs/lane2_toxic_flow_quoter_v1.json`](../configs/lane2_toxic_flow_quoter_v1.json)
-- reducer: [`engine/engine-strategies/src/quoter`](../engine/engine-strategies/src/quoter)
-
-The mainnet block remains in the fourth durable strategy slot (strategy ID 3)
-and `quote_enabled = false`. Rust renders its economic fields from the
-registered JSON. When quoting is disabled, the sleeve cancels recovered opening
-orders and drains its attributed inventory. When quoting is enabled, only
-symbols removed from its configured universe are drained; configured symbols
-are never flattened merely because the process restarted. A refused drain waits
-for its bounded retry timer before another attempt.
-
-When enabled by a reviewed config, the reducer combines microprice, weighted
-book imbalance, volatility, inventory, queue value, and fast/slow aggressive
-flow. Buy aggression protects the ask; sell aggression protects the bid. The
-current rule quotes AGIUSDT at $5.25 per side, caps inventory at $6, starts from
-a 6.5-basis-point half spread, and requires at least four basis points of edge
-after its fee model.
-
-This is an execution-protection experiment. Its two seen-tape research days
-are negative after fees and do not establish profitable quoting.
-
-## Risk and collision rules
-
-All sleeves draw from the same account-wide caps. There is no private sleeve
-wallet. The engine charges pending and live exposure, verifies quote and
-account freshness, rounds to instrument rules, sets venue leverage and stops,
-and serializes one-way venue transitions. Once its own closed trades have lost
-the profile's share of the capital reference inside 24 hours, it refuses every
-sleeve's entries until those trades age out.
-
-Two sleeves cannot own the same symbol at the same time. The current owner may
-reduce it; another sleeve waits for flat venue quantity and complete
-attribution before opening. Unknown or contradictory ownership blocks new
-risk, not a genuine reduction.
-
-## Research contract
-
-Python research calls the persistent Rust `strategy_contract` process through
-[`rust_strategy_contract.py`](../liquidity_migration/rules/rust_strategy_contract.py).
-Replay compares exact discrete effects, event IDs, checkpoint JSON, and
-matching missing-value positions. Continuous calculations use declared
-tolerances.
-
-That fence proves decision-code parity for the tested inputs. It does not prove
-fills, costs, capacity, or profit. Historical results follow
-[`research/governance.md`](research/governance.md); live execution claims use
-the engine WAL, authenticated venue state, and attributed trade log.
+1. **Single-Sleeve Symbol Ownership**: Two sleeves cannot hold exposure in the same symbol simultaneously.
+   * If a second sleeve signals an entry, it is blocked until the first sleeve is flat and fully reconciled.
+2. **Shared Capital Limits**: All sleeves draw against the shared gross exposure ceiling defined in the operational profile.
+3. **Rolling-Loss Circuit Breaker**: If total realized losses across all closed engine trades inside 24 hours reach the loss ceiling, **all entry orders across all sleeves are immediately blocked**. Existing positions continue to exit normally.

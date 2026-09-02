@@ -1,363 +1,168 @@
-# Operations
+# Operations Runbook
 
-Use [`scripts/ops.sh`](../scripts/ops.sh) as the operator entry point. The
-current host state comes from `scripts/ops.sh status`; repository docs describe
-the contract and do not assert that a rollout happened.
+Production host specifications, deployment procedures, safety controls, and incident runbooks.
 
-The live topology is two Rust processes per realm:
+---
 
-- `liquidity-migration-signal-worker-{demo,mainnet}.service` collects public
-  data and publishes normalized observations; and
-- `liquidity-migration-engine{,-mainnet}.service` owns the private account,
-  WAL, reducers, controls, risk, and orders.
+## 1. Production Host Specification
 
-Python services are observers, research jobs, notification handlers, or data
-capture. They do not decide a live directional position.
+| Property | Value | Notes |
+| :--- | :--- | :--- |
+| **Hostname** | `ip-208-84-103-4.my-advin.com` | Dedicated VPS instance. |
+| **Primary IPv4** | `208.84.103.4` | Static dedicated IP. |
+| **Assigned IPv6** | `2602:fb54:1d85::` | Static subnet. |
+| **Server UUID / Name** | `8d5f9972` / `Playful Rainbow` | Host identity. |
+| **Hardware** | 4 vCPU, 8 GB RAM, 127 GB SSD | Host resource profile. |
+| **Bandwidth Quota** | 4 TB / month | Budget: 1.3 TB Bybit + 1.3 TB Binance + uploads. |
+| **Access User** | `root` (Linux) | Authenticated via pinned Ed25519 SSH keys. |
 
-## Operator commands
+---
 
-```text
-scripts/ops.sh status
-scripts/ops.sh units
-scripts/ops.sh logs UNIT [LINES]
-scripts/ops.sh start UNIT...
-scripts/ops.sh stop UNIT...
-scripts/ops.sh restart UNIT...
-scripts/ops.sh attest-flat --environment demo|mainnet
-scripts/ops.sh flatten --environment demo|mainnet [--reason TEXT] [--execute]
-scripts/ops.sh real-money preflight
-scripts/ops.sh real-money render-profile [--execute --output PATH]
-scripts/ops.sh deploy [deploy|rollback|verify|stop-mainnet|disarm-mainnet]
-```
+## 2. Operator Command Reference (`scripts/ops.sh`)
 
-`start`, `stop`, `restart`, `flatten --execute`, profile rendering, and deploy
-modes mutate the host. A unit name without the
-`liquidity-migration-` prefix is qualified automatically.
+Entry-point wrapper for all operational workflows. Prefix `liquidity-migration-` is added automatically to unit names.
 
-## Host specification
+| Command | Syntax | Type | Description |
+| :--- | :--- | :--- | :--- |
+| **Status** | `scripts/ops.sh status` | Read-only | Reports commit, deployed commit, armed state, unit heartbeats, and disk. |
+| **Units** | `scripts/ops.sh units` | Read-only | Lists all fleet systemd units and timers. |
+| **Logs** | `scripts/ops.sh logs <unit> [lines]` | Read-only | Tails journal for a specific unit (default 100 lines). |
+| **Start / Stop** | `scripts/ops.sh <start\|stop\|restart> <unit...>` | Mutating | Controls individual fleet units. |
+| **Flatten** | `scripts/ops.sh flatten --environment <demo\|mainnet> [--execute]` | Mutating | Orders reducers to close attributed exposure. Read-only without `--execute`. |
+| **Attest Flat** | `scripts/ops.sh attest-flat --environment <demo\|mainnet>` | Read-only | Two-scan venue proof that the account holds zero open positions. |
+| **Preflight** | `scripts/ops.sh real-money preflight` | Read-only | Validates all funded credentials, IP bindings, and profile dials. |
+| **Deploy** | `scripts/ops.sh deploy [mode]` | Mutating | Executes exact-commit deployment (`deploy`, `rollback`, `verify`, `disarm-mainnet`). |
 
-The fleet runs on a dedicated VPS host:
+### Venue-Confirmed Trade Accounting
+Reconciles engine WAL fills, orders, and fees against authenticated venue history:
 
-| Property | Value |
-| --- | --- |
-| Hostname | `ip-208-84-103-4.my-advin.com` |
-| Primary IPv4 | `208.84.103.4` |
-| Assigned IPv6 | `2602:fb54:1d85::` |
-| Server UUID / Name | `8d5f9972` (`Playful Rainbow`) |
-| Cores | 4 vCPU |
-| Memory | 8 GB RAM |
-| Storage | 127 GB disk space |
-| Bandwidth quota | 4 TB / month |
-| Access user | `root` |
-
-## What runs
-
-[`deploy/fleet_manifest.tsv`](../deploy/fleet_manifest.tsv) is the machine
-inventory. It defines each unit, realm, lifecycle order,
-activation policy, dependency, health evidence, and artifact. Deployment and
-liveness both consume it; a stray service is not made legitimate by existing
-on the host.
-
-Current account owners:
-
-| Realm | Owner | Public signal worker | Engine state |
-| --- | --- | --- | --- |
-| demo | `liquidity-migration-engine.service` | `liquidity-migration-signal-worker-demo.service` | `/var/lib/liquidity-migration-engine` |
-| mainnet | `liquidity-migration-engine-mainnet.service` | `liquidity-migration-signal-worker-mainnet.service` | `/var/lib/liquidity-migration-engine-mainnet` |
-
-The signal worker has its own state and heartbeat under the public runtime
-tree. Each realm has distinct signal and control spools. Units absent from the
-manifest are disabled and removed during installation.
-
-Units the manifest marks `independent` — the two market recorders (Bybit and
-Binance), their hourly upload, the state backup, and the host watchdog — are
-outside the fleet lifecycle: no deploy, funded stop, or disarm stops them, and
-they start at boot. See [`deploy/systemd/README.md`](../deploy/systemd/README.md)
-§Independent units. A deploy restarts a recorder only when its own inputs
-changed: its unit file, its capture config under `deploy/capture/`, the symbol
-file, the `market_tape` package, or the Python dependencies.
-
-## Host freeze
-
-The host is frozen except for emergencies. Every forward day of tape, and every
-forward day of the registered LONG and CARRY configs' Lane-2 record, is the
-scarce resource, and nothing built on the laptop speeds that clock up; the two
-fleet-down incidents of 2026-09-01 and 2026-09-02 were both caused by deploy
-changes, not by markets.
-
-While the freeze holds:
-
-- No deploy, unit restart, config edit, or state change on the host, unless an
-  emergency needs one. An emergency is the fleet or a recorder being down, data
-  being lost, a security problem, or the funded account needing a stop.
-- Repository work continues and lands through pull requests; it becomes host
-  state only at the next deploy the owner chooses to run. A deploy restarts the
-  trading fleet, so choose a moment when the engines hold little.
-
-The owner ends a freeze by running the deploy, and it holds again afterwards.
-
-## Release layout
-
-The engine binary and signal worker are installed outside the checkout under
-`/opt/liquidity-migration-engine/bin`. Runtime config and credentials remain
-root-owned under `/etc/liquidity-migration`. State remains under `/var/lib` and
-is not recreated by a code checkout. Root SSH access and the pushed `main`
-branch are the security boundary: the deploy installs exactly the commit it is
-given, and that commit must already be on `origin/main`.
-
-## Deployment modes
-
-The deploy entry point accepts:
-
-- `deploy`: fetch and check out the exact commit, build the Rust release,
-  install binaries, units, and rendered configs, run state takeover if it is
-  still pending, and restart the fleet — worker first, then the account owner,
-  then the downstream units, waiting for a fresh heartbeat at each step. The
-  funded realm starts only while `REAL_MONEY=true` is present in the funded
-  credential file; otherwise its units stay stopped. If a realm's worker or
-  owner publishes no fresh heartbeat within three minutes, the deploy rolls
-  back on its own (below) and then fails, so the fleet runs the earlier
-  commit while the failure is visible;
-- `rollback`: deploy the last commit whose deploy finished. When the checkout
-  already sits at that commit, the one before it. The host keeps both under
-  `/opt/liquidity-migration-engine/{deployed,previous}-commit`; `verify`
-  prints them as `deployed` and `rollback-target`;
-- `verify`: read-only fleet summary — installed commit, the deployed and
-  rollback-target commits, arming state, unit states, heartbeat ages, and
-  disk;
-- `stop-mainnet`: stop the funded realm; and
-- `disarm-mainnet`: stop the funded realm and set `REAL_MONEY=false` in the
-  credential file.
-
-```sh
-EXPECTED_COMMIT=<40-lowercase-hex> scripts/ops.sh deploy
-```
-
-`EXPECTED_COMMIT` defaults to the local checkout's `origin/main` tip. The host
-refuses a commit that is not on `origin/main`. Rust renders the exact native
-directional blocks and, for mainnet, the maker block; the installed TOML is
-atomically replaced.
-
-## Native state takeover
-
-Deploy handles each realm while its owner is stopped:
-
-1. `verify-native-strategy-state` accepts an already complete native WAL and
-   skips stopped-state import.
-2. A truly empty WAL and absent takeover sources are seeded with
-   `initialize-native-strategy-state`.
-3. A generation without native checkpoints must provide the complete LONG,
-   CARRY, and Exodus source bundle. Each strategy imports through its Rust
-   strict codec.
-4. Final verification checks strategy order, checkpoint identity and payload,
-   source provenance, and WAL tail.
-
-Takeover takes both the WAL lock and authenticated account lease and requires
-`EXPECTED_ENGINE_ACCOUNT_USER_ID`. Each realm uses its own credential file.
-An exact retry is a no-op. A partial bundle, another account, or a conflicting
-checkpoint stops installation.
-
-The seven persistent stopped-state source roles are:
-
-| Sleeve | Source roles |
-| --- | --- |
-| LONG | `state` |
-| CARRY | `early_exits`, `sizing_anchors`, `target_book` |
-| Exodus | `carry_events`, `identity`, `state` |
-
-Only `carry_early_exits.json` and `carry_presettlement_events.jsonl` may be
-absent: deployment supplies their canonical empty bytes to the strict importer
-because the retired producers create those files only after the first event.
-Every other source is required, and a present malformed file is refused.
-
-Deployment also generates the Exodus `legacy_paths` source from the exact
-installed event, target, and engine-heartbeat paths. These are takeover inputs
-only. The running native reducers do not read them.
-
-## Runtime pause and resume
-
-Pause is a durable engine control, not a process stop. The helper submits
-`entries_enabled=false` for LONG, CARRY, and Exodus and waits for the engine
-heartbeat to acknowledge every sleeve. The signal worker and engine stay
-running so exits and settlement clocks continue.
-
-The trusted helper actions are:
-
-```text
-pause-demo
-resume-demo
-pause-mainnet
-resume-mainnet
-status-fleet
-```
-
-Demo pause also saves the owner-controlled LONG/CARRY entry switches and writes
-their resolved off state. Resume restores those switches and submits the
-matching durable permissions. Exodus resumes with the realm when the committed
-config permits entries.
-
-Mainnet resume cannot arm an account. It requires the funded engine already
-running under the separately owner-managed `REAL_MONEY=true` credential.
-
-## Flatten
-
-Preview first:
-
-```sh
-scripts/ops.sh flatten --environment demo --reason "operator request"
-```
-
-Execution:
-
-```sh
-scripts/ops.sh flatten --environment demo --reason "operator request" --execute
-```
-
-The flatten script requires a fresh exact-realm engine heartbeat. It durably
-disables entries for LONG, CARRY, and Exodus, submits one replayable flatten
-request per sleeve, and waits for all of these engine facts:
-
-- no attributed directional position;
-- no owned directional opening order;
-- none of its flatten requests remains pending; and
-- all three entry permissions remain false.
-
-It leaves entries paused. It deliberately reports venue-global flatness as
-unproven because the heartbeat is scoped to engine-attributed inventory.
-Follow with the authenticated two-scan proof:
-
-```sh
-scripts/ops.sh attest-flat --environment demo
-```
-
-Only credential-wide venue evidence can support a global-flat claim or a later
-state reset.
-
-## Real-money authority
-
-`REAL_MONEY=true` in the root-owned mainnet credential file is the only funded
-arming switch. Repository config, a registered research rule, service enable
-state, and a deploy command do not substitute for it.
-
-`scripts/ops.sh real-money preflight` is read-only. It reports missing account,
-credential, profile, release, and topology requirements. Operational profile
-rendering reads the owner dials and writes the account-wide risk document only
-when `--execute` is explicit; deploy renders it once and installs the same
-bytes for both realms, so the funded dials govern demo too. The funded
-credential file carries two dials, both ratios:
-
-| Dial | Default | Meaning |
-| --- | --- | --- |
-| `RM_CARRY_STOP_LOSS_FRACTION` | 0.35 | venue-native stop distance on CARRY entries |
-| `RM_ROLLING_LOSS_FRACTION` | 0.10 | share of the capital reference the engine's own closed trades may lose, net of fees, inside any 24 hours before it refuses new entries |
-
-A changed dial takes effect at the next deploy, which re-renders the profile.
-The capital reference follows each account's own equity, floored at $100, so
-the rolling-loss limit is a tenth of the current reference on demo and on the
-funded account alike.
-
-The signal worker never receives private credentials. The engine service gets
-only the credential family for its own realm. The notification and liveness
-services get no order credential.
-
-## Verification
-
-After any intended host change, run:
-
-```sh
-scripts/ops.sh status
-scripts/ops.sh units
-scripts/ops.sh logs engine.service 200
-scripts/ops.sh logs signal-worker-demo.service 200
-```
-
-Status reports the installed commit, the deployed and rollback-target
-commits, arming state, every manifest unit's active state, heartbeat ages,
-and disk. Do not replace a failed check with an interpretation of an old doc.
-
-Realm liveness pages on an inactive fleet unit in its realm, a stale or
-unreadable heartbeat, an engine that reports it cannot open positions, and an
-engine whose rolling-loss trip is on. Host liveness, which runs whether or not
-the fleet is up, pages on an inactive independent unit, a recorder that has
-received no market frame or is dropping frames, a stale market-tape upload
-receipt or a Drive short of space, a stale backup receipt, low disk, and an
-unsynchronised host clock. A systemd `active` state alone is not proof that
-either sleeve is producing decisions.
-
-## Off-box copies
-
-Two things leave the box for Google Drive, both through the rclone remote
-configured in `/etc/liquidity-migration/rclone.conf`:
-
-| What | When | Where on the Drive |
-| --- | --- | --- |
-| The engines' logs, closed trades, heartbeats, worker checkpoints, target books, spools, takeover sources, and the two rendered engine configs | every six hours (`backup.timer`) | `LiquidityMigration/engine-state/latest/` mirrors the host; a file that changed or vanished is moved to `engine-state/history/<run stamp>/`, kept 60 days |
-| The market tapes, one archive per finished hour per venue with a `MANIFEST.json` first | ten past every hour (`market-tape-upload.timer`) | `LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/<day>T<HH>Z.tar` for `bybit-linear` and `binance-usdm` |
-
-Each job writes a receipt under `/var/lib/liquidity-migration/receipts/`
-only after the copy landed and was checked; host liveness reads the receipts'
-ages. No credential file is ever copied: the backup refuses a `*.env` source
-by name.
-
-## Venue-confirmed trade accounting
-
-The account-history capture is authenticated but GET-only. Mainnet uses the
-separate `BYBIT_ATTEST_*` key by default; `--credential-set execution` selects
-the engine key explicitly. The capture window must have ended at the venue and
-remain inside Bybit's two-year account-history boundary. The capture checks the
-authenticated user and venue time before and after all three histories finish.
-
-```sh
+```bash
+# Capture authenticated venue history (read-only)
 python scripts/research/capture_bybit_account_history.py \
-  --realm mainnet \
-  --start "$TRADE_START_UTC" \
-  --end "$TRADE_END_UTC" \
-  --out "$VENUE_CAPTURE"
+  --realm mainnet --start "$TRADE_START_UTC" --end "$TRADE_END_UTC" --out "$VENUE_CAPTURE"
 
+# Reconcile WAL against venue records
 python scripts/research/reconcile_venue_wal.py \
   --wal /var/lib/liquidity-migration-engine-mainnet/engine.wal \
   --venue-history "$VENUE_CAPTURE" \
   --sleeve long \
-  --trade-execution-id "$REGISTERED_EXECUTION_ID" \
   --expected-realm mainnet \
   --expected-user-id "$BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID" \
   --engine-config "$DEPLOYED_ENGINE_CONFIG" \
   --expected-commit "$DEPLOYED_COMMIT" \
-  --expected-config-sha256 "$DEPLOYED_ENGINE_CONFIG_SHA256" \
   --out "$ACCOUNTING_REPORT"
 ```
 
-The expected commit is the one the host was told to deploy (the deploy's
-`deployed-commit` record, or the CI run that dispatched it), and the config
-bytes are the rendered engine config the deploy installed; neither comes from
-the evidence being graded. Every Boot record in the log names the commit the
-running binary was built from and the SHA-256 of its config, and each graded
-fill's Boot — the one that recorded it and the one that sent its order — must
-name both expected values. The report says `venue_confirmed` only when the
-complete WAL family, those boot identities, execution and order identities,
-fill fields, one-way position path, fees, closed profit and loss, account cash
-changes, and every crowd-fee settlement agree. A missing, duplicate, foreign,
-damaged, wrong-generation, or out-of-retention row withholds the label, and so
-does a Boot with no commit: logs written by builds before commit stamping
-cannot reach the label.
+---
 
-## Recovery rules
+## 3. Fleet Manifest & Systemd Unit Inventory
 
-- A stale or unreadable engine heartbeat makes position state unknown. Keep
-  entries disabled and inspect the owner before acting on targets or caches.
-- A stale signal heartbeat means decision inputs are unknown. Do not stop the
-  engine merely because the worker failed; the engine still owns exits.
-- A WAL/account mismatch is reconciled from authenticated venue state and WAL
-  attribution. Do not edit the WAL or strategy checkpoint by hand.
-- A deploy whose realm never publishes a fresh heartbeat rolls back to the
-  last finished commit on its own and fails; a deploy that fails earlier (a
-  refused build, config, or state import) leaves the fleet stopped. Read the
-  named check, repair it, and rerun the exact-commit flow, or run `rollback`.
-- The independent units keep running through all of this. If a recorder
-  itself is the problem, `scripts/ops.sh restart forward-capture.service` or
-  `scripts/ops.sh restart forward-capture-binance.service`.
-- A funded stop or disarm is not reversed by a demo command, resume action, or
-  ordinary service restart.
+| Systemd Unit | Realm | User / Group | Activation Policy | Role |
+| :--- | :--- | :--- | :--- | :--- |
+| `liquidity-migration-engine.service` | Demo | `liquidity-engine-demo:liquidity-migration` | `multi-user.target` | Execution engine on demo account. |
+| `liquidity-migration-engine-mainnet.service` | Mainnet | `liquidity-engine-mainnet:liquidity-migration`| `manual` (requires `REAL_MONEY`) | Execution engine on funded account. |
+| `liquidity-migration-signal-worker-demo.service` | Demo | `liquidity-signal-worker:liquidity-migration`| `multi-user.target` | Public feature ingestion & IPC. |
+| `liquidity-migration-signal-worker-mainnet.service`| Mainnet | `liquidity-signal-worker:liquidity-migration`| `multi-user.target` | Public feature ingestion & IPC. |
+| `liquidity-migration-forward-capture.service` | Global | `liquidity-capture:liquidity-migration` | `independent` (boot) | Continuous Bybit tick & L2 capture. |
+| `liquidity-migration-forward-capture-binance.service`| Global | `liquidity-capture:liquidity-migration` | `independent` (boot) | Continuous Binance tick & L2 capture. |
+| `liquidity-migration-telegram-controls.service` | Global | `liquidity-controls:liquidity-controls` | `multi-user.target` | Interactive Telegram operator bot. |
+| `liquidity-migration-trade-notify.timer` | Global | `liquidity-observer:liquidity-migration` | Timer (every 1m) | Fills and closed-trade alert dispatcher. |
+| `liquidity-migration-market-tape-upload.timer` | Global | `root:root` | Timer (hourly at :10) | Ships finished tape archives to Google Drive. |
+| `liquidity-migration-backup.timer` | Global | `root:root` | Timer (every 6h) | Ships engine state & WAL to Google Drive. |
 
-See [`notifications.md`](notifications.md) for alerts and
-[`engine.md`](engine.md) for the durable runtime contract.
+* **Independent Units**: `forward-capture`, `forward-capture-binance`, `market-tape-upload`, `backup`, and `host-liveness` are never stopped by fleet deploys or safety stops.
+
+---
+
+## 4. Deployment & Rollback Protocol
+
+Deployments run via SSH using `scripts/deploy_vps_live.sh`:
+
+```bash
+EXPECTED_COMMIT=<40-hex-commit> scripts/ops.sh deploy
+```
+
+### Deployment Flow & Decoupled Handover
+1. **Fetch & Verify**: Verifies target commit is on `origin/main`.
+2. **Artifact Delivery**: Detects CI precompiled binary archive or builds locally via throttled cargo (`nice -n 10 --jobs 2`).
+3. **Demo Handover**: Stops Demo $\to$ Installs release $\to$ Restores state $\to$ Starts Demo $\to$ Verifies fresh heartbeat within 180s.
+   *(Mainnet continues actively trading during Demo upgrade).*
+4. **Mainnet Atomic Swap**:
+   - Pre-renders config and verifies attestor while Mainnet is live.
+   - Executes atomic swap: `stop_realm_units mainnet` $\to$ `import state` $\to$ `start_realm mainnet`.
+5. **Auto-Rollback**: If either realm fails to publish a fresh heartbeat within 180s, the script rolls back to `/opt/liquidity-migration-engine/deployed-commit`.
+
+### Native State Takeover Sources
+| Sleeve | Source Format | Named Source Roles |
+| :--- | :--- | :--- |
+| **LONG** | `long-book-state-v2` | `state` |
+| **CARRY** | `carry-sizing-anchors-v1-early-exits-v1-target-book-v1` | `early_exits`, `sizing_anchors`, `target_book` |
+| **EXODUS** | `exodus-state-v1-v4-event-tape-v1-identity-v2` | `carry_events`, `identity`, `state` (and generated `legacy_paths`) |
+
+---
+
+## 5. Emergency Safety Controls
+
+### 1. Strategic Pause (Soft Stop)
+Stops new risk while leaving exits, stops, and settlement clocks active:
+```bash
+# Via CLI:
+engine set-strategy-entry-permission --config /etc/liquidity-migration/engine.toml --strategy <sleeve> --entries-enabled false
+# Via Telegram Bot:
+/pause_demo or /pause_mainnet
+```
+
+### 2. Immediate Position Flatten (Hard Exit)
+Cancels working openings and commands reducers to exit all exposure immediately:
+```bash
+# Preview:
+scripts/ops.sh flatten --environment mainnet --reason "emergency risk reduction"
+# Execute:
+scripts/ops.sh flatten --environment mainnet --reason "emergency risk reduction" --execute
+# Verify venue flatness:
+scripts/ops.sh attest-flat --environment mainnet
+```
+
+### 3. Real-Money Disarm (Complete Shutdown)
+Persistently stops funded trading and disables the arming switch:
+```bash
+scripts/ops.sh deploy disarm-mainnet
+```
+* Sets `REAL_MONEY=false` in `/etc/liquidity-migration/bybit-mainnet.env`.
+* Stops `liquidity-migration-engine-mainnet.service`.
+
+---
+
+## 6. Real-Money Configuration Dials
+
+Configured in `/etc/liquidity-migration/bybit-mainnet.env` (`0600`, root-owned):
+
+| Environment Dial | Default | Constraint | Meaning |
+| :--- | :--- | :--- | :--- |
+| `REAL_MONEY` | `false` | Required `true` | Master arming switch for the funded engine. |
+| `RM_CARRY_STOP_LOSS_FRACTION` | `0.35` | Positive ratio | Venue-native stop-loss distance on CARRY positions. |
+| `RM_ROLLING_LOSS_FRACTION` | `0.10` | Positive ratio | Maximum fraction of capital reference lost in 24h before rolling-loss trip triggers. |
+
+---
+
+## 7. Off-Box Google Drive Backups
+
+Configured via `/etc/liquidity-migration/rclone.conf`:
+
+| Data Payload | Schedule | Destination on Google Drive | Retention |
+| :--- | :--- | :--- | :--- |
+| **Engine State & WAL** | Every 6h (`backup.timer`) | `LiquidityMigration/engine-state/latest/` | 60 days in `history/` |
+| **Market Tape Hours** | Hourly at :10 (`upload.timer`)| `LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/` | Permanent archive |
+* **Security Invariant**: Backup scripts explicitly reject `*.env` files to prevent credentials from ever leaving the host.
+
+---
+
+## 8. Incident Recovery Matrix
+
+| Symptom | Probable Cause | Immediate Action |
+| :--- | :--- | :--- |
+| **Engine Heartbeat Stale ($> 30\text{s}$)** | Process crashed or deadlock | Check `scripts/ops.sh logs engine-mainnet 100`. Inspect WAL lock. |
+| **Signal Worker Stale** | WebSocket disconnect or gap | Inspect `logs signal-worker-mainnet`. Engine continues exits independently. |
+| **Rolling Loss Tripped** | 24h loss ceiling breached | Entries halted automatically. Exits permitted. Inspect `heartbeat.json`. |
+| **Capture Dropping Frames** | CPU/disk saturation | Check `journalctl -u liquidity-migration-forward-capture`. Budget shedding will activate. |
+| **Stranger Position Latched** | Unattributed fill on venue | Engine halts new entries. Run `attest-flat` and audit account on exchange. |
