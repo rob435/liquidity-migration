@@ -6,6 +6,25 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-02 — Deployed `f17719d1` at 21:04 UTC: the tiered recorders on
+  both venues, the live universe, the LLM gate on both realms, one profile.**
+  The owner asked for the merge and the deploy in one go, and the freeze ended
+  with it. One `scripts/ops.sh deploy`, no rollback: both signal workers and
+  both engines heartbeated within seconds of their restart and report the
+  commit; the funded engine came back with its rolling-loss trip still latched
+  (until 2026-09-03 09:54 UTC), as expected. The Bybit recorder restarted on
+  its fingerprint and the Binance recorder started for the first time. Sixty
+  seconds in: Bybit 15 shards connected, 30 core names, 11 crowded (funding at
+  or below -8 bp), 11 overheated (at or above +8 bp), 5 movers beyond the
+  names other tiers already hold, 713 on the wide ticker; Binance 9 shards,
+  20 core, 7 crowded, 2 overheated, 506 wide; no dropped frames on either. The
+  windowed tiers (bursting, flooding, levering) show nothing until an hour of
+  ticker history exists, by design. The host watchdog paged once during the
+  rollout, while the Binance unit was still stopped, and the state backup's
+  receipt is still missing: `liquidity-migration-backup.service` has been
+  killed by its 15-minute start timeout on all three runs since the Drive
+  backup shipped (the sources are about 1 GB, Drive already holds 920 MiB of
+  them), so no engine-state backup has completed yet. Not fixed here.
 - **2026-09-02 — Both realms run one thing: a live universe, the LLM entry
   gate on the native LONG sleeve, and one equity-following profile.** The
   owner's directive was that demo and the funded account run exactly the same
