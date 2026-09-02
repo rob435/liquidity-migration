@@ -66,6 +66,16 @@ reject. Two things carry the weight the threshold used to:
   catches what a higher threshold used to catch, and catches it for the right
   reason.
 
+The study harness (`liquidity_migration/research/lab/`) runs those two ideas
+as five plateau checks on any cell that beats its placebo: the neighbouring
+parameter values carry a delta of the same sign; the rule read one day late
+still beats its placebo; the rule required on two consecutive stamps still
+beats it; the rule with its condition turned around does not also beat it;
+and the top three trades carry at most half of the gain. Its dials, which this
+document owns: a variant beats its placebo when at most 5% of matched random
+draws score as well, and the concentration limit is one half. A cell that
+fails any check is a diagnostic, not a finding.
+
 **It is prospective.** Verdicts recorded before 2026-07-31 stand as written;
 results quoting the older 3.25 or 3.58 thresholds are accurate and are not
 restated. A pre-2026-07-31 result that sits between 2.5 and 3.25 is not thereby
