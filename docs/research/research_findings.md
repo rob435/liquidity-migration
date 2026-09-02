@@ -10,9 +10,10 @@ Data tiers, roots, and PIT membership: [docs/data.md](../data.md).
 **Question (owner).** With the exit program closed, the owner asked for the
 next step from outside the repository: Substacks, arXiv and SSRN, X, the
 trend-following canon, proper quantitative models. Scouts read about fifty
-sources with a stated rule and a number — 22 practitioner posts and 32
-papers, ranked by evidence, fit to hourly Bybit alt-perp data, independence
-from the two live sleeves, and effect on the worst dip. Every model with a
+sources with a stated rule and a number — 22 practitioner posts, 32
+papers, and 11 X threads (public unrolls only; X itself cannot be read) —
+ranked by evidence, fit to hourly Bybit alt-perp data, independence from
+the two live sleeves, and effect on the worst dip. Every model with a
 replicable rule was then run on one panel: Bybit USDT perpetuals, daily bars
 from hourly closes, 2021-01-01 to 2026-08-30, 1,041 names including delisted
 ones, membership by trailing 30-day turnover rank (point-in-time), the crowd
@@ -142,6 +143,25 @@ t-statistics that look enormous only because the names move together; the
 three best hours sum to about 10 bp a day against a 15.6 bp round trip, the
 signs flip between years, and the effect is not tradeable. Weekday averages
 (Wednesday +28 bp, Thursday −39 bp) are noise of the same kind.
+
+**What the trend canon and X added.** The canon (Moskowitz-Ooi-Pedersen,
+Hurst-Ooi-Pedersen, Baltas-Kosowski, Harvey et al, Moreira-Muir, Man's crypto
+notes, Turtle and Clenow rules) and the X threads with a stated rule
+(macrocephalopod, HangukQuant, pedma, Robot Wealth, Starkiller) converge on
+three specifications: size each position to a fixed volatility with a
+no-trade buffer; enter on a continuous multi-lookback breakout score inside
+the top volume deciles; gate entries on a slow Bitcoin trend (5/50 EMA,
+50/200 average). The first is answered above — it hurts CARRY and is
+leverage on LONG, and LONG already sizes each name to a volatility target.
+The third is answered by the ledger: a slow Bitcoin gate carries no
+information for LONG (28-day return below zero, 22 trades, +0.064; above or
+below the 200-day average, active-day means 11.5 against 7.1 bp, t 0.8),
+the seven-day state does. The second is an entry-model rework that the
+2026-08-21 v13 program already closed across 25 mechanical cells and was not
+re-run. Two X trades are in the record already as negatives: the 24-hour
+display rollover (2026-07-24 sweep) and shorting fresh listings (the listing
+debut is a mean-versus-median trap). The one live datapoint found for alt
+trend following in 2024–2025 is a practitioner running a 384-day drawdown.
 
 **What the program says.** The desk's two registered sleeves — Sharpe 1.47
 and 1.59 on their replications, uncorrelated, 2.00 combined — sit at or
