@@ -6,6 +6,36 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-02 — Eight exit ideas tested, none survives its control; the
+  recorder promotes crowded names into the deep tier.** An outside review
+  proposed exits framed around continuation value: replace a held position
+  when a blocked candidate is worth more, LONG horizons by entry thesis,
+  renewal on a fresh signal, expiry on the signal clock, a CARRY continuation
+  band, an Exodus microstructure cover, a pre-entry veto of premature Exodus
+  fires, and maker-first scheduled exits. The registered v12 ledger was rebuilt
+  with trigger legs and entry routes (307 trades, +0.528 book units), and every
+  LONG clock variant loses both per trade and at book level with slots and
+  cooldowns in place: signal clock +0.484, renewal +0.460, thesis +0.444,
+  unconditional 96h +0.393 against v12's +0.528, the thesis rule indistinguishable
+  from the same horizons dealt at random, renewal worse than random extension.
+  The ten LONG slots refused one candidate in 5.7 years, so there is nothing
+  to replace into. A walk-forward model of CARRY's remaining-day return on
+  23,523 hourly states has out-of-sample correlation 0.04 and its policy never
+  fires at one sigma. The Exodus fire population cannot be rebuilt faithfully
+  from hourly data: against the venue's displayed rate on the tardis free days,
+  the hourly proxy calls 7 of 49 fires falsely and inflates the premature share
+  from 2% to 16%, so the veto question grades forward from the live WAL and the
+  tape, not from history. Execution of scheduled exits was tried on the one
+  hour of local book tape we hold (88 attempts) and grades nothing. Findings
+  row in `docs/research/research_findings.md`; scripts, ledgers, and results
+  under `~/SHARED_DATA/bybit_full_pit/reports/exit_program_2026-09-02/`. The
+  market recorder now promotes any listed USDT perpetual whose funding rate is
+  at or below -10 bp (the CARRY entry depth) into the deep tier for that day
+  and the next (`--deep-funding-bp 10` on the unit), so the crowded names the
+  CARRY and Exodus sleeves actually hold carry a 50-level book around their
+  settlements; the promoted set is re-read with the daily instrument and ticker
+  snapshot and listed in the recorder's `status.json`. Not deployed by this
+  change.
 - **2026-09-01 — The market recorder, its upload, and the backup stand apart
   from the trading fleet, and the fleet can roll itself back.** The fleet had
   been down since 13:32 UTC: the 13:30 deploy's demo engine was killed by the
