@@ -126,6 +126,9 @@ class BybitAdapter:
     def connection_url(self, topics: list[str]) -> str:
         return self.ws_url
 
+    def connection_group(self, topic: str) -> str:
+        return ""
+
     def subscribe_messages(self, topics: list[str]) -> list[str]:
         return [json.dumps({"op": "subscribe", "args": topics[start : start + 10]}) for start in range(0, len(topics), 10)]
 

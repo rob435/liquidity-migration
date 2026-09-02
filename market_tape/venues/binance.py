@@ -2,10 +2,16 @@
 
 Every shard opens one combined-stream URL that names its streams, so there is
 no subscribe frame to send and each frame arrives as
-`{"stream": ..., "data": ...}`. The venue caps a connection at 1024 streams,
-accepts 10 incoming messages a second (we send none), pings every 3 minutes,
-and closes every connection at its 24-hour mark; the recorder's shard loop
-reconnects and `on_connected` re-anchors the deep books.
+`{"stream": ..., "data": ...}`. The venue routes streams by URL path: `/public`
+carries the high-frequency streams (the depth streams, `bookTicker`, `trade`)
+and `/market` everything else (`aggTrade`, `markPrice`, `ticker`, `kline`,
+`!forceOrder@arr`); a connection receives only its own path's streams and
+silently drops the rest (a path-less URL is `/public`; the legacy path was
+retired 2026-04-23). `connection_group` names the path, and the recorder gives
+each shard one group. The venue caps a connection at 1024 streams, accepts 10
+incoming messages a second, pings every 3 minutes, and closes every connection
+at its 24-hour mark; the recorder's shard loop reconnects and `on_subscribed`
+re-anchors the deep books.
 
 The book comes two ways. `depth<N>@100ms` pushes a whole small book, so each
 frame is a snapshot. `depth@100ms` pushes differences that only mean something
@@ -210,8 +216,17 @@ class BinanceAdapter:
                 result.append(f"{lower}@kline_{feed.arg}")
         return result
 
+    def connection_group(self, topic: str) -> str:
+        suffix = topic.partition("@")[2]
+        if suffix.startswith("depth") or suffix in ("bookTicker", "trade"):
+            return "public"
+        return "market"
+
     def connection_url(self, topics: list[str]) -> str:
-        return f"{self.ws_url}/stream?streams={'/'.join(topics)}"
+        groups = {self.connection_group(topic) for topic in topics}
+        if len(groups) != 1:
+            raise ValueError(f"one Binance connection carries one path, got {sorted(groups)}")
+        return f"{self.ws_url}/{groups.pop()}/stream?streams={'/'.join(topics)}"
 
     def subscribe_messages(self, topics: list[str]) -> list[str]:
         return []

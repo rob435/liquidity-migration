@@ -39,7 +39,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 import websocket
 
@@ -78,10 +78,20 @@ LANES = "lanes"
 QueueItem = tuple[str, Any, int, str]
 
 
-def shard_topics(topics: list[str], per_connection: int) -> list[list[str]]:
+def shard_topics(topics: list[str], per_connection: int, group: Callable[[str], str] | None = None) -> list[list[str]]:
+    """Chunk topics into connections; with `group`, topics of different groups
+    never share a connection, and each group keeps its order."""
+
     if per_connection <= 0:
         raise ValueError("topics per connection must be positive")
-    return [topics[start : start + per_connection] for start in range(0, len(topics), per_connection)]
+    grouped: dict[str, list[str]] = {}
+    for topic in topics:
+        grouped.setdefault(group(topic) if group else "", []).append(topic)
+    return [
+        members[start : start + per_connection]
+        for members in grouped.values()
+        for start in range(0, len(members), per_connection)
+    ]
 
 
 # ----------------------------------------------------------------- metering
@@ -573,14 +583,20 @@ class Recorder:
 
         wanted = set(desired)
         room = self.config.topics_per_connection
+        group = self.adapter.connection_group
         shards = list(self.tier_shards[tier])
         plans: list[list[str]] = [[topic for topic in shard.topics if topic in wanted] for shard in shards]
         placed = {topic for plan in plans for topic in plan}
         leftover = [topic for topic in desired if topic not in placed]
-        for plan in plans:
-            take = leftover[: max(0, room - len(plan))]
+        for shard, plan in zip(shards, plans):
+            anchor = plan[0] if plan else (shard.topics[0] if shard.topics else None)
+            if anchor is None:
+                continue
+            mine = group(anchor)
+            take = [topic for topic in leftover if group(topic) == mine][: max(0, room - len(plan))]
             plan.extend(take)
-            leftover = leftover[len(take) :]
+            taken = set(take)
+            leftover = [topic for topic in leftover if topic not in taken]
         kept: list[Shard] = []
         for shard, plan in zip(shards, plans):
             if plan:
@@ -588,7 +604,7 @@ class Recorder:
                 kept.append(shard)
             else:
                 shard.close()
-        for chunk in shard_topics(leftover, room):
+        for chunk in shard_topics(leftover, room, group):
             kept.append(self._new_shard(tier, chunk))
         with self.shard_lock:
             self.tier_shards[tier] = kept
