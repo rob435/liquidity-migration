@@ -113,6 +113,44 @@ promoted crowded names, every trade and liquidation) is the data both need;
 at the registration's ~15 fires a month, a first read of idea 6 is a
 quarter away.
 
+**State-driven exits: leave when the state that admitted the trade is gone.**
+Every exit above, and every earlier program, keys on the trade's own P&L or
+clock. This family keys on the market instead: at each daily decision after
+the fill, leave at the next hourly close if the admitting state has gone.
+Sixteen cells on the same 307-trade ledger, each against the registered exits
+and a placebo that exits the same number of trades at a random alive stamp
+(200 draws). Deltas are book units against v12's +0.528.
+
+| Cell | Trades hit | Delta | t on hit | Years worse | Placebo ≥ real |
+| --- | --- | --- | --- | --- | --- |
+| BTC regime off | 25 | −0.019 | −0.95 | 4/6 | 62% |
+| ETH regime off | 20 | +0.018 | 1.95 | 1/6 | 1% |
+| either regime off | 38 | −0.003 | −0.12 | 3/6 | 21% |
+| volume rank > 10 / 20 / 30 | 106 / 28 / 6 | −0.066 / −0.025 / +0.001 | −1.77 / −1.47 / 0.22 | 5 / 4 / 2 of 6 | 38% / 62% / 39% |
+| out of universe | 0 | — | — | — | — |
+| funding ≥ 5 / 10 / 20 bp | 42 / 13 / 4 | −0.007 / +0.019 / +0.005 | −0.22 / 1.53 / 1.01 | 2 / 0 / 0 of 6 | 19% / 0.5% / 20% |
+| reverse shock, full / half trigger | 4 / 56 | −0.006 / −0.070 | −0.99 / −3.71 | 1 / 5 of 6 | 80% / 83% |
+| close in the day's bottom quarter | 136 | −0.100 | −1.78 | 4/6 | 55% |
+| regime off or rank > 30 or funding ≥ 20 bp | 44 | +0.005 | 0.23 | 2/6 | 9% |
+
+Two cells beat their placebo, the first exit cells in this desk's record to
+do so, and both fail the plateau checks. ETH regime off: three of its twenty
+trades carry 73% of the gain; require the state to hold for two consecutive
+stamps and the delta is −0.003, lag it one day and it is +0.001, and the same
+rule on BTC loses. Funding ≥ 10 bp: three trades carry 105% of the gain
+(1000BONKUSDT on 2024-03-01 alone is +0.011); thresholds of 6, 7, 8, and 9 bp
+all lose, 10 to 14 bp win, 16 bp fades, the same shape whether the rate is
+taken per settlement or normalised to eight hours. A rule that loses at 9 bp
+and wins at 10 is a spike, not a plateau. The union of the two cells reaches
+t 2.44 on 33 trades and inherits both concentrations. The state does carry
+information about the remaining hold: after an ETH-off stamp the rest of the
+trade returns −6.0 bp of weight against +8.7 otherwise (t −3.4), after a
+funding ≥ 10 bp stamp −12.2 against +8.7 (t −2.6). Nothing is promoted: both
+cells sit below the t 2.5 bar on 13 to 20 trades, and even taken at face
+value they add 0.3 to 0.6 book-percent a year to a book that made 53 over
+5.7 years. Scripts `state_exit_lab.py` and `state_exit_plateau.py`, results
+under `long/state_exits/` in the program folder.
+
 **On the recorder's deep tier (the owner's question).** The 81-name file is
 LONG's entry universe plus the maker canary; the names CARRY and Exodus trade
 are the crowded ones, which change daily and were in the wide tier (no
@@ -126,8 +164,9 @@ registered book earns from the crowd fee: v7 carry +17.2 bp/day mean over
 2021-10→2026-08 (raw Sharpe 1.59, +2,193% compounded on the raw daily
 series), LONG +64.5% marked daily over 5.7 years at gross 1.0 (Sharpe 1.47),
 Exodus a 2025–26 overlay. Every exit family this desk has tried — now
-twenty-odd mechanism families and roughly eighty cells including this
-program — loses to the registered clocks or to its own placebo. The lever
+twenty-odd mechanism families and roughly a hundred cells including this
+program and its sixteen state-driven cells — loses to the registered clocks
+or to its own placebo, or wins on too few trades to survive a plateau check. The lever
 that remains is entry and size, not exit. One population caveat carries
 forward: the carry panel is the both-venue intersection, so Bybit-only names
 such as AGIUSDT (last week's biggest carry loser) are outside every
