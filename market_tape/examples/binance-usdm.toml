@@ -25,48 +25,52 @@ topics_per_connection = 200
 cadence = "day"
 
 [budget]
-monthly_gb = 1000
+# Measured 2026-09-02 21:40 UTC with twenty core names: bookTicker 434 KB/s (more
+# than this whole allowance on its own), the 1000-level diff book 220, trades 172,
+# the wide ticker 141. The diff book at 100 ms carries the top of book, so no tier
+# here takes bookTicker.
+monthly_gb = 1300
 shed = [
   "bursting:book:1000", "flooding:book:1000", "movers:book:1000", "surging:book:1000", "overheated:book:1000",
   "bursting:trades", "flooding:trades", "movers:trades", "surging:trades",
-  "core:book:1", "wide:ticker",
+  "core:trades", "wide:ticker",
 ]
 
 [[tier]]
 name = "core"
-feeds = ["book:1000", "book:1", "trades", "ticker", "liquidations"]
-universe = { kind = "top_turnover", top = 20, leave_top = 30, quote = "USDT" }
+feeds = ["book:1000", "trades", "ticker", "liquidations"]
+universe = { kind = "top_turnover", top = 15, leave_top = 22, quote = "USDT" }
 
 [[tier]]
 name = "crowded"
-feeds = ["book:1000", "book:1", "trades"]
+feeds = ["book:1000", "trades"]
 universe = { kind = "funding_below", threshold_bp = 8, sticky_hours = 48, quote = "USDT", exclude_tiers = ["core"] }
 
 [[tier]]
 name = "overheated"
-feeds = ["book:1000", "book:1", "trades"]
+feeds = ["book:1000", "trades"]
 universe = { kind = "funding_above", threshold_bp = 8, sticky_hours = 48, quote = "USDT", exclude_tiers = ["core", "crowded"] }
 
 [[tier]]
 name = "surging"
-feeds = ["book:1000", "book:1", "trades"]
+feeds = ["book:1000", "trades"]
 universe = { kind = "turnover_surge", ratio = 3, sticky_hours = 24, quote = "USDT", exclude_tiers = ["core", "crowded", "overheated"] }
 
 [[tier]]
 name = "movers"
-feeds = ["book:1000", "book:1", "trades"]
+feeds = ["book:1000", "trades"]
 universe = { kind = "top_movers", top = 10, leave_top = 15, quote = "USDT", exclude_tiers = ["core", "crowded", "overheated", "surging"] }
 
 [[tier]]
 name = "bursting"
-feeds = ["book:1000", "book:1", "trades"]
+feeds = ["book:1000", "trades"]
 universe = { kind = "price_burst", pct = 0.05, window_hours = 1, sticky_hours = 6, quote = "USDT", exclude_tiers = ["core", "crowded", "overheated", "surging", "movers"] }
 
 # Open interest is not on any Binance stream and would take one REST call per name
 # per poll, so there is no open-interest tier here.
 [[tier]]
 name = "flooding"
-feeds = ["book:1000", "book:1", "trades"]
+feeds = ["book:1000", "trades"]
 universe = { kind = "volume_burst", ratio = 3, window_hours = 1, sticky_hours = 6, quote = "USDT", exclude_tiers = ["core", "crowded", "overheated", "surging", "movers", "bursting"] }
 
 [[tier]]
