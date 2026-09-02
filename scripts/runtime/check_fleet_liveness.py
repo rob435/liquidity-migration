@@ -213,38 +213,45 @@ def evaluate_capture_status(
     now: float,
     max_silence_sec: float,
     counters: dict[str, float],
+    label: str = "",
 ) -> tuple[list[Alert], dict[str, float]]:
-    """The recorder's own status file: is data arriving, and is any being lost.
+    """A recorder's own status file: is data arriving, and is any being lost.
 
     `counters` holds the drop counts seen on the previous run; the returned
     copy holds this run's, so a drop pages once per increase, not forever.
+    `label` tells one recorder's alerts and counters from another's when the
+    host runs several.
     """
 
+    def key(name: str) -> str:
+        return f"{name}:{label}" if label else name
+
+    who = f"recorder {label}" if label else "recorder"
     try:
         payload = json.loads(path.read_bytes())
     except OSError:
-        return [Alert("capture-status", "CRITICAL", f"recorder status is unreadable: {path}")], counters
+        return [Alert(key("capture-status"), "CRITICAL", f"{who} status is unreadable: {path}")], counters
     except ValueError:
-        return [Alert("capture-status", "CRITICAL", "recorder status is not JSON")], counters
+        return [Alert(key("capture-status"), "CRITICAL", f"{who} status is not JSON")], counters
     if not isinstance(payload, dict):
-        return [Alert("capture-status", "CRITICAL", "recorder status is not a JSON object")], counters
+        return [Alert(key("capture-status"), "CRITICAL", f"{who} status is not a JSON object")], counters
     alerts = []
     last_receive_ns = _number(payload.get("last_receive_ns"))
     if last_receive_ns is None or last_receive_ns <= 0:
-        alerts.append(Alert("capture-silent", "CRITICAL", "recorder has received no market frame yet"))
+        alerts.append(Alert(key("capture-silent"), "CRITICAL", f"{who} has received no market frame yet"))
     else:
         silence = now - last_receive_ns / 1e9
         if silence > max_silence_sec:
             alerts.append(
                 Alert(
-                    "capture-silent",
+                    key("capture-silent"),
                     "CRITICAL",
-                    f"recorder has received no market frame for {silence:.0f}s (limit {max_silence_sec:.0f}s)",
+                    f"{who} has received no market frame for {silence:.0f}s (limit {max_silence_sec:.0f}s)",
                 )
             )
     if payload.get("disk_blocked") is True:
         alerts.append(
-            Alert("capture-disk", "CRITICAL", "recorder storage is blocked; frames are counted but not written")
+            Alert(key("capture-disk"), "CRITICAL", f"{who} storage is blocked; frames are counted but not written")
         )
     next_counters = dict(counters)
     for field_name, reason in (
@@ -254,24 +261,24 @@ def evaluate_capture_status(
         count = _number(payload.get(field_name))
         if count is None:
             continue
-        previous = counters.get(field_name)
-        next_counters[field_name] = count
+        previous = counters.get(key(field_name))
+        next_counters[key(field_name)] = count
         if previous is not None and count > previous:
             alerts.append(
                 Alert(
-                    f"capture-{field_name}",
+                    key(f"capture-{field_name}"),
                     "WARNING",
-                    f"recorder dropped {count - previous:.0f} frames since the last check ({reason})",
+                    f"{who} dropped {count - previous:.0f} frames since the last check ({reason})",
                 )
             )
     shards = payload.get("shards")
     if isinstance(shards, list):
         down = [shard for shard in shards if isinstance(shard, dict) and shard.get("connected") is False]
         if down and len(down) == len(shards):
-            alerts.append(Alert("capture-shards", "CRITICAL", "recorder has no live venue connection"))
+            alerts.append(Alert(key("capture-shards"), "CRITICAL", f"{who} has no live venue connection"))
         elif down:
             alerts.append(
-                Alert("capture-shards", "WARNING", f"recorder has {len(down)} of {len(shards)} venue connections down")
+                Alert(key("capture-shards"), "WARNING", f"{who} has {len(down)} of {len(shards)} venue connections down")
             )
     return alerts, next_counters
 
@@ -456,8 +463,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--capture-status-file",
-        default=os.environ.get("LIVENESS_CAPTURE_STATUS_FILE") or "",
-        help="the market recorder's status.json ('' skips its data-flow checks)",
+        action="append",
+        default=None,
+        help="a market recorder's status.json; repeat for each recorder (none skips the data-flow checks)",
     )
     p.add_argument(
         "--max-capture-silence-sec",
@@ -525,14 +533,23 @@ def main() -> int:
                 max_age_hours=args.max_backup_age_hours,
             )
         )
-    if args.capture_status_file:
-        capture_alerts, counters = evaluate_capture_status(
-            Path(args.capture_status_file),
-            now=now,
-            max_silence_sec=args.max_capture_silence_sec,
-            counters=load_state(counters_file),
-        )
-        alerts.extend(capture_alerts)
+    capture_status_files = args.capture_status_file or (
+        [os.environ["LIVENESS_CAPTURE_STATUS_FILE"]] if os.environ.get("LIVENESS_CAPTURE_STATUS_FILE") else []
+    )
+    if capture_status_files:
+        counters = load_state(counters_file)
+        for index, status_file in enumerate(capture_status_files):
+            # The first recorder keeps the bare alert keys; later ones are
+            # told apart by their state directory's name.
+            label = "" if index == 0 else Path(status_file).parent.name
+            capture_alerts, counters = evaluate_capture_status(
+                Path(status_file),
+                now=now,
+                max_silence_sec=args.max_capture_silence_sec,
+                counters=counters,
+                label=label,
+            )
+            alerts.extend(capture_alerts)
         save_state(counters_file, counters)
     if args.upload_stamp_file:
         alerts.extend(

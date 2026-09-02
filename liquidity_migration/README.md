@@ -21,6 +21,17 @@ LONG/CARRY/Exodus decisions, private account state, risk, and execution.
 
 `__init__.py` and `__main__.py` are the only modules at the package root.
 
+`research/lab/` is the study harness: the daily panel, the fast backtester,
+the per-trade overlay against a matched placebo, the plateau checks, and the
+evidence-note renderer. Every decision-influencing study runs through it so the
+next negative result is reproducible and the next positive one is gradeable.
+
+The market tape — recorder, Drive archives, loader, book rebuild, bars — is the
+sibling package [`market_tape/`](../market_tape/README.md) at the repository
+root. It imports nothing from `liquidity_migration`; research code may import
+it (it sits below `core` in the order), and nothing on a live decision path
+reads it.
+
 ## Dependency rule
 
 Imports follow the ranks enforced by

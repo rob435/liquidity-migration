@@ -1,0 +1,111 @@
+# market_tape
+
+Record the public market tape of crypto perpetual venues, ship it to Google
+Drive one hour at a time, and read it back as typed rows, rebuilt books, and
+bars. Bybit linear and Binance USD-M perpetuals are the venues today.
+
+The package stands alone. It imports nothing from the trading repository it
+lives in (a test enforces this), depends only on the standard library plus
+`websocket-client` (and `polars` for bars), and can move to its own repository
+with `git subtree split -P market_tape` plus `tests/market_tape/`.
+
+## Commands
+
+```bash
+python -m market_tape check  --config deploy/capture/bybit-linear.toml       # validate, no network
+python -m market_tape record --config deploy/capture/bybit-linear.toml --root /var/lib/liquidity-migration/forward-market
+python -m market_tape pack   --tape bybit-linear=/var/lib/liquidity-migration/forward-market \
+                             --tape binance-usdm=/var/lib/liquidity-migration/forward-market-binance \
+                             --remote-base gdrive:LiquidityMigration/market-tape --state-dir STATE --stamp-file STAMP
+python -m market_tape hours  SOURCE
+python -m market_tape rows   SOURCE --hours 2026-08-30T00..2026-08-30T03 --symbols BTCUSDT --kinds public_trade
+python -m market_tape bars   SOURCE --hours 2026-08-30T00..2026-08-31T00 --interval 1 --out bars.parquet
+python -m market_tape book   SOURCE --hour 2026-08-30T00 --symbol BTCUSDT --at 1788049490035742267
+```
+
+`SOURCE` is a recorder root on a host, a directory laid out like the Drive
+folder (`YYYY/MM/DD/<day>T<HH>Z.tar`), or `rclone:<remote:path>` to read the
+Drive through a local cache.
+
+## What gets recorded
+
+A recorder records one venue from one TOML config: a list of tiers, each a
+universe of symbols and the feeds to take for them. A symbol in several tiers
+gets the union of their feeds; each venue topic is subscribed once. The config
+format, the feed vocabulary (`book:<levels>`, `trades`, `ticker`,
+`liquidations`, `kline:<interval>`, `open_interest:<seconds>`), and the
+universe kinds (`symbols`, `file`, `listed`, `top_turnover`, `funding_below`)
+are documented in [`config.py`](config.py). Universes that depend on the
+venue's tables are re-read at the snapshot cadence, and only the shards of a
+tier whose topic list changed reconnect.
+
+The host configs are under `deploy/capture/`. `examples/bybit-full-universe.toml`
+is the configuration for a machine with unbounded bandwidth and disk: one
+tier, every listed perpetual, every feed.
+
+## The row contract
+
+Every row is one JSON object on one line, sorted by `local_receive_ts_ns`, the
+recorder's wall clock at receipt. Kinds: `orderbook_snapshot`,
+`orderbook_delta`, `public_trade`, `ticker`, `liquidation`, `kline`. The exact
+fields, the typed rows they parse into, and the schema history are in
+[`schema.py`](schema.py); the writer builds rows only through its constructors
+and the reader turns them back with `parse_row`. Prices and sizes inside book
+levels are the venue's decimal strings; the typed rows convert to float.
+
+Venue differences that matter when reading:
+
+| | Bybit | Binance |
+| --- | --- | --- |
+| Book chaining | `update_id` increases; a `snapshot` message or `update_id == 1` restarts | `first_update_id` (U), `update_id` (u), `previous_update_id` (pu); the REST snapshot's `lastUpdateId` anchors the chain |
+| Top of book | `book:1` stream, up to every 10 ms | `bookTicker` stream, on change |
+| Ticker | one stream with last, mark, index, funding, open interest, best bid and ask, 24h turnover | `markPrice@1s` (mark, index, funding) and the 24h `ticker`; best bid and ask come from `book:1`; open interest only by REST poll |
+| `funding_rate` | the upcoming (predicted) rate for the next settlement | the last settled rate; a `funding_below` tier therefore reacts one settlement later than on Bybit |
+| Trades | every public trade | aggregate trades (one row per aggressor fill group) |
+| Liquidations | per-symbol stream | one all-market stream |
+
+`book.Book` applies the right chaining rule from the row's `venue`.
+
+## Layouts
+
+On the recording host, under the root:
+
+```text
+<day>/<HH>/<SYMBOL>/segment-NNNNNN.jsonl.zst   one symbol, one UTC hour, rolled at the size cap
+<day>/<HH>/_meta/instruments-<stamp>.json.zst  the venue's instrument table, as of that moment
+<day>/<HH>/_meta/tickers-<stamp>.json.zst      the venue's ticker table, as of that moment
+manifest.jsonl                                 one receipt per compressed file: rows, span, bytes, SHA-256
+status.json                                    the recorder's own health, rewritten on a timer
+```
+
+On the Drive, one uncompressed tar per finished hour, `MANIFEST.json` first
+(every member's bytes, SHA-256, row count, time span), checked against the
+Drive's own hash before the hour is marked shipped:
+
+```text
+LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/<day>T<HH>Z.tar
+LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/<day>.legacy.tar   a day recorded before the hourly layout
+```
+
+The host keeps a retention window (days, total bytes, free-disk floor, all in
+the config); the Drive is the copy that lasts.
+
+## Reading
+
+`load.open_source` detects the layout; `load.iter_rows(source, hours, ...)`
+streams typed rows across symbols in receive order; `book.Book` rebuilds one
+symbol's book and reports best bid and ask, mid, spread, depth within a
+distance, and imbalance; `bars.build_bars` turns any row stream into
+fixed-interval bars (trades, volume by aggressor, OHLC, VWAP, top of book,
+mark, index, funding, open interest, liquidations) as a polars frame.
+
+`tests/market_tape/fixtures/` holds one small real hour of Bybit tape in both
+layouts with its expected numbers; `test_fixture_hour.py` is the frozen-schema
+regression. Rebuild it with `fixtures/build_fixture.py`.
+
+## Status file
+
+`status.json` is what the host watchdog reads: `last_receive_ns`,
+`disk_blocked`, `dropped_frames`, `disk_dropped_frames`, and
+`shards[].connected`. It also lists each tier's symbol count (and names when
+few), the feeds, the shards with their reconnect counts, and the venue.

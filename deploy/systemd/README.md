@@ -48,14 +48,15 @@ The remaining current units do not decide directional exposure:
 
 ## Independent units
 
-The manifest marks four unit families `independent`. A deploy never stops
+The manifest marks five unit families `independent`. A deploy never stops
 them, a funded stop or disarm never touches them, and they start at boot, so
 they run whether or not the trading fleet is up:
 
 | Unit family | Role |
 | --- | --- |
-| `forward-capture.service` | The Bybit market recorder: books, trades, tickers, funding, liquidations, and daily instrument snapshots ([`docs/data.md`](../../docs/data.md) §Market tape) |
-| `market-tape-upload.service` and timer | Every hour, pack each finished hour of the tape into one archive and upload it to Google Drive |
+| `forward-capture.service` | The Bybit market recorder, `python -m market_tape record` on [`deploy/capture/bybit-linear.toml`](../capture/bybit-linear.toml): books, trades, tickers, funding, liquidations, and daily instrument snapshots ([`docs/data.md`](../../docs/data.md) §Market tape) |
+| `forward-capture-binance.service` | The Binance USD-M market recorder, the same package on [`deploy/capture/binance-usdm.toml`](../capture/binance-usdm.toml) |
+| `market-tape-upload.service` and timer | Every hour, pack each finished hour of each tape into one archive and upload it to Google Drive |
 | `backup.service` and timer | Four times a day, snapshot the engines' logs and state and mirror them to Google Drive with history |
 | `host-liveness.service` and timer | Page on the recorder, the upload receipt, the backup receipt, disk, and the host clock |
 

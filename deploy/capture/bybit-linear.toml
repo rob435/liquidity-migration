@@ -1,0 +1,41 @@
+# The Bybit market recorder on the host. Read by liquidity-migration-forward-capture.service;
+# `python -m market_tape check --config deploy/capture/bybit-linear.toml` validates it.
+schema = 1
+
+[venue]
+name = "bybit"
+market = "linear"
+
+[storage]
+# The unit passes --root; the retention figures bound what widening the tiers costs.
+segment_max_mb = 64
+retention_days = 30
+max_disk_gb = 60
+min_free_disk_gb = 25
+status_interval_seconds = 30
+
+[connection]
+topics_per_connection = 150
+
+[snapshots]
+cadence = "day"
+
+# The standing deep tier: full 50-level books for LONG's entry universe and the
+# maker canary names, read from the symbol file once at start.
+[[tier]]
+name = "deep"
+feeds = ["book:1", "book:50", "trades", "ticker", "liquidations"]
+universe = { kind = "file", path = "deploy/forward-capture-symbols.txt" }
+
+# Names whose funding rate sits at or below -10 bp (the crowd CARRY and Exodus
+# trade) get the deep book for the day they qualify and the next.
+[[tier]]
+name = "crowded"
+feeds = ["book:50"]
+universe = { kind = "funding_below", threshold_bp = 10, sticky_days = 2, quote = "USDT", exclude_tiers = ["deep"] }
+
+# Every other USDT perpetual the venue lists as trading, re-read once a day.
+[[tier]]
+name = "wide"
+feeds = ["book:1", "trades", "ticker", "liquidations"]
+universe = { kind = "listed", quote = "USDT", exclude_tiers = ["deep"] }

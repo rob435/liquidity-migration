@@ -12,9 +12,11 @@ UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYB
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=RCLONE_CONFIG=/var/lib/liquidity-migration/market-tape-upload/rclone.conf
 Environment=RCLONE_CONFIG_SEED=/etc/liquidity-migration/rclone.conf
-ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/pack_market_tape.py \
-    --root /var/lib/liquidity-migration/forward-market \
-    --remote gdrive:LiquidityMigration/market-tape/bybit-linear \
+# One run ships every tape; a tape whose recorder has not started yet is skipped.
+ExecStart=/opt/liquidity-migration/.venv/bin/python -m market_tape pack \
+    --tape bybit-linear=/var/lib/liquidity-migration/forward-market \
+    --tape binance-usdm=/var/lib/liquidity-migration/forward-market-binance \
+    --remote-base gdrive:LiquidityMigration/market-tape \
     --state-dir /var/lib/liquidity-migration/market-tape-upload \
     --stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success
 KillMode=control-group

@@ -41,7 +41,7 @@ testpaths = ["tests"]
 # package-wide claim; any narrower passing scope must be named explicitly.
 [tool.mypy]
 python_version = "3.11"
-files = ["liquidity_migration"]
+files = ["liquidity_migration", "market_tape"]
 ignore_missing_imports = true
 warn_redundant_casts = true
 warn_unused_ignores = true
@@ -55,4 +55,4 @@ module = [
 disable_error_code = ["arg-type"]
 
 [tool.setuptools.packages.find]
-include = ["liquidity_migration*"]
+include = ["liquidity_migration*", "market_tape*"]

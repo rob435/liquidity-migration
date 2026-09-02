@@ -25,6 +25,8 @@ simply, without jargon.
 | Operator commands, deploy modes, unit topology | [docs/operations.md](docs/operations.md) |
 | Telegram channels, watchdog alerts, heartbeat dead-man's switch | [docs/notifications.md](docs/notifications.md) |
 | Data roots, timestamps, point-in-time membership, refresh | [docs/data.md](docs/data.md) |
+| The market tape: recorders, Drive archives, loader, book rebuild, bars | [market_tape/README.md](market_tape/README.md) |
+| The study harness: panel, backtester, overlay, plateau checks, evidence note | [liquidity_migration/research/lab/](liquidity_migration/research/lab/) |
 | The funded account: envelope, arming runbook, what is unproven | [docs/operations.md](docs/operations.md) §Real money |
 
 **The evidence** — research, all under `docs/research/`:
@@ -53,5 +55,7 @@ never copy sleeve status or thresholds here.
 | `cd engine && cargo run --release -- fills --wal PATH` | what the trading cost and what the positions made: maker share, fee, arrival shortfall, markouts, and closed round trips with their P&L |
 | `scripts/ops.sh help` | operator router: status, equity, reset, deploy, and the rest |
 | `python -m liquidity_migration --help` | research and data CLI |
+| `python -m market_tape --help` | the market tape: check a capture config, record, pack, list hours, read rows, build bars, rebuild a book |
+| `python -m liquidity_migration.research.lab.cli dump\|panel` | the study harness: dump the point-in-time inputs once, then build the daily panel every study reads |
 
 Before a push, run the focused tests, then `scripts/dev.sh check`.

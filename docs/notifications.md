@@ -67,9 +67,11 @@ pages on:
 The host scope is independent of the fleet — it keeps running through deploys
 and funded stops — and pages on:
 
-- an inactive independent unit (the recorder, the upload and backup timers);
+- an inactive independent unit (the two recorders, the upload and backup
+  timers);
 - a recorder status file that is stale, says storage is blocked, shows new
-  dropped frames, or reports no market frame for two minutes;
+  dropped frames, or reports no market frame for two minutes — each recorder
+  separately, the Binance one's alerts suffixed with its state directory;
 - a market-tape upload receipt older than three hours, or a Drive with less
   than 200 GB free;
 - a backup receipt older than eight hours;

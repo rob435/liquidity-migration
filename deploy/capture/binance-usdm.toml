@@ -1,0 +1,47 @@
+# The Binance USD-M market recorder on the host. Read by
+# liquidity-migration-forward-capture-binance.service, which passes --root;
+# `python -m market_tape check --config deploy/capture/binance-usdm.toml` validates it.
+schema = 1
+
+[venue]
+name = "binance"
+market = "usdm"
+
+[storage]
+segment_max_mb = 64
+retention_days = 30
+max_disk_gb = 60
+min_free_disk_gb = 25
+status_interval_seconds = 30
+
+[connection]
+# The venue caps a connection at 1024 streams; a ticker feed costs two streams
+# a symbol, so 200 keeps every shard's URL short and well inside the cap.
+topics_per_connection = 200
+
+[snapshots]
+cadence = "day"
+
+# The standing deep tier: the 60 busiest USDT perpetuals by 24h turnover, with
+# the diff book (`book:1000`) anchored by a 1000-level REST snapshot on every
+# connect. Binance names its own symbols, so the Bybit symbol file does not
+# apply here and turnover picks the universe instead.
+[[tier]]
+name = "deep"
+feeds = ["book:1000", "book:1", "trades", "ticker", "liquidations"]
+universe = { kind = "top_turnover", top = 60, quote = "USDT" }
+
+# Names whose last settled funding rate sits at or below -10 bp (the crowd CARRY
+# and Exodus trade) get the deep book for the day they qualify and the next.
+# Binance publishes the settled rate, not a prediction, so this tier reacts one
+# settlement later than Bybit's.
+[[tier]]
+name = "crowded"
+feeds = ["book:1000"]
+universe = { kind = "funding_below", threshold_bp = 10, sticky_days = 2, quote = "USDT", exclude_tiers = ["deep"] }
+
+# Every other USDT perpetual the venue lists as trading, re-read once a day.
+[[tier]]
+name = "wide"
+feeds = ["book:1", "trades", "ticker", "liquidations"]
+universe = { kind = "listed", quote = "USDT", exclude_tiers = ["deep"] }

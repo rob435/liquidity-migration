@@ -49,6 +49,7 @@ MYPY_TARGETS=(
   --exclude
   '^liquidity_migration/research/venue_wal_accounting\.py$'
   liquidity_migration
+  market_tape
   liquidity_migration/research/venue_wal_accounting.py
   scripts/research/capture_bybit_account_history.py
   scripts/research/reconcile_venue_wal.py
@@ -70,7 +71,7 @@ case "$command" in
     exec "$PYTHON_BIN" scripts/devtools/repo_doctor.py --repo "$ROOT_DIR" "$@"
     ;;
   lint)
-    exec "$PYTHON_BIN" -m ruff check liquidity_migration scripts tests "$@"
+    exec "$PYTHON_BIN" -m ruff check liquidity_migration market_tape scripts tests "$@"
     ;;
   shellcheck)
     git ls-files -z -- "${SHELL_FILES[@]}" | xargs -0 shellcheck -S warning "$@"
@@ -85,7 +86,7 @@ case "$command" in
     echo "[dev] repository doctor"
     "$PYTHON_BIN" scripts/devtools/repo_doctor.py --repo "$ROOT_DIR"
     echo "[dev] ruff"
-    "$PYTHON_BIN" -m ruff check liquidity_migration scripts tests
+    "$PYTHON_BIN" -m ruff check liquidity_migration market_tape scripts tests
     if command -v shellcheck >/dev/null 2>&1; then
       echo "[dev] shellcheck"
       git ls-files -z -- "${SHELL_FILES[@]}" | xargs -0 shellcheck -S warning
