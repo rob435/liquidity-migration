@@ -5,9 +5,13 @@ Two tiers. The deep tier (the symbol file) gets the full 50-level book, the top
 of book, every public trade, the ticker (last, mark, index, open interest,
 funding rate and next funding time, best bid and ask, 24h turnover), and every
 liquidation. The wide tier (every other USDT perpetual the venue lists, read
-from the venue once a day) gets the same minus the 50-level book. Once a day,
-and at start, the venue's instrument list and ticker table are written as a
-snapshot, so the universe and each contract's terms are known point in time.
+from the venue once a day) gets the same minus the 50-level book. Any wide-tier
+name whose displayed funding rate is at or below --deep-funding-bp (the crowd
+fee the CARRY and Exodus sleeves trade) is promoted to the deep tier for that
+day and the next, so the crowded names carry a full book around their
+settlements. Once a day, and at start, the venue's instrument list and ticker
+table are written as a snapshot, so the universe and each contract's terms are
+known point in time.
 
 Rows are JSON lines, one file per symbol per UTC hour, compressed as each hour
 closes. Layout under --root: <day>/<HH>/<SYMBOL>/segment-NNNNNN.jsonl.zst and
@@ -32,7 +36,7 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -61,6 +65,10 @@ TICKER_FIELDS = {
     "volume24h": "volume_24h",
 }
 WIDE_UNIVERSES = ("linear-usdt",)
+# CARRY enters a name when its last settled funding is below -10 bp; a promoted
+# name keeps its book for the day it qualified and the following one.
+DEFAULT_DEEP_FUNDING_BP = 10.0
+PROMOTION_DAYS = 2
 
 
 def utc_day(received_ns: int) -> str:
@@ -111,6 +119,37 @@ def wide_topics(symbols: Iterable[str]) -> list[str]:
             f"allLiquidation.{symbol}",
         )
     ]
+
+
+def promoted_topics(symbols: Iterable[str], depth: int) -> list[str]:
+    """A promoted name already has its top of book, trades, ticker, and
+    liquidations in the wide tier; promotion adds only the deep book."""
+    return [f"orderbook.{depth}.{symbol}" for symbol in symbols]
+
+
+def funding_promoted(rows: Iterable[Mapping[str, Any]], *, threshold_bp: float, universe: Iterable[str]) -> list[str]:
+    """Wide-tier names whose displayed funding rate is at or below -threshold_bp."""
+
+    if threshold_bp <= 0:
+        return []
+    allowed = set(universe)
+    symbols = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        symbol = str(row.get("symbol") or "").upper()
+        if symbol not in allowed:
+            continue
+        raw = row.get("fundingRate")
+        if raw is None:
+            continue
+        try:
+            rate = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if rate * 10_000.0 <= -threshold_bp:
+            symbols.add(symbol)
+    return sorted(symbols)
 
 
 def shard_topics(topics: list[str], per_connection: int) -> list[list[str]]:
@@ -650,8 +689,8 @@ class Snapshots:
     def due(self, now_ns: int) -> bool:
         return self.last_day != utc_day(now_ns)
 
-    def take(self, now_ns: int) -> list[dict[str, Any]]:
-        """Write both snapshots; return the instrument rows for the universe."""
+    def take(self, now_ns: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Write both snapshots; return the instrument and ticker rows."""
 
         instruments = fetch_instruments(self.rest_base)
         tickers = fetch_tickers(self.rest_base)
@@ -691,7 +730,7 @@ class Snapshots:
             )
         self.last_day = day
         self.last_ns = now_ns
-        return instruments
+        return instruments, tickers
 
 
 @dataclass
@@ -791,6 +830,8 @@ class ForwardCapture:
         self.args = args
         self.deep_symbols = symbols
         self.wide_symbols: list[str] = []
+        self.promoted_symbols: list[str] = []
+        self.promoted_since: dict[str, str] = {}
         self.root = args.root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.manifest = Manifest(self.root)
@@ -820,6 +861,7 @@ class ForwardCapture:
         self.snapshot_failures = 0
         self.shards: list[Shard] = []
         self.wide_shards: list[Shard] = []
+        self.promoted_shards: list[Shard] = []
         self.shard_lock = threading.Lock()
         self.next_shard_index = 0
         self.worker = threading.Thread(target=self._write_loop, name="forward-writer", daemon=True)
@@ -838,6 +880,7 @@ class ForwardCapture:
         self._refresh_universe(time.time_ns())
         self.shards = self._start_shards(subscription_topics(self.deep_symbols, self.args.depth))
         self.wide_shards = self._start_shards(wide_topics(self.wide_symbols))
+        self.promoted_shards = self._start_shards(promoted_topics(self.promoted_symbols, self.args.depth))
         self.maintainer.start()
         try:
             self.stop.wait()
@@ -864,7 +907,7 @@ class ForwardCapture:
 
     def _all_shards(self) -> list[Shard]:
         with self.shard_lock:
-            return [*self.shards, *self.wide_shards]
+            return [*self.shards, *self.wide_shards, *self.promoted_shards]
 
     def _start_shards(self, topics: list[str]) -> list[Shard]:
         shards = []
@@ -893,24 +936,37 @@ class ForwardCapture:
 
     # ------------------------------------------------------------- universe
 
-    def _refresh_universe(self, now_ns: int) -> bool:
-        """Take the daily snapshot; return whether the wide tier's symbol set changed."""
+    def _refresh_universe(self, now_ns: int) -> tuple[bool, bool]:
+        """Take the daily snapshot; return whether the wide tier and the
+        promoted set changed."""
 
         try:
-            instruments = self.snapshots.take(now_ns)
+            instruments, tickers = self.snapshots.take(now_ns)
         except Exception as exc:  # noqa: BLE001 - the venue's REST is optional to the tape
             self.snapshot_failures += 1
             logging.warning("instrument snapshot failed; keeping the last universe: %s", exc)
-            return False
+            return False, False
         if self.args.wide_universe is None:
-            return False
+            return False, False
         deep = set(self.deep_symbols)
         wide = [symbol for symbol in linear_usdt_perpetuals(instruments) if symbol not in deep]
-        changed = wide != self.wide_symbols
-        if changed:
+        wide_changed = wide != self.wide_symbols
+        if wide_changed:
             logging.info("wide tier has %d symbols (was %d)", len(wide), len(self.wide_symbols))
         self.wide_symbols = wide
-        return changed
+        today = utc_day(now_ns)
+        for symbol in funding_promoted(tickers, threshold_bp=self.args.deep_funding_bp, universe=wide):
+            self.promoted_since[symbol] = today
+        cutoff = (datetime.fromisoformat(today) - timedelta(days=PROMOTION_DAYS - 1)).date().isoformat()
+        self.promoted_since = {
+            symbol: day for symbol, day in self.promoted_since.items() if day >= cutoff and symbol in set(wide)
+        }
+        promoted = sorted(self.promoted_since)
+        promoted_changed = promoted != self.promoted_symbols
+        if promoted_changed:
+            logging.info("funding-promoted deep tier has %d symbols (was %d): %s", len(promoted), len(self.promoted_symbols), promoted)
+        self.promoted_symbols = promoted
+        return wide_changed, promoted_changed
 
     def _restart_wide_shards(self) -> None:
         old = self.wide_shards
@@ -921,6 +977,16 @@ class ForwardCapture:
         with self.shard_lock:
             self.wide_shards = []
         self.wide_shards = self._start_shards(wide_topics(self.wide_symbols))
+
+    def _restart_promoted_shards(self) -> None:
+        old = self.promoted_shards
+        for shard in old:
+            shard.close()
+        for shard in old:
+            shard.join()
+        with self.shard_lock:
+            self.promoted_shards = []
+        self.promoted_shards = self._start_shards(promoted_topics(self.promoted_symbols, self.args.depth))
 
     # -------------------------------------------------------------- writing
 
@@ -970,8 +1036,11 @@ class ForwardCapture:
         self.disk_blocked = not self.retention.writable()
         now_ns = time.time_ns()
         if self.snapshots.due(now_ns) and not self.stop.is_set():
-            if self._refresh_universe(now_ns):
+            wide_changed, promoted_changed = self._refresh_universe(now_ns)
+            if wide_changed:
                 self._restart_wide_shards()
+            if promoted_changed:
+                self._restart_promoted_shards()
         self._write_status()
 
     def _write_status(self) -> None:
@@ -983,6 +1052,8 @@ class ForwardCapture:
             "deep_symbols": len(self.deep_symbols),
             "wide_universe": self.args.wide_universe,
             "wide_symbols": len(self.wide_symbols),
+            "deep_funding_bp": self.args.deep_funding_bp,
+            "promoted_symbols": self.promoted_symbols,
             "shards": [shard.status() for shard in self._all_shards()],
             "received_frames": self.received_frames,
             "written_rows": self.written_rows,
@@ -998,7 +1069,7 @@ class ForwardCapture:
         }
         atomic_json(self.root / "status.json", payload)
         logging.info(
-            "capture status frames=%d rows=%d dropped=%d disk_dropped=%d queued=%d disk_blocked=%s deep=%d wide=%d",
+            "capture status frames=%d rows=%d dropped=%d disk_dropped=%d queued=%d disk_blocked=%s deep=%d wide=%d promoted=%d",
             self.received_frames,
             self.written_rows,
             self.dropped_frames,
@@ -1007,6 +1078,7 @@ class ForwardCapture:
             self.disk_blocked,
             len(self.deep_symbols),
             len(self.wide_symbols),
+            len(self.promoted_symbols),
         )
 
 
@@ -1058,6 +1130,12 @@ def parser() -> argparse.ArgumentParser:
         choices=WIDE_UNIVERSES,
         default=None,
         help="also record every other listed USDT perpetual, without the 50-level book",
+    )
+    result.add_argument(
+        "--deep-funding-bp",
+        type=float,
+        default=DEFAULT_DEEP_FUNDING_BP,
+        help="promote a wide-tier name to the deep tier while its funding rate is at or below minus this; 0 disables",
     )
     result.add_argument("--depth", type=int, default=50, choices=(50,))
     result.add_argument("--segment-max-mb", type=float, default=64.0)

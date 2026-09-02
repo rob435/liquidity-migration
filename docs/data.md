@@ -74,8 +74,8 @@ Two tiers:
 
 | Tier | Symbols | Feeds |
 | --- | --- | --- |
-| deep | [`deploy/forward-capture-symbols.txt`](../deploy/forward-capture-symbols.txt): the sleeves' entry universe and the maker canary names | 50-level book snapshots and deltas, top of book, every public trade, the ticker, every liquidation |
-| wide | every other USDT perpetual the venue lists as trading, re-read once a day | top of book, every public trade, the ticker, every liquidation |
+| deep | [`deploy/forward-capture-symbols.txt`](../deploy/forward-capture-symbols.txt): LONG's entry universe and the maker canary names; plus, for the day it qualifies and the next, any listed name whose funding rate is at or below -10 bp, the crowd CARRY enters on | 50-level book snapshots and deltas, top of book, every public trade, the ticker, every liquidation |
+| wide | every other USDT perpetual the venue lists as trading, re-read once a day with the funding promotion | top of book, every public trade, the ticker, every liquidation |
 
 The ticker carries last, mark, and index price, open interest and its value,
 the funding rate and next funding time, best bid and ask with sizes, and 24h
