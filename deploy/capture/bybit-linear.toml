@@ -31,7 +31,11 @@ cadence = "day"
 [budget]
 # Measured 2026-09-02: the 81-name deep tier alone drew 40-80 GB a day inbound.
 monthly_gb = 1300
-shed = ["movers:book:50", "surging:book:50", "movers:trades", "surging:trades", "core:book:1", "crowded:book:1"]
+shed = [
+  "bursting:book:50", "flooding:book:50", "levering:book:50", "movers:book:50", "surging:book:50", "overheated:book:50",
+  "bursting:trades", "flooding:trades", "levering:trades", "movers:trades", "surging:trades",
+  "core:book:1", "crowded:book:1",
+]
 
 # Names that always get the full treatment whatever their rank: the maker canary.
 [[tier]]
@@ -53,18 +57,45 @@ name = "crowded"
 feeds = ["book:50", "book:1", "trades"]
 universe = { kind = "funding_below", threshold_bp = 8, sticky_hours = 48, quote = "USDT", exclude_tiers = ["pinned", "core"] }
 
+# The crowd fee at or above +8 bp: longs paying up. The squeeze and the short
+# side of the carry, the mirror of `crowded`.
+[[tier]]
+name = "overheated"
+feeds = ["book:50", "book:1", "trades"]
+universe = { kind = "funding_above", threshold_bp = 8, sticky_hours = 48, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded"] }
+
 # Turnover three times what the day's snapshot showed: the pump LONG's trigger
 # family looks for, in a name that was not in the top thirty when it started.
 [[tier]]
 name = "surging"
 feeds = ["book:50", "book:1", "trades"]
-universe = { kind = "turnover_surge", ratio = 3, sticky_hours = 24, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded"] }
+universe = { kind = "turnover_surge", ratio = 3, sticky_hours = 24, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded", "overheated"] }
 
-# A 24h move of fifteen percent either way.
+# The day's ten biggest movers either way, live; a name leaves below rank 15.
 [[tier]]
 name = "movers"
 feeds = ["book:50", "book:1", "trades"]
-universe = { kind = "price_move", pct = 0.15, sticky_hours = 24, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded", "surging"] }
+universe = { kind = "top_movers", top = 10, leave_top = 15, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded", "overheated", "surging"] }
+
+# A five percent move inside an hour, kept six hours: the pop as it happens.
+[[tier]]
+name = "bursting"
+feeds = ["book:50", "book:1", "trades"]
+universe = { kind = "price_burst", pct = 0.05, window_hours = 1, sticky_hours = 6, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded", "overheated", "surging", "movers"] }
+
+# An hour that traded three average hours more than the same hour yesterday.
+[[tier]]
+name = "flooding"
+feeds = ["book:50", "book:1", "trades"]
+universe = { kind = "volume_burst", ratio = 3, window_hours = 1, sticky_hours = 6, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded", "overheated", "surging", "movers", "bursting"] }
+
+# Open interest up or down ten percent inside an hour: leverage piling in or
+# being flushed. Bybit pushes open interest on the ticker, so this costs nothing
+# to watch.
+[[tier]]
+name = "levering"
+feeds = ["book:50", "book:1", "trades"]
+universe = { kind = "oi_change", pct = 0.10, window_hours = 1, sticky_hours = 6, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded", "overheated", "surging", "movers", "bursting", "flooding"] }
 
 # Every other USDT perpetual the venue lists as trading: the ticker and the
 # liquidations, nothing heavier.

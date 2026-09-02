@@ -289,3 +289,37 @@ def test_the_budget_names_a_monthly_allowance_and_pairs_that_exist() -> None:
         parse(MINIMAL + '\n[budget]\nmonthly_gb = 10\nrestore_below = 1.5\n')
     with pytest.raises(ConfigError, match="positive"):
         parse(MINIMAL + '\n[budget]\nmonthly_gb = 0\n')
+
+
+def test_the_other_live_kinds_parse_with_their_own_dials() -> None:
+    hot = parse(_with_universe('{ kind = "funding_above", threshold_bp = 8, sticky_hours = 48 }')).tiers[0].universe
+    assert (hot.kind, hot.threshold_bp, hot.sticky_hours, hot.live, hot.window_hours) == ("funding_above", 8.0, 48.0, True, 0.0)
+    with pytest.raises(ConfigError, match="threshold_bp"):
+        parse(_with_universe('{ kind = "funding_above" }'))
+
+    movers = parse(_with_universe('{ kind = "top_movers", top = 10 }')).tiers[0].universe
+    assert (movers.kind, movers.top, movers.leave_top, movers.live) == ("top_movers", 10, 15, True)
+    with pytest.raises(ConfigError, match="top > 0"):
+        parse(_with_universe('{ kind = "top_movers" }'))
+
+    burst = parse(_with_universe('{ kind = "price_burst", pct = 0.05 }')).tiers[0].universe
+    assert (burst.kind, burst.pct, burst.window_hours, burst.sticky_hours) == ("price_burst", 0.05, 1.0, 48.0)
+    with pytest.raises(ConfigError, match="pct > 0"):
+        parse(_with_universe('{ kind = "price_burst" }'))
+    with pytest.raises(ConfigError, match="window_hours > 0"):
+        parse(_with_universe('{ kind = "price_burst", pct = 0.05, window_hours = 0 }'))
+
+    flood = parse(_with_universe('{ kind = "volume_burst", ratio = 3, window_hours = 2, sticky_hours = 6 }')).tiers[0].universe
+    assert (flood.kind, flood.ratio, flood.window_hours, flood.sticky_hours) == ("volume_burst", 3.0, 2.0, 6.0)
+    with pytest.raises(ConfigError, match="ratio > 0"):
+        parse(_with_universe('{ kind = "volume_burst" }'))
+
+    lever = parse(_with_universe('{ kind = "oi_change", pct = 0.1, window_hours = 0.5 }')).tiers[0].universe
+    assert (lever.kind, lever.pct, lever.window_hours) == ("oi_change", 0.1, 0.5)
+    with pytest.raises(ConfigError, match="pct > 0"):
+        parse(_with_universe('{ kind = "oi_change" }'))
+
+
+def test_history_hours_is_the_longest_window_any_tier_looks_over() -> None:
+    assert parse(MINIMAL).history_hours == 0.0
+    assert parse(_with_universe('{ kind = "volume_burst", ratio = 3, window_hours = 2 }')).history_hours == 2.0

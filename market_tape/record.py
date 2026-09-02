@@ -7,10 +7,11 @@ websocket connections (shards), and writes every normalized row through
 
 Universes that change while the recorder runs are re-read on every maintenance
 tick. The `listed` kind follows the venue's table snapshots; the live kinds
-(`top_turnover`, `funding_below`, `turnover_surge`, `price_move`) follow the
-ticker stream the recorder is already writing, so a name whose funding rate
-collapses or whose turnover explodes gets its deep feeds within one tick, not
-at the next daily snapshot. Topics are added to and removed from the live
+(ranked turnover and movers, funding either side of a line, turnover and
+volume surges, price bursts, open-interest jumps) follow the ticker stream the
+recorder is already writing, so a name whose funding rate collapses or whose
+turnover explodes gets its deep feeds within one tick, not at the next daily
+snapshot. Topics are added to and removed from the live
 connections in place; a connection only reconnects when the venue drops it.
 
 Every received byte is metered per tier and per feed. With a budget in the
@@ -42,7 +43,17 @@ from typing import Any, Iterable, Mapping
 
 import websocket
 
-from market_tape.config import BudgetSettings, CaptureConfig, ConfigError, Feed, Tier, load_symbol_file, validate_symbols
+from market_tape.config import (
+    RANKED_KINDS,
+    BudgetSettings,
+    CaptureConfig,
+    ConfigError,
+    Feed,
+    Tier,
+    Universe,
+    load_symbol_file,
+    validate_symbols,
+)
 from market_tape.schema import (
     KIND_BOOK_DELTA,
     KIND_BOOK_SNAPSHOT,
@@ -123,15 +134,37 @@ class SymbolLive:
     funding_rate: float | None = None
     turnover_24h: float | None = None
     price_change_24h: float | None = None
+    price: float | None = None
+    open_interest: float | None = None
     updated_ns: int = 0
+
+    def copy(self) -> "SymbolLive":
+        return SymbolLive(self.funding_rate, self.turnover_24h, self.price_change_24h, self.price, self.open_interest, self.updated_ns)
+
+
+@dataclass(frozen=True, slots=True)
+class Sample:
+    """One remembered ticker reading, for the windowed universes."""
+
+    ns: int
+    turnover_24h: float | None
+    price: float | None
+    open_interest: float | None
+
+
+SAMPLE_SPACING_NS = 60 * 1_000_000_000
 
 
 class LiveState:
-    """What the ticker stream, and the last table snapshot, say about every symbol."""
+    """What the ticker stream, and the last table snapshot, say about every symbol.
+    With `history_ns` > 0 it also remembers one sample a minute per symbol that
+    far back, so a universe can ask what a name looked like an hour ago."""
 
-    def __init__(self) -> None:
+    def __init__(self, history_ns: int = 0) -> None:
         self.lock = threading.Lock()
         self.symbols: dict[str, SymbolLive] = {}
+        self.history: dict[str, deque[Sample]] = {}
+        self.history_ns = max(0, int(history_ns))
         self.baseline_turnover: dict[str, float] = {}
         self.baseline_ns = 0
 
@@ -144,7 +177,39 @@ class LiveState:
                 live.turnover_24h = float(values["turnover_24h"])
             if "price_change_24h_pct" in values:
                 live.price_change_24h = float(values["price_change_24h_pct"])
+            if "mark_price" in values:
+                live.price = float(values["mark_price"])
+            elif "last_price" in values and live.price is None:
+                live.price = float(values["last_price"])
+            if "open_interest" in values:
+                live.open_interest = float(values["open_interest"])
             live.updated_ns = received_ns
+            if self.history_ns:
+                self._sample(symbol, live, received_ns)
+
+    def _sample(self, symbol: str, live: SymbolLive, now_ns: int) -> None:
+        samples = self.history.setdefault(symbol, deque())
+        if samples and now_ns - samples[-1].ns < SAMPLE_SPACING_NS:
+            return
+        samples.append(Sample(now_ns, live.turnover_24h, live.price, live.open_interest))
+        # One sample older than the window stays, so a lookback exactly at the window's edge resolves.
+        while len(samples) > 1 and samples[1].ns <= now_ns - self.history_ns:
+            samples.popleft()
+
+    def earlier(self, symbol: str, at_ns: int) -> Sample | None:
+        """The newest remembered sample taken at or before `at_ns`; None when the
+        history does not reach back that far."""
+
+        with self.lock:
+            samples = self.history.get(symbol)
+            if not samples or samples[0].ns > at_ns:
+                return None
+            found = None
+            for sample in samples:
+                if sample.ns > at_ns:
+                    break
+                found = sample
+            return found
 
     def seed(self, funding: Mapping[str, float], turnovers: Mapping[str, float], now_ns: int) -> None:
         """A table snapshot: current funding and turnover for every listed name,
@@ -160,10 +225,7 @@ class LiveState:
 
     def view(self) -> tuple[dict[str, SymbolLive], dict[str, float]]:
         with self.lock:
-            return (
-                {symbol: SymbolLive(live.funding_rate, live.turnover_24h, live.price_change_24h, live.updated_ns) for symbol, live in self.symbols.items()},
-                dict(self.baseline_turnover),
-            )
+            return ({symbol: live.copy() for symbol, live in self.symbols.items()}, dict(self.baseline_turnover))
 
 
 # ------------------------------------------------------------------- shards
@@ -420,7 +482,7 @@ class Recorder:
                     raise ConfigError(f"tier {tier.name!r}: {tier.universe.path} names no symbols")
                 self.static_symbols[tier.name] = symbols
         self.tables: dict[str, list[dict[str, Any]]] | None = None
-        self.live = LiveState()
+        self.live = LiveState(history_ns=int(config.history_hours * 3600 * 1e9 * 1.25))
         self.meter = ByteMeter(time.time_ns())
         self.budget = BudgetController(config.budget, self.meter)
         self.members: dict[str, set[str]] = {tier.name: set() for tier in config.tiers}
@@ -589,8 +651,8 @@ class Recorder:
                 symbols = set(self.static_symbols[tier.name])
             elif universe.kind == "listed":
                 symbols = set(listed(universe.quote))
-            elif universe.kind == "top_turnover":
-                symbols = self._top_turnover(tier, live, allowed(universe.quote))
+            elif universe.kind in RANKED_KINDS:
+                symbols = self._ranked(tier, live, allowed(universe.quote))
             else:
                 symbols = self._sticky(tier, now_ns, live, baseline, allowed(universe.quote), instruments_known=bool(instruments))
             excluded: set[str] = set()
@@ -599,12 +661,16 @@ class Recorder:
             resolved[tier.name] = sorted(symbols - excluded)
         return resolved
 
-    def _top_turnover(self, tier: Tier, live: Mapping[str, SymbolLive], allowed: set[str]) -> set[str]:
+    def _ranked(self, tier: Tier, live: Mapping[str, SymbolLive], allowed: set[str]) -> set[str]:
         universe = tier.universe
-        ranked = sorted(
-            (symbol for symbol in allowed if live.get(symbol) is not None and live[symbol].turnover_24h is not None),
-            key=lambda symbol: (-(live[symbol].turnover_24h or 0.0), symbol),
-        )
+
+        def measure(state: SymbolLive) -> float | None:
+            if universe.kind == "top_turnover":
+                return state.turnover_24h
+            return None if state.price_change_24h is None else abs(state.price_change_24h)
+
+        scored = {symbol: measure(live[symbol]) for symbol in allowed if symbol in live}
+        ranked = sorted((symbol for symbol, score in scored.items() if score is not None), key=lambda symbol: (-(scored[symbol] or 0.0), symbol))
         rank = {symbol: position + 1 for position, symbol in enumerate(ranked)}
         leave = max(universe.leave_top, universe.top)
         current = self.members[tier.name]
@@ -624,19 +690,24 @@ class Recorder:
     ) -> set[str]:
         universe = tier.universe
         stamps = self.qualified_ns[tier.name]
+        window_ns = int(universe.window_hours * 3600 * 1e9)
         for symbol in allowed:
             state = live.get(symbol)
             if state is None:
                 continue
             if universe.kind == "funding_below":
                 qualifies = state.funding_rate is not None and state.funding_rate * 10_000.0 <= -universe.threshold_bp
+            elif universe.kind == "funding_above":
+                qualifies = state.funding_rate is not None and state.funding_rate * 10_000.0 >= universe.threshold_bp
             elif universe.kind == "turnover_surge":
                 base = baseline.get(symbol)
                 qualifies = (
                     state.turnover_24h is not None and base is not None and base > 0.0 and state.turnover_24h >= universe.ratio * base
                 )
-            else:
+            elif universe.kind == "price_move":
                 qualifies = state.price_change_24h is not None and abs(state.price_change_24h) >= universe.pct
+            else:
+                qualifies = self._windowed(universe, state, self.live.earlier(symbol, now_ns - window_ns), window_ns)
             if qualifies:
                 stamps[symbol] = now_ns
         sticky_ns = int(universe.sticky_hours * 3600 * 1e9)
@@ -646,6 +717,27 @@ class Recorder:
         members = set(stamps)
         self.members[tier.name] = members
         return members
+
+    @staticmethod
+    def _windowed(universe: Universe, now: SymbolLive, then: Sample | None, window_ns: int) -> bool:
+        """The windowed kinds compare the live reading with the sample one window back."""
+
+        if then is None:
+            return False
+        if universe.kind == "price_burst":
+            if now.price is None or then.price is None or then.price <= 0.0:
+                return False
+            return abs(now.price / then.price - 1.0) >= universe.pct
+        if universe.kind == "oi_change":
+            if now.open_interest is None or then.open_interest is None or then.open_interest <= 0.0:
+                return False
+            return abs(now.open_interest / then.open_interest - 1.0) >= universe.pct
+        # volume_burst: the growth of the rolling 24h turnover over the window is
+        # what the window traded beyond the same window a day earlier.
+        if now.turnover_24h is None or then.turnover_24h is None or now.turnover_24h <= 0.0:
+            return False
+        average_window = now.turnover_24h * window_ns / (24 * 3600 * 1e9)
+        return now.turnover_24h - then.turnover_24h >= universe.ratio * average_window
 
     def _seed_live(self, tables: Mapping[str, list[dict[str, Any]]], now_ns: int) -> None:
         tickers = list(tables.get("tickers") or [])

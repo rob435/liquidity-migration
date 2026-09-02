@@ -88,11 +88,15 @@ On the host:
 | Bybit | pinned | [`deploy/forward-capture-symbols.txt`](../deploy/forward-capture-symbols.txt): the maker canary | 50-level book, top of book, every trade, the ticker, every liquidation |
 | Bybit | core | the 30 busiest USDT perpetuals by 24h turnover, live; a name leaves below rank 45 | the same |
 | Bybit | crowded | any listed USDT perpetual whose funding rate is at or below -8 bp, for 48 hours after it last was | 50-level book, top of book, every trade |
+| Bybit | overheated | funding rate at or above +8 bp, for 48 hours after it last was | the same |
 | Bybit | surging | 24h turnover three times what the day's snapshot showed, for 24 hours | the same |
-| Bybit | movers | a 24h price move of fifteen percent either way, for 24 hours | the same |
+| Bybit | movers | the ten biggest 24h price moves either way, live; a name leaves below rank 15 | the same |
+| Bybit | bursting | a five percent price move inside an hour, for six hours | the same |
+| Bybit | flooding | an hour that traded three average hours more than the same hour a day earlier, for six hours | the same |
+| Bybit | levering | open interest up or down ten percent inside an hour, for six hours | the same |
 | Bybit | wide | every other USDT perpetual the venue lists as trading | the ticker, every liquidation |
 | Binance | core | the 20 busiest USDT perpetuals by 24h turnover, live; a name leaves below rank 30 | 1000-level book snapshots and diffs, top of book, aggregate trades, mark and index price with funding, the 24h ticker, every liquidation |
-| Binance | crowded, surging, movers | as Bybit's | the 1000-level book, top of book, aggregate trades |
+| Binance | crowded, overheated, surging, movers, bursting, flooding | as Bybit's; no open-interest tier, since Binance pushes no open interest and a poll costs one REST call per name | the 1000-level book, top of book, aggregate trades |
 | Binance | wide | every other USDT perpetual the venue lists as trading | mark and index price with funding, the 24h ticker, every liquidation |
 
 Binance publishes the last settled funding rate where Bybit publishes the
@@ -109,7 +113,7 @@ inbound allowance for the month (`[budget]` in its config: 1,300 GB for Bybit,
 1,000 GB for Binance, against the host's 4 TB line with the Drive uploads and
 backups on top). When its projection from the last day of bytes runs over, it
 gives up the configured `tier:feed` pairs in order, one an hour, deep books of
-the movers and surging tiers first and the wide ticker last, and restores them
+the short-lived tiers first and the wide ticker last, and restores them
 in reverse once under pace; the host watchdog warns while a recorder is over.
 Measured on the host on 2026-09-02, the 81-name deep tier drew 40 to 80 GB a
 day inbound, and top of book plus trades for 660 quiet names about as much

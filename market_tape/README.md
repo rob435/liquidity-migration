@@ -43,15 +43,23 @@ pushes them, and it is cheap. The live universes read it as it is written:
 | Kind | Promotes a name when | Meant for |
 | --- | --- | --- |
 | `top_turnover` | its 24h turnover ranks in the top `top`; it leaves below rank `leave_top` | LONG's liquid universe, following the action |
+| `top_movers` | the size of its 24h price change ranks in the top `top`, either way; same `leave_top` | the day's movers |
 | `funding_below` | its funding rate is at or below `-threshold_bp` | the crowd fee (funding) CARRY and Exodus trade |
+| `funding_above` | its funding rate is at or above `threshold_bp` | longs paying up: squeezes, the short side of the carry |
 | `turnover_surge` | its 24h turnover is `ratio` times what the day's table snapshot showed | a pump starting in a name outside the top |
 | `price_move` | its 24h price change is at least `pct` either way | large moves, up or down |
+| `price_burst` | its price moved `pct` either way over the last `window_hours` | the pop as it happens |
+| `volume_burst` | its 24h turnover grew, over the last `window_hours`, by `ratio` average windows | an hour trading far beyond the same hour a day ago |
+| `oi_change` | its open interest moved `pct` either way over the last `window_hours` | leverage piling in or being flushed |
 
 A name that qualified stays for `sticky_hours` after its last qualifying
-observation. Promotion changes the live subscription in place: topics are
-added to and removed from the open connections, and a connection only
-reconnects when the venue drops it. `listed` follows the daily table snapshot;
-`symbols` and `file` are fixed.
+observation; the two ranked kinds use `leave_top` instead. The windowed kinds
+compare against a ticker sample the recorder took `window_hours` earlier (one
+sample a minute is kept, as far back as the longest window), so they see
+nothing until it has run that long. Promotion changes the live subscription in
+place: topics are added to and removed from the open connections, and a
+connection only reconnects when the venue drops it. `listed` follows the daily
+table snapshot; `symbols` and `file` are fixed.
 
 Every received byte is metered per tier and per feed (`status.json` →
 `bytes`). With a `[budget]` the recorder projects a month from its last day of

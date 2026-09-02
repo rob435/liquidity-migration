@@ -92,6 +92,26 @@ edit STATE.md to match.
   `rclone purge` cannot remove the folder itself, because the remote is
   authorized with the `drive.file` scope and a folder delete needs write
   access to every child.
+- **2026-09-02 — The recorders watch every side of the action.** The owner
+  asked for capture wherever there might be an edge, not only where a sleeve
+  acts today: positive funding, the day's movers, volume and volatility. Five
+  live universe kinds join the recorder, all read off the ticker the wide tier
+  already records: `funding_above` (the crowd fee at or above a line, longs
+  paying up), `top_movers` (the biggest 24h moves either way, ranked with the
+  same hysteresis as `top_turnover`), `price_burst` (a move of `pct` inside a
+  window), `volume_burst` (the 24h turnover growing, inside a window, by a
+  multiple of an average window's share — the hour trading far beyond the same
+  hour a day ago), and `oi_change` (open interest up or down by `pct` inside a
+  window). The windowed kinds compare against the recorder's own ticker
+  history, one sample a minute kept as far back as the longest window. On the
+  host, Bybit gains the `overheated` (+8 bp, 48 h), `bursting` (5% in an hour,
+  6 h), `flooding` (three average hours of extra turnover in an hour, 6 h),
+  and `levering` (10% open interest in an hour, 6 h) tiers, and `movers`
+  becomes the day's ten biggest moves (leaving below rank 15) so its cost is
+  bounded; Binance gains the same except `levering`, since it pushes no open
+  interest. The budget sheds the short-lived tiers' deep books first, then
+  their trades, then the core and crowded top of book. Not a host change until
+  the next deploy.
 - **2026-09-02 — The recorders follow the action live and keep to a byte
   budget.** The owner asked why deep capture waited for a daily snapshot to
   notice a crowded name, and pointed at the host's 4 TB a month line. Read on

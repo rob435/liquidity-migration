@@ -26,7 +26,11 @@ cadence = "day"
 
 [budget]
 monthly_gb = 1000
-shed = ["movers:book:1000", "surging:book:1000", "movers:trades", "surging:trades", "core:book:1", "wide:ticker"]
+shed = [
+  "bursting:book:1000", "flooding:book:1000", "movers:book:1000", "surging:book:1000", "overheated:book:1000",
+  "bursting:trades", "flooding:trades", "movers:trades", "surging:trades",
+  "core:book:1", "wide:ticker",
+]
 
 [[tier]]
 name = "core"
@@ -39,14 +43,31 @@ feeds = ["book:1000", "book:1", "trades"]
 universe = { kind = "funding_below", threshold_bp = 8, sticky_hours = 48, quote = "USDT", exclude_tiers = ["core"] }
 
 [[tier]]
+name = "overheated"
+feeds = ["book:1000", "book:1", "trades"]
+universe = { kind = "funding_above", threshold_bp = 8, sticky_hours = 48, quote = "USDT", exclude_tiers = ["core", "crowded"] }
+
+[[tier]]
 name = "surging"
 feeds = ["book:1000", "book:1", "trades"]
-universe = { kind = "turnover_surge", ratio = 3, sticky_hours = 24, quote = "USDT", exclude_tiers = ["core", "crowded"] }
+universe = { kind = "turnover_surge", ratio = 3, sticky_hours = 24, quote = "USDT", exclude_tiers = ["core", "crowded", "overheated"] }
 
 [[tier]]
 name = "movers"
 feeds = ["book:1000", "book:1", "trades"]
-universe = { kind = "price_move", pct = 0.15, sticky_hours = 24, quote = "USDT", exclude_tiers = ["core", "crowded", "surging"] }
+universe = { kind = "top_movers", top = 10, leave_top = 15, quote = "USDT", exclude_tiers = ["core", "crowded", "overheated", "surging"] }
+
+[[tier]]
+name = "bursting"
+feeds = ["book:1000", "book:1", "trades"]
+universe = { kind = "price_burst", pct = 0.05, window_hours = 1, sticky_hours = 6, quote = "USDT", exclude_tiers = ["core", "crowded", "overheated", "surging", "movers"] }
+
+# Open interest is not on any Binance stream and would take one REST call per name
+# per poll, so there is no open-interest tier here.
+[[tier]]
+name = "flooding"
+feeds = ["book:1000", "book:1", "trades"]
+universe = { kind = "volume_burst", ratio = 3, window_hours = 1, sticky_hours = 6, quote = "USDT", exclude_tiers = ["core", "crowded", "overheated", "surging", "movers", "bursting"] }
 
 [[tier]]
 name = "wide"
