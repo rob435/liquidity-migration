@@ -354,6 +354,11 @@ class Shard:
         sent = 0
         while self.reanchor_cursor < len(books) and sent < limit:
             chunk = books[self.reanchor_cursor : self.reanchor_cursor + REANCHOR_CHUNK]
+            if sent:
+                # Between chunks, not between a chunk's drop and re-take: the
+                # venue's incoming-message rate is what this spacing protects,
+                # and the gap it would add sits inside a symbol's blind moment.
+                time.sleep(LIVE_MESSAGE_SPACING_SECONDS)
             self._send_all(self.adapter.remove_messages(chunk))
             self._send_all(self.adapter.add_messages(chunk))
             self._after_subscribe(chunk)
