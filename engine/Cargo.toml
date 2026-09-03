@@ -21,5 +21,14 @@ license = "UNLICENSED"
 lto = "thin"
 codegen-units = 16
 
+# What CI tests with. Same optimizer as `release` — opt-level 3, no
+# debug-assertions, no overflow checks — without the link-time pass, which only
+# changes cross-crate inlining. `--all-targets` builds 34 test binaries and none
+# of them is ever deployed; thin LTO on each was 16 of the gate's 17 minutes.
+# The deployed binary and `cargo run --release -- bench` keep LTO.
+[profile.ci-test]
+inherits = "release"
+lto = false
+
 [profile.bench]
 debug = true

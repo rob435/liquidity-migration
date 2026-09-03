@@ -6,6 +6,40 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — `f06a89f4` deployed; the deploy gate stops paying thin LTO on
+  34 test binaries it never ships.**
+  - Deployed 20:28 UTC from the CI artifact. `deploy-ok
+    commit=f06a89f48980ea9a40a52fb77abaa900baeb4810`, rollback target
+    `ce252af8`, `real-money armed`, every unit on a fresh heartbeat.
+  - Verified on the host, splitting each hour-20 segment at the restart
+    timestamp: Binance writes `ticker`, `public_trade` and `liquidation` and no
+    book row of any kind; Bybit writes `orderbook_snapshot` + deltas + prints +
+    ticker for `BTCUSDT` and `TUTUSDT`, so `core:trades` is recording again
+    after being permanently shed under the old budget. `budget.shed` is empty
+    against the 1800 GB allowance, `dropped=0 disk_dropped=0`, and the log
+    carries `re-anchored 1 book topics for 2026-09-03T20`.
+  - Coverage is total by construction, not by sampling: the venue lists 855
+    instruments, of which 747 are USDT `LinearPerpetual` — and the tiers hold
+    716 (`wide`) + 30 (`core`) + 1 (`pinned`) = 747, with an open segment on
+    disk for each. 448 of those segments read 0 bytes because `SegmentWriter`
+    opens with `buffering=65536`; a thin name shows nothing until 64 KB
+    accumulate.
+  - **The gate was 20:50, and 16 of those minutes were one link-time pass.**
+    The CI Rust cache hits (13 `Compiling` lines, all of them workspace
+    crates), the last crate starts at 20:05:02, and `Finished release profile`
+    lands at 20:21:02. The whole suite *runs* in 7.8 s across 34 binaries. The
+    silence is `lto = "thin"` being applied to every one of those binaries.
+  - Fix: `[profile.ci-test]` inherits `release` and sets `lto = false`, and CI
+    tests with it. Same opt-level, same `debug_assertions`, same overflow
+    checks — LTO only changes cross-crate inlining. Measured cold on the same
+    machine: 1146 s CPU with thin LTO, 686 s without, a 40% cut. Test selection
+    is byte-identical, 1,687 tests either way.
+  - The deployed binary is unchanged: `[profile.release]` keeps thin LTO, and
+    the artifact build now runs as its own `rust-artifact` job *beside* the
+    tests instead of after them. `vps` gates on `[ci, rust, rust-artifact]`, so
+    a red test still blocks the deploy, and the artifact resolves by name so
+    nothing downstream moved.
+
 - **2026-09-03 — The capture earns its bandwidth: Binance stops recording books,
   Bybit gets the room, and every hour of tape anchors its own books.**
   - Verified first, on the running host: every name the funded engine holds is
