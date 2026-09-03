@@ -6,6 +6,44 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — A sleeve sizes against its own fills, never the account's
+  whole position: the 2026-08-22 1000PEPE hand-position sell-down, root-caused
+  and fixed.**
+  - What happened, from the funded WAL (segment 1 holds the imported
+    records): on 2026-08-22 between 08:37:12 and 08:40:43 UTC the venue held
+    33,180,700 `1000PEPEUSDT` long, of which LONG's own fills were 222,000
+    (5 fills, $895.33). The owner had opened the rest by hand. On its next
+    pass the LONG sleeve sent two reduce-only market sells tagged
+    `book-resize`, `eng-1787357335566-12` for 17,113,700 and `-13` for
+    16,067,000 — the venue's entire position down to LONG's own target — and
+    they filled in 331 prints over 26 seconds: $134,459.79 traded, $134.46
+    fee, about 9 bp arrival shortfall, roughly $257 all-in. No round trip was
+    recorded, no `ERROR` line, no CHANGELOG entry until this one. `engine
+    fills` charged all 336 prints to `long`.
+  - Root cause: `native_common::planner_facts` built each sleeve's `Held`
+    from `ctx.position()` — the account's whole holding — plus the sleeve's
+    in-flight quantity, and skipped a symbol only when *another sleeve* held
+    it (`foreign_position`). Exposure no engine order opened reads as
+    nobody's there, so a hand position passed straight into the planner as
+    the sleeve's own and was resized to the sleeve's target. The trait
+    contract already said `position()` is "the wrong number for a strategy to
+    hold inventory against"; the directional sleeves used it anyway. CARRY
+    and EXODUS share the same builder and had the same exposure.
+  - Fix: `Held` is now the sleeve's own signed fills (`my_position`) plus
+    its in-flight quantity, capped by the account reading. A symbol whose
+    venue position is entirely somebody else's, or sits on the other side of
+    the sleeve's own fills, yields no holding — the planner neither exits nor
+    resizes it. The fill sum is shaved of float dust at the `qty_step`'s
+    decimal precision, and where it covers the venue's figure the venue's
+    exact quantity is used, so partial-fill top-ups are unchanged.
+    Five tests in `native_common`; the first reproduces the 08-22 shape
+    (venue 33,180,700, own 222,000) and fails on the old code with
+    `left: 33180700.0, right: 222000.0`. `docs/trading_logic.md` §7 carries
+    the rule as item 4.
+  - Bundled, because any edit under `engine/` restarts the funded engine:
+    the unused `[profile.ci-test]` is gone from `engine/Cargo.toml` (the gate
+    tests debug; release tests run off the deploy path).
+
 - **2026-09-03 — Push runs stop queueing behind each other.**
   - Measured gate on `1e745078`: `rust` 3:57 (tests 2:57), artifact 5:46, ci
     1:50 — the deploy gate is the artifact, 5:46 against 20:50 this morning;

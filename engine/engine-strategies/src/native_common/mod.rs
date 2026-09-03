@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use engine_types::quantize::round_clean;
 use engine_types::{
     Action, InstrumentRule, Intent, OrderKind, Side, StopSpec, StrategyAccountSummary,
     StrategyCheckpoint, StrategyCtx, StrategyEvent, StrategyId, WorkPolicy,
@@ -622,11 +623,31 @@ pub fn planner_facts(ctx: &dyn StrategyCtx, symbols: &BTreeSet<String>) -> Plann
             continue;
         }
         let venue = ctx.position(symbol);
-        let signed_qty = venue
-            .as_ref()
-            .map(|position| signed(position.side, position.qty))
-            .unwrap_or(0.0)
-            + ctx.in_flight(symbol);
+        let in_flight = ctx.in_flight(symbol);
+        // The account reading is the account's whole holding, the owner's
+        // hand trades included, so it is not what a sleeve sizes against. Its
+        // own fills are; the reading only caps them, and flat at the venue is
+        // the fact whatever the fills sum to.
+        let signed_qty = match venue.as_ref() {
+            None => in_flight,
+            Some(position) => {
+                let at_venue = signed(position.side, position.qty);
+                let own = ctx.my_position(symbol) + in_flight;
+                let step = facts.rules.get(name).map_or(0.0, |rule| rule.qty_step);
+                let own = if step > 0.0 {
+                    round_clean(own.abs(), step).copysign(own)
+                } else {
+                    own
+                };
+                if own.abs() <= f64::EPSILON || own.signum() != at_venue.signum() {
+                    0.0
+                } else if at_venue.abs() <= own.abs() {
+                    at_venue
+                } else {
+                    own
+                }
+            }
+        };
         if signed_qty.abs() <= f64::EPSILON {
             continue;
         }
@@ -702,6 +723,88 @@ pub fn attributed_exposure_is_flat(ctx: &dyn StrategyCtx, symbols: &BTreeSet<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::mock_ctx::MockCtx;
+
+    const PEPE: &str = "1000PEPEUSDT";
+
+    fn pepe_ctx() -> (MockCtx, BTreeSet<String>) {
+        let mut ctx = MockCtx::new();
+        ctx.add_symbol(PEPE);
+        ctx.set_rule(
+            PEPE,
+            InstrumentRule {
+                tick_size: 0.000001,
+                qty_step: 100.0,
+                min_qty: 100.0,
+                min_notional: 5.0,
+            },
+        );
+        (ctx, BTreeSet::from([PEPE.to_owned()]))
+    }
+
+    // 2026-08-22 08:40 UTC, funded account: the venue held 33,180,700
+    // 1000PEPE, of which LONG's own fills were 222,000; the rest was the
+    // owner's hand position. The planner sized against the venue's whole
+    // holding and sold all of it in two reduce-only market orders.
+    #[test]
+    fn a_hand_position_on_top_of_the_sleeves_own_is_not_the_sleeves_to_size() {
+        let (mut ctx, symbols) = pepe_ctx();
+        ctx.set_position(PEPE, Side::Buy, 33_180_700.0, 0.0040);
+        ctx.set_my_position(PEPE, 222_000.0);
+
+        let held = planner_facts(&ctx, &symbols)
+            .held(PEPE)
+            .expect("the sleeve's own 222,000 is a holding");
+        assert_eq!(held.side, Side::Buy);
+        assert_eq!(
+            held.qty, 222_000.0,
+            "own fills, not the venue's whole position"
+        );
+    }
+
+    #[test]
+    fn a_position_only_the_owner_placed_is_nobodys_to_plan_against() {
+        let (mut ctx, symbols) = pepe_ctx();
+        ctx.set_hand_position(PEPE, Side::Buy, 33_180_700.0, 0.0040);
+
+        let facts = planner_facts(&ctx, &symbols);
+        assert!(facts.held(PEPE).is_none(), "{:?}", facts.held);
+    }
+
+    #[test]
+    fn the_account_reading_caps_what_the_sleeve_thinks_it_holds() {
+        // A hand close took part of it: the venue holds less than our fills
+        // sum to. The account reading is the fact.
+        let (mut ctx, symbols) = pepe_ctx();
+        ctx.set_position(PEPE, Side::Buy, 200_000.0, 0.0040);
+        ctx.set_my_position(PEPE, 300_000.0);
+
+        let held = planner_facts(&ctx, &symbols).held(PEPE).expect("held");
+        assert_eq!(held.qty, 200_000.0);
+    }
+
+    #[test]
+    fn a_venue_position_against_the_sleeves_own_side_is_not_its_holding() {
+        let (mut ctx, symbols) = pepe_ctx();
+        ctx.set_position(PEPE, Side::Sell, 500_000.0, 0.0040);
+        ctx.set_my_position(PEPE, 222_000.0);
+
+        assert!(planner_facts(&ctx, &symbols).held(PEPE).is_none());
+    }
+
+    #[test]
+    fn a_holding_the_log_and_the_venue_agree_on_keeps_the_venues_exact_quantity() {
+        let (mut ctx, symbols) = pepe_ctx();
+        ctx.set_position(PEPE, Side::Buy, 222_000.0, 0.0040);
+        // Summing fills leaves float dust; shaved at the step's precision, the
+        // two agree and the venue's figure is the one used.
+        ctx.set_my_position(PEPE, 222_000.0 - 1e-7);
+
+        let held = planner_facts(&ctx, &symbols).held(PEPE).expect("held");
+        assert_eq!(held.qty, 222_000.0);
+        assert_eq!(held.entry_px, 0.0040);
+    }
 
     #[derive(Serialize)]
     struct Config {

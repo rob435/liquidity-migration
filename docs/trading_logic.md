@@ -114,3 +114,6 @@ $$\text{Size} = \text{Base} \times M_{\text{depth}} \times M_{\text{persistence}
    * If a second sleeve signals an entry, it is blocked until the first sleeve is flat and fully reconciled.
 2. **Shared Capital Limits**: All sleeves draw against the shared gross exposure ceiling defined in the operational profile.
 3. **Rolling-Loss Circuit Breaker**: If total realized losses across all closed engine trades inside 24 hours reach the loss ceiling, **all entry orders across all sleeves are immediately blocked**. Existing positions continue to exit normally.
+4. **Own-Fills Sizing**: A sleeve plans exits and resizes against its own filled quantity plus its in-flight orders, capped by the account reading (`native_common::planner_facts`).
+   * Exposure no engine order opened — the owner's hand trades included — is nobody's: never resized, never exited, never counted as the sleeve's. A venue position on the other side of the sleeve's own fills is not its holding.
+   * The fill sum is shaved of float dust at the `qty_step`'s decimal precision; where it then covers the venue's figure, the venue's exact quantity is used.
