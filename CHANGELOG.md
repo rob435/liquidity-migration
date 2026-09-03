@@ -128,6 +128,17 @@ edit STATE.md to match.
   over-subscribed, and the capture services' 1 GB memory ceiling is page cache
   from their own writes (anon 127 and 101 MB), not a leak.
 
+- **2026-09-02 — Deployed `76a8fc59` at 22:45 UTC: decoupled Mainnet deployment, Unix socket IPC, and the Rust market-tape crate.**
+  Mainnet deployment was decoupled from Demo verification: Demo was deployed,
+  restarted, and checked for fresh heartbeats while Mainnet continued actively
+  trading and quoting. Mainnet pre-flight and configuration validation ran in the
+  background; the funded engine swap took 9 seconds. Signal delivery switched from
+  filesystem spool polling to direct Unix domain socket streaming (`stream.sock`),
+  cutting signal delivery latency to microseconds and eliminating SSD inode churn,
+  with automatic disk spool fallback during restarts. The native `market-tape`
+  Rust crate was added to the workspace and installed into `/opt/liquidity-migration-engine/bin/market-tape`.
+  Both engines and signal workers heartbeated within 2 seconds of startup, and both
+  market recorders are active with zero dropped frames.
 - **2026-09-02 — The recorders are cut to fit their byte budgets.** Four
   minutes after the Binance fix, the meters read 0.64 MB/s inbound on Bybit
   (1.7 TB a month against 1.3) and 1.18 MB/s on Binance (3.0 TB against 1.0).
