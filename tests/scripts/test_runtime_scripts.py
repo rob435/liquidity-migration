@@ -6,10 +6,14 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "scripts" / "deploy_vps_live.sh"
 SYSTEMD = ROOT / "deploy" / "systemd"
+WORKFLOW = ROOT / ".github" / "workflows" / "vps-deploy.yml"
 
 
 def _remote_script() -> str:
@@ -164,6 +168,24 @@ def test_ci_workflow_dispatch_covers_deploy_rollback_verify_and_disarm() -> None
     assert "deploy|rollback|verify) ;;" in workflow
     assert "disarm-mainnet" in workflow
     assert "rollout" not in workflow.replace("# pending slot", "")
+
+
+def test_the_ci_deploy_hands_the_host_a_token_for_the_private_fetch() -> None:
+    # The host fetches the exact commit itself. This repository is private and
+    # nothing provisions a host credential, so the run's own token has to
+    # travel with the deploy or the fetch asks for a username it cannot get.
+    workflow: dict[str, Any] = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    assert workflow["permissions"]["contents"] == "read"
+    steps = workflow["jobs"]["vps"]["steps"]
+    runner = next(
+        step for step in steps if "scripts/deploy_vps_live.sh" in (step.get("run") or "")
+    )
+    assert runner["env"]["GITHUB_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
+    # It is only a fix because the remote body spends it on that fetch.
+    remote = _remote_script()
+    assert 'if [ -n "$GITHUB_TOKEN" ] && [[ "$REPO_URL" == https://github.com/* ]]; then' in remote
+    assert "git_authorized fetch --no-tags" in remote
+    assert 'printf \'GITHUB_TOKEN=%q\\n\' "$GITHUB_TOKEN"' in DEPLOY.read_text(encoding="utf-8")
 
 
 def test_a_realm_that_does_not_come_up_rolls_back_to_the_last_finished_deploy() -> None:

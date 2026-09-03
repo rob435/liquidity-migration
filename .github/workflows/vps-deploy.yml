@@ -261,6 +261,12 @@ jobs:
       - name: Run VPS mode
         env:
           DEPLOY_MODE_INPUT: ${{ inputs.mode }}
+          # The host fetches the exact commit from a private repository. Its own
+          # https credential is not provisioned by anything here, so the deploy
+          # carries this run's contents:read token to the host, which spends it
+          # on one fetch in a 0600 config it then deletes. Without it the fetch
+          # asks for a username, prompts are disabled, and the deploy stops.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           case "$DEPLOY_MODE_INPUT" in
