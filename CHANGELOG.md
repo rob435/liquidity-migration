@@ -52,6 +52,40 @@ edit STATE.md to match.
     distinct Drive prefixes, and every row names its own `venue` (the Binance
     tape reads back `{'binance'}` and nothing else).
 
+- **2026-09-03 — Incident: the CI deploy could not reach the funded host,
+  because it sends the host no credential for the private fetch.**
+  - `vps-deploy.yml` run 33802727037, `deploy main@42c1529`, dispatched
+    20:31:10 UTC to carry the liveness fix. The `vps` job failed at 20:52:49
+    UTC in `Run VPS mode`, on the host, at `fetch_exact_commit`:
+    `fatal: could not read Username for 'https://github.com': terminal prompts
+    disabled`, then `deploy failed: cannot fetch origin/main`. The deploy stops
+    before it stops anything, so no unit moved and the funded engine kept
+    trading `ce252af8`.
+  - Cause: the workflow's `Run VPS mode` step passed `EXPECTED_COMMIT`,
+    `BRANCH`, `SSH_TARGET` and `SSH_OPTS` and no `GITHUB_TOKEN`, and
+    `actions/checkout` runs with `persist-credentials: false`. On the runner the
+    script's `gh auth token` fallback (`scripts/deploy_vps_live.sh:58-60`) has
+    no authenticated `gh`, so `GITHUB_TOKEN` was empty, so `git_authorized`
+    (`:186`) skipped its authenticated path and the host fetched a private
+    repository with whatever credential it had of its own. That worked at
+    12:52 UTC (run 33756354829) and not at 20:52; the workflow has never
+    supplied a token, so CI deploys have always rested on an undeclared host
+    credential.
+  - Fix: the step now passes `GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}`. The
+    run's own `contents: read` token travels to the host inside the piped
+    remote script, and `git_authorized` spends it on one fetch through a 0600
+    `GIT_CONFIG_GLOBAL` it deletes afterwards — the mechanism the script
+    already implements for an operator's own token. No credential is stored on
+    the host and none is added to the repository.
+  - `tests/scripts/test_runtime_scripts.py::test_the_ci_deploy_hands_the_host_a_token_for_the_private_fetch`
+    reads the workflow and asserts the deploy step carries the token, that the
+    permission it needs is `contents: read`, and that the remote body still
+    spends it on the fetch. Without the fix it fails `KeyError: 'GITHUB_TOKEN'`.
+  - Still open for the owner: the host's own https credential for
+    `/opt/liquidity-migration` stopped working between 12:52 and 20:52 UTC.
+    Nothing here touches it, and a local `scripts/ops.sh deploy` keeps working
+    because `gh auth token` fills the same variable from the operator's shell.
+
 - **2026-09-03 — Incident: a deploy pages its own liveness watchdog.**
   - `fleet liveness (demo)` raised two CRITICALs on `ip-208-84-103-4` inside the
     `ce252af8` deploy (19:09 UTC): `liquidity-migration-chaos-drill.timer is inactive` and
