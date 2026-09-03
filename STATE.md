@@ -6,13 +6,13 @@ Current operational snapshot of the live trading fleet and host environment.
 
 ## 1. Live Deployment Snapshot
 
-Verified against the running host on 2026-09-03 19:12 UTC:
+Verified against the running host on 2026-09-03 23:10 UTC:
 
 | Property | Value | Description |
 | :--- | :--- | :--- |
 | **Host** | `ip-208-84-103-4.my-advin.com` (`208.84.103.4`) | 4 vCPU, 8 GB RAM, 118 GB disk (44% used, 64 GB free). |
-| **Deployed Commit** | `7f7ff56f` (tape shaped for exit studies; prints on every name; per-run CI groups) | Deployed 22:11 UTC 2026-09-03 in 60 s: both recorders restarted on the new config, `demo-ok` and `mainnet-ok result=unchanged-left-running`. The funded engine process has run since 21:44:20 UTC through three deploys; the realm handover is gated on what the realm runs from. |
-| **Rollback Target** | `1e7450788a73fd001fbb304516bb999d77183c8a` | Stored in `/opt/liquidity-migration-engine/previous-commit`. |
+| **Deployed Commit** | `14383fd5` (a sleeve sizes against its own fills, never the account's whole position; unused `[profile.ci-test]` removed) | Deployed 23:09 UTC 2026-09-03 in 74 s: atomic handover of both engines onto the new binary, recorders `unchanged-left-running`. Verified on the host: `engine_commit` matches, NEARUSDT and ZECUSDT still attributed to `long`, `may_open` true, no error or latch since the restart. Hand exposure on the account is nobody's to the sleeves from this build on. |
+| **Rollback Target** | `7f7ff56f76faacbc98826c0684d0f15cc4dc4ab9` | Stored in `/opt/liquidity-migration-engine/previous-commit`. |
 | **Funded Status** | `real-money armed` | `REAL_MONEY=true`. The engine is running with healthy heartbeats. |
 | **Signal IPC** | spool row + `stream.sock` doorbell | Every observation is a spool row first; the socket frame only saves the engine its next poll. Worker generations were renewed on both realms on 2026-09-03 after the desync; the old `g805c44f0…` (mainnet) and `gc4d0071f…` (demo) cursors stay in the WAL. |
 
