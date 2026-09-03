@@ -1936,10 +1936,16 @@ fn merge_whale(
     Ok(())
 }
 
+/// Bybit publishes `deliveryTime: "0"` on a perpetual and a real clock on a
+/// dated or delisting contract. At or past that clock the contract is not
+/// trading, whatever `status` still says.
 fn instrument_is_trading(row: &InstrumentObservation, settle_coin: &str) -> bool {
     row.status.as_deref() == Some("Trading")
         && row.settle_coin.as_deref() == Some(settle_coin)
         && !row.is_prelisting
+        && row
+            .delivery_time_ms
+            .is_none_or(|clock| clock <= 0 || clock > row.observed_ts_ms)
 }
 
 fn restore_instrument_trading_intervals(
@@ -3535,6 +3541,49 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn a_contract_at_its_delivery_clock_is_not_trading_whatever_status_says() {
+        let mut row = InstrumentObservation {
+            symbol: "BTCUSDT".into(),
+            observed_ts_ms: 10 * DAY_MS,
+            available_at_ms: 10 * DAY_MS,
+            contract_type: Some("LinearPerpetual".into()),
+            symbol_type: None,
+            status: Some("Trading".into()),
+            base_coin: Some("BTC".into()),
+            quote_coin: Some("USDT".into()),
+            settle_coin: Some("USDT".into()),
+            launch_time_ms: Some(1),
+            delivery_time_ms: Some(0),
+            tick_size: Some(0.1),
+            qty_step: Some(0.001),
+            min_order_qty: Some(0.001),
+            min_notional_value: Some(5.0),
+            max_order_qty: None,
+            max_market_order_qty: None,
+            funding_interval_min: Some(480),
+            is_prelisting: false,
+        };
+        assert!(
+            instrument_is_trading(&row, "USDT"),
+            "a perpetual's clock is zero"
+        );
+        row.delivery_time_ms = None;
+        assert!(instrument_is_trading(&row, "USDT"));
+        row.delivery_time_ms = Some(11 * DAY_MS);
+        assert!(
+            instrument_is_trading(&row, "USDT"),
+            "a dated contract trades until its clock"
+        );
+        row.delivery_time_ms = Some(10 * DAY_MS);
+        assert!(
+            !instrument_is_trading(&row, "USDT"),
+            "at the clock it has stopped"
+        );
+        row.delivery_time_ms = Some(9 * DAY_MS);
+        assert!(!instrument_is_trading(&row, "USDT"));
+    }
 
     #[test]
     fn directional_symbols_request_quote_and_ticker_exactly_once() {

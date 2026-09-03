@@ -166,3 +166,33 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | **Rolling Loss Tripped** | 24h loss ceiling breached | Entries halted automatically. Exits permitted. Inspect `heartbeat.json`. |
 | **Capture Dropping Frames** | CPU/disk saturation | Check `journalctl -u liquidity-migration-forward-capture`. Budget shedding will activate. |
 | **Stranger Position Latched** | Unattributed fill on venue | Engine halts new entries. Run `attest-flat` and audit account on exchange. |
+| **Engine exits with `signal source … has sequence gap: expected N, got N+1`** and loops under `Restart=always` | A spool row was deleted by something other than the engine (the worker only ever adds rows). Restarting does not help: the cursor is durable and the row is gone. | Start a new worker generation (recipe below). The engine treats `<source>.g<new>` as a fresh source starting at sequence 1 and keeps the old cursor. |
+| **Engine exits with `invalid signal frame size`** | A reader that lost the frame boundary. Fixed 2026-09-03 (resumable frame state); if it recurs, the frame path has regressed. | Restart the engine (the socket is re-bound); rows are on disk. File the recurrence. |
+| **Worker logs `instrument lane: …` every hour** | One venue row failed a check and the whole snapshot was refused; the worker's instrument table stops refreshing (`instruments` in `checkpoint.json` stays stale or empty). | Read the exact message. Fix the check to the venue's real shape (see 2026-09-03 in CHANGELOG); never let one row cost the table. |
+| **Any `CRITICAL` on the funded realm** | — | The watchdog pages the on-call agent ([docs/notifications.md](notifications.md) §On-call agent). The owner reads the run's PR. |
+
+### New signal-worker generation
+
+Use when the engine reports a sequence gap for a source. The worker keeps its universe and input history; only the output sequence restarts, under a new `g<generation>` in the source id. The worker republishes its current state on the next tick.
+
+```bash
+# on the host, as root; <realm> is demo or mainnet
+systemctl stop liquidity-migration-signal-worker-<realm>
+python3 - <<'EOF'
+import json, os
+path = "/var/lib/liquidity-migration-signal-worker-<realm>/checkpoint.json"
+state = json.load(open(path))
+state["source_generation"] = ""
+tmp = path + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump(state, fh, separators=(",", ":"))
+    fh.flush(); os.fsync(fh.fileno())
+os.rename(tmp, path)
+EOF
+chown liquidity-signal-worker:liquidity-migration /var/lib/liquidity-migration-signal-worker-<realm>/checkpoint.json
+systemctl start liquidity-migration-signal-worker-<realm>
+systemctl restart liquidity-migration-engine<-mainnet or empty>
+journalctl -u liquidity-migration-engine<-mainnet or empty> -n 20 --no-pager
+```
+
+Old spool rows from the previous generation may remain; the engine ignores a row below its cursor and retires it.

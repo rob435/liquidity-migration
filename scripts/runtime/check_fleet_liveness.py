@@ -436,6 +436,71 @@ def ping_heartbeat(url: str) -> None:
         pass
 
 
+# The Claude Code routine API: one POST fires one agent run with the text as
+# its untrusted payload. Both values come from /etc/liquidity-migration/liveness.env,
+# written by the owner; the token is per routine and is never an argument.
+INCIDENT_FIRE_URL_ENV = "INCIDENT_ROUTINE_FIRE_URL"
+INCIDENT_FIRE_TOKEN_ENV = "INCIDENT_ROUTINE_FIRE_TOKEN"
+INCIDENT_FIRE_BETA = "experimental-cc-routine-2026-04-01"
+INCIDENT_TEXT_MAX = 60_000
+
+
+def unit_journal_tail(unit: str, lines: int = 40) -> str:
+    try:
+        completed = subprocess.run(
+            ["journalctl", "-u", unit, "-n", str(lines), "--no-pager", "-o", "short-iso"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"(journal unavailable: {error})"
+    if completed.returncode != 0:
+        return f"(journal unavailable: exit {completed.returncode})"
+    return completed.stdout.strip()
+
+
+def incident_text(scope: str, lines: list[str], alerts: list[Alert]) -> str:
+    units = sorted(
+        {
+            alert.key.split(":", 1)[1]
+            for alert in alerts
+            if alert.severity == "CRITICAL"
+            and alert.key.startswith(("unit:", "heartbeat:"))
+            and alert.key.endswith(".service")
+        }
+    )
+    parts = [
+        f"fleet liveness ({scope}) raised a CRITICAL alert on host {os.uname().nodename}.",
+        "",
+        *lines,
+    ]
+    for unit in units:
+        parts += ["", f"--- journalctl -u {unit} -n 40", unit_journal_tail(unit)]
+    text = "\n".join(parts)
+    return text[:INCIDENT_TEXT_MAX]
+
+
+def fire_incident_routine(url: str, token: str, text: str) -> str:
+    """POST the incident to the routine; returns the run's session URL or ''."""
+    body = json.dumps({"text": text}).encode()
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": INCIDENT_FIRE_BETA,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        payload = json.loads(response.read().decode() or "{}")
+    return str(payload.get("claude_code_session_url") or "")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -604,6 +669,19 @@ def main() -> int:
                 print(f"CRITICAL telegram: cannot deliver alerts: {error}")
         else:
             print(message)
+        # A CRITICAL that just cleared its cooldown wakes the on-call agent.
+        # The cooldown is the rate limit: a persisting fault fires once per
+        # --cooldown-min, not once per run.
+        fire_url = os.environ.get(INCIDENT_FIRE_URL_ENV)
+        fire_token = os.environ.get(INCIDENT_FIRE_TOKEN_ENV)
+        if fire_url and fire_token and any(line.startswith("CRITICAL") for line in lines):
+            try:
+                session = fire_incident_routine(
+                    fire_url, fire_token, incident_text(scope, lines, alerts)
+                )
+                print(f"incident routine fired: {session or 'accepted'}")
+            except (OSError, ValueError) as error:
+                print(f"CRITICAL incident-routine: cannot fire the on-call agent: {error}")
     has_critical = any(alert.severity == "CRITICAL" for alert in alerts)
     if not has_critical:
         if not alerts:

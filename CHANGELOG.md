@@ -6,35 +6,73 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
-- **2026-09-03 — The signal stream desynchronised twice and left an engine
-  unable to restart.** Both realms hit it within an hour, on either side of the
-  audit deploy, and neither was caused by it.
-  - Demo, 01:01:28 UTC: `invalid signal frame size: 1668489851 bytes`. That
-    number is `0x6373227B` — little-endian ASCII `{"sc`, the opening of a JSON
-    object read where a frame's length prefix belonged. The reader had lost
-    the frame boundary.
-  - The engine exits on that, and by the time it came back the worker had
-    moved on, so every boot then failed the same way:
-    `signal source directional_public_v1.gc4d0071f….carry has sequence gap:
-    expected 10741, got 10742`. `Restart=always` turned it into a loop —
-    roughly 150 restarts over 22 minutes, until the deploy at 01:23 stopped
-    the engine, restarted the worker with it, and it came back clean.
-  - Mainnet, 01:45:03 UTC: the same frame size, the same byte pattern, the
-    same loop — 51 restarts in seven minutes on the **funded** account, with
-    three carry positions open and no engine managing their exits. Each
-    restart also took the account lease and re-authenticated at the venue.
-  - Recovery, both times, is the worker: it rewinds to its checkpoint and
-    republishes the sequence the engine is still waiting for, and the engine
-    accepts a replay of what it has already consumed. Restarting the worker
-    and then the engine cleared it at 01:52:05. The generation is not the
-    mechanism — demo carries the same `c4d0071f…` it had before its own
-    incident.
-  Two things are unfixed and want a decision. The reader can lose a frame
-  boundary at all, which is the actual defect and is not diagnosed — the byte
-  pattern says a JSON payload was read as a length, so the desync is upstream
-  of the length check that caught it. And a durable state error under
-  `Restart=always` is an unbounded restart loop rather than a stop, which is
-  what turned a recoverable fault into a seven-minute funded outage.
+- **2026-09-03 — The signal stream lost frame boundaries, both engines
+  crash-looped, and the funded engine was down nine hours. Fixed at the root,
+  with the instrument lane that had been dead since 09-01.**
+  - *What happened.* Demo 01:01:28 UTC, mainnet 01:45:03 and 01:55:02, demo
+    again 02:36:18: `invalid signal frame size: 1668489851 bytes`. That number
+    is `0x6373227B`, little-endian ASCII `{"sc` — the opening of the JSON body
+    read where a length prefix belonged. Each time the engine exited, and every
+    restart then failed with `signal source directional_public_v1.g….carry has
+    sequence gap: expected N, got N+1` under `Restart=always`: demo 3,153
+    restarts by 10:46, mainnet 61 before it was stopped by hand at 01:56 with
+    three carry positions open (SKR, FLOCK, BICO, about 74 USDT on 130 equity;
+    venue stops resting). The funded engine stayed stopped until this fix
+    deployed.
+  - *Root cause, reader.* `UnixSignalFeed::next_observation`
+    (`engine/engine-core/src/signals.rs`) is one branch of the core's
+    `select!`, which drops the future whenever a market event wins. It read
+    the frame with two `read_exact` calls, which are not cancel-safe: a poll
+    that had taken the four length bytes and was waiting for the body lost
+    them when dropped, and the next poll read the body's first four bytes as
+    the next length. The worker made the window easy to hit by sending the
+    length and the body in two separate `write` calls. Now the frame in
+    progress lives on the feed (`Frame`), every read is a cancel-safe `read`
+    that resumes where it stopped, and the worker sends one buffer in one
+    `write`. Test: `a_frame_split_by_a_dropped_future_is_still_one_frame`,
+    which fails on the old reader with the production error text.
+  - *Root cause, permanent gap.* The observation the crashed engine had
+    consumed off the socket existed nowhere else: the worker wrote a spool row
+    only when the socket send failed. Now the worker writes the row first,
+    always (`SpoolWriter::write_encoded_observation`), and the frame is a
+    doorbell carrying the same bytes. The engine retires the row after the
+    barrier whichever way it arrived, and on a frame it first delivers any
+    rows with a lower sequence, which the worker wrote before that frame
+    (`HybridSignalFeed`). Nothing an engine loses is lost. Cost: one fsync'd
+    35 KB write per observation in the worker, at about nine a minute.
+  - *Recovery of the two live gaps.* The rows for mainnet 11226 and demo 11613
+    were consumed by crashed engines and are gone. Each worker was given a new
+    generation (`source_generation` blanked in `checkpoint.json`), so its
+    source id changed and the engine met it as a new source at sequence 1,
+    keeping the old cursor. Recipe in docs/operations.md §8.
+  - *The instrument lane.* Both workers logged `instrument lane: input:
+    Trading instrument has already passed its delivery time` every hour since
+    the 09-01 deploy of 07407a58, and from 09-03 01:03 `maxMktOrderQty is not
+    positive`. Both are checks that fail on the venue's real shape: Bybit
+    publishes `deliveryTime: "0"` on every perpetual (813 of 855 linear
+    contracts today), and zero order-size maximums on Closed and Delivering
+    contracts. One row refused the whole snapshot, so **both workers ran with
+    an empty instrument table (`instruments: {}` in both checkpoints) for two
+    days**. The fixture rows in the tests used `delivery_time_ms: None`, which
+    the venue never sends. Now a zero maximum is no maximum
+    (`published_maximum`), the snapshot-level delivery check is gone, and
+    `instrument_is_trading` treats a contract at or past a real delivery clock
+    as not trading, zero meaning no clock. Test:
+    `a_snapshot_of_perpetuals_with_zero_delivery_clocks_passes_source_validation`,
+    which fails on the old check.
+  - *On-call agent.* `check_fleet_liveness.py` now fires a Claude Code
+    routine on any `CRITICAL` that clears its cooldown, when
+    `INCIDENT_ROUTINE_FIRE_URL` and `INCIDENT_ROUTINE_FIRE_TOKEN` are set in
+    `liveness.env`; payload is the alert lines plus each failing unit's last
+    40 journal lines. The routine prompt is `deploy/incident-routine-prompt.md`;
+    the owner creates the routine and its token at claude.ai/code/routines.
+  - *Standing rule.* AGENTS.md §The Funded Engine Is Production: a fault in
+    the funded engine is fixed, tested, deployed, and verified in the same
+    session; stopping it is a holding action.
+  - `Restart=always` stays. A start limit would strand the funded engine after
+    a venue outage that it would otherwise recover from on its own; the fix
+    above removes the fault that made the loop endless, and the on-call agent
+    is what now answers a loop.
 
 - **2026-09-03 — An audit of the live fleet, and the eight things it found.**
   Read off the running host rather than the docs: both engines and both
