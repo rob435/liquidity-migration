@@ -441,3 +441,50 @@ async fn the_beat_carries_the_kernels_rolling_loss_window() {
     assert_eq!(fields["rolling_loss_limit_usdt"].as_f64(), Some(100.0));
     assert_eq!(fields["rolling_loss_tripped"].as_bool(), Some(true));
 }
+
+/// A tripped window is an account-wide refusal in the kernel, so the beat must
+/// not go on reporting each sleeve's own switches as though entries still flow.
+/// Read the two fields together and an operator sees "entries enabled" on an
+/// account that is opening nothing.
+#[tokio::test]
+async fn a_tripped_window_reports_no_sleeve_as_entering() {
+    let path = temp_path("heartbeat-rolling-loss-entries");
+    let (idle, _heard) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let (mut engine, h) = build_with(
+        &quick_tick(),
+        allow_all(),
+        vec![Box::new(idle)],
+        &["BTCUSDT"],
+        &[],
+        Vec::new(),
+    )
+    .await;
+    *h.risk_rolling.view.lock().unwrap() = Some(RollingLossView {
+        window_ms: 86_400_000,
+        trades: 1,
+        net_usdt: -16.14,
+        limit_usdt: 12.98,
+        tripped: true,
+    });
+    engine.write_heartbeat(every_tick(path.path()));
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut ScriptOrderFeed::empty(),
+            tokio::time::sleep(Duration::from_millis(40)),
+        )
+        .await
+        .unwrap();
+
+    let fields = heartbeat_at(path.path());
+    let rows = fields["strategy_entries_enabled"]
+        .as_array()
+        .expect("an array");
+    assert!(!rows.is_empty(), "the run configured a strategy");
+    assert!(
+        rows.iter()
+            .all(|row| row["entries_enabled"].as_bool() == Some(false)),
+        "a tripped window must not report a sleeve as entering: {rows:?}"
+    );
+}

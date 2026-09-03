@@ -6,6 +6,60 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — An audit of the live fleet, and the eight things it found.**
+  Read off the running host rather than the docs: both engines and both
+  recorders healthy, the signal IPC connected in both realms over the sockets
+  with no spool files, the funded lease held by one writer, and the funded WAL
+  replaying clean (599,911 records over two segments, no CRC or torn frame, no
+  order left in flight, reconcile finding nothing). What was wrong:
+  - The funded account's 24h loss window was **tripped** — one close at
+    −16.14 USDT against a 12.98 limit — and the risk kernel was correctly
+    refusing every entry while letting exits flow. The heartbeat did not say
+    so: `rolling_loss_tripped` read true while `strategy_entries_enabled`
+    still reported every sleeve as entering, so the file an operator reads
+    said "trading normally" about an account that was opening nothing. The
+    beat now gates those switches on the window.
+  - The off-box backup had not completed since 2026-09-01 03:17 UTC. It runs
+    every six hours, and each run was killed at the 15-minute
+    `TimeoutStartSec` before it could land a first full copy, so no run ever
+    established a baseline and every later run repeated the whole transfer.
+    Every run that did real work also peaked at exactly its 512 MB
+    `MemoryMax`: four transfers at a 32 MB Drive chunk. The budget is now an
+    hour (flock, not the timeout, is what stops two runs overlapping) and the
+    chunk is 8 MB.
+  - `LONG_NOTIONAL_MULTIPLIER=3.0` in the funded credential file is inert and
+    always was: `notional_multiplier` is written in
+    `liquidity_migration/policy/real_money_profile.py`, 6.0 for LONG and 3.0
+    for carry, and no code anywhere reads that variable. Both realms render
+    6.0. The funded file understated funded LONG size by half to anyone who
+    read it; the dead lines are removed from the host.
+  - The two recorders' `max_disk_gb` summed to 120 GB on a 118 GB filesystem,
+    so neither ever pruned on its own cap and both raced the shared
+    `min_free_disk_gb` guard instead. Bybit is now 40 GB and Binance 30 GB,
+    sized on measured ingest (8.0 and 5.8 GB/day) and summing under the disk
+    with room for the engines' WALs. Local tape is about five days either
+    way; the hourly Drive archive is the history.
+  - A tier with no instrument table fell back to the raw ticker stream and
+    dropped its own quote filter with it, so a cold start could record
+    `WLDUSDC` and `ADAUSD_PERP` off a USDT universe. The fallback now applies
+    the same shape rules `listed_symbols` does. Twelve zero-byte Binance
+    segments and thirty-two Bybit ones were the residue.
+  - The staged-binary path verified `binaries.sha256` only `if [ -f ]` it, so
+    an artifact that simply omitted the manifest installed unverified. The
+    manifest is now required and `tar` is checked. CI has always produced one.
+  - `engine fills` reports a log's whole history, and the funded log opens in
+    shadow — orders worked out and never sent. The command now says how many
+    shadow records it read rather than presenting the two eras as one.
+  - Not changed, and why: `provision_mainnet` renders the funded config with
+    the binary `install_release` just installed, so it cannot move above it.
+    The window where the funded engine runs the old binary and old config
+    while both new ones sit on disk stays, and is now documented where
+    somebody would otherwise reorder it.
+  Two things the audit got wrong and then disproved: the recorders' 1,300 GB
+  allowances are per venue against the host's 4 TB line and are not
+  over-subscribed, and the capture services' 1 GB memory ceiling is page cache
+  from their own writes (anon 127 and 101 MB), not a leak.
+
 - **2026-09-02 — The recorders are cut to fit their byte budgets.** Four
   minutes after the Binance fix, the meters read 0.64 MB/s inbound on Bybit
   (1.7 TB a month against 1.3) and 1.18 MB/s on Binance (3.0 TB against 1.0).

@@ -319,11 +319,15 @@ build_engine() {
     if [ -f "$staged_tar" ]; then
         echo "deploy: installing pre-built release binaries from CI artifact $staged_tar"
         install -d -o root -g root -m 0755 "$CARGO_TARGET_ROOT/release"
-        tar -xzf "$staged_tar" -C "$CARGO_TARGET_ROOT/release"
-        if [ -f "$CARGO_TARGET_ROOT/release/binaries.sha256" ]; then
-            (cd "$CARGO_TARGET_ROOT/release" && sha256sum -c binaries.sha256 >/dev/null) \
-                || fail "pre-built binary sha256 checksum verification failed"
-        fi
+        tar -xzf "$staged_tar" -C "$CARGO_TARGET_ROOT/release" \
+            || fail "cannot unpack the staged release artifact $staged_tar"
+        # Not conditional: an artifact that omits the manifest is refused, not
+        # installed unverified. The manifest travels inside the tarball, so this
+        # catches a corrupt or truncated transfer, not a forged one.
+        [ -f "$CARGO_TARGET_ROOT/release/binaries.sha256" ] \
+            || fail "staged artifact has no binaries.sha256 manifest; refusing unverified binaries"
+        (cd "$CARGO_TARGET_ROOT/release" && sha256sum -c binaries.sha256 >/dev/null) \
+            || fail "pre-built binary sha256 checksum verification failed"
         test -x "$CARGO_TARGET_ROOT/release/engine" || fail "staged engine binary is missing or not executable"
         test -x "$CARGO_TARGET_ROOT/release/signal-worker" || fail "staged signal-worker binary is missing or not executable"
         echo "deploy: pre-built release binaries verified successfully; skipping host compilation"
@@ -1040,6 +1044,11 @@ deploy_mode() {
         rollback_after_failure demo
     fi
     if mainnet_armed; then
+        # provision_mainnet renders the funded config with the binary
+        # install_release just put down, so it cannot move above it. The cost is
+        # a window where the funded engine still runs the old binary and old
+        # config while both new ones sit on disk; Restart=always means a crash
+        # in that window restarts it on the new binary against the old config.
         echo "staging mainnet configuration while live engine continues trading"
         provision_mainnet
         echo "atomic mainnet handover: swapping binaries and state"

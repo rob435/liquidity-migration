@@ -7,8 +7,11 @@ After=network-online.target
 Type=oneshot
 KillMode=control-group
 # One local snapshot and one Drive sync; a run that hangs must not stack
-# behind itself.
-TimeoutStartSec=900
+# behind itself. The budget covers a cold start that has to upload every
+# WAL segment at once: killed short of that, no run ever lands a baseline
+# and each later run repeats the whole transfer. flock, not this timeout,
+# is what stops two runs overlapping.
+TimeoutStartSec=3600
 # Root, because the sources are two engines' state directories with two
 # different owners, and the rclone configuration is root's.
 User=root
