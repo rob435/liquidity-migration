@@ -3,56 +3,76 @@ name: research-phase-runner
 description: Route, execute, and record research work under the Progressive Evidence Model in this quant repository. Use before running, monitoring, or interpreting decision-influencing research. Lane-1 exploration is unlimited on seen data; Lane-2 configs are graded on the rolling run of forward days after their git commit; promotion is a five-line note under docs/research/governance.md.
 ---
 
-# Run research work
+# Research Phase Runner & Evidence Lifecycle
 
-Read `STATE.md`, `docs/research/research_findings.md`, and
-`docs/research/governance.md` for current context, provenance, open work,
-and prior formulations. Before selecting new decision-influencing work,
-record its relationship to the compact priors in the research findings.
-Negative priors inform questions; they are not forbidden lines. Decide which
-lane the work is in; neither lane has a waiting room.
+## 1. Purpose
+Specify execution procedures, lane routing, provenance requirements, and promotion protocols for quantitative research studies under the Progressive Evidence Model.
 
-## Lane 1 — exploration
+---
 
-Run freely on any already-seen data: prototypes, sweeps, diagnostics, many
-ideas in parallel. Record one provenance note (which data this touched) and
-label outputs exploratory. Report all grid cells, era-split results, and
-costs next to gross — a pooled number that hides decay is a wrong answer.
-Do not invent universal Sharpe, return, sample-count, cost, or era-sign gates.
-Rank follow-ups by information gain, mechanism plausibility, effect shape,
-uncertainty, concentration, and executable economics, and record the judgment.
+## 2. Spec Tables
 
-## Lane 2 — rolling forward record
+### Research Lane Routing Matrix
 
-To graduate a prototype: commit its exact config plus scoring recipe
-(metric, baseline, declared grid) — the commit is the registration, and its
-evidence note records which prior or new mechanism it descends from. The
-scorer appends one row per config per new day; a config's evidence is the
-run of days after its commit, and editing it starts a new run. Grade a rule
-only on data it did not shape; commit configs before opening a new surface
-(reserved holdout, freshly backfilled history), and record the opening in
-`docs/research/research_findings.md`.
+| Attribute | Lane 1: Exploration | Lane 2: Graded Record |
+| :--- | :--- | :--- |
+| **Objective** | Ideation, grid sweeps, anomaly discovery, sensitivity tests. | Production candidacy, forward out-of-sample confirmation. |
+| **Data Scope** | Seen historical datasets; unlimited backtests. | Rolling forward days post-registration; unseen holdout. |
+| **Registration** | Provenance note in run manifest. | Git commit of immutable config JSON and scoring recipe. |
+| **Reporting Rule** | Full grid reporting; era-split tables; gross vs net. | One row per day per config; cumulative forward performance. |
+| **Evidentiary Weight**| Hypothesis-generating; non-confirmatory. | Decision-grade confirmatory evidence. |
+| **Promotion Path** | Refine hypothesis $\rightarrow$ commit to Lane 2. | 5-line promotion note $\rightarrow$ operational staged deploy. |
 
-Keep the physics intact in both lanes — causal/PIT inputs, executable
-economics (fills, fees, funding, capacity), reconstructable accounting, and
-honest provenance. A miss relabels the number as a diagnostic; say so and
-keep moving rather than silently relaxing it.
+### Research Run Manifest Schema
 
-## Execution mechanics
+| Field | Type | Description | Invariant |
+| :--- | :--- | :--- | :--- |
+| `run_id` | String | Unique execution identifier (`YYYYMMDD-slug`). | Immutable once written. |
+| `commit_sha` | String | Git commit of the codebase at execution time. | Working tree must be clean or diff recorded. |
+| `config_sha256`| String | SHA-256 digest of the strategy configuration. | Matches committed JSON. |
+| `data_root` | Path | Absolute path to Point-in-Time input dataset. | Must include manifest hash. |
+| `era_split` | Object | Metrics broken down by calendar year / regime. | Required; pooled metrics alone are invalid. |
+| `net_metrics` | Object | Sharpe, CAGR, maxDD, and fees under realistic costs. | Must sit directly next to gross metrics. |
 
-Inspect the selected runner and current `--help`; do not infer dates,
-venues, metrics, commits, or pushes from old experiments. Preserve commands,
-stdout/stderr, partial outputs, failed cells, and hashes. Research execution
-does not authorize external demo orders unless the task explicitly includes
-them. It never authorizes mainnet.
+### Five-Line Promotion Note Schema
 
-## Record
+| Line | Field | Specification | Example |
+| :---: | :--- | :--- | :--- |
+| **1** | `Candidate` | Exact rule and config identifier. | `Candidate: lane2_carry_hold_v7.json (SHA-256: 4ac21e95...)` |
+| **2** | `Evidence Boundary`| Forward date window postdating commit. | `Graded Window: 2026-06-01 to 2026-08-31 (92 forward days)` |
+| **3** | `Economic Return` | Net annualized return, Sharpe, fee drag. | `Economics: +18.4 bp/day net, Sharpe 1.42, MaxDD -3.8%` |
+| **4** | `Predecessor` | Replaced configuration or active control. | `Replaces: lane2_carry_hold_v6.json (deployed 2026-05-15)` |
+| **5** | `Action Point` | Operational deploy target and change point. | `Promotion: staged deploy on 2026-09-01; recorded in CHANGELOG.md` |
 
-Append results to the run's manifest and, when decision-relevant, a short
-evidence note (claim; data that shaped vs graded it; scope; effect size,
-uncertainty, and costs; artifact/commit identities; explicit
-non-conclusions) into `docs/research/research_findings.md`. Promotion of a winning
-config is a five-line note plus a recorded change point through the normal
-deploy flow. Negative results are priors, not prohibitions — a refuted idea
-may return with a new mechanism or new data, and the provenance record
-simply shows what each version saw.
+---
+
+## 3. Invariants
+
+- **Must Never Suppress Negative Results**: Negative results are active priors recorded in `docs/research/research_findings.md`; they *must never* be hidden or deleted.
+- **Must Report Full Parameter Grids**: Reporting only the winning parameter cell is cherry-picking; every cell in the declared search space *must* be documented.
+- **Commit Must Predate Graded Forward Days**: For Lane 2, the commit timestamp *must strictly precede* the dates evaluated; retroactively applied forward tests are invalid.
+- **Research Does Not Authorize Orders**: Executing research backtests *must never* trigger external venue orders or arm real capital.
+
+---
+
+## 4. Operational Recipes
+
+### Run Quantitative Study via Research Lab CLI
+```bash
+# Dump PIT inputs for study window
+python -m liquidity_migration.research.lab.cli dump \
+  --data-root ~/SHARED_DATA/bybit_full_pit \
+  --start 2024-01-01 --end 2025-01-01
+
+# Build study panel and run backtest
+python -m liquidity_migration.research.lab.cli panel \
+  --data-root ~/SHARED_DATA/bybit_full_pit \
+  --config configs/lane2_carry_hold_v7.json \
+  --out reports/lab/carry_v7_study
+```
+
+### Inspect Negative Priors Before Designing Studies
+```bash
+# Search research findings for previous studies on a mechanism
+rg -i "funding rate arb|take-profit|trailing stop" docs/research/research_findings.md
+```

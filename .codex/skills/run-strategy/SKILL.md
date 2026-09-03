@@ -3,63 +3,89 @@ name: run-strategy
 description: Construct and run current liquidity_migration CLI, data, audit, and demo operational commands safely. Use whenever invoking python -m liquidity_migration or scripts/ops.sh so data roots, end-exclusive boundaries, profiles, PIT modes, and mutation handshakes come from current help and code. Never assume today's date, a dry run, cross-venue scope, or mainnet authority.
 ---
 
-# Run repository commands safely
+# Operational Commands & Strategy Execution Router
 
-Start with the current owning surface:
+## 1. Purpose
+Specify CLI routing, execution boundaries, safety handshakes, and operational parameters for running research workflows, data ingestion, and fleet operations across demo and funded environments.
 
+---
+
+## 2. Spec Tables
+
+### Operations CLI Command Matrix (`scripts/ops.sh`)
+
+| Command | Subcommand / Flags | Target Scope | Mutation | Role / Function |
+| :--- | :--- | :--- | :---: | :--- |
+| `status` | None | Fleet-wide | Read-only | Reports live commit, deployed commit, armed state, heartbeats, and disk. |
+| `deploy` | `[deploy\|rollback\|verify]` | Production VPS | **Mutating** | Executes exact-commit binary update with automatic 180s health rollback. |
+| `deploy` | `stop-mainnet` | Funded Engine | **Mutating** | Stops the funded engine unit while leaving demo units and signal workers active. |
+| `deploy` | `disarm-mainnet` | Host Credentials | **Mutating** | Rewrites `REAL_MONEY=false` in the host credential file; persistent disarm. |
+| `real-money` | `preflight` | Host Credentials | Read-only | Validates mainnet keys, IP whitelist, account user ID, and profile dials. |
+| `attest-flat`| `--environment <realm>` | Venue Account | Read-only | Authenticated two-scan venue proof that the account holds zero open positions. |
+| `flatten` | `--environment <realm> [--execute]` | Strategy Sleeves | **Mutating** | Commands reducers to close all open positions. Read-only without `--execute`. |
+| `equity` | `[--sleeves S] [--combined]` | Research Data | Read-only | Generates standard repository equity curve plots and JSON summaries. |
+| `units` | None | Systemd Units | Read-only | Lists status of all fleet services and timers. |
+| `logs` | `<unit> [lines]` | Journald | Read-only | Tails live journal logs for a specific service. |
+
+### Research Data Roots
+
+| Data Root Path | Exchange Venue | Dataset Type | Coverage & Usage | Invariant |
+| :--- | :--- | :--- | :--- | :--- |
+| `~/SHARED_DATA/bybit_full_pit` | Bybit Perpetuals | Full Point-in-Time | Primary research root for LONG and CARRY strategies. | Must verify manifest before study. |
+| `~/SHARED_DATA/binance_full_pit`| Binance Perpetuals | Full Point-in-Time | Secondary venue for cross-venue transfer and robustness studies. | Not an independent data source. |
+
+### Operational Boundaries & Safety Flags
+
+| Realm | Safety Switch | File Location | Behavior |
+| :--- | :--- | :--- | :--- |
+| **Demo** | None (Runs by default) | `/etc/liquidity-migration/bybit-demo.env` | Trades demo exchange account; not a zero-effect dry run. |
+| **Mainnet** | `REAL_MONEY=true` | `/etc/liquidity-migration/bybit-mainnet.env` | **Armed**: Real capital is traded under strict risk kernel limits. |
+| **Mainnet** | `REAL_MONEY=false` | `/etc/liquidity-migration/bybit-mainnet.env` | **Disarmed**: Engine aborts at startup before opening venue sockets. |
+
+---
+
+## 3. Invariants
+
+- **Demo Is Not a Dry Run**: Commands executed against the demo realm mutate the live external demo account; treat demo state transitions with discipline.
+- **Must Never Set `REAL_MONEY` Without Explicit Owner Command**: Never enable or inject `REAL_MONEY=true` on your own initiative; real money is the owner's single explicit arming switch.
+- **Date Boundaries Are End-Exclusive**: In all data and research CLI commands, `--start` is inclusive and `--end` is strictly exclusive (`[start, end)`).
+- **Canary Orders Restricted to Demo**: `engine canary-order` *must only* run on `bybit_demo` and *must never* be directed at mainnet.
+
+---
+
+## 4. Operational Recipes
+
+### Inspect Fleet Health & Live Status
 ```bash
-scripts/ops.sh help
-python -m liquidity_migration --help
-python -m liquidity_migration SUBCOMMAND --help
+# Check running commit, arming state, unit heartbeats, and disk space
+scripts/ops.sh status
+
+# Inspect funded engine logs
+scripts/ops.sh logs engine-mainnet.service 50
 ```
 
-Do not maintain a static package-subcommand list.
+### Prove Account Flatness
+```bash
+# Authenticate against venue and prove zero open positions on demo
+scripts/ops.sh attest-flat --environment demo
 
-## Select roots and boundaries
+# Authenticate against venue and prove zero open positions on funded account
+scripts/ops.sh attest-flat --environment mainnet
+```
 
-- Normal research roots are `~/SHARED_DATA/bybit_full_pit` and
-  `~/SHARED_DATA/binance_full_pit`; inspect actual coverage.
-- Keep research roots separate from VPS account, inbox, capture, and strategy roots.
-- Derive `--start` and end-exclusive `--end` from the task or prospective
-  contract; never silently use today's date.
-- Choose venues from the claim. A second venue is not a universal gate.
-- Use strict PIT only when the claim requires historical-universe coverage, and
-  label partial/current-universe diagnostics honestly.
+### Execute Single Bounded Canary Order (Demo Only)
+```bash
+# Verify resting post-only placement, stop attachment, cancellation, and clean account
+/opt/liquidity-migration-engine/bin/engine canary-order \
+  --config /etc/liquidity-migration/engine.toml \
+  --symbol XRPUSDT \
+  --expected-user-id 579580669 \
+  --execute
+```
 
-## Canonical wrappers
-
-- Deployment/account state: `scripts/ops.sh status`.
-- Deploy a new generation with `scripts/ops.sh deploy`, optionally pinning
-  `EXPECTED_COMMIT`. It stops the fleet, installs the exact commit, and starts
-  the funded realm only while `REAL_MONEY` is armed.
-- Stop or persistently disarm funded trading with `scripts/ops.sh deploy
-  stop-mainnet` or `scripts/ops.sh deploy disarm-mainnet` respectively.
-- Mainnet arming state (read-only): `scripts/ops.sh real-money preflight`.
-- Credential-wide flatness evidence: `scripts/ops.sh attest-flat
-  --environment demo|mainnet`; apply `pit-reconcile` before drawing an
-  accounting conclusion.
-- Equity curves: `scripts/ops.sh equity`; apply `equity-curve`.
-- Tests: `scripts/dev.sh test` (local only; not an operator route).
-- Data builds: use the per-venue builders or current package command help.
-- One bounded live demo order proof: inspect `engine help`, then use
-  `engine canary-order --config PATH --symbol SYMBOL --expected-user-id UID
-  --execute`. It only accepts `bybit_demo`, takes the account lease, and must
-  finish with an exact terminal order state and two clean derivative-account
-  readings. Never substitute a raw signed request or point it at mainnet.
-
-## Forward safety
-
-Demo is not a dry run: it changes the external demo account. Before a forward
-command, inspect `EXECUTION_ENVIRONMENT`, credentials, confirmation,
-checkout, and `REAL_MONEY`. Use a true plan/dry-run
-mode when one exists.
-
-Mainnet is categorically separate. Never set `REAL_MONEY`, select mainnet
-credentials, or infer permission from broad repository work.
-
-## Evidence
-
-Preserve exact commands, configs, roots, code/data identities, warnings,
-failures, and artifacts. Include material funding and costs for net-performance
-claims. Apply `backtest-integrity` before decision-influencing research and
-`research-report` before interpreting it.
+### Build Point-in-Time Historical Dataset
+```bash
+# Ingest and verify Point-in-Time klines and funding data
+python -m liquidity_migration --data-root ~/SHARED_DATA/bybit_full_pit archive-manifest \
+  --start 2024-01-01 --end 2025-01-01
+```

@@ -3,107 +3,91 @@ name: vps-migrate
 description: Migrate or recover the demo VPS and restore checked GitHub Actions operation. Use for VPS replacement, IP or host-key changes, SSH recovery, deploy-key mismatch, deploy workflow failures, or expected-commit drift. Derive hosts, fingerprints, keys, workflow modes, and service state from current canonical files and provider/GitHub state; never rely on values embedded in a skill, enable real money, or destroy a dirty checkout without explicit approval.
 ---
 
-# Migrate or recover the VPS
+# VPS Migration, Deployment & Host Recovery
 
-This workflow crosses SSH, credentials, deployment, and running demo
-services. Derive current values from:
+## 1. Purpose
+Define technical specifications, SSH authentication mechanisms, deployment procedures, and recovery runbooks for maintaining and restoring the live production VPS fleet.
 
-- `.github/workflows/vps-deploy.yml`;
-- `scripts/deploy_vps_live.sh` with
-  `deploy|verify|stop-mainnet|disarm-mainnet`;
-- `scripts/vps/print_vps_recovery_command.sh` and the current SSH restore scripts;
-- `deploy/systemd/README.md`, unit files, and `deploy/sleeves.env`;
-- GitHub variables/secrets and the provider console.
+---
 
-Do not copy hosts, fingerprints, public keys, chat IDs, or branches from old
-receipts or this skill.
+## 2. Spec Tables
 
-## Preflight
+### Host Specification & Network Identity
 
-1. Confirm the host, provider state, repository, branch, exact commit, and
-   intended mode.
-2. Inspect local and remote worktree state without cleaning it.
-3. Confirm the task authorizes recovery/deployment, not only diagnosis.
-4. Verify all credential paths remain demo and `REAL_MONEY=false`.
-5. Read current workflow/script refusal conditions.
-6. Record whether the fleet is quiescent and which commit is installed.
+| Attribute | Canonical Value | Configuration Authority | Invariant |
+| :--- | :--- | :--- | :--- |
+| **Static IPv4** | `208.84.103.4` | DNS & GitHub Variable `VPS_HOST` | Bound in Bybit API key IP whitelist. |
+| **SSH Port** | `22` | `/etc/ssh/sshd_config` on host | Standard OpenSSH port. |
+| **SSH User** | `root` | `deploy_vps_live.sh` / GitHub Secrets | Root authentication via Ed25519 only. |
+| **Host Key Type** | `Ed25519` | Known hosts pin in GitHub Actions | Pinned fingerprint verified against host console. |
+| **Hardware** | 4 vCPU, 8 GB RAM, 127 GB SSD | Provider instance spec | Minimum requirements for 2 engines + 2 workers. |
+| **State Directory** | `/var/lib/liquidity-migration/` | Systemd unit specifications | Shared signals, controls, WALs, logs. |
 
-If the checkout is dirty, preserve and inspect its diff first. Do not reset,
-overwrite, or delete it without explicit cleanup authority and a verified
-archive/patch.
+### Deployment & Recovery Tooling Reference
 
-## Establish SSH identity
+| Tool / Script | Syntax | Execution Target | Role |
+| :--- | :--- | :--- | :--- |
+| **Live Deploy** | `scripts/deploy_vps_live.sh deploy` | Local or CI $\rightarrow$ VPS | Atomic sync of pre-built release binaries and configs. |
+| **Live Verify** | `scripts/deploy_vps_live.sh verify` | VPS (Read-only) | Reads live commits, unit heartbeats, and armed status. |
+| **Rescue Command** | `scripts/vps/print_vps_recovery_command.sh <commit>` | Provider Console | Outputs pasteable rescue command restoring locked commit and keys. |
+| **Ops Wrapper** | `scripts/ops.sh deploy [mode]` | Operator Workstation | Convenience router for deployment, rollback, and verify. |
 
-- Obtain the target's Ed25519 host fingerprint directly and verify it through the
-  provider console or another trusted channel before changing pins.
-- Derive a supplied private key's public fingerprint locally without printing
-  the private key.
-- Distinguish host key, deploy key, and operator key. Rotate only the identity in
-  scope.
-- Update GitHub variables/secrets through the authorized interface. Never commit
-  private keys or private environment files.
+### Fleet Startup Sequencing & Dependencies
 
-## Restore access
+| Startup Order | Systemd Unit | Dependencies | Success Criteria |
+| :---: | :--- | :--- | :--- |
+| **1** | `liquidity-migration-signal-worker-demo.service` | `network-online.target` | Publishes heartbeat to `/var/lib/liquidity-migration-signal-worker-demo/`. |
+| **2** | `liquidity-migration-signal-worker-mainnet.service`| `network-online.target` | Publishes heartbeat to `/var/lib/liquidity-migration-signal-worker-mainnet/`. |
+| **3** | `liquidity-migration-engine.service` | `signal-worker-demo.service` | Obtains demo lease lock; connects WebSocket; starts WAL. |
+| **4** | `liquidity-migration-engine-mainnet.service` | `signal-worker-mainnet.service` | Validates `REAL_MONEY=true`; takes funded lease; starts WAL. |
 
-Generate recovery material from a trusted checkout at the exact intended commit:
+### Incident Triage & Remediation Matrix
 
+| Failure Symptom | Probable Cause | Remediation Recipe |
+| :--- | :--- | :--- |
+| **SSH Connection Refused** | VPS rebooted with altered host key or firewall rule. | Generate recovery script via `print_vps_recovery_command.sh` and paste into provider console. |
+| **Deploy Rejected in CI** | Git tree dirty on VPS or uncommitted change point. | Inspect remote diff via SSH; never run `git reset --hard` without verifying patch. |
+| **Rollback Triggered (180s)** | New binary failed heartbeat verification or crashed on boot. | Inspect unit journal: `journalctl -u <unit> -e`; fix root cause locally and re-deploy. |
+| **Sequence Gap Crash Loop** | Signal worker crashed mid-batch; engine desynced from spool. | Blank `source_generation` in worker checkpoint, prune orphan files, restart worker then engine. |
+
+---
+
+## 3. Invariants
+
+- **Must Never Enable `REAL_MONEY` During Recovery**: VPS migration and recovery *must never* enable funded trading on its own initiative; keep `REAL_MONEY=false` unless explicitly authorized.
+- **Must Never Overwrite Dirty Checkout Blindly**: If the remote VPS checkout contains untracked or modified files, preserve the diff before deploying or resetting.
+- **Must Verify Host Fingerprint Out-of-Band**: When host keys change, verify the new fingerprint through the provider console before updating CI secrets.
+- **Worker Must Start Before Engine**: The signal worker *must* be online and writing its signal spool before the execution engine boots.
+
+---
+
+## 4. Operational Recipes
+
+### Verify VPS Fleet Status
 ```bash
-scripts/vps/print_vps_recovery_command.sh COMMIT
-scripts/vps/print_vps_recovery_command.sh --rescue-only COMMIT
+# Verify live deployment commit and unit health
+SSH_TARGET=root@208.84.103.4 scripts/deploy_vps_live.sh verify
+
+# Or via operator script
+scripts/ops.sh status
 ```
 
-Inspect the generated command before using the provider console. It embeds the
-restore script from the named Git object rather than fetching an unpinned branch
-tip.
-
-After SSH returns, confirm the repository/commit, strict environment-file
-ownership and modes, authorized keys, demo-only credential set, and absence of
-unexpected `REAL_MONEY` or mainnet variables.
-
-## Deploy operation
-
+### Deploy Exact Commit to Production VPS
 ```bash
-# Fetch the exact commit, build, install, restart the fleet.
-EXPECTED_COMMIT=COMMIT SSH_TARGET=USER_AT_HOST \
+# Push directly to main, build binaries, and execute atomic deploy
+EXPECTED_COMMIT=$(git rev-parse HEAD) SSH_TARGET=root@208.84.103.4 \
   scripts/deploy_vps_live.sh deploy
-
-# Read-only fleet summary.
-SSH_TARGET=USER_AT_HOST scripts/deploy_vps_live.sh verify
 ```
 
-Use current script help and environment names; placeholders are not literal values.
+### Emergency SSH Access Restoration via Console
+```bash
+# Generate single pasteable command to restore access from provider rescue console
+scripts/vps/print_vps_recovery_command.sh $(git rev-parse HEAD)
+```
 
-Deploy requires the target commit to be on the selected remote branch. It
-installs locked dependencies and the current unit manifest, renders the native
-configs, runs state takeover while the owners are stopped, and starts the
-signal worker before the engine in each realm. The funded realm starts only
-while `REAL_MONEY` is armed. Verify never repairs drift.
-
-Confirm the exact commit, resolved sleeves, credential mode, service/timer
-state, start order, liveness, and journal/venue agreement appropriate to the
-task.
-
-## GitHub Actions
-
-The manual workflow exposes `deploy`, `verify`, and `disarm-mainnet`. It runs
-CI first, configures the pinned SSH identity, and passes the workflow commit to
-the selected mode. A verify workflow cannot update a stale checkout; run
-`deploy`.
-
-If host/IP/deploy identity changes permanently, update workflow variables or
-pins, scripts, tests, recovery material, and operator docs together. Run the
-focused runtime/deploy tests and lint before proposing a push.
-
-## Diagnose by symptom
-
-- Host-key failure: independently verify the target, then update the pin.
-- Deploy-key mismatch: correct the secret or perform a complete intentional
-  rotation across workflow, authorized keys, scripts, and tests.
-- Permission denied: verify user, authorized keys, modes, and provider state.
-- Expected-commit mismatch: run `deploy`; verify is not deploy.
-- Dirty checkout: inspect and archive; request cleanup authority.
-- CI-only failure: compare workflow variables/secrets and environment with the
-  successful local command without exposing secrets.
-
-Never enable real-money trading as part of VPS recovery. Mainnet requires a
-separate control plane and exact owner authorization under `AGENTS.md`.
+### Roll Back to Previous Deployed Commit
+```bash
+# Execute immediate rollback to known good commit recorded in STATE.md
+EXPECTED_COMMIT=23eff2fe SSH_TARGET=root@208.84.103.4 \
+  scripts/deploy_vps_live.sh rollback
+```

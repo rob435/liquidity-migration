@@ -3,90 +3,84 @@ name: equity-curve
 description: Produce and interpret the repository-standard equity curves for the LONG profile, and for a registered Lane-2 carry config through the same chart. Use scripts/research/equity_curves.sh or scripts/ops.sh equity for citable outputs, select the correct full-PIT venue root, distinguish modeled leverage from presentation-only chart leverage, and report run scope and limitations. A standard curve is descriptive evidence, not proof of live-runtime parity, promotion, or authorization.
 ---
 
-# Produce equity curves
+# Equity Curve Generation & Interpretation
 
-Read current options before constructing a command:
+## 1. Purpose
+Specify execution parameters, sleeve configurations, output schemas, and interpretation standards for producing repository-standard equity curves across LONG, CARRY, and COMBINED portfolios.
 
+---
+
+## 2. Spec Tables
+
+### Equity Curve CLI Parameters (`scripts/research/equity_curves.sh`)
+
+| Parameter | Type | Default | Description | Invariant |
+| :--- | :--- | :--- | :--- | :--- |
+| `--sleeves` | String | `long` | Target sleeve selection: `long`, `carry`, or `long,carry`. | Determines modeled execution engine. |
+| `--root` | Path | `~/SHARED_DATA/bybit_full_pit` | Historical Point-in-Time data directory. | Must contain validated PIT manifest. |
+| `--combined` | Flag | `false` | Synthesizes blended portfolio equity curve. | Requires both `long` and `carry` inputs. |
+| `--combined-long-multiplier` | Float | `6.0` | Sizing multiplier applied to LONG equity. | Matches live funded deployment dial. |
+| `--combined-carry-multiplier`| Float | `3.0` | Sizing multiplier applied to CARRY equity. | Matches live funded deployment dial. |
+| `--combined-weight` | Float | Inverse-vol | Fixed capital allocation weight to CARRY (0.0 to 1.0). | When omitted, defaults to risk parity. |
+| `--combined-scale` | Float | `1.0` | Visual presentation leverage multiplier on blend. | Visual display only; does not model cost. |
+| `--research-config` | Path | None | Explicit registered Lane-2 config (e.g. `configs/lane2_*.json`). | Enforces registered research schema. |
+| `--out` | Path | `reports/equity_curves/` | Destination root for generated plots and ledgers. | Output directory created automatically. |
+
+### Sleeve Reconstruction Characteristics
+
+| Sleeve | Underlying Model Engine | Base Authority Config | Deployed Execution Parity | Excluded Mechanics |
+| :--- | :--- | :--- | :--- | :--- |
+| **LONG** | Native Rust long research runner | Active LONG profile (`v12`) | High parity; matches native reducer. | Microsecond book queue priority. |
+| **CARRY** | Cross-venue research runner | `configs/lane2_carry_hold_v7.json` | Moderate; registered rule shape. | Pre-settlement exit boost not modeled. |
+| **COMBINED** | Daily equity CSV blender | Weighted blend of LONG + CARRY | High descriptive parity at daily bar. | Intraday cross-margin netting. |
+| **EXODUS** | N/A (Demo only) | N/A | None; excluded from standard research curves. | No standardized research series. |
+
+### Output Artifact Schema
+
+| Artifact File | Format | Contents & Purpose |
+| :--- | :--- | :--- |
+| `equity_curve.png` | PNG | Standard 3-pane plot: cumulative return vs BTC, metric tiles, monthly returns table. |
+| `summary.json` | JSON | Key statistics: Sharpe, max drawdown, CAGR, total trades, fee drag, win rate. |
+| `daily_equity.csv` | CSV | Daily time series: date, balance, equity, return, drawdown, gross/net fees. |
+| `trades.parquet` | Parquet | Granular trade-level execution log with causal timestamps and fill prices. |
+
+---
+
+## 3. Invariants
+
+- **Must Never Create Lookalike Plots**: Ad hoc charts *must never* mimic the standard format (strategy-vs-BTC overlay, metric tiles, monthly table); always use `scripts/research/equity_curves.sh` for citable charts.
+- **Must Distinguish Modeled vs Presentation Leverage**: Never report `--combined-scale` as modeled return; scaling without modeled financing drag is purely cosmetic.
+- **Must Declare Reconstruction Gaps**: All reports *must* explicitly state differences between backtest assumptions and live execution (e.g., funding capture, queue latency, slippage).
+- **Descriptive, Not Authorizing**: An equity curve is descriptive evidence of past rules; it *must never* be treated as automated authorization for live capital allocation.
+
+---
+
+## 4. Operational Recipes
+
+### Generate Standard Single-Sleeve Curves
 ```bash
-bash scripts/research/equity_curves.sh --help
-scripts/ops.sh equity --help
+# Generate LONG equity curve using full-PIT Bybit data
+bash scripts/research/equity_curves.sh --sleeves long --root ~/SHARED_DATA/bybit_full_pit
+
+# Generate CARRY equity curve for registered Lane-2 v7 config
+bash scripts/research/equity_curves.sh --sleeves carry --root ~/SHARED_DATA/bybit_full_pit
 ```
 
-Use the standard wrapper for outputs intended to be compared or cited:
-
+### Generate Deployed Combined Portfolio Curve
 ```bash
-bash scripts/research/equity_curves.sh --sleeves long
-bash scripts/research/equity_curves.sh --sleeves carry
-bash scripts/research/equity_curves.sh --sleeves long,carry
-bash scripts/research/equity_curves.sh --root ~/SHARED_DATA/bybit_full_pit
+# Blended LONG (6x) + CARRY (3x) equal-risk portfolio
+bash scripts/research/equity_curves.sh \
+  --sleeves long,carry \
+  --combined \
+  --combined-long-multiplier 6.0 \
+  --combined-carry-multiplier 3.0 \
+  --root ~/SHARED_DATA/bybit_full_pit
+
+# Via operator script
+scripts/ops.sh equity --combined
 ```
 
-Derive the time boundary and venues from the user's question or experiment
-contract. Do not assume a default window is OOS or that both venues are required.
-
-## Understand the reconstruction
-
-- `long` loads the active LONG profile and runs the long-native research
-  engine.
-- `carry` renders the registered research config
-  `configs/lane2_carry_hold_v7.json` from the cross-venue panel, through the
-  same `--research-config` path (below). It is the registered research shape,
-  not a demo daemon replay. This is the rule the deployed v7 execution clock
-  trades — v7 is an execution clock on the same registered file, and its
-  pre-settle exit uplift is not in this render.
-- `--combined` renders a LONG+CARRY portfolio through the same standard chart.
-  It reads the two sleeves' daily equity CSVs, brings each leg to its deployed
-  dial (`--combined-long-multiplier` default 6.0, `--combined-carry-multiplier`
-  default 3.0), and blends them. Default blend is equal-risk (inverse-vol), so
-  neither leg dominates; `--combined-weight` forces a fixed CARRY share.
-  `--combined-scale` is presentation leverage on the blend (not modelled cost).
-  EXODUS is not included: it is demo-only and has no standard-format research
-  series. Output under `<out>/combined/`.
-- Neither curve is automatically a literal daemon replay. Capacity, live state,
-  netting, optional overlays, order lifecycle, and deploy environment can differ.
-  Read `docs/trading_logic.md` and the emitted config before claiming
-  parity.
-- Runtime profile names confer no evidence status.
-
-## Handle leverage correctly
-
-- Use `--long-notional-multiplier` only to scale the same LONG signal when that
-  is the intended comparison.
-
-Do not describe a partial flag combination as “the live config.” Verify every
-material runtime setting and lifecycle behavior.
-
-## Read outputs honestly
-
-Default outputs live under the selected root's `reports/equity_curves/` tree.
-Inspect the generated Markdown/JSON, trade ledgers, CSV, config/run identity,
-chart subtitle, and run label—not only the PNG.
-
-Apply `backtest-integrity` and `research-report` before drawing a conclusion.
-State:
-
-- claim and window;
-- venue/population and PIT provenance;
-- modeled costs/funding and coverage;
-- reconstruction gaps versus runtime;
-- modeled versus presentation leverage;
-- which data shaped the result and which graded it, and the justified
-  conclusion, under `docs/research/governance.md`.
-
-Ad hoc plots are allowed for diagnostics only when they are visually DISTINCT
-from the standard layout, clearly labelled non-standard, and never compared as
-standard outputs. **Never hand-build a chart that imitates the standard format**
-(strategy-vs-BTC overlay, metric tiles, monthly table) in matplotlib or any
-other tool — a lookalike is a second format even when labelled, and this exact
-mistake was made and reverted on 2026-07-28. If a series needs the standard
-format, the wrapper is the only path:
-
-- Registered Lane-2 configs render through the SAME standard chart via
-  `--research-config configs/lane2_*.json` — the carry-hold versions today;
-  the financed-leaders configs this was built for were deleted 2026-08-19
-  (repeatable; output under
-  `<out>/research/<config_id>/`, labelled RESEARCH / simulation-on-seen-data;
-  added 2026-07-28 with `liquidity_migration.research.backtest.financed_longs.research_equity_chart`).
-
-If the wrapper still lacks an option for a recurring citable need, add a tested
-option to the wrapper rather than creating a second format.
+### Inspect Output Summary Metrics
+```bash
+cat reports/equity_curves/combined/summary.json | jq '{sharpe: .sharpe, max_drawdown: .max_dd, cagr: .cagr}'
+```

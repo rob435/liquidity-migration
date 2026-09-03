@@ -6,6 +6,11 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — Refactored all project skills, MCP configuration, and Claude project memory into the Spec-First standard with tables.**
+  - *Skills refactor.* Converted all 8 skills under `.codex/skills/` (`backtest-integrity`, `equity-curve`, `pit-reconcile`, `repo-map`, `research-phase-runner`, `research-report`, `run-strategy`, `vps-migrate`) into the 4-part Spec-First skeleton (Purpose, Spec Tables, Invariants, Operational Recipes). Replaced loose narrative paragraphs with structured markdown tables for parameter routing, artifact schemas, and failure triage matrices.
+  - *MCP specification & config.* Created `docs/mcp.md` defining server registries, tool schemas, transport contracts, and permissions. Added clean `.mcp.json` at repository root with stdio transport.
+  - *Claude project memory index.* Restructured `/Users/jhbvdnsbkvnsd/.claude/projects/-Users-jhbvdnsbkvnsd-Desktop-liquidity-migration/memory/MEMORY.md` into high-density reference tables covering standing conduct, tooling traps, engine runtime, lease locking, deployment procedures, and research findings. Refactored sub-indices `latency-and-order-path-index.md` and `historical-2026-06-07-index.md` to match.
+
 - **2026-09-03 — Streamlined delivery pipeline: eliminated self-PR ceremony on `main`, added CI Rust caching, and decoupled heavy soak/benchmarks from the deploy path.**
   - *Ruleset change.* Removed mandatory `pull_request` and status-check gates from GitHub Ruleset `22048243`. Fast-forward linear direct pushes to `main` are enabled for hotfixes and operational changes, eliminating 15–20 minutes of dead queue time per agent iteration. Protections against deletions and force-pushes remain active.
   - *CI caching & job decoupling.* Added `Swatinem/rust-cache` to `.github/workflows/vps-deploy.yml` across `engine/`. Moved the 2,000,000-op account soak test and 20,000-event benchmark into a non-blocking parallel job (`rust-soak-bench`). The release compilation and smoke-test gate runs directly after unit tests (`cargo test --workspace --all-targets --release`), unblocking VPS deployments in 1–2 minutes rather than 12–19 minutes.

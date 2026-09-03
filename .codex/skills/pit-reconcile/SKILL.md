@@ -3,69 +3,80 @@ name: pit-reconcile
 description: Assess current engine-WAL, authenticated venue, PIT, and model evidence. Use for WAL/venue mismatches, fill or P&L evidence, archive_trade_manifest coverage, pit_membership_fail, or execution-accounting claims. Keep PIT validity separate from operational authorization and never treat projections as account authority.
 ---
 
-# Reconcile account and PIT evidence
+# Point-in-Time & Account Reconciliation
 
-Start from current surfaces:
+## 1. Purpose
+Define the reconciliation protocol, verification hierarchy, and diagnostic workflows for resolving discrepancies between the engine WAL, authenticated exchange state, and Point-in-Time historical datasets.
 
+---
+
+## 2. Spec Tables
+
+### State Authority Hierarchy
+
+| Precedence | Domain / Layer | Primary Artifact | Authority Scope | Non-Authoritative Derivatives |
+| :---: | :--- | :--- | :--- | :--- |
+| **1** | **Exchange Venue** | Authenticated REST/WS API | Final truth on open positions, cash balance, and execution IDs. | Local trade approximations, order estimates. |
+| **2** | **Engine Core WAL** | `engine.wal` (append-only log) | Authoritative local record of sent orders, acknowledged fills, and state. | Strategy parquet, dashboard metrics, Telegram alerts. |
+| **3** | **Strategy Projections**| Heartbeats, trade JSONL, logs | Ephemeral operational view of sleeve state. | Cannot overrule WAL or venue. |
+| **4** | **PIT Data Roots** | Archive trade & kline manifests | Authoritative historical universe membership at timestamp $T$. | Current-listing inferences, live ticker snapshots. |
+
+### Reconciliation Tooling Reference
+
+| Tool | Syntax | Scope | Role |
+| :--- | :--- | :--- | :--- |
+| **Flat Attestation** | `scripts/ops.sh attest-flat --environment <realm>` | Venue Account | Two-scan proof verifying the entire account holds zero exposure. |
+| **WAL Replay** | `engine replay --wal <path>` | Engine WAL | Replays deterministic state transitions and identifies pending items. |
+| **Fills Audit** | `engine fills --wal <path>` | Engine WAL | Computes exact fees, maker share, arrival shortfall, and closed P&L. |
+| **Venue Capture** | `python scripts/research/capture_bybit_account_history.py` | Venue API | Authenticated capture of exchange-side executions and balance history. |
+| **Venue-WAL Join**| `python scripts/research/reconcile_venue_wal.py` | Venue + WAL | Cross-reconciliation of WAL orders against venue execution IDs. |
+| **PIT Manifest** | `python -m liquidity_migration archive-manifest` | Dataset Root | Rebuilds and verifies strict PIT universe listing manifests. |
+
+### Discrepancy Failure Modes & Remediation
+
+| Symptom | Probable Cause | Action Protocol |
+| :--- | :--- | :--- |
+| **WAL / Venue Mismatch** | Unfilled resting order, venue-side liquidation, or manual order. | Stop engine; run `engine attest-flat`; join WAL against venue history. |
+| **May-Open Latch Blocked**| Engine detected unreconciled positions on boot. | Run `engine reconcile-clear --execute` after verifying venue flat. |
+| **Missing PIT Rows** | Kline gaps, unlisted tokens, or coverage boundary error. | Rebuild manifest with end-exclusive date; mark gaps as non-gradeable. |
+| **Double-Counted Fee** | Strategy applied fee before engine WAL recorded venue execution. | Rely solely on `engine fills` venue execution report. |
+
+---
+
+## 3. Invariants
+
+- **Must Never Rely on Projections as Truth**: Heartbeats, Parquet files, and status messages are secondary projections; the engine WAL and venue API *must* be consulted for accounting proof.
+- **Must Never Overwrite Contradictions**: When WAL and venue disagree, preserve the conflicting records and stop the writer; *must never* forcibly wipe or overwrite the WAL to mask an error.
+- **Must Treat Manifest Ends as Exclusive**: In all archive manifest builds, `--end` dates are strictly *exclusive* (`[start, end)`).
+- **Proving Flatness Does Not Prove P&L**: `attest-flat` confirms zero current positions; it *must not* be cited as proof of historical fills, fees, or realized profitability.
+
+---
+
+## 4. Operational Recipes
+
+### Verify Credential Flatness on Host
 ```bash
-scripts/ops.sh help
-scripts/ops.sh status
+# Attest demo account is completely flat across all symbols
 scripts/ops.sh attest-flat --environment demo
-python -m liquidity_migration --help
+
+# Attest funded account is flat
+scripts/ops.sh attest-flat --environment mainnet
 ```
 
-These are demo or research tools. They never authorize real money.
-
-## Account evidence
-
-The Rust engine's write-ahead log (WAL) is the durable local order and fill
-record. Sleeve books, strategy Parquet, dashboards, heartbeats, and
-notifications are projections. The venue remains the authority for what the
-account currently holds and which orders and executions it accepted.
-
-For current credential-wide flatness, use the concrete realm:
-
+### Audit Engine WAL Fills & P&L
 ```bash
-scripts/ops.sh attest-flat --environment demo
+# Decode engine WAL history and open exposures
+/opt/liquidity-migration-engine/bin/engine replay \
+  --wal /var/lib/liquidity-migration-engine-mainnet/engine.wal
+
+# Report exact executed fees, slippage, and realized trade P&L
+/opt/liquidity-migration-engine/bin/engine fills \
+  --wal /var/lib/liquidity-migration-engine-mainnet/engine.wal
 ```
 
-This runs the installed venue adapter's two-scan proof across the credential,
-not just the symbols in the heartbeat. It proves flatness only; it does not
-prove historical fills, fees, funding, or P&L.
-
-Read a WAL with the exact installed engine or the matching local build:
-
+### Rebuild Historical PIT Universe Manifest
 ```bash
-/opt/liquidity-migration-engine/bin/engine replay --wal /absolute/path/to/engine.wal
-/opt/liquidity-migration-engine/bin/engine fills --wal /absolute/path/to/engine.wal
+# Build Point-in-Time symbol manifest for date window (end is exclusive)
+python -m liquidity_migration --data-root ~/SHARED_DATA/bybit_full_pit archive-manifest \
+  --start 2024-01-01 --end 2025-01-01
 ```
-
-Record the engine version, checkout commit, WAL path and segment set. Compare
-immutable client/order/execution identifiers and quantities with authenticated
-venue results for the same account and interval. Do not turn a WAL total into a
-venue-confirmed fee, funding, or P&L claim without that join.
-
-For live mismatches, inspect the exact WAL segment set and replay head, owner
-health, reconciliation events, immutable venue identifiers, and authenticated
-venue snapshot. Preserve contradictory facts and stop unsafe writers. Do not
-repair the headline by editing projections or resetting before flatness is
-proved.
-
-## PIT evidence
-
-PIT membership is checked inside the research run whose claim depends on it.
-For a targeted Bybit manifest rebuild:
-
-```bash
-python -m liquidity_migration --data-root ROOT archive-manifest \
-  --start YYYY-MM-DD --end YYYY-MM-DD
-```
-
-The end is exclusive. Inspect manifest `source` values and kline coverage;
-current-listing-derived tail rows are inference, not archive observations. A
-partial/current-universe run may support only its declared narrower scope.
-
-PIT coverage cannot prove execution, and a reconciled demo journal cannot repair
-a survivorship-invalid historical claim. Apply `AGENTS.md`, `docs/data.md`
-(Point-in-time membership), and `docs/architecture.md` (The account journal) to
-keep those conclusions separate.

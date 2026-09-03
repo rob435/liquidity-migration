@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "liqmig-research": {
+      "command": "python",
+      "args": [
+        "-m",
+        "liquidity_migration",
+        "--help"
+      ],
+      "env": {}
+    }
+  }
+}
