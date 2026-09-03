@@ -244,7 +244,7 @@ impl WalWriter {
         let scan = if len == 0 {
             file.write_all(&MAGIC)?;
             file.sync_data()?;
-            if let Some(dir) = path.parent() {
+            if let Some(dir) = parent_dir(path) {
                 File::open(dir)?.sync_all()?;
             }
             Scan {
@@ -449,7 +449,7 @@ impl Wal for WalWriter {
 
         // 3. The restatement durable, then its name durable.
         file.sync_data()?;
-        if let Some(dir) = path.parent() {
+        if let Some(dir) = parent_dir(&path) {
             File::open(dir)?.sync_all()?;
         }
 
@@ -643,6 +643,18 @@ fn segment_path(family: &Path, index: u64) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The directory to fsync after creating or renaming a file at `path`.
+/// `Path::parent` of a bare filename is `Some("")`, which `File::open`
+/// refuses; the file lives in the working directory, so that is what is
+/// synced.
+fn parent_dir(path: &Path) -> Option<PathBuf> {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => Some(dir.to_path_buf()),
+        Some(_) => Some(PathBuf::from(".")),
+        None => None,
+    }
+}
+
 /// Every segment of this family that exists, ascending by number. The family
 /// file itself is index 1 when present.
 pub fn segments(family: &Path) -> Result<Vec<(u64, PathBuf)>, WalError> {
@@ -650,10 +662,7 @@ pub fn segments(family: &Path) -> Result<Vec<(u64, PathBuf)>, WalError> {
     if family.exists() {
         found.push((1, family.to_path_buf()));
     }
-    let dir = family.parent().filter(|p| !p.as_os_str().is_empty());
-    let dir = dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let dir = parent_dir(family).unwrap_or_else(|| PathBuf::from("."));
     let Some(stem) = family.file_name().map(|n| n.to_string_lossy().into_owned()) else {
         return Ok(found);
     };
@@ -985,6 +994,48 @@ fn sample_record() -> WalRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_filename_syncs_the_working_directory_not_an_empty_path() {
+        assert_eq!(
+            parent_dir(Path::new("engine.wal")),
+            Some(PathBuf::from("."))
+        );
+        assert_eq!(
+            parent_dir(Path::new("var/engine.wal")),
+            Some(PathBuf::from("var"))
+        );
+        assert_eq!(
+            parent_dir(Path::new("/var/lib/engine.wal")),
+            Some(PathBuf::from("/var/lib"))
+        );
+        assert_eq!(parent_dir(Path::new("/")), None);
+    }
+
+    /// The failure this guards: `File::open("")` is ENOENT, so a log named
+    /// without a directory could not be created at all.
+    #[test]
+    fn a_log_named_without_a_directory_can_be_created() {
+        let dir = std::env::temp_dir().join(format!("wal-bare-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "bare.wal";
+        let _ = std::fs::remove_file(dir.join(name));
+        // Change into the directory on a helper thread so the process cwd
+        // of other tests is untouched: the cwd is per-process, so this is
+        // still a shared resource — the thread only scopes the assertion.
+        let dir_for_thread = dir.clone();
+        let created = std::thread::spawn(move || {
+            let previous = std::env::current_dir().unwrap();
+            std::env::set_current_dir(&dir_for_thread).unwrap();
+            let opened = WalWriter::open(Path::new(name)).map(|_| ());
+            std::env::set_current_dir(previous).unwrap();
+            opened
+        })
+        .join()
+        .unwrap();
+        created.expect("a bare relative log name opens in the working directory");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// The invariant that has no other observable: the thread that runs a
     /// barrier must hold a descriptor for the file being written. Rotation is

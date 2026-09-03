@@ -158,6 +158,50 @@ pub enum StopReason {
     FeedClosed,
 }
 
+/// Where the loop's two time-driven waits come from: the group-flush tick
+/// and the sleep to the next strategy timer. Live, Tokio's own timers. A
+/// replay driver hands in a clock it advances itself, so those two waits
+/// fire in the tape's time and not the wall's. Monomorphised: the live loop
+/// pays nothing for the seam.
+pub trait LoopTimer {
+    type Sleep: Future<Output = ()>;
+    type Interval: LoopInterval;
+    fn sleep(&self, duration: Duration) -> Self::Sleep;
+    fn interval(&self, period: Duration) -> Self::Interval;
+}
+
+/// A repeating tick. The first tick is due at once; after a tick fires late
+/// the next is a full period after it (Tokio's `MissedTickBehavior::Delay`).
+#[allow(async_fn_in_trait)]
+pub trait LoopInterval {
+    async fn tick(&mut self);
+}
+
+/// The wall's timers, which is what `run` uses.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemTimer;
+
+impl LoopTimer for SystemTimer {
+    type Sleep = tokio::time::Sleep;
+    type Interval = tokio::time::Interval;
+
+    fn sleep(&self, duration: Duration) -> Self::Sleep {
+        tokio::time::sleep(duration)
+    }
+
+    fn interval(&self, period: Duration) -> Self::Interval {
+        let mut interval = tokio::time::interval(period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval
+    }
+}
+
+impl LoopInterval for tokio::time::Interval {
+    async fn tick(&mut self) {
+        tokio::time::Interval::tick(self).await;
+    }
+}
+
 #[derive(Debug)]
 pub struct RunOutcome {
     pub stopped_by: StopReason,
@@ -532,9 +576,39 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         C: RuntimeControlFeed,
         S: Future<Output = ()>,
     {
+        self.run_with_inputs_on(
+            market_feed,
+            order_feed,
+            signal_feed,
+            control_feed,
+            shutdown,
+            SystemTimer,
+        )
+        .await
+    }
+
+    /// `run_with_inputs` with the loop's timers supplied by the caller. The
+    /// live runner never calls this; the replay driver does, with a clock it
+    /// advances from the tape.
+    pub async fn run_with_inputs_on<M, O, F, C, S, T>(
+        &mut self,
+        market_feed: &mut M,
+        order_feed: &mut O,
+        signal_feed: &mut F,
+        control_feed: &mut C,
+        shutdown: S,
+        timer: T,
+    ) -> Result<RunOutcome, EngineError>
+    where
+        M: MarketFeed,
+        O: OrderFeed,
+        F: SignalFeed,
+        C: RuntimeControlFeed,
+        S: Future<Output = ()>,
+        T: LoopTimer,
+    {
         tokio::pin!(shutdown);
-        let mut flush_tick = tokio::time::interval(self.group_flush);
-        flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut flush_tick = timer.interval(self.group_flush);
         let mut stopped_by = StopReason::Shutdown;
         let mut signals_open = true;
         let mut controls_open = true;
@@ -588,7 +662,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         self.take_completion_turn(completion, order_feed).await?;
                     },
                     _ = flush_tick.tick() => self.on_tick().await?,
-                    _ = tokio::time::sleep(timer_wait.unwrap_or_default()), if timer_wait.is_some() => {
+                    _ = timer.sleep(timer_wait.unwrap_or(Duration::MAX)), if timer_wait.is_some() => {
                         self.on_timers().await?;
                     },
                     _ = std::future::ready(()), if !self.halt_cancel_queue.is_empty() => {
@@ -785,7 +859,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     Err(engine_types::RuntimeControlError::Closed) => controls_open = false,
                     Err(error) => return Err(EngineError::State(error.to_string())),
                 },
-                _ = tokio::time::sleep(timer_wait.unwrap_or_default()), if timer_wait.is_some() => {
+                _ = timer.sleep(timer_wait.unwrap_or(Duration::MAX)), if timer_wait.is_some() => {
                     self.on_timers().await?;
                 }
                 _ = flush_tick.tick() => self.on_tick().await?,
@@ -840,6 +914,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // carries an answer, and a stop that dropped it would be a failed
         // barrier nobody heard about.
         self.settle_barrier()?;
+        // A trip that closed since the last tick is still a closed trip.
+        self.record_trades();
         let now = clock::now_ns();
         let record = self.ledger.record_for_wal(now);
         self.wal.append(&record)?;

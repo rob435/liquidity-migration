@@ -147,7 +147,56 @@ When performing rollouts or cold starts, state is seeded or verified while units
 
 ---
 
-## 8. Development Commands
+## 8. Backtest Replay (`engine backtest`)
+
+The live loop — `Engine::boot_as`, the risk kernel, the strategy reducers, the working-order supervisor, the log — driven by a recorded `market_tape` in the tape's own time, on a simulated venue.
+
+| Input | Source | Contract |
+| :--- | :--- | :--- |
+| `--tape PATH` | `python -m market_tape rows ARCHIVE --hours A..B > tape.jsonl` (or `.jsonl.zst`) | `market_tape/schema.py` rows, `local_receive_ts_ns` ordered; a malformed row stops the run at its line |
+| `--instruments PATH` | `ARCHIVE/<day>/<HH>/_meta/instruments-<stamp>.json[.zst]` | Bybit `instruments-info` rows; a wanted symbol without rules refuses boot |
+| `--config PATH` | engine TOML with `[[strategy]]` blocks | `wal_path`, `trades_path`, spool paths are replaced by the flags |
+| `--wal PATH` | new file | Must be absent or empty; every run starts from nothing |
+| `--signals DIR` | signal spool | Rows validated as live; delivered at `available_wall_ts_ms` |
+
+| Output | Written by | Holds |
+| :--- | :--- | :--- |
+| `--wal` | the engine | The run's log, byte-identical across runs of one tape |
+| `--trades PATH` | the engine (`ClosedTrade`) | Closed round trips: gross, fees, net, holding time, maker share, shortfall |
+| `--equity PATH` | the venue (`EquityPoint`) | Cash, unrealized, equity, initial margin at every fill and settlement |
+| `--report PATH` | the runner (`BacktestReport`) | Tape stats, venue books, engine ledger, reconciliation |
+
+| Dial | Default | Meaning |
+| :--- | :--- | :--- |
+| `--capital` | 10000 | Starting USDT |
+| `--taker-fee` / `--maker-fee` | 0.00055 / 0.0002 | Bybit VIP0 linear |
+| `--rtt-ms` | 175 | Order command round trip; half each way, matched at arrival |
+| `--private-latency-ms` | 60 | Private-stream hop for fills, cancels, amends |
+| `--mmr` | 0.005 | Maintenance margin fraction; equity ≤ Σ maintenance liquidates |
+
+Invariants:
+- Time moves only when the tape feed releases a row or a due wait; nothing later is observed before anything earlier. Two runs of one tape write the same log.
+- The virtual clock is thread-local and guard-held (`engine_types::clock::install_virtual`); the live loop's timers are the system's (`SystemTimer`), monomorphised, untouched.
+- Fills walk the book level by level; resting orders wait behind the displayed queue; stops trigger on the mark and fill through the gap; funding settles once per published boundary; margin is posted; refusals carry Bybit's codes.
+- Not modelled: our impact on the tape's liquidity, reactions to us, liquidation fees, rate limits. Every number is bounded by those omissions.
+- A flat account whose venue books and engine ledger disagree fails the run.
+- Throughput is bound by the log's durability barrier per order (the live path); a 2 h, 8,335-order tape runs in ~35 s.
+
+```bash
+# One tape hour range to a flat file, then the replay and its report
+python -m market_tape rows ARCHIVE --hours 2026-09-02T00..2026-09-03T00 > tape.jsonl
+python scripts/research/run_engine_backtest.py --config engine/engine.demo.toml \
+  --tape tape.jsonl --instruments ARCHIVE/2026-09-02/00/_meta/instruments-*.json.zst \
+  --out-dir var/backtests/2026-09-02
+
+# The engine alone
+cd engine && cargo run --release -- backtest --config CONFIG --tape TAPE \
+  --instruments INSTRUMENTS --wal run.wal --trades trades.jsonl --report report.json
+```
+
+---
+
+## 9. Development Commands
 
 ```bash
 # Style formatting check

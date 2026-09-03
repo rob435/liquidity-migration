@@ -53,6 +53,8 @@ never copy sleeve status or thresholds here.
 | `cd engine && cargo run --release -- wal-cost --wal PATH` | what one append and one durability barrier cost on the filesystem holding PATH: the storage's share of the order path |
 | `cd engine && cargo run --release -- latency --wal PATH` | how long each step of the order path took, per operation, at p50/p90/p99/p99.9: the venue's round trip, the engine's own work, and the time it held a command back to stay inside the request quota, as separate numbers |
 | `cd engine && cargo run --release -- fills --wal PATH` | what the trading cost and what the positions made: maker share, fee, arrival shortfall, markouts, and closed round trips with their P&L |
+| `cd engine && cargo run --release -- backtest --config PATH --tape PATH --instruments PATH --wal PATH` | the live loop on a recorded `market_tape`, in the tape's time, on a simulated venue: [docs/engine.md](docs/engine.md) §8 |
+| `python scripts/research/run_engine_backtest.py --config PATH --tape PATH --instruments PATH --out-dir DIR` | runs `engine backtest` and reads its report, trades, and equity back as research metrics |
 | `scripts/ops.sh help` | operator router: status, equity, reset, deploy, and the rest |
 | `python -m liquidity_migration --help` | research and data CLI |
 | `python -m market_tape --help` | the market tape: check a capture config, record, pack, list hours, read rows, build bars, rebuild a book |

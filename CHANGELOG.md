@@ -6,6 +6,62 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — `engine backtest`: the live loop on a recorded tape, in the
+  tape's own time.**
+  - Deleted the earlier replay driver (`engine-core/src/backtest/`,
+    `scripts/research/run_engine_backtest.py`) and its process-global virtual
+    clock. Audited before deletion: with a `biased` `select!` over an
+    always-ready feed the loop never ticked, never ran a strategy timer, never
+    polled the signal feed, and filled orders against the book at the end of
+    the tape (20,000 events → 2 orders; `dispatch queue 60.03s`); it charged
+    funding on every ticker frame (500 USDT where one settlement is 5), filled
+    an unquoted symbol at an invented 100.00, ignored `reduce_only`, posted no
+    margin, could not read `market_tape`'s row contract (a real-schema tape gave
+    `0 orders, +0.00%` and exit 0), and its clock override broke 28 of 484
+    `engine-core` tests when held for 300 ms. `scripts/dev.sh check` refused it.
+  - Rebuilt as `engine backtest --config --tape --instruments --wal [--signals
+    --trades --equity --report --capital --taker-fee --maker-fee --rtt-ms
+    --private-latency-ms --mmr]`. The tape is `market_tape`'s frozen schema
+    (`python -m market_tape rows`, `.jsonl` or `.jsonl.zst`); books are
+    rebuilt with the recorder's chaining rule and the live feed's level
+    merge; instruments come from the recorder's `instruments_snapshot`. A row
+    that breaks the contract stops the run with its line number.
+  - Time: `engine_types::clock` gains a thread-local virtual clock behind an
+    RAII guard (no other thread can see it; a failed run cannot leave it
+    installed). The loop's two timers come through a `LoopTimer` seam
+    (`Engine::run_with_inputs_on`); `run_with_inputs` passes `SystemTimer`, so
+    the live loop is unchanged and monomorphised. The tape feed is the only
+    clock pump: nothing later is released while an earlier wait is due, and a
+    lowest-priority pump task moves the clock only when the loop is blocked on
+    a venue reply outside its `select!`.
+  - Venue: fills walk the book level by level (partials), resting orders sit
+    behind the displayed queue and fill from prints that reach them, stops
+    trigger on the mark and fill through the gap, funding settles once per
+    published boundary at the rate quoted before it, margin is posted and
+    checked, `reduce_only`/tick/step/minimum refusals carry Bybit's codes,
+    liquidation closes at Σ maintenance. Orders fly half a round trip each way
+    (default 175 ms) and match against the book at arrival; private updates
+    hop 60 ms. Not modelled: our impact on the tape's liquidity, reactions to
+    us, liquidation fees, rate limits.
+  - Report: venue books and the engine's `ClosedTrade` ledger side by side; a
+    flat account whose two sides disagree fails the run. Two runs of one tape
+    write byte-identical logs (tested; also plain vs `.zst` on a 2 h fixture:
+    21,602 events, 8,335 orders, 6,667 fills, 1,635 trips, identical WAL,
+    trades, equity).
+  - `Engine::finish` now writes closed trades before the final ledger record:
+    a trip closed after the last group-flush tick was missing from
+    `trades.jsonl` on any graceful stop, live included.
+  - `engine-wal`: a log named without a directory (`engine.wal`) could not be
+    created — `Path::parent` of a bare name is `""`, and `File::open("")` is
+    ENOENT. `engine bench --wal rel.wal` and a fresh host with the shipped
+    `wal_path = "engine.wal"` hit it. Fixed with a test.
+  - `scripts/research/run_engine_backtest.py` reads the engine's own report,
+    trades, and equity files: arithmetic return on capital, calendar-span
+    annualisation, equity-series drawdown, Sharpe only from ≥ 7 daily closes,
+    unknown fees kept unknown.
+  - Gates: `engine-core` 507 tests, `cargo clippy -D warnings`, `cargo fmt
+    --check`, ruff, mypy green.
+
 - **2026-09-03 — Payload encoding, step two: the writer emits the payload as
   a JSON string.**
   - `payload_wire::serialize` writes UTF-8 payloads as a string and anything

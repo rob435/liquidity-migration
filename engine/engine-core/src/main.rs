@@ -8,6 +8,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use engine_core::backtest::{self, BacktestOptions};
 use engine_core::bench::{self, BenchOptions};
 use engine_core::execution;
 use engine_core::replay;
@@ -18,6 +19,14 @@ engine — the execution loop
 
   engine run --config engine.toml
       Run the engine. It sends orders; REAL_MONEY gates the funded venue.
+
+  engine backtest --config PATH --tape PATH --instruments PATH --wal PATH
+                  [--signals DIR] [--trades PATH] [--equity PATH] [--report PATH]
+                  [--capital USDT] [--taker-fee RATE] [--maker-fee RATE]
+                  [--rtt-ms MS] [--private-latency-ms MS] [--mmr FRACTION]
+      Run the loop against a recorded market_tape, in the tape's own time,
+      on a simulated venue. The log must be new. Prints the report; --report
+      writes it as JSON.
 
   engine bench [--events N] [--rate PER_SEC] [--every N] [--symbols A,B]
                [--wal PATH] [--fills] [--venue-delay-ms MS]
@@ -165,6 +174,45 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
         "run" => {
             let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
             runtime()?.block_on(runner::run(&config))
+        }
+        "backtest" => {
+            let required = |flag: &str| -> Result<PathBuf, Box<dyn Error>> {
+                value(args, flag)
+                    .map(PathBuf::from)
+                    .ok_or_else(|| format!("engine backtest needs {flag} PATH").into())
+            };
+            let mut options = BacktestOptions {
+                engine_config_path: required("--config")?,
+                tape_path: required("--tape")?,
+                instruments_path: required("--instruments")?,
+                wal_path: required("--wal")?,
+                ..BacktestOptions::default()
+            };
+            options.signals_path = value(args, "--signals").map(PathBuf::from);
+            options.trades_path = value(args, "--trades").map(PathBuf::from);
+            options.equity_path = value(args, "--equity").map(PathBuf::from);
+            options.report_path = value(args, "--report").map(PathBuf::from);
+            if let Some(v) = value(args, "--capital") {
+                options.initial_capital_usdt = v.parse()?;
+            }
+            if let Some(v) = value(args, "--taker-fee") {
+                options.taker_fee_rate = v.parse()?;
+            }
+            if let Some(v) = value(args, "--maker-fee") {
+                options.maker_fee_rate = v.parse()?;
+            }
+            if let Some(v) = value(args, "--rtt-ms") {
+                options.order_rtt_ms = v.parse()?;
+            }
+            if let Some(v) = value(args, "--private-latency-ms") {
+                options.private_latency_ms = v.parse()?;
+            }
+            if let Some(v) = value(args, "--mmr") {
+                options.maintenance_margin_rate = v.parse()?;
+            }
+            let report = runtime()?.block_on(backtest::run(options))?;
+            print!("{}", report.table());
+            Ok(())
         }
         "bench" => {
             let mut options = BenchOptions::default();

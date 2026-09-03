@@ -348,7 +348,9 @@ impl SpoolSignalFeed {
         Ok(observation)
     }
 
-    fn read_one(path: &Path) -> Result<Option<SignalObservation>, SignalError> {
+    /// One spool row, validated, with its name checked against its envelope.
+    /// `None` when the file has gone between the scan and the read.
+    pub fn read_one(path: &Path) -> Result<Option<SignalObservation>, SignalError> {
         let (named_sequence, hash) = Self::parse_name(path)?;
         let raw = match std::fs::read(path) {
             Ok(raw) => raw,

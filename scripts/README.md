@@ -40,4 +40,9 @@ python scripts/research/replay_native_strategy_contract.py \
 
 # Render and verify native engine configuration TOML from registered JSON
 engine render-native-config --check ...
+
+# Replay a recorded market_tape through the live loop on a simulated venue
+# and read the engine's own trades/equity/report back as research metrics
+python scripts/research/run_engine_backtest.py --config engine/engine.demo.toml \
+  --tape tape.jsonl --instruments instruments.json.zst --out-dir var/backtests/run-1
 ```
