@@ -131,7 +131,7 @@ edit STATE.md to match.
     `fatal: could not read Username for 'https://github.com': terminal prompts
     disabled`, then `deploy failed: cannot fetch origin/main`. The deploy stops
     before it stops anything, so no unit moved and the funded engine kept
-    trading `ce252af8`.
+    trading `f06a89f4`, the commit the 20:28 UTC local deploy left on the host.
   - Cause: the workflow's `Run VPS mode` step passed `EXPECTED_COMMIT`,
     `BRANCH`, `SSH_TARGET` and `SSH_OPTS` and no `GITHUB_TOKEN`, and
     `actions/checkout` runs with `persist-credentials: false`. On the runner the
@@ -156,6 +156,12 @@ edit STATE.md to match.
     `/opt/liquidity-migration` stopped working between 12:52 and 20:52 UTC.
     Nothing here touches it, and a local `scripts/ops.sh deploy` keeps working
     because `gh auth token` fills the same variable from the operator's shell.
+  - The page that put an agent on this: `fleet liveness (mainnet)` raised
+    `CRITICAL liquidity-migration-mainnet-liveness.timer is inactive` inside the
+    20:28 UTC local deploy of `f06a89f4`, which predates the fix below by two
+    commits — the funded twin the entry below predicts, one line and no other
+    unit, resolved by `start_unit` a moment later. Watching that fix's deploy is
+    how the failure above was found: the run had nobody on it.
 
 - **2026-09-03 — Incident: a deploy pages its own liveness watchdog.**
   - `fleet liveness (demo)` raised two CRITICALs on `ip-208-84-103-4` inside the
