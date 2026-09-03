@@ -72,7 +72,7 @@ stage_ci_binaries_if_available() {
     local run_id=""
     run_id="$(gh api "/repos/rob435/liquidity-migration/actions/artifacts?name=${artifact_name}" --jq '.artifacts[0].workflow_run.id' 2>/dev/null || true)"
     if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
-        run_id="$(gh run list --commit "$commit" --json databaseId,status,conclusion --jq '.[] | select(.conclusion=="success" or .status=="in_progress") | .databaseId' 2>/dev/null | head -n 1 || true)"
+        run_id="$(gh run list --commit "$commit" --json databaseId,status,conclusion --jq '.[] | select(.status=="completed" and .conclusion=="success") | .databaseId' 2>/dev/null | head -n 1 || true)"
     fi
     if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
         echo "deploy: no CI pre-built binary artifact found for $commit; host will build via cargo" >&2
@@ -86,9 +86,17 @@ stage_ci_binaries_if_available() {
         tarball="$(find "$tmp_dir" -name "*.tar.gz" | head -n 1)"
         if [ -n "$tarball" ] && [ -f "$tarball" ]; then
             echo "deploy: staging release binaries onto VPS ($target:$stage_target)..." >&2
-            ssh "${SSH_ARGS[@]}" "$target" "mkdir -p /opt/liquidity-migration-engine/staged" 2>/dev/null || true
-            scp "${SSH_ARGS[@]}" "$tarball" "$target:$stage_target" >/dev/null 2>&1 || true
-            echo "deploy: pre-built release binaries staged successfully; skipping host compilation" >&2
+            # Staged into place under a temporary name and moved only once the
+            # whole file has landed: build_engine reads whatever sits at
+            # $stage_target, and a half-copied tarball there is worse than none.
+            if ssh "${SSH_ARGS[@]}" "$target" "mkdir -p /opt/liquidity-migration-engine/staged" \
+                && scp "${SSH_ARGS[@]}" "$tarball" "$target:$stage_target.partial" \
+                && ssh "${SSH_ARGS[@]}" "$target" "mv -f '$stage_target.partial' '$stage_target'"; then
+                echo "deploy: pre-built release binaries staged; skipping host compilation" >&2
+            else
+                ssh "${SSH_ARGS[@]}" "$target" "rm -f '$stage_target.partial'" 2>/dev/null || true
+                echo "deploy: could not stage pre-built binaries; host will build via cargo" >&2
+            fi
         fi
     fi
     rm -rf "$tmp_dir"
