@@ -29,6 +29,12 @@ Invariants:
 * Book rows chain by their venue's own rule. `engine backtest` implements Bybit's (monotone `update_id`, restarted by a snapshot) and **refuses a book row from any other venue** rather than building a book that is not the venue's.
 * Every book topic is re-subscribed once per UTC hour (`connection.reanchor_books_each_hour`), so each hour of tape — one directory, one uploaded tar — opens with a snapshot per symbol and can be replayed without the hours before it.
 
+### Name coverage against what the sleeves trade
+
+The tiers are keyed on the same signals the sleeves decide from, so a tradeable name is captured by construction rather than by a list: LONG's top-turnover names are `core`, CARRY's and EXODUS's negative-funding names are `crowded` (entry is $\le -10$ bp, capture starts at $-8$ bp), the maker canary is `pinned`, and every other listed perpetual is `wide` on ticker and liquidations. Verified 2026-09-03 against the funded book: `NEARUSDT` and `ZECUSDT` both held, both carrying a 50-level snapshot, deltas, prints and ticker.
+
+**Known limit.** Membership follows market state, not the position book. `core` releases a name below turnover rank 45 and `crowded` 48 hours after funding recovers, while LONG holds for about three days, so a held name that drifts out mid-hold keeps its ticker but loses its book and prints for the remainder. Nothing pins a held name: the recorder reads no engine state by design (public data only, no credentials, its own user). Widening `core`'s `leave_top` is the lever if this ever costs a study, at roughly 21 GB/month per additional name.
+
 | Venue | Tier | Universe Membership Criteria | Feeds Captured |
 | :--- | :--- | :--- | :--- |
 | **Bybit** | `pinned` | Maker canary list (`deploy/forward-capture-symbols.txt`) | `book:50`, `book:1`, `trades`, `ticker`, `liquidations` |
