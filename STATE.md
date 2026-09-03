@@ -11,7 +11,7 @@ Verified against the running host on 2026-09-03 13:07 UTC:
 | Property | Value | Description |
 | :--- | :--- | :--- |
 | **Host** | `ip-208-84-103-4.my-advin.com` (`208.84.103.4`) | 4 vCPU, 8 GB RAM, 118 GB disk (44% used, 64 GB free). |
-| **Deployed Commit** | `27d8844f` (`Streamline CI and deployment pipeline: add Rust cache, decouple soak tests, enable direct push to main`) | Verified across both engines, workers, and git checkout. |
+| **Deployed Commit** | `0cb79859` (`Fix the worker preflight miss and the engine's spool read that lost rows; no frame for a row wider than the cap`) | Deployed 14:11 UTC 2026-09-03 from the CI artifact; both engines and both workers at 0 restarts with fresh heartbeats; both spools drained. |
 | **Rollback Target** | `23eff2fedcf2909194fbc41f256b676604077043` | Stored in `/opt/liquidity-migration-engine/previous-commit`. |
 | **Funded Status** | `real-money armed` | `REAL_MONEY=true`. The engine is running with healthy heartbeats. |
 | **Signal IPC** | spool row + `stream.sock` doorbell | Every observation is a spool row first; the socket frame only saves the engine its next poll. Worker generations were renewed on both realms on 2026-09-03 after the desync; the old `g805c44f0…` (mainnet) and `gc4d0071f…` (demo) cursors stay in the WAL. |
