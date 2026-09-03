@@ -6,6 +6,36 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — The signal stream desynchronised twice and left an engine
+  unable to restart.** Both realms hit it within an hour, on either side of the
+  audit deploy, and neither was caused by it.
+  - Demo, 01:01:28 UTC: `invalid signal frame size: 1668489851 bytes`. That
+    number is `0x6373227B` — little-endian ASCII `{"sc`, the opening of a JSON
+    object read where a frame's length prefix belonged. The reader had lost
+    the frame boundary.
+  - The engine exits on that, and by the time it came back the worker had
+    moved on, so every boot then failed the same way:
+    `signal source directional_public_v1.gc4d0071f….carry has sequence gap:
+    expected 10741, got 10742`. `Restart=always` turned it into a loop —
+    roughly 150 restarts over 22 minutes, until the deploy at 01:23 stopped
+    the engine, restarted the worker with it, and it came back clean.
+  - Mainnet, 01:45:03 UTC: the same frame size, the same byte pattern, the
+    same loop — 51 restarts in seven minutes on the **funded** account, with
+    three carry positions open and no engine managing their exits. Each
+    restart also took the account lease and re-authenticated at the venue.
+  - Recovery, both times, is the worker: it rewinds to its checkpoint and
+    republishes the sequence the engine is still waiting for, and the engine
+    accepts a replay of what it has already consumed. Restarting the worker
+    and then the engine cleared it at 01:52:05. The generation is not the
+    mechanism — demo carries the same `c4d0071f…` it had before its own
+    incident.
+  Two things are unfixed and want a decision. The reader can lose a frame
+  boundary at all, which is the actual defect and is not diagnosed — the byte
+  pattern says a JSON payload was read as a length, so the desync is upstream
+  of the length check that caught it. And a durable state error under
+  `Restart=always` is an unbounded restart loop rather than a stop, which is
+  what turned a recoverable fault into a seven-minute funded outage.
+
 - **2026-09-03 — An audit of the live fleet, and the eight things it found.**
   Read off the running host rather than the docs: both engines and both
   recorders healthy, the signal IPC connected in both realms over the sockets
