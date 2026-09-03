@@ -6,6 +6,43 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — The recorder draws the same crypto line the sleeves do: stocks,
+  ETFs and commodities leave every tier.**
+  - Bybit files 230 of its 747 USDT `LinearPerpetual`s as `symbolType` `stock`
+    (177), `ETF` (49) or `commodity` (4). The signal worker's live universe
+    (`CRYPTO_SYMBOL_TYPES`) and the research universe table
+    (`CRYPTO_LINEAR_SYMBOL_TYPES`) both keep only `""` and `"innovation"`; the
+    recorder's `listed_symbols` kept everything. So the capture spent bytes on
+    names no sleeve can hold and no study consumes, and the burst sensors read
+    the US open as a pump: before the change `levering` resolved to seven names
+    and all seven were equities (`APPSTOCKUSDT FLEXUSDT INTUUSDT NVDAUSDT
+    TEAMUSDT TSLLUSDT WENSTOCKUSDT`), `flooding` was over half equities, `core`
+    carried six (`CLUSDT KORUUSDT SNDKUSDT SOXLUSDT SPCXUSDT XAUUSDT`, ~18
+    GB/month of 50-level book each), and one of the three "pump" books rebuilt
+    as proof earlier today, `POETUSDT`, is Poet Technologies.
+  - `BybitAdapter.listed_symbols` now keeps only `CRYPTO_SYMBOL_TYPES`, and since
+    `listed()` is what every tier's `allowed()` resolves from, a stock enters no
+    tier at all — not the ranked ones, not the funding ones, not the `wide`
+    ticker. Nothing is subscribed for it. `XAUTUSDT` (Tether Gold) stays: the
+    venue types it as an ordinary crypto token, and the rule follows the venue's
+    field rather than a hand-picked list.
+  - `excluded_listed` on both adapters counts what the filter left out, by the
+    venue's own label, and the recorder logs it each time it takes the tables:
+    `venue tables: 517 USDT perpetuals in the domain; outside it ETF=49
+    commodity=4 stock=177`. A label the venue has not used yet lands in that
+    line rather than in a silent gap.
+  - Binance needed no change: it files the same products as
+    `contractType: TRADIFI_PERPETUAL` (189 rows), which the adapter already
+    refuses; the only non-`COIN` names it admits are the crypto indices
+    `BTCDOMUSDT` and `ALLUSDT`. Its test now pins the refusal.
+  - `tests/repo/test_crypto_domain_is_one_line.py` asserts the three constants
+    agree, reading the worker's from `universe.rs` so a drift in any language
+    fails one test. It lives in `tests/repo` because `market_tape` is isolated:
+    its own tests may not name the trading package.
+  - Expected on the host: `wide` falls from 716 to ~487 names (about 84 GB/month
+    of ticker), `core` swaps six stocks and gold for the six crypto names ranked
+    31–36, and the discovery tiers stop filling on the opening bell.
+
 - **2026-09-03 — `f06a89f4` deployed; the deploy gate stops paying thin LTO on
   34 test binaries it never ships.**
   - Deployed 20:28 UTC from the CI artifact. `deploy-ok

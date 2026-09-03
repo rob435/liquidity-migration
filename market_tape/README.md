@@ -47,6 +47,7 @@ python -m market_tape book   SOURCE --hour 2026-09-02T22 --symbol BTCUSDT
 | Metric | Bybit Linear | Binance USD-M |
 | :--- | :--- | :--- |
 | **Recorded book** | `book:50` on every acting tier, `book:1` on the canary | **None.** Cross-venue reference only: ticker and trades |
+| **Listed universe** | `status=Trading`, `contractType=LinearPerpetual`, `symbolType` in `""`/`innovation` — stocks, ETFs, commodities out | `status=TRADING`, `contractType=PERPETUAL` — `TRADIFI_PERPETUAL` out |
 | **Book Chaining** | Monotonic `update_id`; resets on snapshot | `first_update_id` ($U$), `update_id` ($u$), `pu` |
 | **Top of Book** | `book:1` stream | `bookTicker` stream, 434 KB/s for 20 names — costlier than the deep book |
 | **Ticker Stream** | Real-time `tickers.<symbol>` | `@markPrice@1s` + 24h `ticker` |

@@ -57,7 +57,7 @@ Universes:
 
 - `symbols` (an inline list) and `file` (one symbol per line, `#` comments)
   are fixed for the life of the process.
-- `listed`: every perpetual the venue lists as trading, optionally filtered by
+- `listed`: every crypto perpetual the venue lists as trading, optionally filtered by
   `quote`; re-read with each table snapshot.
 - `top_turnover`: the `top` names by 24h turnover. A member stays until it
   falls below rank `leave_top` (default one and a half times `top`), so a name

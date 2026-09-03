@@ -31,17 +31,25 @@ Invariants:
 
 ### Name coverage against what the sleeves trade
 
-The tiers are keyed on the same signals the sleeves decide from, so a tradeable name is captured by construction rather than by a list: LONG's top-turnover names are `core`, CARRY's and EXODUS's negative-funding names are `crowded` (entry is $\le -10$ bp, capture starts at $-8$ bp), the maker canary is `pinned`, and every other listed perpetual is `wide` on ticker and liquidations. Verified 2026-09-03 against the funded book: `NEARUSDT` and `ZECUSDT` both held, both carrying a 50-level snapshot, deltas, prints and ticker.
+The tiers are keyed on the same signals the sleeves decide from, so a tradeable name is captured by construction rather than by a list: LONG's top-turnover names are `core`, CARRY's and EXODUS's negative-funding names are `crowded` (entry is $\le -10$ bp, capture starts at $-8$ bp), the maker canary is `pinned`, and every other listed crypto perpetual is `wide` on ticker and liquidations. Verified 2026-09-03 against the funded book: `NEARUSDT` and `ZECUSDT` both held, both carrying a 50-level snapshot, deltas, prints and ticker.
 
 **Known limit.** Membership follows market state, not the position book. `core` releases a name below turnover rank 45 and `crowded` 48 hours after funding recovers, while LONG holds for about three days, so a held name that drifts out mid-hold keeps its ticker but loses its book and prints for the remainder. Nothing pins a held name: the recorder reads no engine state by design (public data only, no credentials, its own user). Widening `core`'s `leave_top` is the lever if this ever costs a study, at roughly 21 GB/month per additional name.
 
 ### Coverage of the discovery tiers
 
-Coverage is total by construction, not by sampling. The venue lists 855
-instruments; 747 are USDT `LinearPerpetual` (the rest are USDC, or dated
-`LinearFutures`), and the tiers hold 716 `wide` + 30 `core` + 1 `pinned` = 747,
-with an open segment on disk for every one. A name is therefore never absent —
-only shallower.
+Coverage of the domain is total by construction, not by sampling, and the
+domain is crypto. The venue lists 855 instruments; 747 are USDT
+`LinearPerpetual`, and of those 230 are stocks (177), ETFs (49) and commodities
+(4) that Bybit files in the same category and marks with `symbolType`. The
+recorder leaves every `symbolType` but `""` and `"innovation"` out of every
+tier — the same two labels the signal worker's live universe and the research
+universe table keep, pinned together by `tests/repo/test_crypto_domain_is_one_line.py`.
+No sleeve can hold a stock perpetual, and its session-shaped activity fires
+`volume_burst` and `oi_change` on every US open, so before the filter `levering`
+resolved to seven names and all seven were equities. The 517 crypto names that
+remain are covered in full: a name is never absent, only shallower. Binance
+needs no such filter; it files the same products as `TRADIFI_PERPETUAL`, which
+its adapter already refuses.
 
 The discovery sensors resolve to real names and their books chain. Rebuilt from
 one recorded hour with `market_tape book`, `valid: true` and `held_deltas: 0`
@@ -76,10 +84,10 @@ of rows accumulate. Check `status.json` for tier membership, not `ls`.
 | **Bybit** | `bursting` | Price move $\ge 5\%$ inside 1 hour (held 6 hours) | `book:50`, `trades` |
 | **Bybit** | `flooding` | Volume $\ge 3\times$ volume of same hour yesterday | `book:50`, `trades` |
 | **Bybit** | `levering` | Open interest change $\ge 10\%$ inside 1 hour | `book:50`, `trades` |
-| **Bybit** | `wide` | **All other listed USDT perpetuals** | `ticker`, `liquidations` |
+| **Bybit** | `wide` | **All other listed crypto USDT perpetuals** (`symbolType` `""` or `innovation`) | `ticker`, `liquidations` |
 | **Binance** | `core` | Top 15 by 24h turnover (leaves below rank 22) | `trades`, `ticker`, `liquidations` |
 | **Binance** | `crowded`..`flooding`| Same rules as Bybit (no open interest tier) | `trades` |
-| **Binance** | `wide` | **All other listed USDT perpetuals** | `ticker` (`@markPrice@1s`), `liquidations` |
+| **Binance** | `wide` | **All other listed USDT `PERPETUAL`s** (`TRADIFI_PERPETUAL` excluded) | `ticker` (`@markPrice@1s`), `liquidations` |
 
 ---
 

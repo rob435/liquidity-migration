@@ -916,6 +916,7 @@ class Recorder:
             self.snapshots.write(now_ns, tables)
             self.tables = tables
             self._seed_live(tables, now_ns)
+            self._log_listed(tables)
         except Exception as exc:  # noqa: BLE001 - the venue's REST is optional to the tape
             self.snapshot_failures += 1
             logging.warning("venue tables unavailable; keeping the last universe: %s", exc)
@@ -923,6 +924,21 @@ class Recorder:
                 # Hold the snapshot clock so the next maintenance pass tries
                 # again instead of waiting a whole cadence.
                 self.snapshots.last_key = None
+
+    def _log_listed(self, tables: Mapping[str, list[dict[str, Any]]]) -> None:
+        instruments = list(tables.get("instruments") or [])
+        quotes: list[str | None] = [quote for quote in sorted({tier.universe.quote for tier in self.config.tiers if tier.universe.quote})]
+        if not quotes:
+            quotes.append(None)
+        for quote in quotes:
+            listed = len(self.adapter.listed_symbols(instruments, quote=quote))
+            excluded = self.adapter.excluded_listed(instruments, quote=quote)
+            logging.info(
+                "venue tables: %d %s perpetuals in the domain; outside it %s",
+                listed,
+                quote or "all-quote",
+                " ".join(f"{label or '(blank)'}={count}" for label, count in excluded.items()) or "none",
+            )
 
     def _refresh(self, now_ns: int, *, restart: bool) -> None:
         """Take the tables if due, then re-resolve every tier; with `restart`
