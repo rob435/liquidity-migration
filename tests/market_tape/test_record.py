@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import threading
 import tomllib
@@ -574,37 +575,93 @@ def test_frames_are_metered_by_tier_and_feed_class(tmp_path: Path) -> None:
     assert status["by_feed_24h"] == {"deep:book:50": 800, "deep:trades": 120, "wide:control": 40}
 
 
-def test_the_budget_sheds_in_order_one_an_hour_and_restores_in_reverse_when_under_pace() -> None:
+def _metered_hour(meter: ByteMeter, at_ns: int, wide_book: int, movers_book: int, rest: int) -> None:
+    meter.add("all", wide_book + movers_book + rest, at_ns)
+    meter.add("feed:wide:book:1", wide_book, at_ns)
+    meter.add("feed:movers:book:50", movers_book, at_ns)
+    meter.add("feed:core:trades", rest, at_ns)
+
+
+def test_the_budget_sheds_what_the_projection_needs_and_counts_shed_pairs_out_of_it() -> None:
     meter = ByteMeter(BASE_NS)
-    settings = BudgetSettings(monthly_gb=1.0, shed=(("wide", "book:1"), ("movers", "book:50")), restore_below=0.8, act_every_minutes=60)
+    settings = BudgetSettings(monthly_gb=400.0, shed=(("wide", "book:1"), ("movers", "book:50")), restore_below=0.8, act_every_minutes=60)
     budget = BudgetController(settings, meter)
 
     # Less than an hour of history: no projection, no action.
-    meter.add("all", 10**9, BASE_NS + 60 * 10**9)
+    _metered_hour(meter, BASE_NS + 60 * 10**9, 500_000_000, 300_000_000, 200_000_000)
     assert budget.step(BASE_NS + 60 * 10**9) is False
     assert budget.projected_gb is None
 
-    # One hour in, 1 GB received: 720 GB a month against a 1 GB allowance.
+    # One hour in, 1 GB received: 720 GB a month against 400. The first pair
+    # alone carries 360 of it, so the first pair is all that goes.
     assert budget.step(BASE_NS + HOUR_NS) is True
     assert budget.shed_active == [("wide", "book:1")]
+    assert budget.shed_gb[("wide", "book:1")] == pytest.approx(360.0)
     assert budget.over is True
-    # Still over, but the hour has not passed.
-    assert budget.step(BASE_NS + HOUR_NS + 10 * 60 * 10**9) is False
-    assert budget.step(BASE_NS + 2 * HOUR_NS) is True
-    assert budget.shed_active == [("wide", "book:1"), ("movers", "book:50")]
-    # Nothing left to shed.
-    assert budget.step(BASE_NS + 3 * HOUR_NS) is False
 
-    # A day later the meter shows almost nothing: restore the last pair first.
+    # A second hour of traffic without the shed pair. Its first-hour bytes
+    # still sit in the window; the projection leaves them out and reads the
+    # 360 GB/month that is still subscribed — under the allowance, so nothing
+    # more is shed, and the shed pair (360 on top of 360) does not fit under
+    # the restore line.
+    _metered_hour(meter, BASE_NS + HOUR_NS + 60 * 10**9, 0, 300_000_000, 200_000_000)
+    assert budget.step(BASE_NS + 2 * HOUR_NS) is False
+    assert budget.projected_gb == pytest.approx(360.0)
+    assert budget.over is False
+    assert budget.shed_active == [("wide", "book:1")]
+    status = budget.status()
+    assert status["shed"] == ["wide:book:1"]
+    assert status["shed_gb_month"] == {"wide:book:1": 360.0}
+    assert status["shed_order"] == ["wide:book:1", "movers:book:50"]
+
+
+def test_the_budget_sheds_several_pairs_in_one_action_and_says_when_the_list_is_not_enough(caplog: pytest.LogCaptureFixture) -> None:
+    meter = ByteMeter(BASE_NS)
+    settings = BudgetSettings(monthly_gb=100.0, shed=(("wide", "book:1"), ("movers", "book:50")), restore_below=0.8, act_every_minutes=60)
+    budget = BudgetController(settings, meter)
+    _metered_hour(meter, BASE_NS + 60 * 10**9, 500_000_000, 300_000_000, 200_000_000)
+
+    # 720 against 100: both pairs go at once (720 - 360 - 216 = 144), and
+    # what is left is still over, which is said rather than left to status.json.
+    with caplog.at_level(logging.WARNING):
+        assert budget.step(BASE_NS + HOUR_NS) is True
+    assert budget.shed_active == [("wide", "book:1"), ("movers", "book:50")]
+    assert [record.getMessage() for record in caplog.records][-1].startswith("over budget with every sheddable feed shed: 144 GB/month projected against 100 allowed")
+
+    # An hour on, the rest still runs at 144 GB/month with nothing left to
+    # shed: no change, said again.
+    _metered_hour(meter, BASE_NS + HOUR_NS + 60 * 10**9, 0, 0, 200_000_000)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert budget.step(BASE_NS + 2 * HOUR_NS) is False
+    assert any("every sheddable feed shed" in record.getMessage() for record in caplog.records)
+    # Between actions, quiet.
+    caplog.clear()
+    assert budget.step(BASE_NS + 2 * HOUR_NS + 10 * 60 * 10**9) is False
+    assert caplog.records == []
+
+
+def test_a_shed_pair_is_restored_only_when_its_own_month_fits_under_the_restore_line() -> None:
+    meter = ByteMeter(BASE_NS)
+    settings = BudgetSettings(monthly_gb=400.0, shed=(("wide", "book:1"), ("movers", "book:50")), restore_below=0.8, act_every_minutes=60)
+    budget = BudgetController(settings, meter)
+    _metered_hour(meter, BASE_NS + 60 * 10**9, 500_000_000, 300_000_000, 200_000_000)
+    budget.settings = BudgetSettings(monthly_gb=100.0, shed=settings.shed, restore_below=0.8, act_every_minutes=60)
+    assert budget.step(BASE_NS + HOUR_NS) is True
+    assert budget.shed_active == [("wide", "book:1"), ("movers", "book:50")]
+    budget.settings = settings
+
+    # A day later the meter shows almost nothing. The last pair shed carried
+    # 216 GB/month: under 320, restored. The first carried 360: over 320, it
+    # stays shed however quiet the tape is, because restoring it would put
+    # the recorder straight back over.
     late = BASE_NS + 2 * DAY_NS
     meter.add("all", 1, late)
     assert budget.step(late) is True
     assert budget.shed_active == [("wide", "book:1")]
-    assert budget.step(late + HOUR_NS) is True
-    assert budget.shed_active == []
+    assert budget.step(late + HOUR_NS) is False
+    assert budget.shed_active == [("wide", "book:1")]
     assert budget.over is False
-    status = budget.status()
-    assert status["monthly_gb"] == 1.0 and status["shed"] == [] and status["shed_order"] == ["wide:book:1", "movers:book:50"]
 
 
 def test_without_a_budget_the_controller_only_projects() -> None:

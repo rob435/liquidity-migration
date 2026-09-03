@@ -23,7 +23,7 @@ engine — the execution loop
   engine backtest --config PATH --tape PATH --instruments PATH --wal PATH
                   [--signals DIR] [--trades PATH] [--equity PATH] [--report PATH]
                   [--capital USDT] [--taker-fee RATE] [--maker-fee RATE]
-                  [--rtt-ms MS] [--private-latency-ms MS] [--mmr FRACTION]
+                  [--rtt-ms MS] [--private-latency-ms MS] [--mmr FRACTION] [--durable-log]
       Run the loop against a recorded market_tape, in the tape's own time,
       on a simulated venue. The log must be new. Prints the report; --report
       writes it as JSON.
@@ -210,6 +210,7 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
             if let Some(v) = value(args, "--mmr") {
                 options.maintenance_margin_rate = v.parse()?;
             }
+            options.durable_log = args.iter().any(|a| a == "--durable-log");
             let report = runtime()?.block_on(backtest::run(options))?;
             print!("{}", report.table());
             Ok(())

@@ -6,6 +6,52 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — Replay throughput and mid-recording ranges, the first real-tape
+  run, and the recorder's budget controller.**
+  - `engine backtest` writes its log unsynced by default
+    (`WalWriter::open_unsynced`: same frames, same sequences, no wait for the
+    disk at a barrier); `--durable-log` keeps the live path's fsync per order.
+    The 2 h, 8,335-order fixture: 35 s → 2.2 s, and the two logs are
+    byte-identical. The live engine's `WalWriter::open` and `open_current`
+    are durable as before.
+  - The venue matches against the deepest book whose chain is intact
+    (`Cursor::deepest_valid_depth`). Found on the first real tape: four hours
+    of `AGIUSDT` cut from the middle of the recording carry 78,895
+    `orderbook.50` deltas and no 50-level snapshot, so the deep book never
+    chains; the `orderbook.1` stream is a snapshot every row and now stands in
+    until a deep snapshot lands. Before, every order in such a range was
+    refused for want of a book.
+  - First real-tape run: `AGIUSDT` 2026-09-03T14..18Z from the host's recorder
+    (109,983 rows), the maker canary's registered rule
+    (`lane2_toxic_flow_quoter_v1`, `quote_enabled = true`), 1,000 USDT: 20,091
+    market events, 6 orders, 3 maker fills, 1 closed trip, 0 rejections, 0
+    fills priced at mark, 1.9 s. A rerun is byte-identical (log, trades,
+    equity). Reconciliation not checkable: a position was open at tape end.
+  - `market_tape` budget controller (`record.py::BudgetController`). The
+    projection counted a shed pair's bytes for the rest of the trailing day,
+    so one shed per hour drained the whole `shed` list in 12 h whatever the
+    first shed had achieved; restore compared that same projection to
+    `restore_below`, so nothing came back; running out of pairs was silent. On
+    the host at 18:20 UTC all 12 pairs were shed, `core:trades` last at 13:27
+    UTC, `projected_month_gb` 1710 against 1300. Now the projection leaves
+    shed pairs' bytes out; one action sheds as many pairs as the projection
+    needs; a pair returns only when its GB/month as measured at its shed fits
+    under the restore line; over budget with the list exhausted is a `WARNING`
+    per action. `status.json` gains `budget.shed_gb_month`.
+  - The Bybit recorder's arithmetic, from 17 h of metering: the feeds the
+    `shed` list cannot reach project ~1,500 GB/month on their own
+    (`core:book:50` 697, `wide:ticker` 355, `crowded:book:50` 300,
+    `core:ticker` 89, `crowded:trades` 34, `overheated:trades` 25) against
+    `monthly_gb = 1300`. The list cannot meet the allowance; the recorder now
+    sheds everything listed at once and says so every hour. What else goes —
+    the crowd tiers' 50-level books (`crowded` 116 + `overheated` 115 names:
+    |funding| ≥ 8 bp once in 48 h keeps a name, and 30 s re-resolution
+    restarts the 48 h), the core's size, or the Binance share of the host's
+    4 TB line — is the owner's decision; the shed order stands as written.
+  - `storage.py::Retention.prune` deleted `_meta` table snapshots for disk
+    room, oldest first by mtime, receipted as `segment_deleted`. They go with
+    age only now, as `snapshot_deleted`.
+
 - **2026-09-03 — `engine backtest`: the live loop on a recorded tape, in the
   tape's own time.**
   - Deleted the earlier replay driver (`engine-core/src/backtest/`,

@@ -166,7 +166,13 @@ impl Cursor {
                 let Some(depth) = builder.apply(&book).copied() else {
                     return;
                 };
-                if self.venue_depth[i] == Some(depth_key) {
+                // The venue matches against the deepest book that is
+                // currently chained. A range cut from the middle of a
+                // recording carries the deep stream's deltas without the
+                // snapshot they chain to, while the top-of-book stream is a
+                // snapshot every row; until a deep snapshot lands, the
+                // shallow book is the venue's book rather than none.
+                if self.deepest_valid_depth(id.0) == Some(depth_key) {
                     self.venue
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
@@ -249,6 +255,15 @@ impl Cursor {
                 }
             }
         }
+    }
+
+    /// The deepest book of this symbol whose chain is intact right now.
+    fn deepest_valid_depth(&self, symbol: u16) -> Option<u32> {
+        self.books
+            .iter()
+            .filter(|((id, _), builder)| *id == symbol && builder.is_valid())
+            .map(|((_, depth), _)| *depth)
+            .max()
     }
 
     fn known(&mut self, symbol: &str) -> Option<SymbolId> {

@@ -61,6 +61,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rtt-ms", type=int, default=175)
     parser.add_argument("--private-latency-ms", type=int, default=60)
     parser.add_argument("--mmr", type=float, default=0.005)
+    parser.add_argument(
+        "--durable-log",
+        action="store_true",
+        help="fsync the run's log at every barrier as the live engine does; off, a rerun rewrites the same bytes",
+    )
     return parser.parse_args(argv)
 
 
@@ -100,6 +105,8 @@ def run_engine(args: argparse.Namespace) -> Path:
     ]
     if args.signals is not None:
         cmd.extend(["--signals", str(args.signals)])
+    if args.durable_log:
+        cmd.append("--durable-log")
     print("$ " + " ".join(cmd), file=sys.stderr)
     # The engine's tracing goes to stdout beside its report table; keep the
     # console to warnings unless the caller asked for more.

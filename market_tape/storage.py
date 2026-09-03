@@ -35,6 +35,9 @@ from typing import Any, Mapping
 
 from market_tape.schema import SNAPSHOT_INSTRUMENTS, SNAPSHOT_TICKERS, snapshot_payload
 
+#: The per-hour directory holding the venue's instrument and ticker tables.
+META_DIRECTORY = "_meta"
+
 
 def utc_day(ns: int) -> str:
     return datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc).date().isoformat()
@@ -333,9 +336,12 @@ class Retention:
         cutoff = now - self.retention_days * 86_400
         deleted: list[Path] = []
         for path in files:
+            # A venue table snapshot is the point-in-time reference for every
+            # hour after it and weighs kilobytes: it goes with age, never for room.
+            snapshot = path.parent.name == META_DIRECTORY
             expired = path.stat().st_mtime < cutoff
             pressured = total > self.max_bytes or shutil.disk_usage(self.root).free < self.min_free_bytes
-            if not expired and not pressured:
+            if not expired and not (pressured and not snapshot):
                 continue
             size = path.stat().st_size
             relative = path.relative_to(self.root)
@@ -344,7 +350,7 @@ class Retention:
             deleted.append(relative)
             self.manifest.append(
                 {
-                    "kind": "segment_deleted",
+                    "kind": "snapshot_deleted" if snapshot else "segment_deleted",
                     "recorded_at_ns": time.time_ns(),
                     "path": str(relative),
                     "compressed_bytes": size,
@@ -382,7 +388,7 @@ class Snapshots:
     def write(self, now_ns: int, tables: Mapping[str, list[dict[str, Any]]]) -> None:
         day, hour = utc_day_hour(now_ns)
         stamp = datetime.fromtimestamp(now_ns / 1_000_000_000, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        directory = self.root / day / hour / "_meta"
+        directory = self.root / day / hour / META_DIRECTORY
         directory.mkdir(parents=True, exist_ok=True)
         for name, kind in (("instruments", SNAPSHOT_INSTRUMENTS), ("tickers", SNAPSHOT_TICKERS)):
             rows = list(tables.get(name) or [])

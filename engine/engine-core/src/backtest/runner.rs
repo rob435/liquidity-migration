@@ -45,6 +45,10 @@ pub struct BacktestOptions {
     pub order_rtt_ms: u64,
     pub private_latency_ms: u64,
     pub maintenance_margin_rate: f64,
+    /// Whether the run's log waits for the disk at every barrier as the live
+    /// engine's does. Off, a rerun reproduces the same bytes; on, the run
+    /// pays the live order path's storage cost per order.
+    pub durable_log: bool,
 }
 
 impl Default for BacktestOptions {
@@ -68,6 +72,7 @@ impl Default for BacktestOptions {
             private_latency_ms: 60,
             // Bybit's lowest linear maintenance margin tier.
             maintenance_margin_rate: 0.005,
+            durable_log: false,
         }
     }
 }
@@ -299,7 +304,11 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
     require_fresh_log(&opts.wal_path)?;
     let _log_claim =
         engine_wal::lock(&opts.wal_path).map_err(|e| EngineError::Boot(e.to_string()))?;
-    let (wal, replayed) = WalWriter::open(&opts.wal_path)?;
+    let (wal, replayed) = if opts.durable_log {
+        WalWriter::open(&opts.wal_path)?
+    } else {
+        WalWriter::open_unsynced(&opts.wal_path)?
+    };
     let replayed: Vec<WalRecord> = replayed.into_iter().map(|(_, r)| r).collect();
     let symbols: Vec<Symbol> = assembly::symbol_order(&replayed, &wanted);
 

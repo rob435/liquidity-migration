@@ -65,7 +65,20 @@ python -m market_tape book   SOURCE --hour 2026-09-02T22 --symbol BTCUSDT
 manifest.jsonl                                         Receipts: row count, bytes, SHA-256
 status.json                                            Health status updated every 30s
 ```
-* `status.json` schema: `last_receive_ns`, `disk_blocked`, `dropped_frames`, `disk_dropped_frames`, `shards[].connected`, `budget.over`.
+* `status.json` schema: `last_receive_ns`, `disk_blocked`, `dropped_frames`, `disk_dropped_frames`, `shards[].connected`, `budget.projected_month_gb`, `budget.over`, `budget.shed`, `budget.shed_gb_month`.
+
+### Budget (`[budget]` in the capture config)
+
+| Field | Meaning |
+| :--- | :--- |
+| `monthly_gb` | Inbound allowance for the month. Absent: the recorder only measures. |
+| `shed` | `tier:feed` pairs in the order they are given up. Pairs not listed are never shed. |
+| `act_every_minutes` (60) | One action per interval: a shed takes as many pairs, in order, as the projection needs; a restore returns the last pair shed. |
+| `restore_below` (0.8) | A pair comes back only when its GB/month as measured at its shed, added to what is still subscribed, is under this fraction of `monthly_gb`. |
+
+* The projection is the trailing day (or the uptime, if shorter) of bytes from the pairs still subscribed, scaled to a month. A shed pair's bytes in the window are left out.
+* Over budget with every listed pair shed is a `WARNING` per action naming the overshoot: the config decides what else goes.
+* `_meta` table snapshots are pruned by `retention_days` only, never for disk room.
 
 ### Google Drive Layout
 Uploaded hourly at :10 past the hour:

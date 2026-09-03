@@ -9,10 +9,11 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use engine_types::{
-    BookLevel, ForcedClose, InstrumentRule, OrderKind, OrderRequest, OrderUpdate, Side, StopSpec,
-    StrategyId, SymbolId, TimeInForce, VenueError, VenueGateway,
+    BookLevel, Feed, ForcedClose, InstrumentRule, OrderKind, OrderRequest, OrderUpdate, Side,
+    StopSpec, StrategyId, Subscription, SymbolId, TimeInForce, VenueError, VenueGateway,
 };
 
+use super::feed::Cursor;
 use super::scheduler::{Scheduler, VirtualTimer, WaiterKind};
 use super::tape::{
     read_instruments, BookBuilder, BookRow, TapeError, TapeReader, TapeRow, TickerRow,
@@ -436,6 +437,80 @@ fn ticker(mark: f64, funding_rate: Option<f64>, next_ms: Option<i64>) -> TickerR
         next_funding_time_ms: next_ms,
         ..TickerRow::default()
     }
+}
+
+/// A range cut from the middle of a recording: the deep stream's deltas chain
+/// to a snapshot that is not on the tape, while the top-of-book stream is a
+/// snapshot every row. The venue matches against the shallow book until a
+/// deep snapshot lands, and against the deep one from then on.
+#[test]
+fn the_venue_matches_against_the_deepest_book_whose_chain_is_intact() {
+    let rows = [
+        // The deep stream mid-chain: nothing to chain to.
+        r#"{"asks":[["50010.0","5"]],"bids":[["49990.0","5"]],"cross_sequence":0,"depth":50,"exchange_engine_ts_ns":0,"exchange_system_ts_ns":1700000000000000000,"first_update_id":0,"kind":"orderbook_delta","local_receive_ts_ns":1700000000000000000,"previous_update_id":6,"restart_snapshot":false,"sequence_gap":false,"symbol":"BTCUSDT","update_id":7,"venue":"bybit-linear"}"#,
+        // The top of book: whole every row.
+        r#"{"asks":[["50005.0","10"]],"bids":[["50000.0","10"]],"cross_sequence":0,"depth":1,"exchange_engine_ts_ns":0,"exchange_system_ts_ns":1700000000100000000,"first_update_id":0,"kind":"orderbook_snapshot","local_receive_ts_ns":1700000000100000000,"previous_update_id":0,"restart_snapshot":false,"sequence_gap":false,"symbol":"BTCUSDT","update_id":100,"venue":"bybit-linear"}"#,
+        // The deep stream restarts: from here it is the venue's book.
+        r#"{"asks":[["50020.0","5"],["50030.0","5"]],"bids":[["49980.0","5"]],"cross_sequence":0,"depth":50,"exchange_engine_ts_ns":0,"exchange_system_ts_ns":1700000000200000000,"first_update_id":0,"kind":"orderbook_snapshot","local_receive_ts_ns":1700000000200000000,"previous_update_id":0,"restart_snapshot":true,"sequence_gap":false,"symbol":"BTCUSDT","update_id":8,"venue":"bybit-linear"}"#,
+        // A later top of book does not displace it.
+        r#"{"asks":[["50006.0","10"]],"bids":[["50001.0","10"]],"cross_sequence":0,"depth":1,"exchange_engine_ts_ns":0,"exchange_system_ts_ns":1700000000300000000,"first_update_id":0,"kind":"orderbook_snapshot","local_receive_ts_ns":1700000000300000000,"previous_update_id":0,"restart_snapshot":false,"sequence_gap":false,"symbol":"BTCUSDT","update_id":101,"venue":"bybit-linear"}"#,
+    ];
+    let path = write_temp("tape-depths", &(rows.join("\n") + "\n"));
+    let (venue, _scheduler) = venue(1_000_000.0, 10.0);
+    let venue = Arc::new(Mutex::new(venue));
+    let subscriptions = [Subscription {
+        symbol: "BTCUSDT".into(),
+        feed: Feed::Quote,
+    }];
+    let mut cursor = Cursor::new(
+        TapeReader::open(path.path()).unwrap(),
+        venue.clone(),
+        &["BTCUSDT".to_string()],
+        &subscriptions,
+    );
+    let mut absorb = || {
+        cursor.next_row_at().unwrap().expect("a row");
+        cursor.absorb_next();
+    };
+    let entry_after = |side: Side, qty: f64| -> f64 {
+        let mut venue = venue.lock().unwrap();
+        let id = format!("o{}", venue.private_pending());
+        venue
+            .submit(&order(&id, side, qty, OrderKind::Market))
+            .unwrap();
+        venue.account_view().positions[0].entry_px
+    };
+
+    absorb();
+    assert!(
+        venue
+            .lock()
+            .unwrap()
+            .submit(&order("none", Side::Buy, 1.0, OrderKind::Market))
+            .is_err(),
+        "an unchained deep book is no book"
+    );
+
+    absorb();
+    assert_eq!(
+        entry_after(Side::Buy, 1.0),
+        50_005.0,
+        "the top of book fills"
+    );
+
+    absorb();
+    assert_eq!(
+        entry_after(Side::Sell, 2.0),
+        49_980.0,
+        "the deep book's bid, once it is chained"
+    );
+
+    absorb();
+    assert_eq!(
+        entry_after(Side::Sell, 1.0),
+        49_980.0,
+        "the deep book stays the venue's when a shallower snapshot lands"
+    );
 }
 
 #[test]

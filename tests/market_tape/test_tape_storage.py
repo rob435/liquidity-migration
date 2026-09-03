@@ -204,6 +204,31 @@ def test_retention_deletes_for_disk_pressure_with_its_own_reason(tmp_path: Path)
     assert reasons == ["disk_limit"]
 
 
+def test_disk_pressure_spares_the_venue_table_snapshots_and_age_names_them(tmp_path: Path) -> None:
+    manifest = Manifest(tmp_path)
+    hour = tmp_path / "2027-01-15" / "10"
+    (hour / "AGIUSDT").mkdir(parents=True)
+    (hour / "_meta").mkdir()
+    snapshot = hour / "_meta" / "instruments-20270115T100000Z.json.zst"
+    segment = hour / "AGIUSDT" / "segment-000000.jsonl.zst"
+    snapshot.write_bytes(b"tables")
+    segment.write_bytes(b"segment")
+    # The snapshot is the older file; pressure would take it first by age.
+    os.utime(snapshot, (1_000_000, 1_000_000))
+    os.utime(segment, (1_000_001, 1_000_001))
+
+    retention = Retention(tmp_path, manifest, retention_days=36_500, max_bytes=8, min_free_bytes=1)
+    deleted = retention.prune(1_000_100.0)
+    assert deleted == [segment.relative_to(tmp_path)]
+    assert snapshot.exists()
+
+    aged = Retention(tmp_path, manifest, retention_days=1, max_bytes=10**12, min_free_bytes=1)
+    deleted = aged.prune(1_000_000.0 + 2 * 86_400)
+    assert deleted == [snapshot.relative_to(tmp_path)]
+    receipts = [json.loads(line) for line in (tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [(receipt["kind"], receipt["reason"]) for receipt in receipts] == [("segment_deleted", "disk_limit"), ("snapshot_deleted", "age")]
+
+
 @needs_zstd
 def test_snapshots_write_the_venue_tables_with_their_own_payload(tmp_path: Path) -> None:
     manifest = Manifest(tmp_path)

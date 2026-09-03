@@ -206,9 +206,14 @@ impl SyncThread {
 
 pub struct WalWriter {
     file: File,
-    /// Absent only for a writer whose thread could not be started, which
-    /// falls back to synchronous barriers rather than to none.
+    /// Absent for a writer whose thread could not be started, which falls
+    /// back to synchronous barriers rather than to none — and for an
+    /// unsynced writer, which has no barriers to run.
     sync: Option<SyncThread>,
+    /// Whether a barrier waits for the disk. The live engine's log does; a
+    /// replay's log does not, because a rerun rewrites it byte for byte and
+    /// the wait is the whole cost of the order path there.
+    durable: bool,
     /// Frames waiting to go to the OS. Reused across appends: a record is
     /// serialized straight into it, so a warm writer allocates nothing.
     buf: Vec<u8>,
@@ -229,10 +234,24 @@ impl WalWriter {
     /// opened with [`open_current`], which picks the newest segment boot can
     /// trust.
     pub fn open(path: impl AsRef<Path>) -> Result<(Self, Vec<(u64, WalRecord)>), WalError> {
-        Self::open_segment(path.as_ref(), path.as_ref())
+        Self::open_segment(path.as_ref(), path.as_ref(), true)
     }
 
-    fn open_segment(path: &Path, family: &Path) -> Result<(Self, Vec<(u64, WalRecord)>), WalError> {
+    /// [`open`](Self::open), except that no barrier waits for the disk: the
+    /// bytes reach the operating system and no further. Same frames, same
+    /// sequences, same file; only the durability promise is gone. For a log
+    /// whose loss costs a rerun, never for one that carries a position.
+    pub fn open_unsynced(
+        path: impl AsRef<Path>,
+    ) -> Result<(Self, Vec<(u64, WalRecord)>), WalError> {
+        Self::open_segment(path.as_ref(), path.as_ref(), false)
+    }
+
+    fn open_segment(
+        path: &Path,
+        family: &Path,
+        durable: bool,
+    ) -> Result<(Self, Vec<(u64, WalRecord)>), WalError> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -243,9 +262,11 @@ impl WalWriter {
 
         let scan = if len == 0 {
             file.write_all(&MAGIC)?;
-            file.sync_data()?;
-            if let Some(dir) = parent_dir(path) {
-                File::open(dir)?.sync_all()?;
+            if durable {
+                file.sync_data()?;
+                if let Some(dir) = parent_dir(path) {
+                    File::open(dir)?.sync_all()?;
+                }
             }
             Scan {
                 records: Vec::new(),
@@ -261,10 +282,15 @@ impl WalWriter {
         file.seek(SeekFrom::Start(scan.good_end))?;
 
         let next_seq = scan.records.len() as u64 + 1;
-        let sync = SyncThread::spawn(&file).ok();
+        let sync = if durable {
+            SyncThread::spawn(&file).ok()
+        } else {
+            None
+        };
         let writer = WalWriter {
             file,
             sync,
+            durable,
             buf: Vec::with_capacity(BUFFER_HIGH_WATER),
             next_seq,
             family: family.to_path_buf(),
@@ -361,7 +387,9 @@ impl Wal for WalWriter {
 
     fn barrier(&mut self) -> Result<(), WalError> {
         self.push_to_os()?;
-        self.file.sync_data()?;
+        if self.durable {
+            self.file.sync_data()?;
+        }
         Ok(())
     }
 
@@ -371,6 +399,9 @@ impl Wal for WalWriter {
         // shares the file, not the buffer, so anything still in the buffer
         // when it runs would not be covered by it.
         self.push_to_os()?;
+        if !self.durable {
+            return Ok(PendingBarrier::settled());
+        }
         match self.sync.as_ref().and_then(SyncThread::request) {
             Some(done) => Ok(PendingBarrier::running(done)),
             // No thread to ask. Do it here rather than hand back a promise
@@ -421,7 +452,9 @@ impl Wal for WalWriter {
     fn rotate(&mut self, base: &WalRecord) -> Result<bool, WalError> {
         // 1. Finish the archive.
         self.push_to_os()?;
-        self.file.sync_data()?;
+        if self.durable {
+            self.file.sync_data()?;
+        }
 
         // 2. The next unused number, torn leftovers included.
         let next_index = segments(&self.family)?
@@ -448,9 +481,11 @@ impl Wal for WalWriter {
         file.write_all(&frame)?;
 
         // 3. The restatement durable, then its name durable.
-        file.sync_data()?;
-        if let Some(dir) = parent_dir(&path) {
-            File::open(dir)?.sync_all()?;
+        if self.durable {
+            file.sync_data()?;
+            if let Some(dir) = parent_dir(&path) {
+                File::open(dir)?.sync_all()?;
+            }
         }
 
         // 4. Switch. The old file handle closes when it drops; the file
@@ -458,7 +493,11 @@ impl Wal for WalWriter {
         //    descriptor for the file it was started on, so it is replaced
         //    here too — otherwise every later barrier would faithfully sync
         //    the archive and say nothing about the segment being written.
-        self.sync = SyncThread::spawn(&file).ok();
+        self.sync = if self.durable {
+            SyncThread::spawn(&file).ok()
+        } else {
+            None
+        };
         self.file = file;
         self.file_bytes = HEADER_LEN + frame.len() as u64;
         self.next_seq = 2;
@@ -734,11 +773,11 @@ pub fn open_current(
         // evidence.
         let (records, _) = scan_candidate(index, &path)?;
         if trusted(index, &records) {
-            return WalWriter::open_segment(&path, family);
+            return WalWriter::open_segment(&path, family, true);
         }
     }
     // Nothing exists yet: a fresh log at the family path.
-    WalWriter::open_segment(family, family)
+    WalWriter::open_segment(family, family, true)
 }
 
 /// Replay a whole family in order, for the offline readers: every good record
@@ -1034,6 +1073,39 @@ mod tests {
         .join()
         .unwrap();
         created.expect("a bare relative log name opens in the working directory");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An unsynced writer keeps every promise but the disk's: the frames it
+    /// writes read back through a fresh open, and its barriers hold no
+    /// descriptor to wait on.
+    #[test]
+    fn an_unsynced_log_reads_back_the_same_and_runs_no_barrier() {
+        let dir = std::env::temp_dir().join(format!("wal-unsynced-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("research.wal");
+        let _ = std::fs::remove_file(&path);
+        let record = sample_record();
+        {
+            let (mut wal, replayed) = WalWriter::open_unsynced(&path).unwrap();
+            assert!(replayed.is_empty());
+            let (synced, _) = wal.sync_and_write_inodes();
+            assert_eq!(synced, None, "nothing to wait on");
+            assert_eq!(wal.append(&record).unwrap(), 1);
+            wal.barrier_begin().unwrap().wait().unwrap();
+            assert_eq!(wal.append(&record).unwrap(), 2);
+            wal.barrier().unwrap();
+            assert_eq!(wal.append(&record).unwrap(), 3);
+        }
+        let (durable, replayed) = WalWriter::open(&path).unwrap();
+        assert_eq!(replayed.len(), 3, "every frame reached the file");
+        assert_eq!(durable.next_seq(), 4);
+        let (synced, written) = durable.sync_and_write_inodes();
+        assert_eq!(
+            synced,
+            Some(written),
+            "the durable open of the same file syncs it"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

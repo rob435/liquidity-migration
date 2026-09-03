@@ -173,14 +173,16 @@ The live loop — `Engine::boot_as`, the risk kernel, the strategy reducers, the
 | `--rtt-ms` | 175 | Order command round trip; half each way, matched at arrival |
 | `--private-latency-ms` | 60 | Private-stream hop for fills, cancels, amends |
 | `--mmr` | 0.005 | Maintenance margin fraction; equity ≤ Σ maintenance liquidates |
+| `--durable-log` | off | Wait for the disk at every log barrier as the live engine does. Off, the log reaches the OS and no further: same bytes, no fsync per order |
 
 Invariants:
 - Time moves only when the tape feed releases a row or a due wait; nothing later is observed before anything earlier. Two runs of one tape write the same log.
 - The virtual clock is thread-local and guard-held (`engine_types::clock::install_virtual`); the live loop's timers are the system's (`SystemTimer`), monomorphised, untouched.
 - Fills walk the book level by level; resting orders wait behind the displayed queue; stops trigger on the mark and fill through the gap; funding settles once per published boundary; margin is posted; refusals carry Bybit's codes.
+- The venue matches against the deepest book whose chain is intact. A range cut from the middle of a recording carries `orderbook.50` deltas without the snapshot they chain to; until a deep snapshot lands, the `orderbook.1` stream (a snapshot every row) is the venue's book. An order with no chained book at all is refused, never priced.
 - Not modelled: our impact on the tape's liquidity, reactions to us, liquidation fees, rate limits. Every number is bounded by those omissions.
 - A flat account whose venue books and engine ledger disagree fails the run.
-- Throughput is bound by the log's durability barrier per order (the live path); a 2 h, 8,335-order tape runs in ~35 s.
+- Throughput: a 2 h, 8,335-order tape runs in ~2 s; with `--durable-log` the same run pays one fsync per order (~4 ms on a laptop SSD, ~35 s in all) and writes the same bytes.
 
 ```bash
 # One tape hour range to a flat file, then the replay and its report
