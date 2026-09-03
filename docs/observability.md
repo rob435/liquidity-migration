@@ -28,6 +28,10 @@ declares and appends one line per artifact per run.
 | `engine-<realm>-<YYYY-MM>.jsonl` | always, one line per realm per minute |
 | `recorder-<venue>-<YYYY-MM>.jsonl` | always, one line per tape recorder per minute |
 
+Four lines a minute, about 2.4 KB: **3.4 MB a day, 1.2 GB a year**, in monthly
+files. Nothing rotates or prunes them — next to 1.7 TB a month of tape this is
+noise, and the history is the point.
+
 | Field | Meaning |
 | :--- | :--- |
 | `ts_ms` | When the sample was taken, wall clock |
@@ -115,9 +119,16 @@ configuration and prints `no metrics sink configured`.
 ### Metric Names
 
 Line protocol `lm_engine,realm=mainnet equity_usdt=130.28` arrives as the
-Prometheus series `lm_engine_equity_usdt{realm="mainnet"}`. Every sample field
-in §2 becomes one series, tagged `realm`, `state`, and — when live — `venue`
-and `mode`. `lm_engine_up` and `lm_recorder_up` are 1 or 0.
+Prometheus series `lm_engine_equity_usdt{realm="mainnet"}` — measurement,
+underscore, field. Every sample field in §2 becomes one series, tagged
+`realm`, `state`, and — when live — `venue` and `mode`. `lm_engine_up` and
+`lm_recorder_up` are 1 or 0.
+
+Confirm the names the sink actually chose before trusting an empty panel:
+**Explore** → the stack's Prometheus datasource → metrics browser → type
+`lm_`. If they differ from the above, the dashboard needs one find-and-replace
+in `deploy/grafana/liquidity-migration-fleet.json`, not a change to the
+sampler.
 
 ## 6. Diagnostic Commands
 
