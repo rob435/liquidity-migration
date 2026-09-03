@@ -219,8 +219,14 @@ pub struct SpoolSignalFeed {
     directory: PathBuf,
     returned_path: Option<PathBuf>,
     known_paths: BTreeSet<PathBuf>,
+    /// The read a dropped `next_observation` left running. The core drops
+    /// that future whenever another `select!` branch wins; its row stays in
+    /// `known_paths` and the read is joined on the next call.
+    in_flight: Option<(PathBuf, tokio::task::JoinHandle<ReadResult>)>,
     poll: Duration,
 }
+
+type ReadResult = Result<Option<SignalObservation>, SignalError>;
 
 impl SpoolSignalFeed {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
@@ -228,6 +234,7 @@ impl SpoolSignalFeed {
             directory: directory.into(),
             returned_path: None,
             known_paths: BTreeSet::new(),
+            in_flight: None,
             poll: Duration::from_millis(100),
         }
     }
@@ -316,14 +323,25 @@ impl SpoolSignalFeed {
         .map_err(|error| SignalError::Source(format!("signal spool task failed: {error}")))?
     }
 
-    async fn read_known(
-        &mut self,
-        path: PathBuf,
-    ) -> Result<Option<SignalObservation>, SignalError> {
-        let read_path = path.clone();
-        let observation = tokio::task::spawn_blocking(move || Self::read_one(&read_path))
-            .await
+    /// Read the lowest known row. The row leaves `known_paths` only once
+    /// its read has completed, so a future dropped mid-read loses nothing.
+    async fn read_first_known(&mut self) -> ReadResult {
+        let Some(path) = self.known_paths.first().cloned() else {
+            return Ok(None);
+        };
+        let handle = match self.in_flight.take() {
+            Some((in_flight, handle)) if in_flight == path => handle,
+            _ => {
+                let read_path = path.clone();
+                tokio::task::spawn_blocking(move || Self::read_one(&read_path))
+            }
+        };
+        let (_, handle) = self.in_flight.insert((path.clone(), handle));
+        let joined = handle.await;
+        self.in_flight = None;
+        let observation = joined
             .map_err(|error| SignalError::Source(format!("signal read task failed: {error}")))??;
+        self.known_paths.remove(&path);
         if observation.is_some() {
             self.returned_path = Some(path);
         }
@@ -365,21 +383,17 @@ impl SignalFeed for SpoolSignalFeed {
     async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
         self.retire_last().await?;
         loop {
-            if let Some(path) = self.known_paths.pop_first() {
-                if let Some(observation) = self.read_known(path).await? {
+            if !self.known_paths.is_empty() {
+                if let Some(observation) = self.read_first_known().await? {
                     return Ok(observation);
                 }
                 continue;
             }
             let discovered = self.scan().await?;
-            self.known_paths.extend(discovered);
-            if let Some(path) = self.known_paths.pop_first() {
-                if let Some(observation) = self.read_known(path).await? {
-                    return Ok(observation);
-                }
-                continue;
+            if discovered.is_empty() {
+                tokio::time::sleep(self.poll).await;
             }
-            tokio::time::sleep(self.poll).await;
+            self.known_paths.extend(discovered);
         }
     }
 }
@@ -481,10 +495,15 @@ impl SignalFeed for UnixSignalFeed {
                     if frame.len_filled == 4 {
                         let len = u32::from_le_bytes(frame.len_buf) as usize;
                         if len == 0 || len > MAX_SIGNAL_OBSERVATION_BYTES {
+                            // The frame is only the doorbell: the row is on
+                            // disk and the spool poll delivers it.
+                            tracing::warn!(
+                                length_bytes = len,
+                                max_bytes = MAX_SIGNAL_OBSERVATION_BYTES,
+                                "invalid signal frame size; dropping the stream"
+                            );
                             self.drop_stream();
-                            return Err(SignalError::Source(format!(
-                                "invalid signal frame size: {len} bytes (max: {MAX_SIGNAL_OBSERVATION_BYTES})"
-                            )));
+                            continue;
                         }
                         frame.body = vec![0u8; len];
                         frame.body_filled = 0;
@@ -553,8 +572,8 @@ impl SignalFeed for HybridSignalFeed {
     async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
         loop {
             self.spool.retire_last().await?;
-            if let Some(path) = self.spool.known_paths.pop_first() {
-                if let Some(observation) = self.spool.read_known(path).await? {
+            if !self.spool.known_paths.is_empty() {
+                if let Some(observation) = self.spool.read_first_known().await? {
                     return Ok(observation);
                 }
                 continue;
@@ -1069,6 +1088,101 @@ mod tests {
         );
 
         drop(client);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The core drops the feed future whenever another `select!` branch
+    /// wins. A row whose read was in flight is still the next row out.
+    #[test]
+    fn a_row_whose_read_the_core_dropped_is_still_delivered_first() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let directory = crate::testpath::temp_path("signal-spool-dropped-read");
+            std::fs::create_dir(directory.path()).unwrap();
+            let first = observation();
+            let mut second = first.clone();
+            second.sequence = 2;
+            second.observation_id = "funding-2".into();
+            second.content_sha256 = content_sha256(&second);
+            let first_path = spool_path(directory.path(), &first);
+            let second_path = spool_path(directory.path(), &second);
+            std::fs::write(&first_path, serde_json::to_vec(&first).unwrap()).unwrap();
+            std::fs::write(&second_path, serde_json::to_vec(&second).unwrap()).unwrap();
+
+            let mut feed =
+                SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
+            feed.known_paths.insert(first_path.clone());
+            feed.known_paths.insert(second_path.clone());
+
+            // The only blocking thread is busy, so the row read cannot finish
+            // inside the one poll the core gives the feed before dropping it.
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            let hold = tokio::task::spawn_blocking(move || {
+                let _ = held.recv();
+            });
+            let dropped = tokio::time::timeout(Duration::ZERO, feed.next_observation()).await;
+            assert!(dropped.is_err(), "the read is still in flight");
+            release.send(()).unwrap();
+            hold.await.unwrap();
+
+            let received = tokio::time::timeout(Duration::from_secs(2), feed.next_observation())
+                .await
+                .expect("the in-flight read completes")
+                .unwrap();
+            assert_eq!(received, first, "the dropped read's row goes first");
+            assert_eq!(feed.next_observation().await.unwrap(), second);
+            assert!(!first_path.exists(), "the delivered row is retired");
+
+            std::fs::remove_file(second_path).unwrap();
+            std::fs::remove_dir(directory.path()).unwrap();
+        });
+    }
+
+    /// A frame the engine cannot take is dropped with its stream; the row
+    /// is on disk, so the feed keeps running and the next client is heard.
+    #[tokio::test]
+    async fn an_oversize_frame_length_costs_its_stream_and_nothing_else() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let directory = short_test_dir("ux-oversize");
+        let sock_path = directory.join("stream.sock");
+        let mut feed = UnixSignalFeed::bind(&sock_path).unwrap();
+
+        let mut fat = UnixStream::connect(&sock_path).unwrap();
+        fat.write_all(&((MAX_SIGNAL_OBSERVATION_BYTES as u32 + 1).to_le_bytes()))
+            .unwrap();
+        fat.flush().unwrap();
+        let waiting =
+            tokio::time::timeout(Duration::from_millis(100), feed.next_observation()).await;
+        assert!(
+            waiting.is_err(),
+            "an oversize length is not an error the core sees: {waiting:?}"
+        );
+        assert!(feed.active_stream.is_none(), "the fat stream is dropped");
+
+        let mut obs = observation();
+        obs.sequence = 8;
+        obs.content_sha256 = content_sha256(&obs);
+        let body = serde_json::to_vec(&obs).unwrap();
+        let mut client = UnixStream::connect(&sock_path).unwrap();
+        client
+            .write_all(&(body.len() as u32).to_le_bytes())
+            .unwrap();
+        client.write_all(&body).unwrap();
+        client.flush().unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(2), feed.next_observation())
+            .await
+            .expect("the next client's frame is read")
+            .unwrap();
+        assert_eq!(received, obs);
+
+        drop(client);
+        drop(fat);
         let _ = std::fs::remove_dir_all(&directory);
     }
 }

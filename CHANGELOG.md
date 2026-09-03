@@ -6,6 +6,55 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — Both signal workers crash-looped on a preflight miss, then
+  a 20 MB carry row put both engines back into the sequence-gap loop. Three
+  faults fixed at the root; no manual generation bump was needed.**
+  - *What happened.* 12:53:13 UTC demo worker, 12:53:30 mainnet worker:
+    `signal-worker: state: spool class preflight underestimated an emitted
+    observation batch`, exit `status=2/INVALIDARGUMENT`, every ~75 s under
+    `Restart=always` (46 exits each by 13:40). 13:01:26 demo engine, 13:02:44
+    mainnet engine: `invalid signal frame size: 20824977 bytes (max: 16777216)`
+    (demo: 20293767), exit. Every restart then failed within 4 s with
+    `signal source directional_public_v1.g….carry has sequence gap: expected
+    946, got 947` (demo: `expected 931, got 932`), 320 mainnet and 353 demo
+    exits by 13:40. Row 946 was on disk the whole time. The funded account
+    held SKR short (exodus), FLOCK and BICO long (carry) with no engine
+    to exit them.
+  - *Fault 1, worker preflight.* `projected_spool_files`
+    (`engine/signal-worker/src/worker.rs`) had no arm for
+    `WireEvent::LlmGateCandidates`, so a gate publication projected zero
+    `current` rows and emitted one; the post-apply check refused the batch
+    as underestimated and the process exited. The preflight shipped in
+    `af40545e` this morning; the gate event has existed since `1c3cf4c3`.
+    The first gate publication after the deploy (12:53) crashed both
+    workers, and every restart replayed the same file. Now the arm projects
+    one `current` row. Test:
+    `a_gate_publication_passes_the_spool_preflight` (fails on the old code
+    with the production error text).
+  - *Fault 2, engine spool reader.* `SpoolSignalFeed` popped a row out of
+    `known_paths` and then awaited its blocking read. The core drops the
+    feed future whenever another `select!` branch wins, so a read that took
+    longer than one poll (the 20 MB row: ~0.5 s to parse) was abandoned with
+    its row already forgotten; the next row was read and the core saw a gap.
+    The same class as this morning's frame fix, on the other half of the
+    feed; this is also why every earlier gap loop followed a big row. Now
+    the row stays in `known_paths` until its read completes and the
+    in-flight `JoinHandle` is kept on the feed and joined on the next call.
+    Test: `a_row_whose_read_the_core_dropped_is_still_delivered_first`.
+  - *Fault 3, the frame cap.* `payload: Vec<u8>` serializes as a JSON array
+    of integers, so a 6.27 MB `carry_feature_batch` payload (310 symbols) is
+    a 20.8 MB envelope. The worker caps the payload at 16 MiB, the engine
+    caps the *frame* at 16 MiB, and the frame carries the envelope. The
+    worker now sends no frame for a row wider than the cap (the row is the
+    delivery; the spool poll reads it), and an oversize frame length is a
+    `WARN` and a dropped stream in the engine, not an exit. Tests:
+    `a_row_wider_than_one_frame_rings_no_doorbell`,
+    `an_oversize_frame_length_costs_its_stream_and_nothing_else`. The 3×
+    encoding itself is the next change.
+  - *Recovery.* Deploy only. With the reader fixed the engines read 946 and
+    931 from the spool and the cursors advance; the worker stops exiting on
+    the next gate file. Runbook §8 rows updated.
+
 - **2026-09-03 — Refactored all project skills, MCP configuration, and Claude project memory into the Spec-First standard with tables.**
   - *Skills refactor.* Converted all 8 skills under `.codex/skills/` (`backtest-integrity`, `equity-curve`, `pit-reconcile`, `repo-map`, `research-phase-runner`, `research-report`, `run-strategy`, `vps-migrate`) into the 4-part Spec-First skeleton (Purpose, Spec Tables, Invariants, Operational Recipes). Replaced loose narrative paragraphs with structured markdown tables for parameter routing, artifact schemas, and failure triage matrices.
   - *MCP specification & config.* Created `docs/mcp.md` defining server registries, tool schemas, transport contracts, and permissions. Added clean `.mcp.json` at repository root with stdio transport.

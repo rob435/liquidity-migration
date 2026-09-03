@@ -3237,6 +3237,9 @@ impl DurableSignalWorker {
                     );
                 }
             }
+            WireEvent::LlmGateCandidates { .. } => {
+                projected.insert("current", 1);
+            }
             WireEvent::Watermark { observed_ts_ms, .. } => {
                 let long_files = u64::from(
                     !self
@@ -6528,6 +6531,47 @@ mod tests {
         assert_eq!(worker.state.universe.snapshot_ts_ms, DAY_MS + 4);
         let restored = SignalWorker::restore(test_config(), worker.state.clone()).unwrap();
         assert_eq!(restored.state.universe, third);
+    }
+
+    /// The spool preflight must count the gate's row, or every gate
+    /// publication is refused as an underestimated batch and the worker exits.
+    #[test]
+    fn a_gate_publication_passes_the_spool_preflight() {
+        let root = temporary_root("gate-preflight");
+        let mut durable = DurableSignalWorker::open_with_universe(
+            test_config(),
+            test_universe(),
+            root.join("state"),
+            root.join("spool"),
+        )
+        .unwrap();
+        let read_at_ms = 10 * DAY_MS;
+        let decision_ts_ms = read_at_ms - 60_000;
+        let out = durable
+            .apply_and_commit(WireEvent::LlmGateCandidates {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                observed_ts_ms: decision_ts_ms,
+                available_at_ms: read_at_ms,
+                decision_ts_ms,
+                valid_until_ms: decision_ts_ms + HOUR_MS,
+                rows: vec![gate_row("BTCUSDT", 7.0, read_at_ms - 20 * 60_000)],
+            })
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, "llm_gate_candidates");
+        assert_eq!(
+            std::fs::read_dir(root.join("spool"))
+                .unwrap()
+                .filter(|entry| {
+                    entry
+                        .as_ref()
+                        .is_ok_and(|entry| entry.path().extension().is_some_and(|e| e == "json"))
+                })
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -449,8 +449,11 @@ impl SpoolWriter {
             atomic_write(&path, bytes)?;
         }
         // Durable first. The frame is best effort: an engine that is down,
-        // restarting, or slow reads the row on its next spool poll.
-        let _ = self.try_send_socket(bytes);
+        // restarting, or slow reads the row on its next spool poll, and so
+        // does a row wider than one frame.
+        if bytes.len() <= MAX_SIGNAL_OBSERVATION_BYTES {
+            let _ = self.try_send_socket(bytes);
+        }
         Ok((path, observation))
     }
 
@@ -737,6 +740,46 @@ mod tests {
         std::fs::write(&orphan, b"partial").unwrap();
         SpoolWriter::new(&spool).unwrap();
         assert!(!orphan.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A row wider than one frame is still the delivery; the doorbell is
+    /// skipped and the engine reads the row on its next spool poll.
+    #[test]
+    fn a_row_wider_than_one_frame_rings_no_doorbell() {
+        use std::os::unix::net::UnixListener;
+
+        let root =
+            std::env::temp_dir().join(format!("signal-worker-spool-fat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let listener = UnixListener::bind(root.join("stream.sock")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let spool = SpoolWriter::new(&root).unwrap();
+
+        let mut fat: NormalizedObservation = serde_json::from_slice(&observation(3)).unwrap();
+        // Bytes serialize as JSON integers: the envelope is over three times
+        // the payload, and it is the envelope that travels as one frame.
+        fat.payload = vec![b'x'; 5 * 1024 * 1024];
+        fat.content_sha256 = crate::config::sha256_hex(&fat.canonical_envelope_bytes());
+        let bytes = serde_json::to_vec(&fat).unwrap();
+        assert!(fat.payload.len() < engine_types::MAX_SIGNAL_OBSERVATION_BYTES);
+        assert!(bytes.len() > engine_types::MAX_SIGNAL_OBSERVATION_BYTES);
+
+        let (path, parsed) = spool.write_encoded_observation(&bytes).unwrap();
+        assert_eq!(parsed.sequence, 3);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "the row is the delivery"
+        );
+        assert_eq!(
+            listener.accept().map(|_| ()).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "no frame was offered for the fat row"
+        );
+
+        drop(listener);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
