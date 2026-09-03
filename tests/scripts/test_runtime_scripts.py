@@ -235,3 +235,92 @@ def test_the_systemd_unit_runs_the_packer_over_every_tape_and_receipts_it() -> N
         assert Path(root).is_absolute()
     timer = (SYSTEMD / "liquidity-migration-market-tape-upload.timer").read_text(encoding="utf-8")
     assert "Persistent=true" in timer
+
+
+def _function(text: str, name: str) -> str:
+    start = text.index(f"{name}() {{")
+    return text[start : text.index("\n}\n", start) + len("\n}\n")]
+
+
+def _trace_start_realm(realm: str, tmp_path: Path) -> list[str]:
+    """Every systemctl call `start_realm <realm>` makes, in order."""
+
+    bin_dir = tmp_path / realm / "bin"
+    bin_dir.mkdir(parents=True)
+    trace = tmp_path / realm / "systemctl.trace"
+    systemctl = bin_dir / "systemctl"
+    systemctl.write_text(
+        """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$SYSTEMCTL_TRACE"
+""",
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    harness = "\n".join(
+        [
+            "set -euo pipefail",
+            'source "$LM_REPOSITORY_ROOT/deploy/lib_sleeves.sh"',
+            'fail() { echo "$*" >&2; exit 1; }',
+            # The heartbeat wait needs live units; the start order does not.
+            "wait_fresh_heartbeat() { :; }",
+            _function(deploy, "start_unit"),
+            _function(deploy, "start_realm"),
+            f'start_realm "{realm}"',
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "SYSTEMCTL_TRACE": str(trace),
+            "LM_REPOSITORY_ROOT": str(ROOT),
+        },
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return trace.read_text(encoding="utf-8").splitlines()
+
+
+def _units(command: str) -> list[str]:
+    return subprocess.run(
+        ["bash", "-c", f"source deploy/lib_sleeves.sh; {command}"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.split()
+
+
+def test_a_realm_start_runs_its_liveness_watchdog_after_every_unit_it_watches(
+    tmp_path: Path,
+) -> None:
+    """The watchdog alerts on any inactive manifest unit, so it goes last.
+
+    Its stop order puts it ahead of the realm's timers in the start list. Run
+    it there and its first pass pages CRITICAL on timers this same start is
+    about to enable.
+    """
+
+    for realm in ("demo", "mainnet"):
+        calls = _trace_start_realm(realm, tmp_path)
+        jobs = _units(f"lm_immediate_timer_jobs {realm}")
+        assert jobs, realm
+        others = [unit for unit in _units(f"lm_activation_units {realm} start") if unit not in jobs]
+        assert others, realm
+        for job in jobs:
+            assert f"start {job}" in calls, (realm, job, calls)
+            assert calls.count(f"start {job}") == 1, (realm, job, calls)
+            for unit in others:
+                assert f"enable --now {unit}" in calls, (realm, unit, calls)
+                assert calls.index(f"enable --now {unit}") < calls.index(f"start {job}"), (
+                    realm,
+                    unit,
+                    calls,
+                )

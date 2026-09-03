@@ -52,6 +52,26 @@ edit STATE.md to match.
     distinct Drive prefixes, and every row names its own `venue` (the Binance
     tape reads back `{'binance'}` and nothing else).
 
+- **2026-09-03 — Incident: a deploy pages its own liveness watchdog.**
+  - `fleet liveness (demo)` raised two CRITICALs on `ip-208-84-103-4` inside the
+    `ce252af8` deploy (19:09 UTC): `liquidity-migration-chaos-drill.timer is inactive` and
+    `liquidity-migration-demo-liveness.timer is inactive`
+    (`check_fleet_liveness.py::evaluate_units`). Both are real states, held for
+    seconds, inside the deploy that caused them. No unit was down, no position
+    was unprotected, and the funded engine was untouched.
+  - `start_realm` walked one list in stop order, so the realm's `job-now`
+    watchdog (`liquidity-migration-demo-liveness.service`, stop order 200) ran
+    to completion before the same loop enabled the realm's timers
+    (`demo-liveness.timer` 80, `chaos-drill.timer` 50) that
+    `stop_realm_units demo` had just disabled. The watchdog checks every
+    manifest unit for `active` with no grace, so it alerted on the two timers
+    it was four lines early for, and its CRITICAL fired the on-call routine.
+    Both realms carry the fault: `mainnet-liveness.service` (210) likewise
+    precedes `mainnet-liveness.timer` (90).
+  - The `job-now` units now run in a second pass, after every other activation
+    unit in the realm is up. `lm_immediate_timer_jobs` drives that pass, and the
+    first loop skips its members.
+
 - **2026-09-03 — Replay throughput and mid-recording ranges, the first real-tape
   run, and the recorder's budget controller.**
   - `engine backtest` writes its log unsynced by default

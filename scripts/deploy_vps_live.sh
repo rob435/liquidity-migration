@@ -969,10 +969,19 @@ start_realm() {
         [ -n "$unit" ] || continue
         [ "$unit" = "$worker_unit" ] && continue
         case "$immediate_jobs" in
-            *" $unit "*) systemctl start "$unit" || fail "cannot start $unit" ;;
+            *" $unit "*) continue ;;
             *) start_unit "$unit" ;;
         esac
     done < <(lm_activation_units "$realm" start)
+    # A job-now unit is the realm's liveness watchdog: it runs to completion
+    # here, and it alerts on any manifest unit that is not active. Its stop
+    # order puts it ahead of the realm's timers in the start list, so run it
+    # only once every other unit above is up — otherwise its first pass pages
+    # CRITICAL on the timers this same function has not enabled yet.
+    while IFS= read -r unit; do
+        [ -n "$unit" ] || continue
+        systemctl start "$unit" || fail "cannot start $unit"
+    done < <(lm_immediate_timer_jobs "$realm")
 }
 
 # ------------------------------------------------------------------ verify
