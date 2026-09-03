@@ -206,6 +206,19 @@ def test_a_control_frame_or_an_unknown_topic_writes_nothing() -> None:
     assert adapter.normalize(json.dumps([1, 2]), 1) == []
 
 
+def test_only_the_book_topics_are_worth_re_anchoring() -> None:
+    adapter = BybitAdapter()
+    topics = [
+        "orderbook.50.AGIUSDT",
+        "publicTrade.AGIUSDT",
+        "tickers.AGIUSDT",
+        "allLiquidation.AGIUSDT",
+        "orderbook.1.AGIUSDT",
+    ]
+    assert adapter.book_topics(topics) == ["orderbook.50.AGIUSDT", "orderbook.1.AGIUSDT"]
+    assert adapter.book_topics([]) == []
+
+
 def test_each_feed_names_its_venue_topic() -> None:
     adapter = BybitAdapter()
     feeds = [parse_feed(text) for text in ("book:50", "book:1", "trades", "ticker", "liquidations", "kline:1m")]

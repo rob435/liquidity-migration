@@ -51,6 +51,7 @@ def test_the_documented_example_parses() -> None:
     assert config.storage.segment_max_mb == 64.0
     assert config.storage.retention_days == 30
     assert config.topics_per_connection == 150
+    assert config.reanchor_books_each_hour is True, "on unless a config turns it off"
     assert config.snapshot_cadence == "day"
     assert [tier.name for tier in config.tiers] == ["core", "crowded", "wide"]
     core = config.tier("core").universe
@@ -228,6 +229,9 @@ def test_the_storage_and_cadence_dials_must_make_sense() -> None:
         parse(MINIMAL + "\n[storage]\nsegment_max_mb = 0\n")
     with pytest.raises(ConfigError, match="topics_per_connection"):
         parse(MINIMAL + "\n[connection]\ntopics_per_connection = -1\n")
+    with pytest.raises(ConfigError, match="reanchor_books_each_hour"):
+        parse(MINIMAL + "\n[connection]\nreanchor_books_each_hour = 1\n")
+    assert parse(MINIMAL + "\n[connection]\nreanchor_books_each_hour = false\n").reanchor_books_each_hour is False
     hourly = parse(MINIMAL + '\n[snapshots]\ncadence = "hour"\n')
     assert hourly.snapshot_cadence == "hour"
     with pytest.raises(KeyError):

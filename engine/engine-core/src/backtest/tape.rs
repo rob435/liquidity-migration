@@ -26,6 +26,8 @@ pub enum TapeError {
     Io(#[from] std::io::Error),
     #[error("tape line {line}: {detail}")]
     Malformed { line: u64, detail: String },
+    #[error("tape line {line}: book rows from {venue} cannot be replayed here; this reader chains books by Bybit's monotone update_id, and another venue's brackets would build a book that is not the venue's. Filter the tape to one Bybit source.")]
+    UnsupportedVenue { line: u64, venue: String },
     #[error("tape line {line}: local_receive_ts_ns {this} is before the previous row's {previous}; the tape is receive-time ordered")]
     OutOfOrder { line: u64, previous: u64, this: u64 },
     #[error("cannot start `zstd -dc` for {path}: {source}")]
@@ -162,6 +164,23 @@ impl TapeReader {
             }
             let row = match kind {
                 "orderbook_snapshot" | "orderbook_delta" => {
+                    // A book row's meaning is the venue's chaining rule, and
+                    // this reader implements Bybit's: monotone `update_id`
+                    // against the last one, restarted by a snapshot. Binance
+                    // brackets each diff with `first_update_id`/`pu` instead,
+                    // so its rows read here would chain wrongly and produce a
+                    // plausible book that is not the venue's. Refused rather
+                    // than replayed.
+                    let venue = value
+                        .get("venue")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| self.malformed("book row has no venue"))?;
+                    if !venue.starts_with("bybit") {
+                        return Err(TapeError::UnsupportedVenue {
+                            line: self.line,
+                            venue: venue.to_string(),
+                        });
+                    }
                     self.stats.books += 1;
                     TapeRow::Book(
                         parse_book(&value, kind == "orderbook_snapshot", recv_ns)

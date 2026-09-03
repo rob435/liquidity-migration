@@ -34,6 +34,14 @@ class VenueAdapter(Protocol):
         """Which connection a topic must ride: venues that route streams by URL
         path return the path; a shard carries one group only. "" when all share one."""
 
+    def book_topics(self, topics: Iterable[str]) -> list[str]:
+        """The subset of `topics` carrying an order book, in the given order.
+
+        These are the topics a re-subscribe re-anchors with a fresh snapshot,
+        which is what makes an hour of tape replayable without the hours
+        before it. Nothing else is worth re-subscribing: a trade, ticker or
+        liquidation row means the same thing on its own."""
+
     def connection_url(self, topics: list[str]) -> str:
         """The websocket URL for one shard's topics (all of one connection group)."""
 

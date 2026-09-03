@@ -20,6 +20,8 @@ min_free_disk_gb = 25
 
 [connection]
 topics_per_connection = 150
+reanchor_books_each_hour = true   # re-subscribe books each UTC hour so every
+                                  # hour opens with a snapshot per symbol
 
 [snapshots]
 cadence = "day"                # how often the instrument and ticker tables are
@@ -230,6 +232,11 @@ class CaptureConfig:
     storage: StorageSettings
     tiers: tuple[Tier, ...]
     topics_per_connection: int = 150
+    #: Re-subscribe every book topic once per UTC hour so each hour of tape
+    #: opens with a snapshot per symbol. Without it a book delta only means
+    #: something next to a snapshot in an earlier hour, and one hour of the
+    #: archive cannot be replayed on its own.
+    reanchor_books_each_hour: bool = True
     snapshot_cadence: str = "day"
     budget: BudgetSettings = field(default_factory=BudgetSettings)
     source_path: Path | None = None
@@ -441,6 +448,9 @@ def parse_config(data: Mapping[str, Any], *, base_dir: Path, source_path: Path |
 
     connection = data.get("connection") or {}
     topics_per_connection = int(_positive(connection, "topics_per_connection", 150, section="connection"))
+    reanchor = connection.get("reanchor_books_each_hour", True)
+    if not isinstance(reanchor, bool):
+        raise ConfigError("connection.reanchor_books_each_hour must be true or false")
 
     snapshots = data.get("snapshots") or {}
     cadence = str(snapshots.get("cadence") or "day")
@@ -479,6 +489,7 @@ def parse_config(data: Mapping[str, Any], *, base_dir: Path, source_path: Path |
         storage=storage,
         tiers=tuple(tiers),
         topics_per_connection=topics_per_connection,
+        reanchor_books_each_hour=reanchor,
         snapshot_cadence=cadence,
         budget=budget,
         source_path=source_path,

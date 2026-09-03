@@ -222,6 +222,12 @@ class BinanceAdapter:
             return "public"
         return "market"
 
+    def book_topics(self, topics: Iterable[str]) -> list[str]:
+        # `depth<N>` and `bookTicker` are whole books per frame; `depth@100ms`
+        # is the diff stream, and re-subscribing it re-fetches its REST anchor
+        # through `on_subscribed`.
+        return [topic for topic in topics if topic.partition("@")[2].startswith(("depth", "bookTicker"))]
+
     def connection_url(self, topics: list[str]) -> str:
         groups = {self.connection_group(topic) for topic in topics}
         if len(groups) != 1:

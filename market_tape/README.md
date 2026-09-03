@@ -46,8 +46,9 @@ python -m market_tape book   SOURCE --hour 2026-09-02T22 --symbol BTCUSDT
 
 | Metric | Bybit Linear | Binance USD-M |
 | :--- | :--- | :--- |
+| **Recorded book** | `book:50` on every acting tier, `book:1` on the canary | **None.** Cross-venue reference only: ticker and trades |
 | **Book Chaining** | Monotonic `update_id`; resets on snapshot | `first_update_id` ($U$), `update_id` ($u$), `pu` |
-| **Top of Book** | `book:1` stream | `bookTicker` stream |
+| **Top of Book** | `book:1` stream | `bookTicker` stream, 434 KB/s for 20 names — costlier than the deep book |
 | **Ticker Stream** | Real-time `tickers.<symbol>` | `@markPrice@1s` + 24h `ticker` |
 | **Predicted Funding**| Real-time predicted rate for upcoming settlement | Last settled rate (reacts 1 period later) |
 | **Public Trades** | Every individual fill | `aggTrades` (aggregated fill groups) |
@@ -79,6 +80,19 @@ status.json                                            Health status updated eve
 * The projection is the trailing day (or the uptime, if shorter) of bytes from the pairs still subscribed, scaled to a month. A shed pair's bytes in the window are left out.
 * Over budget with every listed pair shed is a `WARNING` per action naming the overshoot: the config decides what else goes.
 * `_meta` table snapshots are pruned by `retention_days` only, never for disk room.
+
+### Hourly book anchoring
+
+`connection.reanchor_books_each_hour` (default true) re-subscribes every book topic once per UTC hour, spread `REANCHOR_SHARDS_PER_TICK` shards at a time across maintenance ticks. The venue answers a subscribe with a snapshot, so each hour of tape opens with one per symbol.
+
+| Property | Value |
+| :--- | :--- |
+| **Why** | A book delta means nothing without a snapshot. The hour is the archive's unit: one directory, one uploaded tar. Anchored hourly, any single hour replays on its own; anchored only at recorder start, replaying hour N means reading every hour since. |
+| **Bytes** | One snapshot per book symbol per hour, about 2.5 KB each: under 1 GB/month for 500 names. |
+| **Paid for it** | The moment between the unsubscribe and the snapshot, which the snapshot row itself marks. |
+| **Counter** | `shards[].reanchors` in `status.json`. |
+
+Only order-book topics are re-subscribed. A trade, ticker, or liquidation row means the same thing standing alone.
 
 ### Google Drive Layout
 Uploaded hourly at :10 past the hour:

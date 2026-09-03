@@ -129,6 +129,9 @@ class BybitAdapter:
     def connection_group(self, topic: str) -> str:
         return ""
 
+    def book_topics(self, topics: Iterable[str]) -> list[str]:
+        return [topic for topic in topics if topic.startswith("orderbook.")]
+
     def subscribe_messages(self, topics: list[str]) -> list[str]:
         return [json.dumps({"op": "subscribe", "args": topics[start : start + 10]}) for start in range(0, len(topics), 10)]
 

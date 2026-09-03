@@ -6,6 +6,50 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — The capture earns its bandwidth: Binance stops recording books,
+  Bybit gets the room, and every hour of tape anchors its own books.**
+  - Verified first, on the running host: every name the funded engine holds is
+    captured with book, prints and ticker. `NEARUSDT` 16,720 fifty-level deltas
+    and 1,557 prints, `ZECUSDT` 38,857 and 32,441, `AGIUSDT` 8,018 plus 382
+    top-of-book rows. The tiers are keyed on the same signals the sleeves
+    trade, so LONG's names sit in `core` and CARRY's in `crowded` by
+    construction.
+  - **Binance records no order book.** Its 1000-level diff stream cost 792
+    GB/month and nothing reads it: the only study that opens that tape is
+    `research/lab/tape.py`, which asks for `mid`, and the cross-venue panel
+    reads the REST hourly datasets, not the tape. `bookTicker` is not the
+    cheap substitute it looks like — the config's own measurement is 434 KB/s
+    for twenty names, 1.1 TB/month, more than the book it would replace. What
+    stays is the ticker (`markPrice@1s`: the funding rate as it moves, mark and
+    index) on every listed name and the trades where flow matters, which is
+    every bars column the cross-venue work reads. `monthly_gb` 1300 → 700,
+    `max_disk_gb` 30 → 18.
+  - **Bybit takes the freed line**: `monthly_gb` 1300 → 1800, `max_disk_gb`
+    40 → 60 (about three days on disk). At its 48-hour tier width the recorder
+    projects 1,710 GB/month, so it now fits and sheds nothing. `core:trades`
+    is out of the shed order entirely: it went last, so it was the first thing
+    permanently sacrificed, and a maker replay fills resting orders against
+    exactly those prints. On the host they had been zero since 13:27 UTC while
+    the books kept flowing at 141k deltas an hour. The order now gives up the
+    discovery tiers, then their prints, then the crowd books, and never a
+    ticker or `core:book:50`.
+  - **Hourly book anchoring** (`connection.reanchor_books_each_hour`, default
+    on): every book topic is re-subscribed once per UTC hour, two shards per
+    maintenance tick, and the venue answers a subscribe with a snapshot. The
+    hour is the archive's unit, so each uploaded tar now replays on its own.
+    Before this, only the recorder's start anchored a book: four recorded hours
+    of `AGIUSDT` held 78,895 fifty-level deltas and no fifty-level snapshot, and
+    a range starting at hour 02 produced 173,011 events, all trades, no book and
+    no orders. Cost is one 2.5 KB snapshot per symbol per hour, under 1 GB/month.
+  - `engine backtest` **refuses a book row from another venue**
+    (`TapeError::UnsupportedVenue`). This reader chains by Bybit's monotone
+    `update_id`; Binance brackets each diff with `first_update_id`/`pu`, so its
+    rows read here would build a plausible book that is not the venue's. Trades
+    and tickers carry no chaining and are still read from any venue.
+  - Separation verified: distinct roots, distinct systemd `StateDirectory`,
+    distinct Drive prefixes, and every row names its own `venue` (the Binance
+    tape reads back `{'binance'}` and nothing else).
+
 - **2026-09-03 — Incident: a deploy pages its own liveness watchdog.**
   - `fleet liveness (demo)` raised two CRITICALs on `ip-208-84-103-4` inside the
     `ce252af8` deploy (19:09 UTC): `liquidity-migration-chaos-drill.timer is inactive` and
