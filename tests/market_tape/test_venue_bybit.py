@@ -264,20 +264,34 @@ def test_topics_are_subscribed_ten_at_a_time() -> None:
     assert adapter.start_lanes({}, lambda row: None, threading.Event()) == []
 
 
-def test_the_listed_universe_is_the_trading_usdt_perpetuals() -> None:
+def _perp(symbol: str, *, quote: str = "USDT", status: str = "Trading", contract: str = "LinearPerpetual", **extra: str) -> dict:
+    return {"symbol": symbol, "status": status, "quoteCoin": quote, "settleCoin": quote, "contractType": contract, **extra}
+
+
+def test_the_listed_universe_is_the_trading_crypto_usdt_perpetuals() -> None:
     adapter = BybitAdapter()
     instruments = [
-        {"symbol": "BTCUSDT", "status": "Trading", "quoteCoin": "USDT", "settleCoin": "USDT", "contractType": "LinearPerpetual"},
-        {"symbol": "ETHPERP", "status": "Trading", "quoteCoin": "USDC", "settleCoin": "USDC", "contractType": "LinearPerpetual"},
-        {"symbol": "BTC-26SEP26", "status": "Trading", "quoteCoin": "USDT", "settleCoin": "USDT", "contractType": "LinearFutures"},
-        {"symbol": "OLDUSDT", "status": "Closed", "quoteCoin": "USDT", "settleCoin": "USDT", "contractType": "LinearPerpetual"},
-        {"symbol": "solusdt", "status": "Trading", "quoteCoin": "USDT", "settleCoin": "USDT", "contractType": "LinearPerpetual"},
+        _perp("BTCUSDT"),
+        _perp("MYXUSDT", symbolType="innovation"),
+        _perp("ETHPERP", quote="USDC"),
+        _perp("BTC-26SEP26", contract="LinearFutures"),
+        _perp("OLDUSDT", status="Closed"),
+        _perp("solusdt"),
+        # Listed as perpetuals in the same category, told apart only by symbolType.
+        _perp("NVDAUSDT", symbolType="stock", underlyingTicker="NVDA", marketRegion="US"),
+        _perp("SOXLUSDT", symbolType="ETF", underlyingTicker="SOXL"),
+        _perp("XAUUSDT", symbolType="commodity"),
+        _perp("NEWTHINGUSDT", symbolType="index"),
         "not a row",
     ]
 
-    assert adapter.listed_symbols(instruments, quote="USDT") == ["BTCUSDT", "SOLUSDT"]
-    assert adapter.listed_symbols(instruments, quote=None) == ["BTCUSDT", "ETHPERP", "SOLUSDT"]
+    assert adapter.listed_symbols(instruments, quote="USDT") == ["BTCUSDT", "MYXUSDT", "SOLUSDT"]
+    assert adapter.listed_symbols(instruments, quote=None) == ["BTCUSDT", "ETHPERP", "MYXUSDT", "SOLUSDT"]
     assert adapter.listed_symbols([], quote="USDT") == []
+    # A label the venue has not used yet is outside the domain too, and is
+    # counted so it shows up in the journal instead of vanishing.
+    assert adapter.excluded_listed(instruments, quote="USDT") == {"ETF": 1, "commodity": 1, "index": 1, "stock": 1}
+    assert adapter.excluded_listed(instruments, quote="USDC") == {}
 
 
 def test_turnover_ranks_highest_first_and_funding_reads_as_a_fraction() -> None:

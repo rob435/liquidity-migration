@@ -83,10 +83,28 @@ jobs:
       - name: Clippy (locked, warnings denied)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
         working-directory: engine
-      # Test the optimized binary we actually deploy, not a debug-only build.
-      - name: Release tests (locked)
-        run: cargo test --workspace --all-targets --release --locked
+      # Optimized, not a debug-only build: `ci-test` is `release` without the
+      # link-time pass. See engine/Cargo.toml for why the tests do not pay it.
+      - name: Optimized tests (locked)
+        run: cargo test --workspace --all-targets --profile ci-test --locked
         working-directory: engine
+
+  # The deployed binaries, built beside `rust` rather than after it: this is the
+  # only build that pays thin LTO, and `vps` gates on both jobs, so a red test
+  # still blocks the deploy that consumes this artifact.
+  rust-artifact:
+    name: Deploy artifact
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'disarm-mainnet'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust cache
+        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          workspaces: "engine -> target"
       - name: Build and smoke-test deploy artifact (locked)
         run: |
           cargo build --release --locked --workspace --bins
@@ -196,7 +214,7 @@ jobs:
       inputs.mode != 'disarm-mainnet' &&
       github.repository == 'rob435/liquidity-migration' &&
       github.ref == 'refs/heads/main'
-    needs: [ci, rust]
+    needs: [ci, rust, rust-artifact]
     runs-on: ubuntu-latest
     environment: production
     # Bound the stopped window; the deploy builds before it stops the fleet.

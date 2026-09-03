@@ -68,7 +68,15 @@ class VenueAdapter(Protocol):
         """The venue's instrument and ticker tables, raw, as `{"instruments": [...], "tickers": [...]}`."""
 
     def listed_symbols(self, instruments: Iterable[Mapping[str, Any]], *, quote: str | None) -> list[str]:
-        """Perpetuals the venue lists as trading, filtered by quote asset when given."""
+        """Crypto perpetuals the venue lists as trading, filtered by quote asset
+        when given. A venue that also lists stocks, ETFs or commodities as
+        perpetuals leaves them out here: no sleeve trades them."""
+
+    def excluded_listed(self, instruments: Iterable[Mapping[str, Any]], *, quote: str | None) -> dict[str, int]:
+        """Trading perpetuals of the quote that `listed_symbols` left out, counted
+        by the venue's own label for them. What the recorder logs when it takes
+        the tables, so a new label shows up in the journal rather than as a
+        silent gap."""
 
     def turnovers(self, tickers: Iterable[Mapping[str, Any]]) -> dict[str, float]:
         """24h quote turnover per symbol from the ticker table."""

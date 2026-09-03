@@ -503,6 +503,10 @@ INSTRUMENTS = [
     {"symbol": "SOLUSDT", "contractType": "PERPETUAL", "status": "SETTLING", "quoteAsset": "USDT", "marginAsset": "USDT"},
     {"symbol": "ADAUSDC", "contractType": "PERPETUAL", "status": "TRADING", "quoteAsset": "USDC", "marginAsset": "USDC"},
     {"symbol": "BTCUSD", "contractType": "PERPETUAL", "status": "TRADING", "quoteAsset": "USD", "marginAsset": "BTC"},
+    # Binance files stocks and commodities under their own contract type.
+    {"symbol": "NVDAUSDT", "contractType": "TRADIFI_PERPETUAL", "status": "TRADING", "quoteAsset": "USDT", "marginAsset": "USDT", "underlyingType": "EQUITY"},
+    {"symbol": "XAUUSDT", "contractType": "TRADIFI_PERPETUAL", "status": "TRADING", "quoteAsset": "USDT", "marginAsset": "USDT", "underlyingType": "COMMODITY"},
+    {"symbol": "BTCUSDT_260327", "contractType": "CURRENT_QUARTER", "status": "TRADING", "quoteAsset": "USDT", "marginAsset": "USDT"},
 ]
 
 TICKERS = [
@@ -513,11 +517,12 @@ TICKERS = [
 ]
 
 
-def test_listed_symbols_keeps_trading_perpetuals() -> None:
+def test_listed_symbols_keeps_trading_crypto_perpetuals() -> None:
     adapter = BinanceAdapter()
     assert adapter.listed_symbols(INSTRUMENTS, quote="USDT") == ["BTCUSDT", "ETHUSDT"]
     assert adapter.listed_symbols(INSTRUMENTS, quote="USDC") == ["ADAUSDC"]
     assert adapter.listed_symbols(INSTRUMENTS, quote=None) == ["ADAUSDC", "BTCUSD", "BTCUSDT", "ETHUSDT"]
+    assert adapter.excluded_listed(INSTRUMENTS, quote="USDT") == {"CURRENT_QUARTER": 1, "TRADIFI_PERPETUAL": 2}
 
 
 def test_turnover_ranked_and_funding_rates() -> None:

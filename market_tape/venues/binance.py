@@ -358,21 +358,37 @@ class BinanceAdapter:
 
     def listed_symbols(self, instruments: Iterable[Mapping[str, Any]], *, quote: str | None) -> list[str]:
         symbols = set()
-        for row in instruments:
-            if not isinstance(row, Mapping):
-                continue
-            if str(row.get("status")) != "TRADING":
-                continue
+        for row in self._trading_rows(instruments, quote=quote):
             if str(row.get("contractType")) != "PERPETUAL":
-                continue
-            if quote is not None and (
-                str(row.get("quoteAsset")) != quote or str(row.get("marginAsset", quote)) != quote
-            ):
                 continue
             symbol = str(row.get("symbol") or "").upper()
             if symbol and symbol.isalnum():
                 symbols.add(symbol)
         return sorted(symbols)
+
+    def excluded_listed(self, instruments: Iterable[Mapping[str, Any]], *, quote: str | None) -> dict[str, int]:
+        # Binance files its stocks, ETFs and commodities under their own
+        # contract type, `TRADIFI_PERPETUAL`, so the perpetual filter is the
+        # domain filter; dated futures are counted here too.
+        counts: dict[str, int] = {}
+        for row in self._trading_rows(instruments, quote=quote):
+            label = str(row.get("contractType"))
+            if label != "PERPETUAL":
+                counts[label] = counts.get(label, 0) + 1
+        return dict(sorted(counts.items()))
+
+    @staticmethod
+    def _trading_rows(instruments: Iterable[Mapping[str, Any]], *, quote: str | None) -> Iterable[Mapping[str, Any]]:
+        for row in instruments:
+            if not isinstance(row, Mapping):
+                continue
+            if str(row.get("status")) != "TRADING":
+                continue
+            if quote is not None and (
+                str(row.get("quoteAsset")) != quote or str(row.get("marginAsset", quote)) != quote
+            ):
+                continue
+            yield row
 
     def turnovers(self, tickers: Iterable[Mapping[str, Any]]) -> dict[str, float]:
         result: dict[str, float] = {}

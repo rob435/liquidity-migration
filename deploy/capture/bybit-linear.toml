@@ -2,7 +2,7 @@
 # which passes --root; `python -m market_tape check --config deploy/capture/bybit-linear.toml`
 # validates it.
 #
-# The ticker is the sensor: every listed name's funding rate, open interest, price,
+# The ticker is the sensor: every listed crypto name's funding rate, open interest, price,
 # 24h turnover and 24h change, and best bid and ask, pushed as they change. The
 # deep feeds (the 50-level book, every trade) go only where a sleeve acts, and they follow the action live: a name enters a tier within one
 # maintenance tick of the ticker showing why. The budget keeps the month's inbound
@@ -116,7 +116,11 @@ feeds = ["book:50", "trades"]
 universe = { kind = "oi_change", pct = 0.10, window_hours = 1, sticky_hours = 6, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded", "overheated", "surging", "movers", "bursting", "flooding"] }
 
 # Every other USDT perpetual the venue lists as trading: the ticker and the
-# liquidations, nothing heavier.
+# liquidations, nothing heavier. "Listed" means crypto: Bybit files stocks,
+# ETFs and commodities as perpetuals in this same category, and the adapter
+# leaves every symbolType but "" and "innovation" out of every tier — the same
+# line the signal worker and the research universe draw. No sleeve trades them,
+# and their session-shaped activity fires the burst sensors on every US open.
 [[tier]]
 name = "wide"
 feeds = ["ticker", "liquidations"]

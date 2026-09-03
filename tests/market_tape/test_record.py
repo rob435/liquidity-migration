@@ -39,13 +39,14 @@ DEEP_FEEDS = (Feed("book", "50"), Feed("book", "1"), Feed("trades"), Feed("ticke
 WIDE_FEEDS = (Feed("ticker"), Feed("liquidations"))
 
 
-def instrument(symbol: str, quote: str = "USDT") -> dict[str, Any]:
+def instrument(symbol: str, quote: str = "USDT", symbol_type: str = "") -> dict[str, Any]:
     return {
         "symbol": symbol,
         "status": "Trading",
         "quoteCoin": quote,
         "settleCoin": quote,
         "contractType": "LinearPerpetual",
+        "symbolType": symbol_type,
     }
 
 
@@ -118,6 +119,47 @@ def test_the_listed_universe_takes_the_quote_and_a_dynamic_tier_without_tables_i
     assert recorder.resolve_tiers(BASE_NS, tables) == {"wide": ["BTCUSDT"]}
     recorder.tables = None
     assert recorder.resolve_tiers(BASE_NS, None) == {"wide": []}
+
+
+def test_a_stock_perpetual_enters_no_tier_however_it_ranks_or_funds(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The venue lists stocks, ETFs and commodities as perpetuals. The sleeves
+    never trade them, so the capture subscribes nothing for them: not the
+    ranked tiers, not the funding tiers, not the wide ticker."""
+
+    recorder = build(
+        tmp_path,
+        Tier("core", DEEP_FEEDS, Universe("top_turnover", top=2, quote="USDT")),
+        Tier("crowded", (Feed("book", "50"),), Universe("funding_below", threshold_bp=8.0, quote="USDT", exclude_tiers=("core",))),
+        Tier("wide", WIDE_FEEDS, Universe("listed", quote="USDT", exclude_tiers=("core", "crowded"))),
+    )
+    tables = {
+        "instruments": [
+            instrument("BTCUSDT"),
+            instrument("MYXUSDT", symbol_type="innovation"),
+            instrument("SKHYNIXUSDT", symbol_type="stock"),
+            instrument("SOXLUSDT", symbol_type="ETF"),
+            instrument("XAUUSDT", symbol_type="commodity"),
+        ],
+        "tickers": [
+            {"symbol": "SKHYNIXUSDT", "turnover24h": "9000000", "fundingRate": "-0.0050"},
+            {"symbol": "XAUUSDT", "turnover24h": "8000000", "fundingRate": "-0.0050"},
+            {"symbol": "BTCUSDT", "turnover24h": "7000", "fundingRate": "0.0001"},
+            {"symbol": "MYXUSDT", "turnover24h": "10", "fundingRate": "-0.0050"},
+            {"symbol": "SOXLUSDT", "turnover24h": "5", "fundingRate": "0.0001"},
+        ],
+    }
+
+    resolved = recorder.resolve_tiers(BASE_NS, tables)
+
+    # The stock and the commodity outrank everything and fund at -50 bp; the
+    # crypto names take their places.
+    assert resolved == {"core": ["BTCUSDT", "MYXUSDT"], "crowded": [], "wide": []}
+    topics, _ = recorder.plan_topics(resolved)
+    assert not any("SKHYNIX" in t or "SOXL" in t or "XAU" in t for tier in topics.values() for t in tier)
+
+    with caplog.at_level(logging.INFO):
+        recorder._log_listed(tables)
+    assert "2 USDT perpetuals in the domain; outside it ETF=1 commodity=1 stock=1" in caplog.text
 
 
 def test_top_turnover_takes_the_ranked_head_of_the_listed_names(tmp_path: Path) -> None:

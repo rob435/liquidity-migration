@@ -24,6 +24,13 @@ from market_tape.venues import Emit
 PUBLIC_LINEAR_WS = "wss://stream.bybit.com/v5/public/linear"
 PUBLIC_REST = "https://api.bybit.com"
 BOOK_LEVELS = (1, 50, 200, 500, 1000)
+#: Bybit lists stocks, ETFs and commodities as `LinearPerpetual` in the same
+#: category as crypto and tells them apart by `symbolType`: "" is its ordinary
+#: crypto product, "innovation" its innovation zone, and "stock", "ETF",
+#: "commodity" are outside the strategy domain. The signal worker and the
+#: research universe table draw the same line with the same two labels;
+#: tests/repo pins the three together.
+CRYPTO_SYMBOL_TYPES = ("", "innovation")
 KLINE_INTERVALS = {
     "1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
     "1h": "60", "2h": "120", "4h": "240", "6h": "360", "12h": "720",
@@ -157,6 +164,24 @@ class BybitAdapter:
 
     def listed_symbols(self, instruments: Iterable[Mapping[str, Any]], *, quote: str | None) -> list[str]:
         symbols = set()
+        for row in self._trading_perpetuals(instruments, quote=quote):
+            if str(row.get("symbolType") or "") not in CRYPTO_SYMBOL_TYPES:
+                continue
+            symbol = str(row.get("symbol") or "").upper()
+            if symbol and symbol.isalnum():
+                symbols.add(symbol)
+        return sorted(symbols)
+
+    def excluded_listed(self, instruments: Iterable[Mapping[str, Any]], *, quote: str | None) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for row in self._trading_perpetuals(instruments, quote=quote):
+            label = str(row.get("symbolType") or "")
+            if label not in CRYPTO_SYMBOL_TYPES:
+                counts[label] = counts.get(label, 0) + 1
+        return dict(sorted(counts.items()))
+
+    @staticmethod
+    def _trading_perpetuals(instruments: Iterable[Mapping[str, Any]], *, quote: str | None) -> Iterable[Mapping[str, Any]]:
         for row in instruments:
             if not isinstance(row, Mapping):
                 continue
@@ -168,10 +193,7 @@ class BybitAdapter:
                 str(row.get("quoteCoin")) != quote or str(row.get("settleCoin", quote)) != quote
             ):
                 continue
-            symbol = str(row.get("symbol") or "").upper()
-            if symbol and symbol.isalnum():
-                symbols.add(symbol)
-        return sorted(symbols)
+            yield row
 
     def turnovers(self, tickers: Iterable[Mapping[str, Any]]) -> dict[str, float]:
         result: dict[str, float] = {}

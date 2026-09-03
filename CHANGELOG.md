@@ -6,6 +6,77 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — The recorder draws the same crypto line the sleeves do: stocks,
+  ETFs and commodities leave every tier.**
+  - Bybit files 230 of its 747 USDT `LinearPerpetual`s as `symbolType` `stock`
+    (177), `ETF` (49) or `commodity` (4). The signal worker's live universe
+    (`CRYPTO_SYMBOL_TYPES`) and the research universe table
+    (`CRYPTO_LINEAR_SYMBOL_TYPES`) both keep only `""` and `"innovation"`; the
+    recorder's `listed_symbols` kept everything. So the capture spent bytes on
+    names no sleeve can hold and no study consumes, and the burst sensors read
+    the US open as a pump: before the change `levering` resolved to seven names
+    and all seven were equities (`APPSTOCKUSDT FLEXUSDT INTUUSDT NVDAUSDT
+    TEAMUSDT TSLLUSDT WENSTOCKUSDT`), `flooding` was over half equities, `core`
+    carried six (`CLUSDT KORUUSDT SNDKUSDT SOXLUSDT SPCXUSDT XAUUSDT`, ~18
+    GB/month of 50-level book each), and one of the three "pump" books rebuilt
+    as proof earlier today, `POETUSDT`, is Poet Technologies.
+  - `BybitAdapter.listed_symbols` now keeps only `CRYPTO_SYMBOL_TYPES`, and since
+    `listed()` is what every tier's `allowed()` resolves from, a stock enters no
+    tier at all — not the ranked ones, not the funding ones, not the `wide`
+    ticker. Nothing is subscribed for it. `XAUTUSDT` (Tether Gold) stays: the
+    venue types it as an ordinary crypto token, and the rule follows the venue's
+    field rather than a hand-picked list.
+  - `excluded_listed` on both adapters counts what the filter left out, by the
+    venue's own label, and the recorder logs it each time it takes the tables:
+    `venue tables: 517 USDT perpetuals in the domain; outside it ETF=49
+    commodity=4 stock=177`. A label the venue has not used yet lands in that
+    line rather than in a silent gap.
+  - Binance needed no change: it files the same products as
+    `contractType: TRADIFI_PERPETUAL` (189 rows), which the adapter already
+    refuses; the only non-`COIN` names it admits are the crypto indices
+    `BTCDOMUSDT` and `ALLUSDT`. Its test now pins the refusal.
+  - `tests/repo/test_crypto_domain_is_one_line.py` asserts the three constants
+    agree, reading the worker's from `universe.rs` so a drift in any language
+    fails one test. It lives in `tests/repo` because `market_tape` is isolated:
+    its own tests may not name the trading package.
+  - Expected on the host: `wide` falls from 716 to ~487 names (about 84 GB/month
+    of ticker), `core` swaps six stocks and gold for the six crypto names ranked
+    31–36, and the discovery tiers stop filling on the opening bell.
+
+- **2026-09-03 — `f06a89f4` deployed; the deploy gate stops paying thin LTO on
+  34 test binaries it never ships.**
+  - Deployed 20:28 UTC from the CI artifact. `deploy-ok
+    commit=f06a89f48980ea9a40a52fb77abaa900baeb4810`, rollback target
+    `ce252af8`, `real-money armed`, every unit on a fresh heartbeat.
+  - Verified on the host, splitting each hour-20 segment at the restart
+    timestamp: Binance writes `ticker`, `public_trade` and `liquidation` and no
+    book row of any kind; Bybit writes `orderbook_snapshot` + deltas + prints +
+    ticker for `BTCUSDT` and `TUTUSDT`, so `core:trades` is recording again
+    after being permanently shed under the old budget. `budget.shed` is empty
+    against the 1800 GB allowance, `dropped=0 disk_dropped=0`, and the log
+    carries `re-anchored 1 book topics for 2026-09-03T20`.
+  - Coverage is total by construction, not by sampling: the venue lists 855
+    instruments, of which 747 are USDT `LinearPerpetual` — and the tiers hold
+    716 (`wide`) + 30 (`core`) + 1 (`pinned`) = 747, with an open segment on
+    disk for each. 448 of those segments read 0 bytes because `SegmentWriter`
+    opens with `buffering=65536`; a thin name shows nothing until 64 KB
+    accumulate.
+  - **The gate was 20:50, and 16 of those minutes were one link-time pass.**
+    The CI Rust cache hits (13 `Compiling` lines, all of them workspace
+    crates), the last crate starts at 20:05:02, and `Finished release profile`
+    lands at 20:21:02. The whole suite *runs* in 7.8 s across 34 binaries. The
+    silence is `lto = "thin"` being applied to every one of those binaries.
+  - Fix: `[profile.ci-test]` inherits `release` and sets `lto = false`, and CI
+    tests with it. Same opt-level, same `debug_assertions`, same overflow
+    checks — LTO only changes cross-crate inlining. Measured cold on the same
+    machine: 1146 s CPU with thin LTO, 686 s without, a 40% cut. Test selection
+    is byte-identical, 1,687 tests either way.
+  - The deployed binary is unchanged: `[profile.release]` keeps thin LTO, and
+    the artifact build now runs as its own `rust-artifact` job *beside* the
+    tests instead of after them. `vps` gates on `[ci, rust, rust-artifact]`, so
+    a red test still blocks the deploy, and the artifact resolves by name so
+    nothing downstream moved.
+
 - **2026-09-03 — The capture earns its bandwidth: Binance stops recording books,
   Bybit gets the room, and every hour of tape anchors its own books.**
   - Verified first, on the running host: every name the funded engine holds is
