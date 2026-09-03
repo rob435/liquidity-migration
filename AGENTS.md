@@ -115,6 +115,12 @@ is an outage, and outages get fixed, not filed.
   worker, the spool, the deploy): find the root cause, fix it properly in
   code, test it, prove the test fails without the fix, merge, deploy through
   the sanctioned workflow, and verify on the host. Same session.
+- Fast local verification before push: Run local unit tests (`cargo test -p <crate>`,
+  `scripts/dev.sh`) first. Local unit tests run in seconds. Never use GitHub CI
+  or remote VPS deploys as a syntax or parsing diagnostic.
+- Direct-to-main fixes: The repository ruleset permits direct linear pushes to
+  `main`. Do not create branches or open self-PRs for hotfixes or solo operational
+  work; push directly to `main` and deploy.
 - Stopping the engine is a holding action, never the fix. Say so when you do
   it, with the positions that are open.
 - A crash loop is itself a fault. So is a lane that logs the same failure

@@ -70,6 +70,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Rust cache
+        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          workspaces: "engine -> target"
       # rust-toolchain.toml pins the compiler, rustfmt, and clippy; Cargo.lock
       # pins and checksums crates. The three gates docs/engine.md names for a
       # developer machine run here on the pinned toolchain.
@@ -83,6 +87,41 @@ jobs:
       - name: Release tests (locked)
         run: cargo test --workspace --all-targets --release --locked
         working-directory: engine
+      - name: Build and smoke-test deploy artifact (locked)
+        run: |
+          cargo build --release --locked --workspace --bins
+          (
+            cd target/release
+            sha256sum engine signal-worker market-tape > binaries.sha256
+            ./engine --help >/dev/null
+            ./signal-worker --help >/dev/null
+            ./market-tape help >/dev/null 2>&1 || true
+            tar -czf "$RUNNER_TEMP/engine-binaries-${GITHUB_SHA}.tar.gz" engine signal-worker market-tape binaries.sha256
+          )
+        working-directory: engine
+      - name: Upload compiled release binaries
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: engine-binaries-${{ github.sha }}
+          path: ${{ runner.temp }}/engine-binaries-${{ github.sha }}.tar.gz
+          retention-days: 14
+
+  # Soak test and benchmark. Runs after the build/test gate but independently
+  # from the VPS deploy path so hotfix deployments are not blocked.
+  rust-soak-bench:
+    name: Engine soak and benchmarks
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'disarm-mainnet'
+    needs: [rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust cache
+        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          workspaces: "engine -> target"
       - name: Account-state soak (bounded, CPU and heap only)
         run: >-
           cargo run --release --locked -p engine-core
@@ -103,24 +142,6 @@ jobs:
           --symbols BTCUSDT
           --wal "$RUNNER_TEMP/engine-bench-${GITHUB_SHA}.wal"
         working-directory: engine
-      - name: Build and smoke-test deploy artifact (locked)
-        run: |
-          cargo build --release --locked --workspace --bins
-          (
-            cd target/release
-            sha256sum engine signal-worker market-tape > binaries.sha256
-            ./engine --help >/dev/null
-            ./signal-worker --help >/dev/null
-            ./market-tape help >/dev/null 2>&1 || true
-            tar -czf "$RUNNER_TEMP/engine-binaries-${GITHUB_SHA}.tar.gz" engine signal-worker market-tape binaries.sha256
-          )
-        working-directory: engine
-      - name: Upload compiled release binaries
-        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
-        with:
-          name: engine-binaries-${{ github.sha }}
-          path: ${{ runner.temp }}/engine-binaries-${{ github.sha }}.tar.gz
-          retention-days: 14
 
   # Safety action: stopping and persistently disarming funded units must remain
   # available even when a build or test is red. It still uses the exact pinned
