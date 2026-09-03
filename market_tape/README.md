@@ -83,13 +83,13 @@ status.json                                            Health status updated eve
 
 ### Hourly book anchoring
 
-`connection.reanchor_books_each_hour` (default true) re-subscribes every book topic once per UTC hour, spread `REANCHOR_SHARDS_PER_TICK` shards at a time across maintenance ticks. The venue answers a subscribe with a snapshot, so each hour of tape opens with one per symbol.
+`connection.reanchor_books_each_hour` (default true) re-subscribes every book topic once per UTC hour. The venue answers a subscribe with a snapshot, so each hour of tape opens with one per symbol. The pass is bounded at `REANCHOR_TOPICS_PER_TICK` topics per maintenance tick and resumes where it stopped, so ~500 topics take about six minutes of the hour; each `REANCHOR_CHUNK` of topics is dropped and re-taken in one pair of messages.
 
 | Property | Value |
 | :--- | :--- |
 | **Why** | A book delta means nothing without a snapshot. The hour is the archive's unit: one directory, one uploaded tar. Anchored hourly, any single hour replays on its own; anchored only at recorder start, replaying hour N means reading every hour since. |
 | **Bytes** | One snapshot per book symbol per hour, about 2.5 KB each: under 1 GB/month for 500 names. |
-| **Paid for it** | The moment between the unsubscribe and the snapshot, which the snapshot row itself marks. |
+| **Paid for it** | One round trip per symbol per hour with its book topic unsubscribed, which the snapshot row that follows marks. |
 | **Counter** | `shards[].reanchors` in `status.json`. |
 
 Only order-book topics are re-subscribed. A trade, ticker, or liquidation row means the same thing standing alone.
