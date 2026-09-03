@@ -60,6 +60,13 @@ edit STATE.md to match.
     as not trading, zero meaning no clock. Test:
     `a_snapshot_of_perpetuals_with_zero_delivery_clocks_passes_source_validation`,
     which fails on the old check.
+    After that deploy the lane failed a third way, `invalid symbol
+    "BTC-01DEC23"`: the Closed list carries 643 dated futures and the Trading
+    list 40 (`BTCUSDT-04SEP26`), names the worker never trades. The lane now
+    keeps every row it can and names what it left out
+    (`normalize_instruments_reporting`), one line per snapshot: against the
+    venue's lists of the day, 1,138 rows kept, 683 dated names left out, no
+    other reason. One row cannot cost the table again.
   - *On-call agent.* `check_fleet_liveness.py` now fires a Claude Code
     routine on any `CRITICAL` that clears its cooldown, when
     `INCIDENT_ROUTINE_FIRE_URL` and `INCIDENT_ROUTINE_FIRE_TOKEN` are set in
