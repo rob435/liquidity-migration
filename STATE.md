@@ -43,8 +43,8 @@ Verified against the running host on 2026-09-03 19:12 UTC:
 | `liquidity-migration-engine-mainnet.service` | Mainnet | Active | $\le 5\text{s}$ fresh |
 | `liquidity-migration-signal-worker-demo.service` | Demo | Active | $\le 5\text{s}$ fresh |
 | `liquidity-migration-signal-worker-mainnet.service`| Mainnet | Active | $\le 5\text{s}$ fresh |
-| `liquidity-migration-forward-capture.service` | Bybit | Active | 713 USDT perp symbols (0 dropped frames). `monthly_gb = 1300` is unreachable: the feeds `budget.shed` cannot reach project ~1,500 GB/month, so every listed pair sheds and stays shed. `core:trades` is the last entry, so core prints stop about an hour after each recorder start — a maker replay on a core name has no prints to fill against. Awaiting the owner's shed-order decision (CHANGELOG 2026-09-03). |
-| `liquidity-migration-forward-capture-binance.service`| Binance | Active | 510 USDT perp symbols (0 dropped frames) |
+| `liquidity-migration-forward-capture.service` | Bybit | Active | The tape that gets replayed: `book:50` and every print on the acting tiers, `book:1` on the canary, ticker and liquidations on all ~716 USDT perps. `monthly_gb = 1800` against 1,710 projected at full tier width, so nothing sheds; `core:trades` and the tickers are not in `shed` at all. Books re-anchor each UTC hour, so every uploaded hour replays on its own. |
+| `liquidity-migration-forward-capture-binance.service`| Binance | Active | Cross-venue reference only, **no order book**: ticker (funding rate, mark, index) on all ~511 USDT perps plus trades on the acting tiers. `monthly_gb = 700`. |
 | `liquidity-migration-telegram-controls.service` | Global | Active | Polling authorized chats |
 | `liquidity-migration-trade-notify.timer` | Global | Active | 5-minute trade scanning |
 

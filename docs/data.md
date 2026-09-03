@@ -21,8 +21,13 @@ Research data, live signal state, and execution evidence are strictly separated:
 ## 2. Market Tape Capture Tiers
 
 The host runs two continuous market data capture services:
-* **Bybit Linear**: `liquidity-migration-forward-capture.service`
-* **Binance USD-M**: `liquidity-migration-forward-capture-binance.service`
+* **Bybit Linear**: `liquidity-migration-forward-capture.service`. The venue we trade, so this is the tape with order books, and the only one `engine backtest` replays.
+* **Binance USD-M**: `liquidity-migration-forward-capture-binance.service`. Cross-venue reference only: ticker (funding rate, mark, index) on every listed name plus trades where flow matters, and **no order book**. `market_tape.bars` gives it `funding_rate`, `mark_price`, `index_price` from the ticker and `open/high/low/close/vwap` from the trades, which is every column the cross-venue studies read.
+
+Invariants:
+* The two tapes never share a path: separate roots, separate systemd `StateDirectory`, separate Google Drive prefixes (`market-tape/bybit-linear` and `market-tape/binance-usdm`), and every row names its own `venue`.
+* Book rows chain by their venue's own rule. `engine backtest` implements Bybit's (monotone `update_id`, restarted by a snapshot) and **refuses a book row from any other venue** rather than building a book that is not the venue's.
+* Every book topic is re-subscribed once per UTC hour (`connection.reanchor_books_each_hour`), so each hour of tape — one directory, one uploaded tar — opens with a snapshot per symbol and can be replayed without the hours before it.
 
 | Venue | Tier | Universe Membership Criteria | Feeds Captured |
 | :--- | :--- | :--- | :--- |
@@ -36,8 +41,8 @@ The host runs two continuous market data capture services:
 | **Bybit** | `flooding` | Volume $\ge 3\times$ volume of same hour yesterday | `book:50`, `trades` |
 | **Bybit** | `levering` | Open interest change $\ge 10\%$ inside 1 hour | `book:50`, `trades` |
 | **Bybit** | `wide` | **All other listed USDT perpetuals** | `ticker`, `liquidations` |
-| **Binance** | `core` | Top 15 by 24h turnover (leaves below rank 22) | `book:1000`, `trades`, `ticker`, `liquidations` |
-| **Binance** | `crowded`..`flooding`| Same rules as Bybit (no open interest tier) | `book:1000`, `trades` |
+| **Binance** | `core` | Top 15 by 24h turnover (leaves below rank 22) | `trades`, `ticker`, `liquidations` |
+| **Binance** | `crowded`..`flooding`| Same rules as Bybit (no open interest tier) | `trades` |
 | **Binance** | `wide` | **All other listed USDT perpetuals** | `ticker` (`@markPrice@1s`), `liquidations` |
 
 ---

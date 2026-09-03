@@ -18,8 +18,10 @@ market = "linear"
 segment_max_mb = 64
 # 30 days is the ceiling; max_disk_gb is what binds on this host, and the two
 # recorders' caps must sum under the filesystem or they race min_free_disk_gb.
+# Bybit is the venue we replay, so it holds the larger share: 60 GB is about
+# three days on disk, and Drive keeps every hour permanently either way.
 retention_days = 30
-max_disk_gb = 40
+max_disk_gb = 60
 min_free_disk_gb = 25
 status_interval_seconds = 30
 
@@ -30,16 +32,27 @@ topics_per_connection = 150
 cadence = "day"
 
 [budget]
-# Measured 2026-09-02 21:40 UTC, first minutes of this shape: core:book:50 222 KB/s,
-# core:trades 130, wide:ticker 108, the short-lived tiers' books 35 each while
-# they hold names. The 50-level book at 20 ms carries the top of book, so the
-# 10 ms top-of-book stream (55 KB/s for the core alone) is taken only for the
-# pinned canary.
-monthly_gb = 1300
+# Measured 2026-09-03 19:20 UTC, all feeds live: 1,390 GB/month with the sticky
+# tiers freshly reset, 1,710 with them at their 48-hour width. The allowance is
+# what the line affords once Binance stopped recording books (700 there, and the
+# uploads): this recorder is the one whose data gets replayed, so it gets the
+# room. Biggest lines: core:book:50 637, wide:ticker 320, core:trades 129,
+# core:ticker 86.
+#
+# What `shed` may never contain, whatever the projection says:
+#   core:book:50   the book every replay and the maker sleeve run on
+#   core:trades    the prints a resting order fills against; without them a
+#                  maker replay on a core name cannot fill at all
+#   *:ticker       funding, open interest and price: the sensor every tier is
+#                  resolved from and CARRY's entry signal
+# So the order below gives up the discovery tiers first, their prints next, and
+# the crowd books last. If that is not enough the recorder says so every hour
+# rather than reaching for anything above.
+monthly_gb = 1800
 shed = [
-  "bursting:book:50", "flooding:book:50", "levering:book:50", "movers:book:50", "surging:book:50", "overheated:book:50",
+  "bursting:book:50", "flooding:book:50", "levering:book:50", "movers:book:50", "surging:book:50",
   "bursting:trades", "flooding:trades", "levering:trades", "movers:trades", "surging:trades",
-  "core:trades",
+  "overheated:book:50", "crowded:book:50",
 ]
 
 # Names that always get the full treatment whatever their rank: the maker canary.

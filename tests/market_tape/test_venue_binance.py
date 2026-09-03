@@ -71,6 +71,26 @@ def test_market_and_defaults() -> None:
         BinanceAdapter(market="spot")
 
 
+def test_only_the_book_topics_are_worth_re_anchoring() -> None:
+    adapter = BinanceAdapter()
+    topics = [
+        "btcusdt@depth@100ms",
+        "btcusdt@aggTrade",
+        "btcusdt@markPrice@1s",
+        "btcusdt@bookTicker",
+        "btcusdt@depth20@100ms",
+        "btcusdt@forceOrder",
+    ]
+    assert adapter.book_topics(topics) == [
+        "btcusdt@depth@100ms",
+        "btcusdt@bookTicker",
+        "btcusdt@depth20@100ms",
+    ]
+    # The recorder's own config takes no book on this venue, so the hourly
+    # re-anchor is a no-op there.
+    assert adapter.book_topics(["btcusdt@aggTrade", "btcusdt@markPrice@1s"]) == []
+
+
 def test_topics_name_one_stream_per_feed() -> None:
     adapter = BinanceAdapter()
     assert adapter.topics("BTCUSDT", feeds("book:1")) == ["btcusdt@bookTicker"]

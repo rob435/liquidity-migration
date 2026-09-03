@@ -153,7 +153,7 @@ The live loop — `Engine::boot_as`, the risk kernel, the strategy reducers, the
 
 | Input | Source | Contract |
 | :--- | :--- | :--- |
-| `--tape PATH` | `python -m market_tape rows ARCHIVE --hours A..B > tape.jsonl` (or `.jsonl.zst`) | `market_tape/schema.py` rows, `local_receive_ts_ns` ordered; a malformed row stops the run at its line |
+| `--tape PATH` | `python -m market_tape rows ARCHIVE --hours A..B > tape.jsonl` (or `.jsonl.zst`) | `market_tape/schema.py` rows, `local_receive_ts_ns` ordered; a malformed row stops the run at its line. Book rows must be Bybit's: another venue's chaining is refused, not guessed |
 | `--instruments PATH` | `ARCHIVE/<day>/<HH>/_meta/instruments-<stamp>.json[.zst]` | Bybit `instruments-info` rows; a wanted symbol without rules refuses boot |
 | `--config PATH` | engine TOML with `[[strategy]]` blocks | `wal_path`, `trades_path`, spool paths are replaced by the flags |
 | `--wal PATH` | new file | Must be absent or empty; every run starts from nothing |
@@ -179,7 +179,8 @@ Invariants:
 - Time moves only when the tape feed releases a row or a due wait; nothing later is observed before anything earlier. Two runs of one tape write the same log.
 - The virtual clock is thread-local and guard-held (`engine_types::clock::install_virtual`); the live loop's timers are the system's (`SystemTimer`), monomorphised, untouched.
 - Fills walk the book level by level; resting orders wait behind the displayed queue; stops trigger on the mark and fill through the gap; funding settles once per published boundary; margin is posted; refusals carry Bybit's codes.
-- The venue matches against the deepest book whose chain is intact. A range cut from the middle of a recording carries `orderbook.50` deltas without the snapshot they chain to; until a deep snapshot lands, the `orderbook.1` stream (a snapshot every row) is the venue's book. An order with no chained book at all is refused, never priced.
+- The venue matches against the deepest book whose chain is intact. Until a deep snapshot lands, the `orderbook.1` stream (a snapshot every row) is the venue's book. An order with no chained book at all is refused, never priced.
+- The recorder re-anchors every book topic once per UTC hour, so a tape cut to any hour range opens with a snapshot and needs no warm-up from earlier hours.
 - Not modelled: our impact on the tape's liquidity, reactions to us, liquidation fees, rate limits. Every number is bounded by those omissions.
 - A flat account whose venue books and engine ledger disagree fails the run.
 - Throughput: a 2 h, 8,335-order tape runs in ~2 s; with `--durable-log` the same run pays one fsync per order (~4 ms on a laptop SSD, ~35 s in all) and writes the same bytes.

@@ -315,7 +315,7 @@ fn a_malformed_row_stops_the_tape_with_its_line_number() {
     let text = format!(
         "{}\n{}\n",
         recorder_rows().lines().next().unwrap(),
-        r#"{"kind":"orderbook_delta","local_receive_ts_ns":1700000000500000000,"symbol":"BTCUSDT","bids":"not a list","update_id":3}"#
+        r#"{"kind":"orderbook_delta","local_receive_ts_ns":1700000000500000000,"symbol":"BTCUSDT","bids":"not a list","update_id":3,"venue":"bybit"}"#
     );
     let path = write_temp("tape-bad", &text);
     let mut reader = TapeReader::open(path.path()).unwrap();
@@ -326,6 +326,29 @@ fn a_malformed_row_stops_the_tape_with_its_line_number() {
         }
         other => panic!("expected a malformed-row error, got {other:?}"),
     }
+}
+
+/// Binance brackets each book diff with `first_update_id`/`pu`; this reader
+/// chains by Bybit's monotone `update_id`. Reading one as the other builds a
+/// plausible book that is not the venue's, so the row is refused instead.
+#[test]
+fn a_book_row_from_another_venue_is_refused_rather_than_chained() {
+    let binance = r#"{"asks":[["50005.0","10"]],"bids":[["50000.0","10"]],"cross_sequence":0,"depth":1000,"exchange_engine_ts_ns":0,"exchange_system_ts_ns":1700000000000000000,"first_update_id":90,"kind":"orderbook_delta","local_receive_ts_ns":1700000000000000000,"previous_update_id":89,"restart_snapshot":false,"sequence_gap":false,"symbol":"BTCUSDT","update_id":100,"venue":"binance"}"#;
+    let path = write_temp("tape-foreign", &format!("{binance}\n"));
+    let mut reader = TapeReader::open(path.path()).unwrap();
+    let error = reader.next_row().expect_err("refused");
+    assert!(
+        matches!(&error, TapeError::UnsupportedVenue { line: 1, venue } if venue == "binance"),
+        "{error}"
+    );
+    // A trade or ticker carries no chaining, so those are read from any venue.
+    let trade = r#"{"exchange_ts_ns":1700000000200000000,"kind":"public_trade","local_receive_ts_ns":1700000000200000000,"price":50002.0,"qty":0.5,"side":"Buy","symbol":"BTCUSDT","trade_id":"1","venue":"binance"}"#;
+    let path = write_temp("tape-foreign-trade", &format!("{trade}\n"));
+    let mut reader = TapeReader::open(path.path()).unwrap();
+    assert!(matches!(
+        reader.next_row().unwrap(),
+        Some((_, TapeRow::Trade(_)))
+    ));
 }
 
 #[test]
