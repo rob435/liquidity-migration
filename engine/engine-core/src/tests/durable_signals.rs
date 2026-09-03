@@ -179,6 +179,80 @@ async fn a_new_worker_generation_starts_at_sequence_one_after_an_old_cursor() {
     )));
 }
 
+/// A row the spool no longer holds cannot be fetched by exiting: the engine
+/// records the gap, delivers the row it has, and keeps running.
+#[tokio::test]
+async fn a_gap_the_spool_cannot_fill_is_logged_and_the_engine_goes_on() {
+    let source = "directional-public.g11111111111111111111111111111111.carry";
+    let old = observation_from(source, 9, Vec::new());
+    let replayed = vec![
+        WalRecord::Names {
+            strategies: vec!["source".into(), "destination".into()],
+            symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "HELDUSDT".into()],
+        },
+        WalRecord::SignalObservation {
+            wall_ts_ms: 1,
+            observation: old.clone(),
+        },
+        WalRecord::SignalObservationConsumed {
+            wall_ts_ms: 2,
+            strategy: StrategyId(1),
+            source: old.source,
+            sequence: old.sequence,
+            observation_id: old.observation_id,
+        },
+    ];
+    let delivered = Rc::new(RefCell::new(Vec::new()));
+    let (done, stopped) = tokio::sync::oneshot::channel();
+    let (mut engine, h) = build(
+        allow_all(),
+        vec![
+            Box::new(QuietStrategy {
+                name: "source",
+                symbol: "BTCUSDT",
+            }),
+            Box::new(SignalReceiverStrategy {
+                signal_ids: delivered.clone(),
+                market_names: Rc::new(RefCell::new(Vec::new())),
+                done: Some(done),
+            }),
+        ],
+        &["BTCUSDT", "ETHUSDT", "HELDUSDT"],
+        &replayed,
+    )
+    .await;
+    let (sender, mut signals) = crate::signals::signal_channel();
+    // Row 10 is gone; row 11 is on hand.
+    sender
+        .try_send(observation_from(source, 11, Vec::new()))
+        .unwrap();
+    engine
+        .run_with_signals(
+            &mut ScriptFeed {
+                events: VecDeque::new(),
+                close_at_end: false,
+                admitted: Rc::new(RefCell::new(Vec::new())),
+                known: 3,
+                admits_wrongly: false,
+            },
+            &mut ScriptOrderFeed::empty(),
+            &mut signals,
+            async {
+                let _ = stopped.await;
+            },
+        )
+        .await
+        .expect("a gap is not an exit");
+
+    assert_eq!(delivered.lock().unwrap().len(), 1);
+    let records = h.records.lock().unwrap();
+    assert!(records.iter().any(|record| matches!(
+        record,
+        WalRecord::SignalObservation { observation, .. }
+            if observation.source == source && observation.sequence == 11
+    )));
+}
+
 #[tokio::test]
 async fn signal_admits_quote_and_ticker_everywhere_before_durable_delivery() {
     let signal_ids = Rc::new(RefCell::new(Vec::new()));

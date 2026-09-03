@@ -123,8 +123,61 @@ pub struct SignalObservation {
     pub observed_wall_ts_ms: i64,
     pub available_wall_ts_ms: i64,
     pub subscriptions: Vec<Subscription>,
+    #[serde(with = "payload_wire")]
     pub payload: Vec<u8>,
     pub content_sha256: String,
+}
+
+/// The payload on the wire. Readers take a JSON string or an array of byte
+/// values; the array is what every row and WAL record written before
+/// 2026-09-03 carries, and what the writer still emits until every reader
+/// takes the string. `content_sha256` covers the bytes, not their encoding.
+mod payload_wire {
+    use serde::de::{Error, SeqAccess, Visitor};
+    use serde::{Deserializer, Serialize, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        bytes.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        struct PayloadVisitor;
+
+        impl<'de> Visitor<'de> for PayloadVisitor {
+            type Value = Vec<u8>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a payload string or an array of byte values")
+            }
+
+            fn visit_str<E: Error>(self, value: &str) -> Result<Vec<u8>, E> {
+                Ok(value.as_bytes().to_vec())
+            }
+
+            fn visit_string<E: Error>(self, value: String) -> Result<Vec<u8>, E> {
+                Ok(value.into_bytes())
+            }
+
+            fn visit_bytes<E: Error>(self, value: &[u8]) -> Result<Vec<u8>, E> {
+                Ok(value.to_vec())
+            }
+
+            fn visit_byte_buf<E: Error>(self, value: Vec<u8>) -> Result<Vec<u8>, E> {
+                Ok(value)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+                let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                Ok(bytes)
+            }
+        }
+
+        deserializer.deserialize_any(PayloadVisitor)
+    }
 }
 
 impl SignalObservation {
@@ -672,5 +725,48 @@ pub trait Strategy {
     /// a broken reducer is strategy health.
     fn health_error(&self) -> Option<&str> {
         None
+    }
+}
+
+#[cfg(test)]
+mod payload_wire_tests {
+    use super::*;
+
+    fn observation(payload: &[u8]) -> SignalObservation {
+        SignalObservation {
+            schema_version: SIGNAL_OBSERVATION_SCHEMA_VERSION,
+            decision_fingerprint: "carry-v1".into(),
+            destination: StrategyId(1),
+            source: "worker".into(),
+            sequence: 1,
+            observation_id: "row-1".into(),
+            kind: "funding_update".into(),
+            observed_wall_ts_ms: 10,
+            available_wall_ts_ms: 11,
+            subscriptions: Vec::new(),
+            payload: payload.to_vec(),
+            content_sha256: "hash".into(),
+        }
+    }
+
+    /// Both wire shapes decode to the same bytes and the same hash.
+    #[test]
+    fn a_payload_reads_as_a_string_or_as_an_array_of_bytes() {
+        let expected = observation(br#"{"rate":"0.0001"}"#);
+        let as_array = serde_json::to_string(&expected).unwrap();
+        assert!(as_array.contains("\"payload\":[123,34,"), "{as_array}");
+        let as_string = as_array.replace(
+            "\"payload\":[123,34,114,97,116,101,34,58,34,48,46,48,48,48,49,34,125]",
+            r#""payload":"{\"rate\":\"0.0001\"}""#,
+        );
+        assert_ne!(as_array, as_string, "the replacement found the array");
+        let from_array: SignalObservation = serde_json::from_str(&as_array).unwrap();
+        let from_string: SignalObservation = serde_json::from_str(&as_string).unwrap();
+        assert_eq!(from_array, expected);
+        assert_eq!(from_string, expected);
+        assert_eq!(
+            from_string.canonical_envelope_bytes(),
+            expected.canonical_envelope_bytes()
+        );
     }
 }

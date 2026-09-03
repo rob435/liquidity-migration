@@ -6,6 +6,30 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — A sequence gap is an `ERROR` line, not a crash loop; the
+  payload reader takes a string as well as a byte array.**
+  - *Gap.* `queue_signal_observation` (`engine/engine-core/src/engine/scheduling.inc.rs`)
+    exited on `sequence != expected`. Every gap loop this repository has
+    recorded was the engine's own doing (a lost frame boundary this morning, a
+    dropped spool read this afternoon), and exiting never fetched the missing
+    row: the cursor is durable and the restart met the same gap, with the
+    funded book unattended. Now a row above `expected` is delivered with an
+    `ERROR` line naming the source, the expected and received sequence, and
+    the count skipped; the cursor records the jump. A row below `expected` is
+    dropped with a `WARN`. `rewrote durable sequence` (same sequence, different
+    bytes) stays fatal. Test:
+    `a_gap_the_spool_cannot_fill_is_logged_and_the_engine_goes_on`. Runbook
+    §8 rows updated; the generation recipe now serves the rewrite case.
+  - *Payload encoding, step one.* `SignalObservation.payload: Vec<u8>` is
+    written as a JSON array of integers, 3.3× the bytes (the 6.27 MB carry row
+    is 20.8 MB on disk and takes ~0.5 s to parse). The type now reads the
+    payload as a JSON string or as the array (`payload_wire`, in
+    `engine/engine-types/src/strategy.rs`); the writer still emits the array.
+    The writer flips only after this reader runs on both realms: the engine
+    WAL and the worker's input journal both hold observations in the old
+    shape, and a binary that could not read the new one would fail replay.
+    Test: `a_payload_reads_as_a_string_or_as_an_array_of_bytes`.
+
 - **2026-09-03 — Both signal workers crash-looped on a preflight miss, then
   a 20 MB carry row put both engines back into the sequence-gap loop. Three
   faults fixed at the root; no manual generation bump was needed.**

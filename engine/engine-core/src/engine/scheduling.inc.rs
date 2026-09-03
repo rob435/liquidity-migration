@@ -670,11 +670,26 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .map(|queued| queued.sequence.saturating_add(1))
             .or_else(|| cursor.map(|known| known.sequence.saturating_add(1)))
             .unwrap_or(1);
-        if observation.sequence != expected {
-            return Err(EngineError::State(format!(
-                "signal source {} has sequence gap: expected {}, got {}",
-                observation.source, expected, observation.sequence
-            )));
+        if observation.sequence < expected {
+            tracing::warn!(
+                source = %observation.source,
+                sequence = observation.sequence,
+                expected,
+                "signal row is behind the rows already queued; dropped"
+            );
+            return Ok(());
+        }
+        if observation.sequence > expected {
+            // The spool no longer holds the rows in between and a restart
+            // would meet the same gap. The engine goes on from the row it
+            // has; the cursor records the jump.
+            tracing::error!(
+                source = %observation.source,
+                expected,
+                got = observation.sequence,
+                skipped = observation.sequence - expected,
+                "signal source has a sequence gap; continuing from the row on hand"
+            );
         }
 
         let route = (observation.source.clone(), observation.destination.0);

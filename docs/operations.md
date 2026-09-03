@@ -166,7 +166,8 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | **Rolling Loss Tripped** | 24h loss ceiling breached | Entries halted automatically. Exits permitted. Inspect `heartbeat.json`. |
 | **Capture Dropping Frames** | CPU/disk saturation | Check `journalctl -u liquidity-migration-forward-capture`. Budget shedding will activate. |
 | **Stranger Position Latched** | Unattributed fill on venue | Engine halts new entries. Run `attest-flat` and audit account on exchange. |
-| **Engine exits with `signal source … has sequence gap: expected N, got N+1`** and loops under `Restart=always` | A spool row was deleted by something other than the engine (the worker only ever adds rows). Restarting does not help: the cursor is durable and the row is gone. If row N is still on disk, the spool reader has regressed (fixed 2026-09-03: a read the core dropped mid-flight lost its row); file it. | Start a new worker generation (recipe below). The engine treats `<source>.g<new>` as a fresh source starting at sequence 1 and keeps the old cursor. |
+| **Engine logs `ERROR signal source … has a sequence gap; continuing from the row on hand`** | Rows between the cursor and the row on disk are gone: something other than the engine deleted spool rows (the worker only ever adds them). Not fatal since 2026-09-03: the engine delivers the row it has and the cursor records the jump. | Find what deleted the rows. If the skipped rows were `funding_update` (lifecycle), check the carry book against the venue. |
+| **Engine exits with `signal source … rewrote durable sequence N`** and loops under `Restart=always` | A worker republished a sequence with different bytes: a checkpoint was restored from a backup older than the engine's cursor, or two workers share one spool. Restarting does not help: the cursor is durable. | Start a new worker generation (recipe below). The engine treats `<source>.g<new>` as a fresh source starting at sequence 1 and keeps the old cursor. |
 | **Engine logs `WARN invalid signal frame size; dropping the stream`** | A frame wider than 16 MiB (the worker sends none since 2026-09-03) or a lost frame boundary (fixed 2026-09-03, resumable frame state). Not fatal: the row is on disk and the spool poll delivers it. | None if the row was delivered. If it repeats every hour, a row is wider than the frame cap: shrink the payload. |
 | **Worker exits with `spool class preflight underestimated an emitted observation batch`** | A `WireEvent` arm is missing from `projected_spool_files` (`engine/signal-worker/src/worker.rs`) for an event that emits a spool row. Every restart replays the same input and exits again. | Add the arm; the fix is a deploy. Nothing on the host needs cleaning. |
 | **Worker logs `instrument lane: …` every hour** | One venue row failed a check and the whole snapshot was refused; the worker's instrument table stops refreshing (`instruments` in `checkpoint.json` stays stale or empty). | Read the exact message. Fix the check to the venue's real shape (see 2026-09-03 in CHANGELOG); never let one row cost the table. |
@@ -174,7 +175,7 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 
 ### New signal-worker generation
 
-Use when the engine reports a sequence gap for a source. The worker keeps its universe and input history; only the output sequence restarts, under a new `g<generation>` in the source id. The worker republishes its current state on the next tick.
+Use when the engine exits with `rewrote durable sequence` for a source. The worker keeps its universe and input history; only the output sequence restarts, under a new `g<generation>` in the source id. The worker republishes its current state on the next tick.
 
 ```bash
 # on the host, as root; <realm> is demo or mainnet
@@ -193,7 +194,7 @@ EOF
 chown liquidity-signal-worker:liquidity-migration /var/lib/liquidity-migration-signal-worker-<realm>/checkpoint.json
 systemctl start liquidity-migration-signal-worker-<realm>
 # Rows of the dead generation that sit above the engine's cursor are orphans:
-# the engine reads them as the gap and exits. Remove them before it starts.
+# the engine would log them as a gap. Remove them before it starts.
 grep -l "\"source\":\"[^\"]*<old generation>" /var/lib/liquidity-migration/signals/<realm>/*.json | xargs -r rm -f
 systemctl restart liquidity-migration-engine<-mainnet or empty>
 journalctl -u liquidity-migration-engine<-mainnet or empty> -n 20 --no-pager

@@ -46,7 +46,7 @@ The engine workspace is under `engine/`:
 | :--- | :--- | :--- | :--- |
 | **WAL File** | `/var/lib/liquidity-migration-engine/engine.wal` | `/var/lib/liquidity-migration-engine-mainnet/engine.wal` | Rotates at `256 MB` (`wal_rotate_mb`). |
 | **Account Lease**| `/run/lock/liquidity-migration/bybit-demo-*.lock` | `/run/lock/liquidity-migration/bybit-mainnet-*.lock` | Single-writer exclusive advisory lock. |
-| **Signal IPC** | `/var/lib/liquidity-migration/signals/demo/` | `/var/lib/liquidity-migration/signals/mainnet/` | Socket `stream.sock` + disk spool. |
+| **Signal IPC** | `/var/lib/liquidity-migration/signals/demo/` | `/var/lib/liquidity-migration/signals/mainnet/` | Disk spool row `<seq:020>-<sha256>.json` is the delivery; a frame on `stream.sock` is the doorbell, sent only when the row is ≤ 16 MiB. Payload ≤ 16 MiB; readers take it as a JSON string or a byte array. A gap in a source's sequence is an `ERROR` line, not an exit. |
 | **Control Spool**| `/var/lib/liquidity-migration/control/demo/` | `/var/lib/liquidity-migration/control/mainnet/` | Immutable command files (`0750`). |
 | **Heartbeat** | `/var/lib/liquidity-migration-engine/heartbeat.json`| `/var/lib/liquidity-migration-engine-mainnet/heartbeat.json` | Atomic 1-line JSON; max age 30s. |
 | **Trade Log** | `/var/lib/liquidity-migration-engine/trades.jsonl` | `/var/lib/liquidity-migration-engine-mainnet/trades.jsonl` | Append-only round-trip closed trades. |
