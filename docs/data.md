@@ -31,7 +31,7 @@ Invariants:
 
 ### Name coverage against what the sleeves trade
 
-The tiers are keyed on the same signals the sleeves decide from, so a tradeable name is captured by construction rather than by a list: LONG's top-turnover names are `core`, CARRY's and EXODUS's negative-funding names are `crowded` (entry is $\le -10$ bp, capture starts at $-8$ bp), the maker canary is `pinned`, and every other listed crypto perpetual is `wide` on ticker and liquidations. Verified 2026-09-03 against the funded book: `NEARUSDT` and `ZECUSDT` both held, both carrying a 50-level snapshot, deltas, prints and ticker.
+The tiers are keyed on the same signals the sleeves decide from, so a tradeable name is captured by construction rather than by a list: LONG's top-turnover names are `core`, CARRY's and EXODUS's negative-funding names are `crowded` (entry is $\le -10$ bp, capture starts at $-8$ bp), the maker canary is `pinned`, and every other listed crypto perpetual is `wide` on ticker and liquidations. `core` is LONG's live rank band (enter 120, leave 160), so every name the sleeve can hold has its book; `crowded` watches CARRY's signal loosened — predicted funding at $-5$ bp against the sleeve's $-10$ bp settled entry. Verified 2026-09-03 against the funded book: `NEARUSDT` and `ZECUSDT` both held, both carrying a 50-level snapshot, deltas, prints and ticker.
 
 **Known limit.** Membership follows market state, not the position book. `core` releases a name below turnover rank 45 and `crowded` 48 hours after funding recovers, while LONG holds for about three days, so a held name that drifts out mid-hold keeps its ticker but loses its book and prints for the remainder. Nothing pins a held name: the recorder reads no engine state by design (public data only, no credentials, its own user). Widening `core`'s `leave_top` is the lever if this ever costs a study, at roughly 21 GB/month per additional name.
 
@@ -76,9 +76,9 @@ of rows accumulate. Check `status.json` for tier membership, not `ls`.
 | Venue | Tier | Universe Membership Criteria | Feeds Captured |
 | :--- | :--- | :--- | :--- |
 | **Bybit** | `pinned` | Maker canary list (`deploy/forward-capture-symbols.txt`) | `book:50`, `book:1`, `trades`, `ticker`, `liquidations` |
-| **Bybit** | `core` | Top 30 by 24h turnover (leaves below rank 45) | `book:50`, `trades`, `ticker`, `liquidations` |
-| **Bybit** | `crowded` | Predicted funding $\le -8\text{ bp}$ (held 48 hours) | `book:50`, `trades` |
-| **Bybit** | `overheated`| Predicted funding $\ge +8\text{ bp}$ (held 48 hours) | `book:50`, `trades` |
+| **Bybit** | `core` | Top 120 by 24h turnover, leaves below rank 160 — LONG's live `enter_rank`/`leave_rank` | `book:50`, `trades`, `ticker`, `liquidations` |
+| **Bybit** | `crowded` | Predicted funding $\le -5\text{ bp}$ (held 48 hours) — CARRY's entry is $-10$ bp *settled*, exit $-3$ bp | `book:50`, `trades` |
+| **Bybit** | `overheated`| Predicted funding $\ge +5\text{ bp}$ (held 48 hours); no sleeve trades it, first to shed | `book:50`, `trades` |
 | **Bybit** | `surging` | 24h turnover $\ge 3\times$ baseline (held 24 hours) | `book:50`, `trades` |
 | **Bybit** | `movers` | Top 10 price gainers/losers (leaves below rank 15) | `book:50`, `trades` |
 | **Bybit** | `bursting` | Price move $\ge 5\%$ inside 1 hour (held 6 hours) | `book:50`, `trades` |
@@ -99,7 +99,7 @@ cross-venue reference and records no book.
 
 | | Bybit linear | Binance USD-M |
 | :--- | :--- | :--- |
-| `monthly_gb` | 1,800 | 700 |
+| `monthly_gb` | 2,400 | 700 |
 | `max_disk_gb` | 60 | 18 |
 | `min_free_disk_gb` | 25 | 25 |
 | `retention_days` | 30 (the disk cap binds first) | 30 |
@@ -112,17 +112,20 @@ scaled to a month; a shed pair's bytes are left out of it. One action per
 projection needs, and a restore returns the last pair shed once its own measured
 GB/month fits under `restore_below` of the allowance.
 
-Bybit gives up the discovery books first and the crowd books last:
+Bybit gives up what no sleeve trades first, then the pump-discovery books, then
+their prints — and nothing of a sleeve's own universe:
 
-1. `bursting`, `flooding`, `levering`, `movers`, `surging` — `book:50`
-2. the same five tiers — `trades`
-3. `overheated:book:50`, then `crowded:book:50`
+1. `overheated` — `book:50`, then `trades`
+2. `bursting`, `flooding`, `levering`, `movers`, `surging` — `book:50`
+3. the same five tiers — `trades`
 
 **Invariants — what `shed` must never contain, whatever the projection says:**
 
 * `core:book:50` — the book every replay and the maker sleeve run on.
 * `core:trades` — the prints a resting order fills against; without them a maker
   replay on a core name cannot fill at all.
+* `crowded:*` — CARRY's names, observed from $-5$ bp predicted so the book is
+  recording before the sleeve's $-10$ bp settled entry.
 * `*:ticker` — funding, open interest and price: the sensor every tier is
   resolved from, and CARRY's entry signal.
 * Anything in the `pinned` canary tier.
@@ -131,12 +134,14 @@ Over budget with every listed pair already shed is a `WARNING` per action naming
 the overshoot. The recorder does not reach for anything above; the config decides
 what else goes.
 
-**Consequence to weigh before widening a tier.** Because the discovery books sit
-first in the list, a projection over 1,800 GB costs the pump tiers their books
-before it costs the crowd theirs. Those pairs are cheap — roughly 2 GB/month per
-name against ~21 GB for a `core` name — so shedding all ten frees little. The
-allowance is set to leave headroom instead: 1,710 GB projected at full 48-hour
-sticky width against 1,800 allowed.
+**What the allowance is built from** (measured 2026-09-03 on the crypto-only
+domain): a top-30 `core` name runs 17.8 GB/month of 50-level book and 3.6 of
+prints; a mid-rank crowd name 7.3 and 1.9; a thin one 2.4. LONG's band adds ~90
+names at roughly 7 GB each, the 5 bp crowd thresholds ~11 more, and the 230
+non-crypto names that left `wide` return 84 — about 2,300 GB at full 48-hour
+sticky width against 2,400 allowed. `overheated` sits first in the shed list
+because it is the one deep tier no sleeve trades; the pump books are cheap
+(~2 GB/month per name) and come after it.
 
 ---
 

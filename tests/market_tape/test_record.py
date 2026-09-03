@@ -973,10 +973,22 @@ def test_the_shipped_host_configs_plan_every_tier(tmp_path: Path) -> None:
         assert [tier.name for tier in config.tiers][-1] == "wide"
         assert config.tier("wide").feeds == (Feed("ticker"), Feed("liquidations"))
         assert config.tier("crowded").universe.kind == "funding_below"
-        assert config.tier("crowded").universe.threshold_bp == 8.0
+        # CARRY enters at -10 bp settled; both venues observe from -5 bp predicted.
+        assert config.tier("crowded").universe.threshold_bp == 5.0
         for tier_name, feed in config.budget.shed:
             assert feed in {f.text for f in config.tier(tier_name).feeds}
         assert not any(name == "wide" and feed == "ticker" for name, feed in config.budget.shed[:-1])
+
+    # Bybit is the venue that gets replayed: its shed list may never reach the
+    # book or prints of a sleeve's own universe, nor any sensor.
+    with (root / "deploy" / "capture" / "bybit-linear.toml").open("rb") as handle:
+        bybit = parse_config(tomllib.load(handle), base_dir=root)
+    core = bybit.tier("core").universe
+    assert (core.kind, core.top, core.leave_top) == ("top_turnover", 120, 160), "core is LONG's live enter/leave rank"
+    shed = set(bybit.budget.shed)
+    assert not shed & {("core", "book:50"), ("core", "trades"), ("crowded", "book:50"), ("crowded", "trades")}
+    assert not any(feed == "ticker" for _, feed in shed)
+    assert bybit.budget.shed[0] == ("overheated", "book:50"), "the one deep tier no sleeve trades goes first"
 
 
 def test_stop_events_are_independent_per_shard(tmp_path: Path) -> None:

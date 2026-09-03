@@ -59,12 +59,12 @@ universe = { kind = "top_turnover", top = 15, leave_top = 22, quote = "USDT" }
 [[tier]]
 name = "crowded"
 feeds = ["trades"]
-universe = { kind = "funding_below", threshold_bp = 8, sticky_hours = 48, quote = "USDT", exclude_tiers = ["core"] }
+universe = { kind = "funding_below", threshold_bp = 5, sticky_hours = 48, quote = "USDT", exclude_tiers = ["core"] }
 
 [[tier]]
 name = "overheated"
 feeds = ["trades"]
-universe = { kind = "funding_above", threshold_bp = 8, sticky_hours = 48, quote = "USDT", exclude_tiers = ["core", "crowded"] }
+universe = { kind = "funding_above", threshold_bp = 5, sticky_hours = 48, quote = "USDT", exclude_tiers = ["core", "crowded"] }
 
 [[tier]]
 name = "surging"

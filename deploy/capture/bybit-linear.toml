@@ -32,27 +32,32 @@ topics_per_connection = 150
 cadence = "day"
 
 [budget]
-# Measured 2026-09-03 19:20 UTC, all feeds live: 1,390 GB/month with the sticky
-# tiers freshly reset, 1,710 with them at their 48-hour width. The allowance is
-# what the line affords once Binance stopped recording books (700 there, and the
-# uploads): this recorder is the one whose data gets replayed, so it gets the
-# room. Biggest lines: core:book:50 637, wide:ticker 320, core:trades 129,
-# core:ticker 86.
+# Measured 2026-09-03 21:30 UTC after the crypto-only domain took effect: the
+# 30-name core ran 17.8 GB/month of 50-level book per name and 3.6 of prints,
+# the mid-rank crowd 7.3 and 1.9, the thin crowd 2.4. Widening core to LONG's
+# band adds ~90 names at roughly 7 GB each, the 5 bp crowd thresholds add ~11
+# more, and the 230 stocks, ETFs and commodities that left `wide` return 84.
+# That projects near 2,300 at full sticky width; the allowance leaves room
+# above it. The line: this 2,400 in, Binance's 700 in, and about 500 out to
+# Drive, of 4 TB.
 #
 # What `shed` may never contain, whatever the projection says:
 #   core:book:50   the book every replay and the maker sleeve run on
 #   core:trades    the prints a resting order fills against; without them a
 #                  maker replay on a core name cannot fill at all
+#   crowded:*      CARRY's names, observed from 5 bp so the book is there
+#                  before the sleeve's 10 bp settled entry
 #   *:ticker       funding, open interest and price: the sensor every tier is
 #                  resolved from and CARRY's entry signal
-# So the order below gives up the discovery tiers first, their prints next, and
-# the crowd books last. If that is not enough the recorder says so every hour
-# rather than reaching for anything above.
-monthly_gb = 1800
+# So the order below gives up `overheated` first — longs paying up, which no
+# sleeve trades — then the pump-discovery books, then their prints. Nothing of
+# `crowded` or `core` is in it: past the last pair the recorder says so every
+# hour rather than reaching for a sleeve's own book.
+monthly_gb = 2400
 shed = [
+  "overheated:book:50", "overheated:trades",
   "bursting:book:50", "flooding:book:50", "levering:book:50", "movers:book:50", "surging:book:50",
   "bursting:trades", "flooding:trades", "levering:trades", "movers:trades", "surging:trades",
-  "overheated:book:50", "crowded:book:50",
 ]
 
 # Names that always get the full treatment whatever their rank: the maker canary.
@@ -61,26 +66,32 @@ name = "pinned"
 feeds = ["book:50", "book:1", "trades", "ticker", "liquidations"]
 universe = { kind = "file", path = "deploy/forward-capture-symbols.txt" }
 
-# LONG's universe: the thirty busiest USDT perpetuals by 24h turnover, live. A
-# name stays until it falls below rank 45, so the boundary does not flap.
+# LONG's universe, as the live worker draws it: enter at turnover rank 120,
+# stay to 160 (configs/signal-worker.mainnet.json `universe.long`). Every name
+# the sleeve can hold has its book and prints recorded; the boundary carries the
+# same hysteresis so it does not flap.
 [[tier]]
 name = "core"
 feeds = ["book:50", "trades", "ticker", "liquidations"]
-universe = { kind = "top_turnover", top = 30, leave_top = 45, quote = "USDT", exclude_tiers = ["pinned"] }
+universe = { kind = "top_turnover", top = 120, leave_top = 160, quote = "USDT", exclude_tiers = ["pinned"] }
 
-# The crowd fee (funding) at or below -8 bp: CARRY enters at -10 bp settled, so
-# capture starts as the crowd forms and keeps the book two days after it thins.
+# CARRY's observation trigger, loosened from its entry: the sleeve enters when
+# the last *settled* funding is at or below -10 bp and exits above -3 bp
+# (docs/trading_logic.md §4). This tier keys on the *predicted* rate, which
+# leads the settled one by up to a funding interval, at -5 bp — so the book is
+# recording as the crowd forms, before the sleeve can act, and stays two days
+# after funding recovers, through the sleeve's exit.
 [[tier]]
 name = "crowded"
 feeds = ["book:50", "trades"]
-universe = { kind = "funding_below", threshold_bp = 8, sticky_hours = 48, quote = "USDT", exclude_tiers = ["pinned", "core"] }
+universe = { kind = "funding_below", threshold_bp = 5, sticky_hours = 48, quote = "USDT", exclude_tiers = ["pinned", "core"] }
 
-# The crowd fee at or above +8 bp: longs paying up. The squeeze and the short
-# side of the carry, the mirror of `crowded`.
+# The mirror of `crowded` at +5 bp predicted: longs paying up. No sleeve trades
+# this side, so it is the first thing the budget gives up.
 [[tier]]
 name = "overheated"
 feeds = ["book:50", "trades"]
-universe = { kind = "funding_above", threshold_bp = 8, sticky_hours = 48, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded"] }
+universe = { kind = "funding_above", threshold_bp = 5, sticky_hours = 48, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded"] }
 
 # Turnover three times what the day's snapshot showed: the pump LONG's trigger
 # family looks for, in a name that was not in the top thirty when it started.

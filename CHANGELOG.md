@@ -6,6 +6,33 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — The deep tiers are the sleeves' own universes: `core` is
+  LONG's rank band, `crowded` is CARRY's signal loosened.**
+  - Sized from the live rules, not a guess. LONG enters at turnover rank 120
+    and leaves at 160 with a $2M/24h floor and 30 days listed
+    (`configs/signal-worker.mainnet.json`); 141 crypto names qualify today and
+    the capture deep-recorded 30, leaving 93 LONG-eligible names ($30M down to
+    $2.8M a day) on ticker alone. `core` is now `top = 120, leave_top = 160`.
+  - CARRY enters when the last *settled* funding is ≤ −10 bp and exits above
+    −3 bp (`docs/trading_logic.md` §4). `crowded` keyed on the *predicted* rate
+    at −8 bp — barely loosened, and predicted leads settled by up to a funding
+    interval. It is now −5 bp, so the book is recording as the crowd forms:
+    16 names qualify today against 14, 10 of them at the sleeve's own −10.
+    `overheated` mirrors at +5 (18 names against 9). Binance's two funding
+    tiers move to 5 bp as well, so the cross-venue trades line up on the same
+    trigger.
+  - Bybit's allowance is 2,400 GB/month, from measured per-name rates (top-30
+    book 17.8 GB, mid-rank 7.3, thin 2.4): ~2,300 projected at full sticky
+    width. Binance measures 482 under its 700 and is untouched. The shed order
+    now gives up `overheated` first — the one deep tier no sleeve trades — then
+    the pump books, then their prints, and stops there: `crowded:*` joins
+    `core:*` and `*:ticker` in the never-shed set, and the shipped-config test
+    pins it.
+  - One deploy for all of it. Each armed deploy runs the mainnet handover
+    unconditionally (`stop_realm_units mainnet` → `start_realm mainnet`), so
+    the recorder changes above and the crypto-only domain ship together rather
+    than restarting the funded engine twice.
+
 - **2026-09-03 — The recorder draws the same crypto line the sleeves do: stocks,
   ETFs and commodities leave every tier.**
   - Bybit files 230 of its 747 USDT `LinearPerpetual`s as `symbolType` `stock`
