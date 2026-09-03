@@ -6,13 +6,13 @@ Current operational snapshot of the live trading fleet and host environment.
 
 ## 1. Live Deployment Snapshot
 
-Verified against the running host on 2026-09-03 13:07 UTC:
+Verified against the running host on 2026-09-03 19:12 UTC:
 
 | Property | Value | Description |
 | :--- | :--- | :--- |
 | **Host** | `ip-208-84-103-4.my-advin.com` (`208.84.103.4`) | 4 vCPU, 8 GB RAM, 118 GB disk (44% used, 64 GB free). |
-| **Deployed Commit** | `d43efaaf` (`Record the 0cb79859 deploy in STATE.md` carrying `e917f22f` payload string encoding) | Deployed 14:35 UTC 2026-09-03 from the CI artifact; both engines and both workers at 0 restarts with fresh heartbeats; both spools drained. |
-| **Rollback Target** | `da2fc396c9365015ed053a1fedbc3cd98dccf28c` | Stored in `/opt/liquidity-migration-engine/previous-commit`. |
+| **Deployed Commit** | `ce252af8` (`engine backtest`: unsynced log, deepest chained book, the recorder's budget controller) | Deployed 19:09 UTC 2026-09-03 from the CI artifact; both engines and both workers on fresh heartbeats. Both recorders restarted with the budget fix, which published one fresh 50-level book snapshot per symbol at 19:09:10Z — the anchor every deep-book replay chains from. |
+| **Rollback Target** | `d43efaaf811b3192ac1bd36691204dcea7508ac8` | Stored in `/opt/liquidity-migration-engine/previous-commit`. |
 | **Funded Status** | `real-money armed` | `REAL_MONEY=true`. The engine is running with healthy heartbeats. |
 | **Signal IPC** | spool row + `stream.sock` doorbell | Every observation is a spool row first; the socket frame only saves the engine its next poll. Worker generations were renewed on both realms on 2026-09-03 after the desync; the old `g805c44f0…` (mainnet) and `gc4d0071f…` (demo) cursors stay in the WAL. |
 
@@ -43,7 +43,7 @@ Verified against the running host on 2026-09-03 13:07 UTC:
 | `liquidity-migration-engine-mainnet.service` | Mainnet | Active | $\le 5\text{s}$ fresh |
 | `liquidity-migration-signal-worker-demo.service` | Demo | Active | $\le 5\text{s}$ fresh |
 | `liquidity-migration-signal-worker-mainnet.service`| Mainnet | Active | $\le 5\text{s}$ fresh |
-| `liquidity-migration-forward-capture.service` | Bybit | Active | 713 USDT perp symbols (0 dropped frames) |
+| `liquidity-migration-forward-capture.service` | Bybit | Active | 713 USDT perp symbols (0 dropped frames). `monthly_gb = 1300` is unreachable: the feeds `budget.shed` cannot reach project ~1,500 GB/month, so every listed pair sheds and stays shed. `core:trades` is the last entry, so core prints stop about an hour after each recorder start — a maker replay on a core name has no prints to fill against. Awaiting the owner's shed-order decision (CHANGELOG 2026-09-03). |
 | `liquidity-migration-forward-capture-binance.service`| Binance | Active | 510 USDT perp symbols (0 dropped frames) |
 | `liquidity-migration-telegram-controls.service` | Global | Active | Polling authorized chats |
 | `liquidity-migration-trade-notify.timer` | Global | Active | 5-minute trade scanning |
