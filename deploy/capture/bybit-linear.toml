@@ -50,12 +50,14 @@ cadence = "day"
 #   *:ticker       funding, open interest and price: the sensor every tier is
 #                  resolved from and CARRY's entry signal
 # So the order below gives up `overheated` first — longs paying up, which no
-# sleeve trades — then the pump-discovery books, then their prints. Nothing of
+# sleeve trades — then the thin names' prints (their price and volume survive
+# on the ticker), then the pump-discovery books, then their prints. Nothing of
 # `crowded` or `core` is in it: past the last pair the recorder says so every
 # hour rather than reaching for a sleeve's own book.
 monthly_gb = 2400
 shed = [
   "overheated:book:50", "overheated:trades",
+  "wide:trades",
   "bursting:book:50", "flooding:book:50", "levering:book:50", "movers:book:50", "surging:book:50",
   "bursting:trades", "flooding:trades", "levering:trades", "movers:trades", "surging:trades",
 ]
@@ -131,13 +133,16 @@ name = "levering"
 feeds = ["book:50", "trades"]
 universe = { kind = "oi_change", pct = 0.10, window_hours = 1, sticky_hours = 6, quote = "USDT", exclude_tiers = ["pinned", "core", "crowded", "overheated", "surging", "movers", "bursting", "flooding"] }
 
-# Every other USDT perpetual the venue lists as trading: the ticker and the
-# liquidations, nothing heavier. "Listed" means crypto: Bybit files stocks,
+# Every other USDT perpetual the venue lists as trading: every print, the
+# ticker and the liquidations — no book. Prints on a thin name cost about a
+# tenth of a GB a month, and with them every name on the venue has a complete
+# trade tape, so a bar-level backtest of any strategy runs on the whole
+# universe; only the book is reserved for the tiers above. "Listed" means crypto: Bybit files stocks,
 # ETFs and commodities as perpetuals in this same category, and the adapter
 # leaves every symbolType but "" and "innovation" out of every tier — the same
 # line the signal worker and the research universe draw. No sleeve trades them,
 # and their session-shaped activity fires the burst sensors on every US open.
 [[tier]]
 name = "wide"
-feeds = ["ticker", "liquidations"]
+feeds = ["trades", "ticker", "liquidations"]
 universe = { kind = "listed", quote = "USDT", exclude_tiers = ["pinned", "core"] }

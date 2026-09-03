@@ -1002,7 +1002,11 @@ def test_the_shipped_host_configs_plan_every_tier(tmp_path: Path) -> None:
             config = parse_config(tomllib.load(handle), base_dir=root)
         assert config.budget.enforced
         assert [tier.name for tier in config.tiers][-1] == "wide"
-        assert config.tier("wide").feeds == (Feed("ticker"), Feed("liquidations"))
+        # The whole universe has a trade tape on the venue we replay; the book is tiered.
+        wide = set(config.tier("wide").feeds)
+        assert {Feed("ticker"), Feed("liquidations")} <= wide and not any(f.name == "book" for f in wide)
+        if name == "bybit-linear":
+            assert Feed("trades") in wide
         assert config.tier("crowded").universe.kind == "funding_below"
         # CARRY holds from a -10 bp settled print until settled funding rises above
         # -3 bp; both venues observe the whole zone from -3 bp predicted.

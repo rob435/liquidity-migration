@@ -37,12 +37,13 @@ The tiers are keyed on the same signals the sleeves decide from, so a tradeable 
 
 ### What the tape gives each sleeve's exit study
 
-The first purpose of the tape is exits. Every listed crypto name carries the
-ticker (price, mark, index, funding, open interest, 24h turnover) and
-liquidations at all times, so every *signal-level* exit — trailing stop, funding
-turn, OI unwind, cascade — can be studied on every name the sleeves ever held.
-The deep tiers add the book and every print, for *execution* and microstructure
-exits, and are shaped so a held name never loses them mid-hold:
+The first purpose of the tape is exits; the second is breadth. Every listed
+crypto name carries every print, the ticker (price, mark, index, funding, open
+interest, 24h turnover) and liquidations at all times, so a bar-level backtest of
+any strategy — and every *signal-level* exit: trailing stop, funding turn, OI
+unwind, cascade — runs on the whole universe. The deep tiers add the 50-level
+book for *execution* and microstructure work, and are shaped so a held name
+never loses it mid-hold:
 
 | Sleeve | Hold | Deep coverage guarantee | Exit questions the tape can answer |
 | :--- | :--- | :--- | :--- |
@@ -105,7 +106,7 @@ of rows accumulate. Check `status.json` for tier membership, not `ls`.
 | **Bybit** | `bursting` | Price move $\ge 5\%$ inside 1 hour (held 6 hours) | `book:50`, `trades` |
 | **Bybit** | `flooding` | Volume $\ge 3\times$ volume of same hour yesterday | `book:50`, `trades` |
 | **Bybit** | `levering` | Open interest change $\ge 10\%$ inside 1 hour | `book:50`, `trades` |
-| **Bybit** | `wide` | **All other listed crypto USDT perpetuals** (`symbolType` `""` or `innovation`) | `ticker`, `liquidations` |
+| **Bybit** | `wide` | **All other listed crypto USDT perpetuals** (`symbolType` `""` or `innovation`) | `trades`, `ticker`, `liquidations` — every name has a complete trade tape; only the book is tiered |
 | **Binance** | `core` | Top 15 by 24h turnover (leaves below rank 22) | `trades`, `ticker`, `liquidations` |
 | **Binance** | `crowded`..`flooding`| Same rules as Bybit (no open interest tier) | `trades` |
 | **Binance** | `wide` | **All other listed USDT `PERPETUAL`s** (`TRADIFI_PERPETUAL` excluded) | `ticker` (`@markPrice@1s`), `liquidations` |
@@ -137,8 +138,9 @@ Bybit gives up what no sleeve trades first, then the pump-discovery books, then
 their prints — and nothing of a sleeve's own universe:
 
 1. `overheated` — `book:50`, then `trades`
-2. `bursting`, `flooding`, `levering`, `movers`, `surging` — `book:50`
-3. the same five tiers — `trades`
+2. `wide:trades` — the thin names' prints; their price and volume stay on the ticker
+3. `bursting`, `flooding`, `levering`, `movers`, `surging` — `book:50`
+4. the same five tiers — `trades`
 
 **Invariants — what `shed` must never contain, whatever the projection says:**
 

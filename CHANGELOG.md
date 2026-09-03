@@ -6,6 +6,16 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — Every name has a trade tape: `wide` records prints.**
+  - The exit-shaped tiers cover ~150 names with book and prints; the other
+    ~350 had ticker and liquidations only, so a trade-level backtest of
+    anything else ran on a third of the venue. Prints on a thin name measure
+    about a tenth of a GB a month (`crowded:trades` 0.11 GB/name), so `wide`
+    on Bybit now carries `trades` too — roughly 80–120 GB/month for a complete
+    trade tape on all 517 names. Only the book is tiered. `wide:trades` sheds
+    after `overheated` and before the discovery books: price and volume
+    survive on the ticker, book depth does not survive anywhere.
+
 - **2026-09-03 — The deep tiers hold a name as long as its sleeve would: the
   tape is shaped for exit studies first.**
   - `1e745078` deployed 21:46 UTC in **26 s**: `mainnet-fingerprint seeded from
