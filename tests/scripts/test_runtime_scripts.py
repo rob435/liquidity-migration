@@ -241,6 +241,10 @@ def test_ci_tests_the_debug_build_on_the_gate_and_the_release_build_off_it() -> 
     assert "cargo test --workspace --all-targets --release --locked" in release
     vps = workflow[workflow.index("\n  vps:\n") :]
     assert "needs: [ci, rust, rust-artifact]" in vps
+    # Push runs never queue behind each other; only dispatched VPS operations share a group.
+    concurrency = workflow[workflow.index("concurrency:") : workflow.index("\njobs:\n")]
+    assert "format('liquidity-migration-ci-{0}', github.run_id)" in concurrency
+    assert "format('liquidity-migration-vps-{0}', github.ref)" in concurrency
     # The host's fetch of a private repository needs the run's token (issue #18).
     assert "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in vps[vps.index("Run VPS mode") :]
 

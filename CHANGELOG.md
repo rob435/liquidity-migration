@@ -6,6 +6,15 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — Push runs stop queueing behind each other.**
+  - Measured gate on `1e745078`: `rust` 3:57 (tests 2:57), artifact 5:46, ci
+    1:50 — the deploy gate is the artifact, 5:46 against 20:50 this morning;
+    release tests ran 12:57 off the path. But the next push sat `pending`
+    behind that run, because the push concurrency group serialised runs and a
+    run now lasts as long as its off-path release-test job. Push and PR runs
+    take a group per `run_id`; dispatched VPS operations keep their one queue
+    per ref, which is the only thing the group ever protected.
+
 - **2026-09-03 — Every name has a trade tape: `wide` records prints.**
   - The exit-shaped tiers cover ~150 names with book and prints; the other
     ~350 had ticker and liquidations only, so a trade-level backtest of
