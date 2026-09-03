@@ -73,6 +73,15 @@ edit STATE.md to match.
     a venue outage that it would otherwise recover from on its own; the fix
     above removes the fault that made the loop endless, and the on-call agent
     is what now answers a loop.
+  - *Deploy and recovery receipt.* Merged as `a2dc5a45` (PR #14), deployed by
+    `vps-deploy.yml` run 33750120171 (`mode=deploy`, all jobs success), on the
+    host at 11:42 UTC. New generations at 11:43: mainnet
+    `805c44f0…` → `b01e9e6f…`, demo `c4d0071f…` → `c3ed639a…`. The first engine
+    start after that still died on the old gap: the dead generation's orphan
+    rows (`…11227-…json`, `…11614-…json`) were still in the spool and sit
+    above the cursor, so they read as the gap. Removed by hand; both engines
+    active from 11:43:53 UTC. The recipe in docs/operations.md §8 now carries
+    that step. Funded engine downtime: 01:56:04 to 11:43:53, 9 h 48 min.
 
 - **2026-09-03 — An audit of the live fleet, and the eight things it found.**
   Read off the running host rather than the docs: both engines and both
