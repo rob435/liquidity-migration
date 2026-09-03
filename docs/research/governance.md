@@ -1,163 +1,73 @@
-# Progressive Evidence Model
+# Progressive Evidence Model & Governance
 
-Explore every day, ship improvements when they are ready, and let evidence
-accumulate as a rolling record rather than through one-shot ceremonies. The
-objective is not "zero bias" — that is unattainable. It is that assumptions,
-data exposure, and uncertainty stay visible enough that contrary evidence can
-change our minds quickly.
+Standards for hypothesis testing, evidence grading, model promotion, and risk governance.
 
-## 1. Two lanes, always open
+---
 
-**Lane 1 — explore, continuously.** Any data we have already seen is open
-for unlimited exploration: plots, prototypes, threshold sweeps, diagnostics,
-ad-hoc scripts, many ideas in parallel. No registration, no ceremony. Label
-the output exploratory and note which data it touched. This is where most of
-the work lives, every day.
+## 1. Dual-Lane Research Architecture
 
-**Lane 2 — rolling forward scoring.** When a prototype looks good, commit
-its config. From that moment, every new day of data it could not have seen
-becomes one more row of evidence — the git commit date is the entire
-registration. There is no unveiling moment and no waiting for a distant date.
+| Research Lane | Scope & Purpose | Data Access | Registration Requirement | Scoring Rule |
+| :--- | :--- | :--- | :--- | :--- |
+| **Lane 1: Exploration** | Fast hypothesis testing, parameter sweeps, diagnostics | Any historical seen data | None (label output as exploratory) | Exploratory only; cannot grade or promote |
+| **Lane 2: Rolling Forward** | Unbiased performance grading of committed prototypes | Data post-dating the commit date | Git commit hash + date *is* the registration | Graded on forward data it did not shape |
 
-The habit that makes Lane 2 work: grade a rule on data it did not shape. A
-rule graded on the data that suggested it always passes and teaches nothing.
-Historical reserves (windows nobody has opened) are an optional accelerant
-when one exists, not a requirement.
+* **Invariant**: Never grade a rule on the data that suggested it.
 
-## 2. What makes a number real
+---
 
-Drop any of these and the number stops meaning anything:
+## 2. Core Evidence Criteria (What Makes a Number Real)
 
-- **Causality.** A simulated decision uses only information available at
-  decision time: PIT membership, causal features, honest latency, adaptive
-  state initialized when the live system could first know it.
-- **Executability.** A performance number includes plausible fills, fees,
-  spread, funding, and capacity at the stated scale. Costs are where most
-  paper edges die; a gross number is a diagnostic, not a result.
-- **Accounting.** Positions, cash, fees, and funding reconcile, and the
-  inputs/code/config that produced a result can be identified again.
-- **Provenance.** Keep a running note of which data has shaped which ideas.
-  It is what lets "this config never saw these days" be true. Deleting the
-  record of what was seen makes all future evidence fake.
+A result must satisfy all four pillars, or it is demoted to an informal diagnostic:
 
-A miss on one of these makes the affected number a diagnostic instead of a
-result. Diagnostics generate the next idea; they do not get graded as
-evidence.
+| Pillar | Strict Requirement | Common Disqualifier |
+| :--- | :--- | :--- |
+| **1. Causality** | Uses only data available at or before `decision_ts_ms`. | Future universe leakage, unconfirmed candle closes. |
+| **2. Executability** | Includes realistic transaction costs, funding, spread, and capacity. | Gross returns, infinite liquidity assumptions. |
+| **3. Accounting** | Cash, positions, fees, and funding reconcile exactly. | Unreconciled PnL, floating point drift. |
+| **4. Provenance** | Immutable audit trail of which data shaped which rules. | Untracked data exposure, missing commit hashes. |
 
-### The significance bar is **t ≥ 2.5**, set 2026-07-31
+---
 
-This is the single number a screen or a registration is measured against, and
-this document is its authority. Code constants in research screens derive
-from here, not the other way round.
+## 3. Statistical Significance Standard
 
-**What it costs, stated plainly.** t 2.5 two-sided is p ≈ 0.012. Across the
-~45 mechanisms this program has screened that is roughly **one false positive
-expected**, against roughly one in twenty under the family-wise Bonferroni
-threshold it replaced (t ≈ 3.25 over ~44 mechanisms, rising to ≈ 3.58 over a
-144-cell tuning grid). The bar no longer controls family-wise error; it is a
-fixed evidence threshold and it admits results a family-wise threshold would
-reject. Two things carry the weight the threshold used to:
+* **Significance Threshold**: **$t \ge 2.5$** (two-sided, $p \approx 0.012$).
+* **Effective Date**: Prospective since 2026-07-31 (replaces legacy Bonferroni $t \ge 3.25$ threshold).
 
-- **A plateau, not a cell.** Report the neighbouring parameter values. One cell
-  at 2.5 with worse neighbours is a spike and should be treated as noise
-  regardless of the bar.
-- **A placebo that fails.** An inverted or size-matched-random arm that
-  *also* looks good means the result is an artifact of the construction. This
-  catches what a higher threshold used to catch, and catches it for the right
-  reason.
+### The 5 Plateau & Placebo Validation Checks
+A candidate parameter cell that beats its placebo must pass all 5 checks to be accepted as an empirical finding:
+1. **Parameter Smoothness**: Neighbouring grid values carry performance deltas of the same sign.
+2. **Lag Stability**: Rule executed with 1-day lag still beats its placebo.
+3. **Persistence**: Rule required on two consecutive timestamps still beats its placebo.
+4. **Directional Asymmetry**: Inverting the rule condition does not beat the placebo.
+5. **Gain Concentration**: The top 3 trades contribute $\le 50\%$ of total net strategy gain.
+* **Placebo Benchmark**: Variant beats placebo when $\le 5\%$ of matched random draws score as well.
 
-The study harness (`liquidity_migration/research/lab/`) runs those two ideas
-as five plateau checks on any cell that beats its placebo: the neighbouring
-parameter values carry a delta of the same sign; the rule read one day late
-still beats its placebo; the rule required on two consecutive stamps still
-beats it; the rule with its condition turned around does not also beat it;
-and the top three trades carry at most half of the gain. Its dials, which this
-document owns: a variant beats its placebo when at most 5% of matched random
-draws score as well, and the concentration limit is one half. A cell that
-fails any check is a diagnostic, not a finding.
+---
 
-**It is prospective.** Verdicts recorded before 2026-07-31 stand as written;
-results quoting the older 3.25 or 3.58 thresholds are accurate and are not
-restated. A pre-2026-07-31 result that sits between 2.5 and 3.25 is not thereby
-promoted — it is eligible to be re-examined, and the re-examination is a new
-registration.
+## 4. Promotion & Demotion Protocol
 
-## 3. Promotion is a note, not a treatise — and demotion is too
-
-When a config's rolling record earns a change to the live system, the
-promotion record is five lines: claim, config commit, forward record,
-decision, date. Ship it through the normal deploy flow and record the change
-point.
-
-Demotion is the mirror: the same five lines, a sleeve toggle, and a recorded
-change point. There is no standing per-sleeve kill-criteria checker, so the
-exit rule lives with the config that declares it. Writing that rule down before
-the outcome is known is what keeps the rolling record honest in both
-directions.
-
-Live runtime is **continuous with recorded change points**, not frozen. Each
-change is recorded so the rolling record stays interpretable across it (a
-config's evidence is the run of days between its commit and its replacement).
-Fix bugs immediately.
-
-Negative results are priors, not prohibitions. A refuted idea can return with
-a new mechanism, new data, or a corrected defect; the record shows what its
-predecessor saw. Rules in this document included: change them when reasoning
-warrants, prospectively.
-
-## 4. Reporting that keeps pace
-
-A decision-influencing result travels with a short evidence note:
-
-1. Claim, and the decision it informs.
-2. What data shaped the idea; what data graded it.
-3. Scope: venue, population, period, scale.
-4. Effect size and uncertainty (not only pass/fail), including costs.
-5. Where the artifacts and config commit live.
-6. What this does not show.
-
-Grids report all cells, results split by era halves (a pooled number that
-hides decay is a wrong answer), and forgone upside is reported next to
-avoided cost. `docs/research/backtesting_errors_we_never_repeat.md` remains the
-failure-mode reference — lessons, not law.
-
-## 5. Mechanics — how to actually commit work into the record
-
-**Lane 1 needs nothing.** Explore freely on already-seen data. Label the output
-exploratory and note which data it touched; that provenance note is what keeps
-Lane 2 honest later.
-
-**Lane 2 — the commit is the registration.** To move a prototype into the
-rolling forward record:
-
-1. Put its exact config (rule, parameters, feature definitions, cost model) in
-   the repository and commit. The commit hash and date *are* the registration —
-   no separate contract document is needed.
-2. Declare the scoring recipe in the config or its manifest: metric,
-   comparator/baseline, and the grid if there is one (all cells report).
-3. Let the scorer append one row per config per new day. The config's evidence
-   is the run of days after its commit; editing the config starts a new run
-   under the new commit.
-
-**The promotion note**, recorded alongside the deploy change point:
+Promoting or demoting a strategy requires a concise 5-line record committed alongside the config change point:
 
 ```text
-Claim:
-Config commit:
-Forward record (days, net delta vs baseline, tail behavior):
-Decision:
-Date:
+Claim:                                 [Concise statement of operational change]
+Config commit:                         [Git SHA of the committed configuration]
+Forward record:                        [Days evaluated, net delta vs baseline, max drawdown]
+Decision:                              [Promote | Demote | Modify]
+Date:                                  [YYYY-MM-DD UTC]
 ```
 
-**Optional historical reserves.** If an untouched historical window exists for a
-genuinely new idea, it can be opened once for instant forward-style evidence —
-the provenance note records that it is now seen. Reserves are an accelerant,
-never a prerequisite.
+### The 6-Item Evidence Note
+Any decision-influencing research report must include:
+1. **Claim**: The specific hypothesis and operational decision it informs.
+2. **Data Lineage**: Exact data that shaped the model vs data that graded it.
+3. **Scope**: Venue, asset universe, observation window, capital scale.
+4. **Net Performance**: Effect size, Sharpe, max drawdown, net of all fees and funding.
+5. **Artifact Provenance**: Links to immutable report JSONs, parquet files, and git commits.
+6. **Negative Scope**: Explicitly state what the test does *not* prove.
 
-## 6. Real money is a separate door
+---
 
-Arming real money is one switch set by the owner's own hand: `REAL_MONEY=true`
-in the host credential file beside the live key. No rolling record, green
-report, or repository authority opens that door — a git commit can never arm.
-Demo is the default operating surface, and capital-preservation
-controls are never traded away for velocity.
+## 5. Funded Execution Authority
+
+* **The Air Gap**: Research reports, backtests, and git commits **cannot arm real money**.
+* **Master Switch**: Live funded trading requires `REAL_MONEY=true` set manually by the operator in `/etc/liquidity-migration/bybit-mainnet.env`.

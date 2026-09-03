@@ -6,6 +6,128 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — The signal stream lost frame boundaries, both engines
+  crash-looped, and the funded engine was down nine hours. Fixed at the root,
+  with the instrument lane that had been dead since 09-01.**
+  - *What happened.* Demo 01:01:28 UTC, mainnet 01:45:03 and 01:55:02, demo
+    again 02:36:18: `invalid signal frame size: 1668489851 bytes`. That number
+    is `0x6373227B`, little-endian ASCII `{"sc` — the opening of the JSON body
+    read where a length prefix belonged. Each time the engine exited, and every
+    restart then failed with `signal source directional_public_v1.g….carry has
+    sequence gap: expected N, got N+1` under `Restart=always`: demo 3,153
+    restarts by 10:46, mainnet 61 before it was stopped by hand at 01:56 with
+    three carry positions open (SKR, FLOCK, BICO, about 74 USDT on 130 equity;
+    venue stops resting). The funded engine stayed stopped until this fix
+    deployed.
+  - *Root cause, reader.* `UnixSignalFeed::next_observation`
+    (`engine/engine-core/src/signals.rs`) is one branch of the core's
+    `select!`, which drops the future whenever a market event wins. It read
+    the frame with two `read_exact` calls, which are not cancel-safe: a poll
+    that had taken the four length bytes and was waiting for the body lost
+    them when dropped, and the next poll read the body's first four bytes as
+    the next length. The worker made the window easy to hit by sending the
+    length and the body in two separate `write` calls. Now the frame in
+    progress lives on the feed (`Frame`), every read is a cancel-safe `read`
+    that resumes where it stopped, and the worker sends one buffer in one
+    `write`. Test: `a_frame_split_by_a_dropped_future_is_still_one_frame`,
+    which fails on the old reader with the production error text.
+  - *Root cause, permanent gap.* The observation the crashed engine had
+    consumed off the socket existed nowhere else: the worker wrote a spool row
+    only when the socket send failed. Now the worker writes the row first,
+    always (`SpoolWriter::write_encoded_observation`), and the frame is a
+    doorbell carrying the same bytes. The engine retires the row after the
+    barrier whichever way it arrived, and on a frame it first delivers any
+    rows with a lower sequence, which the worker wrote before that frame
+    (`HybridSignalFeed`). Nothing an engine loses is lost. Cost: one fsync'd
+    35 KB write per observation in the worker, at about nine a minute.
+  - *Recovery of the two live gaps.* The rows for mainnet 11226 and demo 11613
+    were consumed by crashed engines and are gone. Each worker was given a new
+    generation (`source_generation` blanked in `checkpoint.json`), so its
+    source id changed and the engine met it as a new source at sequence 1,
+    keeping the old cursor. Recipe in docs/operations.md §8.
+  - *The instrument lane.* Both workers logged `instrument lane: input:
+    Trading instrument has already passed its delivery time` every hour since
+    the 09-01 deploy of 07407a58, and from 09-03 01:03 `maxMktOrderQty is not
+    positive`. Both are checks that fail on the venue's real shape: Bybit
+    publishes `deliveryTime: "0"` on every perpetual (813 of 855 linear
+    contracts today), and zero order-size maximums on Closed and Delivering
+    contracts. One row refused the whole snapshot, so **both workers ran with
+    an empty instrument table (`instruments: {}` in both checkpoints) for two
+    days**. The fixture rows in the tests used `delivery_time_ms: None`, which
+    the venue never sends. Now a zero maximum is no maximum
+    (`published_maximum`), the snapshot-level delivery check is gone, and
+    `instrument_is_trading` treats a contract at or past a real delivery clock
+    as not trading, zero meaning no clock. Test:
+    `a_snapshot_of_perpetuals_with_zero_delivery_clocks_passes_source_validation`,
+    which fails on the old check.
+  - *On-call agent.* `check_fleet_liveness.py` now fires a Claude Code
+    routine on any `CRITICAL` that clears its cooldown, when
+    `INCIDENT_ROUTINE_FIRE_URL` and `INCIDENT_ROUTINE_FIRE_TOKEN` are set in
+    `liveness.env`; payload is the alert lines plus each failing unit's last
+    40 journal lines. The routine prompt is `deploy/incident-routine-prompt.md`;
+    the owner creates the routine and its token at claude.ai/code/routines.
+  - *Standing rule.* AGENTS.md §The Funded Engine Is Production: a fault in
+    the funded engine is fixed, tested, deployed, and verified in the same
+    session; stopping it is a holding action.
+  - `Restart=always` stays. A start limit would strand the funded engine after
+    a venue outage that it would otherwise recover from on its own; the fix
+    above removes the fault that made the loop endless, and the on-call agent
+    is what now answers a loop.
+
+- **2026-09-03 — An audit of the live fleet, and the eight things it found.**
+  Read off the running host rather than the docs: both engines and both
+  recorders healthy, the signal IPC connected in both realms over the sockets
+  with no spool files, the funded lease held by one writer, and the funded WAL
+  replaying clean (599,911 records over two segments, no CRC or torn frame, no
+  order left in flight, reconcile finding nothing). What was wrong:
+  - The funded account's 24h loss window was **tripped** — one close at
+    −16.14 USDT against a 12.98 limit — and the risk kernel was correctly
+    refusing every entry while letting exits flow. The heartbeat did not say
+    so: `rolling_loss_tripped` read true while `strategy_entries_enabled`
+    still reported every sleeve as entering, so the file an operator reads
+    said "trading normally" about an account that was opening nothing. The
+    beat now gates those switches on the window.
+  - The off-box backup had not completed since 2026-09-01 03:17 UTC. It runs
+    every six hours, and each run was killed at the 15-minute
+    `TimeoutStartSec` before it could land a first full copy, so no run ever
+    established a baseline and every later run repeated the whole transfer.
+    Every run that did real work also peaked at exactly its 512 MB
+    `MemoryMax`: four transfers at a 32 MB Drive chunk. The budget is now an
+    hour (flock, not the timeout, is what stops two runs overlapping) and the
+    chunk is 8 MB.
+  - `LONG_NOTIONAL_MULTIPLIER=3.0` in the funded credential file is inert and
+    always was: `notional_multiplier` is written in
+    `liquidity_migration/policy/real_money_profile.py`, 6.0 for LONG and 3.0
+    for carry, and no code anywhere reads that variable. Both realms render
+    6.0. The funded file understated funded LONG size by half to anyone who
+    read it; the dead lines are removed from the host.
+  - The two recorders' `max_disk_gb` summed to 120 GB on a 118 GB filesystem,
+    so neither ever pruned on its own cap and both raced the shared
+    `min_free_disk_gb` guard instead. Bybit is now 40 GB and Binance 30 GB,
+    sized on measured ingest (8.0 and 5.8 GB/day) and summing under the disk
+    with room for the engines' WALs. Local tape is about five days either
+    way; the hourly Drive archive is the history.
+  - A tier with no instrument table fell back to the raw ticker stream and
+    dropped its own quote filter with it, so a cold start could record
+    `WLDUSDC` and `ADAUSD_PERP` off a USDT universe. The fallback now applies
+    the same shape rules `listed_symbols` does. Twelve zero-byte Binance
+    segments and thirty-two Bybit ones were the residue.
+  - The staged-binary path verified `binaries.sha256` only `if [ -f ]` it, so
+    an artifact that simply omitted the manifest installed unverified. The
+    manifest is now required and `tar` is checked. CI has always produced one.
+  - `engine fills` reports a log's whole history, and the funded log opens in
+    shadow — orders worked out and never sent. The command now says how many
+    shadow records it read rather than presenting the two eras as one.
+  - Not changed, and why: `provision_mainnet` renders the funded config with
+    the binary `install_release` just installed, so it cannot move above it.
+    The window where the funded engine runs the old binary and old config
+    while both new ones sit on disk stays, and is now documented where
+    somebody would otherwise reorder it.
+  Two things the audit got wrong and then disproved: the recorders' 1,300 GB
+  allowances are per venue against the host's 4 TB line and are not
+  over-subscribed, and the capture services' 1 GB memory ceiling is page cache
+  from their own writes (anon 127 and 101 MB), not a leak.
+
 - **2026-09-02 — Deployed `76a8fc59` at 22:45 UTC: decoupled Mainnet deployment, Unix socket IPC, and the Rust market-tape crate.**
   Mainnet deployment was decoupled from Demo verification: Demo was deployed,
   restarted, and checked for fresh heartbeats while Mainnet continued actively

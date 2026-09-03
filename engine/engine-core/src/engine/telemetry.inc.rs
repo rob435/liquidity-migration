@@ -71,6 +71,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // reason wins, so its kernel refusal still outranks a planner skip.
         let blockers = named_entry_blockers(strategies, names);
         let strategy_errors = named_strategy_errors(strategies, names);
+        // The rolling loss window is an account-wide gate the kernel applies
+        // to every entry, so a sleeve whose own switches are all on is still
+        // opening nothing while it is tripped. Reporting the switches alone
+        // reads as "trading normally" on an account that is refusing.
+        let rolling_loss = risk.rolling_loss();
+        let rolling_loss_tripped = rolling_loss.as_ref().is_some_and(|view| view.tripped);
         let strategy_entries_enabled: Vec<(String, bool)> = strategies
             .iter()
             .enumerate()
@@ -78,7 +84,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 let id = u16::try_from(index).ok()?;
                 Some((
                     names.get(index)?.clone(),
-                    strategy.configured_entries_enabled()
+                    !rolling_loss_tripped
+                        && strategy.configured_entries_enabled()
                         && runtime_entries_enabled.get(&id).copied().unwrap_or(true),
                 ))
             })
@@ -195,7 +202,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 strategy_errors: &strategy_errors,
                 working_entries: &working_entries,
                 costs: &costs,
-                rolling_loss: risk.rolling_loss(),
+                rolling_loss,
             },
         );
     }

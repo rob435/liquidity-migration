@@ -330,3 +330,66 @@ def test_a_recorder_over_its_byte_budget_warns_once_with_what_it_shed(tmp_path: 
     status.write_text(json.dumps(payload))
     alerts, _ = liveness.evaluate_capture_status(status, now=now, max_silence_sec=120, counters={}, label="forward-market-binance")
     assert alerts == []
+
+
+def test_a_new_critical_fires_the_on_call_routine_once(monkeypatch, capsys) -> None:
+    """A CRITICAL that clears its cooldown POSTs the alert text and the failing
+    unit's journal to the routine; a warning, or a repeat inside the cooldown,
+    fires nothing."""
+    calls: list[tuple[str, dict[str, str], dict[str, object]]] = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"claude_code_session_url": "https://claude.ai/code/session_1"}
+            ).encode()
+
+    def fake_urlopen(request, timeout=0):
+        calls.append(
+            (request.full_url, dict(request.header_items()), json.loads(request.data))
+        )
+        return _Response()
+
+    monkeypatch.setattr(liveness.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        liveness, "unit_journal_tail", lambda unit, lines=40: f"journal of {unit}"
+    )
+    alerts = [
+        liveness.Alert(
+            "unit:liquidity-migration-engine-mainnet.service",
+            "CRITICAL",
+            "liquidity-migration-engine-mainnet.service is inactive",
+        ),
+        liveness.Alert("backup", "WARNING", "backup receipt is 9h old"),
+    ]
+    lines, _ = liveness.select_alerts_to_send(
+        alerts, state={}, now=1000.0, cooldown_sec=3600
+    )
+    text = liveness.incident_text("mainnet", lines, alerts)
+    session = liveness.fire_incident_routine(
+        "https://api.anthropic.com/v1/claude_code/routines/trig_x/fire", "tok", text
+    )
+    assert session == "https://claude.ai/code/session_1"
+    url, headers, body = calls[0]
+    assert url.endswith("/routines/trig_x/fire")
+    assert headers["Authorization"] == "Bearer tok"
+    assert headers["Anthropic-beta"] == liveness.INCIDENT_FIRE_BETA
+    assert body == {"text": text}
+    assert "engine-mainnet.service is inactive" in text
+    assert "journal of liquidity-migration-engine-mainnet.service" in text
+    assert "backup receipt" in text, "warnings ride along in the same page"
+
+    # Inside the cooldown the same fault sends nothing, so nothing fires.
+    lines, _ = liveness.select_alerts_to_send(
+        alerts,
+        state={"unit:liquidity-migration-engine-mainnet.service": 1000.0, "backup": 1000.0},
+        now=1600.0,
+        cooldown_sec=3600,
+    )
+    assert not any(line.startswith("CRITICAL") for line in lines)

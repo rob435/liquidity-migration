@@ -262,6 +262,14 @@ fn finish_journal_append(path: &Path, mut file: File) -> Result<(), WorkerError>
     sync_parent(path)
 }
 
+/// How long one frame may wait on the engine before the worker gives up on
+/// it. The row is already durable, so a frame that fails costs the engine
+/// only its next spool poll.
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Delivers observations to the engine: the spool row first, then the same
+/// bytes as one frame down `stream.sock` so the engine need not wait for its
+/// next spool poll. The row is the delivery; the frame is the doorbell.
 #[derive(Clone, Debug)]
 pub struct SpoolWriter {
     directory: PathBuf,
@@ -314,17 +322,17 @@ impl SpoolWriter {
                 ));
             }
             let stream = UnixStream::connect(&sock_path)?;
-            stream.set_write_timeout(Some(Duration::from_millis(50)))?;
+            stream.set_write_timeout(Some(SOCKET_WRITE_TIMEOUT))?;
             *guard = Some(stream);
         }
 
         if let Some(stream) = guard.as_mut() {
-            let len = (bytes.len() as u32).to_le_bytes();
-            if stream
-                .write_all(&len)
-                .and_then(|_| stream.write_all(bytes))
-                .is_ok()
-            {
+            // One buffer, one write: the engine reads the length and the
+            // body from the same syscall's bytes.
+            let mut frame = Vec::with_capacity(bytes.len().saturating_add(4));
+            frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            frame.extend_from_slice(bytes);
+            if stream.write_all(&frame).is_ok() {
                 return Ok(());
             }
         }
@@ -428,22 +436,21 @@ impl SpoolWriter {
         );
         let path = self.directory.join(name);
 
-        if self.try_send_socket(bytes).is_ok() {
-            return Ok((path, observation));
-        }
-
         if path.exists() {
             let existing = fs::read(&path)
                 .map_err(|error| WorkerError::io("read existing signal observation", error))?;
-            if existing == bytes {
-                return Ok((path, observation));
+            if existing != bytes {
+                return Err(WorkerError::state(format!(
+                    "signal spool path {} already contains different bytes",
+                    path.display()
+                )));
             }
-            return Err(WorkerError::state(format!(
-                "signal spool path {} already contains different bytes",
-                path.display()
-            )));
+        } else {
+            atomic_write(&path, bytes)?;
         }
-        atomic_write(&path, bytes)?;
+        // Durable first. The frame is best effort: an engine that is down,
+        // restarting, or slow reads the row on its next spool poll.
+        let _ = self.try_send_socket(bytes);
         Ok((path, observation))
     }
 
@@ -626,6 +633,78 @@ fn sync_parent(path: &Path) -> Result<(), WorkerError> {
 #[cfg(test)]
 mod tests {
     use super::{cleanup_atomic_temporary_files, AtomicJsonStore, SpoolWriter};
+    use crate::model::NormalizedObservation;
+    use engine_types::{Feed, StrategyId, Subscription, SIGNAL_OBSERVATION_SCHEMA_VERSION};
+
+    fn observation(sequence: u64) -> Vec<u8> {
+        let mut observation = NormalizedObservation {
+            schema_version: SIGNAL_OBSERVATION_SCHEMA_VERSION,
+            decision_fingerprint: "carry-v1".to_owned(),
+            destination: StrategyId(2),
+            source: "carry-worker".to_owned(),
+            sequence,
+            observation_id: format!("funding-{sequence}"),
+            kind: "funding_update".to_owned(),
+            observed_wall_ts_ms: 10,
+            available_wall_ts_ms: 11,
+            subscriptions: vec![Subscription {
+                symbol: "BTCUSDT".to_owned(),
+                feed: Feed::Ticker,
+            }],
+            payload: br#"{"rate":"0.0001"}"#.to_vec(),
+            content_sha256: String::new(),
+        };
+        observation.content_sha256 =
+            crate::config::sha256_hex(&observation.canonical_envelope_bytes());
+        serde_json::to_vec(&observation).unwrap()
+    }
+
+    /// The row is the delivery. It is on disk before the frame is sent, and
+    /// the frame carries the same bytes behind one little-endian length.
+    #[test]
+    fn a_row_is_durable_before_the_engine_hears_its_frame() {
+        use std::io::Read;
+        use std::os::unix::net::UnixListener;
+
+        let root =
+            std::env::temp_dir().join(format!("signal-worker-spool-frame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let listener = UnixListener::bind(root.join("stream.sock")).unwrap();
+        let spool = SpoolWriter::new(&root).unwrap();
+
+        let bytes = observation(1);
+        let (path, parsed) = spool.write_encoded_observation(&bytes).unwrap();
+        assert_eq!(parsed.sequence, 1);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "the row is the delivery"
+        );
+
+        let (mut engine, _) = listener.accept().unwrap();
+        let mut frame = Vec::new();
+        engine
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut chunk = [0u8; 65536];
+        while frame.len() < bytes.len() + 4 {
+            let read = engine.read(&mut chunk).unwrap();
+            assert!(read > 0, "frame ended early");
+            frame.extend_from_slice(&chunk[..read]);
+        }
+        assert_eq!(&frame[..4], &(bytes.len() as u32).to_le_bytes());
+        assert_eq!(&frame[4..], &bytes[..]);
+
+        // Without an engine listening the row still lands.
+        drop(engine);
+        drop(listener);
+        let _ = std::fs::remove_file(root.join("stream.sock"));
+        let second = observation(2);
+        let (second_path, _) = spool.write_encoded_observation(&second).unwrap();
+        assert_eq!(std::fs::read(&second_path).unwrap(), second);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn state_round_trip_is_atomic() {

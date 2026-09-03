@@ -1,102 +1,59 @@
 # liquidity-migration
 
-Research and demo execution for crypto-perpetual strategies, primarily on
-Bybit.
+Quantitative research, market data capture, and low-latency algorithmic trading platform for crypto perpetuals (Bybit & Binance).
 
-## The execution engine
+---
 
-[`engine/`](engine) is a Rust workspace that trades: one process, one thread,
-one loop from market message to signed order. It **is the account owner,
-deployed and live on the demo account** — it holds that account's
-single-writer lease and it is the only order path. One credential-free Rust
-signal worker per realm feeds the native LONG and CARRY reducers; Exodus is a
-native consumer of CARRY's durable internal events. A second engine unit runs
-on the funded account, and only while `REAL_MONEY` is armed in the host
-credential file.
+## 1. Core Subsystems
 
-Measured by `cd engine && cargo run --release -- bench`, with real signing and
-a real disk flush in the chain. Three native runs on the production box put
-the decision at 80 ns median and market input through the parsed localhost
-submit response at 1.26 ms median, 3.16 ms p99. This benchmark does not expose
-a socket-write timestamp. (On a laptop the decision is faster and the flush
-slower — 84 ns and 3.9 ms; both tables are in
-[docs/engine.md](docs/engine.md).) Live
-decision-to-acknowledgement is about 179 ms median, dominated by geography.
+| Subsystem | Primary Tech | Authority & Mandate | Entry Point |
+| :--- | :--- | :--- | :--- |
+| **Trading Engine** | Rust (`engine/`) | Low-latency single-threaded execution loop, WAL ledger, risk kernel, venue orders | [`docs/engine.md`](docs/engine.md) |
+| **Signal Worker** | Rust (`engine/signal-worker/`) | Credential-free public data ingestion, feature computation, AF_UNIX streaming | [`docs/architecture.md`](docs/architecture.md) |
+| **Market Tape** | Rust / Python (`market_tape/`) | High-throughput tick/L2 recording, zstd compression, Google Drive archive | [`market_tape/README.md`](market_tape/README.md) |
+| **Operations** | Shell / Python (`scripts/`) | Deployment orchestration, safety stops, liveness monitoring, Telegram alerts | [`docs/operations.md`](docs/operations.md) |
 
-Each of the six venue families may write its hostnames in exactly one file, its own
-`realm.rs`, and the funded gateway refuses to build unless `REAL_MONEY` is
-armed in the host credential file. Design, crates and safety posture:
-[docs/engine.md](docs/engine.md). Live truth: [STATE.md](STATE.md).
+---
 
-## Sleeves
+## 2. Active Strategy Sleeves
 
-| Sleeve | Profile | Toggle |
-| --- | --- | --- |
-| LONG | `LongV12WideStop` — native signal, sizing, entry, stop-decay, cooldown, and time-exit reducer; no take-profit | `LONG_SLEEVE` |
-| CARRY | `carry_hold_v7_live_v1` — native daily scorer, sizing anchors, exit clocks, admission, and resize reducer | `CARRY_SLEEVE` |
-| EXODUS SHORT | `lane2_exodus_short_v1` — native reducer consuming CARRY's WAL-backed pre-settlement events | always configured; events come only from CARRY |
-| LONG / CARRY / EXODUS, real money | as above | `REAL_MONEY=true` in the host's `bybit-mainnet.env` — the single arming switch |
+| Sleeve | Rule | Strategy ID | State | Core Strategy Profile |
+| :--- | :--- | :---: | :--- | :--- |
+| **CARRY** | `configs/lane2_carry_hold_v7.json` | `0` | Active | Sticky 48h hold on extreme negative funding crowd fees ($\le -10\text{ bp}$). |
+| **LONG** | `configs/long_native_v12.json` | `1` | Active | Momentum breakouts on top liquid perpetuals with decaying ATR stops. |
+| **EXODUS** | `configs/lane2_exodus_short_v1.json` | `2` | Active | Event-driven short on distressed CARRY pairs prior to settlement. |
+| **MAKER** | `configs/lane2_toxic_flow_quoter_v1.json` | `3` | Disabled | Microstructural two-sided quoting canary (`quote_enabled = false`). |
 
-Which demo toggles are on is in [`deploy/sleeves.env`](deploy/sleeves.env), not
-here. That file is a ceiling: a host override can turn an enabled sleeve off,
-never on. Real money has no repo toggle at all — arming lives only on the host,
-next to the live API key, so a git commit can never arm.
-Demo is the only practice book. What each sleeve trades is in
-[`docs/trading_logic.md`](docs/trading_logic.md).
+---
 
-The Rust `maker_canary` block remains present but disabled so its WAL identity
-does not move. Its presence is not deployment evidence.
+## 3. Quick Start & Development Checks
 
-## Layout
+```bash
+# Diagnostic environment check
+scripts/dev.sh doctor
 
-| Path | Contents |
-| --- | --- |
-| [`liquidity_migration/`](liquidity_migration/README.md) | the Python research, evidence, policy, notification, and deployment-support plane; it has no live directional decision or order path |
-| [`engine/`](engine) | the Rust execution engine workspace — seven crates, from the shared types to the loop |
-| [`market_tape/`](market_tape/README.md) | the market tape: recorders for Bybit and Binance, the hourly Drive archives, and the reader (typed rows, book rebuild, bars); standalone, imports nothing from the rest of the repository |
-| [`scripts/`](scripts/README.md) | `dev.sh` and `ops.sh` at the root; `runtime/`, `research/`, `maintain/`, `data/`, `vps/`, `devtools/` below |
-| [`deploy/`](deploy) | the canonical fleet manifest, `sleeves.env`, systemd units, and environment handling |
-| [`configs/`](configs) | Lane-2 strategy registrations and operational profiles |
-| `data/` | per-sleeve event stores and reconciliation captures (runtime, not tracked) |
-| `reports/` | research-run outputs (runtime, not tracked) |
-| [`tests/`](tests) | executable contracts |
-| `.codex/skills/` | task runbooks; `.claude/skills/` is a mechanical mirror |
+# Full codebase verification (formatting, lints, rust tests, python tests)
+scripts/dev.sh check
 
-## Local gate
-
-```
-scripts/dev.sh doctor        # read-only Git/Python/dependency/skill diagnostic
-scripts/dev.sh check         # doctor, then ruff, shellcheck, mypy, pytest, engine fmt/clippy/tests
-.venv/bin/python -m pytest -q
+# Fast targeted tests
+pytest -q
+cargo test --manifest-path engine/Cargo.toml --workspace --all-targets
 ```
 
-`scripts/dev.sh` runs offline. Operator commands are `scripts/ops.sh help`; the
-research and data CLI is `python -m liquidity_migration --help`. Python 3.11+.
+---
 
-## Documentation
+## 4. Documentation Index (Spec-First Architecture)
 
-| Doc | Covers |
-| --- | --- |
-| [STATE.md](STATE.md) | the operational snapshot: what runs now and what constrains it |
-| [CHANGELOG.md](CHANGELOG.md) | the dated operational log: deploys, incidents, repairs, change points |
-| [docs/operations.md](docs/operations.md) | `ops.sh` commands, deploy modes, unit topology, the host freeze |
-| [market_tape/README.md](market_tape/README.md) | the market tape: capture configs, the frozen row contract, layouts on the host and the Drive, reading it back |
-| [docs/notifications.md](docs/notifications.md) | the two Telegram channels, the pause/resume controls, watchdog alert cadence and escalation, the heartbeat dead-man's switch |
-| [docs/architecture.md](docs/architecture.md) | the Rust signal, reducer, WAL, control, takeover, and execution seams |
-| [docs/engine.md](docs/engine.md) | the Rust execution engine: crate contracts, latency budget, crash safety, safety posture |
-| [docs/strategy_template.md](docs/strategy_template.md) | the required shape, durability order, replay seam, and tests for a native strategy |
-| [docs/trading_logic.md](docs/trading_logic.md) | what each sleeve trades and why |
-| [docs/data.md](docs/data.md) | data roots, point-in-time boundaries, refresh workflow |
-| [docs/research/research_findings.md](docs/research/research_findings.md) | what the evidence supports, including the negative results |
-| [docs/research/governance.md](docs/research/governance.md) | the Progressive Evidence Model — two lanes, what makes a number real, promotion notes |
-| [docs/research/backtesting_errors_we_never_repeat.md](docs/research/backtesting_errors_we_never_repeat.md) | the failure taxonomy |
-| [liquidity_migration/README.md](liquidity_migration/README.md) | which subpackage owns a module, and what may import what |
-| [scripts/README.md](scripts/README.md) | which script to run, and who runs it |
-| [docs/operations.md](docs/operations.md) §Real money | the funded-account envelope, the owner's arming runbook, and what is still unproven |
-
-`docs/research/research_findings.md` is the durable evidence summary.
-
-## Standing rules
-
-Working rules for agents live in [AGENTS.md](AGENTS.md) — read it before
-changing anything.
+| Document | Primary Contents |
+| :--- | :--- |
+| **[STATE.md](STATE.md)** | Operational snapshot: host specifications, deployed commit, armed status, unit heartbeats. |
+| **[CHANGELOG.md](CHANGELOG.md)** | Historical operational ledger: deployments, incidents, repairs, and migrations. |
+| **[docs/architecture.md](docs/architecture.md)** | System topology, Demo/Mainnet realms, AF_UNIX IPC, durability barriers, trade diagnostics. |
+| **[docs/engine.md](docs/engine.md)** | Engine internals: crate map, boot sequence, memory budget, risk kernel, takeover protocol. |
+| **[docs/operations.md](docs/operations.md)** | Runbook: VPS specifications, `scripts/ops.sh` command reference, deploy/rollback recipes. |
+| **[docs/data.md](docs/data.md)** | Data roots, tape capture tiers, 1,300 GB byte budget, shedding order, timestamp semantics. |
+| **[docs/trading_logic.md](docs/trading_logic.md)** | Strategy rules: entry/exit formulas, universes, sizing multipliers, LLM entry gate. |
+| **[docs/notifications.md](docs/notifications.md)** | Telegram surfaces, trade alert schemas, liveness matrices, interactive bot commands. |
+| **[docs/strategy_template.md](docs/strategy_template.md)** | Developer contract and boilerplate for implementing new native Rust strategies. |
+| **[docs/research/governance.md](docs/research/governance.md)** | Progressive Evidence Model: Lane-1 exploration vs Lane-2 promotion rules. |
+| **[docs/research/research_findings.md](docs/research/research_findings.md)** | Empirical research findings and historical evidence log. |

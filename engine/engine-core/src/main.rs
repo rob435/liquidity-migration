@@ -309,6 +309,15 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
             let (replayed, torn) = engine_wal::replay_chain(Path::new(&path))?;
             let segments = engine_wal::segments(Path::new(&path))?.len();
             let records: Vec<_> = replayed.into_iter().map(|(_, r)| r).collect();
+            // A log that ran in shadow wrote orders down without sending them.
+            // The table below cannot tell those apart from venue fills, so it
+            // says so rather than presenting one era's numbers as the other's.
+            let shadow_records = records
+                .iter()
+                .filter(|record| {
+                    matches!(record, engine_wal::WalRecord::Note { source, .. } if source == "shadow")
+                })
+                .count();
             print!("{}", execution::report::of_log(&records));
             // Naming a numbered segment reads that segment alone, and the
             // table looks exactly the same either way.
@@ -317,6 +326,13 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
                 records.len(),
                 segments
             );
+            if shadow_records > 0 {
+                println!(
+                    "\n  {shadow_records} shadow record(s) in this log: orders worked out and \
+                     never sent. Anything they priced is not a venue fill, and these numbers do \
+                     not separate the two eras."
+                );
+            }
             if torn {
                 println!(
                     "\n  the log ends part-way through a record; anything after that point is \

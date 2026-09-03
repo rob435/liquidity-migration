@@ -1,103 +1,44 @@
-# Systemd fleet
+# Fleet Systemd Units & Lifecycle Specification
 
-[`../fleet_manifest.tsv`](../fleet_manifest.tsv) is the canonical unit
-inventory. The files in this directory implement it exactly; tests reject a
-current manifest row without a file, an unregistered file, or an invalid
-dependency.
+Systemd service topologies, daemon identities, security sandboxing, and execution lifecycle.
 
-## Host specification
+---
 
-The fleet runs on a dedicated host (`ip-208-84-103-4.my-advin.com` / `208.84.103.4`, UUID `8d5f9972` - `Playful Rainbow`, 4 vCPU, 8 GB RAM, 127 GB disk, 4 TB bandwidth quota).
+## 1. Systemd Fleet Unit Inventory
 
-## Trading topology
+Defined canonically in [`deploy/fleet_manifest.tsv`](../fleet_manifest.tsv):
 
-Each realm has two long-running Rust processes:
+| Unit Family | Realm | Systemd Target / Activation | User / Group | Authority & Role |
+| :--- | :--- | :--- | :--- | :--- |
+| `liquidity-migration-signal-worker-demo` | Demo | `multi-user.target` | `liquidity-signal-worker:liquidity-migration` | Public market data ingestion & observation streaming. |
+| `liquidity-migration-signal-worker-mainnet` | Mainnet | `multi-user.target` | `liquidity-signal-worker:liquidity-migration` | Public market data ingestion & observation streaming. |
+| `liquidity-migration-engine` | Demo | `multi-user.target` | `liquidity-engine-demo:liquidity-migration` | Demo execution engine & order authority. |
+| `liquidity-migration-engine-mainnet` | Mainnet | `manual` (needs `REAL_MONEY`) | `liquidity-engine-mainnet:liquidity-migration` | Funded execution engine & order authority. |
+| `liquidity-migration-forward-capture` | Global | `independent` (boot) | `liquidity-capture:liquidity-migration` | Bybit tick, book, and L2 market tape recorder. |
+| `liquidity-migration-forward-capture-binance` | Global | `independent` (boot) | `liquidity-capture:liquidity-migration` | Binance tick, book, and L2 market tape recorder. |
+| `liquidity-migration-market-tape-upload` | Global | Timer (hourly at :10) | `root:root` | Tar & rclone sync to Google Drive. |
+| `liquidity-migration-backup` | Global | Timer (every 6h) | `root:root` | Off-box mirror of engine state & WAL to Google Drive. |
+| `liquidity-migration-trade-notify` | Global | Timer (every 5m) | `liquidity-observer:liquidity-migration` | Monospace HTML trade alerts to Telegram. |
+| `liquidity-migration-telegram-controls` | Global | `multi-user.target` | `liquidity-controls:liquidity-controls` | Long-polling Telegram bot helper. |
+| `liquidity-migration-demo-liveness` | Demo | Timer (periodic) | `liquidity-observer:liquidity-migration` | Realm-level SLA & heartbeat monitoring. |
+| `liquidity-migration-mainnet-liveness` | Mainnet | Timer (periodic) | `liquidity-observer:liquidity-migration` | Realm-level SLA & heartbeat monitoring. |
+| `liquidity-migration-host-liveness` | Global | Timer (periodic) | `liquidity-observer:liquidity-migration` | Host-level disk, tape, and clock monitoring. |
+| `liquidity-migration-chaos-drill` | Demo | Timer (weekly) | `root:root` | Automated demo restart & state recovery drill. |
 
-| Realm | Public-signal worker | Account owner |
-| --- | --- | --- |
-| demo | `liquidity-migration-signal-worker-demo.service` | `liquidity-migration-engine.service` |
-| mainnet | `liquidity-migration-signal-worker-mainnet.service` | `liquidity-migration-engine-mainnet.service` |
+---
 
-The worker has public-data inputs only. It writes immutable observations to
-`/var/lib/liquidity-migration/signals/<realm>` and keeps its checkpoint and
-heartbeat in its own `StateDirectory`. Its unit removes every known private
-credential, real-money switch, and Telegram secret from the environment.
+## 2. Independent Units (Host-Level Daemons)
 
-The engine is the sole account writer. It reads the realm signal spool, owns
-the private venue credential and account lease, and writes the WAL, heartbeat,
-and trade log in its own `StateDirectory`. It also reads durable operator
-commands from `/var/lib/liquidity-migration/controls/<realm>`.
+The 5 unit families marked `independent` (`forward-capture`, `forward-capture-binance`, `market-tape-upload`, `backup`, `host-liveness`):
+* **Never Stopped**: Fleet deploys, safety stops, and disarm actions never terminate independent units.
+* **Boot Activation**: Start automatically on machine boot.
+* **Conditional Restart**: Deploy restarts capture services only if `deploy/capture/`, `market_tape/`, or dependencies changed.
 
-The engine `Wants` and starts after the worker. Worker failure does not stop the
-engine: exits, account reconciliation, and already durable observations must
-remain available. Activation starts the worker first, requires a `ready`
-heartbeat bound to the exact input and engine-config hashes, then starts and
-verifies the account owner.
+---
 
-The mainnet pair starts only when the owner has armed `REAL_MONEY=true` in the
-funded credential file and every funded preflight check passes. A systemd unit
-name or config file cannot arm money.
+## 3. Sandboxing & Linux Security Invariants
 
-## Observers and jobs
-
-The remaining current units do not decide directional exposure:
-
-| Unit family | Role |
-| --- | --- |
-| `demo-liveness` and `mainnet-liveness` service and timer | Page on an inactive fleet unit, a stale heartbeat, a latched engine, or a rolling-loss trip in their realm |
-| `trade-notify.service` and timer | Report actual engine-attributed positions and closed-trade P&L |
-| `telegram-controls.service` | Receive owner commands; the helper submits Rust runtime controls |
-| `chaos-drill.service` and timer | Exercise demo recovery |
-| `llm-ledger.service` and timer | Research-only public-data judgments; no strategy input |
-
-## Independent units
-
-The manifest marks five unit families `independent`. A deploy never stops
-them, a funded stop or disarm never touches them, and they start at boot, so
-they run whether or not the trading fleet is up:
-
-| Unit family | Role |
-| --- | --- |
-| `forward-capture.service` | The Bybit market recorder, `python -m market_tape record` on [`deploy/capture/bybit-linear.toml`](../capture/bybit-linear.toml): books, trades, tickers, funding, liquidations, and daily instrument snapshots ([`docs/data.md`](../../docs/data.md) §Market tape) |
-| `forward-capture-binance.service` | The Binance USD-M market recorder, the same package on [`deploy/capture/binance-usdm.toml`](../capture/binance-usdm.toml) |
-| `market-tape-upload.service` and timer | Every hour, pack each finished hour of each tape into one archive and upload it to Google Drive |
-| `backup.service` and timer | Four times a day, snapshot the engines' logs and state and mirror them to Google Drive with history |
-| `host-liveness.service` and timer | Page on the recorder, the upload receipt, the backup receipt, disk, and the host clock |
-
-Deploy restarts the recorder only when its unit file, script, symbol list, or
-Python dependencies changed, and then waits for a status file the new process
-wrote; otherwise it is left running. Timers are restarted so a changed
-schedule applies.
-
-## Identities and permissions
-
-Trading and observation identities are separate:
-
-- `liquidity-signal-worker` runs both credential-free signal workers.
-- `liquidity-engine-demo` owns the demo engine state and control spool.
-- `liquidity-engine-mainnet` owns the funded engine state and control spool.
-- observer, controls, capture, builder, and research identities receive only
-  the paths required by their units.
-
-The shared `liquidity-migration` group grants narrow read/traverse access. It
-does not grant private credentials or account mutation. Engine units have
-write access only to their state, signal spool, control spool, and account
-lease directory. Signal workers have write access only to their state and
-signal spool.
-
-Each unit file carries its own committed command line. Unit environment files
-select reviewed inputs; callers cannot append an alternate command line.
-
-## Lifecycle
-
-Deploy stops every fleet unit (never an independent one), installs the exact
-commit and the Rust release, renders native configs, completes stopped state
-takeover, then starts the signal worker, the account owner, and the downstream
-units in manifest order, waiting for a fresh heartbeat at each step. A realm
-whose worker or owner publishes no fresh heartbeat is rolled back: the last
-commit whose deploy finished is deployed again, and the run still fails so
-the failure is visible.
-
-Pause and flatten do not stop signal workers. They use durable entry-permission
-and flatten requests in the engine control spool, so settlement observations
-and exits continue.
+1. **State Directory Isolation**: Each service writes strictly to its declared `StateDirectory` in `/var/lib/` (`0750` / `0770`).
+2. **Environment Scrubbing**: Signal worker units explicitly unset venue API credentials, real-money switches, and Telegram tokens.
+3. **No Private Leaks in Backups**: Off-box backup scripts strictly ignore `*.env` files to prevent credentials from leaving the host.
+4. **Arming Protection**: `engine-mainnet.service` requires `REAL_MONEY=true` in `/etc/liquidity-migration/bybit-mainnet.env` to start.

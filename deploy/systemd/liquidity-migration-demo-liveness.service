@@ -14,6 +14,9 @@ KillMode=control-group
 TimeoutStartSec=120
 User=liquidity-observer
 Group=liquidity-migration
+# Read-only journal access: a CRITICAL page carries the failing unit's last
+# 40 journal lines to the on-call agent.
+SupplementaryGroups=systemd-journal
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/sleeves.resolved.env
 EnvironmentFile=/etc/liquidity-migration/signal-worker-demo.env

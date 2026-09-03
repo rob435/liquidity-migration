@@ -288,7 +288,7 @@ fn validate_instrument_source_against_state(
     state: &crate::worker::WorkerState,
     fetched: &FetchedInstruments,
 ) -> Result<(), WorkerError> {
-    let normalized = normalize_instruments(
+    normalize_instruments(
         fetched.observed_ts_ms,
         fetched.available_at_ms,
         &fetched.rows,
@@ -302,16 +302,6 @@ fn validate_instrument_source_against_state(
     {
         return Err(WorkerError::input(
             "Bybit instrument snapshot moved backwards",
-        ));
-    }
-    if normalized.iter().any(|row| {
-        row.status.as_deref() == Some("Trading")
-            && row
-                .delivery_time_ms
-                .is_some_and(|delivery| delivery <= fetched.observed_ts_ms)
-    }) {
-        return Err(WorkerError::input(
-            "Trading instrument has already passed its delivery time",
         ));
     }
     Ok(())
@@ -4083,7 +4073,8 @@ mod tests {
         complete_funding_coverage, complete_whale_coverage, coverage_repair_start,
         funding_job_chunks, kline_job_chunks, runtime_status, send_repair_chunk_and_wait,
         send_whale_chunk_and_wait, source_coverage_contains, source_grid_slots,
-        startup_runtime_status, trading_intervals_contain, validate_source_grid_timestamp,
+        startup_runtime_status, trading_intervals_contain,
+        validate_instrument_source_against_state, validate_source_grid_timestamp,
         validate_source_page_rows, whale_fetch_bounds, whale_job_chunks, FetchedFunding,
         FetchedFundingBatch, FetchedInstruments, FetchedKlineBatch, FetchedKlineJobs,
         FetchedTickers, FetchedUniverseInputs, FetchedWhales, LaneCompletion, LaneState,
@@ -5328,6 +5319,27 @@ mod tests {
             funding_interval: Some(Value::from(60)),
             is_pre_listing: false,
         }
+    }
+
+    /// Bybit's real shape: every perpetual carries `deliveryTime: "0"`. The
+    /// instrument lane must accept the venue's whole list, or the worker runs
+    /// with no instrument table at all.
+    #[test]
+    fn a_snapshot_of_perpetuals_with_zero_delivery_clocks_passes_source_validation() {
+        let worker = crate::worker::SignalWorker::new(checked_demo_config()).unwrap();
+        let observed = 100 * DAY_MS;
+        let fetched = FetchedInstruments {
+            observed_ts_ms: observed,
+            available_at_ms: observed + 5,
+            rows: vec![
+                instrument_wire("BTCUSDT", "Trading", DAY_MS, Some(0)),
+                instrument_wire("ETHUSDT", "Trading", DAY_MS, Some(0)),
+                instrument_wire("ASPUSDT", "Trading", DAY_MS, Some(observed + DAY_MS)),
+                instrument_wire("OLDUSDT", "Closed", DAY_MS, Some(observed - DAY_MS)),
+            ],
+        };
+        validate_instrument_source_against_state(worker.state(), &fetched)
+            .expect("the venue's own list is valid input");
     }
 
     fn temporary_root(label: &str) -> PathBuf {

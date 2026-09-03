@@ -1,63 +1,47 @@
-# `liquidity_migration/`
+# Python Research & Operations Package (`liquidity_migration`)
 
-Python is the research, evidence, data, policy, notification, and deployment
-support plane. It has no live directional decision, registered directional
-config render, or authenticated order path. The Rust workspace under `engine/`
-owns public-signal production, registered config rendering, live
-LONG/CARRY/Exodus decisions, private account state, risk, and execution.
+Python research plane, data pipeline, and operational observability package. **Has zero live order or execution authority.**
 
-## Packages
+---
 
-| Package | Responsibility |
-| --- | --- |
-| `core/` | Business-neutral time, serialization, durable files, typed operational configuration, and venue-realm types |
-| `marketdata/` | Historical/PIT ingestion, public download helpers, and research caches |
-| `data/` | Point-in-time datasets, manifests, histories, universes, and trade tapes |
-| `rules/` | Registered research metadata, takeover-source readers, and persistent clients for the Rust strategy replay contract |
-| `research/` | Historical replay, panels, measurement, charts, accounting, and evidence reports |
-| `policy/` | Real-money arming, funded-profile, and systemd-environment checks |
-| `ops/` | Telegram controls and read-only operator reporting |
-| `cli/` | `python -m liquidity_migration` research and data commands |
+## 1. Package Architecture
 
-`__init__.py` and `__main__.py` are the only modules at the package root.
+| Subpackage | Primary Responsibility |
+| :--- | :--- |
+| **`core/`** | Time math, typed configs, durable JSON/parquet serializers, venue realm types. |
+| **`marketdata/`** | Public historical downloads, REST clients, and raw data caches. |
+| **`data/`** | Point-in-time universe manifests, dataset partitions, and coverage audits. |
+| **`rules/`** | Registered JSON rule loaders, takeover source decoders, Rust replay clients. |
+| **`research/`** | Factor backtesting, study harness (`lab/`), metrics, and evidence generation. |
+| **`policy/`** | Preflight checks, credential validation, and operational profile rendering. |
+| **`ops/`** | Telegram notifications, liveness checkers, and operator command helpers. |
+| **`cli/`** | CLI dispatcher (`python -m liquidity_migration`). |
 
-`research/lab/` is the study harness: the daily panel, the fast backtester,
-the per-trade overlay against a matched placebo, the plateau checks, and the
-evidence-note renderer. Every decision-influencing study runs through it so the
-next negative result is reproducible and the next positive one is gradeable.
+---
 
-The market tape — recorder, Drive archives, loader, book rebuild, bars — is the
-sibling package [`market_tape/`](../market_tape/README.md) at the repository
-root. It imports nothing from `liquidity_migration`; research code may import
-it (it sits below `core` in the order), and nothing on a live decision path
-reads it.
+## 2. Layered Import Dependency Ranks
 
-## Dependency rule
-
-Imports follow the ranks enforced by
-[`tests/repo/test_import_order.py`](../tests/repo/test_import_order.py). Lower
-layers cannot import research, policy, or operations code, and registered
-rules cannot depend on historical research engines. Absolute imports are
-mandatory.
-
-The Python seams are read-only with respect to trading:
+Enforced strictly by `tests/repo/test_import_order.py`:
 
 ```text
-historical or PIT data -> Python research -> Rust strategy_contract -> report
-public forward capture -> immutable research archive
-Rust heartbeat/trades  -> Python liveness and notifications
-operator request       -> commit-bound helper -> Rust control spool
+Rank 1: core/
+Rank 2: marketdata/
+Rank 3: data/
+Rank 4: rules/
+Rank 5: research/
+Rank 6: policy/
+Rank 7: ops/
+Rank 8: cli/
 ```
+* **Strict Rule**: A lower layer may **never import from a higher layer**. Registered rules cannot depend on research engines. Absolute imports are mandatory.
 
-The live Rust flow is documented in
-[`docs/architecture.md`](../docs/architecture.md).
+---
 
-## Entrypoints
+## 3. Data Flow & Read-Only Seams
 
-`python -m liquidity_migration` exposes research and data work. Deployed Python
-units are observers, notifications, public forward capture/upload, backup,
-Telegram transport, and research-only jobs. Live signal acquisition,
-directional config rendering, reduction, account control, and execution run in
-the `signal-worker` and `engine` Rust binaries through the trusted launcher. See
-[`scripts/README.md`](../scripts/README.md) and
-[`deploy/systemd/README.md`](../deploy/systemd/README.md).
+```text
+Historical Data ────────> Python Research ───> Rust strategy_contract ───> Evidence Report
+Public Tape ────────────> Immutable zstd archive (Google Drive)
+Engine WAL / Trades ────> Python Liveness & Telegram Notifier
+Operator Telegram ──────> Sudo Helper ───────> Engine Control Spool
+```

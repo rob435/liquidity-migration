@@ -151,6 +151,22 @@ def test_top_turnover_follows_the_ticker_live_and_leaves_only_below_the_wider_ra
     assert recorder.resolve_tiers(BASE_NS + 4)["core"] == ["AUSDT", "CUSDT", "DUSDT"]
 
 
+def test_a_live_tier_without_an_instrument_table_still_honours_its_quote(tmp_path: Path) -> None:
+    recorder = build(tmp_path, Tier("busy", (Feed("trades"),), Universe("top_turnover", top=5, quote="USDT")))
+    # Cold start: no instrument table has landed, so the ticker stream is the only
+    # universe there is, and it carries every symbol the venue streams -- other
+    # quotes and the venue's own non-perpetual naming included.
+    for symbol, turnover in (
+        ("BTCUSDT", 900.0),
+        ("WLDUSDC", 800.0),
+        ("ADAUSD_PERP", 700.0),
+        ("ETHUSDT", 600.0),
+    ):
+        recorder.live.observe(symbol, {"turnover_24h": turnover}, BASE_NS)
+
+    assert recorder.resolve_tiers(BASE_NS + 1)["busy"] == ["BTCUSDT", "ETHUSDT"]
+
+
 def test_an_exclude_tiers_universe_drops_the_names_an_earlier_tier_holds(tmp_path: Path) -> None:
     recorder = build(
         tmp_path,

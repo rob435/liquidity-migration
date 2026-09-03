@@ -1,274 +1,122 @@
-# Architecture
+# System Architecture
 
-The live trading path is Rust. Each venue account has one engine process, one
-credential-free public-signal worker, one write-ahead log (WAL), and one
-account-writer lease. Python is for research, evidence, notifications, and
-deployment tooling. It has no directional live-decision or order path.
+System topology, execution boundaries, inter-process communication, and durability invariants for the liquidity-migration trading platform.
 
-## Runtime flow
+---
+
+## 1. Process Topology & Boundaries
+
+The live trading platform runs natively in Rust. Python is restricted to offline research, backtesting, deployment orchestration, and Telegram notifications.
+
+| Process / Component | Language | Authority | Credentials | State Root | Systemd Unit |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Trading Engine** (`engine`) | Rust | Sole order authority, WAL, risk kernel, position attribution | Venue API keys (`0600`) | `/var/lib/liquidity-migration-engine[-mainnet]` | `liquidity-migration-engine[-mainnet].service` |
+| **Signal Worker** (`signal-worker`) | Rust | Public market ingestion, feature calculation, observation streaming | None (public data only) | `/var/lib/liquidity-migration-signal-worker-{demo,mainnet}` | `liquidity-migration-signal-worker-{demo,mainnet}.service` |
+| **Market Tape** (`market-tape`) | Rust / Py | Raw tick/book capture, zstd segment compression, manifest logging | None (public WebSocket) | `/var/lib/liquidity-migration/forward-market` | `liquidity-migration-forward-capture[-binance].service` |
+| **Observer / Notifier** | Python | Read-only trade logs, Telegram notifications, heartbeat monitoring | Telegram Bot Token | None (ephemeral) | `liquidity-migration-trade-notify.service` |
+
+### Realm Isolation (Demo vs Mainnet)
+Demo and Mainnet realms are strictly segregated across all resources:
+* **No Fallback**: Neither realm can access, inherit, or fall back to the other's state, sockets, or credentials.
+* **Leases**: Each engine acquires an exclusive single-writer lockfile: `/run/lock/liquidity-migration/bybit-<realm>-user-<uid>.lock`.
+
+---
+
+## 2. Inter-Process Communication (IPC)
+
+The signal worker delivers observations to the engine as immutable spool rows, and rings a Unix domain socket (`AF_UNIX`) so the engine need not wait for its next spool poll.
+
+| Property | Path | Format | Permissions | Ownership |
+| :--- | :--- | :--- | :--- | :--- |
+| **Spool row** | `/var/lib/liquidity-migration/signals/<realm>/<sequence:020>-<content_sha256>.json` | One `SignalObservation` JSON envelope, renamed into place after `fsync` | `0770` dir | `liquidity-signal-worker:liquidity-migration` |
+| **Demo doorbell** | `/var/lib/liquidity-migration/signals/demo/stream.sock` | `[u32 len_le][the row's bytes]` | `0770` | `liquidity-engine-demo:liquidity-migration` |
+| **Mainnet doorbell** | `/var/lib/liquidity-migration/signals/mainnet/stream.sock` | `[u32 len_le][the row's bytes]` | `0770` | `liquidity-engine-mainnet:liquidity-migration` |
+
+### Signal Delivery Mechanics
+
+| Step | Who | Does |
+| :--- | :--- | :--- |
+| 1 | Worker | Writes the row atomically (temp file, `fsync`, rename, directory `fsync`). The row is the delivery. |
+| 2 | Worker | Sends the same bytes as one frame down `stream.sock`, one `write`, 200 ms timeout. Best effort: a failed frame changes nothing. |
+| 3 | Engine | Reads frames with resumable state, so a frame split across polls of the core's `select!` is still one frame. A client that disconnects mid-frame costs only that frame. |
+| 4 | Engine | On a frame, scans the spool: rows with a lower sequence were written before it and go first; the frame waits. Sequences are per source (`<source>.long`, `<source>.carry`). |
+| 5 | Engine | Retires a delivered row on the next poll, after the WAL barrier, whichever path it arrived by. The WAL cursor drops a duplicate. |
+| 6 | Engine (down) | Nothing is lost: rows accumulate; boot drains them in order before the socket is read. |
+
+* **Must**: every observation exist as a row before any frame names it.
+* **Must never**: a read on the socket hold partial-frame state on the future's stack; the core drops that future on every market event.
+* A sequence gap (`signal source … has sequence gap`) means a row was deleted from the spool by something other than the engine. It stops the engine. Recovery: [docs/operations.md §8](operations.md#8-incident-recovery-matrix).
+
+---
+
+## 3. Runtime Data Flow
 
 ```text
-Bybit and Binance public data
-        |
-        v
-Rust signal worker ---- atomic immutable observation ----> signal spool
-                                                            |
-                                                            v
-venue private feeds ---> Rust engine WAL ---> native reducer ---> risk ---> order
-                              |                   |
-                              |                   +--> CARRY event --> Exodus
-                              v
-                    heartbeat and trade log
-                              |
-                              +--> liveness, notifier, operator controls
+Public Market Data (Bybit & Binance WS / REST)
+       |
+       v
+Rust Signal Worker
+  ├── Hourly Klines & Tickers
+  ├── Settled Funding & Whale Flow
+  └── Universe Selection (Top 30/120 Turnover)
+       |
+       v (AF_UNIX streaming socket: stream.sock)
+Rust Execution Engine
+  ├── 1. Append observation to checksummed WAL (Durable Barrier)
+  ├── 2. Pure Strategy Reducer Step (LONG, CARRY, EXODUS, MAKER)
+  ├── 3. Risk Kernel Admission (Margin, Gross Cap, Quote Freshness)
+  └── 4. Venue Order Execution (Bybit Private WebSocket)
+       |
+       +---> Engine WAL / Trade Log (trades.jsonl)
+       +---> Heartbeat (heartbeat.json)
 ```
 
-The demo and mainnet realms are separate throughout: config, worker state,
-signal spool, control spool, engine state, WAL, heartbeat, trade log,
-credentials, account lease, and systemd unit. A realm cannot fall back to the
-other realm's path or credential family.
+---
 
-[`deploy/fleet_manifest.tsv`](../deploy/fleet_manifest.tsv) is the unit
-inventory. It declares lifecycle order, activation policy, dependencies,
-health evidence, and runtime artifacts. Tests require the systemd source tree
-to match that inventory exactly.
+## 4. Strategy Sleeve Registry
 
-## Public-signal worker
+The engine hosts four dedicated native strategy sleeves (`engine/engine-strategies/src/`):
 
-`engine/signal-worker` gathers the public inputs needed by LONG and CARRY. It
-has no private venue credential and cannot submit, cancel, amend, or inspect an
-account order.
+| Sleeve Name | Strategy ID | Trigger / Cadence | Core Mandate | Primary State Checkpoint |
+| :--- | :--- | :--- | :--- | :--- |
+| **`long_native`** | `0` | Hourly feature batch / LLM entry events | Momentum breakouts on top turnover USDT perps | `long-book-state-v2` |
+| **`carry_native`** | `1` | Daily score at decision phase (00:00 UTC) | Captures extreme negative funding crowd fees | `carry-sizing-anchors-v1-early-exits-v1-target-book-v1` |
+| **`exodus_native`** | `2` | Pre-settlement CARRY events | Short entry, retry, and cover for distressed pairs | `exodus-state-v1-v4-event-tape-v1-identity-v2` |
+| **`quoter` (MAKER)** | `3` | Real-time level-50 book & trade ticks | Two-sided liquidity provision around fair mid | Quoter checkpoint |
 
-Its machine inputs are:
+---
 
-- the realm signal config;
-- the registered LONG rule;
-- the registered CARRY rule;
-- the installed operational profile;
-- the engine config;
-- the LLM entry gate's candidates file, read every minute.
+## 5. Durability & Ordering Invariants
 
-The worker normalizes inputs, computes the registered features, and publishes
-immutable sequence-numbered observations. Frequent inputs enter an fsynced,
-size- and count-bounded JSONL journal. Each entry carries a strict schema,
-contiguous source sequence, and the exact output bytes it produced. At a hard
-limit or the one-hour checkpoint-age boundary, the worker streams its state
-through a pending atomic checkpoint. Restart finishes an interrupted
-publication, replays later journal entries, and requires the regenerated output
-bytes to match exactly.
+1. **WAL Barrier Precedes Wire**: An order request is written and synced to the WAL *before* the order bytes leave the network socket. A process crash can never forget an in-flight order.
+2. **Event Sourcing Sequence**:
+   - `Observation` appended to WAL $\to$ Reducer executes $\to$ Strategy emits target state / order request.
+   - Cross-sleeve events (e.g. CARRY $\to$ Exodus) are durable in WAL before the receiving sleeve consumes them.
+3. **Pure Reducer Separation**: Reducers have zero I/O, network, credential, or wall-clock access. All external state is supplied by the engine plug layer.
+4. **Idempotent Recovery**: Duplicate observations, fills, or operator commands are deduplicated by stable UUID / sequence ID.
 
-The checkpoint owns the random 128-bit source generation used by LONG and
-CARRY. Restart and ordinary checkpoint compaction preserve that generation and
-its output sequences. Only initializing a genuinely new state root creates a
-new generation at sequence one. The engine removes an observation only after
-its exact bytes are durable in the WAL.
+---
 
-One persistent Bybit public WebSocket actor owns ticker deltas and confirmed
-hourly candles. Each socket is a source epoch. Subscription replies are matched
-to the exact request. Forty-five seconds without an accepted market event opens
-a gap; acknowledgements and pongs do not reset that clock or the retry delay. A
-transient refusal, timeout, idle stream, or disconnect reconnects forever with
-capped backoff. A permanently bad topic is narrowed to the individual topic and
-quarantined; accepted topics remain live, and a one-minute timer re-probes the
-topic on the same socket. Bybit's request-wide unsupported-operation/category
-response is surfaced as a global fault and is never split into topic
-quarantines.
+## 6. Operator Controls & Safety Stops
 
-A reconnect clears transient ticker state. REST candle repair closes the gap,
-and REST ticker snapshots can fill missing or stale fields without overwriting
-WebSocket fields received after the REST request began. Each ticker field keeps
-its own receipt clock, so a delta cannot refresh an unchanged field.
+Operator commands are durable engine events submitted through the control spool (`/var/lib/liquidity-migration/control/<realm>/`):
 
-Instrument, funding, candle-repair, ticker-fallback, and optional Binance whale
-work run independently but share one process-wide HTTP request bound. Cold
-candle acquisition commits profile-sized chunks rather than retaining all raw
-results. Each history producer holds one bounded job and waits for its commit
-acknowledgement before fetching another. Page length, timestamp grid, requested
-range, unique-row count, and immutable history are checked before durable
-mutation. A venue or normalization fault pauses only that lane and opens repair
-where needed. A sequence, state, spool, serialization, or disk fault remains a
-process error; it is never recast as ordinary source degradation.
-responses. The worker derives the tradable universe on its hourly instrument
-cadence from the realm venue's instrument list and the public ticker page, with
-rank hysteresis so a name at the edge does not flap; the LONG and CARRY
-eligible sets are that refresh's populations, and a changed membership is
-recorded as a universe snapshot in the input journal. The live WebSocket
-follows both the top-of-book quote and ticker for their current trading members
-plus BTC, ETH, and the registered regime symbol.
-The engine execution feed also keeps a separate clock for each L1 quote topic.
-A promised L1 snapshot that stays silent for 45 seconds is re-subscribed on the
-live socket without interrupting healthy topics.
+| Action | Entry Allowed | Exit Allowed | Signal Worker State | Reducer Behavior |
+| :--- | :--- | :--- | :--- | :--- |
+| **Pause** | **No** | Yes | Active | Sets `entry_permission=false`. Cancels working openings. Existing positions hold or exit normally. |
+| **Resume** | **Yes** | Yes | Active | Restores entry permission (only if committed config allows entries). |
+| **Flatten** | **No** | **Forced** | Active | Cancels all working orders. Emits reduction-only market/limit exits until attributed exposure is zero. |
+| **Disarm** | **No** | No orders | Stopped | Sets `REAL_MONEY=false` in `/etc/liquidity-migration/bybit-mainnet.env` and stops engine. |
 
-The signal spool has a total bound and separate `current`, `lifecycle`,
-`catchup`, and `other` quotas. Market snapshots, readiness, LONG features, and
-CARRY features coalesce while an older output of the same kind waits for the
-engine. After that file drains, the next eligible source wake republishes the
-latest state. Funding lifecycle rows and CARRY scorer catch-up remain ordered,
-non-replaceable records. One class reaching its quota does not stop unrelated
-classes unless the total spool limit is reached.
+---
 
-The heartbeat binds the worker to its realm and exact inputs and reports source
-generation, input and output sequences, the current LONG and CARRY horizons,
-CARRY scorer catch-up, independent LONG and CARRY cycle completions, REST
-fallback, WebSocket epochs and topic coverage, queue bounds, and spool pressure.
-During restart it stays `starting` until both sleeve cycles complete or the
-three-cadence startup window expires. `ready` describes current WebSocket
-transport health. A degraded transport can still produce decisions through
-fresh REST fallback; the separate sleeve clocks prove whether it actually does.
+## 7. Trade Diagnostics & Markouts
 
-## Native directional reducers
+Every order fill is attributed to its originating strategy and evaluated against microstructural anchors:
 
-The engine records a signal observation before waking a strategy. Each
-observation carries the universe identity it was built under, and an
-observation may ask the engine to add market subscriptions for its accepted
-symbols; the engine persists those admissions in the WAL and never removes a
-held name's subscription when the universe moves on.
-
-The three directional sleeves have typed pure reducers under
-`engine/engine-strategies/src/native_*`:
-
-- `long_native` owns LONG signal interpretation, sizing, admission, entry,
-  stop decay, cooldown, and time exit, for both of its triggers: the hourly
-  feature batch and the LLM entry gate's judged events.
-- `carry_native` owns the daily score, sizing anchors, ordinary and
-  pre-settlement exits, drop exits, admission, resize boundaries, and current
-  target state.
-- `exodus_native` consumes only typed durable CARRY pre-settlement events and
-  owns short entry, retry, cover, and consumed-event state.
-
-The plug layer supplies facts: durable observation, account view, attributed
-positions, owned orders, instrument rules, and clock. The reducer returns the
-next checkpoint, cross-sleeve events, signal receipt, and order effects. It has
-no file, network, credential, or clock access.
-
-An account view whose private-stream observation clock is zero is explicitly
-invalid even if its last equity and margin numbers are finite. It cannot size or
-grow a position. A durable signal, selection, or handoff timestamp ahead of the
-current wall clock also cannot reopen or grow risk after a clock rollback; the
-plug schedules the next wake at that timestamp. Both cases still allow exits,
-reduction-only resizes, stop repair, and checkpoint progress.
-
-CARRY keeps its one-minute admission selection in the checkpoint. A new symbol
-joins that set only after the shared target planner has a valid price,
-instrument rule, entry window, quantized quantity, and venue minimum and can
-therefore emit an `Enter` step. Missing facts preserve the desired target for a
-later retry without consuming the limited slots.
-
-A decision fingerprint covers the rule and the feature contract that can
-change a decision. Operational cadence, retry timing, and an operator entry
-permission are not decision physics. Restore accepts only the exact checkpoint
-schema, fingerprint, and strictly validated payload.
-
-## Ordered durability
-
-State and action ordering is part of the contract:
-
-1. The engine appends the input observation and crosses a WAL barrier.
-2. The reducer runs once from that input and its prior checkpoint.
-3. A CARRY handoff event is appended before the CARRY checkpoint that records
-   it as fired.
-4. The destination can consume an event only after its next state is durable.
-5. Opening orders reach the venue only after their WAL records cross the order
-   barrier.
-
-Restart rebuilds strategy names, signal receipts, checkpoints, unconsumed
-events, runtime controls, attributed positions, covers, and working orders from
-the WAL, then wakes each reducer once to restore its timers and outstanding
-work. Segment rotation restates the same durable state. A duplicate input,
-event, fill, or control request is identified by its stable identity and is
-not applied twice. When a checkpoint already contains an event that remains
-pending, the destination repeats only the acknowledgement.
-
-## Account and risk authority
-
-Only the engine receives private account credentials. It owns authenticated
-feeds and REST, the venue/account identity check, account-writer lease, order
-registry, fill attribution, reconciliation, leverage, stops, and risk
-admission.
-
-`engine-risk` applies the installed account-wide capital limits, margin and
-gross ceilings, stop-loss charge, instrument rules, quote freshness, account
-view freshness, pending exposure, and the rolling-loss trip: once the engine's
-own closed trades have lost the profile's share of the capital reference inside
-24 hours, entries wait until those trades age out. A limit can block new or
-growing risk; it cannot block a genuine reduction. The venue account is the
-fact about quantity. The WAL is the fact about which strategy opened that
-quantity, and a close the venue itself started is charged to the sleeve whose
-claim it reduced. Unknown or contradictory attribution stops new exposure.
-
-## Operator controls
-
-Pause and flatten are durable engine commands, not process controls.
-
-- Entry permission `false` blocks entries and growing resizes for one sleeve.
-  Signals, checkpoints, settlement clocks, cancels, and exits continue.
-- Resume can restore permission only when the committed strategy config also
-  enables entries.
-- Flatten requires entries disabled. The reducer persists the request, cancels
-  owned openings, emits reduction-only exits, and consumes the request only
-  after venue position, attributed cover, and owned opening work are flat.
-
-The Telegram helper is a commit-bound root boundary that submits these commands
-through the control spool. The signal worker stays running during a pause or
-flatten. Engine heartbeats report effective entry permissions and pending
-flatten requests, so an operator waits for reducer completion rather than for
-mere command-file acceptance.
-
-## Stopped state takeover
-
-Deployment builds and installs the Rust release before rendering the
-engine configs. `engine render-native-config` derives the exact LONG, CARRY,
-Exodus, and mainnet maker TOML from registered JSON and the installed
-operational profile. The installed file is atomically replaced and checked
-against a second Rust render.
-
-With all realm units stopped, the takeover command holds both the WAL lock and
-the authenticated account lease. It verifies the expected account ID and exact
-strategy order, translates each complete source bundle through the selected
-native strategy's strict codec, and appends canonical checkpoints and pending
-events. An exact retry is a no-op. A different source, partial bundle,
-different checkpoint, wrong account, corrupt payload, or mixed strategy order
-is refused.
-
-The load-bearing source formats are:
-
-| Sleeve | Format | Named sources |
-| --- | --- | --- |
-| LONG | `long-book-state-v2` | `state` |
-| CARRY | `carry-sizing-anchors-v1-early-exits-v1-target-book-v1` | `early_exits`, `sizing_anchors`, `target_book` |
-| Exodus | `exodus-state-v1-v4-event-tape-v1-identity-v2` | `carry_events`, `identity`, `legacy_paths`, `state` |
-
-The importer treats only an absent CARRY early-exit map and an absent CARRY
-pre-settlement event tape as canonical empty state. All other sources must be
-present, and a present malformed source is refused.
-
-A truly empty account generation initializes canonical empty checkpoints. A
-nonempty WAL must either verify as a complete current native generation or
-provide the complete takeover bundle.
-
-## Research and replay
-
-Research shapes and grades rules in Python, but decision replay crosses the
-same Rust reducer through the persistent `strategy_contract` JSONL adapter.
-LONG, CARRY, and Exodus fixtures compare exact discrete effects, event IDs,
-checkpoint bytes, and target decisions. The maker research adapter streams
-normalized events through the Rust quoter reducer. These are refactor and
-decision-parity fences, not fill or profit evidence.
-
-The standard CARRY v7 curve sends the full backward-only daily feature frame
-to Rust; Rust owns top-N selection, hysteresis, weights, and lifecycle.
-
-[`strategy_template.md`](strategy_template.md) defines the module boundary,
-durability order, restore behavior, replay adapter, and tests required for any
-additional native strategy.
-
-Historical fills remain models. Live execution evidence comes from the engine
-WAL, authenticated venue state, and trade log. Evidence grading is defined in
-[`research/governance.md`](research/governance.md).
-
-## Other strategies
-
-`maker_canary` keeps the fourth durable strategy slot (strategy ID 3) in mainnet
-and is disabled. Its
-signal decay, fair price, inventory protection, and quote plan are one Rust
-reducer, and its registered JSON is rendered to TOML by Rust.
+| Metric | Code Symbol | Definition |
+| :--- | :--- | :--- |
+| **Arrival Midpoint** | `M0` / `arrival_mid` | Midpoint of the order book at the exact millisecond the order left the socket. |
+| **Fill Price** | `fill_px` | Volume-weighted execution price of the fill. |
+| **Slippage** | `slippage_bp` | Realized execution deviation: $\text{Slippage} = \frac{\text{Fill} - M_0}{M_0} \times 10{,}000$ (basis points, signed by trade direction). |
+| **Post-Trade Markouts** | `markout_<1s|15s|60s|300s>` | Book midpoint at fixed intervals post-fill: measures adverse selection and trade toxicity. |

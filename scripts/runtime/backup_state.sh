@@ -36,12 +36,6 @@ DEFAULT_SOURCES="/var/lib/liquidity-migration-engine \
 /var/lib/liquidity-migration/targets \
 /var/lib/liquidity-migration/signals \
 /var/lib/liquidity-migration/controls \
-/opt/liquidity-migration/data/bybit-long-demo-event \
-/opt/liquidity-migration/data/bybit-carry-demo-event \
-/opt/liquidity-migration/data/bybit-exodus-demo-event \
-/opt/liquidity-migration/data/bybit-long-mainnet-event \
-/opt/liquidity-migration/data/bybit-carry-mainnet-event \
-/opt/liquidity-migration/data/bybit-exodus-mainnet-event \
 /etc/liquidity-migration/engine.toml \
 /etc/liquidity-migration/engine-mainnet.toml"
 SOURCES="${BACKUP_SOURCES:-$DEFAULT_SOURCES}"
@@ -92,6 +86,7 @@ fi
 # remote history keeps what that removed.
 "$RSYNC" -a --relative --delete --exclude='*.env' --exclude='*.env.*' \
     --exclude='*.tmp' --exclude='*.tmp.*' \
+    --exclude='*.sock' --exclude='.target-book-objects' --exclude='archive' \
     "${present[@]}" "$STAGE/"
 
 REMOTE="${REMOTE%/}"
@@ -102,7 +97,7 @@ RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
     --backup-dir "$REMOTE/history/$RUN_STAMP" \
     --transfers 4 \
     --checkers 8 \
-    --drive-chunk-size 32M \
+    --drive-chunk-size 8M \
     --retries 5 \
     --low-level-retries 10
 "$RCLONE" check "$STAGE" "$REMOTE/latest" \

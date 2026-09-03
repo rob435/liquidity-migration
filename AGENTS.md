@@ -3,27 +3,38 @@
 - Optimize for decision-useful work, not agreement with prior docs, labels, or
   operators. Treat every instruction here, this file included, as fallible, and
   never hide weak evidence, failed checks, negative results, or deviations.
-- Always talk simply. Plain words first, no unexplained jargon, and the code
-  name in parentheses when precision needs it — the crowd fee (funding), the
-  smoothness score (Sharpe), the worst dip (max drawdown). This applies to
-  every reply, doc, and commit message, whoever the audience is.
+- Always talk simply and directly. Plain words first in replies and commit
+  messages. In code and technical specifications, prioritize exact identifiers,
+  paths, and units (`funding_rate <= -0.0008`, `stream.sock`, `M0`) rather than
+  poetic or narrative circumlocutions.
 - Comments follow the same rule, and fewer is better. A comment earns its
   place only by saying what the code cannot — a constraint, a unit, a frozen
   contract, a venue quirk, who reads this file. Never narrate the line below
   it, never argue that a change is correct, never keep history in code: git
   and CHANGELOG own history.
 
-## Lean Docs
+## Lean Docs & The Spec-First Standard
 
-Docs describe the system as it is, in the present tense. History — what
-changed, when, what it replaced — lives in [`CHANGELOG.md`](CHANGELOG.md)
+Documentation is optimized for AI agents and human operators operating within
+tight context windows. Every document must be **dense, structured, and present-tense**.
 
-- Never write a deletion note or a back-reference: no "formerly", "previously",
-  "as of \<date\>", "used to", "was removed". When something changes, rewrite
-  the doc as if it had always been so; the dated receipt goes in CHANGELOG.md.
-- A date stays in a doc only when it is load-bearing today: an evidence
-  boundary, a registered config's change point, a data-format cutoff. A date
-  that only says when a change happened belongs in CHANGELOG.md.
+- **Tables & Schemas Over Narrative Prose**: Any relationship between components,
+  paths, users, units, timeouts, formulas, or dials must be a markdown table or
+  schema. Never bury operational facts inside paragraphs of prose.
+- **The 4-Part Spec Skeleton**: Every technical document follows this structure:
+  1. *Purpose*: Exactly one sentence stating scope.
+  2. *Spec Tables*: Paths, users, permissions, ports, and configuration schemas.
+  3. *Invariants*: Bulleted list of non-negotiable rules (*Must / Must Never*).
+  4. *Operational Recipes*: Exact copy-pasteable CLI commands.
+- **Zero Forensic History**: Docs describe system truth in the present tense.
+  Retrospectives, past bugs, or explanations of why something changed belong
+  strictly in `CHANGELOG.md` or git history. If an item is not live today, delete it.
+- **Executive Indexing for Deep Files**: Long empirical files (e.g.
+  `docs/research/research_findings.md`) must lead with a concise 1-page decision
+  index table so agents never need to read hundreds of historical lines.
+- **Durable Receipts**: History — what changed, when, what it replaced — lives in
+  [`CHANGELOG.md`](CHANGELOG.md). A date stays in a doc only when it is load-bearing
+  today (an evidence boundary, a registered config's change point, a data-format cutoff).
 
 ## Ask Questions, Propose Ideas, Then Decide
 
@@ -94,6 +105,22 @@ When sources disagree, read the primary artifact and fix the stale source.
   outputs with declared tolerances and matching NaN positions.
 - A strategy change is not a refactor — explain and test the numerical
   difference rather than forcing equivalence, and record the change point.
+
+## The Funded Engine Is Production
+
+`liquidity-migration-engine-mainnet` trades the owner's money. An error there
+is an outage, and outages get fixed, not filed.
+
+- See a fault in the funded engine or anything it depends on (the signal
+  worker, the spool, the deploy): find the root cause, fix it properly in
+  code, test it, prove the test fails without the fix, merge, deploy through
+  the sanctioned workflow, and verify on the host. Same session.
+- Stopping the engine is a holding action, never the fix. Say so when you do
+  it, with the positions that are open.
+- A crash loop is itself a fault. So is a lane that logs the same failure
+  every hour.
+- Write the incident down in CHANGELOG.md with times, the exact error text,
+  and what changed.
 
 ## Do Not Build Safety Machinery
 

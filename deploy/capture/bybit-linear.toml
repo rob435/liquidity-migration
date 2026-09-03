@@ -16,8 +16,10 @@ market = "linear"
 
 [storage]
 segment_max_mb = 64
+# 30 days is the ceiling; max_disk_gb is what binds on this host, and the two
+# recorders' caps must sum under the filesystem or they race min_free_disk_gb.
 retention_days = 30
-max_disk_gb = 60
+max_disk_gb = 40
 min_free_disk_gb = 25
 status_interval_seconds = 30
 
