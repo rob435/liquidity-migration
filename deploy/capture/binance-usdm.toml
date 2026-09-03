@@ -59,7 +59,7 @@ universe = { kind = "top_turnover", top = 15, leave_top = 22, quote = "USDT" }
 [[tier]]
 name = "crowded"
 feeds = ["trades"]
-universe = { kind = "funding_below", threshold_bp = 5, sticky_hours = 48, quote = "USDT", exclude_tiers = ["core"] }
+universe = { kind = "funding_below", threshold_bp = 3, sticky_hours = 72, quote = "USDT", exclude_tiers = ["core"] }
 
 [[tier]]
 name = "overheated"

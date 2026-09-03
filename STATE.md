@@ -11,8 +11,8 @@ Verified against the running host on 2026-09-03 19:12 UTC:
 | Property | Value | Description |
 | :--- | :--- | :--- |
 | **Host** | `ip-208-84-103-4.my-advin.com` (`208.84.103.4`) | 4 vCPU, 8 GB RAM, 118 GB disk (44% used, 64 GB free). |
-| **Deployed Commit** | `f06a89f4` (the capture earns its bandwidth: no Binance book, hourly book anchoring, the venue guard on replay) | Deployed 20:28 UTC 2026-09-03 from the CI artifact; both engines and both workers on fresh heartbeats, real money still armed. Both recorders restarted: Bybit sheds nothing against its 1800 GB allowance, Binance writes no `orderbook_*` row, and every one of the 747 listed USDT perpetuals has an open segment. |
-| **Rollback Target** | `ce252af88cf337d73f90a22433ac86d2c51f6b03` | Stored in `/opt/liquidity-migration-engine/previous-commit`. |
+| **Deployed Commit** | `1e745078` (six-minute gate; realm handover gated on what the realm runs from) | Deployed 21:46 UTC 2026-09-03 in 26 s: `mainnet-ok result=unchanged-left-running` — the funded engine was not restarted. The recorders run `7625123f`'s capture config: crypto-only domain (517 names), `core` = LONG's rank band, `crowded` = CARRY's zone, Bybit allowance 2,400 GB/month. |
+| **Rollback Target** | `cc94281681b8dbf296890b224285de4787d9ba8b` | Stored in `/opt/liquidity-migration-engine/previous-commit`. |
 | **Funded Status** | `real-money armed` | `REAL_MONEY=true`. The engine is running with healthy heartbeats. |
 | **Signal IPC** | spool row + `stream.sock` doorbell | Every observation is a spool row first; the socket frame only saves the engine its next poll. Worker generations were renewed on both realms on 2026-09-03 after the desync; the old `g805c44f0…` (mainnet) and `gc4d0071f…` (demo) cursors stay in the WAL. |
 

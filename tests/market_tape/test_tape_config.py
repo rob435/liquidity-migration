@@ -327,3 +327,21 @@ def test_the_other_live_kinds_parse_with_their_own_dials() -> None:
 def test_history_hours_is_the_longest_window_any_tier_looks_over() -> None:
     assert parse(MINIMAL).history_hours == 0.0
     assert parse(_with_universe('{ kind = "volume_burst", ratio = 3, window_hours = 2 }')).history_hours == 2.0
+
+
+def test_a_ranked_tier_takes_an_optional_time_floor_and_defaults_to_none() -> None:
+    from pathlib import Path
+
+    from market_tape.config import Universe, _universe
+
+    here = Path(".")
+    bare = _universe({"kind": "top_turnover", "top": 30, "quote": "USDT"}, tier="core", base_dir=here)
+    assert bare.sticky_hours == 0.0
+    floored = _universe({"kind": "top_turnover", "top": 30, "sticky_hours": 96, "quote": "USDT"}, tier="core", base_dir=here)
+    assert floored.sticky_hours == 96.0
+    by_days = _universe({"kind": "top_movers", "top": 10, "sticky_days": 2, "quote": "USDT"}, tier="movers", base_dir=here)
+    assert by_days.sticky_hours == 48.0
+    # The funding kinds keep their 48 h default, parsed or constructed directly.
+    funding = _universe({"kind": "funding_below", "threshold_bp": 3, "quote": "USDT"}, tier="crowded", base_dir=here)
+    assert funding.sticky_hours == 48.0
+    assert Universe("funding_below", threshold_bp=3.0).sticky_hours is None

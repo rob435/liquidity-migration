@@ -44,6 +44,7 @@ from typing import Any, Callable, Iterable, Mapping
 import websocket
 
 from market_tape.config import (
+    DEFAULT_STICKY_HOURS,
     RANKED_KINDS,
     BudgetSettings,
     CaptureConfig,
@@ -796,7 +797,7 @@ class Recorder:
             elif universe.kind == "listed":
                 symbols = set(listed(universe.quote))
             elif universe.kind in RANKED_KINDS:
-                symbols = self._ranked(tier, live, allowed(universe.quote))
+                symbols = self._ranked(tier, now_ns, live, allowed(universe.quote))
             else:
                 symbols = self._sticky(tier, now_ns, live, baseline, allowed(universe.quote), instruments_known=bool(instruments))
             excluded: set[str] = set()
@@ -805,7 +806,7 @@ class Recorder:
             resolved[tier.name] = sorted(symbols - excluded)
         return resolved
 
-    def _ranked(self, tier: Tier, live: Mapping[str, SymbolLive], allowed: set[str]) -> set[str]:
+    def _ranked(self, tier: Tier, now_ns: int, live: Mapping[str, SymbolLive], allowed: set[str]) -> set[str]:
         universe = tier.universe
 
         def measure(state: SymbolLive) -> float | None:
@@ -819,6 +820,18 @@ class Recorder:
         leave = max(universe.leave_top, universe.top)
         current = self.members[tier.name]
         members = {symbol for symbol, position in rank.items() if position <= universe.top or (symbol in current and position <= leave)}
+        # The time floor: a name that ranked inside `top` keeps its place for
+        # sticky_hours after the last time it did, however far it has fallen.
+        stamps = self.qualified_ns[tier.name]
+        sticky_ns = int((universe.sticky_hours or 0.0) * 3600 * 1e9)
+        if sticky_ns:
+            for symbol, position in rank.items():
+                if position <= universe.top:
+                    stamps[symbol] = now_ns
+            for symbol in list(stamps):
+                if now_ns - stamps[symbol] >= sticky_ns or symbol not in allowed:
+                    del stamps[symbol]
+            members |= set(stamps)
         self.members[tier.name] = members
         return members
 
@@ -854,7 +867,8 @@ class Recorder:
                 qualifies = self._windowed(universe, state, self.live.earlier(symbol, now_ns - window_ns), window_ns)
             if qualifies:
                 stamps[symbol] = now_ns
-        sticky_ns = int(universe.sticky_hours * 3600 * 1e9)
+        hours = DEFAULT_STICKY_HOURS if universe.sticky_hours is None else universe.sticky_hours
+        sticky_ns = int(hours * 3600 * 1e9)
         for symbol in list(stamps):
             if now_ns - stamps[symbol] >= sticky_ns or (instruments_known and symbol not in allowed):
                 del stamps[symbol]

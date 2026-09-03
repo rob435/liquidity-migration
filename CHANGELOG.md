@@ -6,6 +6,32 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — The deep tiers hold a name as long as its sleeve would: the
+  tape is shaped for exit studies first.**
+  - `1e745078` deployed 21:46 UTC in **26 s**: `mainnet-fingerprint seeded from
+    cc942816`, then `mainnet-ok result=unchanged-left-running` and the same for
+    demo and both recorders. The funded engine was not restarted; the first
+    gated deploy did what it was built for.
+  - LONG holds a name that surged into turnover rank ≤ 10 for up to 72 h, and
+    by day three a pumped name can sit at rank 300; `core` dropped it below
+    rank 160, mid-hold, with the exit decision live. Ranked tiers now take a
+    time floor: `sticky_hours` keeps a name for that long after it last ranked
+    inside `top`, whatever its rank does. `core` is 96 h — the hold plus a day
+    of tail. Off by default, so no other config changes meaning.
+  - CARRY holds from a −10 bp settled print until settled funding rises above
+    −3 bp, so a name at −4 bp for a week is a hold; `crowded` at −5 bp with
+    48 h sticky dropped it. `crowded` now observes at the sleeve's **exit**
+    line, −3 bp predicted, and holds 72 h past the last such reading: the whole
+    hold zone by definition, plus EXODUS's settlement window. Both venues.
+  - EXODUS needed nothing: its name is a CARRY hold seconds earlier, so it is
+    in `crowded` or `core` with book and prints. The hourly re-anchor coincides
+    with settlement and costs one round trip of deltas per name, on a fresh
+    snapshot; written into the data spec so no study reads the seam as a venue
+    event.
+  - `docs/data.md` now carries the table of what the tape gives each sleeve's
+    exit study — hold, deep-coverage guarantee, and the exit questions it can
+    answer — ahead of the discovery tiers, which take whatever bandwidth is left.
+
 - **2026-09-03 — Ceremony cut: a six-minute gate, and a deploy that restarts
   the funded engine only when the engine changed.**
   - `7625123f` deployed 21:3x UTC from the CI artifact; both recorders

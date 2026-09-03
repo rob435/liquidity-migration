@@ -31,9 +31,30 @@ Invariants:
 
 ### Name coverage against what the sleeves trade
 
-The tiers are keyed on the same signals the sleeves decide from, so a tradeable name is captured by construction rather than by a list: LONG's top-turnover names are `core`, CARRY's and EXODUS's negative-funding names are `crowded` (entry is $\le -10$ bp, capture starts at $-8$ bp), the maker canary is `pinned`, and every other listed crypto perpetual is `wide` on ticker and liquidations. `core` is LONG's live rank band (enter 120, leave 160), so every name the sleeve can hold has its book; `crowded` watches CARRY's signal loosened — predicted funding at $-5$ bp against the sleeve's $-10$ bp settled entry. Verified 2026-09-03 against the funded book: `NEARUSDT` and `ZECUSDT` both held, both carrying a 50-level snapshot, deltas, prints and ticker.
+The tiers are keyed on the same signals the sleeves decide from, so a tradeable name is captured by construction rather than by a list: LONG's top-turnover names are `core`, CARRY's and EXODUS's negative-funding names are `crowded` (entry is $\le -10$ bp, capture starts at $-8$ bp), the maker canary is `pinned`, and every other listed crypto perpetual is `wide` on ticker and liquidations. `core` is LONG's live rank band (enter 120, leave 160) with a 96-hour floor, so every name the sleeve can hold has its book through the hold; `crowded` watches CARRY's whole hold zone — predicted funding at $-3$ bp, the sleeve's exit line — for 72 hours past the last such reading. Verified 2026-09-03 against the funded book: `NEARUSDT` and `ZECUSDT` both held, both carrying a 50-level snapshot, deltas, prints and ticker.
 
 **Known limit.** Membership follows market state, not the position book. `core` releases a name below turnover rank 45 and `crowded` 48 hours after funding recovers, while LONG holds for about three days, so a held name that drifts out mid-hold keeps its ticker but loses its book and prints for the remainder. Nothing pins a held name: the recorder reads no engine state by design (public data only, no credentials, its own user). Widening `core`'s `leave_top` is the lever if this ever costs a study, at roughly 21 GB/month per additional name.
+
+### What the tape gives each sleeve's exit study
+
+The first purpose of the tape is exits. Every listed crypto name carries the
+ticker (price, mark, index, funding, open interest, 24h turnover) and
+liquidations at all times, so every *signal-level* exit — trailing stop, funding
+turn, OI unwind, cascade — can be studied on every name the sleeves ever held.
+The deep tiers add the book and every print, for *execution* and microstructure
+exits, and are shaped so a held name never loses them mid-hold:
+
+| Sleeve | Hold | Deep coverage guarantee | Exit questions the tape can answer |
+| :--- | :--- | :--- | :--- |
+| **LONG** | ≤ 72 h on a name that surged into turnover rank ≤ 10 | `core`: rank ≤ 120, leaves below 160, **and 96 h after it last ranked inside 120** — the pump can fade to rank 300 and the book stays | trailing stop vs. time exit; volume decay (prints); OI unwind; bid-depth thinning; funding turning positive; what the exit left on the table (ticker tail) |
+| **CARRY** | days to weeks while settled funding sits between the $-10$ bp entry and the $-3$ bp exit | `crowded`: predicted funding $\le -3$ bp — the exit line — held 72 h past the last such reading; top-100 names are in `core` anyway | funding trajectory vs. the $-3$ hysteresis; 2-day recovery; OI unwind as the crowd leaves; short-liquidation squeezes; taker buy pressure; bid depth at exit |
+| **EXODUS** | ~60–75 min: short at CARRY's pre-settlement fire, cover hard at S+60 | the name is a CARRY hold seconds earlier, so it is in `crowded` or `core` with book and prints; ticker at ~100 ms, book at 20 ms | cover at S+15/30/60/120; cover on OI stabilisation or price reversal; the settlement print itself (`fundingRate` at `nextFundingTime` roll) |
+
+The hourly book re-anchor runs in the first minutes of each hour, which is also
+when funding settles. Each re-anchored name loses one round trip of deltas and
+opens on a fresh snapshot in that window; the snapshot row marks it. For a
+60-minute EXODUS window this is immaterial, and it is recorded here so no study
+mistakes the seam for a venue event.
 
 ### Coverage of the discovery tiers
 
@@ -76,8 +97,8 @@ of rows accumulate. Check `status.json` for tier membership, not `ls`.
 | Venue | Tier | Universe Membership Criteria | Feeds Captured |
 | :--- | :--- | :--- | :--- |
 | **Bybit** | `pinned` | Maker canary list (`deploy/forward-capture-symbols.txt`) | `book:50`, `book:1`, `trades`, `ticker`, `liquidations` |
-| **Bybit** | `core` | Top 120 by 24h turnover, leaves below rank 160 — LONG's live `enter_rank`/`leave_rank` | `book:50`, `trades`, `ticker`, `liquidations` |
-| **Bybit** | `crowded` | Predicted funding $\le -5\text{ bp}$ (held 48 hours) — CARRY's entry is $-10$ bp *settled*, exit $-3$ bp | `book:50`, `trades` |
+| **Bybit** | `core` | Top 120 by 24h turnover, leaves below rank 160 — LONG's live `enter_rank`/`leave_rank` — and stays 96 h after it last ranked inside 120 | `book:50`, `trades`, `ticker`, `liquidations` |
+| **Bybit** | `crowded` | Predicted funding $\le -3\text{ bp}$ — CARRY's *exit* line, so the whole hold zone from its $-10$ bp settled entry — held 72 hours past the last such reading | `book:50`, `trades` |
 | **Bybit** | `overheated`| Predicted funding $\ge +5\text{ bp}$ (held 48 hours); no sleeve trades it, first to shed | `book:50`, `trades` |
 | **Bybit** | `surging` | 24h turnover $\ge 3\times$ baseline (held 24 hours) | `book:50`, `trades` |
 | **Bybit** | `movers` | Top 10 price gainers/losers (leaves below rank 15) | `book:50`, `trades` |
@@ -124,8 +145,8 @@ their prints — and nothing of a sleeve's own universe:
 * `core:book:50` — the book every replay and the maker sleeve run on.
 * `core:trades` — the prints a resting order fills against; without them a maker
   replay on a core name cannot fill at all.
-* `crowded:*` — CARRY's names, observed from $-5$ bp predicted so the book is
-  recording before the sleeve's $-10$ bp settled entry.
+* `crowded:*` — CARRY's names, observed from $-3$ bp predicted, the sleeve's
+  exit line, so the book is recording for the whole hold and its exit.
 * `*:ticker` — funding, open interest and price: the sensor every tier is
   resolved from, and CARRY's entry signal.
 * Anything in the `pinned` canary tier.

@@ -30,7 +30,7 @@ python -m market_tape book   SOURCE --hour 2026-09-02T22 --symbol BTCUSDT
 
 | Tier Sensor | Trigger Rule | Use Case |
 | :--- | :--- | :--- |
-| `top_turnover` | 24h turnover ranks in top $N$; leaves below rank $M$ | Core liquid universe (LONG). |
+| `top_turnover` | 24h turnover ranks in top $N$; leaves below rank $M$, and no sooner than `sticky_hours` after it last ranked inside $N$ | Core liquid universe (LONG), held through the sleeve's hold. |
 | `top_movers` | 24h price change ranks in top $N$ either way | Day's top gainers / losers. |
 | `funding_below` | Predicted funding $\le -\text{threshold\_bp}$ | Extreme negative funding (CARRY / Exodus). |
 | `funding_above` | Predicted funding $\ge +\text{threshold\_bp}$ | Overheated long crowds. |

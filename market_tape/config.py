@@ -61,9 +61,11 @@ Universes:
   `quote`; re-read with each table snapshot.
 - `top_turnover`: the `top` names by 24h turnover. A member stays until it
   falls below rank `leave_top` (default one and a half times `top`), so a name
-  on the boundary does not flap.
+  on the boundary does not flap; with `sticky_hours` it also stays at least
+  that long after it last ranked inside `top`, whatever its rank does — the
+  floor a sleeve's hold needs.
 - `top_movers`: the `top` names by the size of their 24h price change, up or
-  down, with the same `leave_top` hysteresis.
+  down, with the same `leave_top` hysteresis and optional `sticky_hours`.
 - `funding_below`: names whose funding rate is at or below `-threshold_bp`.
 - `funding_above`: names whose funding rate is at or above `threshold_bp`.
 - `turnover_surge`: names whose 24h turnover is at least `ratio` times what
@@ -171,7 +173,9 @@ class Universe:
     ratio: float = 0.0
     pct: float = 0.0
     window_hours: float = 0.0
-    sticky_hours: float = DEFAULT_STICKY_HOURS
+    #: Unset means the kind's own default: 48 h for the funding and burst kinds,
+    #: no time floor for the ranked kinds. The parser always sets it.
+    sticky_hours: float | None = None
     exclude_tiers: tuple[str, ...] = ()
 
     @property
@@ -346,7 +350,10 @@ def _universe(raw: Mapping[str, Any], *, tier: str, base_dir: Path) -> Universe:
         leave_top = int(raw.get("leave_top") or round(top * 1.5))
         if leave_top < top:
             raise ConfigError(f"tier {tier!r}: leave_top must be at least top")
-        return Universe(kind, top=top, leave_top=leave_top, quote=_quote(raw), exclude_tiers=exclude)
+        # A time floor on membership, off unless asked for: a sleeve that holds
+        # a name for days needs its book for days, whatever its rank does.
+        sticky = _sticky_hours(raw, tier=tier) if ("sticky_hours" in raw or "sticky_days" in raw) else 0.0
+        return Universe(kind, top=top, leave_top=leave_top, sticky_hours=sticky, quote=_quote(raw), exclude_tiers=exclude)
     sticky = _sticky_hours(raw, tier=tier)
     window = 0.0
     if kind in WINDOWED_KINDS:

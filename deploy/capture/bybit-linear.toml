@@ -45,8 +45,8 @@ cadence = "day"
 #   core:book:50   the book every replay and the maker sleeve run on
 #   core:trades    the prints a resting order fills against; without them a
 #                  maker replay on a core name cannot fill at all
-#   crowded:*      CARRY's names, observed from 5 bp so the book is there
-#                  before the sleeve's 10 bp settled entry
+#   crowded:*      CARRY's names, observed from 3 bp — the sleeve's exit line —
+#                  so the book is there for the whole hold and its exit
 #   *:ticker       funding, open interest and price: the sensor every tier is
 #                  resolved from and CARRY's entry signal
 # So the order below gives up `overheated` first — longs paying up, which no
@@ -67,24 +67,29 @@ feeds = ["book:50", "book:1", "trades", "ticker", "liquidations"]
 universe = { kind = "file", path = "deploy/forward-capture-symbols.txt" }
 
 # LONG's universe, as the live worker draws it: enter at turnover rank 120,
-# stay to 160 (configs/signal-worker.mainnet.json `universe.long`). Every name
-# the sleeve can hold has its book and prints recorded; the boundary carries the
-# same hysteresis so it does not flap.
+# stay to 160 (configs/signal-worker.mainnet.json `universe.long`), plus a
+# time floor the rank hysteresis cannot give. LONG enters a name that just
+# surged into the top ten and holds it up to 72 hours; by day three a pumped
+# name can sit at rank 300, and the exit decision is live the whole way down.
+# 96 hours after a name last ranked inside 120 covers the hold and a day of
+# tail after the exit, so the book and prints are there for every exit study.
 [[tier]]
 name = "core"
 feeds = ["book:50", "trades", "ticker", "liquidations"]
-universe = { kind = "top_turnover", top = 120, leave_top = 160, quote = "USDT", exclude_tiers = ["pinned"] }
+universe = { kind = "top_turnover", top = 120, leave_top = 160, sticky_hours = 96, quote = "USDT", exclude_tiers = ["pinned"] }
 
-# CARRY's observation trigger, loosened from its entry: the sleeve enters when
-# the last *settled* funding is at or below -10 bp and exits above -3 bp
-# (docs/trading_logic.md §4). This tier keys on the *predicted* rate, which
-# leads the settled one by up to a funding interval, at -5 bp — so the book is
-# recording as the crowd forms, before the sleeve can act, and stays two days
-# after funding recovers, through the sleeve's exit.
+# CARRY's whole hold zone, observed at its *exit* threshold rather than its
+# entry. The sleeve enters when the last *settled* funding is at or below -10 bp
+# and holds until it rises above -3 bp (docs/trading_logic.md §4); a name whose
+# funding sits at -4 bp for a week is a CARRY hold. This tier keys on the
+# *predicted* rate, which leads the settled one by up to a funding interval, at
+# -3 bp — so the book is recording from before the crowd is deep enough to
+# enter until after it has thinned enough to exit — and stays three days past
+# the last such reading, through the exit and EXODUS's settlement window.
 [[tier]]
 name = "crowded"
 feeds = ["book:50", "trades"]
-universe = { kind = "funding_below", threshold_bp = 5, sticky_hours = 48, quote = "USDT", exclude_tiers = ["pinned", "core"] }
+universe = { kind = "funding_below", threshold_bp = 3, sticky_hours = 72, quote = "USDT", exclude_tiers = ["pinned", "core"] }
 
 # The mirror of `crowded` at +5 bp predicted: longs paying up. No sleeve trades
 # this side, so it is the first thing the budget gives up.

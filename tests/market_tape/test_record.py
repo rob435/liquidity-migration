@@ -162,6 +162,37 @@ def test_a_stock_perpetual_enters_no_tier_however_it_ranks_or_funds(tmp_path: Pa
     assert "2 USDT perpetuals in the domain; outside it ETF=1 commodity=1 stock=1" in caplog.text
 
 
+def test_a_ranked_member_keeps_its_place_for_sticky_hours_after_it_last_ranked_inside_top(tmp_path: Path) -> None:
+    """LONG holds a name that surged into the top ten for up to three days; by
+    then it can sit at rank 300. The rank hysteresis alone drops its book
+    mid-hold; the time floor keeps it until the hold and its exit are on tape."""
+
+    recorder = build(
+        tmp_path, Tier("core", (Feed("book", "50"),), Universe("top_turnover", top=1, leave_top=2, sticky_hours=4.0, quote="USDT"))
+    )
+    names = ("AUSDT", "BUSDT", "CUSDT", "PUMPUSDT")
+    recorder.tables = {"instruments": [instrument(name) for name in names], "tickers": []}
+    for name, turnover in zip(names, (300.0, 200.0, 100.0, 9000.0)):
+        recorder.live.observe(name, {"turnover_24h": turnover}, BASE_NS)
+    assert recorder.resolve_tiers(BASE_NS + 1)["core"] == ["PUMPUSDT"]
+
+    # The pump fades to rank 4, past leave_top. Rank alone would drop it now.
+    recorder.live.observe("PUMPUSDT", {"turnover_24h": 1.0}, BASE_NS + 2)
+    assert recorder.resolve_tiers(BASE_NS + 3)["core"] == ["AUSDT", "PUMPUSDT"]
+    assert recorder.resolve_tiers(BASE_NS + 4 * HOUR_NS)["core"] == ["AUSDT", "PUMPUSDT"]
+    # Four hours after it last ranked inside the top, it goes.
+    assert recorder.resolve_tiers(BASE_NS + 1 + 4 * HOUR_NS)["core"] == ["AUSDT"]
+
+    # Without the floor the old hysteresis is unchanged: the default is off.
+    bare = build(tmp_path / "bare", Tier("core", (Feed("book", "50"),), Universe("top_turnover", top=1, leave_top=2, quote="USDT")))
+    bare.tables = recorder.tables
+    for name, turnover in zip(names, (300.0, 200.0, 100.0, 9000.0)):
+        bare.live.observe(name, {"turnover_24h": turnover}, BASE_NS)
+    bare.resolve_tiers(BASE_NS + 1)
+    bare.live.observe("PUMPUSDT", {"turnover_24h": 1.0}, BASE_NS + 2)
+    assert bare.resolve_tiers(BASE_NS + 3)["core"] == ["AUSDT"]
+
+
 def test_top_turnover_takes_the_ranked_head_of_the_listed_names(tmp_path: Path) -> None:
     recorder = build(tmp_path, Tier("busy", (Feed("trades"),), Universe("top_turnover", top=2, quote="USDT")))
     tables = {
@@ -973,8 +1004,10 @@ def test_the_shipped_host_configs_plan_every_tier(tmp_path: Path) -> None:
         assert [tier.name for tier in config.tiers][-1] == "wide"
         assert config.tier("wide").feeds == (Feed("ticker"), Feed("liquidations"))
         assert config.tier("crowded").universe.kind == "funding_below"
-        # CARRY enters at -10 bp settled; both venues observe from -5 bp predicted.
-        assert config.tier("crowded").universe.threshold_bp == 5.0
+        # CARRY holds from a -10 bp settled print until settled funding rises above
+        # -3 bp; both venues observe the whole zone from -3 bp predicted.
+        assert config.tier("crowded").universe.threshold_bp == 3.0
+        assert config.tier("crowded").universe.sticky_hours == 72.0
         for tier_name, feed in config.budget.shed:
             assert feed in {f.text for f in config.tier(tier_name).feeds}
         assert not any(name == "wide" and feed == "ticker" for name, feed in config.budget.shed[:-1])
@@ -985,6 +1018,7 @@ def test_the_shipped_host_configs_plan_every_tier(tmp_path: Path) -> None:
         bybit = parse_config(tomllib.load(handle), base_dir=root)
     core = bybit.tier("core").universe
     assert (core.kind, core.top, core.leave_top) == ("top_turnover", 120, 160), "core is LONG's live enter/leave rank"
+    assert core.sticky_hours == 96.0, "LONG holds up to 72 h; the book stays through the hold and a day of tail"
     shed = set(bybit.budget.shed)
     assert not shed & {("core", "book:50"), ("core", "trades"), ("crowded", "book:50"), ("crowded", "trades")}
     assert not any(feed == "ticker" for _, feed in shed)
