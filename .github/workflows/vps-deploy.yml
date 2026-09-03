@@ -65,7 +65,7 @@ jobs:
   rust:
     if: github.event_name != 'workflow_dispatch' || inputs.mode != 'disarm-mainnet'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -83,10 +83,11 @@ jobs:
       - name: Clippy (locked, warnings denied)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
         working-directory: engine
-      # Optimized, not a debug-only build: `ci-test` is `release` without the
-      # link-time pass. See engine/Cargo.toml for why the tests do not pay it.
-      - name: Optimized tests (locked)
-        run: cargo test --workspace --all-targets --profile ci-test --locked
+      # The same debug build clippy just produced: the suite runs in seconds,
+      # and this is the profile scripts/dev.sh check tests with locally. The
+      # optimized build is tested in the release job, off the deploy path.
+      - name: Tests (locked)
+        run: cargo test --workspace --all-targets --locked
         working-directory: engine
 
   # The deployed binaries, built beside `rust` rather than after it: this is the
@@ -124,14 +125,14 @@ jobs:
           path: ${{ runner.temp }}/engine-binaries-${{ github.sha }}.tar.gz
           retention-days: 14
 
-  # Soak test and benchmark. Runs after the build/test gate but independently
-  # from the VPS deploy path so hotfix deployments are not blocked.
+  # The optimized build's tests, soak and benchmark. After the gate and off the
+  # deploy path: a red here is investigated, it does not hold a deploy.
   rust-soak-bench:
-    name: Engine soak and benchmarks
+    name: Engine release tests, soak and benchmarks
     if: github.event_name != 'workflow_dispatch' || inputs.mode != 'disarm-mainnet'
     needs: [rust]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -140,6 +141,9 @@ jobs:
         uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
         with:
           workspaces: "engine -> target"
+      - name: Release tests (locked)
+        run: cargo test --workspace --all-targets --release --locked
+        working-directory: engine
       - name: Account-state soak (bounded, CPU and heap only)
         run: >-
           cargo run --release --locked -p engine-core

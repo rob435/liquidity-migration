@@ -192,14 +192,57 @@ def test_a_realm_that_does_not_come_up_rolls_back_to_the_last_finished_deploy() 
     remote = _remote_script()
     deploy_body = remote[remote.index("deploy_mode()") : remote.index("rollback_mode()")]
     assert "seed_generation_record" in deploy_body
-    assert "if ! (start_realm demo); then\n        rollback_after_failure demo" in deploy_body
-    assert "if ! (start_realm mainnet); then\n            rollback_after_failure mainnet" in deploy_body
+    assert "if ! (start_realm demo); then\n            rollback_after_failure demo" in deploy_body
+    assert "if ! (start_realm mainnet); then\n                rollback_after_failure mainnet" in deploy_body
     assert "record_generation" in deploy_body
     rollback = remote[remote.index("rollback_after_failure()") : remote.index("# Every liquidity-migration unit")]
     # A rolled-back generation that also fails stops the fleet instead of looping.
     assert 'if [ "${AUTO_ROLLBACK:-0}" = 1 ]; then' in rollback
     assert 'AUTO_ROLLBACK=1 EXPECTED_COMMIT="$target" deploy_mode' in rollback
     assert "rollback) rollback_mode ;;" in remote
+
+
+def test_a_realm_whose_inputs_did_not_change_is_left_running() -> None:
+    """A deploy that changes nothing a realm runs from — the recorder's config,
+    a doc, the deploy script itself — must not restart the funded engine."""
+
+    remote = _remote_script()
+    fingerprint = _function_body(remote, "realm_fingerprint")
+    # The engine source tree, not the binary: the binary embeds the commit.
+    assert 'rev-parse "$commit:engine"' in fingerprint
+    assert '"$commit:configs/signal-worker.$realm.json"' in fingerprint
+    assert "$ENGINE_MAINNET_CONFIG" in fingerprint and "$ENGINE_DEMO_CONFIG" in fingerprint
+    unchanged = _function_body(remote, "realm_unchanged")
+    assert 'systemctl is-active --quiet "$worker_unit" && systemctl is-active --quiet "$owner_unit"' in unchanged
+
+    deploy_body = remote[remote.index("deploy_mode()") : remote.index("rollback_mode()")]
+    for realm in ("demo", "mainnet"):
+        assert f"if realm_unchanged {realm}; then" in deploy_body
+        assert f'echo "{realm}-ok result=unchanged-left-running"' in deploy_body
+        # The handover, when it runs, records what it started so the next deploy can compare.
+        handover = deploy_body[deploy_body.index(f"stop_realm_units {realm}") :]
+        assert handover.index(f"record_realm_fingerprint {realm}") > handover.index(f"start_realm {realm}")
+    # Nothing stops before the release is on disk; both realms stay up through install.
+    assert deploy_body.index("install_release") < deploy_body.index("stop_realm_units demo")
+    # The first gated deploy seeds the record from the commit that started the realm,
+    # before anything is rendered, so it compares against what actually runs.
+    assert deploy_body.index("seed_realm_fingerprints") < deploy_body.index("install_release")
+    seed = _function_body(remote, "seed_realm_fingerprints")
+    assert 'realm_fingerprint "$realm" "$deployed"' in seed and "$DEPLOYED_COMMIT_FILE" in seed
+    assert "stop_realm_units demo" not in deploy_body[: deploy_body.index("prepare_demo_inputs")]
+
+
+def test_ci_tests_the_debug_build_on_the_gate_and_the_release_build_off_it() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "vps-deploy.yml").read_text(encoding="utf-8")
+    rust = workflow[workflow.index("\n  rust:\n") : workflow.index("\n  rust-artifact:\n")]
+    assert "cargo test --workspace --all-targets --locked" in rust
+    assert "--release" not in rust and "--profile" not in rust
+    release = workflow[workflow.index("\n  rust-soak-bench:\n") : workflow.index("\n  disarm:\n")]
+    assert "cargo test --workspace --all-targets --release --locked" in release
+    vps = workflow[workflow.index("\n  vps:\n") :]
+    assert "needs: [ci, rust, rust-artifact]" in vps
+    # The host's fetch of a private repository needs the run's token (issue #18).
+    assert "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in vps[vps.index("Run VPS mode") :]
 
 
 def test_deploy_never_stops_an_independent_unit() -> None:

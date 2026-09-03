@@ -6,6 +6,39 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — Ceremony cut: a six-minute gate, and a deploy that restarts
+  the funded engine only when the engine changed.**
+  - `7625123f` deployed 21:3x UTC from the CI artifact; both recorders
+    restarted on the crypto-only domain and the sleeve-shaped tiers.
+  - **The gate tests the debug build.** The second run on the LTO-free profile
+    took 9:52 warm against 10:06 cold, so the cache was never the cost: it is
+    opt-level-3 codegen of the workspace into 34 test binaries on four cores,
+    which `rust-cache` never caches. Clippy already builds the workspace in
+    debug in 40 s; `cargo test` on top of it is a link and an 8-second run —
+    the profile `scripts/dev.sh check` has always tested locally. `cargo test
+    --release` moves to the release/soak job, `needs: [rust]` and off the
+    `vps` path. Gate ≈ max(ci 2:00, rust ~3:00, artifact 5:45) against 20:50
+    this morning.
+  - **The realm handover is gated on what the realm runs from.** Every armed
+    deploy ran `stop_realm_units mainnet → start_realm mainnet`, so a recorder
+    config change restarted the funded engine. `realm_fingerprint` hashes the
+    engine source *tree* (`git rev-parse <commit>:engine` — the binary embeds
+    the commit and differs every time), `deploy/systemd`, the fleet manifest,
+    the realm's worker config, and the rendered config and env files; a realm
+    whose fingerprint matches and whose two long-running units are active is
+    left trading (`mainnet-ok result=unchanged-left-running`), and picks the
+    new binary up at its own next restart. The demo stop moves behind the same
+    gate, after `install_release`, so nothing stops before the release is on
+    disk. Tests pin the fingerprint's inputs, the gate on both realms, and the
+    ordering.
+  - `[profile.ci-test]` stays in `engine/Cargo.toml`, unused, until the next
+    real engine change: any edit under `engine/` moves the tree hash and
+    restarts the funded engine, and this commit is the first proof that a
+    non-engine deploy does not.
+  - The CI dispatch deploy carries the run's `GITHUB_TOKEN` to the host for its
+    private fetch (`cc942816`, PR #18, merged just ahead of this). PRs are not
+    the workflow from here: solo work pushes to `main`.
+
 - **2026-09-03 — The deep tiers are the sleeves' own universes: `core` is
   LONG's rank band, `crowded` is CARRY's signal loosened.**
   - Sized from the live rules, not a guess. LONG enters at turnover rank 120

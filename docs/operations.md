@@ -85,11 +85,19 @@ EXPECTED_COMMIT=<40-hex-commit> scripts/ops.sh deploy
 ### Deployment Flow & Decoupled Handover
 1. **Fetch & Verify**: Verifies target commit is on `origin/main`.
 2. **Artifact Delivery**: Detects CI precompiled binary archive or builds locally via throttled cargo (`nice -n 10 --jobs 2`).
-3. **Demo Handover**: Stops Demo $\to$ Installs release $\to$ Restores state $\to$ Starts Demo $\to$ Verifies fresh heartbeat within 180s.
-   *(Mainnet continues actively trading during Demo upgrade).*
-4. **Mainnet Atomic Swap**:
-   - Pre-renders config and verifies attestor while Mainnet is live.
-   - Executes atomic swap: `stop_realm_units mainnet` $\to$ `import state` $\to$ `start_realm mainnet`.
+3. **Install while both realms run**: release binaries, units, and independent
+   units (recorders restart only when their own inputs changed) land with demo
+   and mainnet still trading.
+4. **Handover only when the realm's inputs changed**: `realm_unchanged <realm>`
+   compares a fingerprint of what the realm runs from — the engine source tree
+   hash (`git rev-parse <commit>:engine`, not the binary, which embeds the
+   commit), `deploy/systemd`, the fleet manifest, `configs/signal-worker.<realm>.json`,
+   and the rendered config and env files on the host — against
+   `/opt/liquidity-migration-engine/<realm>.fingerprint`, and requires both
+   long-running units active. Unchanged: `<realm>-ok result=unchanged-left-running`,
+   nothing stops. Changed: `stop_realm_units` $\to$ `import state` $\to$
+   `start_realm` $\to$ fresh heartbeat within 180s, then the fingerprint is recorded.
+   Mainnet's config is rendered first, while it is live.
 5. **Auto-Rollback**: If either realm fails to publish a fresh heartbeat within 180s, the script rolls back to `/opt/liquidity-migration-engine/deployed-commit`.
 
 ### Native State Takeover Sources

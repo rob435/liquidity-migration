@@ -486,6 +486,74 @@ capture_fingerprint() {
     } 2>/dev/null | sha256sum | cut -c1-64
 }
 
+# What one realm's long-running processes run from: the engine workspace
+# source, the realm's worker config, the fleet manifest and unit files, and
+# the rendered config and environment files on this host. The binary itself is
+# not in it: it embeds the commit hash, so it differs on every commit even when
+# nothing it does changed. A path an older commit lacks hashes as absent.
+realm_fingerprint() {
+    local realm="$1" commit="${2:-$EXPECTED_COMMIT}" source_env profile=""
+    case "$realm" in
+        demo) source_env="$DEMO_SIGNAL_SOURCE_ENV" ;;
+        mainnet) source_env="$MAINNET_SIGNAL_SOURCE_ENV" ;;
+    esac
+    if [ -f "$source_env" ]; then
+        profile="$(
+            unset OPERATIONAL_PROFILE_FILE
+            lm_load_private_systemd_environment "$PYTHON" "$source_env" OPERATIONAL_PROFILE_FILE 2>/dev/null || true
+            printf '%s' "${OPERATIONAL_PROFILE_FILE:-}"
+        )"
+    fi
+    {
+        git -C "$REPO_DIR" rev-parse "$commit:engine" "$commit:deploy/systemd" \
+            "$commit:deploy/fleet_manifest.tsv" "$commit:deploy/lib_sleeves.sh" \
+            "$commit:configs/signal-worker.$realm.json" 2>/dev/null || true
+        case "$realm" in
+            demo) cat "$ENGINE_DEMO_CONFIG" "$ENGINE_ENVIRONMENT" "$SIGNAL_WORKER_DEMO_ENV" 2>/dev/null || true ;;
+            mainnet)
+                cat "$ENGINE_MAINNET_CONFIG" "$ENGINE_MAINNET_ENVIRONMENT" "$SIGNAL_WORKER_MAINNET_ENV" \
+                    "$MAINNET_TELEGRAM_ENV" "$MAINNET_CREDENTIAL_ENV" 2>/dev/null || true
+                ;;
+        esac
+        if [ -n "$profile" ]; then cat "$profile" 2>/dev/null || true; fi
+        cat /etc/liquidity-migration/sleeves.resolved.env 2>/dev/null || true
+    } | sha256sum | cut -c1-64
+}
+
+# True when the realm runs from exactly what this deploy would install and both
+# of its long-running units are active: then there is nothing to hand over, and
+# the realm — the funded engine included — is left trading.
+realm_unchanged() {
+    local realm="$1" worker_unit owner_unit recorded
+    worker_unit="$(lm_signal_worker_unit "$realm")" || return 1
+    owner_unit="$(lm_owner_unit "$realm")" || return 1
+    recorded="$(cat "$RELEASE_DIR/$realm.fingerprint" 2>/dev/null || true)"
+    [ -n "$recorded" ] && [ "$recorded" = "$(realm_fingerprint "$realm")" ] \
+        && systemctl is-active --quiet "$worker_unit" && systemctl is-active --quiet "$owner_unit"
+}
+
+record_realm_fingerprint() {
+    realm_fingerprint "$1" > "$RELEASE_DIR/$1.fingerprint"
+}
+
+# The first gated deploy finds no record. A realm that is up was started by the
+# last finished deploy, so what it runs from is that commit's inputs against
+# the host files as they stand now — recorded here, before this deploy renders
+# anything, so the comparison below is against what actually runs.
+seed_realm_fingerprints() {
+    local realm deployed worker_unit owner_unit
+    deployed="$(cat "$DEPLOYED_COMMIT_FILE" 2>/dev/null || true)"
+    [ -n "$deployed" ] || return 0
+    for realm in demo mainnet; do
+        [ -f "$RELEASE_DIR/$realm.fingerprint" ] && continue
+        worker_unit="$(lm_signal_worker_unit "$realm" 2>/dev/null)" || continue
+        owner_unit="$(lm_owner_unit "$realm" 2>/dev/null)" || continue
+        systemctl is-active --quiet "$worker_unit" && systemctl is-active --quiet "$owner_unit" || continue
+        realm_fingerprint "$realm" "$deployed" > "$RELEASE_DIR/$realm.fingerprint"
+        echo "$realm-fingerprint seeded from $deployed"
+    done
+}
+
 # Independent units run through the deploy. Timers are (re)started so a
 # changed schedule applies; a recorder is restarted only when its own inputs
 # changed, and then this waits for a status file the new process wrote.
@@ -1086,16 +1154,24 @@ deploy_mode() {
     type lm_independent_units >/dev/null 2>&1 || lm_independent_units() { :; }
     ensure_runtime_identities
     install_python_environment
+    seed_realm_fingerprints
     build_engine
-    # Decoupled deployment: stop Demo units only. Mainnet stays live and trading.
-    stop_realm_units demo
+    # Both realms keep running while the release lands on disk. A realm is
+    # handed over only when what it runs from changed; otherwise it is left
+    # trading and picks the new binary up at its own next restart.
     install_release
     install_units
     start_independent_units
     prepare_demo_inputs
-    import_native_strategy_state demo
-    if ! (start_realm demo); then
-        rollback_after_failure demo
+    if realm_unchanged demo; then
+        echo "demo-ok result=unchanged-left-running"
+    else
+        stop_realm_units demo
+        import_native_strategy_state demo
+        if ! (start_realm demo); then
+            rollback_after_failure demo
+        fi
+        record_realm_fingerprint demo
     fi
     if mainnet_armed; then
         # provision_mainnet renders the funded config with the binary
@@ -1105,11 +1181,16 @@ deploy_mode() {
         # in that window restarts it on the new binary against the old config.
         echo "staging mainnet configuration while live engine continues trading"
         provision_mainnet
-        echo "atomic mainnet handover: swapping binaries and state"
-        stop_realm_units mainnet
-        import_native_strategy_state mainnet
-        if ! (start_realm mainnet); then
-            rollback_after_failure mainnet
+        if realm_unchanged mainnet; then
+            echo "mainnet-ok result=unchanged-left-running"
+        else
+            echo "atomic mainnet handover: swapping binaries and state"
+            stop_realm_units mainnet
+            import_native_strategy_state mainnet
+            if ! (start_realm mainnet); then
+                rollback_after_failure mainnet
+            fi
+            record_realm_fingerprint mainnet
         fi
     else
         echo "real-money off: funded units stay stopped"
