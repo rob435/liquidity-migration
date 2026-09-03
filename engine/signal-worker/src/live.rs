@@ -19,8 +19,7 @@ use crate::model::{
     InstrumentTradingInterval, SourceCoverage, WireEvent,
 };
 use crate::normalize::{
-    normalize_funding_rows, normalize_instruments, normalize_kline_rows, normalize_tickers,
-    normalize_whales,
+    normalize_funding_rows, normalize_instruments, normalize_kline_rows, normalize_whales,
 };
 use crate::store::atomic_write;
 use crate::worker::{
@@ -275,13 +274,33 @@ fn validate_fetched_instruments(fetched: &FetchedInstruments) -> Result<(), Work
     .map(drop)
 }
 
+/// A whole ticker page: rows that fail are left out downstream, but a page
+/// with rows and nothing usable is a failed fetch.
 fn validate_fetched_tickers(fetched: &FetchedTickers) -> Result<(), WorkerError> {
-    normalize_tickers(
+    let (kept, rejected) = crate::normalize::normalize_tickers_reporting(
         fetched.observed_ts_ms,
         fetched.available_at_ms,
         &fetched.rows,
-    )
-    .map(drop)
+    )?;
+    if kept.is_empty() && !rejected.rows.is_empty() {
+        return Err(WorkerError::input(format!(
+            "no usable ticker rows: {}",
+            rejected.summary("ticker").unwrap_or_default()
+        )));
+    }
+    Ok(())
+}
+
+/// One WebSocket sample: every row must be right, or the stream has a gap.
+fn validate_stream_ticker_sample(fetched: &FetchedTickers) -> Result<(), WorkerError> {
+    for row in &fetched.rows {
+        crate::normalize::normalize_ticker_strict(
+            fetched.observed_ts_ms,
+            fetched.available_at_ms,
+            row,
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_instrument_source_against_state(
@@ -872,7 +891,7 @@ impl LiveRunner {
             available_at_ms: sample.available_at_ms,
             rows: sample.rows,
         };
-        if let Err(error) = validate_fetched_tickers(&fetched) {
+        if let Err(error) = validate_stream_ticker_sample(&fetched) {
             lane_source_failure("Bybit WebSocket ticker lane", error)?;
             stream.mark_source_fault(wall_ms()?);
             return Ok(());
@@ -1701,14 +1720,17 @@ impl LiveRunner {
             fetched.instruments.available_at_ms,
             &fetched.instruments.rows,
         )?;
-        if let Some(summary) = rejected.summary() {
+        if let Some(summary) = rejected.summary("instrument") {
             eprintln!("signal-worker: instrument lane: {summary}");
         }
-        let tickers = normalize_tickers(
+        let (tickers, rejected) = crate::normalize::normalize_tickers_reporting(
             fetched.tickers.observed_ts_ms,
             fetched.tickers.available_at_ms,
             &fetched.tickers.rows,
         )?;
+        if let Some(summary) = rejected.summary("ticker") {
+            eprintln!("signal-worker: instrument lane: {summary}");
+        }
         let (current_resolved, previous) = {
             let state = self.durable.worker().state();
             (
@@ -5369,7 +5391,7 @@ mod tests {
             "rows {} rejected {} ({:?})",
             rows.len(),
             rejected.rows.len(),
-            rejected.summary()
+            rejected.summary("instrument")
         );
         let bad_reasons = rejected
             .rows
@@ -5381,6 +5403,33 @@ mod tests {
             "rows refused for a reason other than a dated name: {bad_reasons:?}"
         );
         assert!(rows.len() > 800, "{}", rows.len());
+
+        if let Ok(path) = std::env::var("LM_BYBIT_TICKERS_JSON") {
+            let payload: Value =
+                serde_json::from_slice(&std::fs::read(path).expect("readable file")).unwrap();
+            let rows = payload["result"]["list"]
+                .as_array()
+                .expect("result.list")
+                .iter()
+                .map(|value| crate::bybit_ws::ticker_wire(value).expect("ticker wire row"))
+                .collect::<Vec<_>>();
+            let (kept, rejected) =
+                crate::normalize::normalize_tickers_reporting(observed, observed + 1, &rows)
+                    .expect("whole ticker page");
+            eprintln!(
+                "tickers {} rejected {} ({:?})",
+                kept.len(),
+                rejected.rows.len(),
+                rejected.summary("ticker")
+            );
+            let bad_reasons = rejected
+                .rows
+                .iter()
+                .filter(|(_, reason)| !reason.contains("invalid symbol"))
+                .collect::<Vec<_>>();
+            assert!(bad_reasons.is_empty(), "{bad_reasons:?}");
+            assert!(kept.len() > 800, "{}", kept.len());
+        }
     }
 
     fn temporary_root(label: &str) -> PathBuf {

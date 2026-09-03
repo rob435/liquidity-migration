@@ -97,16 +97,16 @@ pub fn normalize_funding_rows(
     Ok(out)
 }
 
-/// Rows the venue's instrument list carries that are not perpetual contracts
-/// this worker can hold, or that fail a field check, with the reason. They
-/// are left out of the table rather than costing the whole snapshot.
+/// Rows of a venue-wide list that are not perpetual contracts this worker can
+/// hold, or that fail a field check, with the reason. They are left out of
+/// the table rather than costing the whole snapshot.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RejectedInstruments {
+pub struct RejectedRows {
     pub rows: Vec<(String, String)>,
 }
 
-impl RejectedInstruments {
-    pub fn summary(&self) -> Option<String> {
+impl RejectedRows {
+    pub fn summary(&self, label: &str) -> Option<String> {
         if self.rows.is_empty() {
             return None;
         }
@@ -118,7 +118,7 @@ impl RejectedInstruments {
             .collect::<Vec<_>>()
             .join("; ");
         Some(format!(
-            "{} instrument row(s) left out of the table ({shown}{})",
+            "{} {label} row(s) left out of the table ({shown}{})",
             self.rows.len(),
             if self.rows.len() > 3 { "; …" } else { "" }
         ))
@@ -141,10 +141,10 @@ pub fn normalize_instruments_reporting(
     observed_ts_ms: i64,
     available_at_ms: i64,
     rows: &[BybitInstrumentWire],
-) -> Result<(Vec<InstrumentObservation>, RejectedInstruments), WorkerError> {
+) -> Result<(Vec<InstrumentObservation>, RejectedRows), WorkerError> {
     validate_observation_clock(observed_ts_ms, available_at_ms)?;
     let mut out = Vec::with_capacity(rows.len());
-    let mut rejected = RejectedInstruments::default();
+    let mut rejected = RejectedRows::default();
     for row in rows {
         match normalize_instrument_row(observed_ts_ms, available_at_ms, row) {
             Ok(normalized) => out.push(normalized),
@@ -192,52 +192,86 @@ pub fn normalize_tickers(
     available_at_ms: i64,
     rows: &[BybitTickerWire],
 ) -> Result<Vec<TickerObservation>, WorkerError> {
+    normalize_tickers_reporting(observed_ts_ms, available_at_ms, rows).map(|(rows, _)| rows)
+}
+
+/// The ticker page carries the same dated futures as the instrument list
+/// (`BTCUSDT-04SEP26`). A row that fails is left out and named, never the page.
+pub fn normalize_tickers_reporting(
+    observed_ts_ms: i64,
+    available_at_ms: i64,
+    rows: &[BybitTickerWire],
+) -> Result<(Vec<TickerObservation>, RejectedRows), WorkerError> {
     validate_observation_clock(observed_ts_ms, available_at_ms)?;
     let mut out = Vec::with_capacity(rows.len());
+    let mut rejected = RejectedRows::default();
     for row in rows {
-        out.push(TickerObservation {
-            symbol: normalized_symbol(&row.symbol)?,
-            observed_ts_ms,
-            available_at_ms,
-            mark_observed_ts_ms: ticker_field_clock(
-                row.mark_observed_ts_ms,
-                row.mark_price.is_some(),
-                observed_ts_ms,
-                available_at_ms,
-            )?,
-            funding_observed_ts_ms: ticker_field_clock(
-                row.funding_observed_ts_ms,
-                row.funding_rate.is_some(),
-                observed_ts_ms,
-                available_at_ms,
-            )?,
-            schedule_observed_ts_ms: ticker_field_clock(
-                row.schedule_observed_ts_ms,
-                row.next_funding_time.is_some(),
-                observed_ts_ms,
-                available_at_ms,
-            )?,
-            last_price: positive_optional(row.last_price.as_ref(), "lastPrice")?,
-            mark_price: positive_optional(row.mark_price.as_ref(), "markPrice")?,
-            index_price: positive_optional(row.index_price.as_ref(), "indexPrice")?,
-            bid1_price: positive_optional(row.bid1_price.as_ref(), "bid1Price")?,
-            ask1_price: positive_optional(row.ask1_price.as_ref(), "ask1Price")?,
-            bid1_size: nonnegative_optional(row.bid1_size.as_ref(), "bid1Size")?,
-            ask1_size: nonnegative_optional(row.ask1_size.as_ref(), "ask1Size")?,
-            open_interest: nonnegative_optional(row.open_interest.as_ref(), "openInterest")?,
-            open_interest_value: nonnegative_optional(
-                row.open_interest_value.as_ref(),
-                "openInterestValue",
-            )?,
-            turnover_24h: nonnegative_optional(row.turnover24h.as_ref(), "turnover24h")?,
-            volume_24h: nonnegative_optional(row.volume24h.as_ref(), "volume24h")?,
-            funding_rate: optional_f64(row.funding_rate.as_ref(), "fundingRate")?,
-            next_funding_time_ms: optional_i64(row.next_funding_time.as_ref(), "nextFundingTime")?,
-        });
+        match normalize_ticker_row(observed_ts_ms, available_at_ms, row) {
+            Ok(normalized) => out.push(normalized),
+            Err(error) => rejected.rows.push((row.symbol.clone(), error.to_string())),
+        }
     }
     out.sort_by(|a, b| a.symbol.cmp(&b.symbol));
     reject_duplicate_symbols(out.iter().map(|row| row.symbol.as_str()), "ticker")?;
-    Ok(out)
+    Ok((out, rejected))
+}
+
+/// One row, refused as a whole when any field is wrong. The WebSocket path
+/// uses this: a malformed frame there opens a repairable gap, it is not a
+/// venue-wide list where one dated name may be left out.
+pub fn normalize_ticker_strict(
+    observed_ts_ms: i64,
+    available_at_ms: i64,
+    row: &BybitTickerWire,
+) -> Result<TickerObservation, WorkerError> {
+    validate_observation_clock(observed_ts_ms, available_at_ms)?;
+    normalize_ticker_row(observed_ts_ms, available_at_ms, row)
+}
+
+fn normalize_ticker_row(
+    observed_ts_ms: i64,
+    available_at_ms: i64,
+    row: &BybitTickerWire,
+) -> Result<TickerObservation, WorkerError> {
+    Ok(TickerObservation {
+        symbol: normalized_symbol(&row.symbol)?,
+        observed_ts_ms,
+        available_at_ms,
+        mark_observed_ts_ms: ticker_field_clock(
+            row.mark_observed_ts_ms,
+            row.mark_price.is_some(),
+            observed_ts_ms,
+            available_at_ms,
+        )?,
+        funding_observed_ts_ms: ticker_field_clock(
+            row.funding_observed_ts_ms,
+            row.funding_rate.is_some(),
+            observed_ts_ms,
+            available_at_ms,
+        )?,
+        schedule_observed_ts_ms: ticker_field_clock(
+            row.schedule_observed_ts_ms,
+            row.next_funding_time.is_some(),
+            observed_ts_ms,
+            available_at_ms,
+        )?,
+        last_price: positive_optional(row.last_price.as_ref(), "lastPrice")?,
+        mark_price: positive_optional(row.mark_price.as_ref(), "markPrice")?,
+        index_price: positive_optional(row.index_price.as_ref(), "indexPrice")?,
+        bid1_price: positive_optional(row.bid1_price.as_ref(), "bid1Price")?,
+        ask1_price: positive_optional(row.ask1_price.as_ref(), "ask1Price")?,
+        bid1_size: nonnegative_optional(row.bid1_size.as_ref(), "bid1Size")?,
+        ask1_size: nonnegative_optional(row.ask1_size.as_ref(), "ask1Size")?,
+        open_interest: nonnegative_optional(row.open_interest.as_ref(), "openInterest")?,
+        open_interest_value: nonnegative_optional(
+            row.open_interest_value.as_ref(),
+            "openInterestValue",
+        )?,
+        turnover_24h: nonnegative_optional(row.turnover24h.as_ref(), "turnover24h")?,
+        volume_24h: nonnegative_optional(row.volume24h.as_ref(), "volume24h")?,
+        funding_rate: optional_f64(row.funding_rate.as_ref(), "fundingRate")?,
+        next_funding_time_ms: optional_i64(row.next_funding_time.as_ref(), "nextFundingTime")?,
+    })
 }
 
 fn ticker_field_clock(
@@ -461,10 +495,10 @@ fn reject_duplicate_symbols<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_instruments, normalize_instruments_reporting, normalize_whales,
-        validate_observation_clock,
+        normalize_instruments, normalize_instruments_reporting, normalize_tickers_reporting,
+        normalize_whales, validate_observation_clock,
     };
-    use crate::model::{BinanceWhaleWire, BybitInstrumentWire};
+    use crate::model::{BinanceWhaleWire, BybitInstrumentWire, BybitTickerWire};
     use crate::DAY_MS;
     use serde_json::Value;
     use std::collections::BTreeMap;
@@ -549,12 +583,48 @@ mod tests {
             rejected.rows[0]
         );
         assert!(rejected.rows[2].1.contains("tickSize is not positive"));
-        let summary = rejected.summary().unwrap();
+        let summary = rejected.summary("instrument").unwrap();
         assert!(
             summary.starts_with("3 instrument row(s) left out"),
             "{summary}"
         );
         assert!(summary.contains("BTC-01DEC23"));
+    }
+
+    #[test]
+    fn a_dated_ticker_row_is_left_out_and_named() {
+        let ticker = |symbol: &str| BybitTickerWire {
+            symbol: symbol.into(),
+            mark_observed_ts_ms: None,
+            funding_observed_ts_ms: None,
+            schedule_observed_ts_ms: None,
+            last_price: Some(Value::from("100")),
+            mark_price: Some(Value::from("100")),
+            index_price: None,
+            bid1_price: None,
+            ask1_price: None,
+            bid1_size: None,
+            ask1_size: None,
+            open_interest: None,
+            open_interest_value: None,
+            turnover24h: None,
+            volume24h: None,
+            funding_rate: None,
+            next_funding_time: None,
+        };
+        let (rows, rejected) = normalize_tickers_reporting(
+            DAY_MS,
+            DAY_MS + 1,
+            &[ticker("BTCUSDT-04SEP26"), ticker("BTCUSDT")],
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol, "BTCUSDT");
+        assert_eq!(rejected.rows.len(), 1);
+        assert!(rejected
+            .summary("ticker")
+            .unwrap()
+            .contains("BTCUSDT-04SEP26"));
     }
 
     #[test]
