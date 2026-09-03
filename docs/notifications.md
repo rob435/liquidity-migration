@@ -86,7 +86,7 @@ Long-polls commands from authorized operators (`TELEGRAM_CONTROL_USER_IDS`):
 | Routine | Created by the owner at claude.ai/code/routines, trigger type **API**, repository `rob435/liquidity-migration`. Prompt: [deploy/incident-routine-prompt.md](../deploy/incident-routine-prompt.md). |
 | Fired by | `scripts/runtime/check_fleet_liveness.py`, all three scopes, on a new `CRITICAL`. |
 | Payload | `{"text": …}`: scope, host, alert lines, `journalctl -u <unit> -n 40` per failing unit. Arrives in the run as untrusted `<routine-fire-payload>`. |
-| What the run can do | Read the repo, diagnose from the payload, open a PR with a fix, and dispatch `vps-deploy.yml` (`mode=deploy`) once checks are green. It has no SSH key: host-only actions are described in the PR for the owner. |
+| What the run can do | Read the repo, diagnose from the payload, push the fix and its `CHANGELOG.md` entry straight to `main` (no branch, no PR), and dispatch `vps-deploy.yml` (`mode=deploy`) once checks are green. It has no SSH key: host-only actions are written up for the owner. |
 | Receipt | The watchdog prints `incident routine fired: <session url>` to its journal. |
 
 ---

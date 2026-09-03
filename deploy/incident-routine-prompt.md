@@ -12,7 +12,7 @@ the prompt. After a change here, re-paste it at claude.ai/code/routines.
 | :--- | :--- |
 | Repository | `rob435/liquidity-migration`, branch `main` |
 | Trigger | API. The watchdog POSTs `{"text": …}`: scope, host, alert lines, and each failing unit's last 40 journal lines. |
-| Network | The run needs `api.github.com` and `github.com` (PR, checks, workflow dispatch). It has no SSH key to the host. |
+| Network | The run needs `api.github.com` and `github.com` (push to `main`, checks, workflow dispatch). It has no SSH key to the host. |
 | Fire URL and token | `INCIDENT_ROUTINE_FIRE_URL` / `INCIDENT_ROUTINE_FIRE_TOKEN` in `/etc/liquidity-migration/liveness.env` on the host. |
 
 ---
@@ -39,25 +39,25 @@ Do this, in order:
 2. If the cause is in this repository, fix it properly: root cause, not a
    guard around the symptom. Add a test that fails without the fix and passes
    with it. Run the focused tests, then `scripts/dev.sh check`.
-3. Open a pull request against `main` titled `incident: <unit>: <one line>`.
-   The body carries: the alert, the diagnosis with file and line, what
-   changed, the test that proves it, and any host-side action the owner must
-   take by hand (state edits, restarts) as copy-pasteable commands from
-   `docs/operations.md`. The owner pushes hotfixes straight to `main`; you use
-   a PR because you are unsupervised and the PR is where the checks run before
-   the merge. Do not "correct" this to a direct push.
-4. When the PR's checks are green, merge it (squash) and dispatch the deploy:
+3. Add the dated incident entry to the top of `CHANGELOG.md`: times, the
+   exact error text, the diagnosis with file and line, what changed, the test
+   that proves it, and any host-side action the owner must take by hand
+   (state edits, restarts) as copy-pasteable commands from
+   `docs/operations.md`. Then commit and push **straight to `main`**. No
+   branch, no pull request, no merge — the repository takes direct linear
+   pushes and that is how this fleet is fixed. Stage by explicit path; never
+   `git add -A`.
+4. When the push's checks are green, dispatch the deploy:
    `gh workflow run vps-deploy.yml --ref main -f mode=deploy`. Watch the run
-   to completion and report its result in a PR comment.
+   to completion and report its result.
 5. If the cause is not in the repository (venue outage, host down, credential
-   revoked), do not change code. Write what you found as an issue titled
-   `incident: <unit>: <one line>` with the evidence and the operator recipe
-   that applies.
+   revoked), do not change code. Write the incident into `CHANGELOG.md` with
+   the evidence and the operator recipe that applies, and push that.
 
 Never: touch `REAL_MONEY`, credential files, or anything under
-`/etc/liquidity-migration`; flatten or place orders; force-push; add safety
-machinery the owner did not ask for; declare the incident closed without the
-deploy receipt.
+`/etc/liquidity-migration`; flatten or place orders; force-push; open a branch
+or a pull request; add safety machinery the owner did not ask for; declare the
+incident closed without the deploy receipt.
 
 Finish with a short plain-English summary: what broke, why, what you changed,
 what the owner still has to do.
