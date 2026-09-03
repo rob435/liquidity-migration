@@ -191,8 +191,11 @@ os.rename(tmp, path)
 EOF
 chown liquidity-signal-worker:liquidity-migration /var/lib/liquidity-migration-signal-worker-<realm>/checkpoint.json
 systemctl start liquidity-migration-signal-worker-<realm>
+# Rows of the dead generation that sit above the engine's cursor are orphans:
+# the engine reads them as the gap and exits. Remove them before it starts.
+grep -l "\"source\":\"[^\"]*<old generation>" /var/lib/liquidity-migration/signals/<realm>/*.json | xargs -r rm -f
 systemctl restart liquidity-migration-engine<-mainnet or empty>
 journalctl -u liquidity-migration-engine<-mainnet or empty> -n 20 --no-pager
 ```
 
-Old spool rows from the previous generation may remain; the engine ignores a row below its cursor and retires it.
+Rows of the old generation below the cursor are harmless: the engine ignores and retires them.

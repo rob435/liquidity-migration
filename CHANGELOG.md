@@ -60,6 +60,13 @@ edit STATE.md to match.
     as not trading, zero meaning no clock. Test:
     `a_snapshot_of_perpetuals_with_zero_delivery_clocks_passes_source_validation`,
     which fails on the old check.
+    After that deploy the lane failed a third way, `invalid symbol
+    "BTC-01DEC23"`: the Closed list carries 643 dated futures and the Trading
+    list 40 (`BTCUSDT-04SEP26`), names the worker never trades. The lane now
+    keeps every row it can and names what it left out
+    (`normalize_instruments_reporting`), one line per snapshot: against the
+    venue's lists of the day, 1,138 rows kept, 683 dated names left out, no
+    other reason. One row cannot cost the table again.
   - *On-call agent.* `check_fleet_liveness.py` now fires a Claude Code
     routine on any `CRITICAL` that clears its cooldown, when
     `INCIDENT_ROUTINE_FIRE_URL` and `INCIDENT_ROUTINE_FIRE_TOKEN` are set in
@@ -73,6 +80,15 @@ edit STATE.md to match.
     a venue outage that it would otherwise recover from on its own; the fix
     above removes the fault that made the loop endless, and the on-call agent
     is what now answers a loop.
+  - *Deploy and recovery receipt.* Merged as `a2dc5a45` (PR #14), deployed by
+    `vps-deploy.yml` run 33750120171 (`mode=deploy`, all jobs success), on the
+    host at 11:42 UTC. New generations at 11:43: mainnet
+    `805c44f0…` → `b01e9e6f…`, demo `c4d0071f…` → `c3ed639a…`. The first engine
+    start after that still died on the old gap: the dead generation's orphan
+    rows (`…11227-…json`, `…11614-…json`) were still in the spool and sit
+    above the cursor, so they read as the gap. Removed by hand; both engines
+    active from 11:43:53 UTC. The recipe in docs/operations.md §8 now carries
+    that step. Funded engine downtime: 01:56:04 to 11:43:53, 9 h 48 min.
 
 - **2026-09-03 — An audit of the live fleet, and the eight things it found.**
   Read off the running host rather than the docs: both engines and both
@@ -128,6 +144,17 @@ edit STATE.md to match.
   over-subscribed, and the capture services' 1 GB memory ceiling is page cache
   from their own writes (anon 127 and 101 MB), not a leak.
 
+- **2026-09-02 — Deployed `76a8fc59` at 22:45 UTC: decoupled Mainnet deployment, Unix socket IPC, and the Rust market-tape crate.**
+  Mainnet deployment was decoupled from Demo verification: Demo was deployed,
+  restarted, and checked for fresh heartbeats while Mainnet continued actively
+  trading and quoting. Mainnet pre-flight and configuration validation ran in the
+  background; the funded engine swap took 9 seconds. Signal delivery switched from
+  filesystem spool polling to direct Unix domain socket streaming (`stream.sock`),
+  cutting signal delivery latency to microseconds and eliminating SSD inode churn,
+  with automatic disk spool fallback during restarts. The native `market-tape`
+  Rust crate was added to the workspace and installed into `/opt/liquidity-migration-engine/bin/market-tape`.
+  Both engines and signal workers heartbeated within 2 seconds of startup, and both
+  market recorders are active with zero dropped frames.
 - **2026-09-02 — The recorders are cut to fit their byte budgets.** Four
   minutes after the Binance fix, the meters read 0.64 MB/s inbound on Bybit
   (1.7 TB a month against 1.3) and 1.18 MB/s on Binance (3.0 TB against 1.0).

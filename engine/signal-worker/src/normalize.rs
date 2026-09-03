@@ -97,45 +97,94 @@ pub fn normalize_funding_rows(
     Ok(out)
 }
 
+/// Rows the venue's instrument list carries that are not perpetual contracts
+/// this worker can hold, or that fail a field check, with the reason. They
+/// are left out of the table rather than costing the whole snapshot.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RejectedInstruments {
+    pub rows: Vec<(String, String)>,
+}
+
+impl RejectedInstruments {
+    pub fn summary(&self) -> Option<String> {
+        if self.rows.is_empty() {
+            return None;
+        }
+        let shown = self
+            .rows
+            .iter()
+            .take(3)
+            .map(|(symbol, reason)| format!("{symbol}: {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Some(format!(
+            "{} instrument row(s) left out of the table ({shown}{})",
+            self.rows.len(),
+            if self.rows.len() > 3 { "; …" } else { "" }
+        ))
+    }
+}
+
 pub fn normalize_instruments(
     observed_ts_ms: i64,
     available_at_ms: i64,
     rows: &[BybitInstrumentWire],
 ) -> Result<Vec<InstrumentObservation>, WorkerError> {
+    normalize_instruments_reporting(observed_ts_ms, available_at_ms, rows).map(|(rows, _)| rows)
+}
+
+/// The table plus what was left out of it. Bybit's linear list carries dated
+/// futures (`BTC-01DEC23`, `BTCUSDT-04SEP26`) beside the perpetuals, and
+/// Closed contracts with zeroed filters; one such row must never refuse the
+/// snapshot, because a refused snapshot leaves the worker with no table.
+pub fn normalize_instruments_reporting(
+    observed_ts_ms: i64,
+    available_at_ms: i64,
+    rows: &[BybitInstrumentWire],
+) -> Result<(Vec<InstrumentObservation>, RejectedInstruments), WorkerError> {
     validate_observation_clock(observed_ts_ms, available_at_ms)?;
     let mut out = Vec::with_capacity(rows.len());
+    let mut rejected = RejectedInstruments::default();
     for row in rows {
-        let symbol = normalized_symbol(&row.symbol)?;
-        let price = &row.price_filter;
-        let lot = &row.lot_size_filter;
-        out.push(InstrumentObservation {
-            symbol,
-            observed_ts_ms,
-            available_at_ms,
-            contract_type: clean_text(row.contract_type.as_deref()),
-            symbol_type: clean_text(row.symbol_type.as_deref()).map(|v| v.to_ascii_lowercase()),
-            status: clean_text(row.status.as_deref()),
-            base_coin: clean_text(row.base_coin.as_deref()),
-            quote_coin: clean_text(row.quote_coin.as_deref()),
-            settle_coin: clean_text(row.settle_coin.as_deref()),
-            launch_time_ms: optional_i64(row.launch_time.as_ref(), "launchTime")?,
-            delivery_time_ms: optional_i64(row.delivery_time.as_ref(), "deliveryTime")?,
-            tick_size: positive_optional(price.get("tickSize"), "tickSize")?,
-            qty_step: positive_optional(lot.get("qtyStep"), "qtyStep")?,
-            min_order_qty: nonnegative_optional(lot.get("minOrderQty"), "minOrderQty")?,
-            min_notional_value: nonnegative_optional(
-                lot.get("minNotionalValue"),
-                "minNotionalValue",
-            )?,
-            max_order_qty: published_maximum(lot.get("maxOrderQty"), "maxOrderQty")?,
-            max_market_order_qty: published_maximum(lot.get("maxMktOrderQty"), "maxMktOrderQty")?,
-            funding_interval_min: optional_i64(row.funding_interval.as_ref(), "fundingInterval")?,
-            is_prelisting: row.is_pre_listing,
-        });
+        match normalize_instrument_row(observed_ts_ms, available_at_ms, row) {
+            Ok(normalized) => out.push(normalized),
+            Err(error) => rejected.rows.push((row.symbol.clone(), error.to_string())),
+        }
     }
     out.sort_by(|a, b| a.symbol.cmp(&b.symbol));
     reject_duplicate_symbols(out.iter().map(|row| row.symbol.as_str()), "instrument")?;
-    Ok(out)
+    Ok((out, rejected))
+}
+
+fn normalize_instrument_row(
+    observed_ts_ms: i64,
+    available_at_ms: i64,
+    row: &BybitInstrumentWire,
+) -> Result<InstrumentObservation, WorkerError> {
+    let symbol = normalized_symbol(&row.symbol)?;
+    let price = &row.price_filter;
+    let lot = &row.lot_size_filter;
+    Ok(InstrumentObservation {
+        symbol,
+        observed_ts_ms,
+        available_at_ms,
+        contract_type: clean_text(row.contract_type.as_deref()),
+        symbol_type: clean_text(row.symbol_type.as_deref()).map(|v| v.to_ascii_lowercase()),
+        status: clean_text(row.status.as_deref()),
+        base_coin: clean_text(row.base_coin.as_deref()),
+        quote_coin: clean_text(row.quote_coin.as_deref()),
+        settle_coin: clean_text(row.settle_coin.as_deref()),
+        launch_time_ms: optional_i64(row.launch_time.as_ref(), "launchTime")?,
+        delivery_time_ms: optional_i64(row.delivery_time.as_ref(), "deliveryTime")?,
+        tick_size: positive_optional(price.get("tickSize"), "tickSize")?,
+        qty_step: positive_optional(lot.get("qtyStep"), "qtyStep")?,
+        min_order_qty: nonnegative_optional(lot.get("minOrderQty"), "minOrderQty")?,
+        min_notional_value: nonnegative_optional(lot.get("minNotionalValue"), "minNotionalValue")?,
+        max_order_qty: published_maximum(lot.get("maxOrderQty"), "maxOrderQty")?,
+        max_market_order_qty: published_maximum(lot.get("maxMktOrderQty"), "maxMktOrderQty")?,
+        funding_interval_min: optional_i64(row.funding_interval.as_ref(), "fundingInterval")?,
+        is_prelisting: row.is_pre_listing,
+    })
 }
 
 pub fn normalize_tickers(
@@ -411,7 +460,10 @@ fn reject_duplicate_symbols<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_instruments, normalize_whales, validate_observation_clock};
+    use super::{
+        normalize_instruments, normalize_instruments_reporting, normalize_whales,
+        validate_observation_clock,
+    };
     use crate::model::{BinanceWhaleWire, BybitInstrumentWire};
     use crate::DAY_MS;
     use serde_json::Value;
@@ -466,17 +518,43 @@ mod tests {
         assert_eq!(rows[1].max_market_order_qty, None);
     }
 
+    /// One bad row costs that row, named, and never the snapshot.
     #[test]
-    fn a_zero_tick_size_still_rejects_the_snapshot() {
-        let mut broken = instrument("BTCUSDT", "Trading", "0");
+    fn a_dated_contract_or_a_broken_row_is_left_out_and_named() {
+        let mut broken = instrument("ETHUSDT", "Trading", "0");
         broken
             .price_filter
             .insert("tickSize".to_owned(), Value::from("0"));
-        let error = normalize_instruments(DAY_MS, DAY_MS + 1, &[broken]).unwrap_err();
-        assert!(
-            error.to_string().contains("tickSize is not positive"),
-            "{error}"
+        let (rows, rejected) = normalize_instruments_reporting(
+            DAY_MS,
+            DAY_MS + 1,
+            &[
+                instrument("BTC-01DEC23", "Closed", "1701388800000"),
+                instrument("BTCUSDT-04SEP26", "Trading", "1788508800000"),
+                broken,
+                instrument("BTCUSDT", "Trading", "0"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.symbol.as_str())
+                .collect::<Vec<_>>(),
+            vec!["BTCUSDT"]
         );
+        assert_eq!(rejected.rows.len(), 3);
+        assert!(
+            rejected.rows[0].1.contains("invalid symbol"),
+            "{:?}",
+            rejected.rows[0]
+        );
+        assert!(rejected.rows[2].1.contains("tickSize is not positive"));
+        let summary = rejected.summary().unwrap();
+        assert!(
+            summary.starts_with("3 instrument row(s) left out"),
+            "{summary}"
+        );
+        assert!(summary.contains("BTC-01DEC23"));
     }
 
     #[test]

@@ -1696,11 +1696,14 @@ impl LiveRunner {
             &fetched.instruments,
         )?;
         validate_fetched_tickers(&fetched.tickers)?;
-        let instruments = normalize_instruments(
+        let (instruments, rejected) = crate::normalize::normalize_instruments_reporting(
             fetched.instruments.observed_ts_ms,
             fetched.instruments.available_at_ms,
             &fetched.instruments.rows,
         )?;
+        if let Some(summary) = rejected.summary() {
+            eprintln!("signal-worker: instrument lane: {summary}");
+        }
         let tickers = normalize_tickers(
             fetched.tickers.observed_ts_ms,
             fetched.tickers.available_at_ms,
@@ -5340,6 +5343,44 @@ mod tests {
         };
         validate_instrument_source_against_state(worker.state(), &fetched)
             .expect("the venue's own list is valid input");
+    }
+
+    /// The venue's own lists, when `LM_BYBIT_INSTRUMENTS_JSON` names them
+    /// (colon-separated `instruments-info` responses), through the same wire
+    /// parse and normalisation the lane uses. Run by hand:
+    /// `LM_BYBIT_INSTRUMENTS_JSON=a.json:b.json cargo test -p signal-worker -- --ignored the_venues_real`.
+    #[test]
+    #[ignore = "reads the venue's instrument lists from LM_BYBIT_INSTRUMENTS_JSON"]
+    fn the_venues_real_instrument_lists_normalize() {
+        let paths = std::env::var("LM_BYBIT_INSTRUMENTS_JSON").expect("LM_BYBIT_INSTRUMENTS_JSON");
+        let mut all = Vec::new();
+        for path in paths.split(':') {
+            let payload: Value =
+                serde_json::from_slice(&std::fs::read(path).expect("readable file")).unwrap();
+            for value in payload["result"]["list"].as_array().expect("result.list") {
+                all.push(super::instrument_wire(value).expect("wire row"));
+            }
+        }
+        let observed = 1_788_436_000_000;
+        let (rows, rejected) =
+            crate::normalize::normalize_instruments_reporting(observed, observed + 1, &all)
+                .expect("whole list");
+        eprintln!(
+            "rows {} rejected {} ({:?})",
+            rows.len(),
+            rejected.rows.len(),
+            rejected.summary()
+        );
+        let bad_reasons = rejected
+            .rows
+            .iter()
+            .filter(|(_, reason)| !reason.contains("invalid symbol"))
+            .collect::<Vec<_>>();
+        assert!(
+            bad_reasons.is_empty(),
+            "rows refused for a reason other than a dated name: {bad_reasons:?}"
+        );
+        assert!(rows.len() > 800, "{}", rows.len());
     }
 
     fn temporary_root(label: &str) -> PathBuf {
