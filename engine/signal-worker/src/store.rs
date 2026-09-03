@@ -758,9 +758,9 @@ mod tests {
         let spool = SpoolWriter::new(&root).unwrap();
 
         let mut fat: NormalizedObservation = serde_json::from_slice(&observation(3)).unwrap();
-        // Bytes serialize as JSON integers: the envelope is over three times
-        // the payload, and it is the envelope that travels as one frame.
-        fat.payload = vec![b'x'; 5 * 1024 * 1024];
+        // The envelope is wider than the payload, and it is the envelope
+        // that travels as one frame.
+        fat.payload = vec![b'x'; engine_types::MAX_SIGNAL_OBSERVATION_BYTES - 1];
         fat.content_sha256 = crate::config::sha256_hex(&fat.canonical_envelope_bytes());
         let bytes = serde_json::to_vec(&fat).unwrap();
         assert!(fat.payload.len() < engine_types::MAX_SIGNAL_OBSERVATION_BYTES);

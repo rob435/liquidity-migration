@@ -6,6 +6,18 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — Payload encoding, step two: the writer emits the payload as
+  a JSON string.**
+  - `payload_wire::serialize` writes UTF-8 payloads as a string and anything
+    else as the byte array. The carry row that was 20.8 MB on disk is about
+    7 MB and rides the socket doorbell again. The worker's input-journal
+    replay now compares observations as values, not bytes, so entries written
+    under the old encoding still replay. Deployed only after step one was a
+    finished deploy on both realms, so an auto-rollback lands on a reader
+    that takes both shapes. Test extended:
+    `a_payload_reads_as_a_string_or_as_an_array_of_bytes` (binary payloads
+    still round-trip as the array).
+
 - **2026-09-03 — A sequence gap is an `ERROR` line, not a crash loop; the
   payload reader takes a string as well as a byte array.**
   - *Gap.* `queue_signal_observation` (`engine/engine-core/src/engine/scheduling.inc.rs`)

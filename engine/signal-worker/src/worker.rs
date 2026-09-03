@@ -2822,8 +2822,17 @@ impl DurableSignalWorker {
                 observations.extend(worker.apply(event)?);
             }
             worker.set_suppressed_output_kinds(BTreeSet::new());
-            let regenerated = encode_observations(&observations)?;
-            if regenerated != entry.observation_json {
+            // Compared as values: the journal holds the bytes as they were
+            // written, and the payload's wire encoding changed 2026-09-03.
+            let journaled = entry
+                .observation_json
+                .iter()
+                .map(|json| {
+                    serde_json::from_str::<NormalizedObservation>(json)
+                        .map_err(|error| WorkerError::json("parse journaled observation", error))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if observations != journaled {
                 return Err(WorkerError::state(
                     "input journal replay changed signal observation bytes",
                 ));

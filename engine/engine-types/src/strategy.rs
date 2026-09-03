@@ -128,17 +128,20 @@ pub struct SignalObservation {
     pub content_sha256: String,
 }
 
-/// The payload on the wire. Readers take a JSON string or an array of byte
-/// values; the array is what every row and WAL record written before
-/// 2026-09-03 carries, and what the writer still emits until every reader
-/// takes the string. `content_sha256` covers the bytes, not their encoding.
+/// The payload on the wire: a JSON string when the bytes are UTF-8 (the
+/// worker's payloads are JSON text), else an array of byte values. Readers
+/// take both; rows and WAL records written before 2026-09-03 carry the
+/// array. `content_sha256` covers the bytes, not their encoding.
 mod payload_wire {
     use serde::de::{Error, SeqAccess, Visitor};
     use serde::{Deserializer, Serialize, Serializer};
     use std::fmt;
 
     pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-        bytes.serialize(serializer)
+        match std::str::from_utf8(bytes) {
+            Ok(text) => serializer.serialize_str(text),
+            Err(_) => bytes.serialize(serializer),
+        }
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
@@ -749,17 +752,31 @@ mod payload_wire_tests {
         }
     }
 
-    /// Both wire shapes decode to the same bytes and the same hash.
+    /// Both wire shapes decode to the same bytes and the same hash; text
+    /// payloads are written as a string, anything else as the array.
     #[test]
     fn a_payload_reads_as_a_string_or_as_an_array_of_bytes() {
         let expected = observation(br#"{"rate":"0.0001"}"#);
-        let as_array = serde_json::to_string(&expected).unwrap();
-        assert!(as_array.contains("\"payload\":[123,34,"), "{as_array}");
-        let as_string = as_array.replace(
-            "\"payload\":[123,34,114,97,116,101,34,58,34,48,46,48,48,48,49,34,125]",
-            r#""payload":"{\"rate\":\"0.0001\"}""#,
+        let as_string = serde_json::to_string(&expected).unwrap();
+        assert!(
+            as_string.contains(r#""payload":"{\"rate\":\"0.0001\"}""#),
+            "{as_string}"
         );
-        assert_ne!(as_array, as_string, "the replacement found the array");
+        let as_array = as_string.replace(
+            r#""payload":"{\"rate\":\"0.0001\"}""#,
+            "\"payload\":[123,34,114,97,116,101,34,58,34,48,46,48,48,48,49,34,125]",
+        );
+        assert_ne!(as_array, as_string, "the replacement found the string");
+        let binary = observation(&[0xff, 0x00, 0x7b]);
+        let binary_json = serde_json::to_string(&binary).unwrap();
+        assert!(
+            binary_json.contains("\"payload\":[255,0,123]"),
+            "{binary_json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<SignalObservation>(&binary_json).unwrap(),
+            binary
+        );
         let from_array: SignalObservation = serde_json::from_str(&as_array).unwrap();
         let from_string: SignalObservation = serde_json::from_str(&as_string).unwrap();
         assert_eq!(from_array, expected);
