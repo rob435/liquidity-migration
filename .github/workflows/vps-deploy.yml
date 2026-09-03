@@ -243,6 +243,12 @@ jobs:
       - name: Run VPS mode
         env:
           DEPLOY_MODE_INPUT: ${{ inputs.mode }}
+          # deploy and rollback fetch origin/main on the host, over the HTTPS
+          # remote of a private repository. The deploy script authenticates
+          # that fetch only when GITHUB_TOKEN is non-empty, and its `gh auth
+          # token` fallback is for an operator's own machine: a runner has no
+          # gh login. Without this the host fetch has no credential of its own.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           case "$DEPLOY_MODE_INPUT" in

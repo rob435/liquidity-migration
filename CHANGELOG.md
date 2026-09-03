@@ -6,6 +6,35 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-03 — Incident: a dispatched deploy cannot fetch, so no commit can
+  reach the host.**
+  - Deploy run 172 (`main@42c1529`, dispatched 20:31:10 UTC) failed at
+    20:52:49 UTC in its first host step: `fatal: could not read Username for
+    'https://github.com': terminal prompts disabled`, then `deploy failed:
+    cannot fetch origin/main`. `ci`, `rust` and the soak all passed; the `vps`
+    job's "Run VPS mode" step is what died, 6 seconds in.
+  - It failed inside `fetch_exact_commit` (`scripts/deploy_vps_live.sh:205`),
+    the second call in `deploy_mode` — before `stop_realm_units demo`. No unit
+    was stopped, no binary installed, no config rendered. The fleet stayed on
+    its previous commit and kept trading.
+  - Cause: the workflow's "Run VPS mode" step set no `GITHUB_TOKEN`, so the
+    local half sent the host `GITHUB_TOKEN=''` and `git_authorized`
+    (`scripts/deploy_vps_live.sh:186`) took its unauthenticated branch
+    (`:200`) against the HTTPS remote of a private repository. The `gh auth
+    token` fallback (`:59-62`) is for an operator's own machine; a runner has
+    no gh login. Every workflow-dispatched deploy therefore depended on a git
+    credential held on the host, outside anything this repository manages. The
+    same step fetched successfully at 12:51:54 UTC (run 153,
+    `4933a484..23eff2fe`), so that host credential stopped working between
+    12:51 and 20:52; why is not visible from the runner.
+  - Fix: the step now passes `GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}`
+    (the workflow's `permissions: contents: read` covers the fetch), so the
+    deploy carries its own short-lived credential and no longer depends on
+    host state. Test
+    `test_the_dispatched_deploy_carries_its_own_credential_for_the_host_fetch`
+    pins all three halves of that path: the runner reads the token, the local
+    half forwards it, the host prefers it.
+
 - **2026-09-03 — The capture earns its bandwidth: Binance stops recording books,
   Bybit gets the room, and every hour of tape anchors its own books.**
   - Verified first, on the running host: every name the funded engine holds is

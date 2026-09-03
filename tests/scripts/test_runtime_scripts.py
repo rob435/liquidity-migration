@@ -166,6 +166,26 @@ def test_ci_workflow_dispatch_covers_deploy_rollback_verify_and_disarm() -> None
     assert "rollout" not in workflow.replace("# pending slot", "")
 
 
+def test_the_dispatched_deploy_carries_its_own_credential_for_the_host_fetch() -> None:
+    # fetch_exact_commit runs on the host against the HTTPS remote of a private
+    # repository. git_authorized authenticates only while GITHUB_TOKEN is
+    # non-empty, and the `gh auth token` fallback is for an operator's own
+    # machine, so a runner that does not set it sends the host an empty token
+    # and the fetch prompts for a username and dies.
+    workflow = (ROOT / ".github" / "workflows" / "vps-deploy.yml").read_text(encoding="utf-8")
+    step = workflow[workflow.index("- name: Run VPS mode") :]
+    step = step[: step.index("scripts/deploy_vps_live.sh")]
+    assert "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in step
+    # The three halves of that credential path: the runner reads it, the local
+    # half hands it to the host, and the host prefers it over its own state.
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    assert 'GITHUB_TOKEN="${GITHUB_TOKEN:-}"' in deploy
+    assert "printf 'GITHUB_TOKEN=%q\\n' \"$GITHUB_TOKEN\"" in deploy
+    remote = _remote_script()
+    assert 'if [ -n "$GITHUB_TOKEN" ]' in _function_body(remote, "git_authorized")
+    assert "git_authorized fetch" in _function_body(remote, "fetch_exact_commit")
+
+
 def test_a_realm_that_does_not_come_up_rolls_back_to_the_last_finished_deploy() -> None:
     remote = _remote_script()
     deploy_body = remote[remote.index("deploy_mode()") : remote.index("rollback_mode()")]
