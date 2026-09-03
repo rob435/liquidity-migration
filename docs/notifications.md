@@ -47,6 +47,7 @@ Alerts trigger via `TELEGRAM_ALERT_CHAT_ID` (falls back to main chat if unset):
 | **Host** | Upload Age | Google Drive tape upload receipt $> 3\text{h}$ old or Drive $< 200\text{ GB}$ free. |
 | **Host** | Backup Age | Off-box engine state backup receipt $> 8\text{h}$ old. |
 | **Host** | Storage & Clock | `/var/lib` disk space $< 25\text{ GB}$ or host clock out of sync. |
+| **All** | On-call agent | Any `CRITICAL` that clears its cooldown also fires the Claude Code incident routine (below) with the alert lines and each failing unit's last 40 journal lines. Cooldown is the rate limit: one fire per fault per `--cooldown-min`. |
 
 ---
 
@@ -73,6 +74,19 @@ Long-polls commands from authorized operators (`TELEGRAM_CONTROL_USER_IDS`):
 | `TELEGRAM_CHAT_ID` | Primary destination chat ID for trade updates and status. |
 | `TELEGRAM_ALERT_CHAT_ID` | Dedicated alert channel for critical liveness warnings. |
 | `TELEGRAM_CONTROL_USER_IDS`| Comma-separated list of numeric Telegram user IDs authorized to execute commands. |
+| `LIVENESS_HEARTBEAT_URL` | Dead-man's switch pinged on every healthy watchdog run. `liveness.env`. |
+| `INCIDENT_ROUTINE_FIRE_URL` | `https://api.anthropic.com/v1/claude_code/routines/<id>/fire` for the incident routine. `liveness.env`. Unset means no agent is paged. |
+| `INCIDENT_ROUTINE_FIRE_TOKEN` | The routine's own bearer token (`sk-ant-oat01-…`), generated once in the routine's settings at claude.ai/code/routines. `liveness.env`, `0600 root:root` (systemd reads the file before it drops to the observer user). Never an argument, never logged. |
+
+### On-call agent (incident routine)
+
+| Item | Value |
+| :--- | :--- |
+| Routine | Created by the owner at claude.ai/code/routines, trigger type **API**, repository `rob435/liquidity-migration`. Prompt: [deploy/incident-routine-prompt.md](../deploy/incident-routine-prompt.md). |
+| Fired by | `scripts/runtime/check_fleet_liveness.py`, all three scopes, on a new `CRITICAL`. |
+| Payload | `{"text": …}`: scope, host, alert lines, `journalctl -u <unit> -n 40` per failing unit. Arrives in the run as untrusted `<routine-fire-payload>`. |
+| What the run can do | Read the repo, diagnose from the payload, open a PR with a fix, and dispatch `vps-deploy.yml` (`mode=deploy`) once checks are green. It has no SSH key: host-only actions are described in the PR for the owner. |
+| Receipt | The watchdog prints `incident routine fired: <session url>` to its journal. |
 
 ---
 

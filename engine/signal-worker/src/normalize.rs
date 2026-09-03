@@ -127,8 +127,8 @@ pub fn normalize_instruments(
                 lot.get("minNotionalValue"),
                 "minNotionalValue",
             )?,
-            max_order_qty: positive_optional(lot.get("maxOrderQty"), "maxOrderQty")?,
-            max_market_order_qty: positive_optional(lot.get("maxMktOrderQty"), "maxMktOrderQty")?,
+            max_order_qty: published_maximum(lot.get("maxOrderQty"), "maxOrderQty")?,
+            max_market_order_qty: published_maximum(lot.get("maxMktOrderQty"), "maxMktOrderQty")?,
             funding_interval_min: optional_i64(row.funding_interval.as_ref(), "fundingInterval")?,
             is_prelisting: row.is_pre_listing,
         });
@@ -362,6 +362,12 @@ fn positive_optional(value: Option<&Value>, label: &str) -> Result<Option<f64>, 
     Ok(number)
 }
 
+/// An order-size maximum. Bybit publishes `"0"` here on Closed and Delivering
+/// contracts; a zero maximum is no maximum.
+fn published_maximum(value: Option<&Value>, label: &str) -> Result<Option<f64>, WorkerError> {
+    Ok(optional_f64(value, label)?.filter(|value| *value > 0.0))
+}
+
 fn nonnegative_optional(value: Option<&Value>, label: &str) -> Result<Option<f64>, WorkerError> {
     let number = optional_f64(value, label)?;
     if number.is_some_and(|value| value < 0.0) {
@@ -405,10 +411,73 @@ fn reject_duplicate_symbols<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_whales, validate_observation_clock};
-    use crate::model::BinanceWhaleWire;
+    use super::{normalize_instruments, normalize_whales, validate_observation_clock};
+    use crate::model::{BinanceWhaleWire, BybitInstrumentWire};
     use crate::DAY_MS;
     use serde_json::Value;
+    use std::collections::BTreeMap;
+
+    fn instrument(symbol: &str, status: &str, delivery_time: &str) -> BybitInstrumentWire {
+        BybitInstrumentWire {
+            symbol: symbol.into(),
+            contract_type: Some("LinearPerpetual".into()),
+            symbol_type: None,
+            status: Some(status.into()),
+            base_coin: Some(symbol.trim_end_matches("USDT").into()),
+            quote_coin: Some("USDT".into()),
+            settle_coin: Some("USDT".into()),
+            launch_time: Some(Value::from("1")),
+            delivery_time: Some(Value::from(delivery_time)),
+            price_filter: BTreeMap::from([("tickSize".to_owned(), Value::from("0.01"))]),
+            lot_size_filter: BTreeMap::from([
+                ("qtyStep".to_owned(), Value::from("0.001")),
+                ("minOrderQty".to_owned(), Value::from("0.001")),
+                ("maxOrderQty".to_owned(), Value::from("100")),
+                ("maxMktOrderQty".to_owned(), Value::from("10")),
+            ]),
+            funding_interval: Some(Value::from("480")),
+            is_pre_listing: false,
+        }
+    }
+
+    /// The venue's own shape: a perpetual carries `deliveryTime: "0"`, and a
+    /// Closed contract zeroes its maximums. Neither may cost the snapshot.
+    #[test]
+    fn a_closed_contract_with_zero_maximums_is_kept_beside_the_perpetuals() {
+        let mut closed = instrument("OLDUSDT", "Closed", "1756684800000");
+        closed
+            .lot_size_filter
+            .insert("maxOrderQty".to_owned(), Value::from("0"));
+        closed
+            .lot_size_filter
+            .insert("maxMktOrderQty".to_owned(), Value::from("0"));
+        let rows = normalize_instruments(
+            DAY_MS,
+            DAY_MS + 1,
+            &[instrument("BTCUSDT", "Trading", "0"), closed],
+        )
+        .expect("a zero maximum is no maximum");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].symbol, "BTCUSDT");
+        assert_eq!(rows[0].delivery_time_ms, Some(0));
+        assert_eq!(rows[0].max_market_order_qty, Some(10.0));
+        assert_eq!(rows[1].symbol, "OLDUSDT");
+        assert_eq!(rows[1].max_order_qty, None);
+        assert_eq!(rows[1].max_market_order_qty, None);
+    }
+
+    #[test]
+    fn a_zero_tick_size_still_rejects_the_snapshot() {
+        let mut broken = instrument("BTCUSDT", "Trading", "0");
+        broken
+            .price_filter
+            .insert("tickSize".to_owned(), Value::from("0"));
+        let error = normalize_instruments(DAY_MS, DAY_MS + 1, &[broken]).unwrap_err();
+        assert!(
+            error.to_string().contains("tickSize is not positive"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn observation_precedes_response_availability() {

@@ -1,10 +1,19 @@
 //! Lossless signal delivery into the single-threaded core.
 //!
-//! Production uses [`SpoolSignalFeed`]: signal workers atomically rename immutable
-//! JSON envelopes into a directory. A returned envelope remains until the
-//! reader is polled again, after the engine's WAL barrier; that next poll
-//! retires it. Filenames carry the contiguous source sequence and exact
-//! content hash, and the WAL cursor rejects a duplicate left by a crash.
+//! Production uses [`HybridSignalFeed`]. The signal worker renames every
+//! observation into the spool directory as an immutable JSON envelope named
+//! `<sequence:020>-<content_sha256>.json`, and only then sends the same bytes
+//! down `stream.sock` so the engine need not wait for its next spool poll. The
+//! spool row is the delivery; the frame is the doorbell. A returned envelope
+//! remains until the reader is polled again, after the engine's WAL barrier;
+//! that next poll retires it, whichever path it arrived by. The WAL cursor
+//! rejects a duplicate left by a crash.
+//!
+//! `next_observation` is one branch of the core's `select!`, which drops the
+//! future whenever another branch wins. Every read here is therefore
+//! resumable: a frame that has yielded its length prefix and none of its body
+//! is finished on the next poll, never re-read from its first four bytes.
+//!
 //! The bounded channel is for an in-process credential-free worker or tests;
 //! its sender is non-blocking and says `Full` instead of waiting on the core.
 
@@ -246,7 +255,16 @@ impl SpoolSignalFeed {
         Ok(())
     }
 
-    fn read_one(path: &Path) -> Result<Option<SignalObservation>, SignalError> {
+    /// The spool row an observation is delivered as, whichever path it took.
+    pub fn path_for(&self, observation: &SignalObservation) -> PathBuf {
+        self.directory.join(format!(
+            "{:020}-{}.json",
+            observation.sequence, observation.content_sha256
+        ))
+    }
+
+    /// `(sequence, content_sha256)` from a spool filename.
+    fn parse_name(path: &Path) -> Result<(u64, &str), SignalError> {
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -267,6 +285,53 @@ impl SpoolSignalFeed {
         let named_sequence = sequence.parse::<u64>().map_err(|error| {
             SignalError::Source(format!("signal file {file_name} has bad sequence: {error}"))
         })?;
+        Ok((named_sequence, hash))
+    }
+
+    /// Every `.json` row in the directory, on the blocking pool.
+    async fn scan(&self) -> Result<BTreeSet<PathBuf>, SignalError> {
+        let directory = self.directory.clone();
+        tokio::task::spawn_blocking(move || {
+            let entries = std::fs::read_dir(&directory).map_err(|error| {
+                SignalError::Source(format!(
+                    "cannot scan signal spool {}: {error}",
+                    directory.display()
+                ))
+            })?;
+            let mut paths = BTreeSet::new();
+            for entry in entries {
+                let path = entry
+                    .map_err(|error| SignalError::Source(error.to_string()))?
+                    .path();
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                {
+                    paths.insert(path);
+                }
+            }
+            Ok::<_, SignalError>(paths)
+        })
+        .await
+        .map_err(|error| SignalError::Source(format!("signal spool task failed: {error}")))?
+    }
+
+    async fn read_known(
+        &mut self,
+        path: PathBuf,
+    ) -> Result<Option<SignalObservation>, SignalError> {
+        let read_path = path.clone();
+        let observation = tokio::task::spawn_blocking(move || Self::read_one(&read_path))
+            .await
+            .map_err(|error| SignalError::Source(format!("signal read task failed: {error}")))??;
+        if observation.is_some() {
+            self.returned_path = Some(path);
+        }
+        Ok(observation)
+    }
+
+    fn read_one(path: &Path) -> Result<Option<SignalObservation>, SignalError> {
+        let (named_sequence, hash) = Self::parse_name(path)?;
         let raw = match std::fs::read(path) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -301,57 +366,18 @@ impl SignalFeed for SpoolSignalFeed {
         self.retire_last().await?;
         loop {
             if let Some(path) = self.known_paths.pop_first() {
-                let read_path = path.clone();
-                let observation = tokio::task::spawn_blocking(move || Self::read_one(&read_path))
-                    .await
-                    .map_err(|error| {
-                        SignalError::Source(format!("signal read task failed: {error}"))
-                    })??;
-                let Some(observation) = observation else {
-                    continue;
-                };
-                self.returned_path = Some(path);
-                return Ok(observation);
-            }
-
-            let directory = self.directory.clone();
-            let discovered = tokio::task::spawn_blocking(move || {
-                let entries = std::fs::read_dir(&directory).map_err(|error| {
-                    SignalError::Source(format!(
-                        "cannot scan signal spool {}: {error}",
-                        directory.display()
-                    ))
-                })?;
-                let mut paths = BTreeSet::new();
-                for entry in entries {
-                    let path = entry
-                        .map_err(|error| SignalError::Source(error.to_string()))?
-                        .path();
-                    if path
-                        .extension()
-                        .is_some_and(|extension| extension == "json")
-                    {
-                        paths.insert(path);
-                    }
+                if let Some(observation) = self.read_known(path).await? {
+                    return Ok(observation);
                 }
-                Ok::<_, SignalError>(paths)
-            })
-            .await
-            .map_err(|error| SignalError::Source(format!("signal spool task failed: {error}")))??;
+                continue;
+            }
+            let discovered = self.scan().await?;
             self.known_paths.extend(discovered);
-
             if let Some(path) = self.known_paths.pop_first() {
-                let read_path = path.clone();
-                let observation = tokio::task::spawn_blocking(move || Self::read_one(&read_path))
-                    .await
-                    .map_err(|error| {
-                        SignalError::Source(format!("signal read task failed: {error}"))
-                    })??;
-                let Some(observation) = observation else {
-                    continue;
-                };
-                self.returned_path = Some(path);
-                return Ok(observation);
+                if let Some(observation) = self.read_known(path).await? {
+                    return Ok(observation);
+                }
+                continue;
             }
             tokio::time::sleep(self.poll).await;
         }
@@ -361,10 +387,28 @@ impl SignalFeed for SpoolSignalFeed {
 /// Streaming signal feed over an AF_UNIX domain socket.
 ///
 /// Observations are framed as `[u32 length_le][raw JSON bytes of SignalObservation]`.
+/// The frame being read lives in `frame`, not on the future's stack, because
+/// the core drops this future every time another `select!` branch wins.
 pub struct UnixSignalFeed {
     socket_path: PathBuf,
     listener: tokio::net::UnixListener,
     active_stream: Option<tokio::net::UnixStream>,
+    frame: Frame,
+}
+
+/// One frame in progress. `body` is sized once the four length bytes are in.
+#[derive(Default)]
+struct Frame {
+    len_buf: [u8; 4],
+    len_filled: usize,
+    body: Vec<u8>,
+    body_filled: usize,
+}
+
+impl Frame {
+    fn started(&self) -> bool {
+        self.len_filled > 0
+    }
 }
 
 impl UnixSignalFeed {
@@ -381,11 +425,17 @@ impl UnixSignalFeed {
             socket_path,
             listener,
             active_stream: None,
+            frame: Frame::default(),
         })
     }
 
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    fn drop_stream(&mut self) {
+        self.active_stream = None;
+        self.frame = Frame::default();
     }
 }
 
@@ -393,23 +443,58 @@ impl SignalFeed for UnixSignalFeed {
     async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
         use tokio::io::AsyncReadExt;
         loop {
-            if let Some(stream) = self.active_stream.as_mut() {
-                let mut len_buf = [0u8; 4];
-                match stream.read_exact(&mut len_buf).await {
-                    Ok(_) => {
-                        let len = u32::from_le_bytes(len_buf) as usize;
+            let Some(stream) = self.active_stream.as_mut() else {
+                match self.listener.accept().await {
+                    Ok((stream, _)) => self.active_stream = Some(stream),
+                    Err(err) => {
+                        return Err(SignalError::Source(format!(
+                            "cannot accept Unix signal socket connection on {}: {err}",
+                            self.socket_path.display()
+                        )));
+                    }
+                }
+                continue;
+            };
+            let frame = &mut self.frame;
+            // `read` is cancel-safe: a poll that returns Pending has taken
+            // nothing off the socket, so a dropped future loses no bytes.
+            let read = if frame.len_filled < 4 {
+                stream.read(&mut frame.len_buf[frame.len_filled..]).await
+            } else {
+                stream.read(&mut frame.body[frame.body_filled..]).await
+            };
+            match read {
+                Ok(0) => {
+                    if frame.started() {
+                        tracing::warn!(
+                            length_bytes = frame.len_filled,
+                            body_bytes = frame.body_filled,
+                            "signal client disconnected during frame read"
+                        );
+                    } else {
+                        tracing::debug!("signal client disconnected; waiting for next connection");
+                    }
+                    self.drop_stream();
+                }
+                Ok(read) if frame.len_filled < 4 => {
+                    frame.len_filled += read;
+                    if frame.len_filled == 4 {
+                        let len = u32::from_le_bytes(frame.len_buf) as usize;
                         if len == 0 || len > MAX_SIGNAL_OBSERVATION_BYTES {
-                            self.active_stream = None;
+                            self.drop_stream();
                             return Err(SignalError::Source(format!(
                                 "invalid signal frame size: {len} bytes (max: {MAX_SIGNAL_OBSERVATION_BYTES})"
                             )));
                         }
-                        let mut body = vec![0u8; len];
-                        if let Err(err) = stream.read_exact(&mut body).await {
-                            self.active_stream = None;
-                            tracing::warn!(error = %err, "signal client disconnected during frame read");
-                            continue;
-                        }
+                        frame.body = vec![0u8; len];
+                        frame.body_filled = 0;
+                    }
+                }
+                Ok(read) => {
+                    frame.body_filled += read;
+                    if frame.body_filled == frame.body.len() {
+                        let body = std::mem::take(&mut frame.body);
+                        *frame = Frame::default();
                         let observation: SignalObservation = serde_json::from_slice(&body)
                             .map_err(|err| {
                                 SignalError::Source(format!("malformed signal frame JSON: {err}"))
@@ -417,22 +502,10 @@ impl SignalFeed for UnixSignalFeed {
                         validate(&observation).map_err(SignalError::Source)?;
                         return Ok(observation);
                     }
-                    Err(err) => {
-                        self.active_stream = None;
-                        tracing::debug!(error = %err, "signal client disconnected; waiting for next connection");
-                    }
-                }
-            }
-
-            match self.listener.accept().await {
-                Ok((stream, _)) => {
-                    self.active_stream = Some(stream);
                 }
                 Err(err) => {
-                    return Err(SignalError::Source(format!(
-                        "cannot accept Unix signal socket connection on {}: {err}",
-                        self.socket_path.display()
-                    )));
+                    tracing::debug!(error = %err, "signal client read failed; waiting for next connection");
+                    self.drop_stream();
                 }
             }
         }
@@ -445,11 +518,16 @@ impl Drop for UnixSignalFeed {
     }
 }
 
-/// Dual-mode feed that receives signals over an AF_UNIX streaming socket with zero
-/// disk I/O, while draining offline spool files from disk during catch-up or recovery.
+/// The production feed: spool rows, with the socket as a wake-up.
+///
+/// The worker writes an observation's spool row before it sends the frame, so
+/// any row still on disk with a lower sequence than a frame was written before
+/// it. Those rows go first; the frame waits in `parked`. Sequences are per
+/// source, but a row from another source going first costs nothing.
 pub struct HybridSignalFeed {
     unix: UnixSignalFeed,
     spool: SpoolSignalFeed,
+    parked: Option<SignalObservation>,
 }
 
 impl HybridSignalFeed {
@@ -458,7 +536,11 @@ impl HybridSignalFeed {
         let sock_path = dir.join("stream.sock");
         let unix = UnixSignalFeed::bind(sock_path)?;
         let spool = SpoolSignalFeed::new(dir);
-        Ok(Self { unix, spool })
+        Ok(Self {
+            unix,
+            spool,
+            parked: None,
+        })
     }
 
     pub fn with_poll_interval(mut self, poll: Duration) -> Self {
@@ -469,32 +551,48 @@ impl HybridSignalFeed {
 
 impl SignalFeed for HybridSignalFeed {
     async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
-        self.spool.retire_last().await?;
-        if let Some(path) = self.spool.known_paths.pop_first() {
-            let read_path = path.clone();
-            let observation =
-                tokio::task::spawn_blocking(move || SpoolSignalFeed::read_one(&read_path))
-                    .await
-                    .map_err(|error| {
-                        SignalError::Source(format!("signal read task failed: {error}"))
-                    })??;
-            if let Some(observation) = observation {
-                self.spool.returned_path = Some(path);
+        loop {
+            self.spool.retire_last().await?;
+            if let Some(path) = self.spool.known_paths.pop_first() {
+                if let Some(observation) = self.spool.read_known(path).await? {
+                    return Ok(observation);
+                }
+                continue;
+            }
+            if let Some(observation) = self.parked.take() {
+                self.spool.returned_path = Some(self.spool.path_for(&observation));
                 return Ok(observation);
             }
-        }
-
-        tokio::select! {
-            biased;
-            obs = self.unix.next_observation() => obs,
-            spool_obs = self.spool.next_observation() => spool_obs,
+            let observation = tokio::select! {
+                biased;
+                observation = self.unix.next_observation() => observation?,
+                observation = self.spool.next_observation() => return observation,
+            };
+            let below = self
+                .spool
+                .scan()
+                .await?
+                .into_iter()
+                .filter(|path| {
+                    SpoolSignalFeed::parse_name(path)
+                        .is_ok_and(|(sequence, _)| sequence < observation.sequence)
+                })
+                .collect::<BTreeSet<_>>();
+            if below.is_empty() {
+                self.spool.returned_path = Some(self.spool.path_for(&observation));
+                return Ok(observation);
+            }
+            // Rows a dropped spool scan left behind are rediscovered later;
+            // only the ones written before this frame may go ahead of it.
+            self.spool.known_paths = below;
+            self.parked = Some(observation);
         }
     }
 }
 
 /// Unified signal feed selection for production runners.
 pub enum EngineSignalFeed {
-    Hybrid(HybridSignalFeed),
+    Hybrid(Box<HybridSignalFeed>),
     Spool(SpoolSignalFeed),
 }
 
@@ -502,7 +600,7 @@ impl EngineSignalFeed {
     pub fn for_directory(directory: impl Into<PathBuf>) -> Self {
         let dir = directory.into();
         match HybridSignalFeed::new(&dir) {
-            Ok(hybrid) => Self::Hybrid(hybrid),
+            Ok(hybrid) => Self::Hybrid(Box::new(hybrid)),
             Err(err) => {
                 tracing::warn!(error = %err, path = %dir.display(), "falling back to pure file spool signal feed");
                 Self::Spool(SpoolSignalFeed::new(dir))
@@ -831,6 +929,144 @@ mod tests {
         assert_eq!(obs2, second);
 
         assert!(!first_path.exists());
+
+        drop(client);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The core's `select!` drops the feed future whenever another branch
+    /// wins. A frame whose length prefix was read before that and whose body
+    /// arrives after it is one frame, not a length followed by `{"sc`.
+    #[tokio::test]
+    async fn a_frame_split_by_a_dropped_future_is_still_one_frame() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let directory = short_test_dir("ux-split");
+        let sock_path = directory.join("stream.sock");
+        let mut feed = UnixSignalFeed::bind(&sock_path).unwrap();
+
+        let mut obs = observation();
+        obs.sequence = 7;
+        obs.content_sha256 = content_sha256(&obs);
+        let body = serde_json::to_vec(&obs).unwrap();
+
+        let mut client = UnixStream::connect(&sock_path).unwrap();
+        client
+            .write_all(&(body.len() as u32).to_le_bytes())
+            .unwrap();
+        client.flush().unwrap();
+
+        let dropped =
+            tokio::time::timeout(Duration::from_millis(50), feed.next_observation()).await;
+        assert!(
+            dropped.is_err(),
+            "no body has arrived, so there is nothing to return"
+        );
+
+        client.write_all(&body).unwrap();
+        client.flush().unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(2), feed.next_observation())
+            .await
+            .expect("the body completes the frame the length began")
+            .unwrap();
+        assert_eq!(received, obs);
+
+        drop(client);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[tokio::test]
+    async fn a_client_that_dies_mid_frame_costs_only_its_own_frame() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let directory = short_test_dir("ux-eof");
+        let sock_path = directory.join("stream.sock");
+        let mut feed = UnixSignalFeed::bind(&sock_path).unwrap();
+
+        let mut lost = observation();
+        lost.sequence = 7;
+        lost.content_sha256 = content_sha256(&lost);
+        let lost_body = serde_json::to_vec(&lost).unwrap();
+        let mut first = UnixStream::connect(&sock_path).unwrap();
+        first
+            .write_all(&(lost_body.len() as u32).to_le_bytes())
+            .unwrap();
+        first.write_all(&lost_body[..lost_body.len() / 2]).unwrap();
+        first.flush().unwrap();
+        drop(first);
+
+        let mut whole = observation();
+        whole.sequence = 8;
+        whole.content_sha256 = content_sha256(&whole);
+        let whole_body = serde_json::to_vec(&whole).unwrap();
+        let mut second = UnixStream::connect(&sock_path).unwrap();
+        second
+            .write_all(&(whole_body.len() as u32).to_le_bytes())
+            .unwrap();
+        second.write_all(&whole_body).unwrap();
+        second.flush().unwrap();
+
+        let received = tokio::time::timeout(Duration::from_secs(2), feed.next_observation())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, whole);
+
+        drop(second);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The worker writes a row before it sends the frame. A row still on disk
+    /// with a lower sequence than an arriving frame was written before it and
+    /// goes first; the frame's own row is retired after the barrier like any
+    /// other returned envelope.
+    #[tokio::test]
+    async fn a_frame_waits_for_the_row_written_before_it_and_retires_its_own() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let directory = short_test_dir("hy-order");
+
+        let mut first = observation();
+        first.sequence = 1;
+        first.content_sha256 = content_sha256(&first);
+        let first_path = spool_path(&directory, &first);
+        std::fs::write(&first_path, serde_json::to_vec(&first).unwrap()).unwrap();
+
+        let mut second = observation();
+        second.sequence = 2;
+        second.content_sha256 = content_sha256(&second);
+        let second_path = spool_path(&directory, &second);
+        let second_body = serde_json::to_vec(&second).unwrap();
+        std::fs::write(&second_path, &second_body).unwrap();
+
+        // A poll long enough that only the socket can wake the feed.
+        let mut feed = HybridSignalFeed::new(&directory)
+            .unwrap()
+            .with_poll_interval(Duration::from_secs(30));
+        let mut client = UnixStream::connect(directory.join("stream.sock")).unwrap();
+        client
+            .write_all(&(second_body.len() as u32).to_le_bytes())
+            .unwrap();
+        client.write_all(&second_body).unwrap();
+        client.flush().unwrap();
+
+        assert_eq!(feed.next_observation().await.unwrap(), first);
+        assert_eq!(feed.next_observation().await.unwrap(), second);
+        assert!(!first_path.exists(), "the row before the frame is retired");
+        assert!(
+            second_path.exists(),
+            "the frame's row waits for the barrier"
+        );
+
+        let quiet = tokio::time::timeout(Duration::from_millis(200), feed.next_observation()).await;
+        assert!(quiet.is_err(), "nothing else was written");
+        assert!(
+            !second_path.exists(),
+            "the next poll retires the frame's own row"
+        );
 
         drop(client);
         let _ = std::fs::remove_dir_all(&directory);

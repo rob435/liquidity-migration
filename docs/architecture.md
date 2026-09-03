@@ -24,18 +24,28 @@ Demo and Mainnet realms are strictly segregated across all resources:
 
 ## 2. Inter-Process Communication (IPC)
 
-The signal worker communicates with the engine via a high-throughput Unix Domain Socket (`AF_UNIX`) with automatic disk spool fallback.
+The signal worker delivers observations to the engine as immutable spool rows, and rings a Unix domain socket (`AF_UNIX`) so the engine need not wait for its next spool poll.
 
-| Property | Socket Path | Wire Protocol | Permissions | Ownership |
+| Property | Path | Format | Permissions | Ownership |
 | :--- | :--- | :--- | :--- | :--- |
-| **Demo IPC** | `/var/lib/liquidity-migration/signals/demo/stream.sock` | `[u32 len_le][utf8 json payload]` | `0770` | `liquidity-engine-demo:liquidity-migration` |
-| **Mainnet IPC** | `/var/lib/liquidity-migration/signals/mainnet/stream.sock` | `[u32 len_le][utf8 json payload]` | `0770` | `liquidity-engine-mainnet:liquidity-migration` |
-| **Spool Fallback** | `/var/lib/liquidity-migration/signals/<realm>/` | Atomic `.json` files (`obs-*.json`) | `0770` | `liquidity-signal-worker:liquidity-migration` |
+| **Spool row** | `/var/lib/liquidity-migration/signals/<realm>/<sequence:020>-<content_sha256>.json` | One `SignalObservation` JSON envelope, renamed into place after `fsync` | `0770` dir | `liquidity-signal-worker:liquidity-migration` |
+| **Demo doorbell** | `/var/lib/liquidity-migration/signals/demo/stream.sock` | `[u32 len_le][the row's bytes]` | `0770` | `liquidity-engine-demo:liquidity-migration` |
+| **Mainnet doorbell** | `/var/lib/liquidity-migration/signals/mainnet/stream.sock` | `[u32 len_le][the row's bytes]` | `0770` | `liquidity-engine-mainnet:liquidity-migration` |
 
 ### Signal Delivery Mechanics
-1. **Socket-First**: Worker attempts non-blocking write to `stream.sock` ($< 10\mu s$ latency, zero disk I/O).
-2. **Spool Fallback**: If engine is offline/restarting, worker writes atomic `.json` files to the spool directory.
-3. **Hybrid Drain**: Upon startup, engine drains queued disk spool files in order before consuming the live socket stream.
+
+| Step | Who | Does |
+| :--- | :--- | :--- |
+| 1 | Worker | Writes the row atomically (temp file, `fsync`, rename, directory `fsync`). The row is the delivery. |
+| 2 | Worker | Sends the same bytes as one frame down `stream.sock`, one `write`, 200 ms timeout. Best effort: a failed frame changes nothing. |
+| 3 | Engine | Reads frames with resumable state, so a frame split across polls of the core's `select!` is still one frame. A client that disconnects mid-frame costs only that frame. |
+| 4 | Engine | On a frame, scans the spool: rows with a lower sequence were written before it and go first; the frame waits. Sequences are per source (`<source>.long`, `<source>.carry`). |
+| 5 | Engine | Retires a delivered row on the next poll, after the WAL barrier, whichever path it arrived by. The WAL cursor drops a duplicate. |
+| 6 | Engine (down) | Nothing is lost: rows accumulate; boot drains them in order before the socket is read. |
+
+* **Must**: every observation exist as a row before any frame names it.
+* **Must never**: a read on the socket hold partial-frame state on the future's stack; the core drops that future on every market event.
+* A sequence gap (`signal source … has sequence gap`) means a row was deleted from the spool by something other than the engine. It stops the engine. Recovery: [docs/operations.md §8](operations.md#8-incident-recovery-matrix).
 
 ---
 

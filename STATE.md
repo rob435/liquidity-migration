@@ -6,14 +6,14 @@ Current operational snapshot of the live trading fleet and host environment.
 
 ## 1. Live Deployment Snapshot
 
-Verified via `scripts/ops.sh status` on 2026-09-02 22:45 UTC:
+Verified against the running host on 2026-09-03 01:36 UTC:
 
 | Property | Value | Description |
 | :--- | :--- | :--- |
-| **Host** | `ip-208-84-103-4.my-advin.com` (`208.84.103.4`) | 4 vCPU, 8 GB RAM, 127 GB disk (38% used, 71 GB free). |
-| **Deployed Commit** | `76a8fc59483b08ca2ed33b0857ca81da3ba74d8b` | Verified across both engines, workers, and git checkout. |
-| **Rollback Target** | `811e73350b8c1b7ea3523aab0048a6d6254093dc` | Stored in `/opt/liquidity-migration-engine/previous-commit`. |
-| **Funded Status** | `real-money armed` | Mainnet engine quoting with `REAL_MONEY=true`. |
+| **Host** | `ip-208-84-103-4.my-advin.com` (`208.84.103.4`) | 4 vCPU, 8 GB RAM, 118 GB disk (36% used, 72 GB free). |
+| **Deployed Commit** | `af40545ea9ce3eb3ec52a49adfb7078c9f3a01f9` | Verified across both engines, workers, and git checkout. |
+| **Rollback Target** | `14e86b3fbdb01d50fed9cb748b7318ae0383807c` | Stored in `/opt/liquidity-migration-engine/previous-commit`. |
+| **Funded Status** | `real-money armed`, **entries halted** | `REAL_MONEY=true`. The 24h loss window is tripped (−16.14 vs a 13.08 USDT limit), so the kernel refuses every entry and only exits flow. It clears itself 24h after the losing close. |
 | **Signal IPC** | `stream.sock` (`AF_UNIX`) | Unix domain socket streaming active on Demo and Mainnet. |
 
 ---
@@ -31,7 +31,7 @@ Verified via `scripts/ops.sh status` on 2026-09-02 22:45 UTC:
 * **Gross Exposure Ceiling**: $5.0\times$ equity.
 * **Initial Margin Ceiling**: $1.0\times$ equity.
 * **Capital Reference**: Floating equity (floored at $\$100$).
-* **Rolling-Loss Circuit Breaker**: $0.10$ ($10\%$ of capital reference lost in 24h trips emergency entry halt).
+* **Rolling-Loss Circuit Breaker**: $0.10$ ($10\%$ of capital reference lost in 24h trips emergency entry halt). A trip survives a restart, is reported by `rolling_loss_tripped`, and shows every sleeve as `entries_enabled: false`.
 
 ---
 
@@ -44,7 +44,7 @@ Verified via `scripts/ops.sh status` on 2026-09-02 22:45 UTC:
 | `liquidity-migration-signal-worker-demo.service` | Demo | Active | $\le 5\text{s}$ fresh |
 | `liquidity-migration-signal-worker-mainnet.service`| Mainnet | Active | $\le 5\text{s}$ fresh |
 | `liquidity-migration-forward-capture.service` | Bybit | Active | 713 USDT perp symbols (0 dropped frames) |
-| `liquidity-migration-forward-capture-binance.service`| Binance | Active | 511 USDT perp symbols (0 dropped frames) |
+| `liquidity-migration-forward-capture-binance.service`| Binance | Active | 510 USDT perp symbols (0 dropped frames) |
 | `liquidity-migration-telegram-controls.service` | Global | Active | Polling authorized chats |
 | `liquidity-migration-trade-notify.timer` | Global | Active | 5-minute trade scanning |
 

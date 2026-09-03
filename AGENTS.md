@@ -106,6 +106,22 @@ When sources disagree, read the primary artifact and fix the stale source.
 - A strategy change is not a refactor — explain and test the numerical
   difference rather than forcing equivalence, and record the change point.
 
+## The Funded Engine Is Production
+
+`liquidity-migration-engine-mainnet` trades the owner's money. An error there
+is an outage, and outages get fixed, not filed.
+
+- See a fault in the funded engine or anything it depends on (the signal
+  worker, the spool, the deploy): find the root cause, fix it properly in
+  code, test it, prove the test fails without the fix, merge, deploy through
+  the sanctioned workflow, and verify on the host. Same session.
+- Stopping the engine is a holding action, never the fix. Say so when you do
+  it, with the positions that are open.
+- A crash loop is itself a fault. So is a lane that logs the same failure
+  every hour.
+- Write the incident down in CHANGELOG.md with times, the exact error text,
+  and what changed.
+
 ## Do Not Build Safety Machinery
 
 Do not add safety features, guards, gates, receipts, or proofs on your own
