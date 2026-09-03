@@ -658,7 +658,16 @@ class Recorder:
             return listed_cache[quote]
 
         def allowed(quote: str | None) -> set[str]:
-            return set(listed(quote)) if instruments else set(live)
+            if instruments:
+                return set(listed(quote))
+            # No instrument table yet: the ticker stream is all there is. It
+            # carries every symbol the venue streams, so the tier's own quote
+            # filter has to be applied by shape here — without it a cold start
+            # widens the deep tiers past the quote they asked for and records
+            # names like WLDUSDC and ADAUSD_PERP off a USDT universe.
+            if quote is None:
+                return set(live)
+            return {symbol for symbol in live if symbol.isalnum() and symbol.endswith(quote)}
 
         resolved: dict[str, list[str]] = {}
         for tier in self.config.tiers:

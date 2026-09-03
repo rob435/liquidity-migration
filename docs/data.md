@@ -66,7 +66,7 @@ When projected monthly usage exceeds 1,300 GB, the recorder sheds feeds one by o
 manifest.jsonl                                         Atomic receipts: path, row count, byte size, SHA-256
 status.json                                            Watchdog status updated every 30 seconds
 ```
-* **Retention**: Keeps 30 days or 60 GB locally. Stops writing if disk free space falls below 25 GB.
+* **Retention**: 30 days is the ceiling; the disk cap binds first — **40 GB Bybit, 30 GB Binance**, sized on measured ingest (8.0 and 5.8 GB/day) and summing under the 118 GB filesystem so neither recorder races the other. That is roughly five days of local tape; the hourly Drive archive is the history. Stops writing if disk free space falls below 25 GB.
 
 ### Google Drive Archive Layout
 Finished hours are tarred and uploaded ten minutes past each hour:

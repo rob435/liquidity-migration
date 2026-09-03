@@ -97,7 +97,7 @@ RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
     --backup-dir "$REMOTE/history/$RUN_STAMP" \
     --transfers 4 \
     --checkers 8 \
-    --drive-chunk-size 32M \
+    --drive-chunk-size 8M \
     --retries 5 \
     --low-level-retries 10
 "$RCLONE" check "$STAGE" "$REMOTE/latest" \
