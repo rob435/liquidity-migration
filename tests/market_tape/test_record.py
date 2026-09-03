@@ -6,6 +6,7 @@ import json
 import logging
 import shutil
 import threading
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -389,24 +390,29 @@ def test_a_live_shard_changes_its_subscription_in_place(tmp_path: Path) -> None:
     assert len(socket.sent) == 2
 
 
-def test_re_anchoring_resubscribes_only_the_book_topics(tmp_path: Path) -> None:
+def test_re_anchoring_drops_and_retakes_only_the_book_topics_in_chunks(tmp_path: Path) -> None:
     recorder = build(tmp_path, Tier("deep", DEEP_FEEDS, Universe("symbols", symbols=("BTCUSDT",))))
-    topics = ["orderbook.50.BTCUSDT", "publicTrade.BTCUSDT", "tickers.BTCUSDT", "orderbook.1.BTCUSDT"]
+    books = [f"orderbook.50.SYM{index}USDT" for index in range(record.REANCHOR_CHUNK + 3)]
+    topics = [*books[:4], "publicTrade.BTCUSDT", "tickers.BTCUSDT", *books[4:]]
     shard = unstarted_shard(recorder, "deep", topics)
     socket = FakeSocket()
     shard.socket = socket  # type: ignore[assignment]
     shard.connected = True
 
-    books = shard.reanchor_books()
+    assert shard.reanchor_books("2027-01-15T08", limit=len(books)) == len(books)
 
-    assert books == ["orderbook.50.BTCUSDT", "orderbook.1.BTCUSDT"]
+    # Each chunk is unsubscribed and resubscribed together, so a symbol is
+    # gone for one round trip rather than for the whole shard's pass.
     assert [json.loads(text) for text in socket.sent] == [
-        {"op": "unsubscribe", "args": books},
-        {"op": "subscribe", "args": books},
+        {"op": "unsubscribe", "args": books[: record.REANCHOR_CHUNK]},
+        {"op": "subscribe", "args": books[: record.REANCHOR_CHUNK]},
+        {"op": "unsubscribe", "args": books[record.REANCHOR_CHUNK :]},
+        {"op": "subscribe", "args": books[record.REANCHOR_CHUNK :]},
     ]
     # The subscription itself is unchanged: this is a re-anchor, not a replan.
     assert shard.topics == topics
-    assert shard.reanchors == 1
+    assert shard.reanchored("2027-01-15T08")
+    assert not shard.reanchored("2027-01-15T09")
 
 
 def test_a_shard_with_no_books_and_a_disconnected_one_re_anchor_nothing(tmp_path: Path) -> None:
@@ -414,18 +420,22 @@ def test_a_shard_with_no_books_and_a_disconnected_one_re_anchor_nothing(tmp_path
     ticker_only = unstarted_shard(recorder, "wide", ["tickers.BTCUSDT"])
     ticker_only.socket = FakeSocket()  # type: ignore[assignment]
     ticker_only.connected = True
-    assert ticker_only.reanchor_books() == []
+    assert ticker_only.reanchor_books("2027-01-15T08", limit=40) == 0
+    assert ticker_only.reanchored("2027-01-15T08"), "nothing to anchor is anchored"
 
     offline = unstarted_shard(recorder, "wide", ["orderbook.50.BTCUSDT"])
-    assert offline.reanchor_books() == [], "a shard that is not connected re-anchors on connect"
+    assert offline.reanchor_books("2027-01-15T08", limit=40) == 0
+    assert not offline.reanchored("2027-01-15T08"), "it re-anchors by connecting"
     assert offline.reanchors == 0
 
 
-def test_the_hourly_pass_re_anchors_every_shard_once_spread_over_ticks(tmp_path: Path) -> None:
+def test_the_hourly_pass_is_bounded_per_tick_and_resumes_where_it_stopped(tmp_path: Path) -> None:
     recorder = build(tmp_path, Tier("deep", DEEP_FEEDS, Universe("symbols", symbols=("BTCUSDT",))))
+    per_shard = record.REANCHOR_TOPICS_PER_TICK
     shards = []
-    for index in range(record.REANCHOR_SHARDS_PER_TICK + 1):
-        shard = unstarted_shard(recorder, "deep", [f"orderbook.50.SYM{index}USDT"], index=index)
+    for index in range(2):
+        topics = [f"orderbook.50.S{index}N{n}USDT" for n in range(per_shard)]
+        shard = unstarted_shard(recorder, "deep", topics, index=index)
         shard.socket = FakeSocket()  # type: ignore[assignment]
         shard.connected = True
         shards.append(shard)
@@ -433,17 +443,26 @@ def test_the_hourly_pass_re_anchors_every_shard_once_spread_over_ticks(tmp_path:
 
     hour = BASE_NS
     recorder._reanchor_books(hour)
-    assert sum(s.reanchors for s in shards) == record.REANCHOR_SHARDS_PER_TICK, "spread, not all at once"
-    # A later tick inside the same hour finishes the pass and then stops.
+    assert shards[0].reanchor_cursor == per_shard, "the tick's whole budget went to the first shard"
+    assert shards[1].reanchor_cursor == 0, "bounded per tick, not all at once"
+
     recorder._reanchor_books(hour + 30 * 10**9)
-    assert [s.reanchors for s in shards] == [1] * len(shards)
+    assert [s.reanchor_cursor for s in shards] == [per_shard, per_shard]
+    before = [len(s.socket.sent) for s in shards]  # type: ignore[union-attr]
     recorder._reanchor_books(hour + 60 * 10**9)
-    assert [s.reanchors for s in shards] == [1] * len(shards), "once an hour, not once a tick"
+    assert [len(s.socket.sent) for s in shards] == before, "once an hour, not once a tick"  # type: ignore[union-attr]
 
     # The next UTC hour makes every shard due again.
     recorder._reanchor_books(hour + HOUR_NS)
-    recorder._reanchor_books(hour + HOUR_NS + 30 * 10**9)
-    assert [s.reanchors for s in shards] == [2] * len(shards)
+    assert shards[0].reanchor_cursor == per_shard and shards[0].reanchor_hour.endswith("T09")
+
+
+def test_a_shard_that_just_connected_is_already_anchored_for_its_hour(tmp_path: Path) -> None:
+    recorder = build(tmp_path, Tier("deep", DEEP_FEEDS, Universe("symbols", symbols=("BTCUSDT",))))
+    shard = unstarted_shard(recorder, "deep", ["orderbook.50.BTCUSDT"])
+    day, hour = record.utc_day_hour(time.time_ns())
+    shard.mark_anchored(f"{day}T{hour}")
+    assert shard.reanchored(f"{day}T{hour}"), "connecting subscribed, and subscribing anchored"
 
 
 def test_re_anchoring_is_off_when_the_config_says_so(tmp_path: Path) -> None:

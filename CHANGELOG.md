@@ -34,8 +34,10 @@ edit STATE.md to match.
     discovery tiers, then their prints, then the crowd books, and never a
     ticker or `core:book:50`.
   - **Hourly book anchoring** (`connection.reanchor_books_each_hour`, default
-    on): every book topic is re-subscribed once per UTC hour, two shards per
-    maintenance tick, and the venue answers a subscribe with a snapshot. The
+    on): every book topic is re-subscribed once per UTC hour, 40 topics per
+    maintenance tick in chunks of 10 dropped and re-taken together, so a
+    symbol's book is gone for one round trip rather than for its whole shard's
+    pass. The venue answers a subscribe with a snapshot. The
     hour is the archive's unit, so each uploaded tar now replays on its own.
     Before this, only the recorder's start anchored a book: four recorded hours
     of `AGIUSDT` held 78,895 fifty-level deltas and no fifty-level snapshot, and

@@ -74,10 +74,15 @@ DAY_NS = 24 * 60 * MINUTE_NS
 MONTH_SECONDS = 30 * 86_400
 #: An hour of received bytes before a monthly projection means anything.
 BUDGET_MIN_WINDOW_NS = 60 * MINUTE_NS
-#: Shards re-anchored per maintenance tick. The hourly pass is spread rather
-#: than sent at once: a few hundred symbols re-subscribing in one breath is a
-#: burst of snapshots and a burst of missing deltas.
-REANCHOR_SHARDS_PER_TICK = 2
+#: Book topics re-anchored per maintenance tick, across every shard. The
+#: hourly pass is spread rather than sent at once: a few hundred symbols
+#: re-subscribing in one breath is a burst of snapshots and a burst of
+#: missing deltas. At 40 a tick and a 30-second tick, 500 topics take about
+#: six minutes of the hour.
+REANCHOR_TOPICS_PER_TICK = 40
+#: Topics dropped and re-taken together. One venue message carries ten, so a
+#: chunk is one message each way and a symbol's gap is one round trip.
+REANCHOR_CHUNK = 10
 LANES = "lanes"
 QueueItem = tuple[str, Any, int, str]
 
@@ -263,10 +268,13 @@ class Shard:
     thread: threading.Thread | None = None
     connected: bool = False
     reconnects: int = 0
+    #: Chunks re-anchored, counted for `status.json`.
     reanchors: int = 0
-    #: When this shard's books were last re-anchored, so the hourly pass can
-    #: spread the work instead of re-subscribing every symbol at once.
-    reanchored_hour: str = ""
+    #: The hour `reanchor_cursor` belongs to, and how many of this shard's
+    #: book topics that hour's pass has re-anchored. Together they let the
+    #: hourly pass spread over many maintenance ticks and resume where it was.
+    reanchor_hour: str = ""
+    reanchor_cursor: int = 0
     last_message_ns: int = 0
     backoff_seconds: float = 2.0
 
@@ -314,24 +322,48 @@ class Shard:
                 self._after_subscribe(added)
         return added, removed
 
-    def reanchor_books(self) -> list[str]:
-        """Re-subscribe this shard's book topics so the venue pushes a fresh
-        snapshot for each, and return the topics re-anchored.
+    def book_count(self) -> int:
+        return len(self.adapter.book_topics(self.topics))
+
+    def mark_anchored(self, hour: str) -> None:
+        """Treat this shard's books as anchored for `hour` without sending
+        anything. Connecting subscribes, and subscribing is what anchors a
+        book, so a shard that just connected is already done for its hour."""
+
+        self.reanchor_hour = hour
+        self.reanchor_cursor = self.book_count()
+
+    def reanchor_books(self, hour: str, limit: int) -> int:
+        """Re-subscribe up to `limit` more of this shard's book topics for
+        `hour`, and return how many were sent.
 
         The point is the snapshot: a book delta only means something next to
         one, so an hour of tape whose books were anchored in an earlier hour
-        cannot be replayed on its own. The cost is the moment between the
-        unsubscribe and the snapshot, which the snapshot row itself marks.
+        cannot be replayed on its own. The cost is the moment between a
+        topic's unsubscribe and its snapshot, so the topics go in small
+        chunks that are dropped and re-taken together — one round trip per
+        symbol rather than one per shard. The snapshot row marks the seam.
         """
 
+        if self.reanchor_hour != hour:
+            self.reanchor_hour = hour
+            self.reanchor_cursor = 0
         books = self.adapter.book_topics(self.topics)
-        if not books or not self.connected or self.socket is None:
-            return []
-        self._send_all(self.adapter.remove_messages(books))
-        self._send_all(self.adapter.add_messages(books))
-        self._after_subscribe(books)
-        self.reanchors += 1
-        return books
+        if not self.connected or self.socket is None:
+            return 0
+        sent = 0
+        while self.reanchor_cursor < len(books) and sent < limit:
+            chunk = books[self.reanchor_cursor : self.reanchor_cursor + REANCHOR_CHUNK]
+            self._send_all(self.adapter.remove_messages(chunk))
+            self._send_all(self.adapter.add_messages(chunk))
+            self._after_subscribe(chunk)
+            self.reanchor_cursor += len(chunk)
+            sent += len(chunk)
+            self.reanchors += 1
+        return sent
+
+    def reanchored(self, hour: str) -> bool:
+        return self.reanchor_hour == hour and self.reanchor_cursor >= self.book_count()
 
     def _send_all(self, messages: list[str]) -> None:
         for position, text in enumerate(messages):
@@ -639,7 +671,6 @@ class Recorder:
         with self.shard_lock:
             index = self.next_shard_index
             self.next_shard_index += 1
-        day, hour = utc_day_hour(time.time_ns())
         shard = Shard(
             index=index,
             tier=tier,
@@ -649,10 +680,9 @@ class Recorder:
             on_frame=self._on_frame,
             on_overrun=self._on_overrun,
             emit=self.emit,
-            # Connecting subscribes, and subscribing is what anchors a book,
-            # so this hour is already done for a shard that starts now.
-            reanchored_hour=f"{day}T{hour}",
         )
+        day, hour = utc_day_hour(time.time_ns())
+        shard.mark_anchored(f"{day}T{hour}")
         shard.start()
         return shard
 
@@ -1021,15 +1051,19 @@ class Recorder:
             return
         day, hour = utc_day_hour(now_ns)
         this_hour = f"{day}T{hour}"
-        due = [shard for shard in self._all_shards() if shard.reanchored_hour != this_hour and shard.connected]
-        for shard in due[:REANCHOR_SHARDS_PER_TICK]:
-            topics = shard.reanchor_books()
-            # A shard carrying no book topics is done for the hour either way;
-            # one that failed to send is retried on the next tick.
-            if topics or not self.adapter.book_topics(shard.topics):
-                shard.reanchored_hour = this_hour
-                if topics:
-                    logging.info("re-anchored %d book topics on shard %d for %s", len(topics), shard.index, this_hour)
+        budget = REANCHOR_TOPICS_PER_TICK
+        sent = 0
+        for shard in self._all_shards():
+            if budget <= 0:
+                break
+            # A shard that is not connected re-anchors by connecting.
+            if shard.reanchored(this_hour) or not shard.connected:
+                continue
+            moved = shard.reanchor_books(this_hour, budget)
+            budget -= moved
+            sent += moved
+        if sent:
+            logging.info("re-anchored %d book topics for %s", sent, this_hour)
 
     def tier_status(self, tier: Tier) -> dict[str, Any]:
         symbols = self.tier_symbols[tier.name]
