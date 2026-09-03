@@ -12,6 +12,7 @@ Telegram notification surfaces, trade event dispatchers, liveness alerts, and in
 | **Realm Liveness** | `liquidity-migration-{demo,mainnet}-liveness.timer` | Periodic timer | `TELEGRAM_ALERT_CHAT_ID` | Read-only health monitor |
 | **Host Liveness** | `liquidity-migration-host-liveness.timer` | Periodic timer | `TELEGRAM_ALERT_CHAT_ID` | Read-only host monitor |
 | **Operator Bot** | `liquidity-migration-telegram-controls.service` | Continuous long-polling | Configured chat / whitelist | Sudo helper control spool |
+| **Minute samples** | `liquidity-migration-equity-recorder.timer` | Every minute | Host JSONL, optional metrics sink | Read-only; see [observability.md](observability.md) |
 
 ---
 

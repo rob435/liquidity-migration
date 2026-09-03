@@ -64,7 +64,7 @@ pub use creds::Credentials;
 pub use registry::{
     known_venues, InventoryProbe, OrderFeeds, Venue, VenueName, VenueReadiness, BINANCE_MAINNET,
     BINANCE_TESTNET, BYBIT_DEMO, BYBIT_MAINNET, HYPERLIQUID_MAINNET, HYPERLIQUID_TESTNET,
-    LIGHTER_MAINNET, LIGHTER_TESTNET, VARIATIONAL_MAINNET,
+    LIGHTER_MAINNET, LIGHTER_TESTNET, MEXC_MAINNET, VARIATIONAL_MAINNET,
 };
 pub use venues::binance::{BinanceGateway, BinanceOrderFeed, BinanceRealm};
 pub use venues::bybit::{

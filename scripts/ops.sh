@@ -32,7 +32,9 @@ Operator commands:
   restart UNIT...              restart units
   stop UNIT...                 stop units
   start UNIT...                start units
-  equity [ARGS...]             standard descriptive equity curves
+  equity [ARGS...]             standard descriptive equity curves (research)
+  curve [REALM] [SAMPLES]      the live account's recorded equity curve, read
+                               on the host (default: mainnet, 240 minutes)
   flatten --environment demo|mainnet [--reason TEXT] [--execute]
                                ask each native directional reducer to close its
                                attributed exposure through durable Rust control
@@ -215,6 +217,20 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     ;;
   equity)
     exec bash "$ROOT_DIR/scripts/research/equity_curves.sh" "$@"
+    ;;
+  curve)
+    # The live account's own recorded curve, read on the host from the file
+    # the minute recorder appends to. Read-only, and it says nothing about
+    # research backtests -- that is `equity` above.
+    curve_realm="${1:-mainnet}"
+    case "$curve_realm" in
+      demo|mainnet) ;;
+      *) die_usage "curve realm must be demo or mainnet" ;;
+    esac
+    curve_samples="${2:-240}"
+    [[ "$curve_samples" =~ ^[1-9][0-9]*$ ]] || die_usage "curve samples must be a positive integer"
+    remote_exec 'exec "$REPO_DIR/.venv/bin/python" "$REPO_DIR/scripts/runtime/record_equity.py" \
+      --show "${REMOTE_ARGS[0]}" --samples "${REMOTE_ARGS[1]}"' "$curve_realm" "$curve_samples"
     ;;
   research-refresh)
     exec bash "$ROOT_DIR/scripts/research/research_refresh.sh" "$@"

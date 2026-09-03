@@ -4,6 +4,8 @@ liquidity-migration-market-tape-upload.timer|timer|shared|independent|10|always|
 liquidity-migration-market-tape-upload.service|service|shared|independent|20|job|direct|liquidity-migration-forward-capture.service|none|-|-|-|-|-|-|-
 liquidity-migration-backup.timer|timer|shared|independent|30|always|none|liquidity-migration-backup.service|timer|-|liquidity-migration-backup.service|21600|21600|300|900|-
 liquidity-migration-backup.service|service|shared|independent|40|job|none|-|none|-|-|-|-|-|-|-
+liquidity-migration-equity-recorder.timer|timer|shared|independent|70|always|direct|liquidity-migration-equity-recorder.service|timer|-|liquidity-migration-equity-recorder.service|60|60|5|30|-
+liquidity-migration-equity-recorder.service|service|shared|independent|80|job|direct|-|none|-|-|-|-|-|-|-
 liquidity-migration-host-liveness.timer|timer|shared|independent|50|always|direct|liquidity-migration-host-liveness.service|timer|-|liquidity-migration-host-liveness.service|60|180|15|120|-
 liquidity-migration-host-liveness.service|service|shared|independent|60|job|direct|-|none|-|-|-|-|-|-|-
 liquidity-migration-forward-capture.service|service|shared|independent|90|always|direct|-|active|/var/lib/liquidity-migration/forward-market/status.json|-|-|-|-|-|-

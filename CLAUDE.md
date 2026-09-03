@@ -24,6 +24,7 @@ in the token-efficient, Spec-First structured format without narrative padding.
 | What each sleeve trades and where its evidence stops | [docs/trading_logic.md](docs/trading_logic.md) |
 | Operator commands, deploy modes, unit topology | [docs/operations.md](docs/operations.md) |
 | Telegram channels, watchdog alerts, heartbeat dead-man's switch | [docs/notifications.md](docs/notifications.md) |
+| The equity curve on the host, what is sampled every minute, Grafana Cloud | [docs/observability.md](docs/observability.md) |
 | Data roots, timestamps, point-in-time membership, refresh | [docs/data.md](docs/data.md) |
 | The market tape: recorders, Drive archives, loader, book rebuild, bars | [market_tape/README.md](market_tape/README.md) |
 | The study harness: panel, backtester, overlay, plateau checks, evidence note | [liquidity_migration/research/lab/](liquidity_migration/research/lab/) |
@@ -49,12 +50,13 @@ never copy sleeve status or thresholds here.
 | `.venv/bin/python -m pytest -q` | tests |
 | `.venv/bin/python -m ruff check liquidity_migration scripts tests` | lint |
 | `cd engine && cargo test` | engine tests |
-| `cd engine && cargo run --release -- bench` | engine benchmark: re-measures the latency table in [docs/engine.md](docs/engine.md) |
+| `cd engine && cargo run --release -- bench` | the real loop on this box against a local stand-in venue: decide, durable, wire, ack and end-to-end at p50/p99. Our side of the wire, not the venue's |
 | `cd engine && cargo run --release -- wal-cost --wal PATH` | what one append and one durability barrier cost on the filesystem holding PATH: the storage's share of the order path |
 | `cd engine && cargo run --release -- latency --wal PATH` | how long each step of the order path took, per operation, at p50/p90/p99/p99.9: the venue's round trip, the engine's own work, and the time it held a command back to stay inside the request quota, as separate numbers |
 | `cd engine && cargo run --release -- fills --wal PATH` | what the trading cost and what the positions made: maker share, fee, arrival shortfall, markouts, and closed round trips with their P&L |
-| `cd engine && cargo run --release -- backtest --config PATH --tape PATH --instruments PATH --wal PATH` | the live loop on a recorded `market_tape`, in the tape's time, on a simulated venue: [docs/engine.md](docs/engine.md) §8 |
+| `cd engine && cargo run --release -- backtest --config PATH --tape PATH --instruments PATH --wal PATH` | the live loop on a recorded `market_tape`, in the tape's time, on a simulated venue: [docs/engine.md](docs/engine.md) §9 |
 | `python scripts/research/run_engine_backtest.py --config PATH --tape PATH --instruments PATH --out-dir DIR` | runs `engine backtest` and reads its report, trades, and equity back as research metrics |
+| `scripts/ops.sh curve [REALM] [SAMPLES]` | the live account's recorded equity curve, read on the host: [docs/observability.md](docs/observability.md) |
 | `scripts/ops.sh help` | operator router: status, equity, reset, deploy, and the rest |
 | `python -m liquidity_migration --help` | research and data CLI |
 | `python -m market_tape --help` | the market tape: check a capture config, record, pack, list hours, read rows, build bars, rebuild a book |

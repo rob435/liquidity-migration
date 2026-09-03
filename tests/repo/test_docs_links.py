@@ -46,3 +46,29 @@ def test_every_markdown_link_resolves() -> None:
                 line = text[: match.start()].count("\n") + 1
                 dangling.append(f"{path.relative_to(ROOT)}:{line} -> {target}")
     assert not dangling, "dangling markdown links:\n" + "\n".join(dangling)
+
+
+# Docs name repo paths in backticks far more often than they link them, and a
+# moved module leaves the claim behind. CHANGELOG.md is exempt: history names
+# what a change replaced, and those paths are meant to be gone.
+_INLINE_CODE = re.compile(r"`([^`\n]+)`")
+_REPO_PATH = re.compile(
+    r"^(?:configs|data|deploy|docs|engine|liquidity_migration|market_tape|scripts|tests)"
+    r"/[A-Za-z0-9_./@-]+$"
+)
+_PATH_CLAIM_EXEMPT = frozenset({"CHANGELOG.md"})
+
+
+def test_every_repo_path_a_doc_names_exists() -> None:
+    missing: list[str] = []
+    for path in _tracked_markdown():
+        if str(path.relative_to(ROOT)) in _PATH_CLAIM_EXEMPT:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for match in _INLINE_CODE.finditer(text):
+            claim = match.group(1).strip()
+            if not _REPO_PATH.match(claim) or (ROOT / claim).exists():
+                continue
+            line = text[: match.start()].count("\n") + 1
+            missing.append(f"{path.relative_to(ROOT)}:{line} -> {claim}")
+    assert not missing, "docs name repo paths that do not exist:\n" + "\n".join(missing)

@@ -14,6 +14,7 @@ The live trading platform runs natively in Rust. Python is restricted to offline
 | **Signal Worker** (`signal-worker`) | Rust | Public market ingestion, feature calculation, observation streaming | None (public data only) | `/var/lib/liquidity-migration-signal-worker-{demo,mainnet}` | `liquidity-migration-signal-worker-{demo,mainnet}.service` |
 | **Market Tape** (`market-tape`) | Rust / Py | Raw tick/book capture, zstd segment compression, manifest logging | None (public WebSocket) | `/var/lib/liquidity-migration/forward-market` | `liquidity-migration-forward-capture[-binance].service` |
 | **Observer / Notifier** | Python | Read-only trade logs, Telegram notifications, heartbeat monitoring | Telegram Bot Token | None (ephemeral) | `liquidity-migration-trade-notify.service` |
+| **Equity Recorder** | Python | Read-only heartbeat and recorder status sampling, one line per minute | None | None | `liquidity-migration-equity-recorder.service` |
 
 ### Realm Isolation (Demo vs Mainnet)
 Demo and Mainnet realms are strictly segregated across all resources:

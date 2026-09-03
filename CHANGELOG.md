@@ -6,6 +6,57 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 — The fleet keeps an equity history: one sample a minute to
+  disk, a curve readable on the host, and an optional push to Grafana Cloud.
+  Every venue adapter that is not traded is declared dormant and pinned by a
+  test.**
+  - The gap: `heartbeat.json` is rewritten every five seconds and nothing kept
+    the old one, so the fleet had no history of its own equity. `trades.jsonl`
+    records realized round trips and says nothing between them — a drawdown
+    that never closed a trade left no trace at all, and neither did the
+    minutes an engine was down.
+  - `scripts/runtime/record_equity.py`, run by
+    `liquidity-migration-equity-recorder.timer` every minute at :20, reads
+    every artifact the fleet manifest declares — both engine heartbeats and
+    both tape-recorder status files — and appends one JSON line each to
+    `/var/lib/liquidity-migration/equity/<kind>-<realm>-<YYYY-MM>.jsonl`. A
+    realm with no readable heartbeat is recorded as `state=absent` rather than
+    skipped: the gap is the fact worth keeping. `Persistent=false`, so a
+    missed minute stays missed.
+  - The unit is `independent` in the manifest: it keeps running through fleet
+    restarts and funded stops, which is what lets it record them. It is also
+    the only unit in the fleet that loads no venue environment file at all —
+    its credential surface is empty by construction rather than by unsetting
+    keys it was handed.
+  - `scripts/ops.sh curve [REALM] [SAMPLES]` prints the recorded curve on the
+    host: range, net change, a sparkline with holes where the heartbeat was
+    missing, and the last twenty rows. No remote, no library.
+  - With `METRICS_PUSH_URL`/`_USER`/`_TOKEN` set in
+    `/etc/liquidity-migration/observability.env`, the same samples are pushed
+    as InfluxDB line protocol in one POST — Grafana Cloud's free tier holds
+    10k series and this fleet pushes about 70. Every sample carries `up`, so a
+    dead engine pushes `up=0` rather than nothing. The push is best-effort:
+    the local append happens first and a failed push exits 0 with a `WARNING`.
+    Dashboard: `deploy/grafana/liquidity-migration-fleet.json`. Setup:
+    `docs/observability.md`.
+  - Dormant venues: six venues are compiled, one is traded. `docs/engine.md`
+    §2 now names all ten selectable realms with their readiness and what each
+    is, and `engine/engine-venue/tests/dormant_venues.rs` pins which realms are
+    dormant, what dormancy means at boot per readiness class, and that every
+    dormant gateway, private stream, and realm table is still linked — so
+    deleting an adapter fails to compile in that test rather than at an order.
+    ~19,600 lines kept deliberately; the price is CI time, the value is that a
+    venue decision is a config change.
+  - Doc repairs found on the way: CLAUDE.md pointed `engine bench` at a
+    latency table `docs/engine.md` does not contain; the crate table omitted
+    `engine-marketdata` and called `engine-venue` a two-venue crate;
+    `MEXC_MAINNET` was the one venue constant the crate did not re-export. A
+    new check in `tests/repo/test_docs_links.py` fails the gate when any doc
+    names a repo path that does not exist (CHANGELOG.md exempt: history names
+    what a change replaced).
+  - Also fixed: `render_curve` crashed formatting a sample with no equity
+    number, which is every `absent` row. Caught by its own test before deploy.
+
 - **2026-09-03 — A sleeve sizes against its own fills, never the account's
   whole position: the 2026-08-22 1000PEPE hand-position sell-down, root-caused
   and fixed.**

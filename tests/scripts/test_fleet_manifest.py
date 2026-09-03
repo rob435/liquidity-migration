@@ -203,6 +203,8 @@ def test_independent_units_are_shared_never_stopped_by_a_realm_and_recorder_firs
         "liquidity-migration-backup.service",
         "liquidity-migration-host-liveness.timer",
         "liquidity-migration-host-liveness.service",
+        "liquidity-migration-equity-recorder.timer",
+        "liquidity-migration-equity-recorder.service",
     }
     ordered = _helper("lm_independent_units")
     assert ordered[0] == "liquidity-migration-forward-capture.service"

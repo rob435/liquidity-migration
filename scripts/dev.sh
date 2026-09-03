@@ -56,6 +56,7 @@ MYPY_TARGETS=(
   scripts/devtools/repo_doctor.py
   scripts/data/build_candidate_tape.py
   scripts/runtime/check_fleet_liveness.py
+  scripts/runtime/record_equity.py
 )
 
 command="${1:-help}"

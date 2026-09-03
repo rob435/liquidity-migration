@@ -5,6 +5,9 @@ fires on a `CRITICAL` alert (trigger type **API**; wiring in
 [docs/notifications.md](../docs/notifications.md) §On-call agent). Paste it as
 the routine's prompt verbatim.
 
+Editing this file changes nothing on its own: the routine holds its own copy of
+the prompt. After a change here, re-paste it at claude.ai/code/routines.
+
 | Setting | Value |
 | :--- | :--- |
 | Repository | `rob435/liquidity-migration`, branch `main` |
@@ -28,7 +31,11 @@ Do this, in order:
 
 1. Diagnose from the payload and the code. Name the failing unit, the exact
    error text, and the line of code that produced it. If the payload does not
-   let you reach a root cause, say exactly what is missing.
+   let you reach a root cause, say exactly what is missing, and name the
+   host-side reading that would settle it — the fleet records one equity and
+   recorder sample a minute, so `scripts/ops.sh curve mainnet` shows what the
+   account was worth through the incident and which minutes had no heartbeat
+   at all (`docs/observability.md`). You cannot run it; the owner can.
 2. If the cause is in this repository, fix it properly: root cause, not a
    guard around the symptom. Add a test that fails without the fix and passes
    with it. Run the focused tests, then `scripts/dev.sh check`.
@@ -36,7 +43,9 @@ Do this, in order:
    The body carries: the alert, the diagnosis with file and line, what
    changed, the test that proves it, and any host-side action the owner must
    take by hand (state edits, restarts) as copy-pasteable commands from
-   `docs/operations.md`.
+   `docs/operations.md`. The owner pushes hotfixes straight to `main`; you use
+   a PR because you are unsupervised and the PR is where the checks run before
+   the merge. Do not "correct" this to a direct push.
 4. When the PR's checks are green, merge it (squash) and dispatch the deploy:
    `gh workflow run vps-deploy.yml --ref main -f mode=deploy`. Watch the run
    to completion and report its result in a PR comment.

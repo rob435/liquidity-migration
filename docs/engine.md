@@ -13,7 +13,8 @@ The engine workspace is under `engine/`:
 | **`engine-types`** | Lib | Core domain contracts: market events, orders, strategies, signals, checkpoints, WAL types. |
 | **`engine-wal`** | Lib | Checksummed append-only frame storage, fsync barriers, replay, and segment rotation. |
 | **`engine-risk`** | Lib | Account-wide admission, gross/margin limits, quote freshness, and rolling-loss breaker. |
-| **`engine-venue`** | Lib | Bybit/Binance REST and WebSocket adapters, account lease locking, private feeds. |
+| **`engine-venue`** | Lib | Order gateways, private streams, and the venue registry for all six venues (§2); account lease locking. |
+| **`engine-marketdata`**| Lib | Public market feeds and book rebuild per venue: quotes, trades, level-50 books, funding. |
 | **`engine-strategies`**| Lib | Pure strategy reducers (`LONG`, `CARRY`, `EXODUS`, `MAKER`) and runtime plugs. |
 | **`engine-core`** | Lib | Event loop, boot recovery, command execution, controls, heartbeat, and trade reporting. |
 | **`engine`** | Binary (`bin`) | Production engine runner, takeover tools, and config renderer. |
@@ -22,7 +23,58 @@ The engine workspace is under `engine/`:
 
 ---
 
-## 2. Boot & Recovery Sequence
+## 2. Venue Adapters & Readiness
+
+`engine.toml` names one venue; `VenueName::parse` turns that name into the one
+adapter triple (gateway, private stream, public feed) so a config cannot
+half-switch. Every host any adapter can reach is written in that venue's own
+`realm` module and nowhere else — `engine/engine-venue/tests/venue_fence.rs`
+reads the crate back and fails the suite if a host appears anywhere else.
+
+### Selectable Realms
+
+Readiness is declared in `VenueName::readiness` and enforced at boot by
+`require_engine_run_ready` (`engine/engine-core/src/runner.rs`), before a log,
+credential, or socket is opened.
+
+| `engine.toml` venue | Readiness | Engine may run | Adapter lines | State |
+| :--- | :--- | :---: | ---: | :--- |
+| `bybit_demo` | `live-proven` | yes | 11,570 | Trades. Play money, real matching engine. |
+| `bybit_mainnet` | `live-proven` | yes | (same adapter) | Trades. The funded account; also needs `REAL_MONEY` armed on the host. |
+| `hyperliquid_testnet` | `testnet-canary` | yes | 4,884 | **Dormant.** Offline conformance green; no live order lifecycle observed. |
+| `lighter_testnet` | `testnet-canary` | yes | 5,985 | **Dormant.** Offline conformance green; no live order lifecycle observed. |
+| `hyperliquid_mainnet` | `production-blocked` | no | (same adapter) | **Dormant.** Refused at boot. |
+| `lighter_mainnet` | `production-blocked` | no | (same adapter) | **Dormant.** Refused at boot. |
+| `mexc_mainnet` | `production-blocked` | no | 3,211 | **Dormant.** Refused at boot. |
+| `binance_testnet` | `production-blocked` | no | 4,654 | **Dormant.** Refused at boot. |
+| `binance_mainnet` | `production-blocked` | no | (same adapter) | **Dormant.** Refused at boot. Binance's public feed *is* live: the second tape recorder and the cross-venue panel read it. |
+| `variational_mainnet` | `read-only` | no | 867 | **Dormant.** No trading API in the adapter at all. |
+
+### Invariants
+
+* **Must**: every realm in `VenueName::ALL` be either traded or dormant in
+  `engine/engine-venue/tests/dormant_venues.rs`. That test pins which realms
+  are dormant, what dormancy means at boot per readiness class, and that every
+  dormant gateway, private stream, and realm table is still linked — deleting
+  an adapter fails to compile there rather than at somebody's order.
+* **Must**: offline request-shape conformance stay green where it exists —
+  `engine/engine-venue/tests/hyperliquid_requests.rs`,
+  `engine/engine-venue/tests/lighter_requests.rs`, and
+  `engine/engine-venue/tests/binance_requests.rs`. MEXC and Variational have
+  in-module tests only, and no request-shape suite of their own.
+* **Must Never**: a realm move to `live-proven` without reviewed live evidence
+  from that exact realm — the smallest permitted order, and its cancel or fill.
+  A compiled adapter is not evidence.
+* **Must Never**: real capital reach a `production-blocked` or `read-only`
+  realm. The boot gate refuses the run; there is no override flag.
+
+Only Bybit is traded. Everything else is a kept option: ~19,600 lines whose
+cost is CI time and whose value is that a venue decision is a config change
+rather than a quarter of work.
+
+---
+
+## 3. Boot & Recovery Sequence
 
 `engine run --config PATH` runs on a single-threaded Tokio runtime, establishing identity and state before admitting any order risk:
 
@@ -40,7 +92,7 @@ The engine workspace is under `engine/`:
 
 ---
 
-## 3. Storage, Paths & Memory Budget
+## 4. Storage, Paths & Memory Budget
 
 | Resource | Demo Path | Mainnet Path | Quota / Budget |
 | :--- | :--- | :--- | :--- |
@@ -67,7 +119,7 @@ Bounded acquisition envelopes prevent runaway memory during cold starts:
 
 ---
 
-## 4. Machine Configuration & Rendering
+## 5. Machine Configuration & Rendering
 
 The engine configuration file (`engine.toml` / `engine-mainnet.toml`) contains:
 * `[engine]`: WAL paths, group flush timing (`1-1000ms`), socket paths, heartbeat interval.
@@ -94,7 +146,7 @@ engine render-native-config \
 
 ---
 
-## 5. Risk Kernel & Emergency Circuit Breakers
+## 6. Risk Kernel & Emergency Circuit Breakers
 
 The risk kernel (`engine-risk`) gates every order before it reaches the venue adapter:
 
@@ -114,7 +166,7 @@ The risk kernel (`engine-risk`) gates every order before it reaches the venue ad
 
 ---
 
-## 6. Runtime Controls
+## 7. Runtime Controls
 
 Operator controls are dispatched by placing JSON command files into the realm control spool:
 
@@ -128,7 +180,7 @@ Operator controls are dispatched by placing JSON command files into the realm co
 
 ---
 
-## 7. Native State Takeover & State Audit
+## 8. Native State Takeover & State Audit
 
 When performing rollouts or cold starts, state is seeded or verified while units are stopped:
 
@@ -147,7 +199,7 @@ When performing rollouts or cold starts, state is seeded or verified while units
 
 ---
 
-## 8. Backtest Replay (`engine backtest`)
+## 9. Backtest Replay (`engine backtest`)
 
 The live loop — `Engine::boot_as`, the risk kernel, the strategy reducers, the working-order supervisor, the log — driven by a recorded `market_tape` in the tape's own time, on a simulated venue.
 
@@ -199,7 +251,7 @@ cd engine && cargo run --release -- backtest --config CONFIG --tape TAPE \
 
 ---
 
-## 9. Development Commands
+## 10. Development Commands
 
 ```bash
 # Style formatting check

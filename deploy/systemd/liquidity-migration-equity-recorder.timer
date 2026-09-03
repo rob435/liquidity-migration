@@ -1,0 +1,14 @@
+[Unit]
+Description=Sample every engine heartbeat and recorder status once a minute
+
+[Timer]
+# One minute is the resolution of the equity curve. :20 past keeps it clear of
+# the engine's 5-second heartbeat write and of trade-notify at :30.
+OnCalendar=*-*-* *:*:20
+AccuracySec=5s
+# A missed minute stays missed. Replaying it would append a sample stamped
+# now for a minute that is over, and the gap is the fact worth keeping.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
