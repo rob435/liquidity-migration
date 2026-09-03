@@ -35,6 +35,36 @@ The tiers are keyed on the same signals the sleeves decide from, so a tradeable 
 
 **Known limit.** Membership follows market state, not the position book. `core` releases a name below turnover rank 45 and `crowded` 48 hours after funding recovers, while LONG holds for about three days, so a held name that drifts out mid-hold keeps its ticker but loses its book and prints for the remainder. Nothing pins a held name: the recorder reads no engine state by design (public data only, no credentials, its own user). Widening `core`'s `leave_top` is the lever if this ever costs a study, at roughly 21 GB/month per additional name.
 
+### Coverage of the discovery tiers
+
+Coverage is total by construction, not by sampling. The venue lists 855
+instruments; 747 are USDT `LinearPerpetual` (the rest are USDC, or dated
+`LinearFutures`), and the tiers hold 716 `wide` + 30 `core` + 1 `pinned` = 747,
+with an open segment on disk for every one. A name is therefore never absent —
+only shallower.
+
+The discovery sensors resolve to real names and their books chain. Rebuilt from
+one recorded hour with `market_tape book`, `valid: true` and `held_deltas: 0`
+each — a chained book, not a fragment:
+
+| Tier | Name | Deltas applied | Rebuilt spread |
+| :--- | :--- | ---: | ---: |
+| `movers` | `APRUSDT` | 87,997 | 3.5 bp |
+| `movers` | `MAGMAUSDT` | 20,709 | 5.5 bp |
+| `overheated` | `POETUSDT` | 6,885 | 24.5 bp |
+
+**Known limit — the windowed sensors are blind for one hour after a restart.**
+`price_burst`, `volume_burst` and `oi_change` compare the live ticker against a
+sample one `window_hours` back, and that history lives in memory. A recorder
+restart empties it, so `bursting`, `flooding` and `levering` resolve to zero
+names until an hour of ticker has accumulated. `turnover_surge` is the same
+against its day baseline. The funding and rank tiers (`crowded`, `overheated`,
+`core`, `movers`) need no history and repopulate within one maintenance tick.
+
+**A thin name's segment can legitimately read 0 bytes.** `SegmentWriter` opens
+with `buffering=65536`, so a `wide`-only name shows nothing on disk until 64 KB
+of rows accumulate. Check `status.json` for tier membership, not `ls`.
+
 | Venue | Tier | Universe Membership Criteria | Feeds Captured |
 | :--- | :--- | :--- | :--- |
 | **Bybit** | `pinned` | Maker canary list (`deploy/forward-capture-symbols.txt`) | `book:50`, `book:1`, `trades`, `ticker`, `liquidations` |
@@ -55,15 +85,50 @@ The tiers are keyed on the same signals the sleeves decide from, so a tradeable 
 
 ## 3. Byte Budget & Shedding Hierarchy
 
-Each venue capture carries a **1,300 GB / month** inbound quota to stay within the host's 4 TB monthly bandwidth allocation:
+The two recorders hold separate quotas out of the host's 4 TB line. Bybit is the
+venue that gets replayed, so it holds the larger share; Binance exists only as a
+cross-venue reference and records no book.
+
+| | Bybit linear | Binance USD-M |
+| :--- | :--- | :--- |
+| `monthly_gb` | 1,800 | 700 |
+| `max_disk_gb` | 60 | 18 |
+| `min_free_disk_gb` | 25 | 25 |
+| `retention_days` | 30 (the disk cap binds first) | 30 |
 
 ### Automated Shedding Priority
-When projected monthly usage exceeds 1,300 GB, the recorder sheds feeds one by one each hour in this exact order (and restores them in reverse once under pace):
-1. Deep books of short-lived tiers (`bursting`, `flooding`, `movers`, `surging`, `overheated`).
-2. Public trades of short-lived tiers.
-3. Core trades (`core:trades`).
-4. Wide ticker (`wide:ticker`, Binance only).
-* **Invariant**: The `pinned` canary tier is **never shed**.
+
+The projection is the trailing day of bytes from the pairs **still subscribed**,
+scaled to a month; a shed pair's bytes are left out of it. One action per
+`act_every_minutes`: a shed takes as many pairs from the list, in order, as the
+projection needs, and a restore returns the last pair shed once its own measured
+GB/month fits under `restore_below` of the allowance.
+
+Bybit gives up the discovery books first and the crowd books last:
+
+1. `bursting`, `flooding`, `levering`, `movers`, `surging` — `book:50`
+2. the same five tiers — `trades`
+3. `overheated:book:50`, then `crowded:book:50`
+
+**Invariants — what `shed` must never contain, whatever the projection says:**
+
+* `core:book:50` — the book every replay and the maker sleeve run on.
+* `core:trades` — the prints a resting order fills against; without them a maker
+  replay on a core name cannot fill at all.
+* `*:ticker` — funding, open interest and price: the sensor every tier is
+  resolved from, and CARRY's entry signal.
+* Anything in the `pinned` canary tier.
+
+Over budget with every listed pair already shed is a `WARNING` per action naming
+the overshoot. The recorder does not reach for anything above; the config decides
+what else goes.
+
+**Consequence to weigh before widening a tier.** Because the discovery books sit
+first in the list, a projection over 1,800 GB costs the pump tiers their books
+before it costs the crowd theirs. Those pairs are cheap — roughly 2 GB/month per
+name against ~21 GB for a `core` name — so shedding all ten frees little. The
+allowance is set to leave headroom instead: 1,710 GB projected at full 48-hour
+sticky width against 1,800 allowed.
 
 ---
 
@@ -77,7 +142,7 @@ When projected monthly usage exceeds 1,300 GB, the recorder sheds feeds one by o
 manifest.jsonl                                         Atomic receipts: path, row count, byte size, SHA-256
 status.json                                            Watchdog status updated every 30 seconds
 ```
-* **Retention**: 30 days is the ceiling; the disk cap binds first — **40 GB Bybit, 30 GB Binance**, sized on measured ingest (8.0 and 5.8 GB/day) and summing under the 118 GB filesystem so neither recorder races the other. That is roughly five days of local tape; the hourly Drive archive is the history. Stops writing if disk free space falls below 25 GB.
+* **Retention**: 30 days is the ceiling; the disk cap binds first — **60 GB Bybit, 18 GB Binance**, summing under the 118 GB filesystem so neither recorder races the other. That is about three days of Bybit tape locally; the hourly Drive archive is the permanent history. Either recorder stops writing if free space falls below 25 GB.
 
 ### Google Drive Archive Layout
 Finished hours are tarred and uploaded ten minutes past each hour:
