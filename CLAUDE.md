@@ -57,7 +57,7 @@ never copy sleeve status or thresholds here.
 | `cd engine && cargo run --release -- backtest --config PATH --tape PATH --instruments PATH --wal PATH` | the live loop on a recorded `market_tape`, in the tape's time, on a simulated venue: [docs/engine.md](docs/engine.md) §9 |
 | `python scripts/research/run_engine_backtest.py --config PATH --tape PATH --instruments PATH --out-dir DIR` | runs `engine backtest` and reads its report, trades, and equity back as research metrics |
 | `scripts/ops.sh curve [REALM] [SAMPLES]` | the live account's recorded equity curve, read on the host: [docs/observability.md](docs/observability.md) |
-| `scripts/ops.sh help` | operator router: status, equity, reset, deploy, and the rest |
+| `scripts/ops.sh help` | operator router: status, units, logs, restart/stop/start, flatten, attest-flat, real-money, deploy |
 | `python -m liquidity_migration --help` | research and data CLI |
 | `python -m market_tape --help` | the market tape: check a capture config, record, pack, list hours, read rows, build bars, rebuild a book |
 | `python -m liquidity_migration.research.lab.cli dump\|panel` | the study harness: dump the point-in-time inputs once, then build the daily panel every study reads |
