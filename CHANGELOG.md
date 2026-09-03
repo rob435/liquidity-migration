@@ -67,6 +67,10 @@ edit STATE.md to match.
     (`normalize_instruments_reporting`), one line per snapshot: against the
     venue's lists of the day, 1,138 rows kept, 683 dated names left out, no
     other reason. One row cannot cost the table again.
+    The ticker page the same lane fetches carries the same 40 dated names;
+    it is now tolerant the same way (819 rows kept, 40 left out, no other
+    reason). The single WebSocket ticker row stays strict, because a
+    malformed frame there is a stream gap to repair, not a list to trim.
   - *On-call agent.* `check_fleet_liveness.py` now fires a Claude Code
     routine on any `CRITICAL` that clears its cooldown, when
     `INCIDENT_ROUTINE_FIRE_URL` and `INCIDENT_ROUTINE_FIRE_TOKEN` are set in

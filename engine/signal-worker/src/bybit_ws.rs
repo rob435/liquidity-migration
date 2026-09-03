@@ -12,7 +12,7 @@ use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStre
 
 use crate::http::wall_ms;
 use crate::model::BybitTickerWire;
-use crate::normalize::{normalize_kline_rows, normalize_tickers};
+use crate::normalize::{normalize_kline_rows, normalize_ticker_strict};
 use crate::worker::WorkerError;
 use crate::HOUR_MS;
 
@@ -1232,7 +1232,7 @@ fn parse_frame(text: &str, received_at_ms: i64) -> Result<ParsedMessage, String>
         if row.symbol != topic_symbol.to_ascii_uppercase() {
             return Err("Bybit ticker topic and payload symbols disagree".to_owned());
         }
-        normalize_tickers(received_at_ms, received_at_ms, std::slice::from_ref(&row))
+        normalize_ticker_strict(received_at_ms, received_at_ms, &row)
             .map_err(|error| error.to_string())?;
         return Ok(ParsedMessage::Ticker(Box::new(TickerFrame { kind, row })));
     }
