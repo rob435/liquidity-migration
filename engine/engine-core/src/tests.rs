@@ -1243,6 +1243,7 @@ mod forced_close;
 mod gap_recovery;
 mod heartbeat;
 mod order_path;
+mod ownership;
 mod quote_staleness;
 mod reconciliation;
 mod resting_orders;

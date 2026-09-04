@@ -73,6 +73,8 @@ struct FactsWire {
     held: BTreeMap<String, Held>,
     prices: BTreeMap<String, f64>,
     rules: BTreeMap<String, InstrumentRule>,
+    #[serde(default)]
+    foreign_owned: BTreeSet<String>,
 }
 
 impl FactsWire {
@@ -81,6 +83,7 @@ impl FactsWire {
             held: self.held,
             prices: self.prices,
             rules: self.rules,
+            foreign_owned: self.foreign_owned,
         }
     }
 }

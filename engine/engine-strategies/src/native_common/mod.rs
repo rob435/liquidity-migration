@@ -191,6 +191,7 @@ pub struct PlannerFacts {
     pub held: BTreeMap<String, Held>,
     pub prices: BTreeMap<String, f64>,
     pub rules: BTreeMap<String, InstrumentRule>,
+    pub foreign_owned: BTreeSet<String>,
 }
 
 impl PlannerFacts {
@@ -210,6 +211,10 @@ impl SymbolFacts for PlannerFacts {
 
     fn rule(&self, symbol: &str) -> Option<InstrumentRule> {
         self.rules.get(symbol).copied()
+    }
+
+    fn foreign_owned(&self, symbol: &str) -> bool {
+        self.foreign_owned.contains(symbol)
     }
 }
 
@@ -620,7 +625,7 @@ pub fn planner_facts(ctx: &dyn StrategyCtx, symbols: &BTreeSet<String>) -> Plann
             facts.rules.insert(name.clone(), rule);
         }
         if ctx.foreign_position(symbol) {
-            continue;
+            facts.foreign_owned.insert(name.clone());
         }
         let venue = ctx.position(symbol);
         let in_flight = ctx.in_flight(symbol);
@@ -770,6 +775,117 @@ mod tests {
 
         let facts = planner_facts(&ctx, &symbols);
         assert!(facts.held(PEPE).is_none(), "{:?}", facts.held);
+    }
+
+    fn plan_pepe_target(ctx: &MockCtx, notional_usdt: f64) -> crate::position_plan::Plan {
+        let symbols = BTreeSet::from([PEPE.to_owned()]);
+        let mut facts = planner_facts(ctx, &symbols);
+        facts.prices.insert(PEPE.to_owned(), 0.004);
+        crate::position_plan::plan(
+            &[Target {
+                symbol: PEPE.to_owned(),
+                notional_usdt,
+                stop_loss_fraction: 0.1,
+                entry_valid_until_ms: None,
+                target_qty: None,
+            }],
+            &facts.held_symbols(),
+            &facts,
+            1_000,
+            2_000_000,
+            PlanRules::FLEET,
+        )
+    }
+
+    #[test]
+    fn a_foreign_position_is_not_a_flat_entry_opportunity() {
+        for held_side in [Side::Buy, Side::Sell] {
+            for target_sign in [1.0, -1.0] {
+                let (mut ctx, _) = pepe_ctx();
+                ctx.set_foreign_position(PEPE, held_side, 100_000.0, 0.004);
+                let planned = plan_pepe_target(&ctx, target_sign * 40.0);
+                assert!(
+                    planned.steps.is_empty(),
+                    "foreign {held_side:?}, target {target_sign}: {:?}",
+                    planned.steps
+                );
+                assert!(matches!(
+                    planned.skipped.as_slice(),
+                    [Skipped::ForeignOwner { symbol }] if symbol == PEPE
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn a_foreign_owner_does_not_hide_our_own_reduction() {
+        for held_side in [Side::Buy, Side::Sell] {
+            let (mut ctx, _) = pepe_ctx();
+            ctx.set_foreign_position(PEPE, held_side, 100_000.0, 0.004);
+            let sign = if held_side == Side::Buy { 1.0 } else { -1.0 };
+            ctx.set_my_position(PEPE, sign * 20_000.0);
+            let planned = plan_pepe_target(&ctx, sign * 40.0);
+            assert!(
+                matches!(
+                    planned.steps.as_slice(),
+                    [Step::Resize { side, qty, reduce_only: true, .. }]
+                        if *side == held_side.flipped() && *qty == 10_000.0
+                ),
+                "foreign {held_side:?}: {:?}",
+                planned.steps
+            );
+            let exit = plan_pepe_target(&ctx, 0.0);
+            assert!(matches!(
+                exit.steps.as_slice(),
+                [Step::Exit { side, qty, .. }]
+                    if *side == held_side.flipped() && *qty == 20_000.0
+            ));
+        }
+    }
+
+    #[test]
+    fn a_foreign_owner_blocks_growth_but_preserves_our_stop_tightening() {
+        for side in [Side::Buy, Side::Sell] {
+            let (mut ctx, symbols) = pepe_ctx();
+            let sign = if side == Side::Buy { 1.0 } else { -1.0 };
+            ctx.set_foreign_position(PEPE, side, 100_000.0, 0.004);
+            ctx.set_my_position(PEPE, sign * 20_000.0);
+            let mut facts = planner_facts(&ctx, &symbols);
+            facts.prices.insert(PEPE.into(), 0.004);
+            let held = facts.held.get_mut(PEPE).unwrap();
+            held.stop_px = if side == Side::Buy { 0.003 } else { 0.005 };
+            let plan = crate::position_plan::plan(
+                &[Target {
+                    symbol: PEPE.into(),
+                    notional_usdt: sign * 160.0,
+                    stop_loss_fraction: 0.1,
+                    entry_valid_until_ms: None,
+                    target_qty: None,
+                }],
+                &facts.held_symbols(),
+                &facts,
+                1_000,
+                2_000_000,
+                PlanRules::FLEET,
+            );
+            assert!(matches!(plan.steps.as_slice(), [Step::Restop { .. }]));
+            assert!(matches!(
+                plan.skipped.as_slice(),
+                [Skipped::ForeignOwner { .. }]
+            ));
+        }
+    }
+
+    #[test]
+    fn a_symbol_becomes_available_after_the_foreign_claim_ends() {
+        let (mut ctx, _) = pepe_ctx();
+        ctx.set_foreign_position(PEPE, Side::Buy, 100_000.0, 0.004);
+        assert!(plan_pepe_target(&ctx, 40.0).steps.is_empty());
+        ctx.set_position(PEPE, Side::Buy, 0.0, 0.004);
+        assert!(matches!(
+            plan_pepe_target(&ctx, 40.0).steps.as_slice(),
+            [Step::Enter { .. }]
+        ));
     }
 
     #[test]

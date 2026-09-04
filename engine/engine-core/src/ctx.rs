@@ -163,6 +163,7 @@ impl StrategyCtx for Ctx<'_> {
 
     fn foreign_position(&self, symbol: SymbolId) -> bool {
         self.attribution.held_by_another(self.strategy, symbol)
+            || self.orders.opening_owned_by_another(self.strategy, symbol)
     }
 
     fn my_position(&self, symbol: SymbolId) -> f64 {

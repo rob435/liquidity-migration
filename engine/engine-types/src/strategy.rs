@@ -424,8 +424,8 @@ pub trait StrategyCtx {
     /// stop is attached to the *position*, and there is one position per
     /// symbol. Two strategies holding one symbol would have one stop between
     /// them, set by whichever placed the last opening order — so sharing is
-    /// not something to be sized around. Whoever got there first keeps the
-    /// name until it is flat.
+    /// not something to be sized around. Live opening orders claim the symbol
+    /// before their first fill; the claim ends after orders and exposure end.
     ///
     /// Exposure the engine's own log has no fills for belongs to nobody here:
     /// a hand trade reads as `false`. Boot's reconciliation is what notices

@@ -1,4 +1,9 @@
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
+    fn symbol_owned_by_another(&self, strategy: StrategyId, symbol: SymbolId) -> bool {
+        self.attribution.held_by_another(strategy, symbol)
+            || self.orders.opening_owned_by_another(strategy, symbol)
+    }
+
     /// Judge and reserve one sibling, appending its send record to the WAL.
     /// The caller starts one barrier for the accepted group and dispatches
     /// while that barrier runs.
@@ -36,6 +41,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.wal.append(&WalRecord::Intent {
             intent: intent.clone(),
         })?;
+
+        if !intent.reduce_only && self.symbol_owned_by_another(intent.strategy, intent.symbol) {
+            self.wal.append(&WalRecord::Verdict {
+                client_order_id: None,
+                verdict: RiskVerdict::Deny {
+                    reason: DenyReason::UnknownState {
+                        detail: "foreign_strategy_owner: another strategy owns exposure or a live opening order on this symbol".into(),
+                    },
+                },
+            })?;
+            self.tell_refused(&intent, "foreign_strategy_owner");
+            return Ok(None);
+        }
 
         if !intent.reduce_only
             && self

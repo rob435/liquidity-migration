@@ -828,9 +828,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             leverage: None,
         };
         if !existing.request.reduce_only {
-            let verdict =
+            let verdict = if self.symbol_owned_by_another(existing.request.strategy, symbol) {
+                RiskVerdict::Deny {
+                    reason: DenyReason::UnknownState {
+                        detail: "foreign_strategy_owner: another strategy owns exposure or a live opening order on this symbol".into(),
+                    },
+                }
+            } else {
                 self.risk
-                    .assess_price_amend(client_order_id, &amended_intent, &self.account);
+                    .assess_price_amend(client_order_id, &amended_intent, &self.account)
+            };
             let verdict = durable_risk_verdict(verdict, remaining_qty, true);
             self.wal.append(&WalRecord::Verdict {
                 client_order_id: Some(client_order_id.to_string()),

@@ -424,7 +424,7 @@ async fn the_shipped_kernel_refuses_the_next_entry_and_still_lets_the_exit_out()
     let log = vec![
         WalRecord::Names {
             strategies: vec!["buyer".to_string(), "exiter".to_string()],
-            symbols: vec!["BTCUSDT".to_string()],
+            symbols: vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
         },
         sent("eng-1", Side::Buy, 10.0),
         filled("eng-1", Side::Buy, 10.0, 100.0, recent_replay_ms()),
@@ -450,7 +450,7 @@ async fn the_shipped_kernel_refuses_the_next_entry_and_still_lets_the_exit_out()
 
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
-    let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+    let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT", "ETHUSDT"]);
     venue
         .account_readings
         .lock()
@@ -464,7 +464,9 @@ async fn the_shipped_kernel_refuses_the_next_entry_and_still_lets_the_exit_out()
             stop_px: 90.0,
             leverage: None,
         }]);
-    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    // The new entry has no competing owner, so only the account-wide loss
+    // window refuses it; the other sleeve still reduces its own holding.
+    let (buyer, _heard) = Buyer::new("ETHUSDT", 1, 0.01);
     let mut engine = Engine::boot(
         &quick_tick(),
         "0000000000000000",
@@ -482,10 +484,14 @@ async fn the_shipped_kernel_refuses_the_next_entry_and_still_lets_the_exit_out()
     )
     .await
     .expect("boot");
-    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let entry_symbol = engine.market().table.get("ETHUSDT").unwrap();
+    let exit_symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let mut feed = ScriptFeed::quotes(entry_symbol, 1, false);
+    feed.events
+        .extend(ScriptFeed::quotes(exit_symbol, 1, false).events);
     engine
         .run(
-            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut feed,
             &mut ScriptOrderFeed::empty(),
             tokio::time::sleep(Duration::from_millis(40)),
         )

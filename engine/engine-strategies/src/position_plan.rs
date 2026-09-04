@@ -126,6 +126,9 @@ pub enum Skipped {
     NoPrice { symbol: String },
     /// The engine has no instrument rule, so nothing can be quantized.
     NoInstrumentRule { symbol: String },
+    /// Another sleeve owns exposure or an opening order on this symbol.
+    #[serde(rename = "foreign_strategy_owner")]
+    ForeignOwner { symbol: String },
 }
 
 /// The knobs, all stated rather than assumed.
@@ -167,6 +170,9 @@ pub trait SymbolFacts {
     fn held(&self, symbol: &str) -> Option<Held>;
     fn price(&self, symbol: &str) -> Option<f64>;
     fn rule(&self, symbol: &str) -> Option<InstrumentRule>;
+    fn foreign_owned(&self, _symbol: &str) -> bool {
+        false
+    }
 }
 
 /// Work out what to do to move from what is held to what is wanted.
@@ -275,6 +281,12 @@ pub fn plan(
 
         match position {
             None => {
+                if facts.foreign_owned(symbol) {
+                    skipped.push(Skipped::ForeignOwner {
+                        symbol: symbol.to_string(),
+                    });
+                    continue;
+                }
                 if !entries_allowed {
                     skipped.push(Skipped::EntryWindowClosed {
                         symbol: symbol.to_string(),
@@ -355,6 +367,15 @@ pub fn plan(
                     continue;
                 }
                 let growing = delta_usdt.abs() > 0.0 && (delta_usdt > 0.0) == (standing > 0.0);
+                if growing && facts.foreign_owned(symbol) {
+                    if let Some(step) = restop(symbol, target, &position, want_side, &rule) {
+                        exits.push(step);
+                    }
+                    skipped.push(Skipped::ForeignOwner {
+                        symbol: symbol.to_string(),
+                    });
+                    continue;
+                }
                 if growing && !entries_allowed {
                     skipped.push(Skipped::EntryWindowClosed {
                         symbol: symbol.to_string(),

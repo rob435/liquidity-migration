@@ -6,6 +6,43 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 19:59 UTC — Preserve exclusive symbol ownership in native planning and central admission (local checkpoint).**
+  - `planner_facts` skipped another sleeve's holding but retained its price and
+    instrument rule; `position_plan` interpreted the missing holding as flat
+    and emitted an entry. Dynamic signal subscriptions bypass the static
+    config overlap check. Central placement had no matching ownership check.
+  - `PlannerFacts::foreign_owned` now preserves that unavailable state while
+    retaining the caller's own attributed quantity for reductions. Native
+    LONG/CARRY/Exodus refuse foreign-owned entries/growth and retain exits and
+    stop tightening. Core placement and opening-amend admission consult
+    existing fill attribution and live opening-order indexes, including
+    unfilled and same-batch orders. The refusal code is
+    `foreign_strategy_owner`; no second ownership ledger is introduced.
+  - Seven core tests cover both directions, same-batch reservations, replayed
+    fills/working orders, same-owner growth/reduction, cancellation followed by
+    late-fill replay, the amend path, and cancel/reduce-amend/stop continuity.
+    Four planner tests cover foreign entries, own reduction/full exit,
+    blocked growth with stop tightening, and release of a foreign claim.
+    Running the seven core tests on isolated baseline `e2345ca4` produces five
+    failures and two passes; the same tests all pass with the fix. The initial
+    two planner regressions also fail before the planner correction.
+  - Full debug verification initially exposed a rolling-loss fixture opening
+    one sleeve's entry on another's holding; it was refused by ownership
+    before the loss kernel. The fixture now enters unowned ETH while the
+    other sleeve reduces its BTC. All original loss-value, refusal, and exit
+    assertions remain and pass.
+  - Local checks: doctor ready; Ruff, ShellCheck, mypy (99 files), rustfmt,
+    strict workspace Clippy, 1,457 Python tests, and 1,726 Rust tests in each
+    debug/release all-targets suite pass. The five existing ignored tests
+    (three public-network checks, instrument-list input, full 270-symbol
+    resource envelope) remain opt-in and were not run. Python/Rust golden
+    reducer outputs retain their existing hashes.
+  - Admission adds scans of current attributed holdings and live opening
+    pairs, without a new queue, dependency, or capital limit. WAL/state schemas
+    and configured strategy order are unchanged. This is exclusive ownership
+    enforcement, not portfolio netting or arbitrary-plugin isolation. No
+    deployment or push; reverting the code restores the unsafe behavior.
+
 - **2026-09-04 19:42 UTC — Reset every latency histogram at the window boundary (local checkpoint).**
   - Audited GitHub `main` at `e2345ca450d03a3d58ff19b9d2b436e9b84cfbb4`;
     the clean tracked baseline passes all 510 engine-core library tests.

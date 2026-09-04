@@ -455,6 +455,11 @@ impl LedgerOfOrders {
             .map(|(strategy, symbol)| (StrategyId(*strategy), SymbolId(*symbol)))
     }
 
+    pub fn opening_owned_by_another(&self, mine: StrategyId, symbol: SymbolId) -> bool {
+        self.opening_symbols()
+            .any(|(owner, held)| held == symbol && owner != mine)
+    }
+
     /// Tightest live opening-order stop per (symbol, is-short). Long
     /// protection tightens upward; short protection tightens downward.
     pub fn tightest_opening_stops(&self) -> impl Iterator<Item = ((u16, bool), f64)> + '_ {

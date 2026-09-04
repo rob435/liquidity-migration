@@ -48,6 +48,17 @@ Reducers must enforce deterministic ordering across process crash boundaries:
 | **Cross-Sleeve Fire** | Append cross-sleeve event to WAL $\to$ Persist emitting checkpoint $\to$ Deliver event. |
 | **Event Consumption**| Persist consuming checkpoint $\to$ Acknowledge event receipt. |
 
+### Execution ownership
+
+| Fact / action | Contract |
+| --- | --- |
+| `StrategyCtx::foreign_position(symbol)` | True when another sleeve has attributed exposure or a live opening order, including an order with no fill yet |
+| `PlannerFacts::foreign_owned` | Explicitly carries unavailable ownership into the shared position planner; missing `held` alone is not permission to enter |
+| Opening placement / amend | Core refuses conflicting ownership with `foreign_strategy_owner`; an accepted sibling's `OrderSent` claims its symbol before the next sibling is judged |
+| Own reduction / exit / tighter stop | Remains available if another sleeve also has a claim; own attributed quantity stays visible to the planner |
+| Cancel / reduce-only amend | Uses existing cancellation, risk and venue checks |
+| Replay / rotation | Existing fill attribution and live-order records reconstruct ownership; no separate ownership WAL schema |
+
 ---
 
 ## 4. Required Test Matrix

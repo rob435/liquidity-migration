@@ -292,6 +292,7 @@ impl NativeLong {
                 Skipped::EntryWindowClosed { symbol } => (symbol, "entry_window_closed"),
                 Skipped::NoPrice { symbol } => (symbol, "no_price"),
                 Skipped::NoInstrumentRule { symbol } => (symbol, "no_instrument_rule"),
+                Skipped::ForeignOwner { symbol } => (symbol, "foreign_strategy_owner"),
             };
             self.blockers.insert(symbol, reason.to_owned());
         }
