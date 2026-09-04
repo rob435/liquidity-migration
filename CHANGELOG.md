@@ -6,6 +6,32 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 16:45 UTC — The order path has a measurement again, and the
+  recorder stopped dropping frames. Both verified on the host.**
+  - `2594e6b6` deployed at 16:41 UTC in 317 s with an atomic mainnet
+    handover. All six units active, both engines reporting the commit,
+    `may_open` true, 5 positions each, zero strategy errors, every watchdog
+    timer active and enabled. Demo runs four sleeves: the appended `probe` id
+    3 is the first sleeve added to a realm with a non-empty WAL, which is what
+    the append-only name check exists for.
+  - The probe fired at 16:45:00 UTC, on the wall-clock boundary, and the
+    sampler at 16:45:21 read the measurement out of the engine's 60-second
+    ledger: **end to end p50 11.84 ms**, `wire` p99 11.74 ms, WAL barrier
+    p99 0.36 ms, `decide` under a microsecond. `wire` is 99% of it, so the
+    socket write is where this box's order path spends its time — the venue's
+    own round trip is the separate `ack` step. By 16:46 the ledger was null
+    again, which is the window doing its job: the probe at :00 and the sampler
+    at :20 catch each other exactly once, and that is why the probe fires on
+    the wall clock rather than on an interval since boot.
+  - Recorder, since the 16:19 restart carrying `skip_utf8_validation` and
+    `queue_frames = 131072`: **0 queue overruns, 0 ping/pong timeouts, 0 shard
+    reconnects, 0 dropped frames**, 16 of 16 shards connected, queue fill
+    0.00. The 24 hours before the fix had 348 overruns, 160 timeouts, 501
+    reconnects and 368 dropped frames.
+  - The sampler emits every configured sleeve, so `sleeve_positions` now reads
+    `{carry: 2, exodus: 0, long: 3, probe: 0}` on demo: a flat sleeve is a
+    line at zero instead of a missing series, which is what the dashboard's
+    Exodus gap was.
 - **2026-09-04 16:21 UTC — Incident `host-bf5dcb6544d0dfdc`: the demo realm's
   own watchdog has been off since 16:17:16, and a hand restart cannot re-arm
   what the deploy disabled.**

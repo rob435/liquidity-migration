@@ -192,8 +192,8 @@ scripts/ops.sh curve mainnet
 scripts/ops.sh logs equity-recorder.service 50
 scripts/ops.sh units | grep equity-recorder
 
-# The probe, on the demo engine: one "probe rested" a quarter hour at debug,
-# refusals and fills at warn
+# The probe, on the demo engine: one "probe rested" a quarter hour, refusals
+# and fills at warn. The fleet runs at RUST_LOG=info.
 scripts/ops.sh logs engine.service 400 | grep -i probe
 
 # The dashboard JSON is what the renderer says it is

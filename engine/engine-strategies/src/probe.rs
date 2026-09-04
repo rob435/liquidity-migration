@@ -238,7 +238,9 @@ impl Probe {
         ctx.arm_timer(PULL, self.rest_ns);
         self.fired += 1;
         self.skipped = None;
-        tracing::debug!(
+        // Info, not debug: the fleet runs at RUST_LOG=info, and one line a
+        // quarter hour is the record that the benchmark took a measurement.
+        tracing::info!(
             symbol = %self.symbol_name,
             px,
             qty,
