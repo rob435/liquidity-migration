@@ -250,6 +250,50 @@ wait_fresh_heartbeat() {
     fail "$unit did not publish a fresh heartbeat at $heartbeat"
 }
 
+capture_status_ready() {
+    "$PYTHON" - "$1" "$2" <<'PY'
+import json
+import sys
+
+try:
+    payload = json.load(open(sys.argv[1], encoding="utf-8"))
+    expected_pid = int(sys.argv[2])
+except (OSError, ValueError):
+    raise SystemExit(1)
+if not isinstance(payload, dict):
+    raise SystemExit(1)
+last_receive = payload.get("last_receive_ns")
+shards = payload.get("shards")
+ready = (
+    payload.get("pid") == expected_pid
+    and expected_pid > 0
+    and isinstance(last_receive, (int, float))
+    and not isinstance(last_receive, bool)
+    and last_receive > 0
+    and isinstance(shards, list)
+    and any(isinstance(shard, dict) and shard.get("connected") is True for shard in shards)
+)
+raise SystemExit(0 if ready else 1)
+PY
+}
+
+wait_capture_ready() {
+    local unit="$1" heartbeat="$2" since="$3" attempt written main_pid
+    for attempt in $(seq 1 90); do
+        if systemctl is-active --quiet "$unit" && [ -f "$heartbeat" ]; then
+            main_pid="$(systemctl show --property=MainPID --value "$unit")"
+            written="$(stat -c %Y "$heartbeat")"
+            if [ "$written" -ge "$since" ] \
+                && capture_status_ready "$heartbeat" "$main_pid"; then
+                echo "capture-ready unit=$unit pid=$main_pid age=$(( $(date +%s) - written ))s"
+                return 0
+            fi
+        fi
+        sleep 2
+    done
+    fail "$unit did not publish a received-frame status at $heartbeat"
+}
+
 start_unit() {
     systemctl enable --now "$1" || fail "cannot start $1"
 }
@@ -579,13 +623,13 @@ start_independent_units() {
                 since="$(date +%s)"
                 systemctl enable "$unit" 2>/dev/null || fail "cannot enable $unit"
                 if systemctl restart "$unit" \
-                    && (wait_fresh_heartbeat "$unit" "$CAPTURE_STATUS" "$since"); then
+                    && (wait_capture_ready "$unit" "$CAPTURE_STATUS" "$since"); then
                     printf '%s\n' "$fingerprint" > "$fingerprint_file"
                     echo "capture-ok unit=$unit result=restarted"
                 else
                     # Not fatal: a recorder is independent of the fleet in
                     # both directions, and the host watchdog pages on it.
-                    echo "warning: $unit did not publish a fresh status file; the fleet deploy continues" >&2
+                    echo "warning: $unit did not receive a market frame from its new process; the fleet deploy continues" >&2
                 fi
                 ;;
             *.timer)

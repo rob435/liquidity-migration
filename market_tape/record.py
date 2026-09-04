@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import shutil
 import signal
@@ -169,7 +170,9 @@ class SymbolLive:
     updated_ns: int = 0
 
     def copy(self) -> "SymbolLive":
-        return SymbolLive(self.funding_rate, self.turnover_24h, self.price_change_24h, self.price, self.open_interest, self.updated_ns)
+        return SymbolLive(
+            self.funding_rate, self.turnover_24h, self.price_change_24h, self.price, self.open_interest, self.updated_ns
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,7 +424,9 @@ class Shard:
             # died at once backs off, so a venue outage cannot become a storm
             # of reconnects across every shard.
             lived = (time.time_ns() - opened_ns) / 1e9
-            self.backoff_seconds = 2.0 if lived >= 60.0 else min(self.backoff_seconds * 2.0, RECONNECT_BACKOFF_MAX_SECONDS)
+            self.backoff_seconds = (
+                2.0 if lived >= 60.0 else min(self.backoff_seconds * 2.0, RECONNECT_BACKOFF_MAX_SECONDS)
+            )
             logging.warning("shard %d disconnected; reconnecting in %.0fs", self.index, self.backoff_seconds)
             self.stop.wait(self.backoff_seconds)
 
@@ -449,7 +454,9 @@ class Shard:
             if not self.stop.is_set():
                 logging.warning("shard %d stream error: %s", self.index, exc)
 
-        self.socket = websocket.WebSocketApp(self.adapter.connection_url(topics), on_open=opened, on_message=message, on_error=error)
+        self.socket = websocket.WebSocketApp(
+            self.adapter.connection_url(topics), on_open=opened, on_message=message, on_error=error
+        )
         try:
             self.socket.run_forever(ping_interval=20, ping_timeout=10)
         except Exception as exc:  # noqa: BLE001 - one shard's teardown noise must not stop the others
@@ -513,7 +520,9 @@ class BudgetController:
     @property
     def over(self) -> bool:
         return (
-            self.settings.monthly_gb is not None and self.projected_gb is not None and self.projected_gb > self.settings.monthly_gb
+            self.settings.monthly_gb is not None
+            and self.projected_gb is not None
+            and self.projected_gb > self.settings.monthly_gb
         )
 
     def step(self, now_ns: int) -> bool:
@@ -537,7 +546,11 @@ class BudgetController:
                 projected -= gb
                 changed = True
                 logging.warning(
-                    "over budget (%.0f GB/month projected, %.0f allowed): shedding %s:%s (%.0f GB/month)", self.projected_gb, limit, *pair, gb
+                    "over budget (%.0f GB/month projected, %.0f allowed): shedding %s:%s (%.0f GB/month)",
+                    self.projected_gb,
+                    limit,
+                    *pair,
+                    gb,
                 )
             if projected > limit:
                 logging.warning(
@@ -553,7 +566,11 @@ class BudgetController:
                 self.shed_active.pop()
                 self.last_action_ns = now_ns
                 logging.info(
-                    "under budget (%.0f GB/month projected, %.0f allowed): restoring %s:%s (%.0f GB/month)", self.projected_gb, limit, *pair, gb
+                    "under budget (%.0f GB/month projected, %.0f allowed): restoring %s:%s (%.0f GB/month)",
+                    self.projected_gb,
+                    limit,
+                    *pair,
+                    gb,
                 )
                 return True
         return False
@@ -564,7 +581,9 @@ class BudgetController:
             "projected_month_gb": None if self.projected_gb is None else round(self.projected_gb, 1),
             "over": self.over,
             "shed": [f"{tier}:{feed}" for tier, feed in self.shed_active],
-            "shed_gb_month": {f"{tier}:{feed}": round(self.shed_gb.get((tier, feed), 0.0), 1) for tier, feed in self.shed_active},
+            "shed_gb_month": {
+                f"{tier}:{feed}": round(self.shed_gb.get((tier, feed), 0.0), 1) for tier, feed in self.shed_active
+            },
             "shed_order": [f"{tier}:{feed}" for tier, feed in self.settings.shed],
             "last_action_ns": self.last_action_ns,
         }
@@ -780,7 +799,9 @@ class Recorder:
 
     # ------------------------------------------------------------- universe
 
-    def resolve_tiers(self, now_ns: int, tables: Mapping[str, list[dict[str, Any]]] | None = None) -> dict[str, list[str]]:
+    def resolve_tiers(
+        self, now_ns: int, tables: Mapping[str, list[dict[str, Any]]] | None = None
+    ) -> dict[str, list[str]]:
         """Each tier's symbols, in config order. With `tables` given they seed the
         live state first; otherwise the last snapshot and the ticker stream decide."""
 
@@ -818,7 +839,9 @@ class Recorder:
             elif universe.kind in RANKED_KINDS:
                 symbols = self._ranked(tier, now_ns, live, allowed(universe.quote))
             else:
-                symbols = self._sticky(tier, now_ns, live, baseline, allowed(universe.quote), instruments_known=bool(instruments))
+                symbols = self._sticky(
+                    tier, now_ns, live, baseline, allowed(universe.quote), instruments_known=bool(instruments)
+                )
             excluded: set[str] = set()
             for name in universe.exclude_tiers:
                 excluded.update(resolved.get(name, []))
@@ -834,11 +857,18 @@ class Recorder:
             return None if state.price_change_24h is None else abs(state.price_change_24h)
 
         scored = {symbol: measure(live[symbol]) for symbol in allowed if symbol in live}
-        ranked = sorted((symbol for symbol, score in scored.items() if score is not None), key=lambda symbol: (-(scored[symbol] or 0.0), symbol))
+        ranked = sorted(
+            (symbol for symbol, score in scored.items() if score is not None),
+            key=lambda symbol: (-(scored[symbol] or 0.0), symbol),
+        )
         rank = {symbol: position + 1 for position, symbol in enumerate(ranked)}
         leave = max(universe.leave_top, universe.top)
         current = self.members[tier.name]
-        members = {symbol for symbol, position in rank.items() if position <= universe.top or (symbol in current and position <= leave)}
+        members = {
+            symbol
+            for symbol, position in rank.items()
+            if position <= universe.top or (symbol in current and position <= leave)
+        }
         # The time floor: a name that ranked inside `top` keeps its place for
         # sticky_hours after the last time it did, however far it has fallen.
         stamps = self.qualified_ns[tier.name]
@@ -878,7 +908,10 @@ class Recorder:
             elif universe.kind == "turnover_surge":
                 base = baseline.get(symbol)
                 qualifies = (
-                    state.turnover_24h is not None and base is not None and base > 0.0 and state.turnover_24h >= universe.ratio * base
+                    state.turnover_24h is not None
+                    and base is not None
+                    and base > 0.0
+                    and state.turnover_24h >= universe.ratio * base
                 )
             elif universe.kind == "price_move":
                 qualifies = state.price_change_24h is not None and abs(state.price_change_24h) >= universe.pct
@@ -960,7 +993,9 @@ class Recorder:
 
     def _log_listed(self, tables: Mapping[str, list[dict[str, Any]]]) -> None:
         instruments = list(tables.get("instruments") or [])
-        quotes: list[str | None] = [quote for quote in sorted({tier.universe.quote for tier in self.config.tiers if tier.universe.quote})]
+        quotes: list[str | None] = [
+            quote for quote in sorted({tier.universe.quote for tier in self.config.tiers if tier.universe.quote})
+        ]
         if not quotes:
             quotes.append(None)
         for quote in quotes:
@@ -1050,7 +1085,9 @@ class Recorder:
                     self._meter(tier, rows, len(payload), received_ns)
                 else:
                     rows = payload
-                    self._meter(tier, rows, sum(len(json.dumps(row, separators=(",", ":"))) for row in rows), received_ns)
+                    self._meter(
+                        tier, rows, sum(len(json.dumps(row, separators=(",", ":"))) for row in rows), received_ns
+                    )
                 for row in rows:
                     for segment in self.writer.append(row):
                         self.compressor.submit(segment)
@@ -1166,6 +1203,7 @@ class Recorder:
         payload = {
             "kind": "forward_capture_status",
             "schema_version": SCHEMA_VERSION,
+            "pid": os.getpid(),
             "venue": self.adapter.name,
             "market": self.adapter.market,
             "config": str(self.config.source_path) if self.config.source_path else None,

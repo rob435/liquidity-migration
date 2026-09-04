@@ -49,8 +49,22 @@ from liquidity_migration.policy.oncall_environment import (  # noqa: E402
 
 _MANIFEST = _REPO_ROOT / "deploy" / "fleet_manifest.tsv"
 _DEPLOY_LOCK = Path("/run/liquidity-migration/deploy.lock")
+_MAX_DEPLOY_AGE_SEC = 1_800.0
 _ACCOUNT_SCOPES = ("demo", "mainnet", "host")
 _SIGNAL_WORKER_HEARTBEAT_KIND = "liquidity_migration_signal_worker_heartbeat"
+_DEPLOY_TRANSITIONAL_ALERT_PREFIXES = (
+    "unit:",
+    "heartbeat:",
+    "heartbeat-parse:",
+    "heartbeat-contract:",
+    "may-open:",
+    "rolling-loss:",
+    "worker-status:",
+    "worker-spool:",
+    "capture-",
+    "watchdog:",
+    "manifest",
+)
 _ENGINE_UNITS = {
     "liquidity-migration-engine.service",
     "liquidity-migration-engine-mainnet.service",
@@ -152,15 +166,11 @@ def evaluate_units(scope: str, rows: list[FleetUnit]) -> list[Alert]:
     for row in checked:
         state = states.get(row.unit, "unknown")
         if state != "active":
-            alerts.append(
-                Alert(f"unit:{row.unit}", "CRITICAL", f"{row.unit} is {state}")
-            )
+            alerts.append(Alert(f"unit:{row.unit}", "CRITICAL", f"{row.unit} is {state}"))
     return alerts
 
 
-def evaluate_heartbeats(
-    rows: list[FleetUnit], *, now: float, max_age_sec: float
-) -> list[Alert]:
+def evaluate_heartbeats(rows: list[FleetUnit], *, now: float, max_age_sec: float) -> list[Alert]:
     alerts = []
     for row in rows:
         if row.output_artifact == "-":
@@ -240,15 +250,12 @@ def _signal_worker_detail(payload: dict[str, object], *, now: float) -> str:
             reasons.append(f"{lane} cycle timestamp is in the future")
         elif cadence_ms is not None and now_ms - completed_ms > cadence_ms * 3:
             reasons.append(
-                f"{lane} cycle is {(now_ms - completed_ms) / 1000:.0f}s old "
-                f"(limit {cadence_ms * 3 / 1000:.0f}s)"
+                f"{lane} cycle is {(now_ms - completed_ms) / 1000:.0f}s old (limit {cadence_ms * 3 / 1000:.0f}s)"
             )
     return "; ".join(reasons) or "worker self-check is degraded"
 
 
-def evaluate_engine_heartbeat(
-    unit: str, path: Path, *, now: float | None = None
-) -> list[Alert]:
+def evaluate_engine_heartbeat(unit: str, path: Path, *, now: float | None = None) -> list[Alert]:
     # Freshness alone is not health. Signal workers publish their own verdict;
     # engines publish entry and loss latches. Other heartbeat-bearing units do
     # not carry these fields and receive only the structural JSON check here.
@@ -296,9 +303,7 @@ def evaluate_engine_heartbeat(
             )
     if unit in _ENGINE_UNITS:
         invalid_verdicts = [
-            field
-            for field in ("may_open", "rolling_loss_tripped")
-            if not isinstance(payload.get(field), bool)
+            field for field in ("may_open", "rolling_loss_tripped") if not isinstance(payload.get(field), bool)
         ]
     else:
         invalid_verdicts = []
@@ -307,8 +312,7 @@ def evaluate_engine_heartbeat(
             Alert(
                 f"heartbeat-contract:{unit}",
                 "CRITICAL",
-                f"{unit} heartbeat has no boolean verdict for "
-                f"{', '.join(invalid_verdicts)}",
+                f"{unit} heartbeat has no boolean verdict for {', '.join(invalid_verdicts)}",
             )
         )
     if "may_open" in payload and payload.get("may_open") is not True:
@@ -415,7 +419,9 @@ def evaluate_capture_status(
             alerts.append(Alert(key("capture-shards"), "CRITICAL", f"{who} has no live venue connection"))
         elif down:
             alerts.append(
-                Alert(key("capture-shards"), "WARNING", f"{who} has {len(down)} of {len(shards)} venue connections down")
+                Alert(
+                    key("capture-shards"), "WARNING", f"{who} has {len(down)} of {len(shards)} venue connections down"
+                )
             )
     budget = payload.get("budget")
     if isinstance(budget, dict) and budget.get("over") is True:
@@ -476,27 +482,17 @@ def unit_result(unit: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
-def active_deploy_age(
-    path: Path, *, now: float, lock_table: Path = Path("/proc/locks")
-) -> float | None:
+def active_deploy_age(path: Path, *, now: float, lock_table: Path = Path("/proc/locks")) -> float | None:
     """Seconds the deploy lock has been held, or None when no deploy owns it."""
 
     try:
         metadata = path.stat()
     except FileNotFoundError:
         return None
-    identity = (
-        f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}:"
-        f"{metadata.st_ino}"
-    )
+    identity = f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}:{metadata.st_ino}"
     for line in lock_table.read_text(encoding="utf-8").splitlines():
         fields = line.split()
-        if (
-            len(fields) >= 6
-            and fields[1] == "FLOCK"
-            and fields[3] == "WRITE"
-            and fields[5] == identity
-        ):
+        if len(fields) >= 6 and fields[1] == "FLOCK" and fields[3] == "WRITE" and fields[5] == identity:
             return max(0.0, now - metadata.st_mtime)
     return None
 
@@ -505,7 +501,7 @@ def evaluate_watchdog_chain(
     *,
     now: float | None = None,
     deploy_lock: Path = _DEPLOY_LOCK,
-    max_deploy_age_sec: float = 1_800.0,
+    max_deploy_age_sec: float = _MAX_DEPLOY_AGE_SEC,
 ) -> list[Alert]:
     """The host watchdog supervises the realm watchdogs that cannot see themselves.
 
@@ -533,8 +529,7 @@ def evaluate_watchdog_chain(
             Alert(
                 "deploy-lock",
                 "CRITICAL",
-                f"deployment lock has been held for {deploy_age:.0f}s "
-                f"(limit {max_deploy_age_sec:.0f}s)",
+                f"deployment lock has been held for {deploy_age:.0f}s (limit {max_deploy_age_sec:.0f}s)",
             )
         ]
 
@@ -575,9 +570,7 @@ def evaluate_watchdog_chain(
     return alerts
 
 
-def evaluate_backup_stamp(
-    *, stamp_path: Path, now: float, max_age_hours: float
-) -> list[Alert]:
+def evaluate_backup_stamp(*, stamp_path: Path, now: float, max_age_hours: float) -> list[Alert]:
     try:
         age_hours = (now - stamp_path.stat().st_mtime) / 3600
     except OSError:
@@ -653,10 +646,16 @@ def save_state(path: Path, state: dict[str, float]) -> None:
 
 
 def select_alerts_to_send(
-    alerts: list[Alert], *, state: dict[str, float], now: float, cooldown_sec: float
+    alerts: list[Alert],
+    *,
+    state: dict[str, float],
+    now: float,
+    cooldown_sec: float,
+    preserve_keys: set[str] | None = None,
 ) -> tuple[list[str], dict[str, float]]:
+    preserved = preserve_keys or set()
     lines = []
-    next_state: dict[str, float] = {}
+    next_state: dict[str, float] = {key: state[key] for key in preserved if key in state}
     current = {alert.key: alert for alert in alerts}
     for key, alert in sorted(current.items()):
         last = state.get(key)
@@ -666,19 +665,22 @@ def select_alerts_to_send(
         else:
             next_state[key] = last
     for key in sorted(state):
-        if key not in current:
+        if key not in current and key not in preserved:
             lines.append(f"RESOLVED {key}")
     return lines, next_state
 
 
 def select_incidents_to_fire(
-    alerts: list[Alert], *, state: dict[str, float], now: float
+    alerts: list[Alert], *, state: dict[str, float], now: float, preserve_keys: set[str] | None = None
 ) -> tuple[list[Alert], dict[str, float]]:
     """Return critical faults not yet handed to an agent in this lifetime."""
 
     current = {alert.key: alert for alert in alerts if alert.severity == "CRITICAL"}
     due = [current[key] for key in sorted(current) if key not in state]
     next_state = {key: state.get(key, now) for key in current}
+    for key in preserve_keys or set():
+        if key in state:
+            next_state[key] = state[key]
     return due, next_state
 
 
@@ -754,9 +756,7 @@ def incident_text(
     alerts: list[Alert],
     due: list[Alert] | None = None,
 ) -> str:
-    new_alerts = due if due is not None else [
-        alert for alert in alerts if alert.severity == "CRITICAL"
-    ]
+    new_alerts = due if due is not None else [alert for alert in alerts if alert.severity == "CRITICAL"]
     incident_key = "\n".join([scope, *(alert.key for alert in new_alerts)])
     incident_id = hashlib.sha256(incident_key.encode()).hexdigest()[:16]
     parts = [
@@ -952,11 +952,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--state-file",
         type=Path,
-        default=(
-            Path(os.environ["LIVENESS_STATE_FILE"])
-            if os.environ.get("LIVENESS_STATE_FILE")
-            else None
-        ),
+        default=(Path(os.environ["LIVENESS_STATE_FILE"]) if os.environ.get("LIVENESS_STATE_FILE") else None),
         help="cooldown state file (default: environment, then <repo>/data/.cache; per scope)",
     )
     return p
@@ -965,9 +961,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_arg_parser().parse_args()
     scope = args.account_scope
-    deadman_url = args.heartbeat_url or (
-        os.environ.get("ONCALL_DEADMAN_URL") if scope == "host" else None
-    )
+    deadman_url = args.heartbeat_url or (os.environ.get("ONCALL_DEADMAN_URL") if scope == "host" else None)
     if args.require_oncall:
         errors = validate_runtime_routing()
         if errors:
@@ -981,20 +975,24 @@ def main() -> int:
             return 2
         return run_delivery_drill(scope, deadman_url)
     now = time.time()
-    state_file = args.state_file or (
-        _REPO_ROOT / "data" / ".cache" / f"liveness-{scope}.json"
-    )
+    deploy_maintenance = False
+    if scope == "host":
+        try:
+            deploy_age = active_deploy_age(_DEPLOY_LOCK, now=now)
+        except OSError:
+            deploy_age = None
+        deploy_maintenance = deploy_age is not None and deploy_age <= _MAX_DEPLOY_AGE_SEC
+    state_file = args.state_file or (_REPO_ROOT / "data" / ".cache" / f"liveness-{scope}.json")
     counters_file = state_file.with_name(state_file.stem + ".counters.json")
 
     alerts: list[Alert] = []
-    try:
-        rows = scope_units(scope, load_fleet_manifest())
-        alerts.extend(evaluate_units(scope, rows))
-        alerts.extend(
-            evaluate_heartbeats(rows, now=now, max_age_sec=args.max_heartbeat_age_sec)
-        )
-    except (OSError, ValueError) as error:
-        alerts.append(Alert("manifest", "CRITICAL", f"cannot read the fleet manifest: {error}"))
+    if not deploy_maintenance:
+        try:
+            rows = scope_units(scope, load_fleet_manifest())
+            alerts.extend(evaluate_units(scope, rows))
+            alerts.extend(evaluate_heartbeats(rows, now=now, max_age_sec=args.max_heartbeat_age_sec))
+        except (OSError, ValueError) as error:
+            alerts.append(Alert("manifest", "CRITICAL", f"cannot read the fleet manifest: {error}"))
     if scope == "host":
         alerts.extend(evaluate_disk())
         alerts.extend(evaluate_watchdog_chain())
@@ -1011,7 +1009,7 @@ def main() -> int:
     capture_status_files = args.capture_status_file or (
         [os.environ["LIVENESS_CAPTURE_STATUS_FILE"]] if os.environ.get("LIVENESS_CAPTURE_STATUS_FILE") else []
     )
-    if capture_status_files:
+    if capture_status_files and not deploy_maintenance:
         counters = load_state(counters_file)
         for index, status_file in enumerate(capture_status_files):
             # The first recorder keeps the bare alert keys; later ones are
@@ -1049,20 +1047,33 @@ def main() -> int:
             )
 
     state = load_state(state_file)
+    preserved_alert_keys = (
+        {key for key in state if key.startswith(_DEPLOY_TRANSITIONAL_ALERT_PREFIXES)}
+        if deploy_maintenance
+        else set()
+    )
     lines, next_state = select_alerts_to_send(
-        alerts, state=state, now=now, cooldown_sec=args.cooldown_min * 60
+        alerts,
+        state=state,
+        now=now,
+        cooldown_sec=args.cooldown_min * 60,
+        preserve_keys=preserved_alert_keys,
     )
     routine_state_file = state_file.with_name(state_file.stem + ".routine.json")
     routine_state = load_state(routine_state_file)
     if not routine_state_file.exists():
-        current_critical = {
-            alert.key for alert in alerts if alert.severity == "CRITICAL"
-        }
-        routine_state = {
-            key: sent_at for key, sent_at in state.items() if key in current_critical
-        }
+        current_critical = {alert.key for alert in alerts if alert.severity == "CRITICAL"}
+        routine_state = {key: sent_at for key, sent_at in state.items() if key in current_critical}
+    preserved_routine_keys = (
+        {key for key in routine_state if key.startswith(_DEPLOY_TRANSITIONAL_ALERT_PREFIXES)}
+        if deploy_maintenance
+        else set()
+    )
     due_incidents, next_routine_state = select_incidents_to_fire(
-        alerts, state=routine_state, now=now
+        alerts,
+        state=routine_state,
+        now=now,
+        preserve_keys=preserved_routine_keys,
     )
 
     for alert in alerts:
@@ -1072,16 +1083,11 @@ def main() -> int:
         message = f"fleet liveness ({scope})\n" + "\n".join(lines)
         if args.telegram:
             try:
-                delivered = send_telegram_message(
-                    as_block(message), channel="alerts", parse_mode="HTML"
-                )
+                delivered = send_telegram_message(as_block(message), channel="alerts", parse_mode="HTML")
                 if not delivered:
                     raise RuntimeError("Telegram route is not configured")
             except (OSError, RuntimeError, ValueError) as error:
-                print(
-                    "CRITICAL telegram: cannot deliver alerts "
-                    f"({transport_error(error)})"
-                )
+                print(f"CRITICAL telegram: cannot deliver alerts ({transport_error(error)})")
                 routing_failed = True
             else:
                 save_state(state_file, next_state)
@@ -1097,16 +1103,9 @@ def main() -> int:
             )
             print(f"incident routine fired: {session or 'accepted'}")
         except (KeyError, OSError, RuntimeError, ValueError) as error:
-            print(
-                "CRITICAL incident-routine: cannot fire the on-call agent "
-                f"({transport_error(error)})"
-            )
+            print(f"CRITICAL incident-routine: cannot fire the on-call agent ({transport_error(error)})")
             routing_failed = True
-            retained = {
-                key: fired_at
-                for key, fired_at in routine_state.items()
-                if key in next_routine_state
-            }
+            retained = {key: fired_at for key, fired_at in routine_state.items() if key in next_routine_state}
             save_state(routine_state_file, retained)
         else:
             save_state(routine_state_file, next_routine_state)
@@ -1115,7 +1114,10 @@ def main() -> int:
     has_critical = any(alert.severity == "CRITICAL" for alert in alerts)
     if not has_critical:
         if not alerts:
-            print(f"ok scope={scope} units-and-heartbeats-healthy")
+            if deploy_maintenance:
+                print(f"ok scope={scope} sanctioned-deploy-in-progress")
+            else:
+                print(f"ok scope={scope} units-and-heartbeats-healthy")
         else:
             print(f"ok scope={scope} warnings-present-no-critical")
     return 1 if routing_failed else 0

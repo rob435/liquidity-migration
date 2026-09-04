@@ -43,9 +43,7 @@ def test_inactive_unit_is_a_critical_alert(monkeypatch) -> None:
             output_artifact="-",
         )
     ]
-    monkeypatch.setattr(
-        liveness, "unit_states", lambda units: {unit: "inactive" for unit in units}
-    )
+    monkeypatch.setattr(liveness, "unit_states", lambda units: {unit: "inactive" for unit in units})
     alerts = liveness.evaluate_units("demo", rows)
     assert [alert.severity for alert in alerts] == ["CRITICAL"]
     assert "inactive" in alerts[0].message
@@ -109,19 +107,13 @@ def test_known_heartbeat_producers_fail_closed_on_missing_verdicts(
     heartbeat = tmp_path / "heartbeat.json"
     heartbeat.write_text("{}")
 
-    worker_alerts = liveness.evaluate_engine_heartbeat(
-        "liquidity-migration-signal-worker-mainnet.service", heartbeat
-    )
+    worker_alerts = liveness.evaluate_engine_heartbeat("liquidity-migration-signal-worker-mainnet.service", heartbeat)
     assert [alert.key for alert in worker_alerts] == [
         "heartbeat-contract:liquidity-migration-signal-worker-mainnet.service"
     ]
 
-    engine_alerts = liveness.evaluate_engine_heartbeat(
-        "liquidity-migration-engine-mainnet.service", heartbeat
-    )
-    assert {alert.key for alert in engine_alerts} == {
-        "heartbeat-contract:liquidity-migration-engine-mainnet.service"
-    }
+    engine_alerts = liveness.evaluate_engine_heartbeat("liquidity-migration-engine-mainnet.service", heartbeat)
+    assert {alert.key for alert in engine_alerts} == {"heartbeat-contract:liquidity-migration-engine-mainnet.service"}
     assert len(engine_alerts) == 1
     assert "may_open, rolling_loss_tripped" in engine_alerts[0].message
 
@@ -295,24 +287,16 @@ def test_a_latched_engine_and_a_trip_page_under_separate_keys(tmp_path: Path) ->
 def test_cooldown_suppresses_repeats_and_reports_resolution() -> None:
     alert = liveness.Alert("unit:engine", "CRITICAL", "engine is inactive")
     now = 1_000_000.0
-    lines, state = liveness.select_alerts_to_send(
-        [alert], state={}, now=now, cooldown_sec=1800
-    )
+    lines, state = liveness.select_alerts_to_send([alert], state={}, now=now, cooldown_sec=1800)
     assert len(lines) == 1 and "CRITICAL" in lines[0]
     # Within the cooldown the same condition stays quiet.
-    lines, state = liveness.select_alerts_to_send(
-        [alert], state=state, now=now + 60, cooldown_sec=1800
-    )
+    lines, state = liveness.select_alerts_to_send([alert], state=state, now=now + 60, cooldown_sec=1800)
     assert lines == []
     # Past the cooldown it re-alerts.
-    lines, state = liveness.select_alerts_to_send(
-        [alert], state=state, now=now + 3600, cooldown_sec=1800
-    )
+    lines, state = liveness.select_alerts_to_send([alert], state=state, now=now + 3600, cooldown_sec=1800)
     assert len(lines) == 1
     # A cleared condition sends one resolution note and leaves the state.
-    lines, state = liveness.select_alerts_to_send(
-        [], state=state, now=now + 3700, cooldown_sec=1800
-    )
+    lines, state = liveness.select_alerts_to_send([], state=state, now=now + 3700, cooldown_sec=1800)
     assert lines == ["RESOLVED unit:engine"]
     assert state == {}
 
@@ -321,9 +305,7 @@ def test_agent_fires_once_per_fault_lifetime_and_rearms_after_resolution() -> No
     alert = liveness.Alert("unit:engine", "CRITICAL", "engine is inactive")
     due, state = liveness.select_incidents_to_fire([alert], state={}, now=1000.0)
     assert due == [alert]
-    due, state = liveness.select_incidents_to_fire(
-        [alert], state=state, now=5000.0
-    )
+    due, state = liveness.select_incidents_to_fire([alert], state=state, now=5000.0)
     assert due == [], "Telegram may repeat; a duplicate agent must not launch"
     due, state = liveness.select_incidents_to_fire([], state=state, now=5100.0)
     assert due == [] and state == {}
@@ -331,20 +313,36 @@ def test_agent_fires_once_per_fault_lifetime_and_rearms_after_resolution() -> No
     assert due == [alert]
 
 
+def test_deploy_maintenance_preserves_unobserved_delivery_state() -> None:
+    prior = {"capture-silent": 123.0}
+    warning = liveness.Alert("backup", "WARNING", "backup is late")
+
+    lines, state = liveness.select_alerts_to_send(
+        [warning],
+        state=prior,
+        now=1_000.0,
+        cooldown_sec=1_800.0,
+        preserve_keys={"capture-silent"},
+    )
+    due, routine_state = liveness.select_incidents_to_fire(
+        [], state=prior, now=1_000.0, preserve_keys={"capture-silent"}
+    )
+
+    assert lines == ["WARNING backup is late\nref backup"]
+    assert state == {"capture-silent": 123.0, "backup": 1_000.0}
+    assert due == []
+    assert routine_state == prior
+
+
 def test_backup_stamp_ages_into_a_warning(tmp_path: Path) -> None:
     stamp = tmp_path / "backup.stamp"
     now = time.time()
     stamp.write_text("done")
-    assert (
-        liveness.evaluate_backup_stamp(stamp_path=stamp, now=now, max_age_hours=26)
-        == []
-    )
+    assert liveness.evaluate_backup_stamp(stamp_path=stamp, now=now, max_age_hours=26) == []
     os.utime(stamp, (now - 30 * 3600, now - 30 * 3600))
     alerts = liveness.evaluate_backup_stamp(stamp_path=stamp, now=now, max_age_hours=26)
     assert [alert.severity for alert in alerts] == ["WARNING"]
-    alerts = liveness.evaluate_backup_stamp(
-        stamp_path=tmp_path / "absent", now=now, max_age_hours=26
-    )
+    alerts = liveness.evaluate_backup_stamp(stamp_path=tmp_path / "absent", now=now, max_age_hours=26)
     assert "missing" in alerts[0].message
 
 
@@ -472,7 +470,9 @@ def test_upload_receipt_ages_and_low_drive_space_warn(tmp_path: Path) -> None:
     os.utime(stamp, (now - 5 * 3600, now - 5 * 3600))
     alerts = liveness.evaluate_upload_stamp(stamp_path=stamp, now=now, max_age_hours=3, min_remote_free_gb=200)
     assert {alert.key for alert in alerts} == {"tape-upload", "tape-remote-space"}
-    alerts = liveness.evaluate_upload_stamp(stamp_path=tmp_path / "absent", now=now, max_age_hours=3, min_remote_free_gb=200)
+    alerts = liveness.evaluate_upload_stamp(
+        stamp_path=tmp_path / "absent", now=now, max_age_hours=3, min_remote_free_gb=200
+    )
     assert "missing" in alerts[0].message
 
 
@@ -504,7 +504,9 @@ def test_a_recorder_over_its_byte_budget_warns_once_with_what_it_shed(tmp_path: 
 
     payload["budget"] = {"monthly_gb": 1300, "projected_month_gb": 900.0, "over": False, "shed": ["movers:book:50"]}
     status.write_text(json.dumps(payload))
-    alerts, _ = liveness.evaluate_capture_status(status, now=now, max_silence_sec=120, counters={}, label="forward-market-binance")
+    alerts, _ = liveness.evaluate_capture_status(
+        status, now=now, max_silence_sec=120, counters={}, label="forward-market-binance"
+    )
     assert alerts == []
 
 
@@ -522,20 +524,14 @@ def test_a_new_critical_fires_the_on_call_routine_once(monkeypatch, capsys) -> N
             return False
 
         def read(self):
-            return json.dumps(
-                {"claude_code_session_url": "https://claude.ai/code/session_1"}
-            ).encode()
+            return json.dumps({"claude_code_session_url": "https://claude.ai/code/session_1"}).encode()
 
     def fake_urlopen(request, timeout=0):
-        calls.append(
-            (request.full_url, dict(request.header_items()), json.loads(request.data))
-        )
+        calls.append((request.full_url, dict(request.header_items()), json.loads(request.data)))
         return _Response()
 
     monkeypatch.setattr(liveness.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(
-        liveness, "unit_journal_tail", lambda unit, lines=40: f"journal of {unit}"
-    )
+    monkeypatch.setattr(liveness, "unit_journal_tail", lambda unit, lines=40: f"journal of {unit}")
     alerts = [
         liveness.Alert(
             "unit:liquidity-migration-engine-mainnet.service",
@@ -544,9 +540,7 @@ def test_a_new_critical_fires_the_on_call_routine_once(monkeypatch, capsys) -> N
         ),
         liveness.Alert("backup", "WARNING", "backup receipt is 9h old"),
     ]
-    lines, _ = liveness.select_alerts_to_send(
-        alerts, state={}, now=1000.0, cooldown_sec=3600
-    )
+    lines, _ = liveness.select_alerts_to_send(alerts, state={}, now=1000.0, cooldown_sec=3600)
     text = liveness.incident_text("mainnet", lines, alerts)
     session = liveness.fire_incident_routine(
         "https://api.anthropic.com/v1/claude_code/routines/trig_x/fire", "tok", text
@@ -571,9 +565,7 @@ def test_a_new_critical_fires_the_on_call_routine_once(monkeypatch, capsys) -> N
     assert not any(line.startswith("CRITICAL") for line in lines)
 
 
-def test_failed_telegram_retries_without_launching_a_second_agent(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
+def test_failed_telegram_retries_without_launching_a_second_agent(tmp_path: Path, monkeypatch, capsys) -> None:
     row = liveness.FleetUnit(
         unit="liquidity-migration-engine.service",
         kind="service",
@@ -583,16 +575,12 @@ def test_failed_telegram_retries_without_launching_a_second_agent(
         output_artifact="-",
     )
     monkeypatch.setattr(liveness, "load_fleet_manifest", lambda: [row])
-    monkeypatch.setattr(
-        liveness, "unit_states", lambda units: {unit: "inactive" for unit in units}
-    )
+    monkeypatch.setattr(liveness, "unit_states", lambda units: {unit: "inactive" for unit in units})
     monkeypatch.setattr(liveness, "unit_journal_tail", lambda *_args: "journal")
     for key, value in {
         "TELEGRAM_BOT_TOKEN": "123:token",
         "TELEGRAM_ALERT_CHAT_ID": "-1001",
-        "INCIDENT_ROUTINE_FIRE_URL": (
-            "https://api.anthropic.com/v1/claude_code/routines/trig_1/fire"
-        ),
+        "INCIDENT_ROUTINE_FIRE_URL": ("https://api.anthropic.com/v1/claude_code/routines/trig_1/fire"),
         "INCIDENT_ROUTINE_FIRE_TOKEN": "sk-ant-test",
         "ONCALL_DEADMAN_URL": "https://hc-ping.com/check-id",
     }.items():
@@ -637,12 +625,7 @@ def test_host_supervises_realm_watchdog_results(monkeypatch) -> None:
         liveness,
         "unit_states",
         lambda units: {
-            unit: (
-                "active"
-                if unit != "liquidity-migration-mainnet-liveness.timer"
-                else "inactive"
-            )
-            for unit in units
+            unit: ("active" if unit != "liquidity-migration-mainnet-liveness.timer" else "inactive") for unit in units
         },
     )
     monkeypatch.setattr(liveness, "unit_enabled_state", lambda _unit: "enabled")
@@ -676,19 +659,11 @@ def test_active_deploy_age_reads_the_kernel_lock_table(tmp_path: Path) -> None:
     lock.touch(mode=0o600)
     os.utime(lock, (700.0, 700.0))
     metadata = lock.stat()
-    identity = (
-        f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}:"
-        f"{metadata.st_ino}"
-    )
+    identity = f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}:{metadata.st_ino}"
     lock_table = tmp_path / "locks"
-    lock_table.write_text(
-        f"7: FLOCK ADVISORY WRITE 123 {identity} 0 EOF\n", encoding="utf-8"
-    )
+    lock_table.write_text(f"7: FLOCK ADVISORY WRITE 123 {identity} 0 EOF\n", encoding="utf-8")
 
-    assert (
-        liveness.active_deploy_age(lock, now=1_000.0, lock_table=lock_table)
-        == 300.0
-    )
+    assert liveness.active_deploy_age(lock, now=1_000.0, lock_table=lock_table) == 300.0
 
     lock_table.write_text("", encoding="utf-8")
     assert liveness.active_deploy_age(lock, now=1_000.0, lock_table=lock_table) is None
@@ -702,12 +677,7 @@ def test_host_watchdog_chain_still_catches_a_disabled_timer_while_engine_runs(
     def states(units: list[str]) -> dict[str, str]:
         queried.extend(units)
         return {
-            unit: (
-                "inactive"
-                if unit == "liquidity-migration-mainnet-liveness.timer"
-                else "active"
-            )
-            for unit in units
+            unit: ("inactive" if unit == "liquidity-migration-mainnet-liveness.timer" else "active") for unit in units
         }
 
     monkeypatch.setattr(liveness, "unit_states", states)
@@ -728,26 +698,66 @@ def test_host_watchdog_chain_still_catches_a_disabled_timer_while_engine_runs(
 def test_host_watchdog_pages_on_a_stuck_deploy_lock(monkeypatch) -> None:
     monkeypatch.setattr(liveness, "active_deploy_age", lambda *_args, **_kwargs: 1_801.0)
 
-    alerts = liveness.evaluate_watchdog_chain(
-        now=2_000.0, max_deploy_age_sec=1_800.0
-    )
+    alerts = liveness.evaluate_watchdog_chain(now=2_000.0, max_deploy_age_sec=1_800.0)
 
     assert [alert.key for alert in alerts] == ["deploy-lock"]
     assert "held for 1801s" in alerts[0].message
 
 
-def test_host_incident_carries_the_recorder_journal(monkeypatch) -> None:
+def test_host_scope_suppresses_transitional_checks_during_a_sanctioned_deploy(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     monkeypatch.setattr(
-        liveness, "unit_journal_tail", lambda unit, lines=40: f"journal of {unit}"
+        liveness,
+        "load_fleet_manifest",
+        lambda: (_ for _ in ()).throw(AssertionError("manifest read during deploy")),
     )
+    monkeypatch.setattr(liveness, "active_deploy_age", lambda *_args, **_kwargs: 30.0)
+    monkeypatch.setattr(
+        liveness,
+        "evaluate_units",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unit state queried during deploy")),
+    )
+    monkeypatch.setattr(
+        liveness,
+        "evaluate_heartbeats",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("heartbeat queried during deploy")),
+    )
+    monkeypatch.setattr(
+        liveness,
+        "evaluate_capture_status",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("capture status queried during deploy")),
+    )
+    monkeypatch.setattr(liveness, "evaluate_disk", lambda: [])
+    state_file = tmp_path / "state.json"
+    state_file.write_text('{"capture-silent": 123.0}', encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_fleet_liveness.py",
+            "--account-scope",
+            "host",
+            "--capture-status-file",
+            str(tmp_path / "status.json"),
+            "--state-file",
+            str(state_file),
+        ],
+    )
+
+    assert liveness.main() == 0
+    assert "sanctioned-deploy-in-progress" in capsys.readouterr().out
+    assert state_file.read_text(encoding="utf-8") == '{"capture-silent": 123.0}'
+
+
+def test_host_incident_carries_the_recorder_journal(monkeypatch) -> None:
+    monkeypatch.setattr(liveness, "unit_journal_tail", lambda unit, lines=40: f"journal of {unit}")
     alert = liveness.Alert(
         "capture-silent:forward-market-binance",
         "CRITICAL",
         "recorder has received no frame",
     )
-    text = liveness.incident_text(
-        "host", ["CRITICAL recorder has received no frame"], [alert], [alert]
-    )
+    text = liveness.incident_text("host", ["CRITICAL recorder has received no frame"], [alert], [alert])
     assert "event_kind=incident" in text
     assert "liquidity-migration-forward-capture-binance.service" in text
     assert "journal of liquidity-migration-forward-capture-binance.service" in text

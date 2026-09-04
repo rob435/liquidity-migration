@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
+import logging
 import shutil
 import threading
 import time
@@ -122,7 +122,9 @@ def test_the_listed_universe_takes_the_quote_and_a_dynamic_tier_without_tables_i
     assert recorder.resolve_tiers(BASE_NS, None) == {"wide": []}
 
 
-def test_a_stock_perpetual_enters_no_tier_however_it_ranks_or_funds(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_a_stock_perpetual_enters_no_tier_however_it_ranks_or_funds(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """The venue lists stocks, ETFs and commodities as perpetuals. The sleeves
     never trade them, so the capture subscribes nothing for them: not the
     ranked tiers, not the funding tiers, not the wide ticker."""
@@ -130,7 +132,11 @@ def test_a_stock_perpetual_enters_no_tier_however_it_ranks_or_funds(tmp_path: Pa
     recorder = build(
         tmp_path,
         Tier("core", DEEP_FEEDS, Universe("top_turnover", top=2, quote="USDT")),
-        Tier("crowded", (Feed("book", "50"),), Universe("funding_below", threshold_bp=8.0, quote="USDT", exclude_tiers=("core",))),
+        Tier(
+            "crowded",
+            (Feed("book", "50"),),
+            Universe("funding_below", threshold_bp=8.0, quote="USDT", exclude_tiers=("core",)),
+        ),
         Tier("wide", WIDE_FEEDS, Universe("listed", quote="USDT", exclude_tiers=("core", "crowded"))),
     )
     tables = {
@@ -169,7 +175,10 @@ def test_a_ranked_member_keeps_its_place_for_sticky_hours_after_it_last_ranked_i
     mid-hold; the time floor keeps it until the hold and its exit are on tape."""
 
     recorder = build(
-        tmp_path, Tier("core", (Feed("book", "50"),), Universe("top_turnover", top=1, leave_top=2, sticky_hours=4.0, quote="USDT"))
+        tmp_path,
+        Tier(
+            "core", (Feed("book", "50"),), Universe("top_turnover", top=1, leave_top=2, sticky_hours=4.0, quote="USDT")
+        ),
     )
     names = ("AUSDT", "BUSDT", "CUSDT", "PUMPUSDT")
     recorder.tables = {"instruments": [instrument(name) for name in names], "tickers": []}
@@ -185,7 +194,10 @@ def test_a_ranked_member_keeps_its_place_for_sticky_hours_after_it_last_ranked_i
     assert recorder.resolve_tiers(BASE_NS + 1 + 4 * HOUR_NS)["core"] == ["AUSDT"]
 
     # Without the floor the old hysteresis is unchanged: the default is off.
-    bare = build(tmp_path / "bare", Tier("core", (Feed("book", "50"),), Universe("top_turnover", top=1, leave_top=2, quote="USDT")))
+    bare = build(
+        tmp_path / "bare",
+        Tier("core", (Feed("book", "50"),), Universe("top_turnover", top=1, leave_top=2, quote="USDT")),
+    )
     bare.tables = recorder.tables
     for name, turnover in zip(names, (300.0, 200.0, 100.0, 9000.0)):
         bare.live.observe(name, {"turnover_24h": turnover}, BASE_NS)
@@ -217,7 +229,9 @@ def test_top_turnover_follows_the_ticker_live_and_leaves_only_below_the_wider_ra
     names = ["AUSDT", "BUSDT", "CUSDT", "DUSDT"]
     tables = {
         "instruments": [instrument(name) for name in names],
-        "tickers": [{"symbol": name, "turnover24h": str(turnover)} for name, turnover in zip(names, (400, 300, 200, 100))],
+        "tickers": [
+            {"symbol": name, "turnover24h": str(turnover)} for name, turnover in zip(names, (400, 300, 200, 100))
+        ],
     }
     assert recorder.resolve_tiers(BASE_NS, tables)["core"] == ["AUSDT", "BUSDT"]
 
@@ -306,12 +320,21 @@ def test_a_crowded_name_at_exactly_the_threshold_qualifies_and_a_shallower_one_d
     assert recorder.resolve_tiers(BASE_NS, tables)["crowded"] == ["AGIUSDT", "SOMIUSDT"]
 
 
-def test_a_funding_collapse_on_the_ticker_promotes_within_the_tick_and_expires_after_sticky_hours(tmp_path: Path) -> None:
+def test_a_funding_collapse_on_the_ticker_promotes_within_the_tick_and_expires_after_sticky_hours(
+    tmp_path: Path,
+) -> None:
     recorder = build(
         tmp_path,
-        Tier("crowded", (Feed("book", "50"),), Universe("funding_below", threshold_bp=8.0, sticky_hours=2.0, quote="USDT")),
+        Tier(
+            "crowded",
+            (Feed("book", "50"),),
+            Universe("funding_below", threshold_bp=8.0, sticky_hours=2.0, quote="USDT"),
+        ),
     )
-    tables = {"instruments": [instrument("AGIUSDT"), instrument("BTCUSDT")], "tickers": [{"symbol": "AGIUSDT", "fundingRate": "0.0001"}]}
+    tables = {
+        "instruments": [instrument("AGIUSDT"), instrument("BTCUSDT")],
+        "tickers": [{"symbol": "AGIUSDT", "fundingRate": "0.0001"}],
+    }
     assert recorder.resolve_tiers(BASE_NS, tables)["crowded"] == []
 
     # 14:00: the ticker shows -12 bp; the next tick promotes.
@@ -345,16 +368,23 @@ def test_a_turnover_surge_is_measured_against_the_last_snapshot(tmp_path: Path) 
     assert recorder.resolve_tiers(BASE_NS + 4)["surging"] == ["HNTUSDT"]
 
     # The next snapshot raises the baseline to the new level; the surge is over, the name lingers an hour.
-    recorder.resolve_tiers(BASE_NS + 5, {"instruments": tables["instruments"], "tickers": [{"symbol": "HNTUSDT", "turnover24h": "3000000"}]})
+    recorder.resolve_tiers(
+        BASE_NS + 5,
+        {"instruments": tables["instruments"], "tickers": [{"symbol": "HNTUSDT", "turnover24h": "3000000"}]},
+    )
     assert recorder.resolve_tiers(BASE_NS + 6)["surging"] == ["HNTUSDT"]
     assert recorder.resolve_tiers(BASE_NS + 4 + HOUR_NS)["surging"] == []
 
 
 def test_a_price_move_promotes_either_direction(tmp_path: Path) -> None:
     recorder = build(
-        tmp_path, Tier("movers", (Feed("book", "50"),), Universe("price_move", pct=0.15, sticky_hours=1.0, quote="USDT"))
+        tmp_path,
+        Tier("movers", (Feed("book", "50"),), Universe("price_move", pct=0.15, sticky_hours=1.0, quote="USDT")),
     )
-    recorder.tables = {"instruments": [instrument("UPUSDT"), instrument("DOWNUSDT"), instrument("FLATUSDT")], "tickers": []}
+    recorder.tables = {
+        "instruments": [instrument("UPUSDT"), instrument("DOWNUSDT"), instrument("FLATUSDT")],
+        "tickers": [],
+    }
     recorder.live.observe("UPUSDT", {"price_change_24h_pct": 0.151}, BASE_NS)
     recorder.live.observe("DOWNUSDT", {"price_change_24h_pct": -0.20}, BASE_NS)
     recorder.live.observe("FLATUSDT", {"price_change_24h_pct": 0.149}, BASE_NS)
@@ -561,8 +591,12 @@ def test_a_shard_that_is_not_connected_only_records_the_new_list(tmp_path: Path)
     assert shard.topics == ["publicTrade.ETHUSDT"]
 
 
-def test_reconciling_a_tier_keeps_placement_fills_room_and_closes_empty_shards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))), per_connection=2)
+def test_reconciling_a_tier_keeps_placement_fills_room_and_closes_empty_shards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = build(
+        tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))), per_connection=2
+    )
     created: list[Shard] = []
 
     def quiet_shard(tier: str, topics: list[str]) -> Shard:
@@ -597,11 +631,19 @@ def test_shard_topics_never_mixes_connection_groups() -> None:
     assert shard_topics(["p1", "m1", "p2"], 2) == [["p1", "m1"], ["p2"]]
 
 
-def test_binance_shards_carry_one_path_each_and_live_adds_stay_on_their_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_binance_shards_carry_one_path_each_and_live_adds_stay_on_their_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config = CaptureConfig(
         venue=VenueSettings("binance", "usdm"),
         storage=StorageSettings(root=tmp_path, queue_frames=16, status_interval_seconds=30.0),
-        tiers=(Tier("core", (Feed("book", "1"), Feed("trades"), Feed("ticker")), Universe("symbols", symbols=("BTCUSDT", "ETHUSDT"))),),
+        tiers=(
+            Tier(
+                "core",
+                (Feed("book", "1"), Feed("trades"), Feed("ticker")),
+                Universe("symbols", symbols=("BTCUSDT", "ETHUSDT")),
+            ),
+        ),
         topics_per_connection=3,
     )
     recorder = Recorder(config)
@@ -682,7 +724,9 @@ def test_a_venue_that_will_not_answer_leaves_the_snapshot_clock_open(tmp_path: P
 
 
 @needs_zstd
-def test_a_replan_reconciles_only_the_tiers_whose_topics_changed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_replan_reconciles_only_the_tiers_whose_topics_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     recorder = build(
         tmp_path,
         Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))),
@@ -749,7 +793,9 @@ def _metered_hour(meter: ByteMeter, at_ns: int, wide_book: int, movers_book: int
 
 def test_the_budget_sheds_what_the_projection_needs_and_counts_shed_pairs_out_of_it() -> None:
     meter = ByteMeter(BASE_NS)
-    settings = BudgetSettings(monthly_gb=400.0, shed=(("wide", "book:1"), ("movers", "book:50")), restore_below=0.8, act_every_minutes=60)
+    settings = BudgetSettings(
+        monthly_gb=400.0, shed=(("wide", "book:1"), ("movers", "book:50")), restore_below=0.8, act_every_minutes=60
+    )
     budget = BudgetController(settings, meter)
 
     # Less than an hour of history: no projection, no action.
@@ -780,9 +826,13 @@ def test_the_budget_sheds_what_the_projection_needs_and_counts_shed_pairs_out_of
     assert status["shed_order"] == ["wide:book:1", "movers:book:50"]
 
 
-def test_the_budget_sheds_several_pairs_in_one_action_and_says_when_the_list_is_not_enough(caplog: pytest.LogCaptureFixture) -> None:
+def test_the_budget_sheds_several_pairs_in_one_action_and_says_when_the_list_is_not_enough(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     meter = ByteMeter(BASE_NS)
-    settings = BudgetSettings(monthly_gb=100.0, shed=(("wide", "book:1"), ("movers", "book:50")), restore_below=0.8, act_every_minutes=60)
+    settings = BudgetSettings(
+        monthly_gb=100.0, shed=(("wide", "book:1"), ("movers", "book:50")), restore_below=0.8, act_every_minutes=60
+    )
     budget = BudgetController(settings, meter)
     _metered_hour(meter, BASE_NS + 60 * 10**9, 500_000_000, 300_000_000, 200_000_000)
 
@@ -791,7 +841,9 @@ def test_the_budget_sheds_several_pairs_in_one_action_and_says_when_the_list_is_
     with caplog.at_level(logging.WARNING):
         assert budget.step(BASE_NS + HOUR_NS) is True
     assert budget.shed_active == [("wide", "book:1"), ("movers", "book:50")]
-    assert [record.getMessage() for record in caplog.records][-1].startswith("over budget with every sheddable feed shed: 144 GB/month projected against 100 allowed")
+    assert [record.getMessage() for record in caplog.records][-1].startswith(
+        "over budget with every sheddable feed shed: 144 GB/month projected against 100 allowed"
+    )
 
     # An hour on, the rest still runs at 144 GB/month with nothing left to
     # shed: no change, said again.
@@ -808,7 +860,9 @@ def test_the_budget_sheds_several_pairs_in_one_action_and_says_when_the_list_is_
 
 def test_a_shed_pair_is_restored_only_when_its_own_month_fits_under_the_restore_line() -> None:
     meter = ByteMeter(BASE_NS)
-    settings = BudgetSettings(monthly_gb=400.0, shed=(("wide", "book:1"), ("movers", "book:50")), restore_below=0.8, act_every_minutes=60)
+    settings = BudgetSettings(
+        monthly_gb=400.0, shed=(("wide", "book:1"), ("movers", "book:50")), restore_below=0.8, act_every_minutes=60
+    )
     budget = BudgetController(settings, meter)
     _metered_hour(meter, BASE_NS + 60 * 10**9, 500_000_000, 300_000_000, 200_000_000)
     budget.settings = BudgetSettings(monthly_gb=100.0, shed=settings.shed, restore_below=0.8, act_every_minutes=60)
@@ -863,6 +917,7 @@ def test_the_status_file_carries_what_the_host_watchdog_reads(tmp_path: Path) ->
 
     assert payload["kind"] == "forward_capture_status"
     assert payload["schema_version"] == SCHEMA_VERSION
+    assert payload["pid"] == os.getpid()
     assert payload["venue"] == "bybit" and payload["market"] == "linear"
     assert payload["config"] == "deploy/capture/bybit-linear.toml"
     assert payload["last_receive_ns"] == BASE_NS
@@ -1098,9 +1153,16 @@ def test_stop_events_are_independent_per_shard(tmp_path: Path) -> None:
 def test_positive_funding_promotes_into_an_overheated_tier(tmp_path: Path) -> None:
     recorder = build(
         tmp_path,
-        Tier("overheated", (Feed("book", "50"),), Universe("funding_above", threshold_bp=8.0, sticky_hours=1.0, quote="USDT")),
+        Tier(
+            "overheated",
+            (Feed("book", "50"),),
+            Universe("funding_above", threshold_bp=8.0, sticky_hours=1.0, quote="USDT"),
+        ),
     )
-    recorder.tables = {"instruments": [instrument("HOTUSDT"), instrument("COLDUSDT"), instrument("WARMUSDT")], "tickers": []}
+    recorder.tables = {
+        "instruments": [instrument("HOTUSDT"), instrument("COLDUSDT"), instrument("WARMUSDT")],
+        "tickers": [],
+    }
     recorder.live.observe("HOTUSDT", {"funding_rate": 0.0008}, BASE_NS)
     recorder.live.observe("COLDUSDT", {"funding_rate": -0.0020}, BASE_NS)
     recorder.live.observe("WARMUSDT", {"funding_rate": 0.00079}, BASE_NS)
@@ -1113,7 +1175,9 @@ def test_positive_funding_promotes_into_an_overheated_tier(tmp_path: Path) -> No
     assert recorder.resolve_tiers(BASE_NS + 1 + HOUR_NS)["overheated"] == []
 
 
-def test_top_movers_ranks_by_the_size_of_the_move_and_keeps_a_member_until_it_falls_below_leave_top(tmp_path: Path) -> None:
+def test_top_movers_ranks_by_the_size_of_the_move_and_keeps_a_member_until_it_falls_below_leave_top(
+    tmp_path: Path,
+) -> None:
     recorder = build(
         tmp_path, Tier("movers", (Feed("book", "50"),), Universe("top_movers", top=2, leave_top=3, quote="USDT"))
     )
@@ -1134,7 +1198,11 @@ def test_top_movers_ranks_by_the_size_of_the_move_and_keeps_a_member_until_it_fa
 def test_a_price_burst_is_measured_against_the_sample_one_window_back(tmp_path: Path) -> None:
     recorder = build(
         tmp_path,
-        Tier("bursting", (Feed("book", "50"),), Universe("price_burst", pct=0.05, window_hours=1.0, sticky_hours=1.0, quote="USDT")),
+        Tier(
+            "bursting",
+            (Feed("book", "50"),),
+            Universe("price_burst", pct=0.05, window_hours=1.0, sticky_hours=1.0, quote="USDT"),
+        ),
     )
     recorder.tables = {"instruments": [instrument("POPUSDT")], "tickers": []}
     recorder.live.observe("POPUSDT", {"mark_price": 1.00}, BASE_NS)
@@ -1156,7 +1224,11 @@ def test_a_price_burst_is_measured_against_the_sample_one_window_back(tmp_path: 
 def test_a_volume_burst_is_the_window_trading_beyond_the_same_window_a_day_earlier(tmp_path: Path) -> None:
     recorder = build(
         tmp_path,
-        Tier("flooding", (Feed("book", "50"),), Universe("volume_burst", ratio=3.0, window_hours=1.0, sticky_hours=1.0, quote="USDT")),
+        Tier(
+            "flooding",
+            (Feed("book", "50"),),
+            Universe("volume_burst", ratio=3.0, window_hours=1.0, sticky_hours=1.0, quote="USDT"),
+        ),
     )
     recorder.tables = {"instruments": [instrument("HNTUSDT"), instrument("DULLUSDT")], "tickers": []}
     recorder.live.observe("HNTUSDT", {"turnover_24h": 24_000.0}, BASE_NS)
@@ -1171,9 +1243,16 @@ def test_a_volume_burst_is_the_window_trading_beyond_the_same_window_a_day_earli
 def test_an_open_interest_jump_either_way_promotes(tmp_path: Path) -> None:
     recorder = build(
         tmp_path,
-        Tier("levering", (Feed("book", "50"),), Universe("oi_change", pct=0.10, window_hours=1.0, sticky_hours=1.0, quote="USDT")),
+        Tier(
+            "levering",
+            (Feed("book", "50"),),
+            Universe("oi_change", pct=0.10, window_hours=1.0, sticky_hours=1.0, quote="USDT"),
+        ),
     )
-    recorder.tables = {"instruments": [instrument("UPUSDT"), instrument("DOWNUSDT"), instrument("FLATUSDT")], "tickers": []}
+    recorder.tables = {
+        "instruments": [instrument("UPUSDT"), instrument("DOWNUSDT"), instrument("FLATUSDT")],
+        "tickers": [],
+    }
     for name in ("UPUSDT", "DOWNUSDT", "FLATUSDT"):
         recorder.live.observe(name, {"open_interest": 100.0}, BASE_NS)
     later = BASE_NS + HOUR_NS + 60 * 10**9

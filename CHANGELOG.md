@@ -26,10 +26,20 @@ edit STATE.md to match.
     sample a realm while a sanctioned deploy has disabled its timer. Systemd
     enablement alone removed that false page but also hid a timer disabled by
     mistake while the funded engine kept running. The host scope now uses the
-    deploy's existing exclusive lock as the maintenance fact, suppressing only
-    watchdog-chain checks while it is held. A lock beyond 30 minutes pages; the
-    bound covers the measured 12–19 minute host-build fallback. Outside it,
-    demo is mandatory and mainnet is mandatory whenever enabled or trading.
+    deploy's existing exclusive lock as the maintenance fact. While it is held,
+    the host scope suppresses transition-prone unit, heartbeat, recorder, and
+    realm-watchdog checks without resolving their delivery state; disk, clock,
+    upload, backup, and external dead-man checks continue. A lock beyond 30
+    minutes pages; the bound covers the measured 12–19 minute host-build
+    fallback. Outside it, demo is mandatory and mainnet is mandatory whenever
+    enabled or trading.
+  - Incident `host-84246120f8ea8c9f` exposed a separate lifecycle fault after
+    the real recorder-stall repair: the Binance replacement published a
+    zero-frame status during normal WebSocket warm-up. Recorder readiness no
+    longer accepts file
+    freshness alone: `status.json` names its process, and a deploy remains in
+    maintenance until that PID is the unit's current `MainPID`, a shard is
+    connected, and the replacement has received a market frame.
   - The read-only `diagnose` workflow has its own concurrency group, so an
     incident read no longer waits behind a completed host handover's release
     soak. Focused Python and signal-worker tests pass; the full repository gate,

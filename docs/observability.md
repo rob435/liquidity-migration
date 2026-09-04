@@ -45,6 +45,7 @@ noise, and the history is the point.
 | `fills_maker_share`, `fill_all_in_arrival_bps` | What the trading cost |
 | `end_to_end_p50_ns`, `end_to_end_p99_ns` | The order path, from the engine's latency ledger |
 | `projected_month_gb`, `monthly_gb`, `shed_feeds`, `dropped_frames` | Recorder rows only: inbound projection against allowance |
+| `started_at_ns`, `pid` | Recorder status only: startup grace and process identity used by liveness and deploy readiness checks |
 
 ## 3. Invariants
 

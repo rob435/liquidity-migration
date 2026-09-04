@@ -31,7 +31,7 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Host | Backup | Receipt exceeds 8 h |
 | Host | Machine | `/var/lib` has less than 25 GB free or NTP is unsynchronised |
 | Host | Watchdog plane | Demo watchdog is required; funded watchdog is required while enabled or while its engine runs; a disabled/inactive timer or failed last run is `CRITICAL` outside a deploy |
-| Host | Deployment | The existing exclusive deploy lock suppresses transitional realm-timer checks for 30 min; a longer-held or unreadable lock is `CRITICAL` |
+| Host | Deployment | The existing exclusive deploy lock suppresses transition-prone unit, heartbeat, recorder, and realm-watchdog checks for 30 min; delivery state is preserved, while disk, clock, upload, backup, and dead-man checks continue; a longer-held or unreadable lock is `CRITICAL` |
 | External | Host watchdog | `ONCALL_DEADMAN_URL` receives no healthy host-scope ping |
 
 ### Delivery State
@@ -86,7 +86,8 @@ inaccessible after launch.
 - **Must** keep the automated-responder token outside Telegram-only services.
 - **Must** let the host watchdog outlive deploys, funded stops, and disarms.
 - **Must** supervise realm watchdog results from the independent host scope; a timer cannot prove its own continued execution.
-- **Must** suppress transitional realm-watchdog checks only while the sanctioned deploy owns `/run/liquidity-migration/deploy.lock`; a held lock older than 30 minutes is a fault. The bound covers the measured 12–19 min host-build fallback without hiding a stuck deploy indefinitely.
+- **Must** suppress transition-prone checks only while the sanctioned deploy owns `/run/liquidity-migration/deploy.lock`, preserve their delivery state rather than emitting false resolutions, and continue independent disk, clock, upload, backup, and dead-man checks. A held lock older than 30 minutes is a fault. The bound covers the measured 12–19 min host-build fallback without hiding a stuck deploy indefinitely.
+- **Must** keep a restarted recorder inside the deploy boundary until its status names the new systemd process, at least one shard is connected, and a market frame has arrived.
 - **Must** catch a disabled mainnet watchdog while the funded engine still runs.
 - **Must** fail closed when a known engine or signal worker publishes a fresh JSON object without its required health verdict.
 - **Must** treat a fresh but self-reported `degraded` signal-worker heartbeat as a fault after its bounded, stream-healthy startup and attach that worker's journal to the incident payload.

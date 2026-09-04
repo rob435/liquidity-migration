@@ -133,9 +133,20 @@ def test_deploy_prepares_oncall_routes_before_starting_independent_watchdog() ->
     remote = _remote_script()
     deploy_body = remote[remote.index("deploy_mode()") :]
     assert "liquidity_migration.policy.oncall_environment" in remote
-    assert deploy_body.index("prepare_oncall_inputs") < deploy_body.index(
-        "start_independent_units"
-    )
+    assert deploy_body.index("prepare_oncall_inputs") < deploy_body.index("start_independent_units")
+
+
+def test_deploy_waits_for_a_received_frame_before_releasing_a_restarted_recorder() -> None:
+    remote = _remote_script()
+    ready = remote[remote.index("capture_status_ready()") : remote.index("start_unit()")]
+    independent = _function_body(remote, "start_independent_units")
+
+    assert 'payload.get("last_receive_ns")' in ready
+    assert 'payload.get("pid") == expected_pid' in ready
+    assert 'systemctl show --property=MainPID --value "$unit"' in ready
+    assert 'shard.get("connected") is True' in ready
+    assert 'wait_capture_ready "$unit" "$CAPTURE_STATUS" "$since"' in independent
+    assert 'wait_fresh_heartbeat "$unit" "$CAPTURE_STATUS" "$since"' not in independent
 
 
 def test_observers_load_dedicated_notification_files_not_venue_credentials() -> None:
@@ -152,9 +163,7 @@ def test_observers_load_dedicated_notification_files_not_venue_credentials() -> 
         assert "EnvironmentFile=/etc/liquidity-migration/bybit-demo.env" not in text
         assert "EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env" not in text
     for realm in ("demo", "mainnet", "host"):
-        text = (
-            SYSTEMD / f"liquidity-migration-{realm}-liveness.service"
-        ).read_text(encoding="utf-8")
+        text = (SYSTEMD / f"liquidity-migration-{realm}-liveness.service").read_text(encoding="utf-8")
         assert "EnvironmentFile=/etc/liquidity-migration/oncall.env" in text
         assert "--require-oncall" in text
 
@@ -175,9 +184,7 @@ def test_engine_units_unset_credentials_they_must_not_see() -> None:
     for secret in ("BYBIT_REAL_API_KEY", "REAL_MONEY", "TELEGRAM_BOT_TOKEN"):
         assert secret in demo
     for realm in ("demo", "mainnet"):
-        worker = (
-            SYSTEMD / f"liquidity-migration-signal-worker-{realm}.service"
-        ).read_text(encoding="utf-8")
+        worker = (SYSTEMD / f"liquidity-migration-signal-worker-{realm}.service").read_text(encoding="utf-8")
         assert "bybit-demo.env" not in worker
         assert "bybit-mainnet.env" not in worker
 
@@ -211,15 +218,13 @@ def test_the_ci_deploy_hands_the_host_a_token_for_the_private_fetch() -> None:
     workflow: dict[str, Any] = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     assert workflow["permissions"]["contents"] == "read"
     steps = workflow["jobs"]["vps"]["steps"]
-    runner = next(
-        step for step in steps if "scripts/deploy_vps_live.sh" in (step.get("run") or "")
-    )
+    runner = next(step for step in steps if "scripts/deploy_vps_live.sh" in (step.get("run") or ""))
     assert runner["env"]["GITHUB_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
     # It is only a fix because the remote body spends it on that fetch.
     remote = _remote_script()
     assert 'if [ -n "$GITHUB_TOKEN" ] && [[ "$REPO_URL" == https://github.com/* ]]; then' in remote
     assert "git_authorized fetch --no-tags" in remote
-    assert 'printf \'GITHUB_TOKEN=%q\\n\' "$GITHUB_TOKEN"' in DEPLOY.read_text(encoding="utf-8")
+    assert "printf 'GITHUB_TOKEN=%q\\n' \"$GITHUB_TOKEN\"" in DEPLOY.read_text(encoding="utf-8")
 
 
 def test_a_realm_that_does_not_come_up_rolls_back_to_the_last_finished_deploy() -> None:
@@ -292,8 +297,12 @@ def test_deploy_never_stops_an_independent_unit() -> None:
     assert "list-unit-files" not in stop_fleet
     deploy_body = remote[remote.index("deploy_mode()") : remote.index("rollback_mode()")]
     assert "start_independent_units" in deploy_body
-    independent = remote[remote.index("start_independent_units()") : remote.index("# ------------------------------------------------------------ realm inputs")]
-    assert 'wait_fresh_heartbeat "$unit" "$CAPTURE_STATUS" "$since"' in independent
+    independent = remote[
+        remote.index("start_independent_units()") : remote.index(
+            "# ------------------------------------------------------------ realm inputs"
+        )
+    ]
+    assert 'wait_capture_ready "$unit" "$CAPTURE_STATUS" "$since"' in independent
     assert "result=unchanged-left-running" in independent
 
 
@@ -322,6 +331,8 @@ def test_mainnet_takeover_reloads_the_owner_arming_switch() -> None:
     mainnet = mainnet[: mainnet.index(";;")]
     assert "REAL_MONEY" in mainnet
     assert "BYBIT_INVENTORY_CREDENTIAL_SET" in mainnet
+
+
 def test_the_systemd_unit_runs_the_packer_over_every_tape_and_receipts_it() -> None:
     unit = (SYSTEMD / "liquidity-migration-market-tape-upload.service").read_text(encoding="utf-8")
     assert "ExecStart=/opt/liquidity-migration/.venv/bin/python -m market_tape pack" in unit
