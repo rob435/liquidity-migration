@@ -7,7 +7,7 @@
   ],
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 6,
+  "version": 9,
   "editable": true,
   "graphTooltip": 1,
   "refresh": "1m",
@@ -132,6 +132,8 @@
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "center",
+        "orientation": "auto",
+        "text": {},
         "textMode": "value_and_name",
         "wideLayout": true,
         "reduceOptions": {
@@ -236,6 +238,8 @@
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "center",
+        "orientation": "auto",
+        "text": {},
         "textMode": "value_and_name",
         "wideLayout": true,
         "reduceOptions": {
@@ -364,6 +368,8 @@
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "center",
+        "orientation": "auto",
+        "text": {},
         "textMode": "value_and_name",
         "wideLayout": true,
         "reduceOptions": {
@@ -480,6 +486,8 @@
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "center",
+        "orientation": "auto",
+        "text": {},
         "textMode": "value_and_name",
         "wideLayout": true,
         "reduceOptions": {
@@ -506,10 +514,10 @@
       ]
     },
     {
-      "type": "timeseries",
+      "type": "stat",
       "id": 11,
-      "title": "Equity",
-      "description": "D left \u00b7 M right \u00b7 USDT.",
+      "title": "D \u00b7 Equity",
+      "description": "Current account equity \u00b7 USDT.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
@@ -517,72 +525,126 @@
       "gridPos": {
         "x": 0,
         "y": 5,
-        "w": 12,
-        "h": 8
+        "w": 6,
+        "h": 4
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
           },
           "unit": "currencyUSD",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 14,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": null
-          },
+          "mappings": [],
           "decimals": 2
         },
         "overrides": [
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^demo$/"
+              "options": "/^Now$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "D"
+                "value": "Now"
               },
               {
-                "id": "custom.axisLabel",
-                "value": "D"
-              },
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "text": {
+          "titleSize": 11,
+          "valueSize": 24
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_equity_usdt{realm=\"demo\",realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "Now",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 13,
+      "title": "M \u00b7 Equity",
+      "description": "Current account equity \u00b7 USDT.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 5,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
               {
-                "id": "custom.axisColorMode",
-                "value": "series"
+                "color": "text",
+                "value": null
               }
             ]
           },
+          "unit": "currencyUSD",
+          "mappings": [],
+          "decimals": 2
+        },
+        "overrides": [
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^mainnet$/"
+              "options": "/^Now$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "M"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "custom.axisLabel",
-                "value": "M"
-              },
-              {
-                "id": "custom.axisColorMode",
-                "value": "series"
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 3
+                "value": "Now"
               },
               {
                 "id": "color",
@@ -596,15 +658,22 @@
         ]
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": false,
-          "calcs": []
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "text": {
+          "titleSize": 11,
+          "valueSize": 24
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         }
       },
       "targets": [
@@ -614,19 +683,19 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_engine_equity_usdt{realm=~\"$realm\"}",
+          "expr": "lm_engine_equity_usdt{realm=\"mainnet\",realm=~\"$realm\"}",
           "instant": false,
-          "legendFormat": "{{realm}}",
+          "legendFormat": "Now",
           "range": true,
           "refId": "A"
         }
       ]
     },
     {
-      "type": "timeseries",
+      "type": "stat",
       "id": 12,
-      "title": "Open exposure",
-      "description": "D left \u00b7 M right \u00b7 USDT.",
+      "title": "D \u00b7 Open exposure",
+      "description": "Entry notional of the current open position \u00b7 USDT.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
@@ -634,72 +703,126 @@
       "gridPos": {
         "x": 12,
         "y": 5,
-        "w": 12,
-        "h": 8
+        "w": 6,
+        "h": 4
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
           },
           "unit": "currencyUSD",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 14,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          },
+          "mappings": [],
           "decimals": 2
         },
         "overrides": [
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^demo$/"
+              "options": "/^Now$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "D"
+                "value": "Now"
               },
               {
-                "id": "custom.axisLabel",
-                "value": "D"
-              },
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "text": {
+          "titleSize": 11,
+          "valueSize": 24
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_position_entry_notional_usdt{realm=\"demo\",realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "Now",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 14,
+      "title": "M \u00b7 Open exposure",
+      "description": "Entry notional of the current open position \u00b7 USDT.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 5,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
               {
-                "id": "custom.axisColorMode",
-                "value": "series"
+                "color": "text",
+                "value": null
               }
             ]
           },
+          "unit": "currencyUSD",
+          "mappings": [],
+          "decimals": 2
+        },
+        "overrides": [
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^mainnet$/"
+              "options": "/^Now$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "M"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "custom.axisLabel",
-                "value": "M"
-              },
-              {
-                "id": "custom.axisColorMode",
-                "value": "series"
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 3
+                "value": "Now"
               },
               {
                 "id": "color",
@@ -713,15 +836,22 @@
         ]
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": false,
-          "calcs": []
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "text": {
+          "titleSize": 11,
+          "valueSize": 24
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         }
       },
       "targets": [
@@ -731,9 +861,9 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_engine_position_entry_notional_usdt{realm=~\"$realm\"}",
+          "expr": "lm_engine_position_entry_notional_usdt{realm=\"mainnet\",realm=~\"$realm\"}",
           "instant": false,
-          "legendFormat": "{{realm}}",
+          "legendFormat": "Now",
           "range": true,
           "refId": "A"
         }
@@ -746,14 +876,14 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 13,
+        "y": 9,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "type": "timeseries",
+      "type": "stat",
       "id": 31,
       "title": "Execution activity \u00b7 15m",
       "description": "Orders, fills, resets.",
@@ -763,25 +893,26 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 10,
         "w": 10,
         "h": 9
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
           },
           "unit": "short",
-          "custom": {
-            "drawStyle": "bars",
-            "lineWidth": 2,
-            "fillOpacity": 60,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          },
+          "mappings": [],
           "decimals": 0
         },
         "overrides": [
@@ -794,6 +925,13 @@
               {
                 "id": "displayName",
                 "value": "D orders"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
               }
             ]
           },
@@ -806,6 +944,13 @@
               {
                 "id": "displayName",
                 "value": "M orders"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
               }
             ]
           },
@@ -818,6 +963,13 @@
               {
                 "id": "displayName",
                 "value": "D fills"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
               }
             ]
           },
@@ -830,6 +982,13 @@
               {
                 "id": "displayName",
                 "value": "M fills"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
               }
             ]
           },
@@ -842,6 +1001,13 @@
               {
                 "id": "displayName",
                 "value": "D resets"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
               }
             ]
           },
@@ -854,21 +1020,32 @@
               {
                 "id": "displayName",
                 "value": "M resets"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
               }
             ]
           }
         ]
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": []
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {},
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         }
       },
       "targets": [
@@ -921,7 +1098,7 @@
       },
       "gridPos": {
         "x": 10,
-        "y": 14,
+        "y": 10,
         "w": 14,
         "h": 9
       },
@@ -1134,42 +1311,52 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 19,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "type": "timeseries",
+      "type": "stat",
       "id": 41,
       "title": "Data freshness",
-      "description": "Age in milliseconds.",
+      "description": "Current age.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
         "x": 0,
-        "y": 24,
-        "w": 10,
+        "y": 20,
+        "w": 9,
         "h": 8
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60000
+              },
+              {
+                "color": "red",
+                "value": 180000
+              }
+            ]
           },
           "unit": "ms",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          }
+          "mappings": [],
+          "decimals": 0
         },
         "overrides": [
           {
@@ -1223,30 +1410,6 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^worker demo \u00b7 repair gap$/"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "D \u00b7 gap"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": "/^worker mainnet \u00b7 repair gap$/"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "M \u00b7 gap"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
               "options": "/^recorder binance \u00b7 market frame$/"
             },
             "properties": [
@@ -1271,15 +1434,19 @@
         ]
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": []
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {},
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         }
       },
       "targets": [
@@ -1290,9 +1457,9 @@
           },
           "editorMode": "code",
           "expr": "lm_engine_account_age_ms{realm=~\"$realm\"}",
-          "instant": false,
+          "instant": true,
           "legendFormat": "engine {{realm}} \u00b7 account",
-          "range": true,
+          "range": false,
           "refId": "A"
         },
         {
@@ -1302,9 +1469,9 @@
           },
           "editorMode": "code",
           "expr": "lm_worker_ws_last_frame_age_ms{realm=~\"$realm\"}",
-          "instant": false,
+          "instant": true,
           "legendFormat": "worker {{realm}} \u00b7 market frame",
-          "range": true,
+          "range": false,
           "refId": "B"
         },
         {
@@ -1313,39 +1480,27 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_worker_ws_gap_age_ms{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "worker {{realm}} \u00b7 repair gap",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
           "expr": "lm_recorder_receive_age_ms",
-          "instant": false,
+          "instant": true,
           "legendFormat": "recorder {{realm}} \u00b7 market frame",
-          "range": true,
-          "refId": "D"
+          "range": false,
+          "refId": "C"
         }
       ]
     },
     {
       "type": "bargauge",
       "id": 42,
-      "title": "Pipeline pressure",
+      "title": "Capacity",
       "description": "Capacity used.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
-        "x": 10,
-        "y": 24,
-        "w": 7,
+        "x": 9,
+        "y": 20,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
@@ -1378,72 +1533,24 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^demo \u00b7 WebSocket queue$/"
+              "options": "/^demo \u00b7 worker$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "D \u00b7 queue"
+                "value": "D \u00b7 worker"
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^mainnet \u00b7 WebSocket queue$/"
+              "options": "/^mainnet \u00b7 worker$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "M \u00b7 queue"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": "/^demo \u00b7 spool files$/"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "D \u00b7 files"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": "/^mainnet \u00b7 spool files$/"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "M \u00b7 files"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": "/^demo \u00b7 spool bytes$/"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "D \u00b7 bytes"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": "/^mainnet \u00b7 spool bytes$/"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "M \u00b7 bytes"
+                "value": "M \u00b7 worker"
               }
             ]
           },
@@ -1519,35 +1626,11 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_worker_ws_queue_fill{realm=~\"$realm\"}",
+          "expr": "max by (realm) (lm_worker_ws_queue_fill{realm=~\"$realm\"} or lm_worker_spool_file_fill{realm=~\"$realm\"} or lm_worker_spool_byte_fill{realm=~\"$realm\"})",
           "instant": true,
-          "legendFormat": "{{realm}} \u00b7 WebSocket queue",
+          "legendFormat": "{{realm}} \u00b7 worker",
           "range": false,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_worker_spool_file_fill{realm=~\"$realm\"}",
-          "instant": true,
-          "legendFormat": "{{realm}} \u00b7 spool files",
-          "range": false,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_worker_spool_byte_fill{realm=~\"$realm\"}",
-          "instant": true,
-          "legendFormat": "{{realm}} \u00b7 spool bytes",
-          "range": false,
-          "refId": "C"
         },
         {
           "datasource": {
@@ -1559,7 +1642,7 @@
           "instant": true,
           "legendFormat": "recorder {{realm}} \u00b7 monthly traffic",
           "range": false,
-          "refId": "D"
+          "refId": "B"
         },
         {
           "datasource": {
@@ -1571,40 +1654,49 @@
           "instant": true,
           "legendFormat": "recorder {{realm}} \u00b7 writer queue",
           "range": false,
-          "refId": "E"
+          "refId": "C"
         }
       ]
     },
     {
-      "type": "timeseries",
+      "type": "stat",
       "id": 43,
-      "title": "Recorder faults \u00b7 1h",
-      "description": "Shards, drops, reconnects.",
+      "title": "Faults \u00b7 1h",
+      "description": "Shards down and events.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
         "x": 17,
-        "y": 24,
+        "y": 20,
         "w": 7,
         "h": 8
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
           },
           "unit": "short",
-          "custom": {
-            "drawStyle": "bars",
-            "lineWidth": 2,
-            "fillOpacity": 60,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          },
+          "mappings": [],
           "decimals": 0
         },
         "overrides": [
@@ -1616,43 +1708,19 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "BN \u00b7 shard"
+                "value": "BN \u00b7 shards"
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^binance \u00b7 dropped$/"
+              "options": "/^binance \u00b7 events$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "BN \u00b7 drop"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": "/^binance \u00b7 disk drops$/"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "BN \u00b7 disk"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": "/^binance \u00b7 reconnects$/"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "BN \u00b7 recon"
+                "value": "BN \u00b7 events"
               }
             ]
           },
@@ -1664,58 +1732,38 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "BY \u00b7 shard"
+                "value": "BY \u00b7 shards"
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^bybit \u00b7 dropped$/"
+              "options": "/^bybit \u00b7 events$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "BY \u00b7 drop"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": "/^bybit \u00b7 disk drops$/"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "BY \u00b7 disk"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": "/^bybit \u00b7 reconnects$/"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "BY \u00b7 recon"
+                "value": "BY \u00b7 events"
               }
             ]
           }
         ]
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": []
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "text": {},
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         }
       },
       "targets": [
@@ -1726,9 +1774,9 @@
           },
           "editorMode": "code",
           "expr": "lm_recorder_shards - lm_recorder_shards_connected",
-          "instant": false,
+          "instant": true,
           "legendFormat": "{{realm}} \u00b7 shards down",
-          "range": true,
+          "range": false,
           "refId": "A"
         },
         {
@@ -1737,35 +1785,11 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "increase(lm_recorder_dropped_frames[1h])",
-          "instant": false,
-          "legendFormat": "{{realm}} \u00b7 dropped",
-          "range": true,
+          "expr": "increase(lm_recorder_dropped_frames[1h]) + increase(lm_recorder_disk_dropped_frames[1h]) + increase(lm_recorder_reconnects[1h])",
+          "instant": true,
+          "legendFormat": "{{realm}} \u00b7 events",
+          "range": false,
           "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "increase(lm_recorder_disk_dropped_frames[1h])",
-          "instant": false,
-          "legendFormat": "{{realm}} \u00b7 disk drops",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "increase(lm_recorder_reconnects[1h])",
-          "instant": false,
-          "legendFormat": "{{realm}} \u00b7 reconnects",
-          "range": true,
-          "refId": "D"
         }
       ]
     }

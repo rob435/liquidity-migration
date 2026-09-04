@@ -118,6 +118,11 @@ def stat(
     thresholds: list[tuple[str, float | None]] | None = None,
     mappings: dict[str, tuple[str, str]] | None = None,
     overrides: list[dict[str, Any]] | None = None,
+    sparkline: bool = False,
+    text_mode: str = "value_and_name",
+    justify_mode: str = "center",
+    orientation: str = "auto",
+    text: dict[str, int] | None = None,
 ) -> Panel:
     steps = [{"color": color, "value": value} for color, value in (thresholds or [("text", None)])]
     defaults: dict[str, Any] = {
@@ -148,13 +153,15 @@ def stat(
         "fieldConfig": {"defaults": defaults, "overrides": overrides or []},
         "options": {
             "colorMode": "background" if mappings else ("value" if thresholds else "none"),
-            "graphMode": "none",
-            "justifyMode": "center",
-            "textMode": "value_and_name",
+            "graphMode": "area" if sparkline else "none",
+            "justifyMode": justify_mode,
+            "orientation": orientation,
+            "text": text or {},
+            "textMode": text_mode,
             "wideLayout": True,
             "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
         },
-        "targets": _targets(rows, instant=True),
+        "targets": _targets(rows, instant=not sparkline),
     }
 
 
@@ -219,27 +226,16 @@ def _names(rows: list[tuple[str, str]]) -> list[dict[str, Any]]:
     ]
 
 
-def _account_axes() -> list[dict[str, Any]]:
+def _name_colors(rows: list[tuple[str, str, str]]) -> list[dict[str, Any]]:
     return [
         {
-            "matcher": {"id": "byRegexp", "options": "/^demo$/"},
+            "matcher": {"id": "byRegexp", "options": f"/^{source}$/"},
             "properties": [
-                {"id": "displayName", "value": "D"},
-                {"id": "custom.axisLabel", "value": "D"},
-                {"id": "custom.axisColorMode", "value": "series"},
+                {"id": "displayName", "value": display},
+                {"id": "color", "value": {"mode": "fixed", "fixedColor": color}},
             ],
-        },
-        {
-            "matcher": {"id": "byRegexp", "options": "/^mainnet$/"},
-            "properties": [
-                {"id": "displayName", "value": "M"},
-                {"id": "custom.axisPlacement", "value": "right"},
-                {"id": "custom.axisLabel", "value": "M"},
-                {"id": "custom.axisColorMode", "value": "series"},
-                {"id": "custom.lineWidth", "value": 3},
-                {"id": "color", "value": {"mode": "fixed", "fixedColor": "yellow"}},
-            ],
-        },
+        }
+        for source, display, color in rows
     ]
 
 
@@ -303,41 +299,51 @@ def panels() -> list[Panel]:
     )
     y += 5
 
-    out.append(
-        timeseries(
-            11,
-            "Equity",
-            "D left · M right · USDT.",
-            _grid(0, y, 12, 8),
-            [(f"lm_engine_equity_usdt{{{REALM}}}", "{{realm}}")],
-            unit="currencyUSD",
-            decimals=2,
-            min_zero=False,
-            show_legend=False,
-            fill_opacity=14,
-            overrides=_account_axes(),
-        )
-    )
-    out.append(
-        timeseries(
+    for panel_id, x, realm, metric, title, description, color in (
+        (11, 0, "demo", "lm_engine_equity_usdt", "D · Equity", "Current account equity · USDT.", "green"),
+        (13, 6, "mainnet", "lm_engine_equity_usdt", "M · Equity", "Current account equity · USDT.", "yellow"),
+        (
             12,
-            "Open exposure",
-            "D left · M right · USDT.",
-            _grid(12, y, 12, 8),
-            [(f"lm_engine_position_entry_notional_usdt{{{REALM}}}", "{{realm}}")],
-            unit="currencyUSD",
-            decimals=2,
-            show_legend=False,
-            fill_opacity=14,
-            overrides=_account_axes(),
+            12,
+            "demo",
+            "lm_engine_position_entry_notional_usdt",
+            "D · Open exposure",
+            "Entry notional of the current open position · USDT.",
+            "green",
+        ),
+        (
+            14,
+            18,
+            "mainnet",
+            "lm_engine_position_entry_notional_usdt",
+            "M · Open exposure",
+            "Entry notional of the current open position · USDT.",
+            "yellow",
+        ),
+    ):
+        out.append(
+            stat(
+                panel_id,
+                title,
+                description,
+                _grid(x, y, 6, 4),
+                [(f'{metric}{{realm="{realm}",{REALM}}}', "Now")],
+                unit="currencyUSD",
+                decimals=2,
+                sparkline=True,
+                text_mode="value_and_name",
+                justify_mode="auto",
+                orientation="horizontal",
+                text={"titleSize": 11, "valueSize": 24},
+                overrides=_name_colors([("Now", "Now", color)]),
+            )
         )
-    )
-    y += 8
+    y += 4
 
     out.append(row(30, "Execution", y))
     y += 1
     out.append(
-        timeseries(
+        stat(
             31,
             "Execution activity · 15m",
             "Orders, fills, resets.",
@@ -348,15 +354,15 @@ def panels() -> list[Panel]:
                 (_increase("lm_engine_stream_resets"), "{{realm}} stream resets"),
             ],
             decimals=0,
-            bars=True,
-            overrides=_names(
+            sparkline=True,
+            overrides=_name_colors(
                 [
-                    ("demo orders", "D orders"),
-                    ("mainnet orders", "M orders"),
-                    ("demo fills", "D fills"),
-                    ("mainnet fills", "M fills"),
-                    ("demo stream resets", "D resets"),
-                    ("mainnet stream resets", "M resets"),
+                    ("demo orders", "D orders", "blue"),
+                    ("mainnet orders", "M orders", "blue"),
+                    ("demo fills", "D fills", "green"),
+                    ("mainnet fills", "M fills", "green"),
+                    ("demo stream resets", "D resets", "red"),
+                    ("mainnet stream resets", "M resets", "red"),
                 ]
             ),
         )
@@ -406,26 +412,25 @@ def panels() -> list[Panel]:
     out.append(row(40, "Data pipeline", y))
     y += 1
     out.append(
-        timeseries(
+        stat(
             41,
             "Data freshness",
-            "Age in milliseconds.",
-            _grid(0, y, 10, 8),
+            "Current age.",
+            _grid(0, y, 9, 8),
             [
                 (f"lm_engine_account_age_ms{{{REALM}}}", "engine {{realm}} · account"),
                 (f"lm_worker_ws_last_frame_age_ms{{{REALM}}}", "worker {{realm}} · market frame"),
-                (f"lm_worker_ws_gap_age_ms{{{REALM}}}", "worker {{realm}} · repair gap"),
                 ("lm_recorder_receive_age_ms", "recorder {{realm}} · market frame"),
             ],
             unit="ms",
+            decimals=0,
+            thresholds=[("green", None), ("orange", 60_000), ("red", 180_000)],
             overrides=_names(
                 [
                     ("engine demo · account", "D · acct"),
                     ("engine mainnet · account", "M · acct"),
                     ("worker demo · market frame", "D · feed"),
                     ("worker mainnet · market frame", "M · feed"),
-                    ("worker demo · repair gap", "D · gap"),
-                    ("worker mainnet · repair gap", "M · gap"),
                     ("recorder binance · market frame", "BN · feed"),
                     ("recorder bybit · market frame", "BY · feed"),
                 ]
@@ -435,13 +440,15 @@ def panels() -> list[Panel]:
     out.append(
         bar_gauge(
             42,
-            "Pipeline pressure",
+            "Capacity",
             "Capacity used.",
-            _grid(10, y, 7, 8),
+            _grid(9, y, 8, 8),
             [
-                (f"lm_worker_ws_queue_fill{{{REALM}}}", "{{realm}} · WebSocket queue"),
-                (f"lm_worker_spool_file_fill{{{REALM}}}", "{{realm}} · spool files"),
-                (f"lm_worker_spool_byte_fill{{{REALM}}}", "{{realm}} · spool bytes"),
+                (
+                    f"max by (realm) (lm_worker_ws_queue_fill{{{REALM}}} or "
+                    f"lm_worker_spool_file_fill{{{REALM}}} or lm_worker_spool_byte_fill{{{REALM}}})",
+                    "{{realm}} · worker",
+                ),
                 (
                     "sum by (realm) (last_over_time(lm_recorder_projected_month_gb[24h])) / "
                     "sum by (realm) (last_over_time(lm_recorder_monthly_gb[24h]))",
@@ -452,12 +459,8 @@ def panels() -> list[Panel]:
             thresholds=[("green", None), ("orange", 0.75), ("red", 0.9)],
             overrides=_names(
                 [
-                    ("demo · WebSocket queue", "D · queue"),
-                    ("mainnet · WebSocket queue", "M · queue"),
-                    ("demo · spool files", "D · files"),
-                    ("mainnet · spool files", "M · files"),
-                    ("demo · spool bytes", "D · bytes"),
-                    ("mainnet · spool bytes", "M · bytes"),
+                    ("demo · worker", "D · worker"),
+                    ("mainnet · worker", "M · worker"),
                     ("recorder binance · monthly traffic", "BN · traffic"),
                     ("recorder bybit · monthly traffic", "BY · traffic"),
                     ("recorder binance · writer queue", "BN · queue"),
@@ -467,32 +470,27 @@ def panels() -> list[Panel]:
         )
     )
     out.append(
-        timeseries(
+        stat(
             43,
-            "Recorder faults · 1h",
-            "Shards, drops, reconnects.",
+            "Faults · 1h",
+            "Shards down and events.",
             _grid(17, y, 7, 8),
             [
                 ("lm_recorder_shards - lm_recorder_shards_connected", "{{realm}} · shards down"),
-                (_increase("lm_recorder_dropped_frames", window="1h", realm=False), "{{realm}} · dropped"),
                 (
-                    _increase("lm_recorder_disk_dropped_frames", window="1h", realm=False),
-                    "{{realm}} · disk drops",
+                    f"{_increase('lm_recorder_dropped_frames', window='1h', realm=False)} + "
+                    f"{_increase('lm_recorder_disk_dropped_frames', window='1h', realm=False)} + "
+                    f"{_increase('lm_recorder_reconnects', window='1h', realm=False)}",
+                    "{{realm}} · events",
                 ),
-                (_increase("lm_recorder_reconnects", window="1h", realm=False), "{{realm}} · reconnects"),
             ],
             decimals=0,
-            bars=True,
+            thresholds=[("green", None), ("orange", 1), ("red", 10)],
             overrides=_names(
                 [
                     (f"{realm} · {source}", f"{short} · {display}")
                     for realm, short in (("binance", "BN"), ("bybit", "BY"))
-                    for source, display in (
-                        ("shards down", "shard"),
-                        ("dropped", "drop"),
-                        ("disk drops", "disk"),
-                        ("reconnects", "recon"),
-                    )
+                    for source, display in (("shards down", "shards"), ("events", "events"))
                 ]
             ),
         )
@@ -508,7 +506,7 @@ def dashboard() -> dict[str, Any]:
         "tags": ["liquidity-migration"],
         "timezone": "utc",
         "schemaVersion": 39,
-        "version": 6,
+        "version": 9,
         "editable": True,
         "graphTooltip": 1,
         "refresh": "1m",

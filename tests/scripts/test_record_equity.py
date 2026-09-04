@@ -605,18 +605,19 @@ def test_the_dashboard_charts_only_fields_the_sampler_actually_pushes(tmp_path: 
         assert field in charted_engine, field
     for field in ("projected_month_gb", "dropped_frames", "reconnects", "queue_fill"):
         assert field in charted_recorder, field
-    for field in ("status_healthy", "ticker_coverage_complete", "ws_gap_age_ms", "spool_byte_fill"):
+    for field in ("status_healthy", "ticker_coverage_complete", "ws_last_frame_age_ms", "spool_byte_fill"):
         assert field in charted_worker, field
 
 
-def test_status_panels_read_the_instant_and_counters_are_charted_as_increases() -> None:
+def test_stats_read_the_instant_and_sparklines_read_the_range() -> None:
     dashboard = _dashboard()
     stats = [panel for panel in dashboard["panels"] if panel["type"] == "stat"]
     assert stats
     for panel in stats:
+        sparkline = panel["options"]["graphMode"] == "area"
         for target in panel["targets"]:
-            assert target.get("instant") is True, panel["title"]
-            assert target.get("range") is False, panel["title"]
+            assert target.get("instant") is not sparkline, panel["title"]
+            assert target.get("range") is sparkline, panel["title"]
     # A since-boot counter drawn raw is a cliff at every restart; the view
     # reads them as increases so a restart is a flat line.
     for counter in (
@@ -633,16 +634,20 @@ def test_status_panels_read_the_instant_and_counters_are_charted_as_increases() 
             assert "$realm" not in expr, expr
 
 
-def test_account_charts_give_mainnet_an_independent_axis() -> None:
+def test_account_cards_isolate_demo_and_mainnet_sparklines() -> None:
     dashboard = _dashboard()
     by_title = {panel["title"]: panel for panel in dashboard["panels"]}
-    for title in ("Equity", "Open exposure"):
-        overrides = by_title[title]["fieldConfig"]["overrides"]
-        mainnet = next(override for override in overrides if override["matcher"]["options"] == "/^mainnet$/")
-        properties = {row["id"]: row["value"] for row in mainnet["properties"]}
-        assert properties["custom.axisPlacement"] == "right"
-        assert properties["displayName"] == "M"
-        assert by_title[title]["options"]["legend"]["showLegend"] is False
+    for title in ("D · Equity", "M · Equity", "D · Open exposure", "M · Open exposure"):
+        panel = by_title[title]
+        assert panel["type"] == "stat"
+        assert panel["options"]["graphMode"] == "area"
+        assert panel["options"]["textMode"] == "value_and_name"
+        assert panel["options"]["justifyMode"] == "auto"
+        assert panel["options"]["orientation"] == "horizontal"
+        assert panel["options"]["text"] == {"titleSize": 11, "valueSize": 24}
+        assert panel["gridPos"]["h"] == 4
+        assert panel["targets"][0]["legendFormat"] == "Now"
+        assert len(panel["targets"]) == 1
 
 
 def test_time_series_legends_do_not_squeeze_the_plots() -> None:
@@ -659,6 +664,8 @@ def test_time_series_legends_do_not_squeeze_the_plots() -> None:
 def test_execution_activity_legend_uses_plain_metric_names() -> None:
     dashboard = _dashboard()
     panel = next(panel for panel in dashboard["panels"] if panel["title"] == "Execution activity · 15m")
+    assert panel["type"] == "stat"
+    assert panel["options"]["graphMode"] == "area"
     names = {
         property_["value"]
         for override in panel["fieldConfig"]["overrides"]
