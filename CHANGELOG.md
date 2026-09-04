@@ -6,6 +6,33 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 19:20 UTC — Per-commit Actions work is removed from the funded
+  release path.**
+  - The prior 24 hours contained 67 commits and 90 workflow runs. Their jobs
+    consumed about 2,023 rounded runner-minutes: 937 in release soak and
+    benchmark work, 489 in Rust gates, 357 building deploy artifacts, and 151
+    in Python CI. The latest 100 artifacts alone occupied 1,228 MB against the
+    private Free account's 500 MB included storage.
+  - A push to `main` no longer starts GitHub-hosted work. Code pull requests
+    retain Python and Rust gates and supersede older checks for the same pull
+    request; docs-only pull requests are ignored. The local pre-push gate still
+    checks Python and Rust before a direct push, and a funded deploy reruns the
+    gates against the exact dispatched SHA before touching the host.
+  - Release tests, the two-million-operation account-state soak, and the
+    order-path benchmark move to explicit `mode=qualify`. Only `mode=deploy`
+    creates and uploads the release archive, with two-day retention. Verify,
+    rollback, diagnose, and disarm skip every build and test job.
+  - The full local gate exposed a deterministic fresh-process failure in
+    `the_override_is_confined_to_its_own_thread`: it assumed a newly initialized
+    monotonic clock must already exceed 7 ns. The test now uses `u64::MAX` as
+    the virtual sentinel, so it checks thread confinement without scheduling
+    time as an input and no longer causes paid reruns.
+  - This stops new automatic burn but does not restore already exhausted
+    hosted capacity. The repository remains private. The funded VPS is not a
+    runner; reliable no-minute operation requires a separate private Linux
+    build host, while the ordinary workstation remains a poor always-on
+    production dependency.
+
 - **2026-09-04 ~17:58 UTC — Mainnet signal worker paged `degraded`; the page
   could not name its own cause, and now does.**
   - Incident `mainnet-014ec4a90a2fde5f`, scope `mainnet`, host

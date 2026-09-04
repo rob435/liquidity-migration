@@ -4,41 +4,47 @@ run-name: >-
 
 on:
   pull_request:
-  push:
-    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
   workflow_dispatch:
     inputs:
       mode:
-        description: Deploy, roll back, verify, collect on-call diagnostics, or disarm funded trading.
+        description: Deploy, qualify, roll back, verify, collect diagnostics, or disarm funded trading.
         required: true
         default: verify
         type: choice
-        options: [deploy, rollback, verify, diagnose, disarm-mainnet]
+        options: [deploy, qualify, rollback, verify, diagnose, disarm-mainnet]
 
 permissions:
   contents: read
 
 concurrency:
-  # Mutating VPS operations share one queue per ref, so a safety disarm can
-  # preempt a deploy and two deploys never interleave. Read-only diagnosis and
-  # push/PR checks get a group per run: an incident read must not wait behind an
-  # unrelated release soak after the host handover has already finished.
+  # Mutating VPS operations share one queue per ref, so two deploys never
+  # interleave. PR checks and qualifications cancel an older run for the same
+  # ref. Diagnosis gets its own slot and never waits behind build work.
   group: >-
-    ${{ github.event_name == 'workflow_dispatch' && inputs.mode != 'diagnose'
-        && format('liquidity-migration-vps-{0}', github.ref)
-        || format('liquidity-migration-ci-{0}', github.run_id) }}
+    ${{ github.event_name == 'pull_request'
+        && format('liquidity-migration-pr-{0}', github.event.pull_request.number)
+        || github.event_name == 'workflow_dispatch' && inputs.mode == 'qualify'
+        && format('liquidity-migration-qualify-{0}', github.ref)
+        || github.event_name == 'workflow_dispatch' && inputs.mode == 'diagnose'
+        && format('liquidity-migration-diagnose-{0}', github.run_id)
+        || format('liquidity-migration-vps-{0}', github.ref) }}
   # A funded disarm is the safety interrupt: it requests cancellation of the
   # running deploy. An ordinary dispatch cannot cancel a running disarm. GitHub
   # has no pending-run priority, so do not dispatch ordinary work while a
   # disarm is still pending behind cancellation of the previous run.
   cancel-in-progress: >-
-    ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'disarm-mainnet' }}
+    ${{ github.event_name == 'pull_request'
+        || github.event_name == 'workflow_dispatch' && inputs.mode == 'qualify'
+        || github.event_name == 'workflow_dispatch' && inputs.mode == 'disarm-mainnet' }}
 
 jobs:
   ci:
     if: >-
-      github.event_name != 'workflow_dispatch' ||
-      (inputs.mode != 'disarm-mainnet' && inputs.mode != 'diagnose')
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -68,8 +74,9 @@ jobs:
   # hide an engine failure, or the other way round.
   rust:
     if: >-
-      github.event_name != 'workflow_dispatch' ||
-      (inputs.mode != 'disarm-mainnet' && inputs.mode != 'diagnose')
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.mode == 'deploy' || inputs.mode == 'qualify'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -101,9 +108,7 @@ jobs:
   # still blocks the deploy that consumes this artifact.
   rust-artifact:
     name: Deploy artifact
-    if: >-
-      github.event_name != 'workflow_dispatch' ||
-      (inputs.mode != 'disarm-mainnet' && inputs.mode != 'diagnose')
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -131,16 +136,13 @@ jobs:
         with:
           name: engine-binaries-${{ github.sha }}
           path: ${{ runner.temp }}/engine-binaries-${{ github.sha }}.tar.gz
-          retention-days: 14
+          retention-days: 2
 
-  # The optimized build's tests, soak and benchmark. After the gate and off the
-  # deploy path: a red here is investigated, it does not hold a deploy.
+  # The optimized build's tests, soak and benchmark are an explicit
+  # qualification. They are deliberately off the deploy path.
   rust-soak-bench:
     name: Engine release tests, soak and benchmarks
-    # Push and PR runs exercise this exact SHA. Repeating it in a manual
-    # operation would keep the production concurrency group occupied after
-    # the VPS job has already finished.
-    if: github.event_name != 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'qualify'
     needs: [rust]
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -274,11 +276,15 @@ jobs:
 
   vps:
     if: >-
+      always() &&
       github.event_name == 'workflow_dispatch' &&
-      inputs.mode != 'disarm-mainnet' &&
-      inputs.mode != 'diagnose' &&
+      (inputs.mode == 'deploy' || inputs.mode == 'rollback' || inputs.mode == 'verify') &&
       github.repository == 'rob435/liquidity-migration' &&
-      github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/main' &&
+      (inputs.mode != 'deploy' ||
+       (needs.ci.result == 'success' &&
+        needs.rust.result == 'success' &&
+        needs.rust-artifact.result == 'success'))
     needs: [ci, rust, rust-artifact]
     runs-on: ubuntu-latest
     environment: production

@@ -179,14 +179,15 @@ mod tests {
 
     #[test]
     fn the_override_is_confined_to_its_own_thread() {
-        let _guard = install_virtual(1_000_000_000_000, 7).unwrap();
-        assert_eq!(mono_ns(), 7);
-        let elsewhere = std::thread::spawn(|| (is_virtual(), mono_ns() > 7))
+        let _guard = install_virtual(1_000_000_000_000, u64::MAX).unwrap();
+        assert_eq!(mono_ns(), u64::MAX);
+        let elsewhere = std::thread::spawn(|| (is_virtual(), mono_ns()))
             .join()
             .unwrap();
-        assert_eq!(
-            elsewhere,
-            (false, true),
+        assert!(!elsewhere.0, "another thread keeps the system clock");
+        assert_ne!(
+            elsewhere.1,
+            u64::MAX,
             "another thread keeps the system clock"
         );
     }

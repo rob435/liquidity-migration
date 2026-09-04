@@ -201,7 +201,7 @@ def test_control_helper_parses_and_keeps_the_fixed_action_surface() -> None:
 
 def test_ci_workflow_dispatch_covers_operations_and_fast_diagnostics() -> None:
     workflow = (ROOT / ".github" / "workflows" / "vps-deploy.yml").read_text(encoding="utf-8")
-    assert "options: [deploy, rollback, verify, diagnose, disarm-mainnet]" in workflow
+    assert "options: [deploy, qualify, rollback, verify, diagnose, disarm-mainnet]" in workflow
     assert "deploy|rollback|verify) ;;" in workflow
     assert "disarm-mainnet" in workflow
     diagnose = workflow[workflow.index("\n  diagnose:\n") : workflow.index("\n  vps:\n")]
@@ -277,21 +277,41 @@ def test_a_realm_whose_inputs_did_not_change_is_left_running() -> None:
     assert "handover_realm demo" not in deploy_body[: deploy_body.index("prepare_demo_inputs")]
 
 
-def test_ci_tests_the_debug_build_on_the_gate_and_the_release_build_off_it() -> None:
+def test_ci_runs_only_for_pull_requests_and_explicit_release_operations() -> None:
     workflow = (ROOT / ".github" / "workflows" / "vps-deploy.yml").read_text(encoding="utf-8")
+    triggers = workflow[workflow.index("\non:\n") : workflow.index("\npermissions:\n")]
+    assert "pull_request:" in triggers
+    assert "push:" not in triggers
+    assert '"**/*.md"' in triggers and '"docs/**"' in triggers
+
+    ci = workflow[workflow.index("\n  ci:\n") : workflow.index("\n  rust:\n")]
+    assert "github.event_name == 'pull_request'" in ci
+    assert "inputs.mode == 'deploy'" in ci
+
     rust = workflow[workflow.index("\n  rust:\n") : workflow.index("\n  rust-artifact:\n")]
     assert "cargo test --workspace --all-targets --locked" in rust
     assert "--release" not in rust and "--profile" not in rust
+    assert "inputs.mode == 'deploy' || inputs.mode == 'qualify'" in rust
+
+    artifact = workflow[workflow.index("\n  rust-artifact:\n") : workflow.index("\n  rust-soak-bench:\n")]
+    assert "inputs.mode == 'deploy'" in artifact
+    assert "retention-days: 2" in artifact
+
     release = workflow[workflow.index("\n  rust-soak-bench:\n") : workflow.index("\n  disarm:\n")]
     assert "cargo test --workspace --all-targets --release --locked" in release
-    assert "if: github.event_name != 'workflow_dispatch'" in release
+    assert "inputs.mode == 'qualify'" in release
+
     vps = workflow[workflow.index("\n  vps:\n") :]
     assert "needs: [ci, rust, rust-artifact]" in vps
-    # Push runs never queue behind each other; only dispatched VPS operations share a group.
+    assert "always()" in vps
+    for result in ("needs.ci.result", "needs.rust.result", "needs.rust-artifact.result"):
+        assert f"{result} == 'success'" in vps
+
     concurrency = workflow[workflow.index("concurrency:") : workflow.index("\njobs:\n")]
-    assert "format('liquidity-migration-ci-{0}', github.run_id)" in concurrency
+    assert "format('liquidity-migration-pr-{0}', github.event.pull_request.number)" in concurrency
+    assert "format('liquidity-migration-qualify-{0}', github.ref)" in concurrency
+    assert "format('liquidity-migration-diagnose-{0}', github.run_id)" in concurrency
     assert "format('liquidity-migration-vps-{0}', github.ref)" in concurrency
-    assert "inputs.mode != 'diagnose'" in concurrency
     # The host's fetch of a private repository needs the run's token (issue #18).
     assert "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in vps[vps.index("Run VPS mode") :]
 

@@ -82,6 +82,33 @@ Deployments run via SSH using `scripts/deploy_vps_live.sh`:
 EXPECTED_COMMIT=<40-hex-commit> scripts/ops.sh deploy
 ```
 
+### GitHub Actions execution policy
+
+| Trigger | Hosted work | Production effect |
+| :--- | :--- | :--- |
+| Pull request, code change | Python and Rust debug gates | None |
+| Pull request, docs only | None | None |
+| Push to `main` | None | None; the local pre-push gate remains required |
+| Dispatch `deploy` | Python gate, Rust debug gate, release artifact, VPS deploy | Installs the exact `main` SHA after every gate succeeds |
+| Dispatch `qualify` | Rust debug gate, release tests, soak, benchmark | None |
+| Dispatch `verify`, `rollback` | No build | Reads or restores production through the pinned VPS job |
+| Dispatch `diagnose`, `disarm-mainnet` | No build | Reads incident state or persistently disarms funded trading |
+
+- **Must** keep the repository private.
+- **Must** run `scripts/dev.sh check` before a direct push to `main`.
+- **Must** use `deploy` only for a release candidate; ordinary commits do not
+  create deployments.
+- **Must Never** run a self-hosted Actions worker on the funded trading VPS.
+- **Must Never** expose a self-hosted worker to pull requests from a public
+  repository or grant a build-only worker production credentials.
+
+```bash
+gh workflow run vps-deploy.yml --ref main -f mode=deploy
+gh workflow run vps-deploy.yml --ref main -f mode=qualify
+gh workflow run vps-deploy.yml --ref main -f mode=verify
+gh workflow run vps-deploy.yml --ref main -f mode=diagnose
+```
+
 ### Deployment Flow & Decoupled Handover
 1. **Fetch & Verify**: Verifies target commit is on `origin/main`.
 2. **Artifact Delivery**: Detects CI precompiled binary archive or builds locally via throttled cargo (`nice -n 10 --jobs 2`).
