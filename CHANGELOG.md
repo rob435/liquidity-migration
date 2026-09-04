@@ -6,6 +6,20 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 19:42 UTC — Reset every latency histogram at the window boundary (local checkpoint).**
+  - Audited GitHub `main` at `e2345ca450d03a3d58ff19b9d2b436e9b84cfbb4`;
+    the clean tracked baseline passes all 510 engine-core library tests.
+  - `LatencyLedger::reset` left `BarrierWait` and `QuotaHold` cumulative while
+    every other segment started a fresh 60-second window. Reset and rendering
+    now share `Segment::ALL`; the exhaustive histogram match remains unchanged.
+  - The new regression fails on the old reset with `segments retained previous
+    samples: [BarrierWait, QuotaHold]`, then passes with the fix. It checks all
+    quantiles after reset, two successive windows, and WAL/text equivalence to
+    a fresh ledger. All five ledger tests pass locally.
+  - Metric names, WAL fields, order admission, and the sample-recording path
+    are unchanged. This corrects window semantics; it makes no latency claim.
+    No push, deployment, production state, or capital setting changes.
+
 - **2026-09-04 19:16 UTC — Demo signal worker paged `degraded` the minute its
   120-minute cold-fill grace expired; the boot gap and the carry cycle were
   both still where they started.**

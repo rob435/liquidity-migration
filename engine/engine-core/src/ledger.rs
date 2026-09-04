@@ -61,6 +61,19 @@ pub enum Segment {
 }
 
 impl Segment {
+    pub const ALL: [Self; 10] = [
+        Self::Decide,
+        Self::Durable,
+        Self::BarrierWait,
+        Self::QuotaHold,
+        Self::Wire,
+        Self::Ack,
+        Self::DispatchQueue,
+        Self::VenueTask,
+        Self::CoreResume,
+        Self::EndToEnd,
+    ];
+
     pub fn plain_name(self) -> &'static str {
         match self {
             Segment::Decide => "think",
@@ -190,14 +203,9 @@ impl LatencyLedger {
     }
 
     pub fn reset(&mut self, now_ns: u64) {
-        self.decide.reset();
-        self.durable.reset();
-        self.wire.reset();
-        self.ack.reset();
-        self.dispatch_queue.reset();
-        self.venue_task.reset();
-        self.core_resume.reset();
-        self.end_to_end.reset();
+        for segment in Segment::ALL {
+            self.histogram(segment).reset();
+        }
         self.events = 0;
         self.window_start_ns = now_ns;
     }
@@ -211,18 +219,7 @@ impl LatencyLedger {
             self.events,
             self.decisions()
         )];
-        for segment in [
-            Segment::Decide,
-            Segment::Durable,
-            Segment::BarrierWait,
-            Segment::QuotaHold,
-            Segment::Wire,
-            Segment::Ack,
-            Segment::DispatchQueue,
-            Segment::VenueTask,
-            Segment::CoreResume,
-            Segment::EndToEnd,
-        ] {
+        for segment in Segment::ALL {
             let q = self.quantiles(segment);
             if q.count == 0 {
                 continue;
@@ -306,6 +303,66 @@ mod tests {
         ledger.reset(WINDOW_NS);
         assert_eq!(ledger.quantiles(Segment::Wire).count, 0);
         assert_eq!(ledger.events(), 0);
+    }
+
+    #[test]
+    fn every_segment_starts_a_new_window_without_previous_samples() {
+        let mut ledger = LatencyLedger::new(0);
+        for segment in Segment::ALL {
+            for ns in [1_000_000, 2_000_000, 3_000_000] {
+                ledger.record(segment, ns);
+            }
+            assert_eq!(ledger.quantiles(segment).count, 3, "{segment:?}");
+        }
+        ledger.saw_event();
+        ledger.reset(WINDOW_NS);
+        assert_eq!(ledger.events(), 0);
+        assert_eq!(ledger.decisions(), 0);
+        assert!(!ledger.due(2 * WINDOW_NS - 1));
+        assert!(ledger.due(2 * WINDOW_NS));
+
+        let retained: Vec<_> = Segment::ALL
+            .into_iter()
+            .filter(|segment| ledger.quantiles(*segment).count != 0)
+            .collect();
+        assert!(
+            retained.is_empty(),
+            "segments retained previous samples: {retained:?}"
+        );
+
+        let mut fresh = LatencyLedger::new(WINDOW_NS);
+        for segment in Segment::ALL {
+            assert_eq!(
+                ledger.quantiles(segment),
+                Quantiles::default(),
+                "{segment:?}"
+            );
+            for ns in [10, 20, 30] {
+                ledger.record(segment, ns);
+                fresh.record(segment, ns);
+            }
+            assert_eq!(
+                ledger.quantiles(segment),
+                fresh.quantiles(segment),
+                "{segment:?}"
+            );
+        }
+        assert_eq!(
+            ledger.record_for_wal(2 * WINDOW_NS),
+            fresh.record_for_wal(2 * WINDOW_NS)
+        );
+        assert_eq!(
+            ledger.plain_line(2 * WINDOW_NS),
+            fresh.plain_line(2 * WINDOW_NS)
+        );
+        ledger.reset(2 * WINDOW_NS);
+        for segment in Segment::ALL {
+            assert_eq!(
+                ledger.quantiles(segment),
+                Quantiles::default(),
+                "{segment:?}"
+            );
+        }
     }
 
     #[test]
