@@ -203,6 +203,42 @@ fn a_probe_still_resting_at_the_next_boundary_is_not_doubled() {
 }
 
 #[test]
+fn a_symbol_another_sleeve_holds_is_left_alone_until_it_is_flat() {
+    // A Bybit entry carries stopLoss with tpslMode Full, so the stop names the
+    // whole position on the symbol. This probe's stop is deliberately far from
+    // the market: placing here would put LONG's BTCUSDT position behind the
+    // probe's stop instead of its own ATR stop. BTCUSDT is in LONG's universe.
+    let mut h = bench("");
+    h.ctx.set_now(10_000_000_000);
+    h.quote("CAKEUSDT", 2.000, 2.001);
+    h.drain_actions();
+    h.ctx
+        .set_foreign_position("CAKEUSDT", Side::Buy, 1.0, 2.000);
+
+    fire(&mut h);
+
+    assert!(h.drain().is_empty(), "the holder keeps the symbol");
+    assert_eq!(
+        h.strategy.entry_blockers(),
+        vec![(
+            "CAKEUSDT".to_string(),
+            "another sleeve holds this symbol".to_string()
+        )]
+    );
+    assert!(
+        h.ctx.timers.iter().any(|t| t.id == FIRE),
+        "still on the clock, so it resumes when the sleeve is flat"
+    );
+
+    // Seeding the position as ours is how a test says the sleeve let it go.
+    h.ctx.set_position("CAKEUSDT", Side::Buy, 0.0, 0.0);
+    h.quote("CAKEUSDT", 2.000, 2.001);
+    h.drain_actions();
+    fire(&mut h);
+    assert_eq!(h.drain().len(), 1, "flat again: the probe resumes");
+}
+
+#[test]
 fn no_quote_or_a_stale_one_skips_and_says_so_but_keeps_the_schedule() {
     let mut h = bench("");
     h.ctx.set_now(10_000_000_000);

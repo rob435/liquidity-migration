@@ -15,6 +15,15 @@
 //! minute sampler that reads the heartbeat's 60-second latency window at :20
 //! sees every probe.
 //!
+//! It stands aside for the sleeves. A Bybit entry carries `stopLoss` with
+//! `tpslMode: Full`, so the stop it names belongs to the whole position on
+//! that symbol — and this probe's stop is deliberately far away. Placing on a
+//! symbol a sleeve is holding would put that sleeve's position behind the
+//! probe's stop instead of its own, so a symbol with a foreign position is
+//! skipped until it is flat. The probe's own symbol is in LONG's universe by
+//! design: BTCUSDT is the venue's most liquid book and therefore the honest
+//! benchmark, and a paused measurement is worth more than a moved stop.
+//!
 //! It is not a strategy and cannot make money. It costs the venue two
 //! requests per probe and no fee.
 
@@ -169,6 +178,12 @@ impl Probe {
         };
         if self.draining {
             self.skip(CLOSING);
+            return;
+        }
+        if ctx.foreign_position(symbol) {
+            // One venue stop per position, and this one's is far away: see the
+            // module note. The sleeve that holds the symbol keeps it.
+            self.skip("another sleeve holds this symbol");
             return;
         }
         if self.resting_probe(symbol, ctx).is_some() {

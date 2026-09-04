@@ -121,8 +121,10 @@ sleeve = "probe"
 # 3% under the BTC bid and pulls it two seconds later, so decide, durable,
 # wire, ack and end_to_end are measured on a day no sleeve trades. Not a
 # position and never a page: a fill is closed at market at once and shows
-# only as an entry blocker until flat. Append-only identity: the WAL owns
-# this strategy id, so the block stays. Mainnet has no probe.
+# only as an entry blocker until flat. BTCUSDT is in LONG's universe, and a
+# Bybit entry's `stopLoss` names the whole position's stop, so the probe skips
+# the symbol entirely while any other sleeve holds it. Append-only identity:
+# the WAL owns this strategy id, so the block stays. Mainnet has no probe.
 symbol = "BTCUSDT"
 every_s = 900
 rest_ms = 2000

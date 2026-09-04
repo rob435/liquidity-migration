@@ -9,7 +9,7 @@ What the fleet records about itself, where it lands, and how to see it.
 | Surface | Unit | Cadence | Output | Authority |
 | :--- | :--- | :--- | :--- | :--- |
 | **Equity & recorder samples** | `liquidity-migration-equity-recorder.timer` | Every minute at :20 | JSONL under `/var/lib/liquidity-migration/equity`, plus one optional HTTP push | Read-only; loads no venue environment |
-| **Order-path probe** | the `probe` sleeve of the **demo** engine | Every 15 min at :00, :15, :30, :45 | One venue-minimum post-only `BTCUSDT` buy 3% under the bid, pulled 2 s later: one measurement in the engine's latency ledger, read by the :20 sample | Demo only; never a page, never a Telegram message ([trading_logic.md](trading_logic.md) §1) |
+| **Order-path probe** | the `probe` sleeve of the **demo** engine | Every 15 min at :00, :15, :30, :45 | One venue-minimum post-only `BTCUSDT` buy 3% under the bid, pulled 2 s later: one measurement in the engine's latency ledger, read by the :20 sample | Demo only; never a page, never a Telegram message; stands down while another sleeve holds the symbol ([trading_logic.md](trading_logic.md) §1) |
 | **Engine heartbeat** | the engine itself | Every 5 s | `heartbeat.json`, overwritten | The engine's own statement of health |
 | **Closed trades** | the engine itself | Per closed round trip | `trades.jsonl`, appended | Realized accounting authority |
 | **Liveness alerts** | `*-liveness.timer` | Every 3 min | Telegram, plus the on-call agent | See [notifications.md](notifications.md) |
@@ -67,6 +67,9 @@ noise, and the history is the point.
 * **Must Never**: the probe page or message anybody. It reports through
   `entry_blockers`, never `strategy_errors`, and `notify_book_changes.py` hides
   its sleeve.
+* **Must Never**: the probe place on a symbol another sleeve holds. A Bybit
+  entry carries `stopLoss` with `tpslMode: Full`, so the stop it names belongs
+  to the whole position, and the probe's stop is deliberately far away.
 * **Must Never**: this unit load a venue credential file. It reads published
   artifacts and pushes numbers; its credential surface is empty by construction.
 * **Must Never**: a missed minute be replayed. `Persistent=false`; the gap is

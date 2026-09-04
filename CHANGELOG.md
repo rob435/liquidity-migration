@@ -42,6 +42,15 @@ edit STATE.md to match.
     `notify_book_changes.py` hides the sleeve: the probe cannot page or
     message. Twelve plug tests pin the schedule, the price, the size, the pull,
     the refusal path, the drain and its retry, and the strict parameter table.
+  - The probe stands down for the sleeves. A Bybit entry carries `stopLoss`
+    with `tpslMode: Full`, so the stop it names belongs to the whole position
+    on that symbol (`engine-venue/src/venues/bybit/gateway.rs`, `native_position_stop`).
+    BTCUSDT is inside LONG's top-10-volume universe, so a probe entry there
+    while LONG held the name could put LONG's position behind the probe's
+    deliberately far stop instead of its own ATR stop. The probe now skips a
+    symbol with a foreign position and reports it as a blocker, the same rule
+    the quoter follows; a paused measurement is worth more than a moved stop.
+    The test fails without the guard.
   - The sampler now emits every sleeve the heartbeat lists, zero included, and
     per sleeve its entry gate and blocker count; the whole latency ledger
     (`decide`, `durable`, `wire`, `ack`, `dispatch_queue`, `venue_task`,

@@ -16,7 +16,7 @@ block appends, nothing is inserted, and the two realms' tails differ.
 | **1** | `long_native` | **LONG** | demo, mainnet | Active | Momentum breakouts on top turnover liquid perpetuals. |
 | **2** | `exodus_native` | **EXODUS** | demo, mainnet | Active | Short entry on distressed CARRY pairs prior to settlement. |
 | **3** | `quoter` | **MAKER** | mainnet | Disabled | High-frequency two-sided liquidity provision around fair mid. |
-| **3** | `probe` | **PROBE** | demo | Active | Order-path benchmark, not a trading sleeve: one venue-minimum post-only `BTCUSDT` buy 3% under the bid every 15 min on the wall clock, pulled 2 s later, so `decide`/`durable`/`wire`/`ack`/`end_to_end` are measured on a day no sleeve trades. A fill is closed at market at once and shows only as an entry blocker; it never raises a strategy error or a Telegram message. |
+| **3** | `probe` | **PROBE** | demo | Active | Order-path benchmark, not a trading sleeve: one venue-minimum post-only `BTCUSDT` buy 3% under the bid every 15 min on the wall clock, pulled 2 s later, so `decide`/`durable`/`wire`/`ack`/`end_to_end` are measured on a day no sleeve trades. A fill is closed at market at once and shows only as an entry blocker; it never raises a strategy error or a Telegram message. Skips the symbol while any other sleeve holds it: a Bybit entry's `stopLoss` (`tpslMode: Full`) names the whole position's stop, and the probe's sits far from the market. |
 
 ---
 
