@@ -6,6 +6,128 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 ~20:25 UTC — Demo signal worker paged `degraded` 62 minutes
+  into a fresh process, which proves a transport blip the page still cannot
+  name: one Bybit frame drought longer than 30 s and shorter than the socket's
+  own 45 s allowance.**
+  - Incident `demo-0922e9f30da3bf98`, scope `demo`, host `ip-208-84-103-4`,
+    ref `worker-status:liquidity-migration-signal-worker-demo.service`. Exact
+    alert text: `CRITICAL liquidity-migration-signal-worker-demo.service
+    reports 'degraded': Bybit WebSocket repair gap open for 3700s; carry cycle
+    has not completed`. Demo only: the funded engine and the mainnet worker
+    were not named, no unit was down, and no heartbeat was stale.
+  - Same incident id as the 19:16 page because the id hashes scope plus refs
+    (`check_fleet_liveness.py:807`), not the occurrence. This is a second
+    firing, not a repeat of the first: an incident fires only for a CRITICAL
+    key absent from the state file (`select_incidents_to_fire`,
+    `check_fleet_liveness.py:719`), and a key is dropped when its condition
+    clears (`select_alerts_to_send`, `check_fleet_liveness.py:694`). The
+    19:22:23 stop cleared it, so this page is the **first** 3-minute check
+    after the 19:22:45 start that saw a status outside
+    `starting`/`recovering`/`ready`.
+  - Timeline. pid 2264247 started 19:22:45. Gap age 3700 s puts the page at
+    20:24:27–20:25:25 and the gap stamp at 19:22:47–19:23:45 — this process's
+    boot gap (`SharedState::prepare_epoch`,
+    `engine/signal-worker/src/bybit_ws.rs:305`, held unchanged by
+    `gap_open_since_ms.get_or_insert`, `bybit_ws.rs:310`). Its journal carries
+    exactly two lines, the instrument lane's rejection summary at 19:22:53 and
+    again at 20:22:53 — so the hourly refresh that the 19:16 entry found
+    dropped did run this hour, one hour apart, as `b29fd373` intends.
+  - What the verdict proves. `STARTUP_MAX_MS` is 120 min
+    (`engine/signal-worker/src/live.rs:34`) and the page is at 62 min, so the
+    grace had **not** expired. With `last_carry_cycle_completed_wall_ts_ms`
+    still `None`, `startup_runtime_status` (`live.rs:2842`) returns `starting`
+    exactly while `stream_transport_healthy` (`live.rs:2777`) is true and
+    `degraded` the moment it is not. The verdict was `degraded` and the status
+    was acceptable at every earlier check, so transport was healthy for the
+    first hour and flipped false once, at that heartbeat.
+  - Which clause flipped, by elimination. The deployed watchdog (`65ee75a7`)
+    prints a clause per failing input, and the page carries none of them
+    except the gap and the carry cycle: `bybit_ws_connected` is true,
+    `bybit_ws_ticker_coverage_complete` is true, both quarantine counts are 0,
+    and the LONG cycle is inside 3 × 60 s. Coverage is recomputed every
+    `ticker_cadence_ms` = 5000 in `sample_tickers` (`bybit_ws.rs:168`) and
+    requires `ticker_topics_accepted == ticker_capacity` plus a mark no older
+    than `mark_max_age_ms` = 30 000 ms for every symbol; with both quarantine
+    counts 0 the kline count cannot be short either, because `topics()`
+    (`bybit_ws.rs:1409`) subscribes one ticker and one kline topic per symbol
+    and `subscribe` accumulates into the live set (`bybit_ws.rs:785`). The only
+    input left in `stream_transport_healthy` is frame freshness:
+    `bybit_ws_last_frame_ts_ms` more than 30 000 ms behind the heartbeat clock,
+    or ahead of it.
+  - And the socket never noticed. No fault, no `gap opened in epoch`, no
+    `entered epoch`, no quarantine line for pid 2264247, in a tail unbroken
+    from 16:20 and taken after the alert clock. So no reconnect happened and
+    the drought stayed inside `data_idle_timeout` = 45 s
+    (`bybit_ws.rs:605`): between 30 s and 45 s of silence is simultaneously a
+    `degraded` producer verdict and a healthy socket, and it leaves no log
+    line. `reconfigure_stream` (`live.rs:2293`, called at `live.rs:965`) was a
+    no-op at 20:22:53 — a respawn would have reset the gap stamp and shown
+    `connected` false, and the page shows neither.
+  - The shape it shares with `mainnet-014ec4a90a2fde5f`. That page came ~60 s
+    after its hourly instrument lane finished at 17:56:59; this one ~90 s after
+    20:22:53. The completion arm runs `commit_universe_inputs`,
+    `validate_candidate_instruments`, `reconfigure_stream`,
+    `start_kline_repair` and a LONG watermark inline (`live.rs:952`-`977`) on a
+    4-vCPU box that also carries two engines, two workers and two recorders.
+    Whether that burst starves the stream task or the venue feed itself paused
+    is **not** decidable from the payload; the coincidence is twice now.
+  - Missing, and the host reading that settles it. The frame age at
+    20:24–20:25, and whether the process or the feed stalled. Both are already
+    on disk: `worker_sample` (`scripts/runtime/record_equity.py:219`) records
+    `ws_last_frame_age_ms`, `heartbeat_age_ms`, `long_cycle_age_ms`,
+    `kline_topics_accepted`, `ticker_capacity`, `rest_ticker_success_count` and
+    `status` every minute. `_age_ms` clamps at 0
+    (`record_equity.py:280`), so a frame stamp ahead of the clock reads as
+    age 0 rather than negative.
+
+    ```bash
+    # The minute the verdict flipped, and what the frame age did around it.
+    jq -c 'select(.kind == "worker" and .ts_ms >= 1788552000000)
+           | {t: (.ts_ms/1000 | strftime("%H:%M")), status, ws_connected,
+              ws_last_frame_age_ms, ws_gap_age_ms, heartbeat_age_ms,
+              long_cycle_age_ms, carry_cycle_age_ms, kline_topics_accepted,
+              ticker_capacity, rest_ticker_success_count}' \
+      /var/lib/liquidity-migration/equity/worker-demo-$(date -u +%Y-%m).jsonl
+
+    # The account and the heartbeat coverage through the same window.
+    scripts/ops.sh curve demo
+    scripts/ops.sh logs signal-worker-demo 200
+    ```
+
+    A `ws_last_frame_age_ms` above 30 000 at ~20:24 with `heartbeat_age_ms`
+    flat says the feed paused; the same spike with `heartbeat_age_ms` and
+    `long_cycle_age_ms` rising together says the process stalled and the
+    frame age is a symptom.
+  - Why the page still could not say it. `_transport_reasons`
+    (`check_fleet_liveness.py:221`) prints both of those clauses. It is on
+    `main` at `697341e4` and the host runs `65ee75a7`, so the incident lane
+    stays blind until that deploy lands. Re-verified now: every
+    `vps-deploy.yml` run since 19:15 fails in under 10 s with no job logs —
+    `33910262256`, `33910383652`, `33910443631`, `33910515990`, `33911407276`,
+    `33911912004`. This session added one build-free receipt of its own:
+    `verify` on `e2345ca4`, run `33921858031`, dispatched 21:36:16 UTC. Its
+    sole scheduled job `vps` failed at 21:36:22 after 4 s with every other job
+    skipped, and its log download returns HTTP 404 — no logs were ever
+    produced, so the job never started. The block is unchanged and external.
+    No `deploy` was dispatched: this entry ships no code, and a deploy hands
+    over both realms and restarts the funded engine.
+  - No code change. Nothing in this repository is proven broken by this
+    payload: the two candidates are dials and a guard, and both are the
+    owner's call under `AGENTS.md`. **Proposal**, for a yes or no: (1) let
+    `startup_runtime_status` keep the `TRANSIENT_RECOVERY_MAX_MS` = 2 min
+    allowance (`live.rs:35`) that the post-startup path already gets, so a
+    single sub-idle-timeout drought during a cold fill reads `recovering`
+    instead of paging `CRITICAL`; or (2) raise `mark_max_age_ms` (30 s,
+    `configs/signal-worker.demo.json`) to the socket's own 45 s tolerance so
+    the two agree. (1) is the recommendation: it changes when the fleet pages,
+    not what the worker considers fresh data.
+  - Owner action. Nothing to restart — the worker recovered on its own and
+    reported `starting` again; this entry is a diagnosis plus one reading. To
+    ship the page fix without a runner:
+    `EXPECTED_COMMIT=<main HEAD> scripts/ops.sh deploy` (it hands over both
+    realms, so the funded engine restarts).
+
 - **2026-09-04 19:16 UTC — Demo signal worker paged `degraded` the minute its
   120-minute cold-fill grace expired; the boot gap and the carry cycle were
   both still where they started.**
