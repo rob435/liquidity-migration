@@ -1,6 +1,84 @@
 use super::*;
 
+/// The clocks every completed venue command carries: when it was queued
+/// behind the venue task, when the task took it, when the venue answered,
+/// and how long the request quota held it back.
+struct CompletionClocks {
+    command_id: u64,
+    queued_ns: u64,
+    started_ns: u64,
+    completed_ns: u64,
+    rate_wait_ns: Option<u64>,
+}
+
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
+    /// The request-quota hold, once per completed command.
+    fn record_quota_hold(&mut self, clocks: &CompletionClocks) {
+        if let Some(held) = clocks.rate_wait_ns {
+            self.ledger.record(Segment::QuotaHold, held);
+        }
+    }
+
+    /// A batch reply the venue left short is not an error here: the orders
+    /// it did not answer for stay in flight and the private stream or a
+    /// recovery pass settles them. It is written down.
+    fn note_missing_replies(
+        &mut self,
+        replies: usize,
+        requests: usize,
+        what: &str,
+    ) -> Result<(), EngineError> {
+        if replies != requests {
+            self.wal.append(&WalRecord::Note {
+                source: "engine".into(),
+                text: format!(
+                    "venue returned {replies} answers for {requests} submitted {what}; missing answers remain in flight"
+                ),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// One order's share of a completed command: the three engine-side
+    /// segments and the durable `VenueTiming` row. Returns the moment the
+    /// core handled it, for the caller's own end-to-end segment.
+    fn journal_venue_timing(
+        &mut self,
+        clocks: &CompletionClocks,
+        operation: &str,
+        client_order_id: &str,
+        socket_write_ns: Option<u64>,
+        ack_ns: Option<u64>,
+    ) -> Result<u64, EngineError> {
+        let core_handled_ns = clock::now_ns();
+        self.ledger.record(
+            Segment::DispatchQueue,
+            clocks.started_ns.saturating_sub(clocks.queued_ns),
+        );
+        self.ledger.record(
+            Segment::VenueTask,
+            clocks.completed_ns.saturating_sub(clocks.started_ns),
+        );
+        self.ledger.record(
+            Segment::CoreResume,
+            core_handled_ns.saturating_sub(clocks.completed_ns),
+        );
+        self.wal.append(&WalRecord::VenueTiming {
+            command_id: clocks.command_id,
+            operation: operation.to_string(),
+            client_order_id: client_order_id.to_string(),
+            queued_ns: clocks.queued_ns,
+            task_started_ns: clocks.started_ns,
+            socket_write_ns,
+            ack_ns,
+            rate_wait_ns: clocks.rate_wait_ns,
+            task_completed_ns: clocks.completed_ns,
+            core_handled_ns,
+            core_handled_wall_ns: clock::wall_ns(),
+        })?;
+        Ok(core_handled_ns)
+    }
+
     pub(super) async fn take_venue_completion(
         &mut self,
         completion: MutationCompletion,
@@ -31,19 +109,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     ..
                 },
             ) => {
-                if let Some(held) = rate_wait_ns {
-                    self.ledger.record(Segment::QuotaHold, held);
-                }
-                if replies.len() != requests.len() {
-                    self.wal.append(&WalRecord::Note {
-                        source: "engine".into(),
-                        text: format!(
-                            "venue returned {} answers for {} submitted orders; missing answers remain in flight",
-                            replies.len(),
-                            requests.len()
-                        ),
-                    })?;
-                }
+                let clocks = CompletionClocks {
+                    command_id,
+                    queued_ns,
+                    started_ns,
+                    completed_ns,
+                    rate_wait_ns,
+                };
+                self.record_quota_hold(&clocks);
+                self.note_missing_replies(replies.len(), requests.len(), "orders")?;
                 tracing::debug!(
                     command_id,
                     queue_ns = started_ns.saturating_sub(queued_ns),
@@ -53,17 +127,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 let symbols: Vec<_> = requests.iter().map(|request| request.symbol).collect();
                 let mut replies = replies.into_iter();
                 for (request, (decided_ns, origin_ns)) in requests.into_iter().zip(timings) {
-                    let core_handled_ns = clock::now_ns();
                     self.ledger
                         .record(Segment::Wire, completed_ns.saturating_sub(decided_ns));
-                    self.ledger
-                        .record(Segment::DispatchQueue, started_ns.saturating_sub(queued_ns));
-                    self.ledger
-                        .record(Segment::VenueTask, completed_ns.saturating_sub(started_ns));
-                    self.ledger.record(
-                        Segment::CoreResume,
-                        core_handled_ns.saturating_sub(completed_ns),
-                    );
                     let reply = replies.next().unwrap_or_else(|| {
                         Err(VenueError::BadReply(
                             "the venue omitted this order from its batch reply".to_string(),
@@ -80,19 +145,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         ),
                         Err(_) => (None, None),
                     };
-                    self.wal.append(&WalRecord::VenueTiming {
-                        command_id,
-                        operation: "place".to_string(),
-                        client_order_id: request.client_order_id.clone(),
-                        queued_ns,
-                        task_started_ns: started_ns,
+                    self.journal_venue_timing(
+                        &clocks,
+                        "place",
+                        &request.client_order_id,
                         socket_write_ns,
-                        ack_ns: ack_timing_ns,
-                        rate_wait_ns,
-                        task_completed_ns: completed_ns,
-                        core_handled_ns,
-                        core_handled_wall_ns: clock::wall_ns(),
-                    })?;
+                        ack_timing_ns,
+                    )?;
                     let update = match reply {
                         Ok(ack) => {
                             let ack_ns = if ack.ack_ns > started_ns {
@@ -150,19 +209,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     ..
                 },
             ) => {
-                if let Some(held) = rate_wait_ns {
-                    self.ledger.record(Segment::QuotaHold, held);
-                }
-                if replies.len() != requests.len() {
-                    self.wal.append(&WalRecord::Note {
-                        source: "engine".into(),
-                        text: format!(
-                            "venue returned {} answers for {} submitted cancels; missing answers remain in flight",
-                            replies.len(),
-                            requests.len()
-                        ),
-                    })?;
-                }
+                let clocks = CompletionClocks {
+                    command_id,
+                    queued_ns,
+                    started_ns,
+                    completed_ns,
+                    rate_wait_ns,
+                };
+                self.record_quota_hold(&clocks);
+                self.note_missing_replies(replies.len(), requests.len(), "cancels")?;
                 tracing::debug!(
                     command_id,
                     venue_ns = completed_ns.saturating_sub(started_ns),
@@ -177,28 +232,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 let mut halt_failure = None;
                 let accepted_deadline = clock::now_ns().saturating_add(HALT_CANCEL_CONFIRM_NS);
                 for (_, client_order_id) in requests {
-                    let core_handled_ns = clock::now_ns();
-                    self.ledger
-                        .record(Segment::DispatchQueue, started_ns.saturating_sub(queued_ns));
-                    self.ledger
-                        .record(Segment::VenueTask, completed_ns.saturating_sub(started_ns));
-                    self.ledger.record(
-                        Segment::CoreResume,
-                        core_handled_ns.saturating_sub(completed_ns),
-                    );
-                    self.wal.append(&WalRecord::VenueTiming {
-                        command_id,
-                        operation: "cancel".to_string(),
-                        client_order_id: client_order_id.clone(),
-                        queued_ns,
-                        task_started_ns: started_ns,
-                        socket_write_ns: timing.map(|mark| mark.sent_ns),
-                        ack_ns: timing.map(|mark| mark.ack_ns),
-                        rate_wait_ns,
-                        task_completed_ns: completed_ns,
-                        core_handled_ns,
-                        core_handled_wall_ns: clock::wall_ns(),
-                    })?;
+                    self.journal_venue_timing(
+                        &clocks,
+                        "cancel",
+                        &client_order_id,
+                        timing.map(|mark| mark.sent_ns),
+                        timing.map(|mark| mark.ack_ns),
+                    )?;
                     let reply = replies.next().unwrap_or_else(|| {
                         Err(VenueError::BadReply(
                             "the venue omitted this order from its cancel-batch reply".to_string(),
@@ -282,35 +322,25 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     ..
                 },
             ) => {
-                if let Some(held) = rate_wait_ns {
-                    self.ledger.record(Segment::QuotaHold, held);
-                }
-                let core_handled_ns = clock::now_ns();
-                self.ledger
-                    .record(Segment::DispatchQueue, started_ns.saturating_sub(queued_ns));
-                self.ledger
-                    .record(Segment::VenueTask, completed_ns.saturating_sub(started_ns));
-                self.ledger.record(
-                    Segment::CoreResume,
-                    core_handled_ns.saturating_sub(completed_ns),
-                );
+                let clocks = CompletionClocks {
+                    command_id,
+                    queued_ns,
+                    started_ns,
+                    completed_ns,
+                    rate_wait_ns,
+                };
+                self.record_quota_hold(&clocks);
                 if let Some(mark) = timing {
                     self.ledger
                         .record(Segment::Ack, mark.ack_ns.saturating_sub(mark.sent_ns));
                 }
-                self.wal.append(&WalRecord::VenueTiming {
-                    command_id,
-                    operation: "amend".to_string(),
-                    client_order_id: client_order_id.clone(),
-                    queued_ns,
-                    task_started_ns: started_ns,
-                    socket_write_ns: timing.map(|mark| mark.sent_ns),
-                    ack_ns: timing.map(|mark| mark.ack_ns),
-                    rate_wait_ns,
-                    task_completed_ns: completed_ns,
-                    core_handled_ns,
-                    core_handled_wall_ns: clock::wall_ns(),
-                })?;
+                self.journal_venue_timing(
+                    &clocks,
+                    "amend",
+                    &client_order_id,
+                    timing.map(|mark| mark.sent_ns),
+                    timing.map(|mark| mark.ack_ns),
+                )?;
                 tracing::debug!(
                     command_id,
                     venue_ns = completed_ns.saturating_sub(started_ns),
