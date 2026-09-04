@@ -79,7 +79,35 @@ edit STATE.md to match.
     scripts/ops.sh curve mainnet
     ```
 
-    A `ws_last_frame_age_ms` above 30 000 names a frame drought;
+  - Deploy receipt: none. Commit `697341e4` is on `main`; its push checks (run
+    `33910211410`) and the dispatched `vps-deploy.yml mode=deploy` (run
+    `33910262256`) both failed in seconds with `ci`, `rust`, and
+    `Deploy artifact` producing no logs at all (HTTP 404 on every job log) and
+    `vps` skipped behind them. Every run since `8352e564` at 18:03 UTC ends
+    the same way; the last run to execute anything was `33900447763` at
+    17:24 UTC. This is GitHub refusing to start jobs for the account, not a
+    test failure — the same billing refusal recorded at 18:17 UTC below. The
+    fix is therefore merged and undeployed, and the host still runs
+    `65ee75a7`. Local gate on this commit: Ruff, mypy (99 files), 1 429
+    pytest, `cargo fmt`, `cargo clippy -D warnings`, and every Rust workspace
+    test pass; the 17 pytest and 1 `market-tape` failures in this sandbox are
+    missing `zstd`, `rsync`, `rclone`, and `shellcheck` and fail identically
+    on the parent commit.
+  - Owner action, to deploy once billing is fixed — or now, over SSH, which
+    needs no GitHub runner:
+
+    ```bash
+    EXPECTED_COMMIT=697341e48fed6f23137860a58be4c5c13e7ae02e scripts/ops.sh deploy
+    ```
+
+    Note what that costs: the realm fingerprint hashes the whole `engine`
+    tree, and this commit edits `engine/signal-worker/src/live.rs`, so
+    `realm_unchanged` fails for both realms and each takes a real handover —
+    stop, state import, start, fresh heartbeat inside 180 s. The funded
+    engine's own crates are untouched, but it does get restarted. Deploy when
+    the owner is willing to spend that, not because a watchdog message is
+    waiting.
+  - A `ws_last_frame_age_ms` above 30 000 names a frame drought;
     `kline_topics_accepted` below `ticker_capacity` names a short
     subscription. Nothing needs restarting for this fix: it changes only what
     the next page says. Four restarts in two hours on a two-hour cold-fill
