@@ -190,6 +190,23 @@ When performing rollouts or cold starts, state is seeded or verified while units
 | `import-strategy-state` | Ingests verified historical strategy bundles into the WAL. | Requires WAL lock and account match. |
 | `verify-native-strategy-state` | Verifies WAL checkpoint identity, frame CRC, and state provenance. | Run before restarting units on deploy. |
 
+### Strategy Table Invariants
+
+The WAL's `Names` table maps `StrategyId(i)` to `strategies[i]`, and every
+recorded fill is keyed on that id.
+
+* **Must**: a config's strategy list *extend* the logged table — every id the
+  log already names keeps the same name in the same position. Appending a
+  block is how a running realm gains a sleeve. Both gates take this rule:
+  `Engine::boot` (`engine/engine-core/src/engine/boot_recovery.inc.rs`) and
+  the takeover's `verify_names` (`engine/engine-core/src/takeover.rs`), which
+  fails with `does not preserve the WAL Names prefix`.
+* **Must Never**: a rename, a reorder, an insertion before an existing block,
+  or a removal reach a realm with a non-empty WAL. Each renumbers an id the
+  log's fills are keyed on, handing one sleeve's recorded fills to another.
+* An appended sleeve needs no takeover source: it owns no earlier fill, and a
+  block whose plug declares no checkpoint contract carries no state to import.
+
 ### Takeover Source Roles
 | Sleeve | Source Format | Named Source Roles |
 | :--- | :--- | :--- |

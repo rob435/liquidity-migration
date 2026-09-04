@@ -1257,6 +1257,40 @@ mod tests {
             .contains("does not preserve"),
             "inserting before the WAL's ids renumbers them"
         );
+        // Same length, same members, different places: every id the log owns
+        // is renumbered, so this is not an append either.
+        assert!(
+            verify_names(&["carry".into(), "exodus".into(), "long".into()], &replayed)
+                .unwrap_err()
+                .to_string()
+                .contains("does not preserve")
+        );
+        // A rename keeps the shape and changes whose fills id 2 owns.
+        assert!(verify_names(
+            &["carry".into(), "long".into(), "exodus_v2".into()],
+            &replayed
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("does not preserve"));
+        // An emptied table is a removal of every id, not a fresh start: a
+        // non-empty WAL still owns them.
+        assert!(verify_names(&[], &replayed)
+            .unwrap_err()
+            .to_string()
+            .contains("does not preserve"));
+        // More than one id may arrive at once.
+        verify_names(
+            &[
+                "carry".into(),
+                "long".into(),
+                "exodus".into(),
+                "probe".into(),
+                "maker_canary".into(),
+            ],
+            &replayed,
+        )
+        .expect("two appended ids are still appended ids");
     }
 
     #[test]

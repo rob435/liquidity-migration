@@ -36,9 +36,20 @@ edit STATE.md to match.
     on the parent commit with the host's exact message and passes here. Local:
     `cargo fmt --check`, `cargo clippy -p engine-core --all-targets` and all
     510 `engine-core` library tests green.
-  - No config was reverted and no state was edited by hand. The realm comes
-    back with the next deploy of `main`, which is the same command that
-    stopped it: `gh workflow run vps-deploy.yml --ref main -f mode=deploy`.
+  - Correction to this entry as first written: it said no config was reverted
+    and no state was edited by hand, and that the realm would come back with
+    the next deploy. That was already untrue when it was written. The demo
+    realm had been restored by hand at 16:24 UTC, three minutes earlier: the
+    appended `probe` block was stripped from
+    `/etc/liquidity-migration/engine.toml` (the 4-sleeve file kept at
+    `engine.toml.probe-4sleeve.bak`) and both demo units started. The template
+    change was a pure append, so removing the block restores the previously
+    rendered config exactly. Demo came back with 3 sleeves, `may_open` true,
+    5 positions and a 2.5 s heartbeat, on the `fc22e3be` binary installed
+    three minutes before that. Demo downtime was about six minutes, not until
+    the next deploy. Stopping was the holding action, not the fix.
+  - The next deploy re-renders the 4-sleeve demo config from the template, so
+    the hand edit is transient and the probe arrives with it.
 
 - **2026-09-04 16:02 UTC — Incident `mainnet-014ec4a90a2fde5f`: the mainnet
   half of the same cold-start page. Fixed by `fc22e3b`; the alert now says how
