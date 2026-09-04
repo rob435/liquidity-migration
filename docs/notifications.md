@@ -22,7 +22,7 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | :--- | :--- | :--- |
 | Realm | Unit state | Expected manifest unit is not active |
 | Realm | Heartbeat | Engine or signal-worker artifact exceeds 60 s, is not a JSON object, or omits its producer-specific health verdict |
-| Realm | Signal worker | `starting` is allowed for at most 120 min while the stream is connected, has every topic accepted and none refused, and frames are arriving — ticker coverage is still filling then and does not have to be complete; `degraded`, `stopped`, an unknown verdict, or spool backpressure is `CRITICAL` |
+| Realm | Signal worker | `starting` is allowed for at most 120 min during cold fill; `recovering` is allowed for at most 2 min for a live gap, repair, or coverage miss. Both require a connected, fresh stream with every topic accepted and none refused. Disconnected, stale, mismatched, or quarantined transport is immediately `degraded`; `degraded`, `stopped`, an unknown verdict, or spool backpressure is `CRITICAL` |
 | Realm | Admission | Engine reports `may_open != true` |
 | Realm | Circuit breaker | Engine reports `rolling_loss_tripped=true` |
 | Host | Recorders | Status unreadable, no frames for 2 min, connection loss, blocked storage, or new drops. Silence and connection loss are measured from the recorder's `started_at_ns`, so a restarted recorder reads as starting up for its first 2 min |
@@ -90,7 +90,7 @@ inaccessible after launch.
 - **Must** keep a restarted recorder inside the deploy boundary until its status names the new systemd process, at least one shard is connected, and a market frame has arrived.
 - **Must** catch a disabled mainnet watchdog while the funded engine still runs.
 - **Must** fail closed when a known engine or signal worker publishes a fresh JSON object without its required health verdict.
-- **Must** treat a fresh but self-reported `degraded` signal-worker heartbeat as a fault after its bounded, stream-healthy startup and attach that worker's journal to the incident payload.
+- **Must** treat a fresh but self-reported `degraded` signal-worker heartbeat as a fault after its bounded, transport-healthy startup or recovery and attach that worker's journal to the incident payload.
 - **Must** let read-only incident diagnosis bypass the serialized queue for mutating VPS operations.
 - **Must** commit a sink's cooldown state only after that sink accepts delivery.
 - **Must** treat journals and fire payloads as untrusted evidence.

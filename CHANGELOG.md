@@ -323,17 +323,20 @@ edit STATE.md to match.
     (`decide`, `durable`, `wire`, `ack`, `dispatch_queue`, `venue_task`,
     `core_resume`, `end_to_end` at p50/p99, `barrier_wait` and `quota_hold`
     p99), working orders, pending flattens, amend outcomes and fill costs; and
-    for each recorder the queue capacity and fill, shards configured and
-    connected, reconnects since boot and bytes in 24 h. A null ledger field is
-    absent from the push, never zero. About 160 series, 6 MB a day on the host.
+    for each signal worker its bounded verdict, raw transport and topic facts,
+    reducer-cycle ages, WebSocket queue, and durable spool; and for each
+    recorder the queue capacity and fill, shards configured and connected,
+    reconnects since boot and bytes in 24 h. A null field is absent from the
+    push, never zero. About 220 series, 10 MB a day on the host.
   - The dashboard is rendered by `deploy/grafana/render_dashboard.py` and the
     committed JSON must match it. Health is a state timeline with one lane per
     fact; sleeves are three panels through `label_replace`; the order path has
     a "last measured" stat (`time() - timestamp(last_over_time(...[30d]))`),
-    end-to-end and per-step p99 plotted as points; every since-boot counter is
-    charted as `increase(...[5m])`; recorder panels add reconnects, queue fill
-    and shards connected. A test refuses any expression naming a field the
-    sampler does not push.
+    end-to-end and per-step p99 plotted as points; signal-worker panels put the
+    verdict beside transport, coverage, repair, cycle, queue, and spool facts;
+    every since-boot counter is charted as `increase(...[5m])`; recorder panels
+    add reconnects, queue fill and shards connected. A test refuses any
+    expression naming a field the sampler does not push.
 - **2026-09-04 — Observability follows producer verdicts, and watchdog
   maintenance follows the deploy lock.**
   - The first `2f4af5e5` rollout returned `ok` in all three liveness scopes,
@@ -347,9 +350,21 @@ edit STATE.md to match.
     found the lane busy and discarded the epoch, so the first successful repair
     could not close the WebSocket gap and the worker fetched the whole overlap a
     second time. An in-flight repair now adopts the newest live epoch. Healthy,
-    complete, fresh stream input remains `starting` for the existing 120-minute
-    cold-backfill budget; disconnected or incomplete input is `degraded`
-    immediately, and a backfill beyond the bound is a fault.
+    transport remains `starting` for the existing 120-minute cold-backfill
+    budget even while ticker coverage fills. After cold fill, a gap, repair, or
+    incomplete ticker snapshot reports `recovering` for at most 120 seconds,
+    only while the socket is connected and fresh, every configured topic is
+    accepted, and none is quarantined. Full recovery resets that clock.
+    Disconnected, stale, mismatched, or quarantined input degrades immediately;
+    a persistent recovery or a backfill beyond its longer bound is a fault.
+  - Live acceptance found the missing transition edge at 16:02, 16:05, and
+    16:11 UTC. Watchdog samples caught transient incomplete-coverage heartbeats,
+    read `status=degraded`, and fired incidents although the next heartbeat had
+    full coverage and no transport or quarantine fault. Those samples do not
+    distinguish first fill from expiry followed by REST replacement. Producer
+    health now gives the cold fill its long bound and a later transport-healthy
+    repair its short bound; the raw gap, repair, and incomplete-coverage facts
+    remain visible throughout.
   - Incident `host-bf5dcb6544d0dfdc` proved the independent host watchdog can
     sample a realm while a sanctioned deploy has disabled its timer. Systemd
     enablement alone removed that false page but also hid a timer disabled by

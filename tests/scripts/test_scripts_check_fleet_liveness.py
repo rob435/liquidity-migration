@@ -131,7 +131,7 @@ def test_engine_that_cannot_open_positions_pages(tmp_path: Path) -> None:
     assert liveness.evaluate_engine_heartbeat("worker", heartbeat) == []
 
 
-def test_signal_worker_startup_is_quiet_but_degraded_and_backpressured_page(
+def test_signal_worker_startup_and_recovery_are_quiet_but_degraded_and_backpressured_page(
     tmp_path: Path,
 ) -> None:
     heartbeat = tmp_path / "heartbeat.json"
@@ -149,6 +149,8 @@ def test_signal_worker_startup_is_quiet_but_degraded_and_backpressured_page(
         "spool_backpressured": False,
     }
     heartbeat.write_text(json.dumps(dict(base, status="starting")))
+    assert liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0) == []
+    heartbeat.write_text(json.dumps(dict(base, status="recovering")))
     assert liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0) == []
     heartbeat.write_text(json.dumps(dict(base, status="ready")))
     assert liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0) == []
@@ -471,9 +473,7 @@ def test_a_recorder_seconds_old_is_not_a_dead_venue(tmp_path: Path) -> None:
 
     def read(payload: dict[str, object]) -> dict[str, liveness.Alert]:
         status.write_text(json.dumps(payload))
-        alerts, _ = liveness.evaluate_capture_status(
-            status, now=now, max_silence_sec=120, counters={}, label=label
-        )
+        alerts, _ = liveness.evaluate_capture_status(status, now=now, max_silence_sec=120, counters={}, label=label)
         return {alert.key: alert for alert in alerts}
 
     newborn: dict[str, object] = {

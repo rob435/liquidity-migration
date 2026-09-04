@@ -294,7 +294,7 @@ def evaluate_engine_heartbeat(unit: str, path: Path, *, now: float | None = None
         return alerts
     if payload.get("kind") == _SIGNAL_WORKER_HEARTBEAT_KIND:
         status = payload.get("status")
-        if status not in ("starting", "ready"):
+        if status not in ("starting", "recovering", "ready"):
             alerts.append(
                 Alert(
                     f"worker-status:{unit}",
@@ -1061,9 +1061,7 @@ def main() -> int:
 
     state = load_state(state_file)
     preserved_alert_keys = (
-        {key for key in state if key.startswith(_DEPLOY_TRANSITIONAL_ALERT_PREFIXES)}
-        if deploy_maintenance
-        else set()
+        {key for key in state if key.startswith(_DEPLOY_TRANSITIONAL_ALERT_PREFIXES)} if deploy_maintenance else set()
     )
     lines, next_state = select_alerts_to_send(
         alerts,

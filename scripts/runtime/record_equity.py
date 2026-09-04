@@ -80,7 +80,7 @@ class Source:
 
 
 def read_sources(manifest: Path = _MANIFEST) -> list[Source]:
-    """Engine heartbeats and recorder status files, in manifest order."""
+    """Engine, worker, and recorder artifacts, in manifest order."""
     sources: list[Source] = []
     for raw in manifest.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
@@ -94,6 +94,8 @@ def read_sources(manifest: Path = _MANIFEST) -> list[Source]:
             continue
         if unit.startswith("liquidity-migration-engine"):
             sources.append(Source(realm=realm, kind="engine", path=Path(artifact)))
+        elif unit.startswith("liquidity-migration-signal-worker"):
+            sources.append(Source(realm=realm, kind="worker", path=Path(artifact)))
         elif unit.startswith("liquidity-migration-forward-capture"):
             name = unit[len("liquidity-migration-forward-capture") :].removesuffix(".service")
             sources.append(Source(realm=name.lstrip("-") or "bybit", kind="recorder", path=Path(artifact)))
@@ -212,6 +214,70 @@ def engine_sample(realm: str, path: Path, now_ms: int) -> dict[str, Any]:
 
 def _sleeve_key(strategy: Any) -> str:
     return strategy if isinstance(strategy, str) and strategy else "unattributed"
+
+
+def worker_sample(realm: str, path: Path, now_ms: int) -> dict[str, Any]:
+    """The decision producer's own health verdict and its supporting facts."""
+    sample: dict[str, Any] = {"ts_ms": now_ms, "realm": realm, "kind": "worker"}
+    try:
+        beat = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {**sample, "state": "absent"}
+    except (OSError, ValueError) as error:
+        return {**sample, "state": "unreadable", "error": str(error)}
+    if not isinstance(beat, dict):
+        return {**sample, "state": "unreadable", "error": "heartbeat is not an object"}
+
+    written_ms = _number(beat.get("updated_at_ms"))
+    last_frame_ms = _number(beat.get("bybit_ws_last_frame_ts_ms"))
+    gap_since_ms = _number(beat.get("bybit_ws_gap_open_since_wall_ts_ms"))
+    long_cycle_ms = _number(beat.get("last_long_cycle_completed_wall_ts_ms"))
+    carry_cycle_ms = _number(beat.get("last_carry_cycle_completed_wall_ts_ms"))
+    status = beat.get("status")
+    ticker_capacity = _number(beat.get("bybit_ws_ticker_capacity"))
+    sample.update(
+        {
+            "state": "live",
+            "status": status,
+            "source_generation": beat.get("source_generation"),
+            "heartbeat_age_ms": _age_ms(now_ms, written_ms),
+            "status_healthy": 1.0 if status in {"starting", "recovering", "ready"} else 0.0,
+            "status_ready": 1.0 if status == "ready" else 0.0,
+            "status_starting": 1.0 if status == "starting" else 0.0,
+            "status_recovering": 1.0 if status == "recovering" else 0.0,
+            "ws_connected": _number(beat.get("bybit_ws_connected")),
+            "ws_gap_open": _number(beat.get("bybit_ws_gap_open")),
+            "ws_gap_age_ms": _age_ms(now_ms, gap_since_ms) if beat.get("bybit_ws_gap_open") is True else None,
+            "ws_last_frame_age_ms": _age_ms(now_ms, last_frame_ms),
+            "ticker_rows": _number(beat.get("bybit_ws_ticker_rows")),
+            "ticker_capacity": ticker_capacity,
+            "ticker_coverage_complete": _number(beat.get("bybit_ws_ticker_coverage_complete")),
+            "ticker_topics_accepted": _number(beat.get("bybit_ws_ticker_topics_accepted")),
+            "ticker_topics_quarantined": _number(beat.get("bybit_ws_ticker_topics_quarantined")),
+            "kline_topics_accepted": _number(beat.get("bybit_ws_kline_topics_accepted")),
+            "kline_topics_quarantined": _number(beat.get("bybit_ws_kline_topics_quarantined")),
+            "ws_queue_fill": _ratio(
+                _number(beat.get("bybit_ws_queued_frames")),
+                _number(beat.get("bybit_ws_queue_capacity")),
+            ),
+            "long_cycle_age_ms": _age_ms(now_ms, long_cycle_ms),
+            "carry_cycle_age_ms": _age_ms(now_ms, carry_cycle_ms),
+            "rest_ticker_success_count": _number(beat.get("rest_ticker_success_count")),
+            "rest_ticker_failure_count": _number(beat.get("rest_ticker_failure_count")),
+            "spool_files": _number(beat.get("spool_files")),
+            "spool_bytes": _number(beat.get("spool_bytes")),
+            "spool_file_fill": _ratio(_number(beat.get("spool_files")), _number(beat.get("spool_file_cap"))),
+            "spool_byte_fill": _ratio(_number(beat.get("spool_bytes")), _number(beat.get("spool_byte_cap"))),
+            "spool_backpressured": _number(beat.get("spool_backpressured")),
+            "spool_backpressured_classes": _count(beat.get("spool_backpressured_classes")),
+            "replaceable_outputs_coalesced": _number(beat.get("replaceable_outputs_coalesced")),
+        }
+    )
+    return sample
+
+
+def _age_ms(now_ms: int, then_ms: float | None) -> float | None:
+    return None if then_ms is None else max(0.0, now_ms - then_ms)
 
 
 def recorder_sample(name: str, path: Path, now_ms: int) -> dict[str, Any]:
@@ -333,8 +399,7 @@ def push(body: str, url: str, user: str, token: str) -> None:
         method="POST",
         headers={
             "Content-Type": "text/plain; charset=utf-8",
-            "Authorization": "Basic "
-            + base64.b64encode(f"{user}:{token}".encode()).decode("ascii"),
+            "Authorization": "Basic " + base64.b64encode(f"{user}:{token}".encode()).decode("ascii"),
         },
     )
     with urllib.request.urlopen(request, timeout=_PUSH_TIMEOUT_S) as response:  # noqa: S310
@@ -384,7 +449,9 @@ def render_curve(state_dir: Path, realm: str, samples: int) -> str:
         spark = "".join(
             blocks[0]
             if not isinstance(value, (int, float))
-            else blocks[1 + int((value - low) / span * 7)] if span > 0 else blocks[4]
+            else blocks[1 + int((value - low) / span * 7)]
+            if span > 0
+            else blocks[4]
             for value in values
         )
         lines.append(f"equity {low:.2f} .. {high:.2f} USDT  net {known[-1] - known[0]:+.2f}")
@@ -428,6 +495,8 @@ def main(argv: list[str] | None = None) -> int:
     for source in read_sources(args.manifest):
         if source.kind == "engine":
             sample = engine_sample(source.realm, source.path, now_ms)
+        elif source.kind == "worker":
+            sample = worker_sample(source.realm, source.path, now_ms)
         else:
             sample = recorder_sample(source.realm, source.path, now_ms)
         append(args.state_dir, sample)

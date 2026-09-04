@@ -11,6 +11,7 @@ What the fleet records about itself, where it lands, and how to see it.
 | **Equity & recorder samples** | `liquidity-migration-equity-recorder.timer` | Every minute at :20 | JSONL under `/var/lib/liquidity-migration/equity`, plus one optional HTTP push | Read-only; loads no venue environment |
 | **Order-path probe** | the `probe` sleeve of the **demo** engine | Every 15 min at :00, :15, :30, :45 | One venue-minimum post-only `BTCUSDT` buy 3% under the bid, pulled 2 s later: one measurement in the engine's latency ledger, read by the :20 sample | Demo only; never a page, never a Telegram message; stands down while another sleeve holds the symbol ([trading_logic.md](trading_logic.md) §1) |
 | **Engine heartbeat** | the engine itself | Every 5 s | `heartbeat.json`, overwritten | The engine's own statement of health |
+| **Signal-worker heartbeat** | each realm's credential-free producer | At most every 5 s | `heartbeat.json`, overwritten; sampled locally and remotely every minute | Worker verdict plus raw WebSocket, coverage, cycle, queue, and spool facts |
 | **Closed trades** | the engine itself | Per closed round trip | `trades.jsonl`, appended | Realized accounting authority |
 | **Liveness alerts** | `*-liveness.timer` | Every 3 min | Telegram, plus the on-call agent | See [notifications.md](notifications.md) |
 
@@ -27,9 +28,10 @@ declares and appends one line per artifact per run.
 | File | Written when |
 | :--- | :--- |
 | `engine-<realm>-<YYYY-MM>.jsonl` | always, one line per realm per minute |
+| `worker-<realm>-<YYYY-MM>.jsonl` | always, one line per realm per minute |
 | `recorder-<venue>-<YYYY-MM>.jsonl` | always, one line per tape recorder per minute |
 
-Four lines a minute, about 4.2 KB: **6 MB a day, 2.2 GB a year**, in monthly
+Six lines a minute, about 7 KB: **10 MB a day, 3.7 GB a year**, in monthly
 files. Nothing rotates or prunes them — next to 1.7 TB a month of tape this is
 noise, and the history is the point.
 
@@ -46,6 +48,10 @@ noise, and the history is the point.
 | `uptime_s`, `market_events`, `orders_sent`, `fills`, `stream_resets`, `amends_confirmed`, `amends_pulled_unconfirmed` | Since-boot counters; all reset on restart. The dashboard reads them as `increase()` |
 | `fills_maker_share`, `fill_all_in_arrival_bps`, `fill_arrival_shortfall_bps`, `fill_fee_coverage`, `fill_markout_1m_our_way_bps` | What the trading cost |
 | `decide_*`, `durable_*`, `wire_*`, `ack_*`, `dispatch_queue_*`, `venue_task_*`, `core_resume_*`, `end_to_end_*` (`_p50_ns`, `_p99_ns`), `barrier_wait_p99_ns`, `quota_hold_p99_ns` | The order path step by step, from the engine's 60-second latency ledger. Null in the file and **absent from the push** in a minute nothing went out: an empty window is no measurement, never zero |
+| `status_healthy`, `status_ready`, `status_starting`, `status_recovering`, `heartbeat_age_ms` | Worker rows only: the bounded producer verdict and heartbeat freshness; `starting` is cold fill, while `recovering` is a live repair inside its two-minute bound |
+| `ws_connected`, `ws_gap_open`, `ws_gap_age_ms`, `ws_last_frame_age_ms`, `ticker_coverage_complete` | Worker rows only: raw transport and coverage state. A coverage miss remains visible while the producer applies its two-minute persistence bound |
+| `ticker_rows`, `ticker_capacity`, `*_topics_accepted`, `*_topics_quarantined`, `ws_queue_fill` | Worker rows only: exact subscription and bounded in-memory queue facts |
+| `long_cycle_age_ms`, `carry_cycle_age_ms`, `rest_ticker_*_count`, `spool_*`, `replaceable_outputs_coalesced` | Worker rows only: reducer progress, fallback outcomes, and durable handoff pressure |
 | `projected_month_gb`, `monthly_gb`, `budget_over`, `shed_feeds` | Recorder rows only: inbound projection against allowance |
 | `received_frames`, `written_rows`, `dropped_frames`, `disk_dropped_frames`, `queued_frames`, `queue_capacity`, `queue_fill`, `disk_blocked` | Recorder rows only: the writer queue. A dropped frame is an overrun, and every overrun reconnects the shard |
 | `shards`, `shards_connected`, `reconnects`, `bytes_24h`, `free_disk_bytes`, `snapshot_failures` | Recorder rows only: the connections and the disk. `reconnects` is since boot, summed over shards |
@@ -98,7 +104,7 @@ tail -3 /var/lib/liquidity-migration/equity/engine-mainnet-$(date -u +%Y-%m).jso
 ## 5. Grafana Cloud
 
 The free tier is enough: it holds 10k active series and this fleet pushes about
-160. Metrics retention there is 14 days, which is why the host files are the
+220. Metrics retention there is 14 days, which is why the host files are the
 record and the dashboard is the view.
 
 ### One-Time Setup
@@ -121,7 +127,7 @@ vi /etc/liquidity-migration/observability.env    # fill URL, user, token
 # Prove it in one run, without waiting for the timer
 systemctl start liquidity-migration-equity-recorder.service
 journalctl -u liquidity-migration-equity-recorder.service -n 5 --no-pager
-# "recorded and pushed 4 samples" means the sink accepted it.
+# "recorded and pushed 6 samples" means the sink accepted it.
 ```
 
 ### Configuration
@@ -144,10 +150,11 @@ the script renders.
 
 | Section | Panels | Reads |
 | :--- | :--- | :--- |
-| **Health** | state timeline, one lane per fact; equity with sparkline | `lm_engine_up`, `may_open`, `1 - rolling_loss_tripped`, `lm_recorder_up`, `equity_usdt` |
+| **Health** | state timeline, one lane per fact; equity with sparkline | `lm_engine_up`, `may_open`, `1 - rolling_loss_tripped`, `lm_worker_status_healthy`, `lm_recorder_up`, `equity_usdt` |
 | **Account** | equity and available; rolling 24h loss against its ceiling | `equity_usdt`, `available_usdt`, `rolling_loss_*` |
 | **Sleeves** | positions by sleeve; entries enabled by sleeve (state timeline); blockers by sleeve | `lm_engine_sleeve_<name>_{positions,entries_enabled,blockers}` through `label_replace` |
 | **Order path** | seconds since the ledger last held an order; orders since boot; end to end p50/p99; every step at p99; working orders, blockers, faults | `time() - timestamp(last_over_time(end_to_end_p50_ns[30d]))`, the `*_p99_ns` steps, `working_entries`, `strategy_errors` |
+| **Signal workers** | verdict and raw transport timeline; heartbeat/frame/repair/cycle ages; WebSocket queue and durable spool fill | `lm_worker_*` |
 | **Engine** | heartbeat and account age; orders/fills/resets per 5 min; market events per second and venue clock offset | ages in ms; `increase(...[5m])` over the since-boot counters |
 | **Tape recorders** | projected month against allowance; frames dropped and reconnects per 5 min; queue fill, shards connected, shed feeds | `lm_recorder_*`, unfiltered by realm |
 
@@ -160,7 +167,7 @@ how long the funded engine has gone without sending anything.
 Line protocol `lm_engine,realm=mainnet equity_usdt=130.28` arrives as the
 Prometheus series `lm_engine_equity_usdt{realm="mainnet"}` — measurement,
 underscore, field. Every numeric sample field in §2 becomes one series.
-`lm_engine_up` and `lm_recorder_up` are 1 or 0. The per-sleeve dictionaries
+`lm_engine_up`, `lm_worker_up`, and `lm_recorder_up` are 1 or 0. The per-sleeve dictionaries
 flatten to `lm_engine_sleeve_<name>_positions`,
 `lm_engine_sleeve_<name>_entries_enabled` and `lm_engine_sleeve_<name>_blockers`,
 one series per configured sleeve, and the dashboard turns the name back into a

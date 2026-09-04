@@ -1,12 +1,12 @@
 [Unit]
-Description=liquidity-migration one equity and recorder sample per minute to disk
+Description=liquidity-migration one fleet-health sample per artifact per minute
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
 KillMode=control-group
-# Four file reads, four appends, and at most one HTTP POST. A minute timer
+# Six file reads, six appends, and at most one HTTP POST. A minute timer
 # must never find the previous run still activating.
 TimeoutStartSec=45
 User=liquidity-observer

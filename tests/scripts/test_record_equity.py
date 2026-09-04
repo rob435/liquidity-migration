@@ -68,6 +68,40 @@ def _heartbeat(now_ms: int, **overrides: Any) -> dict[str, Any]:
     return beat
 
 
+def _worker_heartbeat(now_ms: int, **overrides: Any) -> dict[str, Any]:
+    beat = {
+        "updated_at_ms": now_ms - 2_000,
+        "status": "starting",
+        "source_generation": "g123",
+        "last_long_cycle_completed_wall_ts_ms": now_ms - 5_000,
+        "last_carry_cycle_completed_wall_ts_ms": None,
+        "rest_ticker_success_count": 3,
+        "rest_ticker_failure_count": 1,
+        "bybit_ws_connected": True,
+        "bybit_ws_gap_open": True,
+        "bybit_ws_gap_open_since_wall_ts_ms": now_ms - 10_000,
+        "bybit_ws_last_frame_ts_ms": now_ms - 100,
+        "bybit_ws_ticker_rows": 171,
+        "bybit_ws_ticker_capacity": 171,
+        "bybit_ws_ticker_coverage_complete": True,
+        "bybit_ws_ticker_topics_accepted": 171,
+        "bybit_ws_ticker_topics_quarantined": 0,
+        "bybit_ws_kline_topics_accepted": 171,
+        "bybit_ws_kline_topics_quarantined": 0,
+        "bybit_ws_queued_frames": 2,
+        "bybit_ws_queue_capacity": 342,
+        "spool_files": 1,
+        "spool_bytes": 120_981,
+        "spool_file_cap": 4_096,
+        "spool_byte_cap": 2_147_483_648,
+        "spool_backpressured": False,
+        "spool_backpressured_classes": [],
+        "replaceable_outputs_coalesced": 7,
+    }
+    beat.update(overrides)
+    return beat
+
+
 def test_realms_and_paths_come_from_the_fleet_manifest() -> None:
     sources = record_equity.read_sources(MANIFEST)
     engines = {source.realm: source.path for source in sources if source.kind == "engine"}
@@ -77,6 +111,11 @@ def test_realms_and_paths_come_from_the_fleet_manifest() -> None:
     }
     recorders = {source.realm for source in sources if source.kind == "recorder"}
     assert recorders == {"bybit", "binance"}
+    workers = {source.realm: source.path for source in sources if source.kind == "worker"}
+    assert workers == {
+        "demo": Path("/var/lib/liquidity-migration-signal-worker-demo/heartbeat.json"),
+        "mainnet": Path("/var/lib/liquidity-migration-signal-worker-mainnet/heartbeat.json"),
+    }
 
 
 def test_a_live_heartbeat_becomes_the_numbers_a_curve_needs(tmp_path: Path) -> None:
@@ -310,6 +349,41 @@ def test_the_recorder_sample_carries_the_budget_and_the_drops(tmp_path: Path) ->
     assert ",up=1.0," in line
 
 
+def test_the_worker_sample_carries_the_verdict_and_the_supporting_facts(tmp_path: Path) -> None:
+    now_ms = 1_788_000_000_000
+    beat = tmp_path / "heartbeat.json"
+    beat.write_text(json.dumps(_worker_heartbeat(now_ms)), encoding="utf-8")
+
+    sample = record_equity.worker_sample("mainnet", beat, now_ms)
+
+    assert sample["state"] == "live"
+    assert sample["heartbeat_age_ms"] == 2_000
+    assert sample["status_healthy"] == 1.0
+    assert sample["status_ready"] == 0.0
+    assert sample["status_starting"] == 1.0
+    assert sample["status_recovering"] == 0.0
+    assert sample["ws_connected"] == 1.0
+    assert sample["ws_gap_open"] == 1.0
+    assert sample["ws_gap_age_ms"] == 10_000
+    assert sample["ws_last_frame_age_ms"] == 100
+    assert sample["ticker_coverage_complete"] == 1.0
+    assert sample["ticker_topics_accepted"] == 171.0
+    assert sample["kline_topics_accepted"] == 171.0
+    assert sample["long_cycle_age_ms"] == 5_000
+    assert sample["carry_cycle_age_ms"] is None
+    assert sample["ws_queue_fill"] == round(2 / 342, 6)
+    assert sample["spool_backpressured"] == 0.0
+    assert sample["spool_byte_fill"] == round(120_981 / 2_147_483_648, 6)
+    line = record_equity.line_protocol(sample)
+    assert line.startswith("lm_worker,realm=mainnet ")
+    assert ",up=1.0," in line
+
+    beat.write_text(json.dumps(_worker_heartbeat(now_ms, status="recovering")), encoding="utf-8")
+    recovering = record_equity.worker_sample("mainnet", beat, now_ms)
+    assert recovering["status_healthy"] == 1.0
+    assert recovering["status_recovering"] == 1.0
+
+
 def test_a_run_with_no_sink_configured_records_and_exits_zero(tmp_path: Path, capsys, monkeypatch) -> None:
     for key in ("METRICS_PUSH_URL", "METRICS_PUSH_USER", "METRICS_PUSH_TOKEN"):
         monkeypatch.delenv(key, raising=False)
@@ -442,7 +516,9 @@ def _expressions(dashboard: dict[str, Any]) -> list[str]:
 
 
 def test_the_dashboard_json_is_what_its_renderer_renders() -> None:
-    spec = importlib.util.spec_from_file_location("render_dashboard", ROOT / "deploy" / "grafana" / "render_dashboard.py")
+    spec = importlib.util.spec_from_file_location(
+        "render_dashboard", ROOT / "deploy" / "grafana" / "render_dashboard.py"
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -503,20 +579,31 @@ def test_the_dashboard_charts_only_fields_the_sampler_actually_pushes(tmp_path: 
     )
     recorder_line = record_equity.line_protocol(record_equity.recorder_sample("bybit", status, now_ms))
     recorder_fields = {pair.split("=", 1)[0] for pair in recorder_line.split(" ")[1].split(",")}
+    worker_beat = tmp_path / "worker-heartbeat.json"
+    worker_beat.write_text(
+        json.dumps(_worker_heartbeat(now_ms, last_carry_cycle_completed_wall_ts_ms=now_ms - 6_000)),
+        encoding="utf-8",
+    )
+    worker_line = record_equity.line_protocol(record_equity.worker_sample("mainnet", worker_beat, now_ms))
+    worker_fields = {pair.split("=", 1)[0] for pair in worker_line.split(" ")[1].split(",")}
 
     charted_engine = set(re.findall(r"lm_engine_([a-z0-9_]+)", expressions))
     charted_recorder = set(re.findall(r"lm_recorder_([a-z0-9_]+)", expressions))
+    charted_worker = set(re.findall(r"lm_worker_([a-z0-9_]+)", expressions))
     # `lm_engine_sleeve_.*_positions` is a regex over the per-sleeve series.
     charted_engine = {field for field in charted_engine if not field.startswith("sleeve_")}
     assert charted_engine <= engine_fields, sorted(charted_engine - engine_fields)
     assert charted_recorder <= recorder_fields, sorted(charted_recorder - recorder_fields)
+    assert charted_worker <= worker_fields, sorted(charted_worker - worker_fields)
     for suffix in ("positions", "entries_enabled", "blockers"):
-        assert f'lm_engine_sleeve_(.*)_{suffix}' in expressions, suffix
+        assert f"lm_engine_sleeve_(.*)_{suffix}" in expressions, suffix
         assert any(field.endswith(f"_{suffix}") and field.startswith("sleeve_") for field in engine_fields)
     for field in ("equity_usdt", "available_usdt", "may_open", "rolling_loss_net_usdt", "end_to_end_p99_ns"):
         assert field in charted_engine, field
     for field in ("projected_month_gb", "dropped_frames", "reconnects", "queue_fill"):
         assert field in charted_recorder, field
+    for field in ("status_healthy", "ticker_coverage_complete", "ws_gap_age_ms", "spool_byte_fill"):
+        assert field in charted_worker, field
 
 
 def test_stat_panels_read_the_instant_and_counters_are_charted_as_increases() -> None:
@@ -529,10 +616,15 @@ def test_stat_panels_read_the_instant_and_counters_are_charted_as_increases() ->
             assert target.get("range") is False, panel["title"]
     # A since-boot counter drawn raw is a cliff at every restart; the view
     # reads them as increases so a restart is a flat line.
-    for counter in ("lm_engine_fills", "lm_engine_stream_resets", "lm_recorder_dropped_frames", "lm_recorder_reconnects"):
+    for counter in (
+        "lm_engine_fills",
+        "lm_engine_stream_resets",
+        "lm_recorder_dropped_frames",
+        "lm_recorder_reconnects",
+    ):
         assert f"increase({counter}" in " ".join(_expressions(dashboard)), counter
-    # The realm variable is fed by lm_engine_up; recorder realms are venues
-    # and a realm filter on them would hide every recorder series.
+    # The realm variable is fed by lm_engine_up; worker realms match it, while
+    # recorder realms are venues and a realm filter would hide every recorder.
     for expr in _expressions(dashboard):
         if "lm_recorder_" in expr:
             assert "$realm" not in expr, expr

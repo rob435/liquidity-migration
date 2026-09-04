@@ -32,6 +32,7 @@ const KLINE_PUBLICATION_LAG_MS: i64 = 60_000;
 const FUNDING_PUBLICATION_LAG_MS: i64 = 5 * 60_000;
 const CARRY_CATCHUP_CHUNK_DAYS: i64 = 1;
 const STARTUP_MAX_MS: i64 = 120 * 60_000;
+const TRANSIENT_RECOVERY_MAX_MS: i64 = 2 * 60_000;
 pub const KLINE_FETCH_CHUNK_SIZE: usize = 1;
 pub const FUNDING_FETCH_CHUNK_SIZE: usize = 1;
 pub const WHALE_FETCH_CHUNK_SIZE: usize = 1;
@@ -681,6 +682,7 @@ impl LiveRunner {
             ..LaneState::default()
         };
         let mut pending_klines = BTreeMap::<(String, i64), ConfirmedKline>::new();
+        let mut transient_recovery_started_at_ms = None;
 
         let mut ticker_tick = cadence(self.config.live.ticker_cadence_ms);
         let mut instrument_tick = cadence(self.config.live.instrument_cadence_ms);
@@ -806,6 +808,7 @@ impl LiveRunner {
                         run_started_at_ms,
                         now_ms,
                         self.config.sources.mark_max_age_ms,
+                        &mut transient_recovery_started_at_ms,
                     );
                     self.write_heartbeat(status, Some(health))?;
                 }
@@ -2730,24 +2733,15 @@ fn runtime_status(
 }
 
 fn stream_inputs_healthy(health: &StreamHealth, now_ms: i64, max_frame_age_ms: i64) -> bool {
-    stream_startup_inputs_healthy(health, now_ms, max_frame_age_ms)
-        && health.ticker_coverage_complete
+    stream_transport_healthy(health, now_ms, max_frame_age_ms) && health.ticker_coverage_complete
 }
 
-/// Stream input a cold start can actually have: the socket is up, every topic
-/// this worker asked for was accepted, none was refused, and frames are
-/// arriving. Ticker coverage is not in it — it fills symbol by symbol from the
-/// stream, so a booting worker never has it, and requiring it here would make
-/// every restart page inside one watchdog interval.
-fn stream_startup_inputs_healthy(
-    health: &StreamHealth,
-    now_ms: i64,
-    max_frame_age_ms: i64,
-) -> bool {
+fn stream_transport_healthy(health: &StreamHealth, now_ms: i64, max_frame_age_ms: i64) -> bool {
     let frame_fresh = health
         .last_frame_ts_ms
         .is_some_and(|last| last <= now_ms && now_ms.saturating_sub(last) <= max_frame_age_ms);
     health.connected
+        && health.ticker_capacity > 0
         && health.ticker_topics_quarantined == 0
         && health.kline_topics_quarantined == 0
         && health.ticker_topics_accepted == health.ticker_capacity
@@ -2755,8 +2749,27 @@ fn stream_startup_inputs_healthy(
         && frame_fresh
 }
 
-/// The status one heartbeat carries: the live verdict, held at `starting` for
-/// the bounded cold start while the stream itself is sound.
+fn transient_recovery_acceptable(
+    health: &StreamHealth,
+    repair_running: bool,
+    transport_healthy: bool,
+    recovery_started_at_ms: &mut Option<i64>,
+    now_ms: i64,
+) -> bool {
+    if !transport_healthy {
+        *recovery_started_at_ms = None;
+        return false;
+    }
+    if health.ticker_coverage_complete && !health.gap_open && !repair_running {
+        *recovery_started_at_ms = None;
+        return true;
+    }
+    let started_at_ms = *recovery_started_at_ms.get_or_insert(now_ms);
+    now_ms.saturating_sub(started_at_ms) < TRANSIENT_RECOVERY_MAX_MS
+}
+
+/// One producer verdict: `starting` for bounded cold fill, `recovering` for a
+/// short repair on an otherwise sound transport, and `degraded` for a fault.
 fn heartbeat_status(
     health: &StreamHealth,
     repair_running: bool,
@@ -2764,11 +2777,25 @@ fn heartbeat_status(
     started_at_ms: i64,
     now_ms: i64,
     max_frame_age_ms: i64,
+    recovery_started_at_ms: &mut Option<i64>,
 ) -> &'static str {
+    let transport_healthy = stream_transport_healthy(health, now_ms, max_frame_age_ms);
+    let recovery_acceptable = transient_recovery_acceptable(
+        health,
+        repair_running,
+        transport_healthy,
+        recovery_started_at_ms,
+        now_ms,
+    );
+    let live_status = match runtime_status(health, repair_running, now_ms, max_frame_age_ms) {
+        "ready" => "ready",
+        _ if transport_healthy && recovery_acceptable => "recovering",
+        _ => "degraded",
+    };
     startup_runtime_status(
-        runtime_status(health, repair_running, now_ms, max_frame_age_ms),
+        live_status,
         cycles,
-        stream_startup_inputs_healthy(health, now_ms, max_frame_age_ms),
+        transport_healthy,
         started_at_ms,
         now_ms,
     )
@@ -4142,14 +4169,15 @@ mod tests {
         complete_funding_coverage, complete_whale_coverage, coverage_repair_start,
         funding_job_chunks, heartbeat_status, kline_job_chunks, runtime_status,
         send_repair_chunk_and_wait, send_whale_chunk_and_wait, source_coverage_contains,
-        source_grid_slots, startup_runtime_status, trading_intervals_contain,
+        source_grid_slots, startup_runtime_status, stream_transport_healthy,
+        trading_intervals_contain, transient_recovery_acceptable,
         validate_instrument_source_against_state, validate_source_grid_timestamp,
         validate_source_page_rows, whale_fetch_bounds, whale_job_chunks, FetchedFunding,
         FetchedFundingBatch, FetchedInstruments, FetchedKlineBatch, FetchedKlineJobs,
         FetchedTickers, FetchedUniverseInputs, FetchedWhales, LaneCompletion, LaneState,
         LiveRunOptions, LiveRunner, StreamEvent, StreamHealth, TickerSample,
         FUNDING_FETCH_CHUNK_SIZE, KLINE_FETCH_CHUNK_SIZE, LANE_COMPLETION_QUEUE_CAPACITY,
-        STARTUP_MAX_MS, WHALE_FETCH_CHUNK_SIZE,
+        STARTUP_MAX_MS, TRANSIENT_RECOVERY_MAX_MS, WHALE_FETCH_CHUNK_SIZE,
     };
     use crate::bybit_ws::BybitPublicStream;
     use crate::config::SignalWorkerConfig;
@@ -4292,9 +4320,18 @@ mod tests {
             ..StreamHealth::default()
         };
         let cycles = [(None, 60_000), (None, 60_000)];
+        let mut old_recovery = Some(started_at_ms + 1);
         assert_eq!(runtime_status(&booting, true, now_ms, 30_000), "degraded");
         assert_eq!(
-            heartbeat_status(&booting, true, cycles, started_at_ms, now_ms, 30_000),
+            heartbeat_status(
+                &booting,
+                true,
+                cycles,
+                started_at_ms,
+                now_ms,
+                30_000,
+                &mut old_recovery,
+            ),
             "starting",
             "a sound stream that has not finished filling coverage is warmup, not a fault"
         );
@@ -4303,8 +4340,17 @@ mod tests {
             connected: false,
             ..booting.clone()
         };
+        let mut disconnected_recovery = None;
         assert_eq!(
-            heartbeat_status(&disconnected, true, cycles, started_at_ms, now_ms, 30_000),
+            heartbeat_status(
+                &disconnected,
+                true,
+                cycles,
+                started_at_ms,
+                now_ms,
+                30_000,
+                &mut disconnected_recovery,
+            ),
             "degraded",
             "a disconnected stream is a fault from the first heartbeat"
         );
@@ -4313,12 +4359,22 @@ mod tests {
             ticker_topics_quarantined: 1,
             ..booting.clone()
         };
+        let mut refused_recovery = None;
         assert_eq!(
-            heartbeat_status(&refused, true, cycles, started_at_ms, now_ms, 30_000),
+            heartbeat_status(
+                &refused,
+                true,
+                cycles,
+                started_at_ms,
+                now_ms,
+                30_000,
+                &mut refused_recovery,
+            ),
             "degraded",
             "a refused topic never fills, so it is not warmup"
         );
 
+        let mut expired_startup_recovery = Some(started_at_ms + 1);
         assert_eq!(
             heartbeat_status(
                 &booting,
@@ -4326,11 +4382,13 @@ mod tests {
                 cycles,
                 started_at_ms,
                 started_at_ms + STARTUP_MAX_MS,
-                30_000
+                30_000,
+                &mut expired_startup_recovery,
             ),
             "degraded",
             "past the cold-start bound an unfinished backfill is a fault"
         );
+        let mut completed_cycle_recovery = Some(started_at_ms + 1);
         assert_eq!(
             heartbeat_status(
                 &booting,
@@ -4341,7 +4399,8 @@ mod tests {
                 ],
                 started_at_ms,
                 now_ms,
-                30_000
+                30_000,
+                &mut completed_cycle_recovery,
             ),
             "degraded",
             "once both cycles have run, incomplete coverage is the live verdict again"
@@ -4454,6 +4513,100 @@ mod tests {
         health.kline_topics_accepted = 2;
         health.ticker_topics_quarantined = 1;
         assert_eq!(runtime_status(&health, false, now_ms, 30_000), "degraded");
+        health.ticker_topics_quarantined = 0;
+        health.ticker_coverage_complete = false;
+        assert_eq!(runtime_status(&health, false, now_ms, 30_000), "degraded");
+    }
+
+    #[test]
+    fn transient_recovery_is_bounded_and_transport_failures_are_immediate() {
+        let started_at_ms = 1_000_000;
+        let mut health = StreamHealth {
+            connected: true,
+            gap_open: true,
+            last_frame_ts_ms: Some(started_at_ms + 59_999),
+            ticker_capacity: 2,
+            ticker_coverage_complete: false,
+            ticker_topics_accepted: 2,
+            kline_topics_accepted: 2,
+            ..StreamHealth::default()
+        };
+        let mut recovery_started_at_ms = None;
+
+        assert!(transient_recovery_acceptable(
+            &health,
+            true,
+            true,
+            &mut recovery_started_at_ms,
+            started_at_ms + 60_000,
+        ));
+        assert_eq!(recovery_started_at_ms, Some(started_at_ms + 60_000));
+        assert!(!transient_recovery_acceptable(
+            &health,
+            true,
+            true,
+            &mut recovery_started_at_ms,
+            started_at_ms + 60_000 + TRANSIENT_RECOVERY_MAX_MS,
+        ));
+
+        health.ticker_coverage_complete = true;
+        health.gap_open = false;
+        assert!(transient_recovery_acceptable(
+            &health,
+            false,
+            true,
+            &mut recovery_started_at_ms,
+            started_at_ms + 60_000 + TRANSIENT_RECOVERY_MAX_MS,
+        ));
+        assert_eq!(recovery_started_at_ms, None);
+
+        health.ticker_coverage_complete = false;
+        assert!(!transient_recovery_acceptable(
+            &health,
+            false,
+            false,
+            &mut recovery_started_at_ms,
+            started_at_ms + 60_000 + TRANSIENT_RECOVERY_MAX_MS,
+        ));
+        assert_eq!(recovery_started_at_ms, None);
+        assert!(stream_transport_healthy(
+            &health,
+            started_at_ms + 60_000,
+            180_000,
+        ));
+
+        health.gap_open = true;
+        health.last_frame_ts_ms = Some(started_at_ms + 59_999);
+        let cycles = [
+            (Some(started_at_ms + 59_000), 60_000),
+            (Some(started_at_ms + 59_000), 60_000),
+        ];
+        let mut heartbeat_recovery = None;
+        assert_eq!(
+            heartbeat_status(
+                &health,
+                true,
+                cycles,
+                started_at_ms - STARTUP_MAX_MS,
+                started_at_ms + 60_000,
+                180_000,
+                &mut heartbeat_recovery,
+            ),
+            "recovering"
+        );
+        health.last_frame_ts_ms = Some(started_at_ms + 60_000 + TRANSIENT_RECOVERY_MAX_MS - 1);
+        assert_eq!(
+            heartbeat_status(
+                &health,
+                true,
+                cycles,
+                started_at_ms - STARTUP_MAX_MS,
+                started_at_ms + 60_000 + TRANSIENT_RECOVERY_MAX_MS,
+                180_000,
+                &mut heartbeat_recovery,
+            ),
+            "degraded"
+        );
     }
 
     #[test]

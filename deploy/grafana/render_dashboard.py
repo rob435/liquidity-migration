@@ -231,13 +231,14 @@ def panels() -> list[Panel]:
             1,
             "Health",
             "One lane per fact, sampled every minute. Green is the good state: a readable heartbeat, "
-            "may_open true, the 24h loss breaker not tripped, a live recorder. A red minute is a real minute: "
-            "the sampler writes the line whether or not the engine is up.",
+            "may_open true, the 24h loss breaker not tripped, a healthy signal worker, a live recorder. A red "
+            "minute is a real minute: the sampler writes the line whether or not a producer is up.",
             _grid(0, y, 16, 8),
             [
                 (f"lm_engine_up{{{REALM}}}", "{{realm}} · engine heartbeat"),
                 (f"lm_engine_may_open{{{REALM}}}", "{{realm}} · may open"),
                 (f"1 - lm_engine_rolling_loss_tripped{{{REALM}}}", "{{realm}} · loss breaker clear"),
+                (f"lm_worker_status_healthy{{{REALM}}}", "{{realm}} · signal worker healthy"),
                 ("lm_recorder_up", "recorder {{realm}} · live"),
             ],
             on_text="ok",
@@ -425,6 +426,67 @@ def panels() -> list[Panel]:
     )
     y += 9
 
+    out.append(row(36, "Signal workers", y))
+    y += 1
+    out.append(
+        state_timeline(
+            37,
+            "Worker transport and verdict",
+            "The worker's own bounded verdict next to its raw transport facts. Starting is healthy while cold "
+            "fill is inside its bound; recovering is healthy for two minutes during a later gap, repair, or "
+            "coverage miss. Socket, topic quarantine, and spool faults remain immediate.",
+            _grid(0, y, 8, 8),
+            [
+                (f"lm_worker_up{{{REALM}}}", "{{realm}} · heartbeat"),
+                (f"lm_worker_status_healthy{{{REALM}}}", "{{realm}} · verdict"),
+                (f"lm_worker_ws_connected{{{REALM}}}", "{{realm}} · socket"),
+                (f"lm_worker_ticker_coverage_complete{{{REALM}}}", "{{realm}} · ticker coverage"),
+                (f"1 - lm_worker_spool_backpressured{{{REALM}}}", "{{realm}} · spool writable"),
+                (
+                    f"1 - clamp_max(lm_worker_ticker_topics_quarantined{{{REALM}}} + "
+                    f"lm_worker_kline_topics_quarantined{{{REALM}}}, 1)",
+                    "{{realm}} · topics clean",
+                ),
+            ],
+            on_text="ok",
+            off_text="NOT ok",
+        )
+    )
+    out.append(
+        timeseries(
+            38,
+            "Worker freshness and repair age",
+            "Heartbeat and last-frame age should stay low. Repair-gap age exists while causal history is being "
+            "closed; LONG and carry cycle age show whether reducers continue completing during that repair.",
+            _grid(8, y, 8, 8),
+            [
+                (f"lm_worker_heartbeat_age_ms{{{REALM}}}", "{{realm}} heartbeat"),
+                (f"lm_worker_ws_last_frame_age_ms{{{REALM}}}", "{{realm}} last frame"),
+                (f"lm_worker_ws_gap_age_ms{{{REALM}}}", "{{realm}} repair gap"),
+                (f"lm_worker_long_cycle_age_ms{{{REALM}}}", "{{realm}} LONG cycle"),
+                (f"lm_worker_carry_cycle_age_ms{{{REALM}}}", "{{realm}} carry cycle"),
+            ],
+            unit="ms",
+            legend_table=True,
+        )
+    )
+    out.append(
+        timeseries(
+            39,
+            "Worker queue and durable spool fill",
+            "Fraction of each bounded buffer in use. The WebSocket queue absorbs bursts; the durable spool holds "
+            "observations until the engine acknowledges them. One means the corresponding hard cap.",
+            _grid(16, y, 8, 8),
+            [
+                (f"lm_worker_ws_queue_fill{{{REALM}}}", "{{realm}} WebSocket queue"),
+                (f"lm_worker_spool_file_fill{{{REALM}}}", "{{realm}} spool files"),
+                (f"lm_worker_spool_byte_fill{{{REALM}}}", "{{realm}} spool bytes"),
+            ],
+            unit="percentunit",
+        )
+    )
+    y += 8
+
     out.append(row(40, "Engine", y))
     y += 1
     out.append(
@@ -552,7 +614,7 @@ def dashboard() -> dict[str, Any]:
         "title": "liquidity-migration fleet",
         "uid": "liqmig-fleet",
         "description": (
-            "The funded and demo engines and the tape recorders, sampled once a minute by "
+            "The funded and demo engines, signal workers, and tape recorders, sampled once a minute by "
             "scripts/runtime/record_equity.py. The JSONL under /var/lib/liquidity-migration/equity on the host "
             "is the record; this is a view. Rendered by deploy/grafana/render_dashboard.py."
         ),
