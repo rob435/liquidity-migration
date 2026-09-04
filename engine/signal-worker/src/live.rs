@@ -99,6 +99,10 @@ pub struct WorkerHeartbeat {
     pub bybit_ws_reconnect_count: u64,
     pub bybit_ws_fault_count: u64,
     pub bybit_ws_last_frame_ts_ms: Option<i64>,
+    /// The frame-age limit this worker applies to `bybit_ws_last_frame_ts_ms`
+    /// when it decides transport health, so a reader can name the clause that
+    /// failed instead of guessing the limit.
+    pub bybit_ws_max_frame_age_ms: i64,
     pub bybit_ws_ticker_rows: usize,
     pub bybit_ws_ticker_capacity: usize,
     pub bybit_ws_ticker_coverage_complete: bool,
@@ -2564,6 +2568,7 @@ impl LiveRunner {
             bybit_ws_reconnect_count: stream_health.reconnect_count,
             bybit_ws_fault_count: stream_health.fault_count,
             bybit_ws_last_frame_ts_ms: stream_health.last_frame_ts_ms,
+            bybit_ws_max_frame_age_ms: self.config.sources.mark_max_age_ms,
             bybit_ws_ticker_rows: stream_health.ticker_rows,
             bybit_ws_ticker_capacity: stream_health.ticker_capacity,
             bybit_ws_ticker_coverage_complete: stream_health.ticker_coverage_complete,
@@ -2663,6 +2668,7 @@ fn write_provisional_heartbeat(
         bybit_ws_reconnect_count: 0,
         bybit_ws_fault_count: 0,
         bybit_ws_last_frame_ts_ms: None,
+        bybit_ws_max_frame_age_ms: config.sources.mark_max_age_ms,
         bybit_ws_ticker_rows: 0,
         bybit_ws_ticker_capacity: ticker_capacity,
         bybit_ws_ticker_coverage_complete: false,
@@ -4489,6 +4495,50 @@ mod tests {
         );
 
         drop(stream);
+        drop(runner);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_heartbeat_publishes_the_frame_age_limit_it_judges_itself_by() {
+        // `stream_transport_healthy` decides `degraded` on the frame age and
+        // the kline topic count. A reader that cannot see the limit cannot
+        // name either clause, which is how an incident page ends up listing
+        // only the consequences.
+        let root = temporary_root("heartbeat-frame-limit");
+        let _ = std::fs::remove_dir_all(&root);
+        let options = LiveRunOptions {
+            state_dir: root.join("state"),
+            spool_dir: root.join("spool"),
+            heartbeat: root.join("heartbeat.json"),
+        };
+        let config = checked_demo_config();
+        let runner =
+            LiveRunner::new_with_universe(config.clone(), test_universe(), options).unwrap();
+        let health = StreamHealth {
+            connected: true,
+            epoch: 1,
+            last_frame_ts_ms: Some(100 * DAY_MS),
+            ticker_capacity: 517,
+            ticker_topics_accepted: 517,
+            kline_topics_accepted: 516,
+            ..StreamHealth::default()
+        };
+
+        runner.write_heartbeat("degraded", Some(health)).unwrap();
+
+        let payload: Value =
+            serde_json::from_slice(&std::fs::read(root.join("heartbeat.json")).unwrap()).unwrap();
+        assert_eq!(
+            payload["bybit_ws_max_frame_age_ms"],
+            Value::from(config.sources.mark_max_age_ms)
+        );
+        assert_eq!(
+            payload["bybit_ws_last_frame_ts_ms"],
+            Value::from(100 * DAY_MS)
+        );
+        assert_eq!(payload["bybit_ws_kline_topics_accepted"], Value::from(516));
+        assert_eq!(payload["bybit_ws_ticker_capacity"], Value::from(517));
         drop(runner);
         std::fs::remove_dir_all(root).unwrap();
     }

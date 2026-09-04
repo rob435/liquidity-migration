@@ -91,6 +91,7 @@ inaccessible after launch.
 - **Must** catch a disabled mainnet watchdog while the funded engine still runs.
 - **Must** fail closed when a known engine or signal worker publishes a fresh JSON object without its required health verdict.
 - **Must** treat a fresh but self-reported `degraded` signal-worker heartbeat as a fault after its bounded, transport-healthy startup or recovery and attach that worker's journal to the incident payload.
+- **Must** name, in a `degraded` signal-worker page, the transport input that decided the verdict: kline topics accepted against `bybit_ws_ticker_capacity`, and the frame age against the worker's own `bybit_ws_max_frame_age_ms`. The gap age and cycle lines are consequences; a page carrying only those cannot be diagnosed off-host.
 - **Must** let read-only incident diagnosis bypass the serialized queue for mutating VPS operations.
 - **Must** commit a sink's cooldown state only after that sink accepts delivery.
 - **Must** treat journals and fire payloads as untrusted evidence.

@@ -6,6 +6,86 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 ~17:58 UTC — Mainnet signal worker paged `degraded`; the page
+  could not name its own cause, and now does.**
+  - Incident `mainnet-014ec4a90a2fde5f`, scope `mainnet`, host
+    `ip-208-84-103-4`, ref
+    `worker-status:liquidity-migration-signal-worker-mainnet.service`. Exact
+    alert text: `CRITICAL liquidity-migration-signal-worker-mainnet.service
+    reports 'degraded': Bybit WebSocket repair gap open for 3651s; carry cycle
+    has not completed`. The funded engine was not named and did not page; no
+    unit was down, no heartbeat was stale, and the worker's own heartbeat was
+    fresh.
+  - Timeline from the payload's journal: the unit was restarted at 14:42:22,
+    16:00:56, 16:43:14 and 16:56:53 UTC. The last process (pid 2212679) logged
+    the hourly instrument-lane rejection summary at 16:57:00 and 17:56:59 and
+    nothing else. `bybit_ws_gap_open_since_wall_ts_ms` + 3651 s puts the page
+    at ~17:58 UTC, so the gap had been open since the 16:56:53 start — the boot
+    gap `SharedState::prepare_epoch` opens
+    (`engine/signal-worker/src/bybit_ws.rs:309`), which only
+    `mark_gap_repaired` closes, and that runs only once a repair finishes with
+    complete coverage (`engine/signal-worker/src/live.rs:1190`).
+  - Diagnosis. The verdict comes from `heartbeat_status`
+    (`engine/signal-worker/src/live.rs:2778`). With the carry cycle still
+    `None`, `startup_runtime_status`
+    (`engine/signal-worker/src/live.rs:2809`) returns `starting` — not
+    `degraded` — while transport is healthy and the process is inside
+    `STARTUP_MAX_MS` (120 min). The page came 61 min after start, so the
+    verdict proves `stream_transport_healthy`
+    (`engine/signal-worker/src/live.rs:2744`) was false at that heartbeat. Its
+    clauses split in two: the ones the page reports (connected, ticker
+    coverage, quarantine counts — all sound here) and two it does not — kline
+    topics accepted against the symbol count, and frame age against
+    `mark_max_age_ms` (30 000 ms, `configs/signal-worker.mainnet.json`). One of
+    those two flipped the worker, and the page named neither, so the on-call
+    routine could not reach the host-side fact. That gap in the incident lane
+    is the fault fixed here; the wobble itself is a host reading the routine
+    has no transport for.
+  - Changed. `WorkerHeartbeat` now publishes `bybit_ws_max_frame_age_ms`, the
+    limit the worker itself judges `bybit_ws_last_frame_ts_ms` by
+    (`engine/signal-worker/src/live.rs:105`, set in both heartbeat writers).
+    `_signal_worker_detail` in `scripts/runtime/check_fleet_liveness.py` now
+    reports, for a connected worker, `N/M kline topics accepted` when the
+    subscription is short, and `no Bybit WebSocket frame for Ns (limit Ns)`, a
+    missing frame stamp, or a future one. A disconnected worker keeps its
+    single line. No threshold, grace window, or health definition changed.
+  - Tests. `tests/scripts/test_scripts_check_fleet_liveness.py::test_degraded_worker_page_names_the_transport_input_that_decided_it`
+    rebuilds this incident's heartbeat; without the fix it fails with the
+    incident's exact message, `worker reports 'degraded': Bybit WebSocket
+    repair gap open for 300s; carry cycle has not completed`.
+    `live::tests::the_heartbeat_publishes_the_frame_age_limit_it_judges_itself_by`
+    fails when the limit is published as anything but `mark_max_age_ms`.
+  - Not the cause, for the next reader: the hourly `691 instrument row(s) left
+    out of the table (BTC-01DEC23: input: invalid symbol …)` and `40 ticker
+    row(s) …` lines are Bybit's dated futures being kept out of a perpetuals
+    table by design (`engine/signal-worker/src/normalize.rs:136`). They are
+    two-thirds of the payload's 40 journal lines and carry no fault.
+  - Owner action, on the host. The minute samples already hold the reading the
+    page lacked — `worker_sample` records `ws_last_frame_age_ms` and
+    `kline_topics_accepted` (`scripts/runtime/record_equity.py:251`), and
+    `scripts/ops.sh curve mainnet` reads only the engine file, so read the
+    worker file directly:
+
+    ```bash
+    # What the transport did through the incident hour, minute by minute.
+    grep '"kind": *"worker"' \
+      /var/lib/liquidity-migration/equity/worker-mainnet-$(date -u +%Y-%m).jsonl \
+      | jq -c 'select(.ts_ms >= 1788537600000 and .ts_ms <= 1788544800000)
+               | {t: (.ts_ms/1000 | strftime("%H:%M")), status, ws_connected,
+                  ws_last_frame_age_ms, kline_topics_accepted, ticker_capacity,
+                  ws_gap_age_ms, carry_cycle_age_ms}'
+
+    # And the account through the same window.
+    scripts/ops.sh curve mainnet
+    ```
+
+    A `ws_last_frame_age_ms` above 30 000 names a frame drought;
+    `kline_topics_accepted` below `ticker_capacity` names a short
+    subscription. Nothing needs restarting for this fix: it changes only what
+    the next page says. Four restarts in two hours on a two-hour cold-fill
+    window is its own question — each restart resets the carry cycle to `None`
+    and reopens the boot gap.
+
 - **2026-09-04 18:17 UTC — Fleet observability is live; on-call delivery works,
   but GitHub billing blocks autonomous host action.**
   - The host writes six local JSONL samples before each remote push. Three

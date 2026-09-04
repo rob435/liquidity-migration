@@ -206,6 +206,64 @@ def test_incomplete_ticker_coverage_says_how_short_the_fill_is(tmp_path: Path) -
     assert "ticker coverage incomplete" in alerts[0].message
 
 
+def test_degraded_worker_page_names_the_transport_input_that_decided_it(tmp_path: Path) -> None:
+    # The worker's own verdict is degraded only while transport is unhealthy,
+    # and a bounded cold fill (carry cycle still None) makes the gap and cycle
+    # lines say nothing about which transport clause failed.
+    heartbeat = tmp_path / "heartbeat.json"
+    payload = {
+        "kind": "liquidity_migration_signal_worker_heartbeat",
+        "status": "degraded",
+        "updated_at_ms": 1_000_000,
+        "bybit_ws_connected": True,
+        "bybit_ws_gap_open": True,
+        "bybit_ws_gap_open_since_wall_ts_ms": 700_000,
+        "bybit_ws_ticker_coverage_complete": True,
+        "bybit_ws_ticker_capacity": 517,
+        "bybit_ws_ticker_topics_accepted": 517,
+        "bybit_ws_ticker_topics_quarantined": 0,
+        "bybit_ws_kline_topics_accepted": 516,
+        "bybit_ws_kline_topics_quarantined": 0,
+        "bybit_ws_last_frame_ts_ms": 953_000,
+        "bybit_ws_max_frame_age_ms": 30_000,
+        "last_long_cycle_completed_wall_ts_ms": 990_000,
+        "last_carry_cycle_completed_wall_ts_ms": None,
+        "long_cycle_cadence_ms": 60_000,
+        "carry_cycle_cadence_ms": 60_000,
+    }
+    heartbeat.write_text(json.dumps(payload))
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert [alert.key for alert in alerts] == ["worker-status:worker"]
+    assert "516/517 kline topics accepted" in alerts[0].message
+    assert "no Bybit WebSocket frame for 47s (limit 30s)" in alerts[0].message
+    assert "carry cycle has not completed" in alerts[0].message
+
+    # A sound transport says nothing extra, so the page stays about the lane.
+    healthy_transport = dict(
+        payload,
+        bybit_ws_kline_topics_accepted=517,
+        bybit_ws_last_frame_ts_ms=999_000,
+    )
+    heartbeat.write_text(json.dumps(healthy_transport))
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert "kline topics accepted" not in alerts[0].message
+    assert "WebSocket frame" not in alerts[0].message
+
+    # An absent or future frame stamp is named rather than read as fresh.
+    heartbeat.write_text(json.dumps(dict(healthy_transport, bybit_ws_last_frame_ts_ms=None)))
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert "no Bybit WebSocket frame recorded" in alerts[0].message
+    heartbeat.write_text(json.dumps(dict(healthy_transport, bybit_ws_last_frame_ts_ms=1_000_001)))
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert "Bybit WebSocket frame timestamp is in the future" in alerts[0].message
+
+    # A disconnected stream keeps its one line; the clauses below it are moot.
+    heartbeat.write_text(json.dumps(dict(payload, bybit_ws_connected=False)))
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert "Bybit WebSocket disconnected" in alerts[0].message
+    assert "kline topics accepted" not in alerts[0].message
+
+
 def test_signal_worker_unknown_status_fails_closed(tmp_path: Path) -> None:
     heartbeat = tmp_path / "heartbeat.json"
     heartbeat.write_text(

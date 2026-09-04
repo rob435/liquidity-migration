@@ -218,10 +218,39 @@ def _rolling_loss_detail(payload: dict[str, object]) -> str:
     return f"own closed trades lost {abs(net):.2f} USDT inside {window} against a {limit:.2f} USDT limit"
 
 
+def _transport_reasons(payload: dict[str, object], *, now: float) -> list[str]:
+    """The transport inputs the worker's own verdict turns on that no other
+    line reports: a kline subscription short of the symbol count, and a frame
+    drought. Either one alone flips a bounded cold fill to ``degraded``."""
+
+    reasons: list[str] = []
+    accepted = _number(payload.get("bybit_ws_kline_topics_accepted"))
+    capacity = _number(payload.get("bybit_ws_ticker_capacity"))
+    if accepted is not None and capacity is not None and accepted != capacity:
+        reasons.append(f"{accepted:g}/{capacity:g} kline topics accepted")
+    last_frame_ms = _number(payload.get("bybit_ws_last_frame_ts_ms"))
+    if last_frame_ms is None:
+        reasons.append("no Bybit WebSocket frame recorded")
+        return reasons
+    limit_ms = _number(payload.get("bybit_ws_max_frame_age_ms"))
+    written_ms = _number(payload.get("updated_at_ms"))
+    clock_ms = written_ms if written_ms else now * 1000
+    age_ms = clock_ms - last_frame_ms
+    if age_ms < 0:
+        reasons.append("Bybit WebSocket frame timestamp is in the future")
+    elif limit_ms is not None and age_ms > limit_ms:
+        reasons.append(
+            f"no Bybit WebSocket frame for {age_ms / 1000:.0f}s (limit {limit_ms / 1000:.0f}s)"
+        )
+    return reasons
+
+
 def _signal_worker_detail(payload: dict[str, object], *, now: float) -> str:
     reasons: list[str] = []
     if payload.get("bybit_ws_connected") is not True:
         reasons.append("Bybit WebSocket disconnected")
+    else:
+        reasons.extend(_transport_reasons(payload, now=now))
     if payload.get("bybit_ws_gap_open") is True:
         since_ms = _number(payload.get("bybit_ws_gap_open_since_wall_ts_ms"))
         if since_ms is None:
