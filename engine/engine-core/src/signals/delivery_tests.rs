@@ -33,6 +33,214 @@ fn write(feed: &SpoolSignalFeed, row: &SignalObservation) -> PathBuf {
     path
 }
 
+fn available_at(mut observation: SignalObservation, wall_ms: i64) -> SignalObservation {
+    observation.available_wall_ts_ms = wall_ms;
+    observation.content_sha256 = content_sha256(&observation);
+    observation
+}
+
+#[tokio::test]
+async fn future_availability_channel_keeps_the_row_and_serves_ready_destinations() {
+    let _clock = engine_types::clock::install_virtual(1_000_000_000, 0).unwrap();
+    let (sender, mut feed) = signal_channel();
+    let future = available_at(row("future", 1), 1_100);
+    let mut ready = row("ready", 1);
+    ready.destination = StrategyId(1);
+    ready.content_sha256 = content_sha256(&ready);
+    sender.try_send(future.clone()).unwrap();
+    sender.try_send(ready.clone()).unwrap();
+    assert_eq!(feed.next_observation().await.unwrap(), ready);
+    feed.acknowledge_last().unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), feed.next_observation())
+            .await
+            .is_err()
+    );
+    assert_eq!(feed.0.lock().ordinary_rows, 1);
+    assert!(feed.0.lock().outstanding.is_none());
+    engine_types::clock::advance_virtual_to(200_000_000).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(200), feed.next_observation())
+            .await
+            .unwrap()
+            .unwrap(),
+        future
+    );
+    feed.acknowledge_last().unwrap();
+    assert_eq!(feed.0.lock().ordinary_rows, 0);
+}
+
+#[tokio::test]
+async fn future_availability_spool_prefix_wait_is_cancel_safe_and_does_not_block_ready_rows() {
+    let _clock = engine_types::clock::install_virtual(1_000_000_000, 0).unwrap();
+    let directory = crate::testpath::temp_path("signal-future-prefix");
+    std::fs::create_dir(directory.path()).unwrap();
+    let mut feed =
+        SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_secs(30));
+    let future = available_at(row("future", 1), 1_100);
+    let future_path = write(&feed, &future);
+    let mut ready = row("ready", 1);
+    ready.destination = StrategyId(1);
+    ready.content_sha256 = content_sha256(&ready);
+    write(&feed, &ready);
+    feed.set_gap_requests(&[request("future", 1)], &[StrategyId(0)])
+        .unwrap();
+    assert_eq!(feed.next_observation().await.unwrap(), ready);
+    feed.acknowledge_last().unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), feed.next_observation())
+            .await
+            .is_err()
+    );
+    assert!(future_path.exists());
+    assert!(feed.returned.is_none());
+    engine_types::clock::advance_virtual_to(200_000_000).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), feed.next_observation())
+            .await
+            .unwrap()
+            .unwrap(),
+        future
+    );
+    assert!(future_path.exists());
+}
+
+#[tokio::test]
+async fn future_availability_spool_wakes_at_the_earliest_eligible_timestamp() {
+    let _clock = engine_types::clock::install_virtual(1_000_000_000, 0).unwrap();
+    let directory = crate::testpath::temp_path("signal-availability-deadline");
+    std::fs::create_dir(directory.path()).unwrap();
+    let mut feed =
+        SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_secs(30));
+    let later = available_at(row("later", 1), 1_500);
+    let earlier = available_at(row("earlier", 2), 1_100);
+    write(&feed, &later);
+    write(&feed, &earlier);
+    let receive = async {
+        let observation = tokio::time::timeout(Duration::from_secs(2), feed.next_observation())
+            .await
+            .expect("availability wakes the reader without another poll interval or doorbell")
+            .unwrap();
+        (observation, crate::clock::wall_ms())
+    };
+    let clock = async {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        engine_types::clock::advance_virtual_to(100_000_000).unwrap();
+    };
+    let ((received, delivered_ms), ()) = tokio::join!(receive, clock);
+    assert_eq!(received, earlier);
+    assert!(delivered_ms >= received.available_wall_ts_ms);
+    assert!(feed.path_for(&later).exists());
+}
+
+#[tokio::test]
+async fn future_availability_channel_wakes_without_another_send() {
+    let _clock = engine_types::clock::install_virtual(1_000_000_000, 0).unwrap();
+    let (sender, mut feed) = signal_channel();
+    let expected = available_at(row("future", 1), 1_100);
+    sender.try_send(expected.clone()).unwrap();
+    let receive = async {
+        let observation = tokio::time::timeout(Duration::from_secs(2), feed.next_observation())
+            .await
+            .expect("availability wakes the channel without another sender notification")
+            .unwrap();
+        (observation, crate::clock::wall_ms())
+    };
+    let clock = async {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        engine_types::clock::advance_virtual_to(100_000_000).unwrap();
+    };
+    let ((received, delivered_ms), ()) = tokio::join!(receive, clock);
+    assert_eq!(received, expected);
+    assert!(delivered_ms >= received.available_wall_ts_ms);
+}
+
+#[tokio::test]
+async fn future_availability_channel_rechecks_wall_time_after_its_timer_fires() {
+    let mut clock = Some(engine_types::clock::install_virtual(1_000_000_000, 0).unwrap());
+    let (sender, mut feed) = signal_channel();
+    let expected = available_at(row("future", 1), 1_050);
+    sender.try_send(expected.clone()).unwrap();
+    let receive =
+        async { tokio::time::timeout(Duration::from_millis(100), feed.next_observation()).await };
+    let correct_clock = async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        drop(clock.take());
+        clock = Some(engine_types::clock::install_virtual(900_000_000, 0).unwrap());
+    };
+    let (result, ()) = tokio::join!(receive, correct_clock);
+    assert!(result.is_err(), "the original monotonic deadline cannot authorize early delivery after a wall-clock rollback");
+    assert!(feed.0.lock().outstanding.is_none());
+    assert_eq!(feed.0.lock().ordinary_rows, 1);
+    engine_types::clock::advance_virtual_to(150_000_000).unwrap();
+    assert_eq!(feed.next_observation().await.unwrap(), expected);
+}
+
+#[tokio::test]
+async fn future_availability_cannot_reserve_the_only_channel_recovery_slot() {
+    let _clock = engine_types::clock::install_virtual(1_000_000_000, 0).unwrap();
+    let (sender, mut feed) = signal_channel();
+    for sequence in 2..=(SIGNAL_CHANNEL_CAPACITY as u64 + 1) {
+        sender.try_send(row("future", sequence)).unwrap();
+    }
+    feed.set_gap_requests(
+        &[request("future", 1), request("ready", 1)],
+        &[StrategyId(0)],
+    )
+    .unwrap();
+    let missing = available_at(row("future", 1), 1_100);
+    let refused = sender.try_send(missing.clone()).unwrap_err();
+    assert!(matches!(&refused, SignalSendError::Full(_)));
+    let missing = refused.into_inner();
+    assert_eq!(feed.0.lock().ordinary_rows, SIGNAL_CHANNEL_CAPACITY);
+    assert!(!feed.0.lock().recovery_used);
+    let ready = row("ready", 1);
+    sender.try_send(ready.clone()).unwrap();
+    assert_eq!(feed.next_observation().await.unwrap(), ready);
+    assert!(feed.0.lock().recovery_used);
+    feed.acknowledge_last().unwrap();
+    assert!(!feed.0.lock().recovery_used);
+    engine_types::clock::advance_virtual_to(100_000_000).unwrap();
+    sender.try_send(missing.clone()).unwrap();
+    assert_eq!(feed.next_observation().await.unwrap(), missing);
+    assert!(feed.0.lock().recovery_used);
+    feed.acknowledge_last().unwrap();
+    assert!(!feed.0.lock().recovery_used);
+    assert_eq!(feed.0.lock().ordinary_rows, SIGNAL_CHANNEL_CAPACITY);
+}
+
+#[tokio::test]
+async fn future_availability_cancelled_scan_rechecks_a_backward_clock_correction() {
+    let directory = crate::testpath::temp_path("signal-availability-clock-rollback");
+    std::fs::create_dir(directory.path()).unwrap();
+    let mut feed =
+        SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_secs(30));
+    let expected = available_at(row("source", 1), 1_000);
+    let path = write(&feed, &expected);
+    let mut scanner = feed.scanner.take().unwrap();
+    let directory_path = directory.path().to_owned();
+    feed.selection = Some(tokio::task::spawn_blocking(move || {
+        let selected = scanner.select(&directory_path, &[], &[], 1_000);
+        (scanner, Vec::new(), Vec::new(), selected)
+    }));
+    let _clock = engine_types::clock::install_virtual(900_000_000, 0).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), feed.next_observation())
+            .await
+            .is_err()
+    );
+    assert!(path.exists());
+    assert!(feed.returned.is_none());
+    engine_types::clock::advance_virtual_to(100_000_000).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), feed.next_observation())
+            .await
+            .unwrap()
+            .unwrap(),
+        expected
+    );
+}
+
 #[tokio::test]
 async fn only_explicit_acknowledgement_can_retire_a_spool_row() {
     let directory = crate::testpath::temp_path("signal-explicit-ack");
@@ -119,7 +327,7 @@ fn bounded_spool_pages_find_catchup_beyond_a_saturated_metadata_cache() {
     let gaps = vec![request("future", 1)];
     let mut scanner = SpoolScanner::default();
     assert!(scanner
-        .select(directory.path(), &gaps, &[])
+        .select(directory.path(), &gaps, &[], 1_000)
         .unwrap()
         .is_none());
     assert_eq!(scanner.deferred.len(), SPOOL_METADATA_CAPACITY);
@@ -133,17 +341,25 @@ fn bounded_spool_pages_find_catchup_beyond_a_saturated_metadata_cache() {
     write(&feed, &independent);
     assert_eq!(
         scanner
-            .select(directory.path(), &gaps, &[])
+            .select(directory.path(), &gaps, &[], 1_000)
             .unwrap()
             .unwrap()
             .1,
         independent
     );
-    let missing = row("future", 1);
+    let missing = available_at(row("future", 1), 1_100);
     write(&feed, &missing);
     assert_eq!(
         scanner
-            .select(directory.path(), &gaps, &[])
+            .select(directory.path(), &gaps, &[], 1_000)
+            .unwrap()
+            .unwrap()
+            .1,
+        independent
+    );
+    assert_eq!(
+        scanner
+            .select(directory.path(), &gaps, &[], 1_100)
             .unwrap()
             .unwrap()
             .1,

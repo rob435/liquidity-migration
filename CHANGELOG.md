@@ -6,6 +6,33 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 22:27 UTC — Keep future signal rows in their source until availability (isolated local checkpoint).**
+  - Live channel and disk-spool selection wait for `available_wall_ts_ms`,
+    including requested missing prefixes, while other ready destinations
+    continue. Availability deadlines wake without another send or a long spool
+    poll. Cancelled waits preserve ownership; scans receive the engine clock
+    explicitly and recheck time on return. Core admission checks time both
+    before subscription admission and immediately before WAL acceptance.
+  - A future prefix may use ordinary channel capacity but cannot occupy the
+    sole recovery slot while a ready missing prefix needs it. Refusal returns
+    ownership to the sender. Source rows remain immutable and unacknowledged
+    until durable acceptance; no signal WAL schema changes.
+  - Eleven availability regressions cover independent destinations, exact
+    prefixes, full channel/cache recovery, virtual live/replay parity, wake
+    deadlines and clock corrections during scanning and symbol admission.
+    Three initial negative controls and a separate recovery-slot counterexample
+    fail before their corresponding fixes.
+  - On this isolated branch, explicit Rust 1.90 passes 1,786 workspace/all-target
+    debug tests (five existing opt-in skips), 575 optimized engine-core tests,
+    strict workspace/all-target Clippy and formatting. All 1,499 Python tests,
+    Ruff and mypy over 100 files pass. These results include this round's timer
+    and p99.9 changes; concurrent shared-main refactors are excluded.
+  - Accepted-but-unconsumed capacity, consumer-fault handling and a producer
+    readiness handshake remain open. Custom feeds must honor deferral to avoid
+    polling loops; the core independently prevents early acceptance. The round
+    ends with local checkpoints, without integration into the shared checkout,
+    push, deployment, capital changes or live WAL migration.
+
 - **2026-09-04 22:16 UTC — Carry measured p99.9 through local latency reports.**
   - The existing HDR histograms now report p99.9 in benchmark JSON/tables,
     heartbeat output, optional WAL summary fields, replay text, the equity

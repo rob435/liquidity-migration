@@ -104,8 +104,10 @@ impl SignalSender {
         }
         let ordinary = state.ordinary_rows < SIGNAL_CHANNEL_CAPACITY
             && state.ordinary_bytes.saturating_add(bytes) <= SIGNAL_CHANNEL_BYTES;
-        let recovery =
-            !ordinary && !state.recovery_used && signal_requested(&state.gaps, &observation);
+        let recovery = !ordinary
+            && !state.recovery_used
+            && signal_requested(&state.gaps, &observation)
+            && signal_available(&observation, crate::clock::wall_ms());
         if ordinary {
             state.ordinary_rows += 1;
             state.ordinary_bytes += bytes;
@@ -179,20 +181,29 @@ impl SignalFeed for SignalReceiver {
             let changed = self.0.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            {
+            let next_available = {
                 let mut state = self.0.lock();
                 if state.outstanding.is_some() {
                     return Err(protocol_error(
                         "previous row was neither acknowledged nor deferred",
                     ));
                 }
+                let wall_ms = crate::clock::wall_ms();
                 let index = state
                     .queued
                     .iter()
-                    .position(|(observation, _)| signal_requested(&state.gaps, observation))
+                    .position(|(observation, _)| {
+                        signal_available(observation, wall_ms)
+                            && signal_requested(&state.gaps, observation)
+                    })
                     .or_else(|| {
                         state.queued.iter().position(|(observation, _)| {
-                            signal_eligible(&state.gaps, &state.blocked_destinations, observation)
+                            signal_available(observation, wall_ms)
+                                && signal_eligible(
+                                    &state.gaps,
+                                    &state.blocked_destinations,
+                                    observation,
+                                )
                         })
                     });
                 if let Some(index) = index {
@@ -208,8 +219,23 @@ impl SignalFeed for SignalReceiver {
                 if state.senders == 0 && state.queued.is_empty() {
                     return Err(SignalError::Closed);
                 }
+                state
+                    .queued
+                    .iter()
+                    .filter(|(observation, _)| {
+                        signal_eligible(&state.gaps, &state.blocked_destinations, observation)
+                    })
+                    .map(|(observation, _)| observation.available_wall_ts_ms)
+                    .min()
+            };
+            if let Some(available_ms) = next_available {
+                tokio::select! {
+                    _ = changed => {},
+                    _ = tokio::time::sleep(availability_wait(available_ms, crate::clock::wall_ms())) => {},
+                }
+            } else {
+                changed.await;
             }
-            changed.await;
         }
     }
 }

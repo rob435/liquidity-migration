@@ -17,6 +17,7 @@ Record the verified execution boundaries, unresolved defects, and implementation
 | Remote metadata | GitHub branch API reports `protected=false`; current head signature `valid`; handoff head `unsigned`; ruleset API returns HTTP 403 requiring a plan upgrade/public repository |
 | Production | No host, account, live WAL, credentials, or running deployment inspected or changed; `STATE.md` remains a historical operational snapshot, not evidence from this audit |
 | Checkpoints | Local commits only; validation receipts belong in `CHANGELOG.md` |
+| Current working scope | `codex/tier1-runtime-fairness`, based on `15c60924`; this round's timer, p99.9 and signal-availability checks exclude concurrent refactors in the shared `main` checkout; integration requires fresh verification |
 | Qualified local artifact | `15c60924abfb9f5c7848b7ee7b4c5853f2b932d3`; actual Rust 1.90/macOS ARM release tests, soak, local benchmark, smoke checks and unchanged-byte packaging pass; [hashes and workload results](tier1-release-qualification.json). Subsequent changes require their own verification |
 | Source notation | Rust crate paths below are relative to `engine/` |
 
@@ -92,12 +93,13 @@ the Cargo 1.90/Rust 1.97 series also has a higher candidate saturation median.
 | Feed acknowledgement | A returned spool row is retired only after explicit durable-acceptance/duplicate acknowledgement. Deferral keeps it on disk; cancellation of reads and deletion preserves their handles |
 | Prefix | The accepted cursor advances only through a contiguous source/generation prefix; buffered rows never become accepted merely through replay |
 | Saturation | Missing prefix rows remain retrievable when count/byte limits are full; restarting a full durable inbox is not a recovery mechanism |
+| Availability | Live channel, spool and replay wait for `available_wall_ts_ms`; ready destinations remain selectable. Future rows cannot borrow the channel's sole recovery slot. Cancelled waits retain ownership, scans carry the engine clock explicitly, and core rechecks availability before WAL acceptance |
 | Scope | Named strategy input dependencies resolve once at boot and cover entry placement, opening amend, existing opening orders, queued actions and other source/generation delivery. Native Exodus declares its CARRY dependency; independent destinations remain usable |
 | Generation | A new source generation must not silently clear an older known gap for its dependent strategy; legacy accepted-gap cursors cannot reconstruct erased history |
 | Exits | Private updates, account recovery, stop maintenance, cancel and genuine reductions remain serviceable during a gap |
 | Replay | The producer's immutable spool retains deferred payloads; WAL retains accepted inputs, cursors, routes and gap high-water marks. `segment_base_v2` requires gap state; cursor/route/subscription inconsistencies fail boot. Existing callbacks are at-least-once across crashes |
 | Compatibility | New readers accept legacy WAL. Older readers must refuse a new required gap/inbox record or versioned rotation, rather than ignore optional state. The current WAL decoder already rejects checksum-valid unknown records without truncating them |
-| Remaining limits | Known gaps are enforced; a producer-readiness handshake before boot-restored actions and capacity/backpressure for accepted unconsumed observations remain open. No automatic waiver or live state migration is implemented |
+| Remaining limits | Known gaps and future-availability boundaries are enforced. A malformed native payload or a no-op consumer can still leave an accepted observation retained; consumer-fault handling, accepted-input backpressure and a producer-readiness handshake before boot-restored actions remain open. No automatic waiver or live state migration is implemented |
 
 ## Invariants
 

@@ -43,6 +43,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.host.strategies.len()
             )));
         }
+        if !crate::signals::signal_available(&observation, clock::wall_ms()) {
+            return feed
+                .defer_last(observation)
+                .map_err(|error| EngineError::State(error.to_string()));
+        }
         let admission = self
             .signals
             .classify(&observation)
@@ -145,6 +150,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let observations = std::mem::take(&mut self.pending_signal_deliveries);
         let now = clock::now_ns();
         for observation in observations {
+            // Symbol admission can yield while wall time is corrected.
+            if !crate::signals::signal_available(&observation, clock::wall_ms()) {
+                feed.defer_last(observation)
+                    .map_err(|error| EngineError::State(error.to_string()))?;
+                continue;
+            }
             for subscription in &observation.subscriptions {
                 let Some(symbol) = self.books.market.table.get(&subscription.symbol) else {
                     return Err(EngineError::State(format!(
@@ -181,9 +192,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 &EngineEvent::Signal(observation),
                 now,
             );
+            feed.acknowledge_last()
+                .map_err(|error| EngineError::State(error.to_string()))?;
         }
-        feed.acknowledge_last()
-            .map_err(|error| EngineError::State(error.to_string()))?;
         self.update_signal_requests(feed)?;
         Ok(())
     }

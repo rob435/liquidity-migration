@@ -115,6 +115,17 @@ pub(crate) fn signal_requested(gaps: &[SignalGapRequest], observation: &SignalOb
     requested_sequence(gaps, &observation.source) == Some(observation.sequence)
 }
 
+pub(crate) fn signal_available(observation: &SignalObservation, wall_ms: i64) -> bool {
+    observation.available_wall_ts_ms <= wall_ms
+}
+
+fn availability_wait(available_ms: i64, wall_ms: i64) -> Duration {
+    // Monotonic timers cannot observe wall-clock corrections. Recheck long
+    // waits without changing the timestamp required for delivery.
+    Duration::from_millis(available_ms.saturating_sub(wall_ms).max(0) as u64)
+        .min(Duration::from_secs(1))
+}
+
 fn retained_bytes(observation: &SignalObservation) -> usize {
     std::mem::size_of::<SignalObservation>()
         .saturating_add(observation.payload.capacity())
@@ -145,6 +156,7 @@ struct DeliveryIdentity {
     source: String,
     sequence: u64,
     content_sha256: String,
+    available_wall_ts_ms: i64,
 }
 
 impl DeliveryIdentity {
@@ -154,6 +166,7 @@ impl DeliveryIdentity {
             source: observation.source.clone(),
             sequence: observation.sequence,
             content_sha256: observation.content_sha256.clone(),
+            available_wall_ts_ms: observation.available_wall_ts_ms,
         }
     }
 
@@ -162,6 +175,7 @@ impl DeliveryIdentity {
             && self.source == observation.source
             && self.sequence == observation.sequence
             && self.content_sha256 == observation.content_sha256
+            && self.available_wall_ts_ms == observation.available_wall_ts_ms
     }
 }
 

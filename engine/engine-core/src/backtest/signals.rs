@@ -192,6 +192,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn future_availability_live_channel_and_replay_share_virtual_time() {
+        let _clock = engine_types::clock::install_virtual(2_000_000, 2_000_000).unwrap();
+        let scheduler = Scheduler::starting_at(2_000_000);
+        scheduler.open();
+        let missing = row("gap", 1, 4);
+        let mut ready = row("independent", 1, 2);
+        ready.destination = StrategyId(1);
+        ready.content_sha256 = crate::signals::content_sha256(&ready);
+        let mut replay = SignalReplayFeed {
+            observations: vec![Some(ready.clone()), Some(missing.clone())],
+            outstanding: None,
+            gaps: Vec::new(),
+            blocked_destinations: Vec::new(),
+            scheduler: scheduler.clone(),
+        };
+        let (sender, mut live) = crate::signals::signal_channel();
+        sender.try_send(missing.clone()).unwrap();
+        sender.try_send(ready.clone()).unwrap();
+        let gaps = [SignalGapRequest {
+            source: "gap".into(),
+            next_sequence: 1,
+        }];
+        replay.set_gap_requests(&gaps, &[StrategyId(0)]).unwrap();
+        live.set_gap_requests(&gaps, &[StrategyId(0)]).unwrap();
+        assert_eq!(replay.next_observation().await.unwrap(), ready);
+        assert_eq!(live.next_observation().await.unwrap(), ready);
+        replay.acknowledge_last().unwrap();
+        live.acknowledge_last().unwrap();
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(5),
+            replay.next_observation()
+        )
+        .await
+        .is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(5), live.next_observation())
+                .await
+                .is_err()
+        );
+        assert_eq!(crate::clock::wall_ms(), 2);
+        assert!(scheduler.earliest_pending(&[WaiterKind::Signal]).is_none());
+        scheduler.advance_to(4_000_000);
+        assert_eq!(crate::clock::wall_ms(), 4);
+        assert_eq!(replay.next_observation().await.unwrap(), missing);
+        assert_eq!(live.next_observation().await.unwrap(), missing);
+        replay.acknowledge_last().unwrap();
+        live.acknowledge_last().unwrap();
+    }
+
+    #[tokio::test]
     async fn replay_defer_and_cancellation_preserve_availability_and_exact_catchup() {
         let scheduler = Scheduler::starting_at(2_000_000);
         scheduler.open();

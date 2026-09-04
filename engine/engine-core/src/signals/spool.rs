@@ -8,7 +8,7 @@ use super::*;
 /// disk cannot stall private-order or market processing on the core thread.
 pub struct SpoolSignalFeed {
     directory: PathBuf,
-    returned: Option<(PathBuf, DeliveryIdentity)>,
+    pub(super) returned: Option<(PathBuf, DeliveryIdentity)>,
     acknowledged: Option<PathBuf>,
     pub(super) retirement: Option<tokio::task::JoinHandle<Result<(), SignalError>>>,
     pub(super) scanner: Option<SpoolScanner>,
@@ -32,9 +32,17 @@ type ScanResult = (
 #[derive(Default)]
 pub(super) struct SpoolScanner {
     pub(super) deferred: BTreeMap<PathBuf, DeliveryIdentity>,
+    next_available_ms: Option<i64>,
 }
 
 impl SpoolScanner {
+    fn wait_until(&mut self, available_ms: i64) {
+        self.next_available_ms = Some(
+            self.next_available_ms
+                .map_or(available_ms, |known| known.min(available_ms)),
+        );
+    }
+
     fn remember(&mut self, path: PathBuf, observation: &SignalObservation) {
         if !self.deferred.contains_key(&path) && self.deferred.len() == SPOOL_METADATA_CAPACITY {
             self.deferred.pop_first();
@@ -84,6 +92,7 @@ impl SpoolScanner {
         gaps: &[SignalGapRequest],
         blocked_destinations: &[StrategyId],
         exact: bool,
+        wall_ms: i64,
     ) -> Result<SelectedRow, SignalError> {
         let sequences = exact.then(|| {
             gaps.iter()
@@ -112,6 +121,10 @@ impl SpoolScanner {
                     {
                         continue;
                     }
+                    if known.available_wall_ts_ms > wall_ms {
+                        self.wait_until(known.available_wall_ts_ms);
+                        continue;
+                    }
                 }
                 let Some(observation) = SpoolSignalFeed::read_one(&path)? else {
                     self.deferred.remove(&path);
@@ -122,9 +135,12 @@ impl SpoolScanner {
                 } else {
                     signal_eligible(gaps, blocked_destinations, &observation)
                 };
-                if eligible {
+                if eligible && signal_available(&observation, wall_ms) {
                     self.deferred.remove(&path);
                     return Ok(Some((path, observation)));
+                }
+                if eligible {
+                    self.wait_until(observation.available_wall_ts_ms);
                 }
                 self.remember(path, &observation);
             }
@@ -136,13 +152,17 @@ impl SpoolScanner {
         directory: &Path,
         gaps: &[SignalGapRequest],
         blocked_destinations: &[StrategyId],
+        wall_ms: i64,
     ) -> Result<SelectedRow, SignalError> {
+        self.next_available_ms = None;
         if !gaps.is_empty() {
-            if let Some(row) = self.select_pass(directory, gaps, blocked_destinations, true)? {
+            if let Some(row) =
+                self.select_pass(directory, gaps, blocked_destinations, true, wall_ms)?
+            {
                 return Ok(Some(row));
             }
         }
-        self.select_pass(directory, gaps, blocked_destinations, false)
+        self.select_pass(directory, gaps, blocked_destinations, false, wall_ms)
     }
 }
 
@@ -342,7 +362,18 @@ impl SignalFeed for SpoolSignalFeed {
         self.retire_acknowledged().await?;
         loop {
             if self.selection.is_none() {
-                tokio::time::sleep_until(self.next_scan).await;
+                let mut deadline = self.next_scan;
+                if let Some(available_ms) = self
+                    .scanner
+                    .as_ref()
+                    .and_then(|scanner| scanner.next_available_ms)
+                {
+                    deadline = deadline.min(
+                        tokio::time::Instant::now()
+                            + availability_wait(available_ms, crate::clock::wall_ms()),
+                    );
+                }
+                tokio::time::sleep_until(deadline).await;
                 let mut scanner = self
                     .scanner
                     .take()
@@ -350,9 +381,13 @@ impl SignalFeed for SpoolSignalFeed {
                 let directory = self.directory.clone();
                 let gaps = self.gaps.clone();
                 let blocked_destinations = self.blocked_destinations.clone();
+                // The engine's virtual clock is thread-local, so the blocking
+                // pool must receive this reading rather than sampling its own.
+                let wall_ms = crate::clock::wall_ms();
                 self.scan_generation = self.wake_generation;
                 self.selection = Some(tokio::task::spawn_blocking(move || {
-                    let selected = scanner.select(&directory, &gaps, &blocked_destinations);
+                    let selected =
+                        scanner.select(&directory, &gaps, &blocked_destinations, wall_ms);
                     (scanner, gaps, blocked_destinations, selected)
                 }));
             }
@@ -374,8 +409,10 @@ impl SignalFeed for SpoolSignalFeed {
                 continue;
             }
             if let Some((path, observation)) = selected {
-                // A cancelled poll may have been followed by a new gap policy.
-                if !signal_eligible(&self.gaps, &self.blocked_destinations, &observation) {
+                // Policy or wall time can change while a cancelled scan finishes.
+                if !signal_eligible(&self.gaps, &self.blocked_destinations, &observation)
+                    || !signal_available(&observation, crate::clock::wall_ms())
+                {
                     self.scanner
                         .as_mut()
                         .expect("scanner restored")

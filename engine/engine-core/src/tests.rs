@@ -1263,6 +1263,7 @@ mod rolling_loss;
 mod rotation;
 mod runtime_controls;
 mod scheduler_fairness;
+mod signal_availability;
 mod strategy_checkpoints;
 mod strategy_events;
 mod worked_entries;
