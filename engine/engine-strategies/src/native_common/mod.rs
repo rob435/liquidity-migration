@@ -17,6 +17,8 @@ use sha2::{Digest, Sha256};
 
 use crate::position_plan::{Held, PlanRules, Skipped, Step, SymbolFacts, Target};
 
+pub mod sleeve;
+
 pub const DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION: u16 = 1;
 pub const CARRY_SLEEVE_NAME: &str = "carry";
 pub const EXODUS_SLEEVE_NAME: &str = "exodus";

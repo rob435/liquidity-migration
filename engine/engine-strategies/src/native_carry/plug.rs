@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use engine_types::{
     MarketEvent, OrderUpdate, SignalObservation, Strategy, StrategyCheckpoint,
     StrategyCheckpointIdentity, StrategyCtx, StrategyId, StrategyImportContext,
-    StrategyImportSource, Subscription, SymbolId, TimerId, TranslatedStrategyState, WorkPolicy,
+    StrategyImportSource, Subscription, SymbolId, TimerId, TranslatedStrategyState,
     SIGNAL_OBSERVATION_SCHEMA_VERSION,
 };
 use serde::Deserialize;
@@ -17,12 +17,12 @@ use super::plan::{
     SleeveState, StrategyConfig,
 };
 use super::scorer::{CarryDecision, CarryFeatureRow, DAY_MS};
+use crate::native_common::sleeve::{SleeveConfig, SleeveCore, SleeveState as SleeveStateContract};
 use crate::native_common::{
     attributed_exposure_is_flat, attributed_symbols, checkpoint_payload,
     directional_account_is_healthy, emit_effects, flatten_execution, owned_order_state,
     planner_facts, validate_exact_symbol_coverage, validate_signal_identity, Effect,
     FlattenExecutionInput, SignalConfigIdentity, TickerObservation, UniverseIdentity,
-    DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
 };
 use crate::params::Params;
 use crate::position_plan::Skipped;
@@ -103,100 +103,32 @@ struct Readiness {
 }
 
 pub struct NativeCarry {
-    id: StrategyId,
-    pub config: StrategyConfig,
-    pub state: SleeveState,
-    restored: bool,
-    checkpoint_fingerprint: Option<String>,
-    blockers: BTreeMap<String, String>,
-    last_error: Option<String>,
-    flatten_request_id: Option<String>,
+    pub core: SleeveCore<StrategyConfig, SleeveState>,
 }
 
 impl NativeCarry {
     pub fn new(config: StrategyConfig, state: SleeveState) -> Result<Self, &'static str> {
-        config.validate()?;
-        let mut state = state;
-        if state.schema_version == 0 {
-            state.schema_version = DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION;
-        }
-        state.validate()?;
         Ok(Self {
-            id: StrategyId(0),
-            config,
-            state,
-            restored: true,
-            checkpoint_fingerprint: None,
-            blockers: BTreeMap::new(),
-            last_error: None,
-            flatten_request_id: None,
+            core: SleeveCore::new(config, state)?,
         })
     }
 
     pub fn from_params(id: StrategyId, params: &toml::Value) -> Result<Self, BuildError> {
-        let config = config_from_params(params)?;
         Ok(Self {
-            id,
-            config,
-            state: SleeveState {
-                schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
-                ..SleeveState::default()
-            },
-            restored: false,
-            checkpoint_fingerprint: None,
-            blockers: BTreeMap::new(),
-            last_error: None,
-            flatten_request_id: None,
+            core: SleeveCore::from_config(id, config_from_params(params)?),
         })
     }
 
     pub fn reduce(&mut self, input: ReducerInput) -> Result<ReducerOutput, &'static str> {
-        let output = reduce_lifecycle(input, self.state.clone(), &self.config)?;
-        self.state = output.next_state.clone();
-        self.checkpoint_fingerprint = Some(self.config.fingerprint());
+        let output = reduce_lifecycle(input, self.core.state.clone(), &self.core.config)?;
+        self.core.state = output.next_state.clone();
+        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
         Ok(output)
     }
 
-    fn ensure_restored(&mut self, ctx: &dyn StrategyCtx) {
-        if self.restored {
-            return;
-        }
-        self.restored = true;
-        let Some(checkpoint) = ctx.strategy_global_checkpoint() else {
-            return;
-        };
-        self.checkpoint_fingerprint = Some(checkpoint.decision_fingerprint.clone());
-        if checkpoint.schema_version != DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION
-            || checkpoint.decision_fingerprint != self.config.fingerprint()
-        {
-            self.last_error = Some("CARRY checkpoint identity mismatch".to_owned());
-            return;
-        }
-        match serde_json::from_slice::<SleeveState>(&checkpoint.payload)
-            .map_err(|error| error.to_string())
-            .and_then(|state| {
-                state.validate().map_err(str::to_owned)?;
-                Ok(state)
-            }) {
-            Ok(state) => self.state = state,
-            Err(error) => {
-                self.last_error = Some(format!("CARRY checkpoint refused: {error}"));
-                self.checkpoint_fingerprint = Some("invalid-checkpoint".to_owned());
-            }
-        }
-    }
-
-    fn entry_work(&self) -> Option<WorkPolicy> {
-        self.config.rest_entries.then_some(WorkPolicy {
-            hold_decision_px: self.config.hold_decision_price,
-            give_up_instead_of_crossing: self.config.give_up_instead_of_crossing,
-            ..WorkPolicy::default()
-        })
-    }
-
     fn effective_config(&self, ctx: &dyn StrategyCtx) -> StrategyConfig {
-        let mut config = self.config.clone();
-        config.entries_enabled = ctx.entries_enabled(self.config.entries_enabled);
+        let mut config = self.core.config.clone();
+        config.entries_enabled = ctx.entries_enabled(self.core.config.entries_enabled);
         config
     }
 
@@ -212,8 +144,8 @@ impl NativeCarry {
         ctx: &dyn StrategyCtx,
     ) -> BTreeSet<String> {
         let mut symbols = attributed_symbols(ctx);
-        symbols.extend(self.state.desired_targets.keys().cloned());
-        if let Some(decision) = &self.state.current_decision {
+        symbols.extend(self.core.state.desired_targets.keys().cloned());
+        if let Some(decision) = &self.core.state.current_decision {
             symbols.extend(decision.weights.keys().cloned());
         }
         symbols.extend(extra);
@@ -228,7 +160,7 @@ impl NativeCarry {
         ctx.strategy_events(&mut events);
         let mut fires = Vec::new();
         for event in events {
-            if event.source != self.id {
+            if event.source != self.core.id {
                 continue;
             }
             if event.kind != "carry_presettlement_fire" {
@@ -268,22 +200,22 @@ impl NativeCarry {
             presettlement: Vec::new(),
             durable_fires: self.durable_fires(ctx)?,
             trail_by_symbol: BTreeMap::new(),
-            entry_blockers: self.blockers.clone(),
+            entry_blockers: self.core.blockers.clone(),
             account_healthy: healthy,
             equity_usdt: equity,
             upcoming_sizing_equity_usdt: None,
             facts: planner_facts(ctx, &symbols),
             owned_working_symbols: working,
             owned_opening_order_ids: opening,
-            checkpoint_fingerprint: self.checkpoint_fingerprint.clone(),
+            checkpoint_fingerprint: self.core.checkpoint_fingerprint.clone(),
             signal_receipt: None,
         })
     }
 
     fn apply(&mut self, output: ReducerOutput, ctx: &mut dyn StrategyCtx) {
-        self.state = output.next_state;
-        self.checkpoint_fingerprint = Some(self.config.fingerprint());
-        self.blockers.clear();
+        self.core.state = output.next_state;
+        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
+        self.core.blockers.clear();
         for skipped in output.execution.skipped {
             let (symbol, reason) = match skipped {
                 Skipped::TooSmallToBother { symbol, .. } => (symbol, "inside_resize_band"),
@@ -294,57 +226,58 @@ impl NativeCarry {
                 Skipped::NoInstrumentRule { symbol } => (symbol, "no_instrument_rule"),
                 Skipped::ForeignOwner { symbol } => (symbol, "foreign_strategy_owner"),
             };
-            self.blockers.insert(symbol, reason.to_owned());
+            self.core.blockers.insert(symbol, reason.to_owned());
         }
-        for symbol in &self.state.refused_entries {
-            self.blockers
+        for symbol in &self.core.state.refused_entries {
+            self.core
+                .blockers
                 .entry(symbol.clone())
                 .or_insert_with(|| "entry_refused".to_owned());
         }
         if let Err(error) = emit_effects(
             output.execution.effects,
-            self.id,
-            Some(&self.config.exodus_sleeve_name),
-            self.entry_work(),
+            self.core.id,
+            Some(&self.core.config.exodus_sleeve_name),
+            self.core.entry_work(),
             ctx,
         ) {
-            self.last_error = Some(error.to_owned());
+            self.core.last_error = Some(error.to_owned());
         } else {
-            self.last_error = None;
+            self.core.last_error = None;
         }
         self.arm_next(ctx);
     }
 
     fn apply_scorer_catchup(&mut self, output: ScorerCatchupOutput, ctx: &mut dyn StrategyCtx) {
-        self.state = output.next_state;
-        self.checkpoint_fingerprint = Some(self.config.fingerprint());
-        if let Err(error) = emit_effects(output.execution.effects, self.id, None, None, ctx) {
-            self.last_error = Some(error.to_owned());
+        self.core.state = output.next_state;
+        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
+        if let Err(error) = emit_effects(output.execution.effects, self.core.id, None, None, ctx) {
+            self.core.last_error = Some(error.to_owned());
         } else {
-            self.last_error = None;
+            self.core.last_error = None;
         }
     }
 
     fn replan_with_mode(&mut self, replan_mode: ReplanMode, ctx: &mut dyn StrategyCtx) {
-        self.ensure_restored(ctx);
-        if self.flatten_request_id.is_some() {
+        self.core.ensure_restored("CARRY", ctx);
+        if self.core.flatten_request_id.is_some() {
             self.flatten_now(ctx);
             return;
         }
-        let Some(decision) = self.state.current_decision.clone() else {
+        let Some(decision) = self.core.state.current_decision.clone() else {
             return;
         };
         let input = match self.base_input(ctx.wall_ms().max(1), decision, Vec::new(), ctx) {
             Ok(input) => input,
             Err(error) => {
-                self.last_error = Some(error);
+                self.core.last_error = Some(error);
                 return;
             }
         };
         let config = self.effective_config(ctx);
-        match reduce_lifecycle_with_mode(input, self.state.clone(), &config, replan_mode) {
+        match reduce_lifecycle_with_mode(input, self.core.state.clone(), &config, replan_mode) {
             Ok(output) => self.apply(output, ctx),
-            Err(error) => self.last_error = Some(error.to_owned()),
+            Err(error) => self.core.last_error = Some(error.to_owned()),
         }
     }
 
@@ -354,27 +287,28 @@ impl NativeCarry {
 
     fn defer_opening(&mut self, name: String, reason: &str, ctx: &mut dyn StrategyCtx) {
         let now_ms = ctx.wall_ms().max(1);
-        if self.state.entry_cycle_started_ms == 0
+        if self.core.state.entry_cycle_started_ms == 0
             || now_ms
                 >= self
+                    .core
                     .state
                     .entry_cycle_started_ms
                     .saturating_add(super::plan::ENTRY_CYCLE_MS)
         {
-            self.state.entry_cycle_started_ms = now_ms;
-            self.state.entry_cycle_selected_symbols.clear();
-            self.state.refused_entries.clear();
-            self.state.entry_retry_after_ms.clear();
+            self.core.state.entry_cycle_started_ms = now_ms;
+            self.core.state.entry_cycle_selected_symbols.clear();
+            self.core.state.refused_entries.clear();
+            self.core.state.entry_retry_after_ms.clear();
         }
-        self.blockers.insert(name.clone(), reason.to_owned());
-        self.state.entry_retry_after_ms.remove(&name);
-        self.state.refused_entries.insert(name);
+        self.core.blockers.insert(name.clone(), reason.to_owned());
+        self.core.state.entry_retry_after_ms.remove(&name);
+        self.core.state.refused_entries.insert(name);
         self.replan(ctx);
     }
 
     fn flatten_now(&mut self, ctx: &mut dyn StrategyCtx) {
-        self.ensure_restored(ctx);
-        let Some(request_id) = self.flatten_request_id.clone() else {
+        self.core.ensure_restored("CARRY", ctx);
+        let Some(request_id) = self.core.flatten_request_id.clone() else {
             return;
         };
         let mut symbols = self.known_symbols(Vec::new(), ctx);
@@ -382,13 +316,13 @@ impl NativeCarry {
         symbols.extend(working);
         let facts = planner_facts(ctx, &symbols);
         let conclusively_flat = attributed_exposure_is_flat(ctx, &symbols);
-        self.state.desired_targets.clear();
-        self.state.refused_entries.clear();
-        self.state.entry_retry_after_ms.clear();
+        self.core.state.desired_targets.clear();
+        self.core.state.refused_entries.clear();
+        self.core.state.entry_retry_after_ms.clear();
         let (execution, flat) = flatten_execution(
-            &self.state,
+            &self.core.state,
             FlattenExecutionInput {
-                config_fingerprint: self.config.fingerprint(),
+                config_fingerprint: self.core.config.fingerprint(),
                 facts: &facts,
                 owned_opening_order_ids: &opening,
                 now_ms: ctx.wall_ms().max(1),
@@ -398,45 +332,47 @@ impl NativeCarry {
             },
         );
         if flat {
-            self.flatten_request_id = None;
+            self.core.flatten_request_id = None;
         }
-        self.checkpoint_fingerprint = Some(self.config.fingerprint());
+        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
         if let Err(error) = emit_effects(
             execution.effects,
-            self.id,
-            Some(&self.config.exodus_sleeve_name),
-            self.entry_work(),
+            self.core.id,
+            Some(&self.core.config.exodus_sleeve_name),
+            self.core.entry_work(),
             ctx,
         ) {
-            self.last_error = Some(error.to_owned());
+            self.core.last_error = Some(error.to_owned());
         }
     }
 
     fn arm_next(&self, ctx: &mut dyn StrategyCtx) {
-        let Some(decision) = &self.state.current_decision else {
+        let Some(decision) = &self.core.state.current_decision else {
             return;
         };
         let now_ms = ctx.wall_ms().max(1);
-        let cutoff = decision.decision_ts_ms + self.config.execution.signal_validity_ms
-            - self.config.execution.engine_entry_cutoff_ms;
+        let cutoff = decision.decision_ts_ms + self.core.config.execution.signal_validity_ms
+            - self.core.config.execution.engine_entry_cutoff_ms;
         let decision_available = decision.decision_ts_ms <= now_ms;
         let account_retry = (decision_available
             && !self.account(ctx).0
-            && ctx.entries_enabled(self.config.entries_enabled)
+            && ctx.entries_enabled(self.core.config.entries_enabled)
             && self.has_deferred_growth(ctx)
             && cutoff > now_ms)
             .then(|| now_ms.saturating_add(ENTRY_RETRY_MS));
         let next_entry_cycle = self
+            .core
             .state
             .entry_cycle_started_ms
             .saturating_add(super::plan::ENTRY_CYCLE_MS);
         let entry_cycle = (decision_available
-            && (!self.state.entry_cycle_selected_symbols.is_empty()
-                || !self.state.refused_entries.is_empty())
+            && (!self.core.state.entry_cycle_selected_symbols.is_empty()
+                || !self.core.state.refused_entries.is_empty())
             && next_entry_cycle > now_ms
             && cutoff > now_ms)
             .then_some(next_entry_cycle);
         let next = self
+            .core
             .state
             .current_decision
             .as_ref()
@@ -444,7 +380,7 @@ impl NativeCarry {
                 decision
                     .weights
                     .keys()
-                    .any(|symbol| !self.state.desired_targets.contains_key(symbol))
+                    .any(|symbol| !self.core.state.desired_targets.contains_key(symbol))
                     .then_some(next_entry_cycle)
             })
             .filter(|wake| decision_available && *wake > now_ms && cutoff > now_ms)
@@ -461,35 +397,39 @@ impl NativeCarry {
     }
 
     fn has_deferred_growth(&self, ctx: &dyn StrategyCtx) -> bool {
-        let Some(decision) = &self.state.current_decision else {
+        let Some(decision) = &self.core.state.current_decision else {
             return false;
         };
         if decision
             .weights
             .keys()
-            .any(|symbol| !self.state.desired_targets.contains_key(symbol))
-            || !self.state.refused_entries.is_empty()
+            .any(|symbol| !self.core.state.desired_targets.contains_key(symbol))
+            || !self.core.state.refused_entries.is_empty()
         {
             return true;
         }
         let symbols = self.known_symbols(Vec::new(), ctx);
         let facts = planner_facts(ctx, &symbols);
         let (working, _) = owned_order_state(ctx);
-        self.state.desired_targets.iter().any(|(symbol, target)| {
-            if target.notional_usdt <= 0.0 || working.contains(symbol) {
-                return false;
-            }
-            let Some(held) = facts.held.get(symbol) else {
-                return true;
-            };
-            let held_notional = held.notional();
-            if held_notional <= 0.0 {
-                return false;
-            }
-            let growth = target.notional_usdt - held_notional;
-            growth > self.config.execution.resize_floor_usdt
-                && growth > held_notional * self.config.execution.resize_floor_fraction
-        })
+        self.core
+            .state
+            .desired_targets
+            .iter()
+            .any(|(symbol, target)| {
+                if target.notional_usdt <= 0.0 || working.contains(symbol) {
+                    return false;
+                }
+                let Some(held) = facts.held.get(symbol) else {
+                    return true;
+                };
+                let held_notional = held.notional();
+                if held_notional <= 0.0 {
+                    return false;
+                }
+                let growth = target.notional_usdt - held_notional;
+                growth > self.core.config.execution.resize_floor_usdt
+                    && growth > held_notional * self.core.config.execution.resize_floor_fraction
+            })
     }
 
     fn validate_observation(
@@ -499,7 +439,7 @@ impl NativeCarry {
         envelope: &SignalEnvelope,
     ) -> Result<(), String> {
         if observation.schema_version != SIGNAL_OBSERVATION_SCHEMA_VERSION
-            || observation.destination != self.id
+            || observation.destination != self.core.id
             || observation.source.is_empty()
             || observation.sequence == 0
             || observation.observation_id.is_empty()
@@ -513,7 +453,7 @@ impl NativeCarry {
         validate_signal_identity(
             &envelope.config,
             envelope.universe.as_ref(),
-            &self.config.environment,
+            &self.core.config.environment,
         )
         .map_err(str::to_owned)?;
         if observation.decision_fingerprint != envelope.config.carry_decision_fingerprint {
@@ -526,8 +466,8 @@ impl NativeCarry {
         let effects = vec![
             Effect::PersistCheckpoint {
                 symbol: String::new(),
-                config_fingerprint: self.config.fingerprint(),
-                payload: checkpoint_payload(&self.state),
+                config_fingerprint: self.core.config.fingerprint(),
+                payload: checkpoint_payload(&self.core.state),
             },
             Effect::ConsumeSignal {
                 source: observation.source.clone(),
@@ -535,10 +475,10 @@ impl NativeCarry {
                 observation_id: observation.observation_id.clone(),
             },
         ];
-        if let Err(error) = emit_effects(effects, self.id, None, None, ctx) {
-            self.last_error = Some(error.to_owned());
+        if let Err(error) = emit_effects(effects, self.core.id, None, None, ctx) {
+            self.core.last_error = Some(error.to_owned());
         }
-        self.checkpoint_fingerprint = Some(self.config.fingerprint());
+        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
     }
 
     fn accept_signal(
@@ -560,26 +500,27 @@ impl NativeCarry {
         if observation.kind != kind {
             return Err("CARRY outer and inner signal kinds disagree".to_owned());
         }
-        self.ensure_restored(ctx);
-        if observation.decision_fingerprint != self.config.fingerprint() {
+        self.core.ensure_restored("CARRY", ctx);
+        if observation.decision_fingerprint != self.core.config.fingerprint() {
             emit_effects(
                 vec![Effect::ConsumeSignal {
                     source: observation.source.clone(),
                     sequence: observation.sequence,
                     observation_id: observation.observation_id.clone(),
                 }],
-                self.id,
+                self.core.id,
                 None,
                 None,
                 ctx,
             )
             .map_err(str::to_owned)?;
-            self.last_error = None;
+            self.core.last_error = None;
             return Ok(());
         }
-        if envelope.config.carry_config_id != self.config.rule.config_id
-            || envelope.config.carry_rule_sha256 != self.config.rule_sha256
-            || envelope.config.carry_feature_contract_sha256 != self.config.feature_contract_sha256
+        if envelope.config.carry_config_id != self.core.config.rule.config_id
+            || envelope.config.carry_rule_sha256 != self.core.config.rule_sha256
+            || envelope.config.carry_feature_contract_sha256
+                != self.core.config.feature_contract_sha256
         {
             return Err("CARRY signal config does not bind this reducer".to_owned());
         }
@@ -621,7 +562,7 @@ impl NativeCarry {
                         rows,
                         signal_receipt: receipt,
                     },
-                    self.state.clone(),
+                    self.core.state.clone(),
                     &effective_config,
                 )
                 .map_err(str::to_owned)?;
@@ -659,7 +600,7 @@ impl NativeCarry {
                 if signal_is_stale(
                     ctx.wall_ms(),
                     decision_ts_ms,
-                    self.config.execution.book_validity_ms,
+                    self.core.config.execution.book_validity_ms,
                 ) {
                     let output = reduce_scorer_catchup(
                         ScorerCatchupInput {
@@ -667,7 +608,7 @@ impl NativeCarry {
                             rows,
                             signal_receipt: receipt,
                         },
-                        self.state.clone(),
+                        self.core.state.clone(),
                         &effective_config,
                     )
                     .map_err(str::to_owned)?;
@@ -720,8 +661,9 @@ impl NativeCarry {
                     marks,
                     rejections,
                 };
-                let output = reduce_signal(batch, input, self.state.clone(), &effective_config)
-                    .map_err(str::to_owned)?;
+                let output =
+                    reduce_signal(batch, input, self.core.state.clone(), &effective_config)
+                        .map_err(str::to_owned)?;
                 self.apply(output, ctx);
             }
             SignalPayload::MarketSnapshot {
@@ -738,7 +680,7 @@ impl NativeCarry {
                     return Ok(());
                 }
                 validate_tickers(&tickers, observation.observed_wall_ts_ms)?;
-                let Some(decision) = self.state.current_decision.clone() else {
+                let Some(decision) = self.core.state.current_decision.clone() else {
                     self.consume_only(observation, ctx);
                     return Ok(());
                 };
@@ -758,7 +700,7 @@ impl NativeCarry {
                     validate_mark(mark, observation.observed_wall_ts_ms)?;
                     input.facts.prices.insert(mark.symbol.clone(), mark.mark_px);
                 }
-                let output = reduce_lifecycle(input, self.state.clone(), &effective_config)
+                let output = reduce_lifecycle(input, self.core.state.clone(), &effective_config)
                     .map_err(str::to_owned)?;
                 self.apply(output, ctx);
             }
@@ -769,7 +711,7 @@ impl NativeCarry {
                 if decision_ts_ms <= 0 || decision_ts_ms > observation.observed_wall_ts_ms {
                     return Err("CARRY funding update decision clock is invalid".to_owned());
                 }
-                let Some(decision) = self.state.current_decision.clone() else {
+                let Some(decision) = self.core.state.current_decision.clone() else {
                     self.consume_only(observation, ctx);
                     return Ok(());
                 };
@@ -777,7 +719,7 @@ impl NativeCarry {
                     || signal_is_stale(
                         ctx.wall_ms(),
                         decision_ts_ms,
-                        self.config.execution.book_validity_ms,
+                        self.core.config.execution.book_validity_ms,
                     )
                 {
                     self.consume_only(observation, ctx);
@@ -795,7 +737,7 @@ impl NativeCarry {
                 )?;
                 input.settled_funding = settled_funding;
                 input.signal_receipt = Some(receipt);
-                let output = reduce_lifecycle(input, self.state.clone(), &effective_config)
+                let output = reduce_lifecycle(input, self.core.state.clone(), &effective_config)
                     .map_err(str::to_owned)?;
                 self.apply(output, ctx);
             }
@@ -813,7 +755,7 @@ impl NativeCarry {
                 self.consume_only(observation, ctx);
             }
         }
-        if self.flatten_request_id.is_some() {
+        if self.core.flatten_request_id.is_some() {
             self.flatten_now(ctx);
         }
         Ok(())
@@ -952,33 +894,15 @@ impl Strategy for NativeCarry {
     }
 
     fn checkpoint_identity(&self) -> Option<StrategyCheckpointIdentity> {
-        Some(StrategyCheckpointIdentity {
-            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
-            decision_fingerprint: self.config.fingerprint(),
-        })
+        self.core.checkpoint_identity()
     }
 
     fn initial_checkpoint(&self) -> Option<StrategyCheckpoint> {
-        let state = SleeveState {
-            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
-            ..SleeveState::default()
-        };
-        Some(StrategyCheckpoint {
-            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
-            decision_fingerprint: self.config.fingerprint(),
-            payload: checkpoint_payload(&state),
-        })
+        self.core.initial_checkpoint()
     }
 
     fn validate_checkpoint(&self, checkpoint: &StrategyCheckpoint) -> Result<(), String> {
-        if checkpoint.schema_version != DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION
-            || checkpoint.decision_fingerprint != self.config.fingerprint()
-        {
-            return Err("CARRY checkpoint identity mismatch".to_owned());
-        }
-        let state: SleeveState =
-            serde_json::from_slice(&checkpoint.payload).map_err(|error| error.to_string())?;
-        state.validate().map_err(str::to_owned)
+        self.core.validate_checkpoint("CARRY", checkpoint)
     }
 
     fn translate_checkpoint(
@@ -987,7 +911,7 @@ impl Strategy for NativeCarry {
         source_format: &str,
         sources: &[StrategyImportSource],
     ) -> Result<TranslatedStrategyState, String> {
-        super::state_import::translate(&self.config, source_format, sources)
+        super::state_import::translate(&self.core.config, source_format, sources)
     }
 
     fn requires_signal_feed(&self) -> bool {
@@ -995,7 +919,7 @@ impl Strategy for NativeCarry {
     }
 
     fn configured_entries_enabled(&self) -> bool {
-        self.config.entries_enabled
+        self.core.config.entries_enabled
     }
 
     fn on_boot(&mut self, ctx: &mut dyn StrategyCtx) {
@@ -1012,13 +936,13 @@ impl Strategy for NativeCarry {
     }
 
     fn on_flatten_directional(&mut self, request_id: &str, ctx: &mut dyn StrategyCtx) {
-        self.flatten_request_id = Some(request_id.to_owned());
+        self.core.flatten_request_id = Some(request_id.to_owned());
         self.flatten_now(ctx);
     }
 
     fn on_signal(&mut self, observation: &SignalObservation, ctx: &mut dyn StrategyCtx) {
         if let Err(error) = self.accept_signal(observation, ctx) {
-            self.last_error = Some(error);
+            self.core.last_error = Some(error);
         }
     }
 
@@ -1032,7 +956,7 @@ impl Strategy for NativeCarry {
         };
         if symbol
             .and_then(|id| ctx.symbol_name(id))
-            .is_some_and(|name| self.state.desired_targets.contains_key(name))
+            .is_some_and(|name| self.core.state.desired_targets.contains_key(name))
         {
             self.replan(ctx);
         }
@@ -1045,7 +969,7 @@ impl Strategy for NativeCarry {
     }
 
     fn on_order(&mut self, update: &OrderUpdate, ctx: &mut dyn StrategyCtx) {
-        self.ensure_restored(ctx);
+        self.core.ensure_restored("CARRY", ctx);
         let terminal = match update {
             OrderUpdate::Reject {
                 client_order_id,
@@ -1061,13 +985,13 @@ impl Strategy for NativeCarry {
             if let Some(facts) = ctx.order_facts(client_order_id) {
                 if facts.reduce_only {
                     if let Some(name) = ctx.symbol_name(facts.symbol).map(str::to_owned) {
-                        self.blockers.insert(name, reason.to_owned());
+                        self.core.blockers.insert(name, reason.to_owned());
                     }
                     ctx.arm_timer(TIMER, 1_000_000_000);
                     return;
                 }
                 if let Some(name) = ctx.symbol_name(facts.symbol).map(str::to_owned) {
-                    if self.state.desired_targets.contains_key(&name) {
+                    if self.core.state.desired_targets.contains_key(&name) {
                         self.defer_opening(name, reason, ctx);
                         return;
                     }
@@ -1084,12 +1008,12 @@ impl Strategy for NativeCarry {
         reason: &str,
         ctx: &mut dyn StrategyCtx,
     ) {
-        self.ensure_restored(ctx);
+        self.core.ensure_restored("CARRY", ctx);
         let Some(name) = ctx.symbol_name(symbol).map(str::to_owned) else {
             return;
         };
         if reduce_only {
-            self.blockers.insert(name, reason.to_owned());
+            self.core.blockers.insert(name, reason.to_owned());
             ctx.arm_timer(TIMER, 1_000_000_000);
             return;
         }
@@ -1097,21 +1021,54 @@ impl Strategy for NativeCarry {
     }
 
     fn entry_blockers(&self) -> Vec<(String, String)> {
-        self.blockers
-            .iter()
-            .map(|(symbol, reason)| (symbol.clone(), reason.clone()))
-            .collect()
+        self.core.entry_blockers()
     }
 
     fn health_error(&self) -> Option<&str> {
-        self.last_error.as_deref()
+        self.core.health_error()
     }
 }
 
+impl SleeveConfig for StrategyConfig {
+    fn validate(&self) -> Result<(), &'static str> {
+        StrategyConfig::validate(self)
+    }
+
+    fn fingerprint(&self) -> String {
+        StrategyConfig::fingerprint(self)
+    }
+
+    fn rest_entries(&self) -> bool {
+        self.rest_entries
+    }
+
+    fn hold_decision_price(&self) -> bool {
+        self.hold_decision_price
+    }
+
+    fn give_up_instead_of_crossing(&self) -> bool {
+        self.give_up_instead_of_crossing
+    }
+}
+
+impl SleeveStateContract for SleeveState {
+    fn schema_version(&self) -> u16 {
+        self.schema_version
+    }
+
+    fn set_schema_version(&mut self, version: u16) {
+        self.schema_version = version;
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        SleeveState::validate(self)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mock_ctx::{MockCtx, RestingSeed};
+    use crate::native_common::DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION;
     use engine_types::{Action, OrderKind, Side};
     use serde_json::json;
 
@@ -1396,7 +1353,7 @@ mod tests {
         assert!(error.contains("predates its UTC generation"));
         assert!(ctx.emitted.is_empty());
         assert_eq!(
-            strategy.state,
+            strategy.core.state,
             SleeveState {
                 schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
                 ..SleeveState::default()

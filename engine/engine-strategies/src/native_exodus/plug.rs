@@ -1,19 +1,17 @@
 //! Engine adapter for the native Exodus event consumer.
 
-use std::collections::BTreeMap;
-
 use engine_types::{
     MarketEvent, OrderUpdate, Strategy, StrategyCheckpoint, StrategyCheckpointIdentity,
     StrategyCtx, StrategyEvent, StrategyId, StrategyImportContext, StrategyImportSource,
-    Subscription, SymbolId, TimerId, TranslatedStrategyState, WorkPolicy,
+    Subscription, SymbolId, TimerId, TranslatedStrategyState,
 };
 
 use super::plan::{reduce, ReducerInput, ReducerOutput, SleeveState, StrategyConfig};
+use crate::native_common::sleeve::{SleeveConfig, SleeveCore, SleeveState as SleeveStateContract};
 use crate::native_common::{
-    attributed_exposure_is_flat, attributed_symbols, checkpoint_payload,
-    directional_account_is_healthy, emit_effects, flatten_execution, owned_order_state,
-    planner_facts, CarryPresettlementFire, FlattenExecutionInput,
-    DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+    attributed_exposure_is_flat, attributed_symbols, directional_account_is_healthy, emit_effects,
+    flatten_execution, owned_order_state, planner_facts, CarryPresettlementFire,
+    FlattenExecutionInput,
 };
 use crate::params::Params;
 use crate::position_plan::Skipped;
@@ -42,111 +40,44 @@ pub fn decision_fingerprint_from_params(params: &toml::Value) -> Result<String, 
 }
 
 pub struct NativeExodus {
-    id: StrategyId,
-    pub config: StrategyConfig,
-    pub state: SleeveState,
-    restored: bool,
-    checkpoint_fingerprint: Option<String>,
-    blockers: BTreeMap<String, String>,
-    last_error: Option<String>,
-    flatten_request_id: Option<String>,
+    pub core: SleeveCore<StrategyConfig, SleeveState>,
 }
 
 impl NativeExodus {
     pub fn new(config: StrategyConfig, state: SleeveState) -> Result<Self, &'static str> {
-        config.validate()?;
-        let mut state = state;
-        if state.schema_version == 0 {
-            state.schema_version = DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION;
-        }
-        state.validate()?;
         Ok(Self {
-            id: StrategyId(0),
-            config,
-            state,
-            restored: true,
-            checkpoint_fingerprint: None,
-            blockers: BTreeMap::new(),
-            last_error: None,
-            flatten_request_id: None,
+            core: SleeveCore::new(config, state)?,
         })
     }
 
     pub fn from_params(id: StrategyId, params: &toml::Value) -> Result<Self, BuildError> {
         Ok(Self {
-            id,
-            config: config_from_params(params)?,
-            state: SleeveState {
-                schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
-                ..SleeveState::default()
-            },
-            restored: false,
-            checkpoint_fingerprint: None,
-            blockers: BTreeMap::new(),
-            last_error: None,
-            flatten_request_id: None,
+            core: SleeveCore::from_config(id, config_from_params(params)?),
         })
     }
 
     pub fn reduce(&mut self, input: ReducerInput) -> Result<ReducerOutput, &'static str> {
-        let output = reduce(input, self.state.clone(), &self.config)?;
-        self.state = output.next_state.clone();
-        self.checkpoint_fingerprint = Some(self.config.fingerprint());
+        let output = reduce(input, self.core.state.clone(), &self.core.config)?;
+        self.core.state = output.next_state.clone();
+        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
         Ok(output)
     }
 
-    fn ensure_restored(&mut self, ctx: &dyn StrategyCtx) {
-        if self.restored {
-            return;
-        }
-        self.restored = true;
-        let Some(checkpoint) = ctx.strategy_global_checkpoint() else {
-            return;
-        };
-        self.checkpoint_fingerprint = Some(checkpoint.decision_fingerprint.clone());
-        if checkpoint.schema_version != DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION
-            || checkpoint.decision_fingerprint != self.config.fingerprint()
-        {
-            self.last_error = Some("Exodus checkpoint identity mismatch".to_owned());
-            return;
-        }
-        match serde_json::from_slice::<SleeveState>(&checkpoint.payload)
-            .map_err(|error| error.to_string())
-            .and_then(|state| {
-                state.validate().map_err(str::to_owned)?;
-                Ok(state)
-            }) {
-            Ok(state) => self.state = state,
-            Err(error) => {
-                self.last_error = Some(format!("Exodus checkpoint refused: {error}"));
-                self.checkpoint_fingerprint = Some("invalid-checkpoint".to_owned());
-            }
-        }
-    }
-
-    fn entry_work(&self) -> Option<WorkPolicy> {
-        self.config.rest_entries.then_some(WorkPolicy {
-            hold_decision_px: self.config.hold_decision_price,
-            give_up_instead_of_crossing: self.config.give_up_instead_of_crossing,
-            ..WorkPolicy::default()
-        })
-    }
-
     fn effective_config(&self, ctx: &dyn StrategyCtx) -> StrategyConfig {
-        let mut config = self.config.clone();
-        config.entries_enabled = ctx.entries_enabled(self.config.entries_enabled);
+        let mut config = self.core.config.clone();
+        config.entries_enabled = ctx.entries_enabled(self.core.config.entries_enabled);
         config
     }
 
     fn pending_events(&self, ctx: &dyn StrategyCtx) -> Result<Vec<CarryPresettlementFire>, String> {
         let source = ctx
-            .strategy_id(&self.config.carry_sleeve_name)
+            .strategy_id(&self.core.config.carry_sleeve_name)
             .ok_or_else(|| "configured CARRY source strategy is absent".to_owned())?;
         let mut pending = Vec::new();
         ctx.strategy_events(&mut pending);
         let mut decoded = Vec::new();
         for event in pending {
-            if event.destination != self.id {
+            if event.destination != self.core.id {
                 continue;
             }
             if event.source != source || event.kind != "carry_presettlement_fire" {
@@ -175,7 +106,7 @@ impl NativeExodus {
     ) -> ReducerInput {
         let (working, opening) = owned_order_state(ctx);
         let mut symbols = attributed_symbols(ctx);
-        symbols.extend(self.state.open.keys().cloned());
+        symbols.extend(self.core.state.open.keys().cloned());
         symbols.extend(events.iter().map(|event| event.symbol.clone()));
         symbols.extend(working.iter().cloned());
         let account = ctx.account_summary();
@@ -187,16 +118,16 @@ impl NativeExodus {
             owned_working_symbols: working,
             owned_opening_order_ids: opening,
             account_healthy,
-            checkpoint_fingerprint: self.checkpoint_fingerprint.clone(),
+            checkpoint_fingerprint: self.core.checkpoint_fingerprint.clone(),
         }
     }
 
     fn apply(&mut self, output: ReducerOutput, ctx: &mut dyn StrategyCtx) {
-        self.state = output.next_state;
-        self.checkpoint_fingerprint = Some(self.config.fingerprint());
-        self.blockers.clear();
+        self.core.state = output.next_state;
+        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
+        self.core.blockers.clear();
         for (event_id, reason) in output.summary.blocked_events {
-            self.blockers.insert(event_id, reason);
+            self.core.blockers.insert(event_id, reason);
         }
         for skipped in output.execution.skipped {
             let (symbol, reason) = match skipped {
@@ -208,93 +139,98 @@ impl NativeExodus {
                 Skipped::NoInstrumentRule { symbol } => (symbol, "no_instrument_rule"),
                 Skipped::ForeignOwner { symbol } => (symbol, "foreign_strategy_owner"),
             };
-            self.blockers.insert(symbol, reason.to_owned());
+            self.core.blockers.insert(symbol, reason.to_owned());
         }
-        for symbol in &self.state.refused_entries {
-            self.blockers
+        for symbol in &self.core.state.refused_entries {
+            self.core
+                .blockers
                 .entry(symbol.clone())
                 .or_insert_with(|| "entry_refused".to_owned());
         }
         if let Err(error) = emit_effects(
             output.execution.effects,
-            self.id,
+            self.core.id,
             None,
-            self.entry_work(),
+            self.core.entry_work(),
             ctx,
         ) {
-            self.last_error = Some(error.to_owned());
+            self.core.last_error = Some(error.to_owned());
         } else {
-            self.last_error = None;
+            self.core.last_error = None;
         }
         self.arm_next(ctx);
     }
 
     fn replan(&mut self, ctx: &mut dyn StrategyCtx) {
-        self.ensure_restored(ctx);
-        if self.flatten_request_id.is_some() {
+        self.core.ensure_restored("Exodus", ctx);
+        if self.core.flatten_request_id.is_some() {
             self.flatten_now(ctx);
             return;
         }
         let events = match self.pending_events(ctx) {
             Ok(events) => events,
             Err(error) => {
-                self.last_error = Some(error);
+                self.core.last_error = Some(error);
                 return;
             }
         };
-        if events.is_empty() && self.state.open.is_empty() && self.checkpoint_fingerprint.is_none()
+        if events.is_empty()
+            && self.core.state.open.is_empty()
+            && self.core.checkpoint_fingerprint.is_none()
         {
             return;
         }
         let input = self.base_input(ctx.wall_ms().max(1), events, ctx);
         let config = self.effective_config(ctx);
-        match reduce(input, self.state.clone(), &config) {
+        match reduce(input, self.core.state.clone(), &config) {
             Ok(output) => self.apply(output, ctx),
-            Err(error) => self.last_error = Some(error.to_owned()),
+            Err(error) => self.core.last_error = Some(error.to_owned()),
         }
     }
 
     fn defer_opening(&mut self, name: String, reason: &str, ctx: &mut dyn StrategyCtx) {
-        self.blockers.insert(name.clone(), reason.to_owned());
-        self.state.refused_entries.insert(name.clone());
+        self.core.blockers.insert(name.clone(), reason.to_owned());
+        self.core.state.refused_entries.insert(name.clone());
         let now_ms = ctx.wall_ms().max(1);
-        let retry_at = self.state.open.get(&name).map(|record| {
+        let retry_at = self.core.state.open.get(&name).map(|record| {
             now_ms.saturating_add(TERMINAL_ENTRY_RETRY_MS).min(
                 record
                     .settlement_ts_ms
-                    .saturating_add(self.config.rule.entry_valid_minutes_after_settlement * 60_000)
+                    .saturating_add(
+                        self.core.config.rule.entry_valid_minutes_after_settlement * 60_000,
+                    )
                     .saturating_sub(ENGINE_ENTRY_CUTOFF_MS),
             )
         });
         if let Some(retry_at) = retry_at.filter(|retry_at| *retry_at > now_ms) {
-            self.state.entry_retry_after_ms.insert(name, retry_at);
+            self.core.state.entry_retry_after_ms.insert(name, retry_at);
         } else {
-            self.state.entry_retry_after_ms.remove(&name);
+            self.core.state.entry_retry_after_ms.remove(&name);
         }
         self.replan(ctx);
     }
 
     fn flatten_now(&mut self, ctx: &mut dyn StrategyCtx) {
-        self.ensure_restored(ctx);
-        let Some(request_id) = self.flatten_request_id.clone() else {
+        self.core.ensure_restored("Exodus", ctx);
+        let Some(request_id) = self.core.flatten_request_id.clone() else {
             return;
         };
         let mut symbols = attributed_symbols(ctx);
-        symbols.extend(self.state.open.keys().cloned());
+        symbols.extend(self.core.state.open.keys().cloned());
         let (working, opening) = owned_order_state(ctx);
         symbols.extend(working);
         let facts = planner_facts(ctx, &symbols);
         let conclusively_flat = attributed_exposure_is_flat(ctx, &symbols);
         if conclusively_flat && opening.values().all(Vec::is_empty) {
-            self.state.open.clear();
-            self.state.entry_closed_ts_ms_by_symbol.clear();
-            self.state.refused_entries.clear();
-            self.state.entry_retry_after_ms.clear();
+            self.core.state.open.clear();
+            self.core.state.entry_closed_ts_ms_by_symbol.clear();
+            self.core.state.refused_entries.clear();
+            self.core.state.entry_retry_after_ms.clear();
         }
         let (execution, flat) = flatten_execution(
-            &self.state,
+            &self.core.state,
             FlattenExecutionInput {
-                config_fingerprint: self.config.fingerprint(),
+                config_fingerprint: self.core.config.fingerprint(),
                 facts: &facts,
                 owned_opening_order_ids: &opening,
                 now_ms: ctx.wall_ms().max(1),
@@ -304,11 +240,17 @@ impl NativeExodus {
             },
         );
         if flat {
-            self.flatten_request_id = None;
+            self.core.flatten_request_id = None;
         }
-        self.checkpoint_fingerprint = Some(self.config.fingerprint());
-        if let Err(error) = emit_effects(execution.effects, self.id, None, self.entry_work(), ctx) {
-            self.last_error = Some(error.to_owned());
+        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
+        if let Err(error) = emit_effects(
+            execution.effects,
+            self.core.id,
+            None,
+            self.core.entry_work(),
+            ctx,
+        ) {
+            self.core.last_error = Some(error.to_owned());
         }
     }
 
@@ -317,6 +259,7 @@ impl NativeExodus {
         let account = ctx.account_summary();
         let account_healthy = directional_account_is_healthy(account);
         let mut wakes = self
+            .core
             .state
             .open
             .values()
@@ -324,12 +267,13 @@ impl NativeExodus {
                 [
                     record.fired_ts_ms,
                     record.settlement_ts_ms
-                        + self.config.rule.cover_minutes_after_settlement * 60_000,
+                        + self.core.config.rule.cover_minutes_after_settlement * 60_000,
                 ]
             })
             .filter(|wake| *wake > now_ms)
             .chain(
-                self.state
+                self.core
+                    .state
                     .entry_retry_after_ms
                     .values()
                     .copied()
@@ -337,12 +281,13 @@ impl NativeExodus {
             )
             .collect::<Vec<_>>();
         if !account_healthy
-            && ctx.entries_enabled(self.config.entries_enabled)
-            && self.state.open.values().any(|record| {
+            && ctx.entries_enabled(self.core.config.entries_enabled)
+            && self.core.state.open.values().any(|record| {
                 let entry_deadline = record.settlement_ts_ms
-                    + (self.config.rule.entry_valid_minutes_after_settlement - 15) * 60_000;
+                    + (self.core.config.rule.entry_valid_minutes_after_settlement - 15) * 60_000;
                 now_ms < entry_deadline
                     && !self
+                        .core
                         .state
                         .entry_closed_ts_ms_by_symbol
                         .contains_key(&record.symbol)
@@ -352,21 +297,22 @@ impl NativeExodus {
         }
         if let Ok(events) = self.pending_events(ctx) {
             for event in events {
-                if self.state.consumed_event_ids.contains(&event.event_id) {
+                if self.core.state.consumed_event_ids.contains(&event.event_id) {
                     continue;
                 }
                 if event.fired_ts_ms > now_ms {
                     wakes.push(event.fired_ts_ms);
                 }
                 let deadline = event.settlement_ts_ms
-                    + (self.config.rule.entry_valid_minutes_after_settlement - 15) * 60_000;
+                    + (self.core.config.rule.entry_valid_minutes_after_settlement - 15) * 60_000;
                 if deadline > now_ms {
                     wakes.push(deadline);
-                    let matches_source = event.environment == self.config.environment
-                        && event.source_profile == self.config.rule.accepted_source_profile
-                        && event.source_config_id == self.config.rule.accepted_source_config_id;
+                    let matches_source = event.environment == self.core.config.environment
+                        && event.source_profile == self.core.config.rule.accepted_source_profile
+                        && event.source_config_id
+                            == self.core.config.rule.accepted_source_config_id;
                     if !account_healthy
-                        && ctx.entries_enabled(self.config.entries_enabled)
+                        && ctx.entries_enabled(self.core.config.entries_enabled)
                         && event.fired_ts_ms <= now_ms
                         && matches_source
                     {
@@ -388,7 +334,7 @@ impl Strategy for NativeExodus {
     }
 
     fn input_dependencies(&self) -> Vec<String> {
-        vec![self.config.carry_sleeve_name.clone()]
+        vec![self.core.config.carry_sleeve_name.clone()]
     }
 
     fn subscriptions(&self) -> Vec<Subscription> {
@@ -396,33 +342,15 @@ impl Strategy for NativeExodus {
     }
 
     fn checkpoint_identity(&self) -> Option<StrategyCheckpointIdentity> {
-        Some(StrategyCheckpointIdentity {
-            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
-            decision_fingerprint: self.config.fingerprint(),
-        })
+        self.core.checkpoint_identity()
     }
 
     fn initial_checkpoint(&self) -> Option<StrategyCheckpoint> {
-        let state = SleeveState {
-            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
-            ..SleeveState::default()
-        };
-        Some(StrategyCheckpoint {
-            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
-            decision_fingerprint: self.config.fingerprint(),
-            payload: checkpoint_payload(&state),
-        })
+        self.core.initial_checkpoint()
     }
 
     fn validate_checkpoint(&self, checkpoint: &StrategyCheckpoint) -> Result<(), String> {
-        if checkpoint.schema_version != DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION
-            || checkpoint.decision_fingerprint != self.config.fingerprint()
-        {
-            return Err("Exodus checkpoint identity mismatch".to_owned());
-        }
-        let state: SleeveState =
-            serde_json::from_slice(&checkpoint.payload).map_err(|error| error.to_string())?;
-        state.validate().map_err(str::to_owned)
+        self.core.validate_checkpoint("Exodus", checkpoint)
     }
 
     fn translate_checkpoint(
@@ -432,7 +360,7 @@ impl Strategy for NativeExodus {
         sources: &[StrategyImportSource],
     ) -> Result<TranslatedStrategyState, String> {
         super::state_import::translate(
-            &self.config,
+            &self.core.config,
             super::state_import::LegacyImportIdentity {
                 venue: &context.venue,
                 realm: &context.realm,
@@ -444,7 +372,7 @@ impl Strategy for NativeExodus {
     }
 
     fn configured_entries_enabled(&self) -> bool {
-        self.config.entries_enabled
+        self.core.config.entries_enabled
     }
 
     fn on_boot(&mut self, ctx: &mut dyn StrategyCtx) {
@@ -461,7 +389,7 @@ impl Strategy for NativeExodus {
     }
 
     fn on_flatten_directional(&mut self, request_id: &str, ctx: &mut dyn StrategyCtx) {
-        self.flatten_request_id = Some(request_id.to_owned());
+        self.core.flatten_request_id = Some(request_id.to_owned());
         self.flatten_now(ctx);
     }
 
@@ -479,7 +407,7 @@ impl Strategy for NativeExodus {
         };
         if symbol
             .and_then(|id| ctx.symbol_name(id))
-            .is_some_and(|name| self.state.open.contains_key(name))
+            .is_some_and(|name| self.core.state.open.contains_key(name))
         {
             self.replan(ctx);
         }
@@ -492,7 +420,7 @@ impl Strategy for NativeExodus {
     }
 
     fn on_order(&mut self, update: &OrderUpdate, ctx: &mut dyn StrategyCtx) {
-        self.ensure_restored(ctx);
+        self.core.ensure_restored("Exodus", ctx);
         let terminal = match update {
             OrderUpdate::Reject {
                 client_order_id,
@@ -508,13 +436,13 @@ impl Strategy for NativeExodus {
             if let Some(facts) = ctx.order_facts(client_order_id) {
                 if facts.reduce_only {
                     if let Some(name) = ctx.symbol_name(facts.symbol).map(str::to_owned) {
-                        self.blockers.insert(name, reason.to_owned());
+                        self.core.blockers.insert(name, reason.to_owned());
                     }
                     ctx.arm_timer(TIMER, u64::try_from(FAST_RETRY_MS).unwrap_or(1) * 1_000_000);
                     return;
                 }
                 if let Some(name) = ctx.symbol_name(facts.symbol).map(str::to_owned) {
-                    if self.state.open.contains_key(&name) {
+                    if self.core.state.open.contains_key(&name) {
                         self.defer_opening(name, reason, ctx);
                         return;
                     }
@@ -531,36 +459,69 @@ impl Strategy for NativeExodus {
         reason: &str,
         ctx: &mut dyn StrategyCtx,
     ) {
-        self.ensure_restored(ctx);
+        self.core.ensure_restored("Exodus", ctx);
         let Some(name) = ctx.symbol_name(symbol).map(str::to_owned) else {
             return;
         };
-        if !reduce_only && self.state.open.contains_key(&name) {
+        if !reduce_only && self.core.state.open.contains_key(&name) {
             self.defer_opening(name, reason, ctx);
             return;
         }
-        self.blockers.insert(name, reason.to_owned());
+        self.core.blockers.insert(name, reason.to_owned());
         ctx.arm_timer(TIMER, u64::try_from(FAST_RETRY_MS).unwrap_or(1) * 1_000_000);
     }
 
     fn entry_blockers(&self) -> Vec<(String, String)> {
-        self.blockers
-            .iter()
-            .map(|(symbol, reason)| (symbol.clone(), reason.clone()))
-            .collect()
+        self.core.entry_blockers()
     }
 
     fn health_error(&self) -> Option<&str> {
-        self.last_error.as_deref()
+        self.core.health_error()
     }
 }
 
+impl SleeveConfig for StrategyConfig {
+    fn validate(&self) -> Result<(), &'static str> {
+        StrategyConfig::validate(self)
+    }
+
+    fn fingerprint(&self) -> String {
+        StrategyConfig::fingerprint(self)
+    }
+
+    fn rest_entries(&self) -> bool {
+        self.rest_entries
+    }
+
+    fn hold_decision_price(&self) -> bool {
+        self.hold_decision_price
+    }
+
+    fn give_up_instead_of_crossing(&self) -> bool {
+        self.give_up_instead_of_crossing
+    }
+}
+
+impl SleeveStateContract for SleeveState {
+    fn schema_version(&self) -> u16 {
+        self.schema_version
+    }
+
+    fn set_schema_version(&mut self, version: u16) {
+        self.schema_version = version;
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        SleeveState::validate(self)
+    }
+}
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use crate::mock_ctx::{Harness, MockCtx, RestingSeed};
+    use crate::native_common::{checkpoint_payload, DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION};
     use crate::native_exodus::plan::{OpenRecord, RuleConfig};
     use engine_types::{Action, OrderKind, Side};
 
@@ -618,14 +579,16 @@ mod tests {
             payload: checkpoint_payload(&restored),
         };
         let strategy = NativeExodus {
-            id: StrategyId(1),
-            config,
-            state: SleeveState::default(),
-            restored: false,
-            checkpoint_fingerprint: None,
-            blockers: BTreeMap::new(),
-            last_error: None,
-            flatten_request_id: None,
+            core: SleeveCore {
+                id: StrategyId(1),
+                config,
+                state: SleeveState::default(),
+                restored: false,
+                checkpoint_fingerprint: None,
+                blockers: std::collections::BTreeMap::new(),
+                last_error: None,
+                flatten_request_id: None,
+            },
         };
         let mut harness = Harness::new(Box::new(strategy));
         harness.ctx.set_wall_ms(now_ms);
@@ -797,7 +760,7 @@ mod tests {
         ctx.set_strategy_id("carry", StrategyId(0));
 
         strategy.defer_opening("AUSDT".into(), "venue_reject", &mut ctx);
-        let retry_at = strategy.state.entry_retry_after_ms["AUSDT"];
+        let retry_at = strategy.core.state.entry_retry_after_ms["AUSDT"];
         assert_eq!(retry_at, now_ms + TERMINAL_ENTRY_RETRY_MS);
 
         let mut near_deadline_state = SleeveState {
@@ -822,7 +785,7 @@ mod tests {
         deadline_ctx.set_strategy_id("carry", StrategyId(0));
         near_deadline.defer_opening("AUSDT".into(), "venue_reject", &mut deadline_ctx);
         assert_eq!(
-            near_deadline.state.entry_retry_after_ms["AUSDT"],
+            near_deadline.core.state.entry_retry_after_ms["AUSDT"],
             now_ms + 10_000,
             "the bounded retry cannot outlive the entry deadline"
         );

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use engine_types::{
     MarketEvent, OrderUpdate, SignalObservation, Strategy, StrategyCheckpoint,
     StrategyCheckpointIdentity, StrategyCtx, StrategyId, StrategyImportContext,
-    StrategyImportSource, Subscription, SymbolId, TimerId, TranslatedStrategyState, WorkPolicy,
+    StrategyImportSource, Subscription, SymbolId, TimerId, TranslatedStrategyState,
     SIGNAL_OBSERVATION_SCHEMA_VERSION,
 };
 use serde::Deserialize;
@@ -15,12 +15,12 @@ use super::plan::{
     FeatureRow, GateSignal, LongSignalBatch, MarketMark, ReplanMode, SleeveState, StrategyConfig,
     GATE_TRIGGER_MAX_AGE_MS,
 };
+use crate::native_common::sleeve::{SleeveConfig, SleeveCore, SleeveState as SleeveStateContract};
 use crate::native_common::{
     attributed_exposure_is_flat, attributed_symbols, checkpoint_payload,
     directional_account_is_healthy, emit_effects, flatten_execution, owned_order_state,
     planner_facts, validate_exact_symbol_coverage, validate_signal_identity, Effect,
     FlattenExecutionInput, SignalConfigIdentity, UniverseIdentity,
-    DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
 };
 use crate::params::Params;
 use crate::position_plan::Skipped;
@@ -90,103 +90,34 @@ struct GateCandidateRow {
 }
 
 pub struct NativeLong {
-    id: StrategyId,
-    pub config: StrategyConfig,
-    pub state: SleeveState,
-    restored: bool,
-    checkpoint_fingerprint: Option<String>,
-    blockers: BTreeMap<String, String>,
-    last_error: Option<String>,
-    flatten_request_id: Option<String>,
+    pub core: SleeveCore<StrategyConfig, SleeveState>,
 }
 
 impl NativeLong {
     /// Reducer-facing constructor used by contract tests.
     pub fn new(config: StrategyConfig, state: SleeveState) -> Result<Self, &'static str> {
-        config.validate()?;
-        let mut state = state;
-        if state.schema_version == 0 {
-            state.schema_version = DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION;
-        }
-        state.validate()?;
         Ok(Self {
-            id: StrategyId(0),
-            config,
-            state,
-            restored: true,
-            checkpoint_fingerprint: None,
-            blockers: BTreeMap::new(),
-            last_error: None,
-            flatten_request_id: None,
+            core: SleeveCore::new(config, state)?,
         })
     }
 
     pub fn from_params(id: StrategyId, params: &toml::Value) -> Result<Self, BuildError> {
-        let config = config_from_params(params)?;
         Ok(Self {
-            id,
-            config,
-            state: SleeveState {
-                schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
-                ..SleeveState::default()
-            },
-            restored: false,
-            checkpoint_fingerprint: None,
-            blockers: BTreeMap::new(),
-            last_error: None,
-            flatten_request_id: None,
+            core: SleeveCore::from_config(id, config_from_params(params)?),
         })
     }
 
     pub fn reduce(&mut self, input: BatchInput) -> Result<BatchOutput, &'static str> {
-        let output = reduce_batch(input, self.state.clone(), &self.config)?;
-        self.state = output.next_state.clone();
-        self.checkpoint_fingerprint = Some(self.config.fingerprint());
+        let output = reduce_batch(input, self.core.state.clone(), &self.core.config)?;
+        self.core.state = output.next_state.clone();
+        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
         Ok(output)
     }
 
-    fn ensure_restored(&mut self, ctx: &dyn StrategyCtx) {
-        if self.restored {
-            return;
-        }
-        self.restored = true;
-        let Some(checkpoint) = ctx.strategy_global_checkpoint() else {
-            return;
-        };
-        self.checkpoint_fingerprint = Some(checkpoint.decision_fingerprint.clone());
-        let expected = self.config.fingerprint();
-        if checkpoint.schema_version != DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION
-            || checkpoint.decision_fingerprint != expected
-        {
-            self.last_error = Some("LONG checkpoint identity mismatch".to_owned());
-            return;
-        }
-        match serde_json::from_slice::<SleeveState>(&checkpoint.payload)
-            .map_err(|error| error.to_string())
-            .and_then(|state| {
-                state.validate().map_err(str::to_owned)?;
-                Ok(state)
-            }) {
-            Ok(state) => self.state = state,
-            Err(error) => {
-                self.last_error = Some(format!("LONG checkpoint refused: {error}"));
-                self.checkpoint_fingerprint = Some("invalid-checkpoint".to_owned());
-            }
-        }
-    }
-
-    fn entry_work(&self) -> Option<WorkPolicy> {
-        self.config.rest_entries.then_some(WorkPolicy {
-            hold_decision_px: self.config.hold_decision_price,
-            give_up_instead_of_crossing: self.config.give_up_instead_of_crossing,
-            ..WorkPolicy::default()
-        })
-    }
-
     fn effective_config(&self, ctx: &dyn StrategyCtx) -> StrategyConfig {
-        let mut config = self.config.clone();
+        let mut config = self.core.config.clone();
         config.entries_enabled =
-            ctx.entries_enabled(self.config.entries_enabled) && Self::account(ctx).0;
+            ctx.entries_enabled(self.core.config.entries_enabled) && Self::account(ctx).0;
         config
     }
 
@@ -198,9 +129,9 @@ impl NativeLong {
 
     fn known_symbols(&self, ctx: &dyn StrategyCtx) -> BTreeSet<String> {
         let mut symbols = attributed_symbols(ctx);
-        symbols.extend(self.state.symbols.keys().cloned());
-        symbols.extend(self.state.pending_signals.keys().cloned());
-        symbols.extend(self.state.exit_pending.iter().cloned());
+        symbols.extend(self.core.state.symbols.keys().cloned());
+        symbols.extend(self.core.state.pending_signals.keys().cloned());
+        symbols.extend(self.core.state.exit_pending.iter().cloned());
         symbols
     }
 
@@ -223,7 +154,7 @@ impl NativeLong {
     fn current_decisions(&self, now_ms: i64, ctx: &dyn StrategyCtx) -> Vec<DecisionInput> {
         let (_, equity) = Self::account(ctx);
         let mut decisions = BTreeMap::<String, DecisionInput>::new();
-        for (symbol, prior) in &self.state.symbols {
+        for (symbol, prior) in &self.core.state.symbols {
             decisions.insert(
                 symbol.clone(),
                 DecisionInput {
@@ -239,7 +170,7 @@ impl NativeLong {
                 },
             );
         }
-        for (symbol, pending) in &self.state.pending_signals {
+        for (symbol, pending) in &self.core.state.pending_signals {
             decisions.insert(
                 symbol.clone(),
                 DecisionInput {
@@ -274,16 +205,16 @@ impl NativeLong {
             facts: planner_facts(ctx, &symbols),
             owned_working_symbols: working,
             owned_opening_order_ids: opening,
-            checkpoint_fingerprint: self.checkpoint_fingerprint.clone(),
+            checkpoint_fingerprint: self.core.checkpoint_fingerprint.clone(),
             signal_receipt,
             replace_gate_pending: false,
         }
     }
 
     fn apply(&mut self, output: BatchOutput, ctx: &mut dyn StrategyCtx) {
-        self.state = output.next_state;
-        self.checkpoint_fingerprint = Some(self.config.fingerprint());
-        self.blockers.clear();
+        self.core.state = output.next_state;
+        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
+        self.core.blockers.clear();
         for skipped in output.execution.skipped {
             let (symbol, reason) = match skipped {
                 Skipped::TooSmallToBother { symbol, .. } => (symbol, "inside_resize_band"),
@@ -294,23 +225,24 @@ impl NativeLong {
                 Skipped::NoInstrumentRule { symbol } => (symbol, "no_instrument_rule"),
                 Skipped::ForeignOwner { symbol } => (symbol, "foreign_strategy_owner"),
             };
-            self.blockers.insert(symbol, reason.to_owned());
+            self.core.blockers.insert(symbol, reason.to_owned());
         }
-        for symbol in &self.state.refused_entries {
-            self.blockers
+        for symbol in &self.core.state.refused_entries {
+            self.core
+                .blockers
                 .entry(symbol.clone())
                 .or_insert_with(|| "entry_refused".to_owned());
         }
         if let Err(error) = emit_effects(
             output.execution.effects,
-            self.id,
+            self.core.id,
             None,
-            self.entry_work(),
+            self.core.entry_work(),
             ctx,
         ) {
-            self.last_error = Some(error.to_owned());
+            self.core.last_error = Some(error.to_owned());
         } else {
-            self.last_error = None;
+            self.core.last_error = None;
         }
         self.arm_next(ctx);
     }
@@ -319,8 +251,8 @@ impl NativeLong {
         let effects = vec![
             Effect::PersistCheckpoint {
                 symbol: String::new(),
-                config_fingerprint: self.config.fingerprint(),
-                payload: checkpoint_payload(&self.state),
+                config_fingerprint: self.core.config.fingerprint(),
+                payload: checkpoint_payload(&self.core.state),
             },
             Effect::ConsumeSignal {
                 source: observation.source.clone(),
@@ -328,31 +260,31 @@ impl NativeLong {
                 observation_id: observation.observation_id.clone(),
             },
         ];
-        if let Err(error) = emit_effects(effects, self.id, None, None, ctx) {
-            self.last_error = Some(error.to_owned());
+        if let Err(error) = emit_effects(effects, self.core.id, None, None, ctx) {
+            self.core.last_error = Some(error.to_owned());
         } else {
-            self.last_error = None;
+            self.core.last_error = None;
         }
-        self.checkpoint_fingerprint = Some(self.config.fingerprint());
+        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
         self.arm_next(ctx);
     }
 
     fn replan_with_mode(&mut self, replan_mode: ReplanMode, ctx: &mut dyn StrategyCtx) {
-        self.ensure_restored(ctx);
-        if self.flatten_request_id.is_some() {
+        self.core.ensure_restored("LONG", ctx);
+        if self.core.flatten_request_id.is_some() {
             self.flatten_now(ctx);
             return;
         }
         let now_ms = ctx.wall_ms().max(1);
         let decisions = self.current_decisions(now_ms, ctx);
-        if decisions.is_empty() && self.checkpoint_fingerprint.is_none() {
+        if decisions.is_empty() && self.core.checkpoint_fingerprint.is_none() {
             return;
         }
         let input = self.make_input(decisions, None, ctx);
         let config = self.effective_config(ctx);
-        match reduce_batch_with_mode(input, self.state.clone(), &config, replan_mode) {
+        match reduce_batch_with_mode(input, self.core.state.clone(), &config, replan_mode) {
             Ok(output) => self.apply(output, ctx),
-            Err(error) => self.last_error = Some(error.to_owned()),
+            Err(error) => self.core.last_error = Some(error.to_owned()),
         }
     }
 
@@ -362,34 +294,35 @@ impl NativeLong {
 
     fn defer_opening(&mut self, name: String, reason: &str, ctx: &mut dyn StrategyCtx) {
         let now_ms = ctx.wall_ms().max(1);
-        if self.state.entry_cycle_started_ms == 0
+        if self.core.state.entry_cycle_started_ms == 0
             || now_ms
                 >= self
+                    .core
                     .state
                     .entry_cycle_started_ms
                     .saturating_add(super::plan::ENTRY_CYCLE_MS)
         {
-            self.state.entry_cycle_started_ms = now_ms;
-            self.state.entry_cycle_selected_symbols.clear();
-            self.state.refused_entries.clear();
+            self.core.state.entry_cycle_started_ms = now_ms;
+            self.core.state.entry_cycle_selected_symbols.clear();
+            self.core.state.refused_entries.clear();
         }
-        self.blockers.insert(name.clone(), reason.to_owned());
-        self.state.refused_entries.insert(name);
+        self.core.blockers.insert(name.clone(), reason.to_owned());
+        self.core.state.refused_entries.insert(name);
         let effect = Effect::PersistCheckpoint {
             symbol: String::new(),
-            config_fingerprint: self.config.fingerprint(),
-            payload: checkpoint_payload(&self.state),
+            config_fingerprint: self.core.config.fingerprint(),
+            payload: checkpoint_payload(&self.core.state),
         };
-        if let Err(error) = emit_effects(vec![effect], self.id, None, None, ctx) {
-            self.last_error = Some(error.to_owned());
+        if let Err(error) = emit_effects(vec![effect], self.core.id, None, None, ctx) {
+            self.core.last_error = Some(error.to_owned());
         }
-        self.checkpoint_fingerprint = Some(self.config.fingerprint());
+        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
         self.arm_next(ctx);
     }
 
     fn flatten_now(&mut self, ctx: &mut dyn StrategyCtx) {
-        self.ensure_restored(ctx);
-        let Some(request_id) = self.flatten_request_id.clone() else {
+        self.core.ensure_restored("LONG", ctx);
+        let Some(request_id) = self.core.flatten_request_id.clone() else {
             return;
         };
         let mut symbols = self.known_symbols(ctx);
@@ -397,18 +330,18 @@ impl NativeLong {
         symbols.extend(working);
         let facts = planner_facts(ctx, &symbols);
         let conclusively_flat = attributed_exposure_is_flat(ctx, &symbols);
-        self.state.pending_signals.clear();
+        self.core.state.pending_signals.clear();
         if conclusively_flat && opening.values().all(Vec::is_empty) {
-            self.state.symbols.clear();
-            self.state.exit_pending.clear();
-            self.state.refused_entries.clear();
+            self.core.state.symbols.clear();
+            self.core.state.exit_pending.clear();
+            self.core.state.refused_entries.clear();
         } else {
-            self.state.exit_pending.extend(facts.held_symbols());
+            self.core.state.exit_pending.extend(facts.held_symbols());
         }
         let (execution, flat) = flatten_execution(
-            &self.state,
+            &self.core.state,
             FlattenExecutionInput {
-                config_fingerprint: self.config.fingerprint(),
+                config_fingerprint: self.core.config.fingerprint(),
                 facts: &facts,
                 owned_opening_order_ids: &opening,
                 now_ms: ctx.wall_ms().max(1),
@@ -418,18 +351,24 @@ impl NativeLong {
             },
         );
         if flat {
-            self.flatten_request_id = None;
+            self.core.flatten_request_id = None;
         }
-        self.checkpoint_fingerprint = Some(self.config.fingerprint());
-        if let Err(error) = emit_effects(execution.effects, self.id, None, self.entry_work(), ctx) {
-            self.last_error = Some(error.to_owned());
+        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
+        if let Err(error) = emit_effects(
+            execution.effects,
+            self.core.id,
+            None,
+            self.core.entry_work(),
+            ctx,
+        ) {
+            self.core.last_error = Some(error.to_owned());
         }
     }
 
     fn arm_next(&self, ctx: &mut dyn StrategyCtx) {
         let now_ms = ctx.wall_ms().max(1);
         let mut wakes = Vec::new();
-        for prior in self.state.symbols.values() {
+        for prior in self.core.state.symbols.values() {
             if prior.attempted_signal_ts_ms > now_ms {
                 wakes.push(prior.attempted_signal_ts_ms);
             }
@@ -446,18 +385,20 @@ impl NativeLong {
                 }
             }
         }
-        for pending in self.state.pending_signals.values() {
+        for pending in self.core.state.pending_signals.values() {
             let clocks = if let Some(gate) = pending.gate.as_ref() {
                 [
                     pending.signal_ts_ms + GATE_TRIGGER_MAX_AGE_MS,
                     gate.valid_until_ms,
-                    pending.signal_ts_ms + self.config.signal_freshness_ms,
+                    pending.signal_ts_ms + self.core.config.signal_freshness_ms,
                 ]
             } else {
                 [
-                    pending.signal_ts_ms + self.config.rule.entry_delay_hours.max(1) * 3_600_000,
-                    pending.signal_ts_ms + self.config.rule.fc_sniper_deadline_hours * 3_600_000,
-                    pending.signal_ts_ms + self.config.signal_freshness_ms,
+                    pending.signal_ts_ms
+                        + self.core.config.rule.entry_delay_hours.max(1) * 3_600_000,
+                    pending.signal_ts_ms
+                        + self.core.config.rule.fc_sniper_deadline_hours * 3_600_000,
+                    pending.signal_ts_ms + self.core.config.signal_freshness_ms,
                 ]
             };
             for wake in clocks {
@@ -466,24 +407,26 @@ impl NativeLong {
                 }
             }
         }
-        if !self.state.pending_signals.is_empty()
+        if !self.core.state.pending_signals.is_empty()
             && !Self::account(ctx).0
-            && ctx.entries_enabled(self.config.entries_enabled)
+            && ctx.entries_enabled(self.core.config.entries_enabled)
         {
             wakes.push(now_ms.saturating_add(1_000));
         }
         let next_entry_cycle = self
+            .core
             .state
             .entry_cycle_started_ms
             .saturating_add(super::plan::ENTRY_CYCLE_MS);
         let unresolved_entry = self
+            .core
             .state
             .symbols
             .values()
             .any(|prior| prior.requested && !prior.filled);
         if (unresolved_entry
-            || !self.state.pending_signals.is_empty()
-            || !self.state.refused_entries.is_empty())
+            || !self.core.state.pending_signals.is_empty()
+            || !self.core.state.refused_entries.is_empty())
             && next_entry_cycle > now_ms
         {
             wakes.push(next_entry_cycle);
@@ -500,7 +443,7 @@ impl NativeLong {
         ctx: &mut dyn StrategyCtx,
     ) -> Result<(), String> {
         if observation.schema_version != SIGNAL_OBSERVATION_SCHEMA_VERSION
-            || observation.destination != self.id
+            || observation.destination != self.core.id
             || observation.source.is_empty()
             || observation.sequence == 0
             || observation.observation_id.is_empty()
@@ -518,7 +461,7 @@ impl NativeLong {
         validate_signal_identity(
             &envelope.config,
             envelope.universe.as_ref(),
-            &self.config.environment,
+            &self.core.config.environment,
         )
         .map_err(str::to_owned)?;
         if observation.decision_fingerprint != envelope.config.long_decision_fingerprint {
@@ -531,21 +474,21 @@ impl NativeLong {
         if observation.kind != kind {
             return Err("LONG outer and inner signal kinds disagree".to_owned());
         }
-        self.ensure_restored(ctx);
-        if observation.decision_fingerprint != self.config.fingerprint() {
+        self.core.ensure_restored("LONG", ctx);
+        if observation.decision_fingerprint != self.core.config.fingerprint() {
             emit_effects(
                 vec![Effect::ConsumeSignal {
                     source: observation.source.clone(),
                     sequence: observation.sequence,
                     observation_id: observation.observation_id.clone(),
                 }],
-                self.id,
+                self.core.id,
                 None,
                 None,
                 ctx,
             )
             .map_err(str::to_owned)?;
-            self.last_error = None;
+            self.core.last_error = None;
             return Ok(());
         }
         let eligible = envelope
@@ -554,11 +497,13 @@ impl NativeLong {
             .expect("validated LONG universe identity")
             .long_symbols
             .clone();
-        if envelope.config.long_profile != self.config.profile_name
-            || envelope.config.long_execution_strategy_id != self.config.rule.execution_strategy_id
-            || envelope.config.long_rule_sha256 != self.config.rule_sha256
-            || envelope.config.long_feature_contract_sha256 != self.config.feature_contract_sha256
-            || envelope.config.long_decision_fingerprint != self.config.fingerprint()
+        if envelope.config.long_profile != self.core.config.profile_name
+            || envelope.config.long_execution_strategy_id
+                != self.core.config.rule.execution_strategy_id
+            || envelope.config.long_rule_sha256 != self.core.config.rule_sha256
+            || envelope.config.long_feature_contract_sha256
+                != self.core.config.feature_contract_sha256
+            || envelope.config.long_decision_fingerprint != self.core.config.fingerprint()
         {
             return Err("LONG signal config does not bind this reducer".to_owned());
         }
@@ -637,8 +582,8 @@ impl NativeLong {
         if entry_window_is_closed(
             ctx.wall_ms(),
             batch.decision_ts_ms,
-            self.config.book_validity_ms,
-            self.config.engine_entry_cutoff_ms,
+            self.core.config.book_validity_ms,
+            self.core.config.engine_entry_cutoff_ms,
         ) {
             self.consume_only(observation, ctx);
             return Ok(());
@@ -676,9 +621,10 @@ impl NativeLong {
             input.facts.prices.insert(symbol, mark);
         }
         let config = self.effective_config(ctx);
-        let output = reduce_batch(input, self.state.clone(), &config).map_err(str::to_owned)?;
+        let output =
+            reduce_batch(input, self.core.state.clone(), &config).map_err(str::to_owned)?;
         self.apply(output, ctx);
-        if self.flatten_request_id.is_some() {
+        if self.core.flatten_request_id.is_some() {
             self.flatten_now(ctx);
         }
         Ok(())
@@ -710,8 +656,8 @@ impl NativeLong {
         if entry_window_is_closed(
             ctx.wall_ms(),
             received_ts_ms,
-            self.config.book_validity_ms,
-            self.config.engine_entry_cutoff_ms,
+            self.core.config.book_validity_ms,
+            self.core.config.engine_entry_cutoff_ms,
         ) {
             self.consume_only(observation, ctx);
             return Ok(());
@@ -760,9 +706,10 @@ impl NativeLong {
         let mut input = self.make_input(decisions, receipt, ctx);
         input.replace_gate_pending = true;
         let config = self.effective_config(ctx);
-        let output = reduce_batch(input, self.state.clone(), &config).map_err(str::to_owned)?;
+        let output =
+            reduce_batch(input, self.core.state.clone(), &config).map_err(str::to_owned)?;
         self.apply(output, ctx);
-        if self.flatten_request_id.is_some() {
+        if self.core.flatten_request_id.is_some() {
             self.flatten_now(ctx);
         }
         Ok(())
@@ -808,33 +755,15 @@ impl Strategy for NativeLong {
     }
 
     fn checkpoint_identity(&self) -> Option<StrategyCheckpointIdentity> {
-        Some(StrategyCheckpointIdentity {
-            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
-            decision_fingerprint: self.config.fingerprint(),
-        })
+        self.core.checkpoint_identity()
     }
 
     fn initial_checkpoint(&self) -> Option<StrategyCheckpoint> {
-        let state = SleeveState {
-            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
-            ..SleeveState::default()
-        };
-        Some(StrategyCheckpoint {
-            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
-            decision_fingerprint: self.config.fingerprint(),
-            payload: checkpoint_payload(&state),
-        })
+        self.core.initial_checkpoint()
     }
 
     fn validate_checkpoint(&self, checkpoint: &StrategyCheckpoint) -> Result<(), String> {
-        if checkpoint.schema_version != DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION
-            || checkpoint.decision_fingerprint != self.config.fingerprint()
-        {
-            return Err("LONG checkpoint identity mismatch".to_owned());
-        }
-        let state: SleeveState =
-            serde_json::from_slice(&checkpoint.payload).map_err(|error| error.to_string())?;
-        state.validate().map_err(str::to_owned)
+        self.core.validate_checkpoint("LONG", checkpoint)
     }
 
     fn translate_checkpoint(
@@ -843,7 +772,7 @@ impl Strategy for NativeLong {
         source_format: &str,
         sources: &[StrategyImportSource],
     ) -> Result<TranslatedStrategyState, String> {
-        super::state_import::translate(&self.config, source_format, sources)
+        super::state_import::translate(&self.core.config, source_format, sources)
     }
 
     fn requires_signal_feed(&self) -> bool {
@@ -851,7 +780,7 @@ impl Strategy for NativeLong {
     }
 
     fn configured_entries_enabled(&self) -> bool {
-        self.config.entries_enabled
+        self.core.config.entries_enabled
     }
 
     fn on_boot(&mut self, ctx: &mut dyn StrategyCtx) {
@@ -868,13 +797,13 @@ impl Strategy for NativeLong {
     }
 
     fn on_flatten_directional(&mut self, request_id: &str, ctx: &mut dyn StrategyCtx) {
-        self.flatten_request_id = Some(request_id.to_owned());
+        self.core.flatten_request_id = Some(request_id.to_owned());
         self.flatten_now(ctx);
     }
 
     fn on_signal(&mut self, observation: &SignalObservation, ctx: &mut dyn StrategyCtx) {
         if let Err(error) = self.accept_signal(observation, ctx) {
-            self.last_error = Some(error);
+            self.core.last_error = Some(error);
         }
     }
 
@@ -889,9 +818,9 @@ impl Strategy for NativeLong {
         if symbol
             .and_then(|id| ctx.symbol_name(id))
             .is_some_and(|name| {
-                self.state.symbols.contains_key(name)
-                    || self.state.pending_signals.contains_key(name)
-                    || self.state.exit_pending.contains(name)
+                self.core.state.symbols.contains_key(name)
+                    || self.core.state.pending_signals.contains_key(name)
+                    || self.core.state.exit_pending.contains(name)
             })
         {
             self.replan(ctx);
@@ -905,7 +834,7 @@ impl Strategy for NativeLong {
     }
 
     fn on_order(&mut self, update: &OrderUpdate, ctx: &mut dyn StrategyCtx) {
-        self.ensure_restored(ctx);
+        self.core.ensure_restored("LONG", ctx);
         let terminal = match update {
             OrderUpdate::Reject {
                 client_order_id,
@@ -921,18 +850,19 @@ impl Strategy for NativeLong {
             if let Some(facts) = ctx.order_facts(client_order_id) {
                 if facts.reduce_only {
                     if let Some(name) = ctx.symbol_name(facts.symbol).map(str::to_owned) {
-                        self.blockers.insert(name, reason.to_owned());
+                        self.core.blockers.insert(name, reason.to_owned());
                     }
                     ctx.arm_timer(TIMER, 1_000_000_000);
                     return;
                 }
                 if let Some(name) = ctx.symbol_name(facts.symbol).map(str::to_owned) {
                     if self
+                        .core
                         .state
                         .symbols
                         .get(&name)
                         .is_some_and(|prior| prior.requested)
-                        && !self.state.exit_pending.contains(&name)
+                        && !self.core.state.exit_pending.contains(&name)
                     {
                         self.defer_opening(name, reason, ctx);
                         return;
@@ -950,12 +880,12 @@ impl Strategy for NativeLong {
         reason: &str,
         ctx: &mut dyn StrategyCtx,
     ) {
-        self.ensure_restored(ctx);
+        self.core.ensure_restored("LONG", ctx);
         let Some(name) = ctx.symbol_name(symbol).map(str::to_owned) else {
             return;
         };
         if reduce_only {
-            self.blockers.insert(name, reason.to_owned());
+            self.core.blockers.insert(name, reason.to_owned());
             ctx.arm_timer(TIMER, 1_000_000_000);
             return;
         }
@@ -963,21 +893,54 @@ impl Strategy for NativeLong {
     }
 
     fn entry_blockers(&self) -> Vec<(String, String)> {
-        self.blockers
-            .iter()
-            .map(|(symbol, reason)| (symbol.clone(), reason.clone()))
-            .collect()
+        self.core.entry_blockers()
     }
 
     fn health_error(&self) -> Option<&str> {
-        self.last_error.as_deref()
+        self.core.health_error()
     }
 }
 
+impl SleeveConfig for StrategyConfig {
+    fn validate(&self) -> Result<(), &'static str> {
+        StrategyConfig::validate(self)
+    }
+
+    fn fingerprint(&self) -> String {
+        StrategyConfig::fingerprint(self)
+    }
+
+    fn rest_entries(&self) -> bool {
+        self.rest_entries
+    }
+
+    fn hold_decision_price(&self) -> bool {
+        self.hold_decision_price
+    }
+
+    fn give_up_instead_of_crossing(&self) -> bool {
+        self.give_up_instead_of_crossing
+    }
+}
+
+impl SleeveStateContract for SleeveState {
+    fn schema_version(&self) -> u16 {
+        self.schema_version
+    }
+
+    fn set_schema_version(&mut self, version: u16) {
+        self.schema_version = version;
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        SleeveState::validate(self)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mock_ctx::{MockCtx, RestingSeed};
+    use crate::native_common::DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION;
     use engine_types::{Action, OrderKind, Side};
     use serde_json::json;
 
