@@ -22,10 +22,10 @@ edit STATE.md to match.
     independent axes while retaining their exact USDT values. Explore resolves
     the `lm_` family and returns both realms for `lm_engine_account_age_ms`.
   - Commit `8352e564` carries the operator redesign, `cb416d46` carries the
-    funded-account scale repair, and `9ca9f795` removes plot-stealing tables in
-    favor of compact `D`, `M`, `BY`, and `BN` labels. The renderer matches the
-    generated JSON, all 26 dashboard tests pass, and the push gate passes Ruff,
-    ShellCheck, mypy, 1,453 Python tests, Rust formatting and Clippy, and every
+    funded-account scale repair, `9ca9f795` removes plot-stealing tables, and
+    `99e12ab2` spells out the execution legend. The renderer matches the
+    generated JSON, all 27 dashboard tests pass, and the push gate passes Ruff,
+    ShellCheck, mypy, 1,454 Python tests, Rust formatting and Clippy, and every
     Rust workspace test.
   - Run `33900447763` passed CI, Rust, and the verified artifact for
     `65ee75a7`, then GitHub refused to start the VPS job because recent account
