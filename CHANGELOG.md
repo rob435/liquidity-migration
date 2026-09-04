@@ -85,7 +85,9 @@ edit STATE.md to match.
     `Deploy artifact` producing no logs at all (HTTP 404 on every job log) and
     `vps` skipped behind them. Every run since `8352e564` at 18:03 UTC ends
     the same way; the last run to execute anything was `33900447763` at
-    17:24 UTC. This is GitHub refusing to start jobs for the account, not a
+    17:24 UTC. Not specific to this work: the owner's own `93ab5cd` failed the
+    same way in 6 s at 19:17 UTC, and run `33910443631` in 7 s at 19:18 UTC.
+    This is GitHub refusing to start jobs for the account, not a
     test failure — the same billing refusal recorded at 18:17 UTC below. The
     fix is therefore merged and undeployed, and the host still runs
     `65ee75a7`. Local gate on this commit: Ruff, mypy (99 files), 1 429
