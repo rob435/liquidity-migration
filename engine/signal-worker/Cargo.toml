@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 license = "UNLICENSED"
 
+[lints]
+workspace = true
+
 [lib]
 name = "signal_worker"
 path = "src/lib.rs"

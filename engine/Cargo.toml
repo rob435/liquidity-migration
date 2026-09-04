@@ -12,6 +12,16 @@ members = [
     "market-tape",
 ]
 
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+mem_forget = "deny"
+rc_buffer = "deny"
+unnecessary_self_imports = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+empty_structs_with_brackets = "deny"
+
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
