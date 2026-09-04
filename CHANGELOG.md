@@ -34,9 +34,10 @@ edit STATE.md to match.
     `prune()` first. `prune()` walked the whole tape with `rglob("*.zst")`
     and spent three `stat()` calls per file — the sort key, the size sum, and
     the `expired` test — plus a `shutil.disk_usage` **per file** at
-    `storage.py:343` while the tape was under `max_disk_gb`, and, on every
-    tick that deleted anything, a second full walk of the tree in
-    `remove_empty_directories`. On this host that covers 517 USDT perpetuals ×
+    `storage.py:343` while the tape was under `max_disk_gb`, and then a
+    second full walk of the tree — `os.walk` with an `rmdir` attempt on every
+    directory — in `remove_empty_directories`, unconditionally, deletions or
+    not. On this host that covers 517 USDT perpetuals ×
     24 hourly directories × the ~3 days that `max_disk_gb = 60` holds: tens of
     thousands of compressed segments, three to four syscalls each, every 30
     seconds, growing with the tape. When one pass ran past 120 s the heartbeat
@@ -94,10 +95,10 @@ edit STATE.md to match.
     first pass after restart roughly four minutes long; the 14:47:43 overrun
     falls inside the second. The disk trend `dd25715` recorded — 64 GB free at
     00:10 UTC, 36 GB at 15:07 — puts the tape at or near `max_disk_gb = 60`,
-    which is the pass's most expensive mode: it deletes on every tick, and
-    every tick that deletes then walked the tree a second time in
-    `remove_empty_directories`. That walk now runs only when a pass deleted
-    something, once per 300 s rather than per 30 s.
+    which is the pass's most expensive mode: it deletes on every tick, and a
+    deleting pass leaves the most directories for the second walk to try to
+    `rmdir`. That second walk now runs only when a pass deleted something,
+    once per 300 s rather than per 30 s.
 
 - **2026-09-04 — Incident `host-bf5dcb6544d0dfdc`: the new watchdog-chain check
   paged CRITICAL on its own deploy. Requirement now reads systemd enablement,
