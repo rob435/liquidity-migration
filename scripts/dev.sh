@@ -54,6 +54,7 @@ MYPY_TARGETS=(
   scripts/research/capture_bybit_account_history.py
   scripts/research/reconcile_venue_wal.py
   scripts/devtools/repo_doctor.py
+  scripts/release_artifact.py
   scripts/data/build_candidate_tape.py
   scripts/runtime/check_fleet_liveness.py
   scripts/runtime/record_equity.py

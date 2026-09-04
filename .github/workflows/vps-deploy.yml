@@ -98,17 +98,18 @@ jobs:
         working-directory: engine
       # The same debug build clippy just produced: the suite runs in seconds,
       # and this is the profile scripts/dev.sh check tests with locally. The
-      # optimized build is tested in the release job, off the deploy path.
+      # artifact job tests the optimized profile consumed by deploy.
       - name: Tests (locked)
         run: cargo test --workspace --all-targets --locked
         working-directory: engine
 
-  # The deployed binaries, built beside `rust` rather than after it: this is the
-  # only build that pays thin LTO, and `vps` gates on both jobs, so a red test
-  # still blocks the deploy that consumes this artifact.
+  # Optimized tests, local workloads and packaging share one Cargo target.
+  # Upload only the qualified bytes; deployment does not rebuild them.
   rust-artifact:
-    name: Deploy artifact
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy'
+    name: Qualified release artifact
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.mode == 'deploy' || inputs.mode == 'qualify')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -119,64 +120,17 @@ jobs:
         uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
         with:
           workspaces: "engine -> target"
-      - name: Build and smoke-test deploy artifact (locked)
-        run: |
-          cargo build --release --locked --workspace --bins
-          (
-            cd target/release
-            sha256sum engine signal-worker market-tape > binaries.sha256
-            ./engine --help >/dev/null
-            ./signal-worker --help >/dev/null
-            ./market-tape help >/dev/null 2>&1 || true
-            tar -czf "$RUNNER_TEMP/engine-binaries-${GITHUB_SHA}.tar.gz" engine signal-worker market-tape binaries.sha256
-          )
-        working-directory: engine
-      - name: Upload compiled release binaries
+      - name: Qualify and package release binaries (locked, local workloads)
+        run: >-
+          python3 scripts/release_artifact.py qualify
+          --commit "$GITHUB_SHA"
+          --output "$RUNNER_TEMP/engine-binaries-${GITHUB_SHA}.tar.gz"
+      - name: Upload qualified release binaries
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: engine-binaries-${{ github.sha }}
           path: ${{ runner.temp }}/engine-binaries-${{ github.sha }}.tar.gz
           retention-days: 2
-
-  # The optimized build's tests, soak and benchmark are an explicit
-  # qualification. They are deliberately off the deploy path.
-  rust-soak-bench:
-    name: Engine release tests, soak and benchmarks
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'qualify'
-    needs: [rust]
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Rust cache
-        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
-        with:
-          workspaces: "engine -> target"
-      - name: Release tests (locked)
-        run: cargo test --workspace --all-targets --release --locked
-        working-directory: engine
-      - name: Account-state soak (bounded, CPU and heap only)
-        run: >-
-          cargo run --release --locked -p engine-core
-          --example account_state_soak --
-          --operations 2000000
-          --live-ids 65536
-          --sample-ops 4096
-          --history-rows 0,1000,10000,100000
-          --repeats 3
-          --json
-        working-directory: engine
-      - name: Engine order-path benchmark (local pretend venue)
-        run: >-
-          cargo run --release --locked -p engine-core --bin engine -- bench
-          --events 20000
-          --rate 0
-          --every 20
-          --symbols BTCUSDT
-          --wal "$RUNNER_TEMP/engine-bench-${GITHUB_SHA}.wal"
-        working-directory: engine
 
   # Safety action: stopping and persistently disarming funded units must remain
   # available even when a build or test is red. It still uses the exact pinned
@@ -288,7 +242,7 @@ jobs:
     needs: [ci, rust, rust-artifact]
     runs-on: ubuntu-latest
     environment: production
-    # Bound the stopped window; the deploy builds before it stops the fleet.
+    # Qualification finishes before the host begins a fleet handover.
     timeout-minutes: 120
     env:
       VPS_HOST: ${{ vars.VPS_HOST || '208.84.103.4' }}
@@ -316,19 +270,21 @@ jobs:
           test "$host_fingerprints" = "$VPS_ED25519_FINGERPRINT"
           mv ~/.ssh/known_hosts.candidate ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
-      - name: Download compiled release binaries
+      - name: Download qualified release binaries
         if: inputs.mode == 'deploy'
         uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
         with:
           name: engine-binaries-${{ github.sha }}
           path: staged-binaries
-      - name: Stage compiled release binaries onto VPS
+      - name: Stage qualified release binaries onto VPS
         if: inputs.mode == 'deploy'
         run: |
           set -euo pipefail
           test -f "staged-binaries/engine-binaries-${GITHUB_SHA}.tar.gz"
+          python3 scripts/release_artifact.py verify --commit "$GITHUB_SHA" --artifact "staged-binaries/engine-binaries-${GITHUB_SHA}.tar.gz"
           ssh -i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" "$VPS_USER@$VPS_HOST" "mkdir -p /opt/liquidity-migration-engine/staged"
-          scp -i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" "staged-binaries/engine-binaries-${GITHUB_SHA}.tar.gz" "$VPS_USER@$VPS_HOST:/opt/liquidity-migration-engine/staged/${GITHUB_SHA}.tar.gz"
+          scp -i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" "staged-binaries/engine-binaries-${GITHUB_SHA}.tar.gz" "$VPS_USER@$VPS_HOST:/opt/liquidity-migration-engine/staged/${GITHUB_SHA}.tar.gz.partial"
+          ssh -i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" "$VPS_USER@$VPS_HOST" "mv -f /opt/liquidity-migration-engine/staged/${GITHUB_SHA}.tar.gz.partial /opt/liquidity-migration-engine/staged/${GITHUB_SHA}.tar.gz"
       - name: Run VPS mode
         env:
           DEPLOY_MODE_INPUT: ${{ inputs.mode }}

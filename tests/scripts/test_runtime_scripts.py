@@ -293,13 +293,12 @@ def test_ci_runs_only_for_pull_requests_and_explicit_release_operations() -> Non
     assert "--release" not in rust and "--profile" not in rust
     assert "inputs.mode == 'deploy' || inputs.mode == 'qualify'" in rust
 
-    artifact = workflow[workflow.index("\n  rust-artifact:\n") : workflow.index("\n  rust-soak-bench:\n")]
+    artifact = workflow[workflow.index("\n  rust-artifact:\n") : workflow.index("\n  disarm:\n")]
     assert "inputs.mode == 'deploy'" in artifact
+    assert "inputs.mode == 'qualify'" in artifact
+    assert "scripts/release_artifact.py qualify" in artifact
     assert "retention-days: 2" in artifact
-
-    release = workflow[workflow.index("\n  rust-soak-bench:\n") : workflow.index("\n  disarm:\n")]
-    assert "cargo test --workspace --all-targets --release --locked" in release
-    assert "inputs.mode == 'qualify'" in release
+    assert "rust-soak-bench:" not in workflow
 
     vps = workflow[workflow.index("\n  vps:\n") :]
     assert "needs: [ci, rust, rust-artifact]" in vps

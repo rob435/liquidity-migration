@@ -6,6 +6,30 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 21:38 UTC — Bind release qualification to deployed bytes (local checkpoint).**
+  - Deploy and qualify now use one optimized producer: locked release tests,
+    bounded account-state soak, local pretend-venue benchmark and binary smoke
+    checks share one Cargo target. Packaging checks that engine, signal-worker
+    and market-tape bytes remain unchanged throughout qualification and records
+    commit, pinned compiler, native target, platform and qualification-log hashes.
+  - Deployment verifies the candidate and retained incumbent artifacts before
+    checkout, freshly extracts all three binaries and never falls back to a
+    host build or unbound `.previous` files. Staged transfers use a temporary
+    name and rename after completion. The verifier travels with the dispatcher
+    so a checkout predating it can still restore a qualified binary generation.
+  - All 66 focused release/runtime tests pass; three original negative controls
+    exposed unqualified deployment, host-build fallback without an artifact,
+    and acceptance of checksum-only legacy bundles. Full Python tests, Ruff,
+    ShellCheck and mypy also pass; the helper joins the regular mypy targets.
+    Pipeline tests use hermetic workloads; actual optimized qualification is
+    recorded separately after running this checkpoint in a clean checkout.
+  - Qualification explicitly records `wal_compatibility=not_assessed`.
+    An eventual rollout needs a qualified incumbent artifact on the compatible
+    platform and an approved WAL adoption/rollback plan. This local change does
+    not convert an old binary into a reader of new required WAL state. Root
+    deployment privilege, source fetch/token use and immutable release-directory
+    installation remain open in the audit. No workflow dispatch, push or deploy.
+
 - **2026-09-04 21:36 UTC — Recover missing signal prefixes before reducer delivery (local checkpoint).**
   - Sequence 9 followed by 11 previously delivered 11, advanced the durable
     cursor and discarded a later 10. The regression fails on that behavior.

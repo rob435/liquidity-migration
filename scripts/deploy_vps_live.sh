@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-command VPS deploy, rollback, read-only verify, and the funded safety stops.
 #
-# deploy: fetch the exact commit, build, install, restart the fleet. A realm
+# deploy: verify its qualified binaries, fetch the exact commit, install, restart the fleet. A realm
 #   that does not publish a fresh heartbeat on the new commit is rolled back
 #   to the last commit that did.
 # rollback: deploy the last commit whose deploy finished (or, when the current
@@ -60,51 +60,52 @@ if { [ "$MODE" = deploy ] || [ "$MODE" = rollback ]; } && [ -z "$GITHUB_TOKEN" ]
     GITHUB_TOKEN="$(gh auth token --hostname github.com 2>/dev/null || true)"
 fi
 
-stage_ci_binaries_if_available() {
+stage_qualified_binaries() {
     local commit="$1" target="$2"
     local stage_target="/opt/liquidity-migration-engine/staged/${commit}.tar.gz"
     if ssh "${SSH_ARGS[@]}" "$target" "test -f '$stage_target'" 2>/dev/null; then
-        echo "deploy: pre-built release binaries already staged on host ($stage_target)" >&2
+        echo "deploy: release artifact already staged; remote verification follows ($stage_target)" >&2
         return 0
     fi
-    command -v gh >/dev/null 2>&1 || return 0
+    command -v gh >/dev/null 2>&1 \
+        || { echo "deploy: stage a qualified artifact for $commit; gh is unavailable" >&2; return 1; }
     local artifact_name="engine-binaries-${commit}"
     local run_id=""
-    run_id="$(gh api "/repos/rob435/liquidity-migration/actions/artifacts?name=${artifact_name}" --jq '.artifacts[0].workflow_run.id' 2>/dev/null || true)"
+    run_id="$(gh api "/repos/rob435/liquidity-migration/actions/artifacts?name=${artifact_name}" --jq 'first(.artifacts[] | select(.expired == false)) | .workflow_run.id' 2>/dev/null || true)"
     if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
-        run_id="$(gh run list --commit "$commit" --json databaseId,status,conclusion --jq '.[] | select(.status=="completed" and .conclusion=="success") | .databaseId' 2>/dev/null | head -n 1 || true)"
+        echo "deploy: no qualified artifact found for $commit; run qualification first" >&2
+        return 1
     fi
-    if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
-        echo "deploy: no CI pre-built binary artifact found for $commit; host will build via cargo" >&2
-        return 0
-    fi
-    echo "deploy: downloading CI release binaries from GitHub Actions (run $run_id)..." >&2
+    local run_identity
+    run_identity="$(gh run view "$run_id" --repo rob435/liquidity-migration --json headSha,conclusion --jq '[.headSha,.conclusion] | join(" ")' 2>/dev/null || true)"
+    [ "$run_identity" = "$commit success" ] \
+        || { echo "deploy: artifact run $run_id is not successful for $commit" >&2; return 1; }
+    echo "deploy: downloading qualified release binaries from GitHub Actions (run $run_id)..." >&2
     local tmp_dir
-    tmp_dir="$(mktemp -d)" || return 0
-    if gh run download "$run_id" -n "$artifact_name" -D "$tmp_dir" >/dev/null 2>&1; then
-        local tarball
-        tarball="$(find "$tmp_dir" -name "*.tar.gz" | head -n 1)"
-        if [ -n "$tarball" ] && [ -f "$tarball" ]; then
+    tmp_dir="$(mktemp -d)" || return 1
+    local staged=1
+    if gh run download "$run_id" --repo rob435/liquidity-migration -n "$artifact_name" -D "$tmp_dir" >/dev/null 2>&1; then
+        local tarball="$tmp_dir/$artifact_name.tar.gz"
+        if python3 "$LOCAL_REPOSITORY/scripts/release_artifact.py" verify \
+            --commit "$commit" --artifact "$tarball" >/dev/null; then
             echo "deploy: staging release binaries onto VPS ($target:$stage_target)..." >&2
-            # Staged into place under a temporary name and moved only once the
-            # whole file has landed: build_engine reads whatever sits at
-            # $stage_target, and a half-copied tarball there is worse than none.
             if ssh "${SSH_ARGS[@]}" "$target" "mkdir -p /opt/liquidity-migration-engine/staged" \
                 && scp "${SSH_ARGS[@]}" "$tarball" "$target:$stage_target.partial" \
                 && ssh "${SSH_ARGS[@]}" "$target" "mv -f '$stage_target.partial' '$stage_target'"; then
-                echo "deploy: pre-built release binaries staged; skipping host compilation" >&2
+                staged=0
             else
                 ssh "${SSH_ARGS[@]}" "$target" "rm -f '$stage_target.partial'" 2>/dev/null || true
-                echo "deploy: could not stage pre-built binaries; host will build via cargo" >&2
             fi
         fi
     fi
     rm -rf "$tmp_dir"
+    [ "$staged" = 0 ] || echo "deploy: could not stage a qualified artifact for $commit" >&2
+    return "$staged"
 }
 
 read -r -a SSH_ARGS <<< "$SSH_OPTS"
 if [ "$MODE" = deploy ]; then
-    stage_ci_binaries_if_available "$EXPECTED_COMMIT" "$SSH_TARGET"
+    stage_qualified_binaries "$EXPECTED_COMMIT" "$SSH_TARGET"
 fi
 {
     printf 'MODE=%q\n' "$MODE"
@@ -114,6 +115,10 @@ fi
     printf 'BRANCH=%q\n' "$BRANCH"
     printf 'EXPECTED_COMMIT=%q\n' "$EXPECTED_COMMIT"
     printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
+    if [ "$MODE" = deploy ] || [ "$MODE" = rollback ]; then
+        # The verifier must survive a rollback to a checkout that predates it.
+        printf 'RELEASE_ARTIFACT_PY=%q\n' "$(cat "$LOCAL_REPOSITORY/scripts/release_artifact.py")"
+    fi
     cat <<'REMOTE_SCRIPT'
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -147,8 +152,7 @@ PREVIOUS_COMMIT_FILE=$RELEASE_DIR/previous-commit
 # $RELEASE_DIR/<unit>.fingerprint; a deploy that changes none of it leaves
 # that recorder running.
 CONTROLS_SUDOERS=/etc/sudoers.d/liquidity-migration-controls
-CARGO_TARGET_ROOT=/opt/engine-build-target
-RUST_TOOLCHAIN_DIR=/opt/rust
+QUALIFIED_RELEASE_DIR=""
 
 ENGINE_ENVIRONMENT=/etc/liquidity-migration/engine.env
 ENGINE_DEMO_CONFIG=/etc/liquidity-migration/engine.toml
@@ -406,44 +410,39 @@ install_python_environment() {
         || fail "cannot install locked Python dependencies"
 }
 
+release_artifact() {
+    [ -n "${RELEASE_ARTIFACT_PY:-}" ] || fail "missing release artifact verifier"
+    printf '%s\n' "$RELEASE_ARTIFACT_PY" | /usr/bin/python3 -I - "$@"
+}
+
+cleanup_release() {
+    if [ -n "$QUALIFIED_RELEASE_DIR" ]; then
+        rm -rf -- "$QUALIFIED_RELEASE_DIR"
+        QUALIFIED_RELEASE_DIR=""
+    fi
+}
+trap cleanup_release EXIT
+
 build_engine() {
-    local staged_tar="/opt/liquidity-migration-engine/staged/${EXPECTED_COMMIT}.tar.gz"
-    if [ -f "$staged_tar" ]; then
-        echo "deploy: installing pre-built release binaries from CI artifact $staged_tar"
-        install -d -o root -g root -m 0755 "$CARGO_TARGET_ROOT/release"
-        tar -xzf "$staged_tar" -C "$CARGO_TARGET_ROOT/release" \
-            || fail "cannot unpack the staged release artifact $staged_tar"
-        # Not conditional: an artifact that omits the manifest is refused, not
-        # installed unverified. The manifest travels inside the tarball, so this
-        # catches a corrupt or truncated transfer, not a forged one.
-        [ -f "$CARGO_TARGET_ROOT/release/binaries.sha256" ] \
-            || fail "staged artifact has no binaries.sha256 manifest; refusing unverified binaries"
-        (cd "$CARGO_TARGET_ROOT/release" && sha256sum -c binaries.sha256 >/dev/null) \
-            || fail "pre-built binary sha256 checksum verification failed"
-        test -x "$CARGO_TARGET_ROOT/release/engine" || fail "staged engine binary is missing or not executable"
-        test -x "$CARGO_TARGET_ROOT/release/signal-worker" || fail "staged signal-worker binary is missing or not executable"
-        echo "deploy: pre-built release binaries verified successfully; skipping host compilation"
-        return 0
+    local staged_tar="$RELEASE_DIR/staged/${EXPECTED_COMMIT}.tar.gz" incumbent=""
+    [ -f "$staged_tar" ] || fail "missing qualified release artifact $staged_tar; host compilation is disabled"
+    if [ -f "$ENGINE_BINARY" ]; then
+        [ -s "$DEPLOYED_COMMIT_FILE" ] || fail "cannot bind the incumbent release for rollback"
+        incumbent="$(cat "$DEPLOYED_COMMIT_FILE")"
+        if [ "$incumbent" != "$EXPECTED_COMMIT" ]; then
+            release_artifact verify --require-platform --commit "$incumbent" \
+                --artifact "$RELEASE_DIR/staged/$incumbent.tar.gz" >/dev/null \
+                || fail "stage a qualified rollback artifact for incumbent $incumbent before deploy"
+        fi
     fi
-    if [ "${AUTO_ROLLBACK:-0}" = 1 ] && [ -f "$ENGINE_BINARY.previous" ] && [ -f "$SIGNAL_WORKER_BINARY.previous" ]; then
-        echo "rollback: using cached previous release binaries; skipping compilation"
-        return 0
-    fi
-    local toolchain
-    toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$REPO_DIR/rust-toolchain.toml")"
-    [ -n "$toolchain" ] || fail "cannot read the pinned Rust toolchain"
-    install -d -o root -g root -m 0755 "$CARGO_TARGET_ROOT"
-    (
-        cd "$REPO_DIR/engine"
-        HOME=/root \
-        PATH="$RUST_TOOLCHAIN_DIR/cargo/bin:/usr/bin:/bin" \
-        CARGO_HOME="$RUST_TOOLCHAIN_DIR/cargo" \
-        RUSTUP_HOME="$RUST_TOOLCHAIN_DIR/rustup" \
-        RUSTUP_TOOLCHAIN="$toolchain" \
-        nice -n 10 cargo build --release --locked --workspace --bins \
-            --jobs 2 \
-            --target-dir "$CARGO_TARGET_ROOT"
-    ) || fail "cannot build the engine workspace"
+    cleanup_release
+    QUALIFIED_RELEASE_DIR="$(mktemp -d "$RELEASE_DIR/staged/.qualified.XXXXXX")" \
+        || fail "cannot create a fresh release extraction directory"
+    release_artifact unpack --commit "$EXPECTED_COMMIT" --artifact "$staged_tar" \
+        --output "$QUALIFIED_RELEASE_DIR" >/dev/null \
+        || fail "release artifact qualification failed for $EXPECTED_COMMIT"
+    echo "deploy: qualified release bytes verified for $EXPECTED_COMMIT"
+    echo "deploy: artifact qualification does not certify rollback across WAL format changes"
 }
 
 stop_realm_units() {
@@ -457,35 +456,16 @@ stop_realm_units() {
 
 install_release() {
     install -d -o root -g root -m 0755 "${ENGINE_BINARY%/*}"
-    if [ "${AUTO_ROLLBACK:-0}" = 1 ] && [ -f "$ENGINE_BINARY.previous" ] && [ -f "$SIGNAL_WORKER_BINARY.previous" ]; then
-        echo "rollback: restoring previous release binaries"
-        cp -pf "$ENGINE_BINARY.previous" "$ENGINE_BINARY" || fail "cannot restore engine binary"
-        cp -pf "$SIGNAL_WORKER_BINARY.previous" "$SIGNAL_WORKER_BINARY" || fail "cannot restore signal-worker binary"
-        if [ -f "$MARKET_TAPE_BINARY.previous" ]; then
-            cp -pf "$MARKET_TAPE_BINARY.previous" "$MARKET_TAPE_BINARY" 2>/dev/null || true
-        fi
-    else
-        if [ -f "$ENGINE_BINARY" ]; then
-            cp -pf "$ENGINE_BINARY" "$ENGINE_BINARY.previous" 2>/dev/null || true
-        fi
-        if [ -f "$SIGNAL_WORKER_BINARY" ]; then
-            cp -pf "$SIGNAL_WORKER_BINARY" "$SIGNAL_WORKER_BINARY.previous" 2>/dev/null || true
-        fi
-        if [ -f "$MARKET_TAPE_BINARY" ]; then
-            cp -pf "$MARKET_TAPE_BINARY" "$MARKET_TAPE_BINARY.previous" 2>/dev/null || true
-        fi
-        install -o root -g "$RUNTIME_GROUP" -m 0755 \
-            "$CARGO_TARGET_ROOT/release/engine" "$ENGINE_BINARY" \
-            || fail "cannot install the engine binary"
-        install -o root -g "$RUNTIME_GROUP" -m 0755 \
-            "$CARGO_TARGET_ROOT/release/signal-worker" "$SIGNAL_WORKER_BINARY" \
-            || fail "cannot install the signal-worker binary"
-        if [ -f "$CARGO_TARGET_ROOT/release/market-tape" ]; then
-            install -o root -g "$RUNTIME_GROUP" -m 0755 \
-                "$CARGO_TARGET_ROOT/release/market-tape" "$MARKET_TAPE_BINARY" \
-                || fail "cannot install the market-tape binary"
-        fi
-    fi
+    install -o root -g "$RUNTIME_GROUP" -m 0755 \
+        "$QUALIFIED_RELEASE_DIR/engine" "$ENGINE_BINARY" \
+        || fail "cannot install the engine binary"
+    install -o root -g "$RUNTIME_GROUP" -m 0755 \
+        "$QUALIFIED_RELEASE_DIR/signal-worker" "$SIGNAL_WORKER_BINARY" \
+        || fail "cannot install the signal-worker binary"
+    install -o root -g "$RUNTIME_GROUP" -m 0755 \
+        "$QUALIFIED_RELEASE_DIR/market-tape" "$MARKET_TAPE_BINARY" \
+        || fail "cannot install the market-tape binary"
+    cleanup_release
     install -o root -g root -m 0755 \
         "$REPO_DIR/deploy/telegram_control_helper.sh" "$ENGINE_CONTROL_HELPER" \
         || fail "cannot install the Telegram control helper"
@@ -1218,6 +1198,7 @@ PY
 
 deploy_mode() {
     seed_generation_record
+    build_engine
     fetch_exact_commit
     # Re-read the manifest helpers from the exact commit this run installs. A
     # commit from before the independent lifecycle has no helper for it, and a
@@ -1228,7 +1209,6 @@ deploy_mode() {
     ensure_runtime_identities
     install_python_environment
     seed_realm_fingerprints
-    build_engine
     # Both realms keep running while the release lands on disk. A realm is
     # handed over only when what it runs from changed; otherwise it is left
     # trading and picks the new binary up at its own next restart.
