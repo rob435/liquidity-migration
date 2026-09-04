@@ -28,7 +28,8 @@ The engine workspace is under `engine/`:
 | :--- | :--- |
 | `engine.rs` | `Engine`, the `select!` loop, one handler per loop arm, the `StopReason` |
 | `engine/boot_recovery.rs` | `Engine::boot`, WAL replay into engine state, missed-fill recovery, venue reconciliation at boot |
-| `engine/scheduling.rs` | Strategy wakes, timers, durable actions, signal intake and admission, the per-wake drain |
+| `engine/scheduling.rs` | Strategy wakes, timers, durable actions, the per-wake drain |
+| `engine/signal_intake.rs` | Durable signal admission: cursor check, symbol admission across the four id tables, barrier, delivery |
 | `engine/intent_admission.rs` | `prepare_intent`, `OpeningRefusal` codes, risk verdicts, order minting and placement groups |
 | `engine/venue_completion.rs` | Venue command completions, `VenueTiming` journaling, private-stream updates, stop maintenance |
 | `engine/telemetry.rs` | Heartbeat and closed-trade rows |

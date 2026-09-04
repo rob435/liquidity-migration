@@ -462,6 +462,7 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
 mod boot_recovery;
 mod intent_admission;
 mod scheduling;
+mod signal_intake;
 mod telemetry;
 mod venue_completion;
 
