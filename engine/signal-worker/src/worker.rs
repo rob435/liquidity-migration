@@ -541,6 +541,12 @@ impl SignalWorker {
                         row,
                     )?;
                 }
+                // Kline replacement revokes coverage even if its frontier is absent or invalid.
+                if replace_coverage {
+                    self.state.kline_checked_from_ms.remove(&symbol);
+                    self.state.kline_checked_through_ms.remove(&symbol);
+                    self.state.kline_coverage_intervals.remove(&symbol);
+                }
                 self.state.kline_coverage_mut().merge(
                     &symbol,
                     checked_from_ms,

@@ -6,6 +6,22 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 23:00 UTC — Preserve candle coverage replacement during worker integration (local checkpoint).**
+  - The shared history extraction returned before clearing candle coverage
+    when `BybitKlineBatch` supplied `replace_coverage=true` with no frontier.
+    Empty replacement inputs could retain old proven coverage through replay
+    and restart. The kline caller again clears all three coverage maps before
+    frontier validation; funding's empty-frontier behavior stays unchanged.
+  - Two regressions cover six candle replacement/frontier cases, both funding
+    replacement modes and checkpoint restoration. Before the fix, the candle
+    test fails with `left: Some(864000000), right: None`; the funding control
+    passes. The fixed tree passes 1,788 Rust workspace/all-target tests in each
+    of debug and optimized builds, with five existing opt-in skips, strict
+    Clippy and formatting under actual Rust 1.90.0.
+  - Current live kline publication uses `replace_coverage=false`; this finding
+    concerns the supported input and replay contract, not an observed funded
+    incident. No worker checkpoint schema, production state or deployment changes.
+
 - **2026-09-04 22:27 UTC — Keep future signal rows in their source until availability (isolated local checkpoint).**
   - Live channel and disk-spool selection wait for `available_wall_ts_ms`,
     including requested missing prefixes, while other ready destinations

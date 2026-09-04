@@ -563,6 +563,99 @@ fn duplicate_public_rows_must_be_byte_equivalent() {
 }
 
 #[test]
+fn kline_replacement_clears_coverage_before_frontier_validation_and_restart() {
+    let from = 10 * DAY_MS;
+    let through = 11 * DAY_MS;
+    let cases = [
+        (true, None, None, true, false),
+        (false, None, None, true, true),
+        (true, Some(from), None, false, false),
+        (false, Some(from), None, false, true),
+        (true, Some(from), Some(through + HOUR_MS), false, false),
+        (true, Some(from + 1), Some(through), false, false),
+    ];
+    for (replace, checked_from_ms, checked_through_ms, succeeds, retained) in cases {
+        let config = test_config();
+        let mut worker = SignalWorker::with_universe(config.clone(), test_universe()).unwrap();
+        let event = |sequence, checked_from_ms, checked_through_ms, replace_coverage| {
+            WireEvent::BybitKlineBatch {
+                schema_version: SCHEMA_VERSION,
+                sequence,
+                symbol: "BTCUSDT".into(),
+                available_at_ms: through,
+                checked_from_ms,
+                checked_through_ms,
+                replace_coverage,
+                rows: Vec::new(),
+            }
+        };
+        worker
+            .apply(event(1, Some(from), Some(through), false))
+            .unwrap();
+        let result = worker.apply(event(2, checked_from_ms, checked_through_ms, replace));
+        assert_eq!(
+            result.is_ok(),
+            succeeds,
+            "{replace:?} {checked_from_ms:?} {checked_through_ms:?}"
+        );
+        let restored = SignalWorker::restore(config, worker.state.clone()).unwrap();
+        for state in [&worker.state, &restored.state] {
+            assert_eq!(
+                state.kline_checked_from_ms.get("BTCUSDT").copied(),
+                retained.then_some(from)
+            );
+            assert_eq!(
+                state.kline_checked_through_ms.get("BTCUSDT").copied(),
+                retained.then_some(through)
+            );
+            assert_eq!(
+                state.kline_coverage_intervals.contains_key("BTCUSDT"),
+                retained
+            );
+        }
+    }
+}
+
+#[test]
+fn funding_replacement_without_frontier_retains_coverage() {
+    let from = 10 * DAY_MS;
+    let through = 11 * DAY_MS;
+    for replace_coverage in [false, true] {
+        let config = test_config();
+        let mut worker = SignalWorker::with_universe(config.clone(), test_universe()).unwrap();
+        for (sequence, checked_from_ms, checked_through_ms) in
+            [(1, Some(from), Some(through)), (2, None, None)]
+        {
+            worker
+                .apply(WireEvent::BybitFundingBatch {
+                    schema_version: SCHEMA_VERSION,
+                    sequence,
+                    symbol: "BTCUSDT".into(),
+                    available_at_ms: through,
+                    checked_from_ms,
+                    checked_through_ms,
+                    replace_coverage,
+                    emit_lifecycle: false,
+                    rows: Vec::new(),
+                })
+                .unwrap();
+        }
+        let restored = SignalWorker::restore(config, worker.state.clone()).unwrap();
+        for state in [&worker.state, &restored.state] {
+            assert_eq!(
+                state.funding_checked_from_ms.get("BTCUSDT").copied(),
+                Some(from)
+            );
+            assert_eq!(
+                state.funding_checked_through_ms.get("BTCUSDT").copied(),
+                Some(through)
+            );
+            assert_eq!(state.funding_coverage_intervals["BTCUSDT"].len(), 1);
+        }
+    }
+}
+
+#[test]
 fn disjoint_kline_windows_survive_restart_without_claiming_the_gap() {
     let config = test_config();
     let universe = test_universe();
