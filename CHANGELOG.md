@@ -21,11 +21,11 @@ edit STATE.md to match.
     `grafanacloud-proudtortoise1017-prom`; live engine, worker, recorder,
     account, and latency data populate. Explore resolves the `lm_` family and
     returns both realms for `lm_engine_account_age_ms`.
-  - Commit `bae45c83` carries final dashboard version 9 after the operator,
-    funded-scale, legend, and single-purpose-panel passes. The renderer matches
-    the generated JSON, all 27 dashboard tests pass, and the push gate passes
-    Ruff, ShellCheck, mypy, 1,454 Python tests, Rust formatting and Clippy, and
-    every Rust workspace test.
+  - Commit `9a5abcf7` carries final dashboard version 10 after the operator,
+    funded-scale, legend, single-purpose-panel, and locally padded sparkline
+    passes. The renderer matches the generated JSON, all 27 dashboard tests
+    pass, and the push gate passes Ruff, ShellCheck, mypy, 1,454 Python tests,
+    Rust formatting and Clippy, and every Rust workspace test.
   - Run `33900447763` passed CI, Rust, and the verified artifact for
     `65ee75a7`, then GitHub refused to start the VPS job because recent account
     payments failed. The VPS recovery recipe installed the same exact artifact
