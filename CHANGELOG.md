@@ -6,6 +6,36 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 20:22 UTC — Qualify the local fixes with the actual pinned compiler and retain comparative latency evidence.**
+  - Explicit Rust 1.90.0 paths pass rustfmt, strict workspace/all-targets
+    Clippy, and all 1,726 Rust tests in each debug and optimized suite. Five
+    existing opt-in tests remain skipped: three public-network checks, the
+    external instrument-list fixture, and the 270-symbol resource envelope.
+    The earlier Python suite passes all 1,457 tests; Ruff, ShellCheck and
+    mypy (99 files) also pass. No source changes follow these final gates.
+  - Toolchain correction: this machine's default compiler is Homebrew Rust
+    1.97.1. `rustup run 1.90.0 cargo` selects Cargo 1.90 but still finds that
+    compiler on PATH. Initial "pinned" checks and timings therefore used
+    Rust 1.97.1. Final commands explicitly select PATH, RUSTC and RUSTDOC;
+    both benchmark build caches confirm Rust 1.90.0. The audit records the
+    commands and retains both earlier compiler series under their true labels.
+  - Baseline `e2345ca4` and candidate `c517bab0` each run four alternating
+    measured repetitions per profile after warm-up, with fresh local WALs
+    and the internal HTTP venue. On Rust 1.90, median run p99 changes from
+    0.434 to 0.467 ms for one paced symbol, 0.605 to 0.588 ms for 100 paced
+    symbols with unfilled orders, and 3,705.668 to 3,702.522 ms under
+    saturation. All run ranges overlap and order counts match; these samples
+    establish neither a speedup nor a stable regression. Seconds of saturated
+    backlog remain a limitation. Production risk, callbacks from many
+    strategies, real venue latency and p99.9 are outside this harness.
+  - `docs/tier1-local-benchmark.json` retains the 24 pinned-compiler runs;
+    the two explicitly named Rust 1.97 artifacts retain 48 supplemental runs.
+    Each records source and binary hashes, profiles, hardware, and unrounded
+    quantiles extracted after WAL replay validates checksums. The comparison
+    table and interpretation live in `docs/tier1-audit.md`.
+  - All checkpoints remain local. No push, deployment, production access,
+    live WAL migration, credential rotation or capital-setting change.
+
 - **2026-09-04 20:00 UTC — Record the independent platform audit and correct durability/gap descriptions (local checkpoint).**
   - `docs/tier1-audit.md` verifies the handoff against `e2345ca4`, separates
     existing protections from missing capabilities, and orders the next work

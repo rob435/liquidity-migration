@@ -1,0 +1,2112 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-09-04T20:10:55Z",
+  "source": {
+    "baseline": "e2345ca450d03a3d58ff19b9d2b436e9b84cfbb4",
+    "candidate": "c517bab0f1a1ee4dad190f718659c23daa1e6024"
+  },
+  "binary_sha256": {
+    "baseline": "c61992ab2c8e5b692dbebf5aca06c445bf302f6dccee3c5d34f05345d926ec8c",
+    "candidate": "51b742e31d607c05fa8239f6720aee983ed8527c923ec5475619a321a25c3af3"
+  },
+  "toolchain": "rustc 1.97.1 (8bab26f4f 2026-07-14) (Homebrew)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: aarch64-apple-darwin\nrelease: 1.97.1\nLLVM version: 22.1.8",
+  "cargo_lock_sha256": "024fb663693fa1ff4984ba799cd1a91ba11d544aafd8ffc283bc3da59ee80391",
+  "rust_toolchain_sha256": "d1e1cf170b3a28b4484d94f1a96b98f8b1c6fd498f8dd9196ff6dd931e0c687f",
+  "build": "rustup run 1.90.0 cargo build --release --locked -p engine-core --bin engine; actual compiler: Homebrew rustc 1.97.1; workspace thin LTO; codegen-units=16",
+  "machine": {
+    "os": "macOS-15.7.2-arm64-arm-64bit-Mach-O",
+    "cpu": "Apple M4",
+    "memory_bytes": 17179869184,
+    "logical_cpus": 10,
+    "filesystem": "local /private/tmp; filesystem details retained below",
+    "filesystem_details": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   460Gi   347Gi    78Gi    82%     18M  822M    2%   /System/Volumes/Data",
+    "governor": "not controlled; laptop default",
+    "cgroup": "not applicable on macOS"
+  },
+  "method": {
+    "repeats_per_binary_per_profile": 4,
+    "ordering": "one warm-up per binary/profile, then alternating baseline-first and candidate-first pairs",
+    "concurrent_builds": false,
+    "venue": "internally created localhost HTTP server; no TLS or external credentials",
+    "risk": "benchmark AllowEverything, not production risk kernel",
+    "fills": false,
+    "durability": "real local WAL; existing barrier/dispatch overlap; barrier wait reported separately",
+    "limits": [
+      "p99.9 is not measured by the current ledger",
+      "market to submit result ends before the subsequent barrier wait",
+      "write it down ends at barrier request, not fsync completion",
+      "one synthetic strategy; paced 100-symbol profile builds active order claims, not real portfolio fills",
+      "laptop scheduling/storage noise is uncontrolled; no absolute production budget or speedup claim"
+    ],
+    "validation_compiler_note": "Cargo 1.90.0 launched through rustup still selected Homebrew rustc 1.97.1 from PATH; target/.rustc_info.json confirms this compiler. This is supplemental evidence, not qualification of the repository compiler pin.",
+    "benchmark_command": "engine/target/release/engine bench --events EVENTS --rate RATE --every EVERY --symbols SYMBOLS --wal NEW_TEMP_WAL",
+    "result_extraction": "After each run, engine replay validates WAL checksums; the sole Note with source=bench supplies all unrounded quantiles below."
+  },
+  "profiles": [
+    {
+      "name": "one_symbol_paced",
+      "events": 4000,
+      "rate": 2000,
+      "every": 20,
+      "symbols": [
+        "BTCUSDT"
+      ]
+    },
+    {
+      "name": "100_symbols_paced_unfilled",
+      "events": 10000,
+      "rate": 2000,
+      "every": 19,
+      "symbols": [
+        "TEST000USDT",
+        "TEST001USDT",
+        "TEST002USDT",
+        "TEST003USDT",
+        "TEST004USDT",
+        "TEST005USDT",
+        "TEST006USDT",
+        "TEST007USDT",
+        "TEST008USDT",
+        "TEST009USDT",
+        "TEST010USDT",
+        "TEST011USDT",
+        "TEST012USDT",
+        "TEST013USDT",
+        "TEST014USDT",
+        "TEST015USDT",
+        "TEST016USDT",
+        "TEST017USDT",
+        "TEST018USDT",
+        "TEST019USDT",
+        "TEST020USDT",
+        "TEST021USDT",
+        "TEST022USDT",
+        "TEST023USDT",
+        "TEST024USDT",
+        "TEST025USDT",
+        "TEST026USDT",
+        "TEST027USDT",
+        "TEST028USDT",
+        "TEST029USDT",
+        "TEST030USDT",
+        "TEST031USDT",
+        "TEST032USDT",
+        "TEST033USDT",
+        "TEST034USDT",
+        "TEST035USDT",
+        "TEST036USDT",
+        "TEST037USDT",
+        "TEST038USDT",
+        "TEST039USDT",
+        "TEST040USDT",
+        "TEST041USDT",
+        "TEST042USDT",
+        "TEST043USDT",
+        "TEST044USDT",
+        "TEST045USDT",
+        "TEST046USDT",
+        "TEST047USDT",
+        "TEST048USDT",
+        "TEST049USDT",
+        "TEST050USDT",
+        "TEST051USDT",
+        "TEST052USDT",
+        "TEST053USDT",
+        "TEST054USDT",
+        "TEST055USDT",
+        "TEST056USDT",
+        "TEST057USDT",
+        "TEST058USDT",
+        "TEST059USDT",
+        "TEST060USDT",
+        "TEST061USDT",
+        "TEST062USDT",
+        "TEST063USDT",
+        "TEST064USDT",
+        "TEST065USDT",
+        "TEST066USDT",
+        "TEST067USDT",
+        "TEST068USDT",
+        "TEST069USDT",
+        "TEST070USDT",
+        "TEST071USDT",
+        "TEST072USDT",
+        "TEST073USDT",
+        "TEST074USDT",
+        "TEST075USDT",
+        "TEST076USDT",
+        "TEST077USDT",
+        "TEST078USDT",
+        "TEST079USDT",
+        "TEST080USDT",
+        "TEST081USDT",
+        "TEST082USDT",
+        "TEST083USDT",
+        "TEST084USDT",
+        "TEST085USDT",
+        "TEST086USDT",
+        "TEST087USDT",
+        "TEST088USDT",
+        "TEST089USDT",
+        "TEST090USDT",
+        "TEST091USDT",
+        "TEST092USDT",
+        "TEST093USDT",
+        "TEST094USDT",
+        "TEST095USDT",
+        "TEST096USDT",
+        "TEST097USDT",
+        "TEST098USDT",
+        "TEST099USDT"
+      ]
+    },
+    {
+      "name": "one_symbol_saturation",
+      "events": 20000,
+      "rate": 0,
+      "every": 20,
+      "symbols": [
+        "BTCUSDT"
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "binary": "baseline",
+      "profile": "one_symbol_paced",
+      "repeat": 0,
+      "elapsed_s": 2.028839334001532,
+      "wal_sha256": "32cdfdab71ef1d1c2edc1b4ab08b0d56b9a11aecd02ea34390b019847adceee1",
+      "metrics": {
+        "events": 4000,
+        "orders": 200,
+        "think": {
+          "count": 200,
+          "p50_ns": 583,
+          "p90_ns": 625,
+          "p99_ns": 667,
+          "max_ns": 709
+        },
+        "write it down": {
+          "count": 200,
+          "p50_ns": 75007,
+          "p90_ns": 125247,
+          "p99_ns": 189951,
+          "max_ns": 204415
+        },
+        "still waiting on the disk": {
+          "count": 200,
+          "p50_ns": 3315711,
+          "p90_ns": 4218879,
+          "p99_ns": 4493311,
+          "max_ns": 4612095
+        },
+        "submit result": {
+          "count": 200,
+          "p50_ns": 249343,
+          "p90_ns": 341247,
+          "p99_ns": 439551,
+          "max_ns": 510207
+        },
+        "API round trip": {
+          "count": 200,
+          "p50_ns": 110527,
+          "p90_ns": 131967,
+          "p99_ns": 160639,
+          "max_ns": 169983
+        },
+        "dispatch queue": {
+          "count": 200,
+          "p50_ns": 5959,
+          "p90_ns": 9839,
+          "p99_ns": 16719,
+          "max_ns": 51167
+        },
+        "venue task": {
+          "count": 200,
+          "p50_ns": 166655,
+          "p90_ns": 206591,
+          "p99_ns": 263679,
+          "max_ns": 291071
+        },
+        "core resume": {
+          "count": 200,
+          "p50_ns": 22127,
+          "p90_ns": 24879,
+          "p99_ns": 33631,
+          "max_ns": 46687
+        },
+        "market to submit result": {
+          "count": 200,
+          "p50_ns": 284415,
+          "p90_ns": 376063,
+          "p99_ns": 489983,
+          "max_ns": 563199
+        }
+      }
+    },
+    {
+      "binary": "candidate",
+      "profile": "one_symbol_paced",
+      "repeat": 0,
+      "elapsed_s": 2.0270094169973163,
+      "wal_sha256": "2eda30f02cc0bc21bfb202763692fecbf6299d92581002b32ca7431f03bcf849",
+      "metrics": {
+        "events": 4000,
+        "orders": 200,
+        "think": {
+          "count": 200,
+          "p50_ns": 834,
+          "p90_ns": 1000,
+          "p99_ns": 1750,
+          "max_ns": 2625
+        },
+        "write it down": {
+          "count": 200,
+          "p50_ns": 102975,
+          "p90_ns": 139135,
+          "p99_ns": 203775,
+          "max_ns": 247807
+        },
+        "still waiting on the disk": {
+          "count": 200,
+          "p50_ns": 3309567,
+          "p90_ns": 4255743,
+          "p99_ns": 4476927,
+          "max_ns": 4595711
+        },
+        "submit result": {
+          "count": 200,
+          "p50_ns": 290047,
+          "p90_ns": 360191,
+          "p99_ns": 467455,
+          "max_ns": 553983
+        },
+        "API round trip": {
+          "count": 200,
+          "p50_ns": 112319,
+          "p90_ns": 137599,
+          "p99_ns": 169599,
+          "max_ns": 215167
+        },
+        "dispatch queue": {
+          "count": 200,
+          "p50_ns": 10959,
+          "p90_ns": 17839,
+          "p99_ns": 27551,
+          "max_ns": 46399
+        },
+        "venue task": {
+          "count": 200,
+          "p50_ns": 172543,
+          "p90_ns": 215039,
+          "p99_ns": 279551,
+          "max_ns": 285951
+        },
+        "core resume": {
+          "count": 200,
+          "p50_ns": 21919,
+          "p90_ns": 25295,
+          "p99_ns": 31375,
+          "max_ns": 38335
+        },
+        "market to submit result": {
+          "count": 200,
+          "p50_ns": 326143,
+          "p90_ns": 398847,
+          "p99_ns": 510463,
+          "max_ns": 606207
+        }
+      }
+    },
+    {
+      "binary": "candidate",
+      "profile": "one_symbol_paced",
+      "repeat": 1,
+      "elapsed_s": 2.028299583995249,
+      "wal_sha256": "e7dd9fb03bf1b35a37f139cafabddb04ed472097e3138d187f23351233bdf04c",
+      "metrics": {
+        "events": 4000,
+        "orders": 200,
+        "think": {
+          "count": 200,
+          "p50_ns": 875,
+          "p90_ns": 1291,
+          "p99_ns": 2000,
+          "max_ns": 5919
+        },
+        "write it down": {
+          "count": 200,
+          "p50_ns": 86271,
+          "p90_ns": 119295,
+          "p99_ns": 184831,
+          "max_ns": 208127
+        },
+        "still waiting on the disk": {
+          "count": 200,
+          "p50_ns": 3526655,
+          "p90_ns": 4276223,
+          "p99_ns": 4546559,
+          "max_ns": 4567039
+        },
+        "submit result": {
+          "count": 200,
+          "p50_ns": 270591,
+          "p90_ns": 334335,
+          "p99_ns": 460543,
+          "max_ns": 496383
+        },
+        "API round trip": {
+          "count": 200,
+          "p50_ns": 113343,
+          "p90_ns": 132351,
+          "p99_ns": 150399,
+          "max_ns": 163071
+        },
+        "dispatch queue": {
+          "count": 200,
+          "p50_ns": 9007,
+          "p90_ns": 14375,
+          "p99_ns": 27887,
+          "max_ns": 50719
+        },
+        "venue task": {
+          "count": 200,
+          "p50_ns": 172031,
+          "p90_ns": 205567,
+          "p99_ns": 254719,
+          "max_ns": 268543
+        },
+        "core resume": {
+          "count": 200,
+          "p50_ns": 21967,
+          "p90_ns": 24511,
+          "p99_ns": 29551,
+          "max_ns": 41023
+        },
+        "market to submit result": {
+          "count": 200,
+          "p50_ns": 304895,
+          "p90_ns": 377599,
+          "p99_ns": 506111,
+          "max_ns": 546303
+        }
+      }
+    },
+    {
+      "binary": "baseline",
+      "profile": "one_symbol_paced",
+      "repeat": 1,
+      "elapsed_s": 2.03003183400142,
+      "wal_sha256": "4e49bd1a1cc6d07acbfee0561a2b2b7205cdf5663c6105947fecf35d23a4b8e2",
+      "metrics": {
+        "events": 4000,
+        "orders": 200,
+        "think": {
+          "count": 200,
+          "p50_ns": 875,
+          "p90_ns": 1042,
+          "p99_ns": 2125,
+          "max_ns": 3501
+        },
+        "write it down": {
+          "count": 200,
+          "p50_ns": 86015,
+          "p90_ns": 125823,
+          "p99_ns": 179711,
+          "max_ns": 192127
+        },
+        "still waiting on the disk": {
+          "count": 200,
+          "p50_ns": 3334143,
+          "p90_ns": 4214783,
+          "p99_ns": 4464639,
+          "max_ns": 10993663
+        },
+        "submit result": {
+          "count": 200,
+          "p50_ns": 273919,
+          "p90_ns": 366847,
+          "p99_ns": 459007,
+          "max_ns": 881151
+        },
+        "API round trip": {
+          "count": 200,
+          "p50_ns": 115647,
+          "p90_ns": 140543,
+          "p99_ns": 171647,
+          "max_ns": 507647
+        },
+        "dispatch queue": {
+          "count": 200,
+          "p50_ns": 10007,
+          "p90_ns": 16719,
+          "p99_ns": 28383,
+          "max_ns": 43967
+        },
+        "venue task": {
+          "count": 200,
+          "p50_ns": 175231,
+          "p90_ns": 227455,
+          "p99_ns": 269055,
+          "max_ns": 726015
+        },
+        "core resume": {
+          "count": 200,
+          "p50_ns": 22095,
+          "p90_ns": 25423,
+          "p99_ns": 33471,
+          "max_ns": 40447
+        },
+        "market to submit result": {
+          "count": 200,
+          "p50_ns": 309503,
+          "p90_ns": 404991,
+          "p99_ns": 512255,
+          "max_ns": 911359
+        }
+      }
+    },
+    {
+      "binary": "baseline",
+      "profile": "one_symbol_paced",
+      "repeat": 2,
+      "elapsed_s": 2.029572957995697,
+      "wal_sha256": "587884f794f6249265978255e071e055398acbb594b98e8199d29f5351ab054d",
+      "metrics": {
+        "events": 4000,
+        "orders": 200,
+        "think": {
+          "count": 200,
+          "p50_ns": 875,
+          "p90_ns": 1208,
+          "p99_ns": 2167,
+          "max_ns": 3293
+        },
+        "write it down": {
+          "count": 200,
+          "p50_ns": 84543,
+          "p90_ns": 119871,
+          "p99_ns": 166399,
+          "max_ns": 215167
+        },
+        "still waiting on the disk": {
+          "count": 200,
+          "p50_ns": 3426303,
+          "p90_ns": 4255743,
+          "p99_ns": 4599807,
+          "max_ns": 5484543
+        },
+        "submit result": {
+          "count": 200,
+          "p50_ns": 265215,
+          "p90_ns": 334335,
+          "p99_ns": 432895,
+          "max_ns": 520447
+        },
+        "API round trip": {
+          "count": 200,
+          "p50_ns": 110847,
+          "p90_ns": 134527,
+          "p99_ns": 181375,
+          "max_ns": 189695
+        },
+        "dispatch queue": {
+          "count": 200,
+          "p50_ns": 9335,
+          "p90_ns": 13839,
+          "p99_ns": 27167,
+          "max_ns": 48255
+        },
+        "venue task": {
+          "count": 200,
+          "p50_ns": 166783,
+          "p90_ns": 211071,
+          "p99_ns": 259199,
+          "max_ns": 292351
+        },
+        "core resume": {
+          "count": 200,
+          "p50_ns": 21967,
+          "p90_ns": 25055,
+          "p99_ns": 30847,
+          "max_ns": 39935
+        },
+        "market to submit result": {
+          "count": 200,
+          "p50_ns": 300031,
+          "p90_ns": 370943,
+          "p99_ns": 485631,
+          "max_ns": 581631
+        }
+      }
+    },
+    {
+      "binary": "candidate",
+      "profile": "one_symbol_paced",
+      "repeat": 2,
+      "elapsed_s": 2.028720666989102,
+      "wal_sha256": "2ee75750255a6d2b99d6cbe5d9b945945037f0541d38cf10fed458ae6cf1288c",
+      "metrics": {
+        "events": 4000,
+        "orders": 200,
+        "think": {
+          "count": 200,
+          "p50_ns": 583,
+          "p90_ns": 584,
+          "p99_ns": 709,
+          "max_ns": 1167
+        },
+        "write it down": {
+          "count": 200,
+          "p50_ns": 80767,
+          "p90_ns": 116671,
+          "p99_ns": 189439,
+          "max_ns": 201599
+        },
+        "still waiting on the disk": {
+          "count": 200,
+          "p50_ns": 3508223,
+          "p90_ns": 4268031,
+          "p99_ns": 4558847,
+          "max_ns": 4681727
+        },
+        "submit result": {
+          "count": 200,
+          "p50_ns": 254975,
+          "p90_ns": 321791,
+          "p99_ns": 464383,
+          "max_ns": 473599
+        },
+        "API round trip": {
+          "count": 200,
+          "p50_ns": 111039,
+          "p90_ns": 130431,
+          "p99_ns": 160895,
+          "max_ns": 167807
+        },
+        "dispatch queue": {
+          "count": 200,
+          "p50_ns": 5791,
+          "p90_ns": 8583,
+          "p99_ns": 16463,
+          "max_ns": 65919
+        },
+        "venue task": {
+          "count": 200,
+          "p50_ns": 164991,
+          "p90_ns": 201727,
+          "p99_ns": 253695,
+          "max_ns": 266239
+        },
+        "core resume": {
+          "count": 200,
+          "p50_ns": 21919,
+          "p90_ns": 24431,
+          "p99_ns": 29215,
+          "max_ns": 35423
+        },
+        "market to submit result": {
+          "count": 200,
+          "p50_ns": 289791,
+          "p90_ns": 355839,
+          "p99_ns": 510975,
+          "max_ns": 523519
+        }
+      }
+    },
+    {
+      "binary": "candidate",
+      "profile": "one_symbol_paced",
+      "repeat": 3,
+      "elapsed_s": 2.0292222919961205,
+      "wal_sha256": "fd54b466b890462ab5b4d2649d73991891c28591cc0d1c769683840446c0af04",
+      "metrics": {
+        "events": 4000,
+        "orders": 200,
+        "think": {
+          "count": 200,
+          "p50_ns": 834,
+          "p90_ns": 1083,
+          "p99_ns": 2042,
+          "max_ns": 2625
+        },
+        "write it down": {
+          "count": 200,
+          "p50_ns": 91007,
+          "p90_ns": 141951,
+          "p99_ns": 197375,
+          "max_ns": 220543
+        },
+        "still waiting on the disk": {
+          "count": 200,
+          "p50_ns": 3471359,
+          "p90_ns": 4231167,
+          "p99_ns": 5382143,
+          "max_ns": 6316031
+        },
+        "submit result": {
+          "count": 200,
+          "p50_ns": 262911,
+          "p90_ns": 368383,
+          "p99_ns": 485375,
+          "max_ns": 516095
+        },
+        "API round trip": {
+          "count": 200,
+          "p50_ns": 104831,
+          "p90_ns": 137727,
+          "p99_ns": 164863,
+          "max_ns": 179583
+        },
+        "dispatch queue": {
+          "count": 200,
+          "p50_ns": 10007,
+          "p90_ns": 17679,
+          "p99_ns": 23167,
+          "max_ns": 67263
+        },
+        "venue task": {
+          "count": 200,
+          "p50_ns": 157695,
+          "p90_ns": 224127,
+          "p99_ns": 269311,
+          "max_ns": 299775
+        },
+        "core resume": {
+          "count": 200,
+          "p50_ns": 21551,
+          "p90_ns": 24383,
+          "p99_ns": 28431,
+          "max_ns": 31423
+        },
+        "market to submit result": {
+          "count": 200,
+          "p50_ns": 298495,
+          "p90_ns": 408831,
+          "p99_ns": 529407,
+          "max_ns": 565247
+        }
+      }
+    },
+    {
+      "binary": "baseline",
+      "profile": "one_symbol_paced",
+      "repeat": 3,
+      "elapsed_s": 2.0296154170064256,
+      "wal_sha256": "8e454cfa94d59e25b955b44fccdb253c7cba30df7bb4bd2bf5128e3fc37446b5",
+      "metrics": {
+        "events": 4000,
+        "orders": 200,
+        "think": {
+          "count": 200,
+          "p50_ns": 833,
+          "p90_ns": 959,
+          "p99_ns": 1750,
+          "max_ns": 1833
+        },
+        "write it down": {
+          "count": 200,
+          "p50_ns": 77887,
+          "p90_ns": 116223,
+          "p99_ns": 186367,
+          "max_ns": 192255
+        },
+        "still waiting on the disk": {
+          "count": 200,
+          "p50_ns": 3338239,
+          "p90_ns": 4227071,
+          "p99_ns": 4382719,
+          "max_ns": 4567039
+        },
+        "submit result": {
+          "count": 200,
+          "p50_ns": 254335,
+          "p90_ns": 341759,
+          "p99_ns": 472319,
+          "max_ns": 490751
+        },
+        "API round trip": {
+          "count": 200,
+          "p50_ns": 108671,
+          "p90_ns": 134399,
+          "p99_ns": 160895,
+          "max_ns": 186623
+        },
+        "dispatch queue": {
+          "count": 200,
+          "p50_ns": 10007,
+          "p90_ns": 16007,
+          "p99_ns": 25007,
+          "max_ns": 48863
+        },
+        "venue task": {
+          "count": 200,
+          "p50_ns": 163839,
+          "p90_ns": 214911,
+          "p99_ns": 275455,
+          "max_ns": 284159
+        },
+        "core resume": {
+          "count": 200,
+          "p50_ns": 21839,
+          "p90_ns": 24719,
+          "p99_ns": 30671,
+          "max_ns": 44895
+        },
+        "market to submit result": {
+          "count": 200,
+          "p50_ns": 290047,
+          "p90_ns": 381695,
+          "p99_ns": 518911,
+          "max_ns": 540671
+        }
+      }
+    },
+    {
+      "binary": "baseline",
+      "profile": "100_symbols_paced_unfilled",
+      "repeat": 0,
+      "elapsed_s": 5.022881958997459,
+      "wal_sha256": "d6ef613104ef1a147a5e13e6639932e41718070f435a68d30bdd947b1229a5d3",
+      "metrics": {
+        "events": 10000,
+        "orders": 526,
+        "think": {
+          "count": 526,
+          "p50_ns": 667,
+          "p90_ns": 1000,
+          "p99_ns": 1875,
+          "max_ns": 4627
+        },
+        "write it down": {
+          "count": 526,
+          "p50_ns": 104575,
+          "p90_ns": 156671,
+          "p99_ns": 230911,
+          "max_ns": 282879
+        },
+        "still waiting on the disk": {
+          "count": 526,
+          "p50_ns": 3352575,
+          "p90_ns": 4016127,
+          "p99_ns": 4251647,
+          "max_ns": 5316607
+        },
+        "submit result": {
+          "count": 526,
+          "p50_ns": 288767,
+          "p90_ns": 385791,
+          "p99_ns": 513791,
+          "max_ns": 583679
+        },
+        "API round trip": {
+          "count": 526,
+          "p50_ns": 107519,
+          "p90_ns": 137727,
+          "p99_ns": 173695,
+          "max_ns": 213887
+        },
+        "dispatch queue": {
+          "count": 526,
+          "p50_ns": 20255,
+          "p90_ns": 57471,
+          "p99_ns": 67071,
+          "max_ns": 89663
+        },
+        "venue task": {
+          "count": 526,
+          "p50_ns": 158847,
+          "p90_ns": 210815,
+          "p99_ns": 248575,
+          "max_ns": 345343
+        },
+        "core resume": {
+          "count": 526,
+          "p50_ns": 22127,
+          "p90_ns": 25967,
+          "p99_ns": 30591,
+          "max_ns": 47903
+        },
+        "market to submit result": {
+          "count": 526,
+          "p50_ns": 322303,
+          "p90_ns": 427007,
+          "p99_ns": 562687,
+          "max_ns": 615423
+        }
+      }
+    },
+    {
+      "binary": "candidate",
+      "profile": "100_symbols_paced_unfilled",
+      "repeat": 0,
+      "elapsed_s": 5.021080334001454,
+      "wal_sha256": "342135e6c81a81f8cdb1a27eee033d9045d9c76c532e96d85ba429369d570e2b",
+      "metrics": {
+        "events": 10000,
+        "orders": 526,
+        "think": {
+          "count": 526,
+          "p50_ns": 708,
+          "p90_ns": 1000,
+          "p99_ns": 1625,
+          "max_ns": 6291
+        },
+        "write it down": {
+          "count": 526,
+          "p50_ns": 88575,
+          "p90_ns": 129087,
+          "p99_ns": 203775,
+          "max_ns": 1377279
+        },
+        "still waiting on the disk": {
+          "count": 526,
+          "p50_ns": 3354623,
+          "p90_ns": 3993599,
+          "p99_ns": 4530175,
+          "max_ns": 9953279
+        },
+        "submit result": {
+          "count": 526,
+          "p50_ns": 257791,
+          "p90_ns": 346623,
+          "p99_ns": 508159,
+          "max_ns": 1549311
+        },
+        "API round trip": {
+          "count": 526,
+          "p50_ns": 105663,
+          "p90_ns": 130047,
+          "p99_ns": 170111,
+          "max_ns": 239487
+        },
+        "dispatch queue": {
+          "count": 526,
+          "p50_ns": 7835,
+          "p90_ns": 55647,
+          "p99_ns": 64255,
+          "max_ns": 67711
+        },
+        "venue task": {
+          "count": 526,
+          "p50_ns": 150399,
+          "p90_ns": 198655,
+          "p99_ns": 278271,
+          "max_ns": 314879
+        },
+        "core resume": {
+          "count": 526,
+          "p50_ns": 21631,
+          "p90_ns": 25503,
+          "p99_ns": 29679,
+          "max_ns": 83903
+        },
+        "market to submit result": {
+          "count": 526,
+          "p50_ns": 294143,
+          "p90_ns": 386303,
+          "p99_ns": 563199,
+          "max_ns": 1581055
+        }
+      }
+    },
+    {
+      "binary": "candidate",
+      "profile": "100_symbols_paced_unfilled",
+      "repeat": 1,
+      "elapsed_s": 5.021932916002697,
+      "wal_sha256": "2b61013b09201aedc9b2143107d77521ea4860e40f1caba68fe7ebf8eceeec7b",
+      "metrics": {
+        "events": 10000,
+        "orders": 526,
+        "think": {
+          "count": 526,
+          "p50_ns": 667,
+          "p90_ns": 1000,
+          "p99_ns": 1916,
+          "max_ns": 6959
+        },
+        "write it down": {
+          "count": 526,
+          "p50_ns": 113471,
+          "p90_ns": 158975,
+          "p99_ns": 221823,
+          "max_ns": 232959
+        },
+        "still waiting on the disk": {
+          "count": 526,
+          "p50_ns": 3426303,
+          "p90_ns": 3979263,
+          "p99_ns": 4395007,
+          "max_ns": 10371071
+        },
+        "submit result": {
+          "count": 526,
+          "p50_ns": 297215,
+          "p90_ns": 408575,
+          "p99_ns": 529919,
+          "max_ns": 764415
+        },
+        "API round trip": {
+          "count": 526,
+          "p50_ns": 109887,
+          "p90_ns": 148479,
+          "p99_ns": 196223,
+          "max_ns": 422143
+        },
+        "dispatch queue": {
+          "count": 526,
+          "p50_ns": 10335,
+          "p90_ns": 55295,
+          "p99_ns": 67775,
+          "max_ns": 84095
+        },
+        "venue task": {
+          "count": 526,
+          "p50_ns": 162303,
+          "p90_ns": 232959,
+          "p99_ns": 296703,
+          "max_ns": 535551
+        },
+        "core resume": {
+          "count": 526,
+          "p50_ns": 22095,
+          "p90_ns": 25791,
+          "p99_ns": 31503,
+          "max_ns": 39583
+        },
+        "market to submit result": {
+          "count": 526,
+          "p50_ns": 333823,
+          "p90_ns": 450815,
+          "p99_ns": 570367,
+          "max_ns": 816127
+        }
+      }
+    },
+    {
+      "binary": "baseline",
+      "profile": "100_symbols_paced_unfilled",
+      "repeat": 1,
+      "elapsed_s": 5.024940374991274,
+      "wal_sha256": "66680c29846bbbf39684e167866965611c12368c29721dd18290fae0ef35a0ac",
+      "metrics": {
+        "events": 10000,
+        "orders": 526,
+        "think": {
+          "count": 526,
+          "p50_ns": 667,
+          "p90_ns": 1000,
+          "p99_ns": 1833,
+          "max_ns": 8295
+        },
+        "write it down": {
+          "count": 526,
+          "p50_ns": 94975,
+          "p90_ns": 144895,
+          "p99_ns": 239487,
+          "max_ns": 282367
+        },
+        "still waiting on the disk": {
+          "count": 526,
+          "p50_ns": 3534847,
+          "p90_ns": 4048895,
+          "p99_ns": 5939199,
+          "max_ns": 10280959
+        },
+        "submit result": {
+          "count": 526,
+          "p50_ns": 270847,
+          "p90_ns": 372735,
+          "p99_ns": 534527,
+          "max_ns": 644095
+        },
+        "API round trip": {
+          "count": 526,
+          "p50_ns": 107007,
+          "p90_ns": 133887,
+          "p99_ns": 181759,
+          "max_ns": 282367
+        },
+        "dispatch queue": {
+          "count": 526,
+          "p50_ns": 10215,
+          "p90_ns": 30799,
+          "p99_ns": 68031,
+          "max_ns": 74303
+        },
+        "venue task": {
+          "count": 526,
+          "p50_ns": 154751,
+          "p90_ns": 212095,
+          "p99_ns": 292095,
+          "max_ns": 377343
+        },
+        "core resume": {
+          "count": 526,
+          "p50_ns": 21887,
+          "p90_ns": 25503,
+          "p99_ns": 31791,
+          "max_ns": 43295
+        },
+        "market to submit result": {
+          "count": 526,
+          "p50_ns": 307455,
+          "p90_ns": 411903,
+          "p99_ns": 568319,
+          "max_ns": 690687
+        }
+      }
+    },
+    {
+      "binary": "baseline",
+      "profile": "100_symbols_paced_unfilled",
+      "repeat": 2,
+      "elapsed_s": 5.022040667012334,
+      "wal_sha256": "d881e9d5998c149af05ee6c11a61adcda2b2467ccd83d3c47222f8533dd064a1",
+      "metrics": {
+        "events": 10000,
+        "orders": 526,
+        "think": {
+          "count": 526,
+          "p50_ns": 667,
+          "p90_ns": 1000,
+          "p99_ns": 2125,
+          "max_ns": 5295
+        },
+        "write it down": {
+          "count": 526,
+          "p50_ns": 89151,
+          "p90_ns": 139647,
+          "p99_ns": 207231,
+          "max_ns": 257279
+        },
+        "still waiting on the disk": {
+          "count": 526,
+          "p50_ns": 3557375,
+          "p90_ns": 3997695,
+          "p99_ns": 4333567,
+          "max_ns": 9863167
+        },
+        "submit result": {
+          "count": 526,
+          "p50_ns": 266239,
+          "p90_ns": 372479,
+          "p99_ns": 474623,
+          "max_ns": 718847
+        },
+        "API round trip": {
+          "count": 526,
+          "p50_ns": 106431,
+          "p90_ns": 135167,
+          "p99_ns": 182783,
+          "max_ns": 200703
+        },
+        "dispatch queue": {
+          "count": 526,
+          "p50_ns": 11423,
+          "p90_ns": 34943,
+          "p99_ns": 66047,
+          "max_ns": 76991
+        },
+        "venue task": {
+          "count": 526,
+          "p50_ns": 154623,
+          "p90_ns": 212735,
+          "p99_ns": 274687,
+          "max_ns": 466175
+        },
+        "core resume": {
+          "count": 526,
+          "p50_ns": 21919,
+          "p90_ns": 25807,
+          "p99_ns": 34431,
+          "max_ns": 40799
+        },
+        "market to submit result": {
+          "count": 526,
+          "p50_ns": 303359,
+          "p90_ns": 415743,
+          "p99_ns": 525823,
+          "max_ns": 766463
+        }
+      }
+    },
+    {
+      "binary": "candidate",
+      "profile": "100_symbols_paced_unfilled",
+      "repeat": 2,
+      "elapsed_s": 5.022304124999209,
+      "wal_sha256": "eb60c421229c14caf4e58bf0691b6fc38a11aca0766e3a49984a9ceb0f2d8660",
+      "metrics": {
+        "events": 10000,
+        "orders": 526,
+        "think": {
+          "count": 526,
+          "p50_ns": 708,
+          "p90_ns": 1000,
+          "p99_ns": 1666,
+          "max_ns": 7587
+        },
+        "write it down": {
+          "count": 526,
+          "p50_ns": 96639,
+          "p90_ns": 144383,
+          "p99_ns": 224255,
+          "max_ns": 278271
+        },
+        "still waiting on the disk": {
+          "count": 526,
+          "p50_ns": 3221503,
+          "p90_ns": 3999743,
+          "p99_ns": 4472831,
+          "max_ns": 4632575
+        },
+        "submit result": {
+          "count": 526,
+          "p50_ns": 274943,
+          "p90_ns": 370687,
+          "p99_ns": 523263,
+          "max_ns": 665599
+        },
+        "API round trip": {
+          "count": 526,
+          "p50_ns": 107391,
+          "p90_ns": 133119,
+          "p99_ns": 177023,
+          "max_ns": 195071
+        },
+        "dispatch queue": {
+          "count": 526,
+          "p50_ns": 10295,
+          "p90_ns": 56639,
+          "p99_ns": 67007,
+          "max_ns": 70847
+        },
+        "venue task": {
+          "count": 526,
+          "p50_ns": 154367,
+          "p90_ns": 200575,
+          "p99_ns": 269567,
+          "max_ns": 384511
+        },
+        "core resume": {
+          "count": 526,
+          "p50_ns": 21967,
+          "p90_ns": 25343,
+          "p99_ns": 30175,
+          "max_ns": 35231
+        },
+        "market to submit result": {
+          "count": 526,
+          "p50_ns": 312063,
+          "p90_ns": 407295,
+          "p99_ns": 573951,
+          "max_ns": 690175
+        }
+      }
+    },
+    {
+      "binary": "candidate",
+      "profile": "100_symbols_paced_unfilled",
+      "repeat": 3,
+      "elapsed_s": 5.021902166001382,
+      "wal_sha256": "d59af30d34b64177c0a351bd28d59cb21ccdf4d6274cfe81db4a7fdfccd321cd",
+      "metrics": {
+        "events": 10000,
+        "orders": 526,
+        "think": {
+          "count": 526,
+          "p50_ns": 667,
+          "p90_ns": 959,
+          "p99_ns": 1542,
+          "max_ns": 7959
+        },
+        "write it down": {
+          "count": 526,
+          "p50_ns": 91327,
+          "p90_ns": 131711,
+          "p99_ns": 215039,
+          "max_ns": 381439
+        },
+        "still waiting on the disk": {
+          "count": 526,
+          "p50_ns": 3295231,
+          "p90_ns": 4030463,
+          "p99_ns": 4497407,
+          "max_ns": 10002431
+        },
+        "submit result": {
+          "count": 526,
+          "p50_ns": 271359,
+          "p90_ns": 349951,
+          "p99_ns": 513023,
+          "max_ns": 684031
+        },
+        "API round trip": {
+          "count": 526,
+          "p50_ns": 107263,
+          "p90_ns": 128767,
+          "p99_ns": 166783,
+          "max_ns": 181119
+        },
+        "dispatch queue": {
+          "count": 526,
+          "p50_ns": 10295,
+          "p90_ns": 35231,
+          "p99_ns": 68095,
+          "max_ns": 72639
+        },
+        "venue task": {
+          "count": 526,
+          "p50_ns": 158463,
+          "p90_ns": 201087,
+          "p99_ns": 267775,
+          "max_ns": 284159
+        },
+        "core resume": {
+          "count": 526,
+          "p50_ns": 21887,
+          "p90_ns": 24591,
+          "p99_ns": 32047,
+          "max_ns": 51711
+        },
+        "market to submit result": {
+          "count": 526,
+          "p50_ns": 307455,
+          "p90_ns": 390911,
+          "p99_ns": 558591,
+          "max_ns": 730111
+        }
+      }
+    },
+    {
+      "binary": "baseline",
+      "profile": "100_symbols_paced_unfilled",
+      "repeat": 3,
+      "elapsed_s": 5.0253058330126805,
+      "wal_sha256": "2c1ac2fdb245773aae67a99599dfa861361a7163b0682187b2e3af13147e984a",
+      "metrics": {
+        "events": 10000,
+        "orders": 526,
+        "think": {
+          "count": 526,
+          "p50_ns": 709,
+          "p90_ns": 1000,
+          "p99_ns": 1916,
+          "max_ns": 12751
+        },
+        "write it down": {
+          "count": 526,
+          "p50_ns": 92543,
+          "p90_ns": 134527,
+          "p99_ns": 212863,
+          "max_ns": 306175
+        },
+        "still waiting on the disk": {
+          "count": 526,
+          "p50_ns": 3293183,
+          "p90_ns": 3969023,
+          "p99_ns": 4481023,
+          "max_ns": 10371071
+        },
+        "submit result": {
+          "count": 526,
+          "p50_ns": 284415,
+          "p90_ns": 368383,
+          "p99_ns": 474879,
+          "max_ns": 549887
+        },
+        "API round trip": {
+          "count": 526,
+          "p50_ns": 112191,
+          "p90_ns": 142079,
+          "p99_ns": 168959,
+          "max_ns": 235007
+        },
+        "dispatch queue": {
+          "count": 526,
+          "p50_ns": 10583,
+          "p90_ns": 56383,
+          "p99_ns": 63775,
+          "max_ns": 70335
+        },
+        "venue task": {
+          "count": 526,
+          "p50_ns": 165503,
+          "p90_ns": 216447,
+          "p99_ns": 267263,
+          "max_ns": 336127
+        },
+        "core resume": {
+          "count": 526,
+          "p50_ns": 22015,
+          "p90_ns": 25551,
+          "p99_ns": 31295,
+          "max_ns": 35103
+        },
+        "market to submit result": {
+          "count": 526,
+          "p50_ns": 319999,
+          "p90_ns": 407039,
+          "p99_ns": 512255,
+          "max_ns": 604159
+        }
+      }
+    },
+    {
+      "binary": "baseline",
+      "profile": "one_symbol_saturation",
+      "repeat": 0,
+      "elapsed_s": 3.5606295420002425,
+      "wal_sha256": "9f96421a218e67fa279ca79b0811445e77e603f53d93736c608ee59d3b0da054",
+      "metrics": {
+        "events": 20000,
+        "orders": 1000,
+        "think": {
+          "count": 1000,
+          "p50_ns": 83,
+          "p90_ns": 125,
+          "p99_ns": 125,
+          "max_ns": 167
+        },
+        "write it down": {
+          "count": 1000,
+          "p50_ns": 1782579199,
+          "p90_ns": 3149922303,
+          "p99_ns": 3489660927,
+          "max_ns": 3529506815
+        },
+        "still waiting on the disk": {
+          "count": 1000,
+          "p50_ns": 3088383,
+          "p90_ns": 3670015,
+          "p99_ns": 3917823,
+          "max_ns": 10436607
+        },
+        "submit result": {
+          "count": 1000,
+          "p50_ns": 1783627775,
+          "p90_ns": 3149922303,
+          "p99_ns": 3489660927,
+          "max_ns": 3529506815
+        },
+        "API round trip": {
+          "count": 1000,
+          "p50_ns": 94591,
+          "p90_ns": 113855,
+          "p99_ns": 139647,
+          "max_ns": 165247
+        },
+        "dispatch queue": {
+          "count": 1000,
+          "p50_ns": 238719,
+          "p90_ns": 487167,
+          "p99_ns": 567807,
+          "max_ns": 5251071
+        },
+        "venue task": {
+          "count": 1000,
+          "p50_ns": 131711,
+          "p90_ns": 166399,
+          "p99_ns": 226303,
+          "max_ns": 267263
+        },
+        "core resume": {
+          "count": 1000,
+          "p50_ns": 22015,
+          "p90_ns": 26543,
+          "p99_ns": 32303,
+          "max_ns": 34943
+        },
+        "market to submit result": {
+          "count": 1000,
+          "p50_ns": 1783627775,
+          "p90_ns": 3149922303,
+          "p99_ns": 3491758079,
+          "max_ns": 3529506815
+        }
+      }
+    },
+    {
+      "binary": "candidate",
+      "profile": "one_symbol_saturation",
+      "repeat": 0,
+      "elapsed_s": 3.773956667006132,
+      "wal_sha256": "a1fd5e54a09bb288c55e93d68fae032c4165d3e712a9bdc6b83eff7d96c8b3a5",
+      "metrics": {
+        "events": 20000,
+        "orders": 1000,
+        "think": {
+          "count": 1000,
+          "p50_ns": 83,
+          "p90_ns": 125,
+          "p99_ns": 125,
+          "max_ns": 208
+        },
+        "write it down": {
+          "count": 1000,
+          "p50_ns": 1835007999,
+          "p90_ns": 3386900479,
+          "p99_ns": 3709861887,
+          "max_ns": 3743416319
+        },
+        "still waiting on the disk": {
+          "count": 1000,
+          "p50_ns": 3348479,
+          "p90_ns": 3694591,
+          "p99_ns": 3991551,
+          "max_ns": 13418495
+        },
+        "submit result": {
+          "count": 1000,
+          "p50_ns": 1835007999,
+          "p90_ns": 3386900479,
+          "p99_ns": 3709861887,
+          "max_ns": 3743416319
+        },
+        "API round trip": {
+          "count": 1000,
+          "p50_ns": 96063,
+          "p90_ns": 119487,
+          "p99_ns": 158975,
+          "max_ns": 237951
+        },
+        "dispatch queue": {
+          "count": 1000,
+          "p50_ns": 250367,
+          "p90_ns": 493823,
+          "p99_ns": 554495,
+          "max_ns": 4997119
+        },
+        "venue task": {
+          "count": 1000,
+          "p50_ns": 134271,
+          "p90_ns": 176639,
+          "p99_ns": 248447,
+          "max_ns": 347647
+        },
+        "core resume": {
+          "count": 1000,
+          "p50_ns": 22175,
+          "p90_ns": 26959,
+          "p99_ns": 35007,
+          "max_ns": 473343
+        },
+        "market to submit result": {
+          "count": 1000,
+          "p50_ns": 1835007999,
+          "p90_ns": 3386900479,
+          "p99_ns": 3709861887,
+          "max_ns": 3743416319
+        }
+      }
+    },
+    {
+      "binary": "candidate",
+      "profile": "one_symbol_saturation",
+      "repeat": 1,
+      "elapsed_s": 3.808197709004162,
+      "wal_sha256": "a8f8f420c6b6df6bec31f9af9f58c2035f4d36416b070867249f10abc089362d",
+      "metrics": {
+        "events": 20000,
+        "orders": 1000,
+        "think": {
+          "count": 1000,
+          "p50_ns": 83,
+          "p90_ns": 125,
+          "p99_ns": 125,
+          "max_ns": 125
+        },
+        "write it down": {
+          "count": 1000,
+          "p50_ns": 1870659583,
+          "p90_ns": 3405774847,
+          "p99_ns": 3741319167,
+          "max_ns": 3776970751
+        },
+        "still waiting on the disk": {
+          "count": 1000,
+          "p50_ns": 3387391,
+          "p90_ns": 3694591,
+          "p99_ns": 4325375,
+          "max_ns": 13041663
+        },
+        "submit result": {
+          "count": 1000,
+          "p50_ns": 1871708159,
+          "p90_ns": 3405774847,
+          "p99_ns": 3741319167,
+          "max_ns": 3776970751
+        },
+        "API round trip": {
+          "count": 1000,
+          "p50_ns": 97023,
+          "p90_ns": 119039,
+          "p99_ns": 151551,
+          "max_ns": 225151
+        },
+        "dispatch queue": {
+          "count": 1000,
+          "p50_ns": 236671,
+          "p90_ns": 486399,
+          "p99_ns": 563199,
+          "max_ns": 5017599
+        },
+        "venue task": {
+          "count": 1000,
+          "p50_ns": 135423,
+          "p90_ns": 172799,
+          "p99_ns": 240511,
+          "max_ns": 411135
+        },
+        "core resume": {
+          "count": 1000,
+          "p50_ns": 22047,
+          "p90_ns": 27007,
+          "p99_ns": 32671,
+          "max_ns": 40255
+        },
+        "market to submit result": {
+          "count": 1000,
+          "p50_ns": 1871708159,
+          "p90_ns": 3405774847,
+          "p99_ns": 3741319167,
+          "max_ns": 3776970751
+        }
+      }
+    },
+    {
+      "binary": "baseline",
+      "profile": "one_symbol_saturation",
+      "repeat": 1,
+      "elapsed_s": 3.531978375001927,
+      "wal_sha256": "7010a0e293bb13fa135504823526b0555d7434f0a9d8eb98b822872626077724",
+      "metrics": {
+        "events": 20000,
+        "orders": 1000,
+        "think": {
+          "count": 1000,
+          "p50_ns": 83,
+          "p90_ns": 125,
+          "p99_ns": 125,
+          "max_ns": 125
+        },
+        "write it down": {
+          "count": 1000,
+          "p50_ns": 1798307839,
+          "p90_ns": 3152019455,
+          "p99_ns": 3468689407,
+          "max_ns": 3502243839
+        },
+        "still waiting on the disk": {
+          "count": 1000,
+          "p50_ns": 2844671,
+          "p90_ns": 3649535,
+          "p99_ns": 3799039,
+          "max_ns": 11100159
+        },
+        "submit result": {
+          "count": 1000,
+          "p50_ns": 1798307839,
+          "p90_ns": 3152019455,
+          "p99_ns": 3468689407,
+          "max_ns": 3502243839
+        },
+        "API round trip": {
+          "count": 1000,
+          "p50_ns": 97919,
+          "p90_ns": 119103,
+          "p99_ns": 147071,
+          "max_ns": 278783
+        },
+        "dispatch queue": {
+          "count": 1000,
+          "p50_ns": 250751,
+          "p90_ns": 500223,
+          "p99_ns": 565759,
+          "max_ns": 5066751
+        },
+        "venue task": {
+          "count": 1000,
+          "p50_ns": 136959,
+          "p90_ns": 171263,
+          "p99_ns": 238975,
+          "max_ns": 433151
+        },
+        "core resume": {
+          "count": 1000,
+          "p50_ns": 22175,
+          "p90_ns": 26751,
+          "p99_ns": 34239,
+          "max_ns": 86335
+        },
+        "market to submit result": {
+          "count": 1000,
+          "p50_ns": 1798307839,
+          "p90_ns": 3152019455,
+          "p99_ns": 3468689407,
+          "max_ns": 3502243839
+        }
+      }
+    },
+    {
+      "binary": "baseline",
+      "profile": "one_symbol_saturation",
+      "repeat": 2,
+      "elapsed_s": 3.54959675000282,
+      "wal_sha256": "e30506bd4802ffc9535819080dd59ae7dca67c09ab255c7833a41b0af8789772",
+      "metrics": {
+        "events": 20000,
+        "orders": 1000,
+        "think": {
+          "count": 1000,
+          "p50_ns": 83,
+          "p90_ns": 125,
+          "p99_ns": 125,
+          "max_ns": 208
+        },
+        "write it down": {
+          "count": 1000,
+          "p50_ns": 1784676351,
+          "p90_ns": 3145727999,
+          "p99_ns": 3481272319,
+          "max_ns": 3519021055
+        },
+        "still waiting on the disk": {
+          "count": 1000,
+          "p50_ns": 3074047,
+          "p90_ns": 3676159,
+          "p99_ns": 3825663,
+          "max_ns": 9207807
+        },
+        "submit result": {
+          "count": 1000,
+          "p50_ns": 1785724927,
+          "p90_ns": 3145727999,
+          "p99_ns": 3481272319,
+          "max_ns": 3519021055
+        },
+        "API round trip": {
+          "count": 1000,
+          "p50_ns": 97023,
+          "p90_ns": 119679,
+          "p99_ns": 149119,
+          "max_ns": 279807
+        },
+        "dispatch queue": {
+          "count": 1000,
+          "p50_ns": 246015,
+          "p90_ns": 492031,
+          "p99_ns": 563711,
+          "max_ns": 5017599
+        },
+        "venue task": {
+          "count": 1000,
+          "p50_ns": 135167,
+          "p90_ns": 169855,
+          "p99_ns": 245503,
+          "max_ns": 438271
+        },
+        "core resume": {
+          "count": 1000,
+          "p50_ns": 22175,
+          "p90_ns": 27167,
+          "p99_ns": 34175,
+          "max_ns": 111167
+        },
+        "market to submit result": {
+          "count": 1000,
+          "p50_ns": 1785724927,
+          "p90_ns": 3145727999,
+          "p99_ns": 3481272319,
+          "max_ns": 3519021055
+        }
+      }
+    },
+    {
+      "binary": "candidate",
+      "profile": "one_symbol_saturation",
+      "repeat": 2,
+      "elapsed_s": 3.637130834002164,
+      "wal_sha256": "c35bbf83f32531f0a3d76451b4c1931daad0865824850e4a898c39dae21e9770",
+      "metrics": {
+        "events": 20000,
+        "orders": 1000,
+        "think": {
+          "count": 1000,
+          "p50_ns": 83,
+          "p90_ns": 125,
+          "p99_ns": 125,
+          "max_ns": 125
+        },
+        "write it down": {
+          "count": 1000,
+          "p50_ns": 1799356415,
+          "p90_ns": 3238002687,
+          "p99_ns": 3569352703,
+          "max_ns": 3605004287
+        },
+        "still waiting on the disk": {
+          "count": 1000,
+          "p50_ns": 3233791,
+          "p90_ns": 3715071,
+          "p99_ns": 4159487,
+          "max_ns": 10264575
+        },
+        "submit result": {
+          "count": 1000,
+          "p50_ns": 1799356415,
+          "p90_ns": 3238002687,
+          "p99_ns": 3569352703,
+          "max_ns": 3607101439
+        },
+        "API round trip": {
+          "count": 1000,
+          "p50_ns": 94015,
+          "p90_ns": 114239,
+          "p99_ns": 145535,
+          "max_ns": 197247
+        },
+        "dispatch queue": {
+          "count": 1000,
+          "p50_ns": 223487,
+          "p90_ns": 462847,
+          "p99_ns": 536063,
+          "max_ns": 4988927
+        },
+        "venue task": {
+          "count": 1000,
+          "p50_ns": 131839,
+          "p90_ns": 168959,
+          "p99_ns": 234367,
+          "max_ns": 435455
+        },
+        "core resume": {
+          "count": 1000,
+          "p50_ns": 21839,
+          "p90_ns": 27007,
+          "p99_ns": 33311,
+          "max_ns": 42175
+        },
+        "market to submit result": {
+          "count": 1000,
+          "p50_ns": 1799356415,
+          "p90_ns": 3238002687,
+          "p99_ns": 3569352703,
+          "max_ns": 3607101439
+        }
+      }
+    },
+    {
+      "binary": "candidate",
+      "profile": "one_symbol_saturation",
+      "repeat": 3,
+      "elapsed_s": 3.7082212079985766,
+      "wal_sha256": "f87f5a899e5d2fa3966e78eb5377a1f9775dd238d85a27f3108035c1e81004a6",
+      "metrics": {
+        "events": 20000,
+        "orders": 1000,
+        "think": {
+          "count": 1000,
+          "p50_ns": 83,
+          "p90_ns": 125,
+          "p99_ns": 125,
+          "max_ns": 125
+        },
+        "write it down": {
+          "count": 1000,
+          "p50_ns": 1819279359,
+          "p90_ns": 3292528639,
+          "p99_ns": 3640655871,
+          "max_ns": 3676307455
+        },
+        "still waiting on the disk": {
+          "count": 1000,
+          "p50_ns": 3334143,
+          "p90_ns": 3713023,
+          "p99_ns": 3921919,
+          "max_ns": 11706367
+        },
+        "submit result": {
+          "count": 1000,
+          "p50_ns": 1819279359,
+          "p90_ns": 3292528639,
+          "p99_ns": 3640655871,
+          "max_ns": 3676307455
+        },
+        "API round trip": {
+          "count": 1000,
+          "p50_ns": 95103,
+          "p90_ns": 116927,
+          "p99_ns": 145279,
+          "max_ns": 184703
+        },
+        "dispatch queue": {
+          "count": 1000,
+          "p50_ns": 240255,
+          "p90_ns": 476927,
+          "p99_ns": 551935,
+          "max_ns": 4968447
+        },
+        "venue task": {
+          "count": 1000,
+          "p50_ns": 133247,
+          "p90_ns": 168191,
+          "p99_ns": 231039,
+          "max_ns": 275455
+        },
+        "core resume": {
+          "count": 1000,
+          "p50_ns": 22047,
+          "p90_ns": 26751,
+          "p99_ns": 34239,
+          "max_ns": 56511
+        },
+        "market to submit result": {
+          "count": 1000,
+          "p50_ns": 1819279359,
+          "p90_ns": 3292528639,
+          "p99_ns": 3640655871,
+          "max_ns": 3676307455
+        }
+      }
+    },
+    {
+      "binary": "baseline",
+      "profile": "one_symbol_saturation",
+      "repeat": 3,
+      "elapsed_s": 3.647547583008418,
+      "wal_sha256": "fa160e5399c5b10718ef206b1f75014940deec83441201caddb608492c651a20",
+      "metrics": {
+        "events": 20000,
+        "orders": 1000,
+        "think": {
+          "count": 1000,
+          "p50_ns": 83,
+          "p90_ns": 84,
+          "p99_ns": 125,
+          "max_ns": 125
+        },
+        "write it down": {
+          "count": 1000,
+          "p50_ns": 1845493759,
+          "p90_ns": 3265265663,
+          "p99_ns": 3579838463,
+          "max_ns": 3615490047
+        },
+        "still waiting on the disk": {
+          "count": 1000,
+          "p50_ns": 3192831,
+          "p90_ns": 3663871,
+          "p99_ns": 5107711,
+          "max_ns": 12926975
+        },
+        "submit result": {
+          "count": 1000,
+          "p50_ns": 1846542335,
+          "p90_ns": 3265265663,
+          "p99_ns": 3579838463,
+          "max_ns": 3615490047
+        },
+        "API round trip": {
+          "count": 1000,
+          "p50_ns": 98239,
+          "p90_ns": 120639,
+          "p99_ns": 148351,
+          "max_ns": 189823
+        },
+        "dispatch queue": {
+          "count": 1000,
+          "p50_ns": 238591,
+          "p90_ns": 483071,
+          "p99_ns": 570879,
+          "max_ns": 5029887
+        },
+        "venue task": {
+          "count": 1000,
+          "p50_ns": 138111,
+          "p90_ns": 177023,
+          "p99_ns": 231807,
+          "max_ns": 381695
+        },
+        "core resume": {
+          "count": 1000,
+          "p50_ns": 21887,
+          "p90_ns": 26303,
+          "p99_ns": 33855,
+          "max_ns": 76799
+        },
+        "market to submit result": {
+          "count": 1000,
+          "p50_ns": 1846542335,
+          "p90_ns": 3265265663,
+          "p99_ns": 3579838463,
+          "max_ns": 3615490047
+        }
+      }
+    }
+  ],
+  "summary": [
+    {
+      "profile": "one_symbol_paced",
+      "baseline": {
+        "orders_per_run": [
+          200,
+          200,
+          200,
+          200
+        ],
+        "stages": {
+          "market to submit result": {
+            "median_run_p99_ns": 501119.0,
+            "min_run_p99_ns": 485631,
+            "max_run_p99_ns": 518911
+          },
+          "write it down": {
+            "median_run_p99_ns": 183039.0,
+            "min_run_p99_ns": 166399,
+            "max_run_p99_ns": 189951
+          },
+          "still waiting on the disk": {
+            "median_run_p99_ns": 4478975.0,
+            "min_run_p99_ns": 4382719,
+            "max_run_p99_ns": 4599807
+          }
+        }
+      },
+      "candidate": {
+        "orders_per_run": [
+          200,
+          200,
+          200,
+          200
+        ],
+        "stages": {
+          "market to submit result": {
+            "median_run_p99_ns": 510719.0,
+            "min_run_p99_ns": 506111,
+            "max_run_p99_ns": 529407
+          },
+          "write it down": {
+            "median_run_p99_ns": 193407.0,
+            "min_run_p99_ns": 184831,
+            "max_run_p99_ns": 203775
+          },
+          "still waiting on the disk": {
+            "median_run_p99_ns": 4552703.0,
+            "min_run_p99_ns": 4476927,
+            "max_run_p99_ns": 5382143
+          }
+        }
+      }
+    },
+    {
+      "profile": "100_symbols_paced_unfilled",
+      "baseline": {
+        "orders_per_run": [
+          526,
+          526,
+          526,
+          526
+        ],
+        "stages": {
+          "market to submit result": {
+            "median_run_p99_ns": 544255.0,
+            "min_run_p99_ns": 512255,
+            "max_run_p99_ns": 568319
+          },
+          "write it down": {
+            "median_run_p99_ns": 221887.0,
+            "min_run_p99_ns": 207231,
+            "max_run_p99_ns": 239487
+          },
+          "still waiting on the disk": {
+            "median_run_p99_ns": 4407295.0,
+            "min_run_p99_ns": 4251647,
+            "max_run_p99_ns": 5939199
+          }
+        }
+      },
+      "candidate": {
+        "orders_per_run": [
+          526,
+          526,
+          526,
+          526
+        ],
+        "stages": {
+          "market to submit result": {
+            "median_run_p99_ns": 566783.0,
+            "min_run_p99_ns": 558591,
+            "max_run_p99_ns": 573951
+          },
+          "write it down": {
+            "median_run_p99_ns": 218431.0,
+            "min_run_p99_ns": 203775,
+            "max_run_p99_ns": 224255
+          },
+          "still waiting on the disk": {
+            "median_run_p99_ns": 4485119.0,
+            "min_run_p99_ns": 4395007,
+            "max_run_p99_ns": 4530175
+          }
+        }
+      }
+    },
+    {
+      "profile": "one_symbol_saturation",
+      "baseline": {
+        "orders_per_run": [
+          1000,
+          1000,
+          1000,
+          1000
+        ],
+        "stages": {
+          "market to submit result": {
+            "median_run_p99_ns": 3486515199.0,
+            "min_run_p99_ns": 3468689407,
+            "max_run_p99_ns": 3579838463
+          },
+          "write it down": {
+            "median_run_p99_ns": 3485466623.0,
+            "min_run_p99_ns": 3468689407,
+            "max_run_p99_ns": 3579838463
+          },
+          "still waiting on the disk": {
+            "median_run_p99_ns": 3871743.0,
+            "min_run_p99_ns": 3799039,
+            "max_run_p99_ns": 5107711
+          }
+        }
+      },
+      "candidate": {
+        "orders_per_run": [
+          1000,
+          1000,
+          1000,
+          1000
+        ],
+        "stages": {
+          "market to submit result": {
+            "median_run_p99_ns": 3675258879.0,
+            "min_run_p99_ns": 3569352703,
+            "max_run_p99_ns": 3741319167
+          },
+          "write it down": {
+            "median_run_p99_ns": 3675258879.0,
+            "min_run_p99_ns": 3569352703,
+            "max_run_p99_ns": 3741319167
+          },
+          "still waiting on the disk": {
+            "median_run_p99_ns": 4075519.0,
+            "min_run_p99_ns": 3921919,
+            "max_run_p99_ns": 4325375
+          }
+        }
+      }
+    }
+  ]
+}

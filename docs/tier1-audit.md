@@ -13,6 +13,7 @@ Record the verified execution boundaries, unresolved defects, and implementation
 | Source baseline | GitHub `main`, `e2345ca450d03a3d58ff19b9d2b436e9b84cfbb4`; 53 commits after the handoff's `ca41a7931fadccd43c0a0e62a8a7f1d2bee9052f` |
 | Handoff | Context and hypotheses; its ticket order and proposed types are not implementation requirements |
 | Baseline checks | Repository doctor ready; 510 engine-core library tests pass |
+| Compiler | Repository pin: Rust 1.90.0. Shell default: Homebrew Rust 1.97.1. Here `rustup run 1.90.0 cargo` still discovers Homebrew `rustc` through PATH; set the toolchain bin directory and `RUSTC` explicitly, and verify `target/.rustc_info.json` |
 | Remote metadata | GitHub branch API reports `protected=false`; current head signature `valid`; handoff head `unsigned`; ruleset API returns HTTP 403 requiring a plan upgrade/public repository |
 | Production | No host, account, live WAL, credentials, or running deployment inspected or changed; `STATE.md` remains a historical operational snapshot, not evidence from this audit |
 | Checkpoints | Local commits only; validation receipts belong in `CHANGELOG.md` |
@@ -56,6 +57,33 @@ Record the verified execution boundaries, unresolved defects, and implementation
 | 7 | Bound callback output at emission and measure callback duration. Move slow work outside the decision callback; extract state-owned components incrementally. | Measuring an overrun after a synchronous callback cannot preempt an infinite callback. A hard isolation guarantee needs an execution boundary, not a timer alone |
 | 8 | Split venue/catalog dependencies and feature-select builds when measured build/runtime cost or adapter testing warrants it. | A crate per venue is optional packaging, not a prerequisite for correcting execution ownership |
 
+### Local performance evidence
+
+| Parameter | Scope |
+| --- | --- |
+| Primary artifact | [All 24 measured Rust 1.90 runs, profiles, hashes, compiler and machine metadata](tier1-local-benchmark.json) |
+| Supplemental artifacts | [24 runs with Homebrew Cargo/Rust 1.97](tier1-local-benchmark-1.97.json); [24 runs with Cargo 1.90 still discovering Homebrew Rust 1.97](tier1-local-benchmark-1.97-cargo1.90.json); these do not qualify the compiler pin |
+| Source comparison | `e2345ca4` baseline versus `c517bab0` candidate |
+| Machine / compiler | Apple M4, 16 GiB, macOS Darwin 24.6.0, explicit Rust 1.90.0; both build-cache compiler records verified before measurement; no concurrent builds from this audit |
+| Method | One warm-up per binary/profile, four alternating run pairs, new real WAL per run, localhost HTTP venue, no fills, benchmark allow-all risk |
+| Timing boundary | Market event to handling the submit result; the subsequent disk-barrier wait is separate |
+| Stage limitation | `write it down` spans decision timestamp to barrier request, including prior queueing/admission; it does not isolate ownership lookup, WAL append, or fsync cost |
+
+| Profile | Events / quotes per second / every-Nth order / symbols | Orders per run | Baseline median run p99 (range), ms | Candidate median run p99 (range), ms |
+| --- | --- | --- | --- | --- |
+| Paced, one symbol | 4,000 / 2,000 / 20 / 1 | 200 | 0.434 (0.415–0.526) | 0.467 (0.411–0.562) |
+| Paced, 100 symbols with unfilled orders | 10,000 / 2,000 / 19 / 100 | 526 | 0.605 (0.503–0.719) | 0.588 (0.525–0.739) |
+| Saturation, one symbol | 20,000 / unlimited / 20 / 1 | 1,000 | 3,705.668 (3,621.782–3,774.874) | 3,702.522 (3,619.684–3,852.468) |
+
+All profiles send the same order counts before and after. The one-symbol
+paced median is higher; the other two are slightly lower. All run ranges
+overlap. These samples do not isolate a reproducible regression or establish
+a speedup. The saturated run exposes seconds of backlog and cannot justify a
+nominal latency budget. This single-strategy local harness does not measure
+production risk, many-strategy callback cost, real venue latency, or p99.9.
+Supplemental compiler series remain separate because their binaries differ;
+the Cargo 1.90/Rust 1.97 series also has a higher candidate saturation median.
+
 ### Signal migration requirements
 
 | Boundary | Required behavior |
@@ -88,6 +116,11 @@ scripts/dev.sh lint
 scripts/dev.sh shellcheck
 scripts/dev.sh types
 scripts/dev.sh test
+tier1_rust_bin="$(dirname "$(rustup which --toolchain 1.90.0 rustc)")"
+export PATH="$tier1_rust_bin:$PATH"
+export RUSTC="$tier1_rust_bin/rustc"
+export RUSTDOC="$tier1_rust_bin/rustdoc"
+rustc -Vv
 cargo fmt --manifest-path engine/Cargo.toml --all -- --check
 cargo clippy --manifest-path engine/Cargo.toml --workspace --all-targets --locked -- -D warnings
 cargo test --manifest-path engine/Cargo.toml --workspace --all-targets --locked
