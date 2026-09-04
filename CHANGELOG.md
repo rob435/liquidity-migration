@@ -13,6 +13,11 @@ edit STATE.md to match.
     benchmark work, 489 in Rust gates, 357 building deploy artifacts, and 151
     in Python CI. The latest 100 artifacts alone occupied 1,228 MB against the
     private Free account's 500 MB included storage.
+  - Ninety-eight obsolete, reproducible archives (1,203.7 MiB) were deleted.
+    The latest exact archives for deployed commit `65ee75a7`, rollback target
+    `16d52f88`, and the uninterrupted funded process `218905d4` remain: three
+    artifacts totaling 37.1 MiB. Deleted archives are not recoverable from
+    Actions, but their commits can reproduce them.
   - A push to `main` no longer starts GitHub-hosted work. Code pull requests
     retain Python and Rust gates and supersede older checks for the same pull
     request; docs-only pull requests are ignored. The local pre-push gate still
@@ -32,6 +37,11 @@ edit STATE.md to match.
     runner; reliable no-minute operation requires a separate private Linux
     build host, while the ordinary workstation remains a poor always-on
     production dependency.
+  - Run `33911407276` exercised the new build-free `verify` path: CI, Rust,
+    artifact, and qualification jobs all skipped, and `vps` became the only
+    scheduled job. GitHub refused it before runner assignment with the same
+    failed-payment or spending-limit annotation. Storage cleanup therefore did
+    not restore hosted compute; the external capacity block remains.
 
 - **2026-09-04 ~17:58 UTC — Mainnet signal worker paged `degraded`; the page
   could not name its own cause, and now does.**
