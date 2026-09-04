@@ -48,8 +48,13 @@ from liquidity_migration.policy.oncall_environment import (  # noqa: E402
 )
 
 _MANIFEST = _REPO_ROOT / "deploy" / "fleet_manifest.tsv"
+_DEPLOY_LOCK = Path("/run/liquidity-migration/deploy.lock")
 _ACCOUNT_SCOPES = ("demo", "mainnet", "host")
 _SIGNAL_WORKER_HEARTBEAT_KIND = "liquidity_migration_signal_worker_heartbeat"
+_ENGINE_UNITS = {
+    "liquidity-migration-engine.service",
+    "liquidity-migration-engine-mainnet.service",
+}
 
 
 @dataclass(frozen=True)
@@ -260,6 +265,16 @@ def evaluate_engine_heartbeat(
             )
         ]
     alerts = []
+    is_signal_worker = "signal-worker" in unit
+    if is_signal_worker and payload.get("kind") != _SIGNAL_WORKER_HEARTBEAT_KIND:
+        alerts.append(
+            Alert(
+                f"heartbeat-contract:{unit}",
+                "CRITICAL",
+                f"{unit} heartbeat has the wrong or missing kind",
+            )
+        )
+        return alerts
     if payload.get("kind") == _SIGNAL_WORKER_HEARTBEAT_KIND:
         status = payload.get("status")
         if status not in ("starting", "ready"):
@@ -279,6 +294,23 @@ def evaluate_engine_heartbeat(
                     f"{unit} signal spool is backpressured",
                 )
             )
+    if unit in _ENGINE_UNITS:
+        invalid_verdicts = [
+            field
+            for field in ("may_open", "rolling_loss_tripped")
+            if not isinstance(payload.get(field), bool)
+        ]
+    else:
+        invalid_verdicts = []
+    if invalid_verdicts:
+        alerts.append(
+            Alert(
+                f"heartbeat-contract:{unit}",
+                "CRITICAL",
+                f"{unit} heartbeat has no boolean verdict for "
+                f"{', '.join(invalid_verdicts)}",
+            )
+        )
     if "may_open" in payload and payload.get("may_open") is not True:
         alerts.append(Alert(f"may-open:{unit}", "CRITICAL", f"{unit} cannot open positions"))
     if payload.get("rolling_loss_tripped") is True:
@@ -424,26 +456,81 @@ def unit_result(unit: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
-def evaluate_watchdog_chain() -> list[Alert]:
+def active_deploy_age(
+    path: Path, *, now: float, lock_table: Path = Path("/proc/locks")
+) -> float | None:
+    """Seconds the deploy lock has been held, or None when no deploy owns it."""
+
+    try:
+        metadata = path.stat()
+    except FileNotFoundError:
+        return None
+    identity = (
+        f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}:"
+        f"{metadata.st_ino}"
+    )
+    for line in lock_table.read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if (
+            len(fields) >= 6
+            and fields[1] == "FLOCK"
+            and fields[3] == "WRITE"
+            and fields[5] == identity
+        ):
+            return max(0.0, now - metadata.st_mtime)
+    return None
+
+
+def evaluate_watchdog_chain(
+    *,
+    now: float | None = None,
+    deploy_lock: Path = _DEPLOY_LOCK,
+    max_deploy_age_sec: float = 1_800.0,
+) -> list[Alert]:
     """The host watchdog supervises the realm watchdogs that cannot see themselves.
 
-    A realm watchdog is required exactly while systemd is enabled to run it.
-    `systemctl enable --now` and `disable --now` move enablement and activation
-    in one step, so the deploy's stop and start halves never leave a window
-    where this check demands a timer the deploy has legitimately torn down. The
-    manifest's `always` activation scopes a unit to its realm's activation set,
-    not to every minute of the host's life.
+    The deploy's existing exclusive lock is the maintenance boundary. A bounded
+    lock suppresses transitional timer states; a stuck lock pages. Outside that
+    boundary, demo is always required and mainnet is required while either its
+    timer is enabled or its funded engine is running.
     """
+
+    checked_at = time.time() if now is None else now
+    try:
+        deploy_age = active_deploy_age(deploy_lock, now=checked_at)
+    except OSError as error:
+        return [
+            Alert(
+                "deploy-lock",
+                "CRITICAL",
+                f"cannot inspect deployment lock: {error}",
+            )
+        ]
+    if deploy_age is not None:
+        if deploy_age <= max_deploy_age_sec:
+            return []
+        return [
+            Alert(
+                "deploy-lock",
+                "CRITICAL",
+                f"deployment lock has been held for {deploy_age:.0f}s "
+                f"(limit {max_deploy_age_sec:.0f}s)",
+            )
+        ]
 
     timers = {
         "demo": "liquidity-migration-demo-liveness.timer",
         "mainnet": "liquidity-migration-mainnet-liveness.timer",
     }
-    active = unit_states(list(timers.values()))
+    mainnet_engine = "liquidity-migration-engine-mainnet.service"
+    active = unit_states([*timers.values(), mainnet_engine])
     alerts: list[Alert] = []
     for realm, timer in timers.items():
         enabled = unit_enabled_state(timer)
-        if not enabled.startswith("enabled"):
+        expected = realm == "demo" or enabled.startswith("enabled")
+        if realm == "mainnet" and active.get(mainnet_engine) == "active":
+            expected = True
+        if not expected:
             continue
         state = active.get(timer, "unknown")
         if state != "active":
@@ -610,6 +697,7 @@ def _incident_units(scope: str, alerts: list[Alert]) -> list[str]:
         "unit:",
         "heartbeat:",
         "heartbeat-parse:",
+        "heartbeat-contract:",
         "may-open:",
         "rolling-loss:",
         "worker-status:",

@@ -31,6 +31,7 @@ const FIVE_MIN_MS: i64 = 300_000;
 const KLINE_PUBLICATION_LAG_MS: i64 = 60_000;
 const FUNDING_PUBLICATION_LAG_MS: i64 = 5 * 60_000;
 const CARRY_CATCHUP_CHUNK_DAYS: i64 = 1;
+const STARTUP_MAX_MS: i64 = 120 * 60_000;
 pub const KLINE_FETCH_CHUNK_SIZE: usize = 1;
 pub const FUNDING_FETCH_CHUNK_SIZE: usize = 1;
 pub const WHALE_FETCH_CHUNK_SIZE: usize = 1;
@@ -149,6 +150,7 @@ struct LaneState {
     funding: bool,
     whales: bool,
     repair: bool,
+    repair_epoch: Option<u64>,
     instruments_ready: bool,
     funding_ready: bool,
     repair_failure_count: usize,
@@ -793,10 +795,21 @@ impl LiveRunner {
                     );
                     let status = startup_runtime_status(
                         base_status,
-                        self.last_long_cycle_completed_wall_ts_ms,
-                        self.config.live.kline_cadence_ms,
-                        self.last_carry_cycle_completed_wall_ts_ms,
-                        self.config.live.kline_cadence_ms,
+                        [
+                            (
+                                self.last_long_cycle_completed_wall_ts_ms,
+                                self.config.live.kline_cadence_ms,
+                            ),
+                            (
+                                self.last_carry_cycle_completed_wall_ts_ms,
+                                self.config.live.kline_cadence_ms,
+                            ),
+                        ],
+                        stream_inputs_healthy(
+                            &health,
+                            now_ms,
+                            self.config.sources.mark_max_age_ms,
+                        ),
                         run_started_at_ms,
                         now_ms,
                     );
@@ -1169,6 +1182,7 @@ impl LiveRunner {
             }
             LaneCompletion::RepairFinished { end_ms, epoch } => {
                 lanes.repair = false;
+                let repaired_epoch = lanes.repair_epoch.take().or(epoch);
                 let pending_committed =
                     self.flush_pending_klines_or_recover(stream, pending, lane_tx, lanes)?;
                 if !pending_committed {
@@ -1176,7 +1190,7 @@ impl LiveRunner {
                 }
                 let current_end = closed_kline_end(wall_ms()?);
                 let coverage_complete = self.kline_repair_jobs(current_end).is_empty();
-                if let Some(epoch) = epoch {
+                if let Some(epoch) = repaired_epoch {
                     if coverage_complete {
                         stream.mark_gap_repaired(epoch);
                     }
@@ -1434,6 +1448,9 @@ impl LiveRunner {
         lanes: &mut LaneState,
         epoch: Option<u64>,
     ) -> Result<(), WorkerError> {
+        if epoch.is_some() {
+            lanes.repair_epoch = epoch;
+        }
         if lanes.repair {
             return Ok(());
         }
@@ -1479,6 +1496,7 @@ impl LiveRunner {
                 ))
         });
         lanes.repair = true;
+        lanes.repair_epoch = epoch;
         spawn_repair_lane(
             lane_tx.clone(),
             self.bybit.clone(),
@@ -2708,18 +2726,9 @@ fn runtime_status(
     now_ms: i64,
     max_frame_age_ms: i64,
 ) -> &'static str {
-    let frame_fresh = health
-        .last_frame_ts_ms
-        .is_some_and(|last| last <= now_ms && now_ms.saturating_sub(last) <= max_frame_age_ms);
-    if health.connected
+    if stream_inputs_healthy(health, now_ms, max_frame_age_ms)
         && !health.gap_open
         && !repair_running
-        && health.ticker_coverage_complete
-        && health.ticker_topics_quarantined == 0
-        && health.kline_topics_quarantined == 0
-        && health.ticker_topics_accepted == health.ticker_capacity
-        && health.kline_topics_accepted == health.ticker_capacity
-        && frame_fresh
     {
         "ready"
     } else {
@@ -2727,30 +2736,40 @@ fn runtime_status(
     }
 }
 
+fn stream_inputs_healthy(health: &StreamHealth, now_ms: i64, max_frame_age_ms: i64) -> bool {
+    let frame_fresh = health
+        .last_frame_ts_ms
+        .is_some_and(|last| last <= now_ms && now_ms.saturating_sub(last) <= max_frame_age_ms);
+    health.connected
+        && health.ticker_coverage_complete
+        && health.ticker_topics_quarantined == 0
+        && health.kline_topics_quarantined == 0
+        && health.ticker_topics_accepted == health.ticker_capacity
+        && health.kline_topics_accepted == health.ticker_capacity
+        && frame_fresh
+}
+
 fn startup_runtime_status(
     base_status: &'static str,
-    last_long_cycle_ms: Option<i64>,
-    long_cadence_ms: u64,
-    last_carry_cycle_ms: Option<i64>,
-    carry_cadence_ms: u64,
+    cycles: [(Option<i64>, u64); 2],
+    startup_inputs_healthy: bool,
     started_at_ms: i64,
     now_ms: i64,
 ) -> &'static str {
-    let long_window_ms = i64::try_from(long_cadence_ms)
-        .unwrap_or(i64::MAX / 3)
-        .saturating_mul(3);
-    let carry_window_ms = i64::try_from(carry_cadence_ms)
-        .unwrap_or(i64::MAX / 3)
-        .saturating_mul(3);
-    let startup_window_ms = long_window_ms.max(carry_window_ms);
-    if (last_long_cycle_ms.is_none() || last_carry_cycle_ms.is_none())
-        && now_ms.saturating_sub(started_at_ms) < startup_window_ms
+    if cycles
+        .iter()
+        .any(|(completed_at_ms, _)| completed_at_ms.is_none())
+        && startup_inputs_healthy
+        && now_ms.saturating_sub(started_at_ms) < STARTUP_MAX_MS
     {
         "starting"
-    } else if !last_long_cycle_ms.is_some_and(|completed_at_ms| {
-        completed_at_ms <= now_ms && now_ms.saturating_sub(completed_at_ms) <= long_window_ms
-    }) || !last_carry_cycle_ms.is_some_and(|completed_at_ms| {
-        completed_at_ms <= now_ms && now_ms.saturating_sub(completed_at_ms) <= carry_window_ms
+    } else if cycles.iter().any(|(completed_at_ms, cadence_ms)| {
+        let window_ms = i64::try_from(*cadence_ms)
+            .unwrap_or(i64::MAX / 3)
+            .saturating_mul(3);
+        !completed_at_ms.is_some_and(|completed_at_ms| {
+            completed_at_ms <= now_ms && now_ms.saturating_sub(completed_at_ms) <= window_ms
+        })
     }) {
         "degraded"
     } else {
@@ -4105,7 +4124,7 @@ mod tests {
         FetchedTickers, FetchedUniverseInputs, FetchedWhales, LaneCompletion, LaneState,
         LiveRunOptions, LiveRunner, StreamEvent, StreamHealth, TickerSample,
         FUNDING_FETCH_CHUNK_SIZE, KLINE_FETCH_CHUNK_SIZE, LANE_COMPLETION_QUEUE_CAPACITY,
-        WHALE_FETCH_CHUNK_SIZE,
+        STARTUP_MAX_MS, WHALE_FETCH_CHUNK_SIZE,
     };
     use crate::bybit_ws::BybitPublicStream;
     use crate::config::SignalWorkerConfig;
@@ -4164,16 +4183,20 @@ mod tests {
     #[test]
     fn runtime_stays_starting_only_for_the_bounded_cycle_warmup() {
         assert_eq!(
-            startup_runtime_status("ready", None, 60_000, None, 60_000, 1_000, 180_999),
+            startup_runtime_status(
+                "degraded",
+                [(None, 60_000), (None, 60_000)],
+                true,
+                1_000,
+                STARTUP_MAX_MS,
+            ),
             "starting"
         );
         assert_eq!(
             startup_runtime_status(
                 "ready",
-                Some(2_000),
-                60_000,
-                Some(3_000),
-                60_000,
+                [(Some(2_000), 60_000), (Some(3_000), 60_000)],
+                true,
                 1_000,
                 3_000,
             ),
@@ -4182,22 +4205,29 @@ mod tests {
         assert_eq!(
             startup_runtime_status(
                 "degraded",
-                Some(2_000),
-                60_000,
-                None,
-                60_000,
+                [(Some(2_000), 60_000), (None, 60_000)],
+                true,
                 1_000,
-                181_000,
+                STARTUP_MAX_MS + 1_000,
             ),
             "degraded"
         );
         assert_eq!(
             startup_runtime_status(
+                "degraded",
+                [(None, 60_000), (None, 60_000)],
+                false,
+                1_000,
+                60_000,
+            ),
+            "degraded",
+            "a disconnected or incomplete stream is not healthy warmup"
+        );
+        assert_eq!(
+            startup_runtime_status(
                 "ready",
-                Some(1_000),
-                60_000,
-                Some(200_000),
-                60_000,
+                [(Some(1_000), 60_000), (Some(200_000), 60_000)],
+                true,
                 1_000,
                 200_001,
             ),
@@ -4207,16 +4237,41 @@ mod tests {
         assert_eq!(
             startup_runtime_status(
                 "ready",
-                Some(200_000),
-                60_000,
-                Some(200_002),
-                60_000,
+                [(Some(200_000), 60_000), (Some(200_002), 60_000)],
+                true,
                 1_000,
                 200_001,
             ),
             "degraded",
             "a future cycle timestamp is not fresh"
         );
+    }
+
+    #[tokio::test]
+    async fn a_live_epoch_adopts_the_repair_already_started_at_boot() {
+        let root = temporary_root("repair-adopts-epoch");
+        let _ = std::fs::remove_dir_all(&root);
+        let options = LiveRunOptions {
+            state_dir: root.join("state"),
+            spool_dir: root.join("spool"),
+            heartbeat: root.join("heartbeat.json"),
+        };
+        let runner =
+            LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
+        let (lane_tx, _lane_rx) = tokio::sync::mpsc::channel(1);
+        let mut lanes = LaneState {
+            repair: true,
+            ..LaneState::default()
+        };
+
+        runner
+            .start_kline_repair(&lane_tx, &mut lanes, Some(7))
+            .unwrap();
+
+        assert!(lanes.repair);
+        assert_eq!(lanes.repair_epoch, Some(7));
+        drop(runner);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

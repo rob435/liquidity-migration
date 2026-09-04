@@ -53,7 +53,15 @@ def test_inactive_unit_is_a_critical_alert(monkeypatch) -> None:
 
 def test_fresh_heartbeat_passes_and_stale_heartbeat_pages(tmp_path: Path) -> None:
     heartbeat = tmp_path / "heartbeat.json"
-    heartbeat.write_text(json.dumps({"wall_ts_ms": 0}))
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "wall_ts_ms": 0,
+                "may_open": True,
+                "rolling_loss_tripped": False,
+            }
+        )
+    )
     row = liveness.FleetUnit(
         unit="liquidity-migration-engine.service",
         kind="service",
@@ -93,6 +101,29 @@ def test_non_object_heartbeat_pages(tmp_path: Path) -> None:
 
     assert [alert.key for alert in alerts] == ["heartbeat-parse:worker"]
     assert "not a JSON object" in alerts[0].message
+
+
+def test_known_heartbeat_producers_fail_closed_on_missing_verdicts(
+    tmp_path: Path,
+) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    heartbeat.write_text("{}")
+
+    worker_alerts = liveness.evaluate_engine_heartbeat(
+        "liquidity-migration-signal-worker-mainnet.service", heartbeat
+    )
+    assert [alert.key for alert in worker_alerts] == [
+        "heartbeat-contract:liquidity-migration-signal-worker-mainnet.service"
+    ]
+
+    engine_alerts = liveness.evaluate_engine_heartbeat(
+        "liquidity-migration-engine-mainnet.service", heartbeat
+    )
+    assert {alert.key for alert in engine_alerts} == {
+        "heartbeat-contract:liquidity-migration-engine-mainnet.service"
+    }
+    assert len(engine_alerts) == 1
+    assert "may_open, rolling_loss_tripped" in engine_alerts[0].message
 
 
 def test_engine_that_cannot_open_positions_pages(tmp_path: Path) -> None:
@@ -560,6 +591,7 @@ def test_failed_telegram_retries_without_launching_a_second_agent(
 
 
 def test_host_supervises_realm_watchdog_results(monkeypatch) -> None:
+    monkeypatch.setattr(liveness, "active_deploy_age", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         liveness,
         "unit_states",
@@ -586,23 +618,56 @@ def test_host_supervises_realm_watchdog_results(monkeypatch) -> None:
 
 
 def test_host_watchdog_chain_ignores_a_realm_a_deploy_has_torn_down(monkeypatch) -> None:
-    # `stop_fleet` runs `systemctl disable --now` on every realm unit, so the
-    # deploy window reads disabled+inactive on both realms and is not a fault.
+    # The deploy already holds this lock around every mutating mode. Its real
+    # lifetime, not an ambiguous timer state, is the maintenance boundary.
+    monkeypatch.setattr(liveness, "active_deploy_age", lambda *_args, **_kwargs: 30.0)
     monkeypatch.setattr(
-        liveness, "unit_states", lambda units: dict.fromkeys(units, "inactive")
+        liveness,
+        "unit_states",
+        lambda _units: (_ for _ in ()).throw(AssertionError("units queried during deploy")),
     )
-    monkeypatch.setattr(liveness, "unit_enabled_state", lambda _unit: "disabled")
-    monkeypatch.setattr(liveness, "unit_result", lambda _unit: "success")
 
-    assert liveness.evaluate_watchdog_chain() == []
+    assert liveness.evaluate_watchdog_chain(now=100.0) == []
 
 
-def test_host_watchdog_chain_reads_enablement_not_the_engine(monkeypatch) -> None:
+def test_active_deploy_age_reads_the_kernel_lock_table(tmp_path: Path) -> None:
+    lock = tmp_path / "deploy.lock"
+    lock.touch(mode=0o600)
+    os.utime(lock, (700.0, 700.0))
+    metadata = lock.stat()
+    identity = (
+        f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}:"
+        f"{metadata.st_ino}"
+    )
+    lock_table = tmp_path / "locks"
+    lock_table.write_text(
+        f"7: FLOCK ADVISORY WRITE 123 {identity} 0 EOF\n", encoding="utf-8"
+    )
+
+    assert (
+        liveness.active_deploy_age(lock, now=1_000.0, lock_table=lock_table)
+        == 300.0
+    )
+
+    lock_table.write_text("", encoding="utf-8")
+    assert liveness.active_deploy_age(lock, now=1_000.0, lock_table=lock_table) is None
+
+
+def test_host_watchdog_chain_still_catches_a_disabled_timer_while_engine_runs(
+    monkeypatch,
+) -> None:
     queried: list[str] = []
 
     def states(units: list[str]) -> dict[str, str]:
         queried.extend(units)
-        return dict.fromkeys(units, "active")
+        return {
+            unit: (
+                "inactive"
+                if unit == "liquidity-migration-mainnet-liveness.timer"
+                else "active"
+            )
+            for unit in units
+        }
 
     monkeypatch.setattr(liveness, "unit_states", states)
     monkeypatch.setattr(
@@ -610,12 +675,24 @@ def test_host_watchdog_chain_reads_enablement_not_the_engine(monkeypatch) -> Non
         "unit_enabled_state",
         lambda unit: "disabled" if "mainnet" in unit else "enabled-runtime",
     )
-    monkeypatch.setattr(liveness, "unit_result", lambda _unit: "exit-code")
+    monkeypatch.setattr(liveness, "unit_result", lambda _unit: "success")
+    monkeypatch.setattr(liveness, "active_deploy_age", lambda *_args, **_kwargs: None)
 
     alerts = liveness.evaluate_watchdog_chain()
 
-    assert {alert.key for alert in alerts} == {"watchdog:demo"}
-    assert "liquidity-migration-engine-mainnet.service" not in queried
+    assert {alert.key for alert in alerts} == {"watchdog:mainnet"}
+    assert "liquidity-migration-engine-mainnet.service" in queried
+
+
+def test_host_watchdog_pages_on_a_stuck_deploy_lock(monkeypatch) -> None:
+    monkeypatch.setattr(liveness, "active_deploy_age", lambda *_args, **_kwargs: 1_801.0)
+
+    alerts = liveness.evaluate_watchdog_chain(
+        now=2_000.0, max_deploy_age_sec=1_800.0
+    )
+
+    assert [alert.key for alert in alerts] == ["deploy-lock"]
+    assert "held for 1801s" in alerts[0].message
 
 
 def test_host_incident_carries_the_recorder_journal(monkeypatch) -> None:

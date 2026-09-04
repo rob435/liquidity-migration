@@ -21,8 +21,8 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Scope | Condition | Threshold / Meaning |
 | :--- | :--- | :--- |
 | Realm | Unit state | Expected manifest unit is not active |
-| Realm | Heartbeat | Engine or signal-worker artifact exceeds 60 s, is not JSON, or is not a JSON object |
-| Realm | Signal worker | A bounded `starting` state is allowed; `degraded`, `stopped`, an unknown verdict, or spool backpressure is `CRITICAL` |
+| Realm | Heartbeat | Engine or signal-worker artifact exceeds 60 s, is not a JSON object, or omits its producer-specific health verdict |
+| Realm | Signal worker | `starting` is allowed for at most 120 min while the live stream is complete and fresh; `degraded`, `stopped`, an unknown verdict, or spool backpressure is `CRITICAL` |
 | Realm | Admission | Engine reports `may_open != true` |
 | Realm | Circuit breaker | Engine reports `rolling_loss_tripped=true` |
 | Host | Recorders | Status unreadable, no frames for 2 min, connection loss, blocked storage, or new drops |
@@ -30,7 +30,8 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Host | Upload | Receipt exceeds 3 h or destination has less than 200 GB free |
 | Host | Backup | Receipt exceeds 8 h |
 | Host | Machine | `/var/lib` has less than 25 GB free or NTP is unsynchronised |
-| Host | Watchdog plane | An enabled realm watchdog timer is inactive or its last run failed |
+| Host | Watchdog plane | Demo watchdog is required; funded watchdog is required while enabled or while its engine runs; a disabled/inactive timer or failed last run is `CRITICAL` outside a deploy |
+| Host | Deployment | The existing exclusive deploy lock suppresses transitional realm-timer checks for 30 min; a longer-held or unreadable lock is `CRITICAL` |
 | External | Host watchdog | `ONCALL_DEADMAN_URL` receives no healthy host-scope ping |
 
 ### Delivery State
@@ -85,8 +86,10 @@ inaccessible after launch.
 - **Must** keep the automated-responder token outside Telegram-only services.
 - **Must** let the host watchdog outlive deploys, funded stops, and disarms.
 - **Must** supervise realm watchdog results from the independent host scope; a timer cannot prove its own continued execution.
-- **Must** read a realm watchdog's requirement from its systemd enablement, never from a realm's runtime state; `enable --now` and `disable --now` move both together, so a deploy's teardown is not a fault.
-- **Must** treat a fresh but self-reported `degraded` signal-worker heartbeat as a fault and attach that worker's journal to the incident payload.
+- **Must** suppress transitional realm-watchdog checks only while the sanctioned deploy owns `/run/liquidity-migration/deploy.lock`; a held lock older than 30 minutes is a fault. The bound covers the measured 12–19 min host-build fallback without hiding a stuck deploy indefinitely.
+- **Must** catch a disabled mainnet watchdog while the funded engine still runs.
+- **Must** fail closed when a known engine or signal worker publishes a fresh JSON object without its required health verdict.
+- **Must** treat a fresh but self-reported `degraded` signal-worker heartbeat as a fault after its bounded, stream-healthy startup and attach that worker's journal to the incident payload.
 - **Must** let read-only incident diagnosis bypass the serialized queue for mutating VPS operations.
 - **Must** commit a sink's cooldown state only after that sink accepts delivery.
 - **Must** treat journals and fire payloads as untrusted evidence.

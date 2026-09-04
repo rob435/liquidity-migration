@@ -6,6 +6,35 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 — Observability follows producer verdicts, and watchdog
+  maintenance follows the deploy lock.**
+  - The first `2f4af5e5` rollout returned `ok` in all three liveness scopes,
+    while both fresh signal-worker heartbeats said `status=degraded`, their
+    Bybit repair gaps had remained open since process start, and no CARRY
+    cycle had completed. A fresh file proved only that the process could write;
+    liveness now requires the signal worker's semantic verdict and fails closed
+    when a known worker or engine omits its producer-specific health fields.
+  - The startup state had two separate defects. `LiveRunner::run` started the
+    REST repair before the WebSocket established its epoch. `EpochStarted`
+    found the lane busy and discarded the epoch, so the first successful repair
+    could not close the WebSocket gap and the worker fetched the whole overlap a
+    second time. An in-flight repair now adopts the newest live epoch. Healthy,
+    complete, fresh stream input remains `starting` for the existing 120-minute
+    cold-backfill budget; disconnected or incomplete input is `degraded`
+    immediately, and a backfill beyond the bound is a fault.
+  - Incident `host-bf5dcb6544d0dfdc` proved the independent host watchdog can
+    sample a realm while a sanctioned deploy has disabled its timer. Systemd
+    enablement alone removed that false page but also hid a timer disabled by
+    mistake while the funded engine kept running. The host scope now uses the
+    deploy's existing exclusive lock as the maintenance fact, suppressing only
+    watchdog-chain checks while it is held. A lock beyond 30 minutes pages; the
+    bound covers the measured 12–19 minute host-build fallback. Outside it,
+    demo is mandatory and mainnet is mandatory whenever enabled or trading.
+  - The read-only `diagnose` workflow has its own concurrency group, so an
+    incident read no longer waits behind a completed host handover's release
+    soak. Focused Python and signal-worker tests pass; the full repository gate,
+    push, rollout, and live receipts follow below before this entry is closed.
+
 - **2026-09-04 14:49 UTC — Incident `host-08ad9d5834fa6d2f`: the recorder's
   heartbeat sat behind a full walk of the tape. Retention now has its own
   thread and its own cadence.**

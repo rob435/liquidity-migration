@@ -4,9 +4,9 @@ Description=Run the liquidity-migration liveness + position-safety watchdog ever
 [Timer]
 # Fast cadence: a down daemon / unprotected position must surface in minutes,
 # not the hourly entry-health window. The first pass is one minute after the
-# timer arms — cold-start noise is handled by the watchdog's own startup grace,
-# not by staying blind for ten minutes — then every 3 minutes regardless of
-# prior run duration.
+# timer arms. The worker itself calls a healthy live-stream backfill `starting`
+# for at most 120 minutes; disconnected or incomplete inputs report degraded
+# immediately. Then run every 3 minutes regardless of prior run duration.
 OnActiveSec=1min
 OnUnitActiveSec=3min
 AccuracySec=15s
