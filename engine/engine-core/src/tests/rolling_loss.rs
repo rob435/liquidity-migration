@@ -129,6 +129,7 @@ fn segment_base(
         signal_observations: Vec::new(),
         signal_cursors: Vec::new(),
         signal_subscriptions: Vec::new(),
+        signal_gaps: Vec::new(),
         runtime_control_requests: Vec::new(),
         runtime_control_consumed: Vec::new(),
         open_orders: Vec::new(),

@@ -5,9 +5,9 @@
 //! `<sequence:020>-<content_sha256>.json`, and only then sends the same bytes
 //! down `stream.sock` so the engine need not wait for its next spool poll. The
 //! spool row is the delivery; the frame is the doorbell. A returned envelope
-//! remains until the reader is polled again, after the engine's WAL barrier;
-//! that next poll retires it, whichever path it arrived by. The WAL cursor
-//! rejects a duplicate left by a crash.
+//! remains until the engine explicitly acknowledges its WAL barrier. Deferred
+//! rows stay on disk; requested missing prefixes take priority over other rows.
+//! The WAL cursor rejects a duplicate left by a crash.
 //!
 //! `next_observation` is one branch of the core's `select!`, which drops the
 //! future whenever another branch wins. Every read here is therefore
@@ -17,19 +17,157 @@
 //! The bounded channel is for an in-process credential-free worker or tests;
 //! its sender is non-blocking and says `Full` instead of waiting on the core.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use engine_types::{
-    SignalError, SignalFeed, SignalObservation, SignalSubscriptionState, Subscription, WalRecord,
-    MAX_SIGNAL_OBSERVATION_BYTES, MAX_SIGNAL_SUBSCRIPTIONS, SIGNAL_OBSERVATION_SCHEMA_VERSION,
+    SignalError, SignalFeed, SignalGapRequest, SignalObservation, SignalSubscriptionState,
+    StrategyId, Subscription, WalRecord, MAX_SIGNAL_OBSERVATION_BYTES, MAX_SIGNAL_SUBSCRIPTIONS,
+    SIGNAL_OBSERVATION_SCHEMA_VERSION,
 };
 use sha2::{Digest, Sha256};
 
 pub const SIGNAL_CHANNEL_CAPACITY: usize = 256;
+pub const SIGNAL_CHANNEL_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_SIGNAL_RETAINED_BYTES: usize = MAX_SIGNAL_OBSERVATION_BYTES + 1024 * 1024;
+pub const MAX_SIGNAL_GAP_REQUESTS: usize = 4_096;
+const SPOOL_SCAN_PAGE: usize = 64;
+const SPOOL_METADATA_CAPACITY: usize = 4_096;
+// The producer permits byte-array JSON encoding as well as UTF-8 strings.
+const MAX_SIGNAL_FILE_BYTES: u64 = 80 * 1024 * 1024;
 const FIELD_BYTES_MAX: usize = 256;
 const SYMBOL_BYTES_MAX: usize = 128;
+
+pub(crate) fn ordered_gap_requests(
+    gaps: &[SignalGapRequest],
+) -> Result<Vec<SignalGapRequest>, SignalError> {
+    if gaps.len() > MAX_SIGNAL_GAP_REQUESTS {
+        return Err(SignalError::Source("too many signal gap requests".into()));
+    }
+    let mut ordered = gaps.to_vec();
+    ordered.sort_by(|left, right| left.source.cmp(&right.source));
+    if ordered.iter().any(|gap| {
+        gap.source.is_empty() || gap.source.len() > FIELD_BYTES_MAX || gap.next_sequence == 0
+    }) || ordered
+        .windows(2)
+        .any(|pair| pair[0].source == pair[1].source)
+    {
+        return Err(SignalError::Source(
+            "signal gap requests must name distinct sources and positive sequences".into(),
+        ));
+    }
+    Ok(ordered)
+}
+
+fn requested_sequence(gaps: &[SignalGapRequest], source: &str) -> Option<u64> {
+    gaps.binary_search_by(|gap| gap.source.as_str().cmp(source))
+        .ok()
+        .map(|index| gaps[index].next_sequence)
+}
+
+pub(crate) fn ordered_blocked_destinations(
+    destinations: &[StrategyId],
+) -> Result<Vec<StrategyId>, SignalError> {
+    if destinations.len() > u16::MAX as usize + 1 {
+        return Err(SignalError::Source(
+            "too many blocked signal destinations".into(),
+        ));
+    }
+    let mut ordered = destinations.to_vec();
+    ordered.sort_unstable_by_key(|destination| destination.0);
+    ordered.dedup();
+    Ok(ordered)
+}
+
+fn identity_eligible(
+    gaps: &[SignalGapRequest],
+    blocked: &[StrategyId],
+    source: &str,
+    sequence: u64,
+    destination: StrategyId,
+) -> bool {
+    match requested_sequence(gaps, source) {
+        Some(next) => sequence <= next,
+        None => blocked
+            .binary_search_by_key(&destination.0, |known| known.0)
+            .is_err(),
+    }
+}
+
+pub(crate) fn signal_eligible(
+    gaps: &[SignalGapRequest],
+    blocked: &[StrategyId],
+    observation: &SignalObservation,
+) -> bool {
+    identity_eligible(
+        gaps,
+        blocked,
+        &observation.source,
+        observation.sequence,
+        observation.destination,
+    )
+}
+
+pub(crate) fn signal_requested(gaps: &[SignalGapRequest], observation: &SignalObservation) -> bool {
+    requested_sequence(gaps, &observation.source) == Some(observation.sequence)
+}
+
+fn retained_bytes(observation: &SignalObservation) -> usize {
+    std::mem::size_of::<SignalObservation>()
+        .saturating_add(observation.payload.capacity())
+        .saturating_add(observation.source.capacity())
+        .saturating_add(observation.decision_fingerprint.capacity())
+        .saturating_add(observation.observation_id.capacity())
+        .saturating_add(observation.kind.capacity())
+        .saturating_add(observation.content_sha256.capacity())
+        .saturating_add(
+            observation
+                .subscriptions
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Subscription>()),
+        )
+        .saturating_add(
+            observation
+                .subscriptions
+                .iter()
+                .fold(0usize, |bytes, subscription| {
+                    bytes.saturating_add(subscription.symbol.capacity())
+                }),
+        )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DeliveryIdentity {
+    destination: StrategyId,
+    source: String,
+    sequence: u64,
+    content_sha256: String,
+}
+
+impl DeliveryIdentity {
+    fn of(observation: &SignalObservation) -> Self {
+        Self {
+            destination: observation.destination,
+            source: observation.source.clone(),
+            sequence: observation.sequence,
+            content_sha256: observation.content_sha256.clone(),
+        }
+    }
+
+    fn matches(&self, observation: &SignalObservation) -> bool {
+        self.destination == observation.destination
+            && self.source == observation.source
+            && self.sequence == observation.sequence
+            && self.content_sha256 == observation.content_sha256
+    }
+}
+
+fn protocol_error(message: &str) -> SignalError {
+    SignalError::Source(format!("signal delivery protocol: {message}"))
+}
 
 pub fn content_sha256(observation: &SignalObservation) -> String {
     hex::encode(Sha256::digest(observation.canonical_envelope_bytes()))
@@ -159,43 +297,215 @@ pub fn active_subscriptions(replayed: &[WalRecord]) -> Vec<Subscription> {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SignalSendError {
-    Full,
-    Closed,
+    Full(Box<SignalObservation>),
+    Closed(Box<SignalObservation>),
+}
+
+impl SignalSendError {
+    pub fn into_inner(self) -> SignalObservation {
+        match self {
+            Self::Full(observation) | Self::Closed(observation) => *observation,
+        }
+    }
 }
 
 impl std::fmt::Display for SignalSendError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            SignalSendError::Full => "signal queue is full",
-            SignalSendError::Closed => "signal receiver is closed",
+            SignalSendError::Full(_) => "signal queue is full",
+            SignalSendError::Closed(_) => "signal receiver is closed",
         })
     }
 }
 
 impl std::error::Error for SignalSendError {}
 
-#[derive(Clone)]
-pub struct SignalSender(tokio::sync::mpsc::Sender<SignalObservation>);
+pub struct SignalSender(Arc<SignalChannel>);
 
-pub struct SignalReceiver(tokio::sync::mpsc::Receiver<SignalObservation>);
+pub struct SignalReceiver(Arc<SignalChannel>);
+
+struct SignalChannel {
+    state: Mutex<ChannelState>,
+    changed: tokio::sync::Notify,
+}
+
+struct ChannelState {
+    queued: VecDeque<(SignalObservation, bool)>,
+    gaps: Vec<SignalGapRequest>,
+    blocked_destinations: Vec<StrategyId>,
+    outstanding: Option<(DeliveryIdentity, usize, bool)>,
+    ordinary_rows: usize,
+    ordinary_bytes: usize,
+    recovery_used: bool,
+    senders: usize,
+    receiver_alive: bool,
+}
+
+impl SignalChannel {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ChannelState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
 
 pub fn signal_channel() -> (SignalSender, SignalReceiver) {
-    let (sender, receiver) = tokio::sync::mpsc::channel(SIGNAL_CHANNEL_CAPACITY);
-    (SignalSender(sender), SignalReceiver(receiver))
+    let shared = Arc::new(SignalChannel {
+        state: Mutex::new(ChannelState {
+            queued: VecDeque::new(),
+            gaps: Vec::new(),
+            blocked_destinations: Vec::new(),
+            outstanding: None,
+            ordinary_rows: 0,
+            ordinary_bytes: 0,
+            recovery_used: false,
+            senders: 1,
+            receiver_alive: true,
+        }),
+        changed: tokio::sync::Notify::new(),
+    });
+    (SignalSender(shared.clone()), SignalReceiver(shared))
+}
+
+impl Clone for SignalSender {
+    fn clone(&self) -> Self {
+        self.0.lock().senders += 1;
+        Self(self.0.clone())
+    }
+}
+
+impl Drop for SignalSender {
+    fn drop(&mut self) {
+        self.0.lock().senders -= 1;
+        self.0.changed.notify_one();
+    }
+}
+
+impl Drop for SignalReceiver {
+    fn drop(&mut self) {
+        self.0.lock().receiver_alive = false;
+    }
 }
 
 impl SignalSender {
     pub fn try_send(&self, observation: SignalObservation) -> Result<(), SignalSendError> {
-        self.0.try_send(observation).map_err(|error| match error {
-            tokio::sync::mpsc::error::TrySendError::Full(_) => SignalSendError::Full,
-            tokio::sync::mpsc::error::TrySendError::Closed(_) => SignalSendError::Closed,
-        })
+        let bytes = retained_bytes(&observation);
+        let mut state = self.0.lock();
+        if !state.receiver_alive {
+            return Err(SignalSendError::Closed(Box::new(observation)));
+        }
+        if bytes > MAX_SIGNAL_RETAINED_BYTES {
+            return Err(SignalSendError::Full(Box::new(observation)));
+        }
+        let ordinary = state.ordinary_rows < SIGNAL_CHANNEL_CAPACITY
+            && state.ordinary_bytes.saturating_add(bytes) <= SIGNAL_CHANNEL_BYTES;
+        let recovery =
+            !ordinary && !state.recovery_used && signal_requested(&state.gaps, &observation);
+        if ordinary {
+            state.ordinary_rows += 1;
+            state.ordinary_bytes += bytes;
+        } else if recovery {
+            state.recovery_used = true;
+        } else {
+            return Err(SignalSendError::Full(Box::new(observation)));
+        }
+        state.queued.push_back((observation, recovery));
+        drop(state);
+        self.0.changed.notify_one();
+        Ok(())
     }
 }
 
 impl SignalFeed for SignalReceiver {
+    fn set_gap_requests(
+        &mut self,
+        gaps: &[SignalGapRequest],
+        blocked_destinations: &[StrategyId],
+    ) -> Result<(), SignalError> {
+        let gaps = ordered_gap_requests(gaps)?;
+        let blocked_destinations = ordered_blocked_destinations(blocked_destinations)?;
+        let mut state = self.0.lock();
+        state.gaps = gaps;
+        state.blocked_destinations = blocked_destinations;
+        drop(state);
+        self.0.changed.notify_one();
+        Ok(())
+    }
+
+    fn acknowledge_last(&mut self) -> Result<(), SignalError> {
+        let mut state = self.0.lock();
+        let (_, bytes, recovery) = state
+            .outstanding
+            .take()
+            .ok_or_else(|| protocol_error("no row to acknowledge"))?;
+        if recovery {
+            state.recovery_used = false;
+        } else {
+            state.ordinary_rows -= 1;
+            state.ordinary_bytes -= bytes;
+        }
+        Ok(())
+    }
+
+    fn defer_last(&mut self, observation: SignalObservation) -> Result<(), SignalError> {
+        let mut state = self.0.lock();
+        let (identity, bytes, recovery) = state
+            .outstanding
+            .as_ref()
+            .ok_or_else(|| protocol_error("no row to defer"))?;
+        let returned_bytes = retained_bytes(&observation);
+        if !identity.matches(&observation) || returned_bytes > *bytes {
+            return Err(protocol_error(
+                "deferred row differs from the outstanding delivery",
+            ));
+        }
+        let recovery = *recovery;
+        let bytes = *bytes;
+        if !recovery {
+            state.ordinary_bytes -= bytes - returned_bytes;
+        }
+        state.outstanding = None;
+        state.queued.push_front((observation, recovery));
+        Ok(())
+    }
+
     async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
-        self.0.recv().await.ok_or(SignalError::Closed)
+        loop {
+            let changed = self.0.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let mut state = self.0.lock();
+                if state.outstanding.is_some() {
+                    return Err(protocol_error(
+                        "previous row was neither acknowledged nor deferred",
+                    ));
+                }
+                let index = state
+                    .queued
+                    .iter()
+                    .position(|(observation, _)| signal_requested(&state.gaps, observation))
+                    .or_else(|| {
+                        state.queued.iter().position(|(observation, _)| {
+                            signal_eligible(&state.gaps, &state.blocked_destinations, observation)
+                        })
+                    });
+                if let Some(index) = index {
+                    let (observation, recovery) =
+                        state.queued.remove(index).expect("queued index exists");
+                    state.outstanding = Some((
+                        DeliveryIdentity::of(&observation),
+                        retained_bytes(&observation),
+                        recovery,
+                    ));
+                    return Ok(observation);
+                }
+                if state.senders == 0 && state.queued.is_empty() {
+                    return Err(SignalError::Closed);
+                }
+            }
+            changed.await;
+        }
     }
 }
 
@@ -204,6 +514,23 @@ impl SignalFeed for SignalReceiver {
 pub struct NoSignals;
 
 impl SignalFeed for NoSignals {
+    fn set_gap_requests(
+        &mut self,
+        gaps: &[SignalGapRequest],
+        blocked_destinations: &[StrategyId],
+    ) -> Result<(), SignalError> {
+        ordered_blocked_destinations(blocked_destinations)?;
+        ordered_gap_requests(gaps).map(|_| ())
+    }
+
+    fn acknowledge_last(&mut self) -> Result<(), SignalError> {
+        Err(protocol_error("no row to acknowledge"))
+    }
+
+    fn defer_last(&mut self, _observation: SignalObservation) -> Result<(), SignalError> {
+        Err(protocol_error("no row to defer"))
+    }
+
     async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
         std::future::pending().await
     }
@@ -217,25 +544,159 @@ impl SignalFeed for NoSignals {
 /// disk cannot stall private-order or market processing on the core thread.
 pub struct SpoolSignalFeed {
     directory: PathBuf,
-    returned_path: Option<PathBuf>,
-    known_paths: BTreeSet<PathBuf>,
-    /// The read a dropped `next_observation` left running. The core drops
-    /// that future whenever another `select!` branch wins; its row stays in
-    /// `known_paths` and the read is joined on the next call.
-    in_flight: Option<(PathBuf, tokio::task::JoinHandle<ReadResult>)>,
+    returned: Option<(PathBuf, DeliveryIdentity)>,
+    acknowledged: Option<PathBuf>,
+    retirement: Option<tokio::task::JoinHandle<Result<(), SignalError>>>,
+    scanner: Option<SpoolScanner>,
+    selection: Option<tokio::task::JoinHandle<ScanResult>>,
+    gaps: Vec<SignalGapRequest>,
+    blocked_destinations: Vec<StrategyId>,
     poll: Duration,
+    next_scan: tokio::time::Instant,
+    wake_generation: u64,
+    scan_generation: u64,
 }
 
-type ReadResult = Result<Option<SignalObservation>, SignalError>;
+type SelectedRow = Option<(PathBuf, SignalObservation)>;
+type ScanResult = (
+    SpoolScanner,
+    Vec<SignalGapRequest>,
+    Vec<StrategyId>,
+    Result<SelectedRow, SignalError>,
+);
+
+#[derive(Default)]
+struct SpoolScanner {
+    deferred: BTreeMap<PathBuf, DeliveryIdentity>,
+}
+
+impl SpoolScanner {
+    fn remember(&mut self, path: PathBuf, observation: &SignalObservation) {
+        if !self.deferred.contains_key(&path) && self.deferred.len() == SPOOL_METADATA_CAPACITY {
+            self.deferred.pop_first();
+        }
+        self.deferred
+            .insert(path, DeliveryIdentity::of(observation));
+    }
+
+    fn page(
+        directory: &Path,
+        after: Option<&Path>,
+        exact: Option<&BTreeSet<u64>>,
+    ) -> Result<Vec<PathBuf>, SignalError> {
+        let entries = std::fs::read_dir(directory).map_err(|error| {
+            SignalError::Source(format!(
+                "cannot scan signal spool {}: {error}",
+                directory.display()
+            ))
+        })?;
+        let mut paths = BTreeSet::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|error| SignalError::Source(error.to_string()))?
+                .path();
+            if path.extension().is_none_or(|extension| extension != "json")
+                || after.is_some_and(|after| path.as_path() <= after)
+            {
+                continue;
+            }
+            if let Some(exact) = exact {
+                let (sequence, _) = SpoolSignalFeed::parse_name(&path)?;
+                if !exact.contains(&sequence) {
+                    continue;
+                }
+            }
+            paths.insert(path);
+            if paths.len() > SPOOL_SCAN_PAGE {
+                paths.pop_last();
+            }
+        }
+        Ok(paths.into_iter().collect())
+    }
+
+    fn select_pass(
+        &mut self,
+        directory: &Path,
+        gaps: &[SignalGapRequest],
+        blocked_destinations: &[StrategyId],
+        exact: bool,
+    ) -> Result<SelectedRow, SignalError> {
+        let sequences = exact.then(|| {
+            gaps.iter()
+                .map(|gap| gap.next_sequence)
+                .collect::<BTreeSet<_>>()
+        });
+        let mut after = None;
+        loop {
+            let page = Self::page(directory, after.as_deref(), sequences.as_ref())?;
+            if page.is_empty() {
+                return Ok(None);
+            }
+            after = page.last().cloned();
+            for path in page {
+                if let Some(known) = self.deferred.get(&path) {
+                    let next = requested_sequence(gaps, &known.source);
+                    if (exact && next != Some(known.sequence))
+                        || (!exact
+                            && !identity_eligible(
+                                gaps,
+                                blocked_destinations,
+                                &known.source,
+                                known.sequence,
+                                known.destination,
+                            ))
+                    {
+                        continue;
+                    }
+                }
+                let Some(observation) = SpoolSignalFeed::read_one(&path)? else {
+                    self.deferred.remove(&path);
+                    continue;
+                };
+                let eligible = if exact {
+                    signal_requested(gaps, &observation)
+                } else {
+                    signal_eligible(gaps, blocked_destinations, &observation)
+                };
+                if eligible {
+                    self.deferred.remove(&path);
+                    return Ok(Some((path, observation)));
+                }
+                self.remember(path, &observation);
+            }
+        }
+    }
+
+    fn select(
+        &mut self,
+        directory: &Path,
+        gaps: &[SignalGapRequest],
+        blocked_destinations: &[StrategyId],
+    ) -> Result<SelectedRow, SignalError> {
+        if !gaps.is_empty() {
+            if let Some(row) = self.select_pass(directory, gaps, blocked_destinations, true)? {
+                return Ok(Some(row));
+            }
+        }
+        self.select_pass(directory, gaps, blocked_destinations, false)
+    }
+}
 
 impl SpoolSignalFeed {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
-            returned_path: None,
-            known_paths: BTreeSet::new(),
-            in_flight: None,
+            returned: None,
+            acknowledged: None,
+            retirement: None,
+            scanner: Some(SpoolScanner::default()),
+            selection: None,
+            gaps: Vec::new(),
+            blocked_destinations: Vec::new(),
             poll: Duration::from_millis(100),
+            next_scan: tokio::time::Instant::now(),
+            wake_generation: 0,
+            scan_generation: 0,
         }
     }
 
@@ -244,25 +705,38 @@ impl SpoolSignalFeed {
         self
     }
 
-    pub async fn retire_last(&mut self) -> Result<(), SignalError> {
-        if let Some(path) = self.returned_path.take() {
-            tokio::task::spawn_blocking(move || match std::fs::remove_file(&path) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(SignalError::Source(format!(
-                    "cannot retire durable signal file {}: {error}",
-                    path.display()
-                ))),
-            })
-            .await
-            .map_err(|error| {
-                SignalError::Source(format!("signal retire task failed: {error}"))
-            })??;
+    fn wake(&mut self) {
+        self.wake_generation = self.wake_generation.wrapping_add(1);
+        self.next_scan = tokio::time::Instant::now();
+    }
+
+    async fn retire_acknowledged(&mut self) -> Result<(), SignalError> {
+        let Some(path) = self.acknowledged.as_ref() else {
+            return Ok(());
+        };
+        if self.retirement.is_none() {
+            let path = path.clone();
+            self.retirement = Some(tokio::task::spawn_blocking(
+                move || match std::fs::remove_file(&path) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(SignalError::Source(format!(
+                        "cannot retire durable signal file {}: {error}",
+                        path.display()
+                    ))),
+                },
+            ));
         }
+        let result = self.retirement.as_mut().expect("retirement exists").await;
+        self.retirement = None;
+        result.map_err(|error| {
+            SignalError::Source(format!("signal retire task failed: {error}"))
+        })??;
+        self.acknowledged = None;
         Ok(())
     }
 
-    /// The spool row an observation is delivered as, whichever path it took.
+    /// The immutable spool filename includes the sequence and canonical hash.
     pub fn path_for(&self, observation: &SignalObservation) -> PathBuf {
         self.directory.join(format!(
             "{:020}-{}.json",
@@ -270,15 +744,14 @@ impl SpoolSignalFeed {
         ))
     }
 
-    /// `(sequence, content_sha256)` from a spool filename.
     fn parse_name(path: &Path) -> Result<(u64, &str), SignalError> {
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
-            .ok_or_else(|| SignalError::Source("signal filename is not UTF-8".to_string()))?;
+            .ok_or_else(|| SignalError::Source("signal filename is not UTF-8".into()))?;
         let stem = file_name
             .strip_suffix(".json")
-            .ok_or_else(|| SignalError::Source("signal file must end in .json".to_string()))?;
+            .ok_or_else(|| SignalError::Source("signal file must end in .json".into()))?;
         let (sequence, hash) = stem.split_once('-').ok_or_else(|| {
             SignalError::Source(format!(
                 "signal file {file_name} must be <sequence>-<sha256>.json"
@@ -289,79 +762,49 @@ impl SpoolSignalFeed {
                 "signal file {file_name} sequence must be 20 decimal digits"
             )));
         }
-        let named_sequence = sequence.parse::<u64>().map_err(|error| {
+        let sequence = sequence.parse::<u64>().map_err(|error| {
             SignalError::Source(format!("signal file {file_name} has bad sequence: {error}"))
         })?;
-        Ok((named_sequence, hash))
+        Ok((sequence, hash))
     }
 
-    /// Every `.json` row in the directory, on the blocking pool.
-    async fn scan(&self) -> Result<BTreeSet<PathBuf>, SignalError> {
-        let directory = self.directory.clone();
-        tokio::task::spawn_blocking(move || {
-            let entries = std::fs::read_dir(&directory).map_err(|error| {
-                SignalError::Source(format!(
-                    "cannot scan signal spool {}: {error}",
-                    directory.display()
-                ))
-            })?;
-            let mut paths = BTreeSet::new();
-            for entry in entries {
-                let path = entry
-                    .map_err(|error| SignalError::Source(error.to_string()))?
-                    .path();
-                if path
-                    .extension()
-                    .is_some_and(|extension| extension == "json")
-                {
-                    paths.insert(path);
-                }
-            }
-            Ok::<_, SignalError>(paths)
-        })
-        .await
-        .map_err(|error| SignalError::Source(format!("signal spool task failed: {error}")))?
-    }
-
-    /// Read the lowest known row. The row leaves `known_paths` only once
-    /// its read has completed, so a future dropped mid-read loses nothing.
-    async fn read_first_known(&mut self) -> ReadResult {
-        let Some(path) = self.known_paths.first().cloned() else {
-            return Ok(None);
-        };
-        let handle = match self.in_flight.take() {
-            Some((in_flight, handle)) if in_flight == path => handle,
-            _ => {
-                let read_path = path.clone();
-                tokio::task::spawn_blocking(move || Self::read_one(&read_path))
-            }
-        };
-        let (_, handle) = self.in_flight.insert((path.clone(), handle));
-        let joined = handle.await;
-        self.in_flight = None;
-        let observation = joined
-            .map_err(|error| SignalError::Source(format!("signal read task failed: {error}")))??;
-        self.known_paths.remove(&path);
-        if observation.is_some() {
-            self.returned_path = Some(path);
-        }
-        Ok(observation)
-    }
-
-    /// One spool row, validated, with its name checked against its envelope.
-    /// `None` when the file has gone between the scan and the read.
     pub fn read_one(path: &Path) -> Result<Option<SignalObservation>, SignalError> {
         let (named_sequence, hash) = Self::parse_name(path)?;
-        let raw = match std::fs::read(path) {
-            Ok(raw) => raw,
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
                 return Err(SignalError::Source(format!(
                     "cannot read signal file {}: {error}",
                     path.display()
-                )));
+                )))
             }
         };
+        let length = file
+            .metadata()
+            .map_err(|error| SignalError::Source(error.to_string()))?
+            .len();
+        if length > MAX_SIGNAL_FILE_BYTES {
+            return Err(SignalError::Source(format!(
+                "signal file {} exceeds {MAX_SIGNAL_FILE_BYTES} bytes",
+                path.display()
+            )));
+        }
+        let mut raw = Vec::with_capacity(length as usize);
+        file.take(MAX_SIGNAL_FILE_BYTES + 1)
+            .read_to_end(&mut raw)
+            .map_err(|error| {
+                SignalError::Source(format!(
+                    "cannot read signal file {}: {error}",
+                    path.display()
+                ))
+            })?;
+        if raw.len() as u64 > MAX_SIGNAL_FILE_BYTES {
+            return Err(SignalError::Source(format!(
+                "signal file {} exceeds {MAX_SIGNAL_FILE_BYTES} bytes",
+                path.display()
+            )));
+        }
         let observation: SignalObservation = serde_json::from_slice(&raw).map_err(|error| {
             SignalError::Source(format!(
                 "signal file {} is not an observation: {error}",
@@ -382,20 +825,108 @@ impl SpoolSignalFeed {
 }
 
 impl SignalFeed for SpoolSignalFeed {
+    fn set_gap_requests(
+        &mut self,
+        gaps: &[SignalGapRequest],
+        blocked_destinations: &[StrategyId],
+    ) -> Result<(), SignalError> {
+        let gaps = ordered_gap_requests(gaps)?;
+        let blocked_destinations = ordered_blocked_destinations(blocked_destinations)?;
+        if self.gaps != gaps || self.blocked_destinations != blocked_destinations {
+            self.gaps = gaps;
+            self.blocked_destinations = blocked_destinations;
+            self.wake();
+        }
+        Ok(())
+    }
+
+    fn acknowledge_last(&mut self) -> Result<(), SignalError> {
+        let (path, _) = self
+            .returned
+            .take()
+            .ok_or_else(|| protocol_error("no row to acknowledge"))?;
+        self.acknowledged = Some(path);
+        self.wake();
+        Ok(())
+    }
+
+    fn defer_last(&mut self, observation: SignalObservation) -> Result<(), SignalError> {
+        let (path, identity) = self
+            .returned
+            .as_ref()
+            .ok_or_else(|| protocol_error("no row to defer"))?;
+        if !identity.matches(&observation) {
+            return Err(protocol_error(
+                "deferred row differs from the outstanding delivery",
+            ));
+        }
+        self.scanner
+            .as_mut()
+            .expect("delivery restored its scanner")
+            .remember(path.clone(), &observation);
+        self.returned = None;
+        self.wake();
+        Ok(())
+    }
+
     async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
-        self.retire_last().await?;
+        if self.returned.is_some() {
+            return Err(protocol_error(
+                "previous row was neither acknowledged nor deferred",
+            ));
+        }
+        self.retire_acknowledged().await?;
         loop {
-            if !self.known_paths.is_empty() {
-                if let Some(observation) = self.read_first_known().await? {
-                    return Ok(observation);
+            if self.selection.is_none() {
+                tokio::time::sleep_until(self.next_scan).await;
+                let mut scanner = self
+                    .scanner
+                    .take()
+                    .expect("one scanner is retained across polls");
+                let directory = self.directory.clone();
+                let gaps = self.gaps.clone();
+                let blocked_destinations = self.blocked_destinations.clone();
+                self.scan_generation = self.wake_generation;
+                self.selection = Some(tokio::task::spawn_blocking(move || {
+                    let selected = scanner.select(&directory, &gaps, &blocked_destinations);
+                    (scanner, gaps, blocked_destinations, selected)
+                }));
+            }
+            let joined = self.selection.as_mut().expect("selection exists").await;
+            self.selection = None;
+            let (scanner, selected_gaps, selected_blocked, selected) = match joined {
+                Ok(result) => result,
+                Err(error) => {
+                    self.scanner = Some(SpoolScanner::default());
+                    return Err(SignalError::Source(format!(
+                        "signal scan task failed: {error}"
+                    )));
                 }
+            };
+            self.scanner = Some(scanner);
+            let selected = selected?;
+            if selected_gaps != self.gaps || selected_blocked != self.blocked_destinations {
+                self.wake();
                 continue;
             }
-            let discovered = self.scan().await?;
-            if discovered.is_empty() {
-                tokio::time::sleep(self.poll).await;
+            if let Some((path, observation)) = selected {
+                // A cancelled poll may have been followed by a new gap policy.
+                if !signal_eligible(&self.gaps, &self.blocked_destinations, &observation) {
+                    self.scanner
+                        .as_mut()
+                        .expect("scanner restored")
+                        .remember(path, &observation);
+                    self.wake();
+                    continue;
+                }
+                self.returned = Some((path, DeliveryIdentity::of(&observation)));
+                return Ok(observation);
             }
-            self.known_paths.extend(discovered);
+            self.next_scan = if self.scan_generation == self.wake_generation {
+                tokio::time::Instant::now() + self.poll
+            } else {
+                tokio::time::Instant::now()
+            };
         }
     }
 }
@@ -453,10 +984,28 @@ impl UnixSignalFeed {
         self.active_stream = None;
         self.frame = Frame::default();
     }
+
+    async fn next_doorbell(&mut self) -> Result<(), SignalError> {
+        use tokio::io::AsyncReadExt;
+        let mut chunk = [0u8; 8192];
+        loop {
+            let Some(stream) = self.active_stream.as_mut() else {
+                let (stream, _) = self.listener.accept().await.map_err(|error| {
+                    SignalError::Source(format!("cannot accept signal doorbell: {error}"))
+                })?;
+                self.active_stream = Some(stream);
+                continue;
+            };
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => self.drop_stream(),
+                Ok(_) => return Ok(()),
+            }
+        }
+    }
 }
 
-impl SignalFeed for UnixSignalFeed {
-    async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
+impl UnixSignalFeed {
+    pub async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
         use tokio::io::AsyncReadExt;
         loop {
             let Some(stream) = self.active_stream.as_mut() else {
@@ -539,28 +1088,19 @@ impl Drop for UnixSignalFeed {
     }
 }
 
-/// The production feed: spool rows, with the socket as a wake-up.
-///
-/// The worker writes an observation's spool row before it sends the frame, so
-/// any row still on disk with a lower sequence than a frame was written before
-/// it. Those rows go first; the frame waits in `parked`. Sequences are per
-/// source, but a row from another source going first costs nothing.
+/// The socket wakes the spool reader; only immutable spool files deliver rows.
 pub struct HybridSignalFeed {
     unix: UnixSignalFeed,
     spool: SpoolSignalFeed,
-    parked: Option<SignalObservation>,
 }
 
 impl HybridSignalFeed {
     pub fn new(directory: impl Into<PathBuf>) -> std::io::Result<Self> {
-        let dir = directory.into();
-        let sock_path = dir.join("stream.sock");
-        let unix = UnixSignalFeed::bind(sock_path)?;
-        let spool = SpoolSignalFeed::new(dir);
+        let directory = directory.into();
+        let unix = UnixSignalFeed::bind(directory.join("stream.sock"))?;
         Ok(Self {
             unix,
-            spool,
-            parked: None,
+            spool: SpoolSignalFeed::new(directory),
         })
     }
 
@@ -571,42 +1111,34 @@ impl HybridSignalFeed {
 }
 
 impl SignalFeed for HybridSignalFeed {
+    fn set_gap_requests(
+        &mut self,
+        gaps: &[SignalGapRequest],
+        blocked_destinations: &[StrategyId],
+    ) -> Result<(), SignalError> {
+        self.spool.set_gap_requests(gaps, blocked_destinations)
+    }
+
+    fn acknowledge_last(&mut self) -> Result<(), SignalError> {
+        self.spool.acknowledge_last()
+    }
+
+    fn defer_last(&mut self, observation: SignalObservation) -> Result<(), SignalError> {
+        self.spool.defer_last(observation)
+    }
+
     async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
         loop {
-            self.spool.retire_last().await?;
-            if !self.spool.known_paths.is_empty() {
-                if let Some(observation) = self.spool.read_first_known().await? {
-                    return Ok(observation);
-                }
-                continue;
-            }
-            if let Some(observation) = self.parked.take() {
-                self.spool.returned_path = Some(self.spool.path_for(&observation));
-                return Ok(observation);
-            }
-            let observation = tokio::select! {
+            tokio::select! {
                 biased;
-                observation = self.unix.next_observation() => observation?,
                 observation = self.spool.next_observation() => return observation,
-            };
-            let below = self
-                .spool
-                .scan()
-                .await?
-                .into_iter()
-                .filter(|path| {
-                    SpoolSignalFeed::parse_name(path)
-                        .is_ok_and(|(sequence, _)| sequence < observation.sequence)
-                })
-                .collect::<BTreeSet<_>>();
-            if below.is_empty() {
-                self.spool.returned_path = Some(self.spool.path_for(&observation));
-                return Ok(observation);
+                frame = self.unix.next_doorbell() => {
+                    if let Err(error) = frame {
+                        tracing::warn!(%error, "signal doorbell rejected; durable spool remains authoritative");
+                    }
+                    self.spool.wake();
+                }
             }
-            // Rows a dropped spool scan left behind are rediscovered later;
-            // only the ones written before this frame may go ahead of it.
-            self.spool.known_paths = below;
-            self.parked = Some(observation);
         }
     }
 }
@@ -614,7 +1146,7 @@ impl SignalFeed for HybridSignalFeed {
 /// Unified signal feed selection for production runners.
 pub enum EngineSignalFeed {
     Hybrid(Box<HybridSignalFeed>),
-    Spool(SpoolSignalFeed),
+    Spool(Box<SpoolSignalFeed>),
 }
 
 impl EngineSignalFeed {
@@ -624,19 +1156,51 @@ impl EngineSignalFeed {
             Ok(hybrid) => Self::Hybrid(Box::new(hybrid)),
             Err(err) => {
                 tracing::warn!(error = %err, path = %dir.display(), "falling back to pure file spool signal feed");
-                Self::Spool(SpoolSignalFeed::new(dir))
+                Self::Spool(Box::new(SpoolSignalFeed::new(dir)))
             }
         }
     }
 }
 
 impl SignalFeed for EngineSignalFeed {
+    fn set_gap_requests(
+        &mut self,
+        gaps: &[SignalGapRequest],
+        blocked_destinations: &[StrategyId],
+    ) -> Result<(), SignalError> {
+        match self {
+            Self::Hybrid(feed) => feed.set_gap_requests(gaps, blocked_destinations),
+            Self::Spool(feed) => feed.set_gap_requests(gaps, blocked_destinations),
+        }
+    }
+
+    fn acknowledge_last(&mut self) -> Result<(), SignalError> {
+        match self {
+            Self::Hybrid(feed) => feed.acknowledge_last(),
+            Self::Spool(feed) => feed.acknowledge_last(),
+        }
+    }
+
+    fn defer_last(&mut self, observation: SignalObservation) -> Result<(), SignalError> {
+        match self {
+            Self::Hybrid(feed) => feed.defer_last(observation),
+            Self::Spool(feed) => feed.defer_last(observation),
+        }
+    }
+
     async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
         match self {
             Self::Hybrid(feed) => feed.next_observation().await,
             Self::Spool(feed) => feed.next_observation().await,
         }
     }
+}
+
+#[cfg(test)]
+fn publish_test_row(path: &Path, raw: &[u8]) {
+    let staged = path.with_extension("publishing");
+    std::fs::write(&staged, raw).unwrap();
+    std::fs::rename(staged, path).unwrap();
 }
 
 #[cfg(test)]
@@ -688,7 +1252,10 @@ mod tests {
         for _ in 0..SIGNAL_CHANNEL_CAPACITY {
             sender.try_send(observation()).unwrap();
         }
-        assert_eq!(sender.try_send(observation()), Err(SignalSendError::Full));
+        assert!(matches!(
+            sender.try_send(observation()),
+            Err(SignalSendError::Full(_))
+        ));
     }
 
     #[tokio::test]
@@ -702,8 +1269,8 @@ mod tests {
         second.content_sha256 = content_sha256(&second);
         let first_path = spool_path(directory.path(), &first);
         let second_path = spool_path(directory.path(), &second);
-        std::fs::write(&first_path, serde_json::to_vec(&first).unwrap()).unwrap();
-        std::fs::write(&second_path, serde_json::to_vec(&second).unwrap()).unwrap();
+        publish_test_row(&first_path, &serde_json::to_vec(&first).unwrap());
+        publish_test_row(&second_path, &serde_json::to_vec(&second).unwrap());
 
         let mut feed =
             SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
@@ -712,6 +1279,7 @@ mod tests {
             first_path.exists(),
             "not retired before core can barrier it"
         );
+        feed.acknowledge_last().unwrap();
         assert_eq!(feed.next_observation().await.unwrap(), second);
         assert!(
             !first_path.exists(),
@@ -733,7 +1301,7 @@ mod tests {
         let mut bad = observation();
         bad.content_sha256 = "0".repeat(64);
         let path = spool_path(directory.path(), &bad);
-        std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+        publish_test_row(&path, &serde_json::to_vec(&bad).unwrap());
         let mut feed = SpoolSignalFeed::new(directory.path());
         assert!(feed.next_observation().await.is_err());
         assert!(
@@ -755,14 +1323,15 @@ mod tests {
         live.content_sha256 = content_sha256(&live);
         let missing_path = spool_path(directory.path(), &missing);
         let live_path = spool_path(directory.path(), &live);
-        std::fs::write(&missing_path, serde_json::to_vec(&missing).unwrap()).unwrap();
-        std::fs::write(&live_path, serde_json::to_vec(&live).unwrap()).unwrap();
+        publish_test_row(&missing_path, &serde_json::to_vec(&missing).unwrap());
+        publish_test_row(&live_path, &serde_json::to_vec(&live).unwrap());
 
         let mut feed =
             SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
-        feed.known_paths.insert(missing_path.clone());
-        feed.known_paths.insert(live_path.clone());
-        std::fs::remove_file(missing_path).unwrap();
+        let scanned = SpoolScanner::page(directory.path(), None, None).unwrap();
+        assert_eq!(scanned.len(), 2);
+        std::fs::remove_file(&missing_path).unwrap();
+        assert!(SpoolSignalFeed::read_one(&missing_path).unwrap().is_none());
         assert_eq!(feed.next_observation().await.unwrap(), live);
 
         std::fs::remove_file(live_path).unwrap();
@@ -778,7 +1347,7 @@ mod tests {
         high.observation_id = "long-100".into();
         high.content_sha256 = content_sha256(&high);
         let high_path = spool_path(directory.path(), &high);
-        std::fs::write(&high_path, serde_json::to_vec(&high).unwrap()).unwrap();
+        publish_test_row(&high_path, &serde_json::to_vec(&high).unwrap());
 
         let mut feed =
             SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
@@ -790,8 +1359,9 @@ mod tests {
         low.observation_id = "carry-1".into();
         low.content_sha256 = content_sha256(&low);
         let low_path = spool_path(directory.path(), &low);
-        std::fs::write(&low_path, serde_json::to_vec(&low).unwrap()).unwrap();
+        publish_test_row(&low_path, &serde_json::to_vec(&low).unwrap());
 
+        feed.acknowledge_last().unwrap();
         assert_eq!(feed.next_observation().await.unwrap(), low);
         assert!(!high_path.exists());
         assert!(low_path.exists());
@@ -857,6 +1427,7 @@ mod tests {
             strategy_global_checkpoints: vec![],
             strategy_events: vec![],
             signal_observations: vec![],
+            signal_gaps: vec![],
             signal_cursors: vec![engine_types::SignalCursor {
                 source: second.source.clone(),
                 sequence: 2,
@@ -925,7 +1496,7 @@ mod tests {
         first.sequence = 1;
         first.content_sha256 = content_sha256(&first);
         let first_path = spool_path(&directory, &first);
-        std::fs::write(&first_path, serde_json::to_vec(&first).unwrap()).unwrap();
+        publish_test_row(&first_path, &serde_json::to_vec(&first).unwrap());
 
         let mut feed = HybridSignalFeed::new(&directory)
             .unwrap()
@@ -939,6 +1510,7 @@ mod tests {
         second.content_sha256 = content_sha256(&second);
         let body = serde_json::to_vec(&second).unwrap();
         let len = (body.len() as u32).to_le_bytes();
+        publish_test_row(&spool_path(&directory, &second), &body);
 
         let sock_path = directory.join("stream.sock");
         let mut client = UnixStream::connect(&sock_path).unwrap();
@@ -946,6 +1518,7 @@ mod tests {
         client.write_all(&body).unwrap();
         client.flush().unwrap();
 
+        feed.acknowledge_last().unwrap();
         let obs2 = feed.next_observation().await.unwrap();
         assert_eq!(obs2, second);
 
@@ -1054,14 +1627,14 @@ mod tests {
         first.sequence = 1;
         first.content_sha256 = content_sha256(&first);
         let first_path = spool_path(&directory, &first);
-        std::fs::write(&first_path, serde_json::to_vec(&first).unwrap()).unwrap();
+        publish_test_row(&first_path, &serde_json::to_vec(&first).unwrap());
 
         let mut second = observation();
         second.sequence = 2;
         second.content_sha256 = content_sha256(&second);
         let second_path = spool_path(&directory, &second);
         let second_body = serde_json::to_vec(&second).unwrap();
-        std::fs::write(&second_path, &second_body).unwrap();
+        publish_test_row(&second_path, &second_body);
 
         // A poll long enough that only the socket can wake the feed.
         let mut feed = HybridSignalFeed::new(&directory)
@@ -1075,6 +1648,7 @@ mod tests {
         client.flush().unwrap();
 
         assert_eq!(feed.next_observation().await.unwrap(), first);
+        feed.acknowledge_last().unwrap();
         assert_eq!(feed.next_observation().await.unwrap(), second);
         assert!(!first_path.exists(), "the row before the frame is retired");
         assert!(
@@ -1082,6 +1656,7 @@ mod tests {
             "the frame's row waits for the barrier"
         );
 
+        feed.acknowledge_last().unwrap();
         let quiet = tokio::time::timeout(Duration::from_millis(200), feed.next_observation()).await;
         assert!(quiet.is_err(), "nothing else was written");
         assert!(
@@ -1112,13 +1687,11 @@ mod tests {
             second.content_sha256 = content_sha256(&second);
             let first_path = spool_path(directory.path(), &first);
             let second_path = spool_path(directory.path(), &second);
-            std::fs::write(&first_path, serde_json::to_vec(&first).unwrap()).unwrap();
-            std::fs::write(&second_path, serde_json::to_vec(&second).unwrap()).unwrap();
+            publish_test_row(&first_path, &serde_json::to_vec(&first).unwrap());
+            publish_test_row(&second_path, &serde_json::to_vec(&second).unwrap());
 
             let mut feed =
                 SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
-            feed.known_paths.insert(first_path.clone());
-            feed.known_paths.insert(second_path.clone());
 
             // The only blocking thread is busy, so the row read cannot finish
             // inside the one poll the core gives the feed before dropping it.
@@ -1136,6 +1709,7 @@ mod tests {
                 .expect("the in-flight read completes")
                 .unwrap();
             assert_eq!(received, first, "the dropped read's row goes first");
+            feed.acknowledge_last().unwrap();
             assert_eq!(feed.next_observation().await.unwrap(), second);
             assert!(!first_path.exists(), "the delivered row is retired");
 
@@ -1186,5 +1760,455 @@ mod tests {
         drop(client);
         drop(fat);
         let _ = std::fs::remove_dir_all(&directory);
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    use engine_types::StrategyId;
+
+    fn row(source: &str, sequence: u64) -> SignalObservation {
+        let mut row = SignalObservation {
+            schema_version: SIGNAL_OBSERVATION_SCHEMA_VERSION,
+            decision_fingerprint: "delivery-test".into(),
+            destination: StrategyId(0),
+            source: source.into(),
+            sequence,
+            observation_id: format!("{source}-{sequence}"),
+            kind: "test".into(),
+            observed_wall_ts_ms: 1,
+            available_wall_ts_ms: 2,
+            subscriptions: Vec::new(),
+            payload: b"{}".to_vec(),
+            content_sha256: String::new(),
+        };
+        row.content_sha256 = content_sha256(&row);
+        row
+    }
+
+    fn request(source: &str, next_sequence: u64) -> SignalGapRequest {
+        SignalGapRequest {
+            source: source.into(),
+            next_sequence,
+        }
+    }
+
+    fn write(feed: &SpoolSignalFeed, row: &SignalObservation) -> PathBuf {
+        let path = feed.path_for(row);
+        publish_test_row(&path, &serde_json::to_vec(row).unwrap());
+        path
+    }
+
+    #[tokio::test]
+    async fn only_explicit_acknowledgement_can_retire_a_spool_row() {
+        let directory = crate::testpath::temp_path("signal-explicit-ack");
+        std::fs::create_dir(directory.path()).unwrap();
+        let mut feed = SpoolSignalFeed::new(directory.path());
+        let expected = row("worker.g1", 3);
+        let path = write(&feed, &expected);
+        let delivered = feed.next_observation().await.unwrap();
+        assert!(feed.next_observation().await.is_err());
+        assert!(path.exists());
+        feed.defer_last(delivered).unwrap();
+        feed.set_gap_requests(&[request("worker.g1", 1)], &[])
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), feed.next_observation())
+                .await
+                .is_err()
+        );
+        assert!(path.exists());
+        drop(feed);
+        let mut restarted = SpoolSignalFeed::new(directory.path());
+        assert_eq!(restarted.next_observation().await.unwrap(), expected);
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn gap_catchup_precedes_new_generations_while_independent_destinations_flow() {
+        let directory = crate::testpath::temp_path("signal-catchup");
+        std::fs::create_dir(directory.path()).unwrap();
+        let mut feed =
+            SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
+        let future = row("worker.g1", 3);
+        let future_path = write(&feed, &future);
+        let delivered = feed.next_observation().await.unwrap();
+        feed.defer_last(delivered).unwrap();
+        feed.set_gap_requests(&[request("worker.g1", 1)], &[StrategyId(0)])
+            .unwrap();
+        let next_generation = row("worker.g2", 1);
+        let next_path = write(&feed, &next_generation);
+        let mut independent = row("independent", 1);
+        independent.destination = StrategyId(1);
+        independent.content_sha256 = content_sha256(&independent);
+        write(&feed, &independent);
+        assert_eq!(feed.next_observation().await.unwrap(), independent);
+        feed.acknowledge_last().unwrap();
+        assert!(future_path.exists());
+        assert!(next_path.exists());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), feed.next_observation())
+                .await
+                .is_err()
+        );
+        for sequence in 1..=2 {
+            write(&feed, &row("worker.g1", sequence));
+        }
+        for sequence in 1..=3 {
+            feed.set_gap_requests(&[request("worker.g1", sequence)], &[StrategyId(0)])
+                .unwrap();
+            assert_eq!(
+                feed.next_observation().await.unwrap(),
+                row("worker.g1", sequence)
+            );
+            feed.acknowledge_last().unwrap();
+        }
+        feed.set_gap_requests(&[], &[]).unwrap();
+        assert_eq!(feed.next_observation().await.unwrap(), next_generation);
+        feed.acknowledge_last().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), feed.next_observation())
+                .await
+                .is_err()
+        );
+        assert!(!future_path.exists());
+    }
+
+    #[test]
+    fn bounded_spool_pages_find_catchup_beyond_a_saturated_metadata_cache() {
+        let directory = crate::testpath::temp_path("signal-paged-catchup");
+        std::fs::create_dir(directory.path()).unwrap();
+        let feed = SpoolSignalFeed::new(directory.path());
+        for sequence in 2..=(SPOOL_METADATA_CAPACITY as u64 + 3) {
+            write(&feed, &row("future", sequence));
+        }
+        let gaps = vec![request("future", 1)];
+        let mut scanner = SpoolScanner::default();
+        assert!(scanner
+            .select(directory.path(), &gaps, &[])
+            .unwrap()
+            .is_none());
+        assert_eq!(scanner.deferred.len(), SPOOL_METADATA_CAPACITY);
+        assert_eq!(
+            SpoolScanner::page(directory.path(), None, None)
+                .unwrap()
+                .len(),
+            SPOOL_SCAN_PAGE
+        );
+        let independent = row("other", 50_000);
+        write(&feed, &independent);
+        assert_eq!(
+            scanner
+                .select(directory.path(), &gaps, &[])
+                .unwrap()
+                .unwrap()
+                .1,
+            independent
+        );
+        let missing = row("future", 1);
+        write(&feed, &missing);
+        assert_eq!(
+            scanner
+                .select(directory.path(), &gaps, &[])
+                .unwrap()
+                .unwrap()
+                .1,
+            missing
+        );
+        assert!(scanner.deferred.len() <= SPOOL_METADATA_CAPACITY);
+    }
+
+    #[tokio::test]
+    async fn a_full_channel_retains_rows_and_has_one_prefix_recovery_slot() {
+        let (sender, mut feed) = signal_channel();
+        for sequence in 2..=(SIGNAL_CHANNEL_CAPACITY as u64 + 1) {
+            sender.try_send(row("future", sequence)).unwrap();
+        }
+        feed.set_gap_requests(&[request("future", 1)], &[]).unwrap();
+        let ordinary_rejected = row("other", 1);
+        let refused = sender.try_send(ordinary_rejected.clone()).unwrap_err();
+        assert!(matches!(&refused, SignalSendError::Full(_)));
+        assert_eq!(refused.into_inner(), ordinary_rejected);
+        sender.try_send(row("future", 1)).unwrap();
+        assert!(matches!(
+            sender.try_send(row("future", 1)),
+            Err(SignalSendError::Full(_))
+        ));
+        assert_eq!(feed.0.lock().queued.len(), SIGNAL_CHANNEL_CAPACITY + 1);
+        assert_eq!(feed.next_observation().await.unwrap(), row("future", 1));
+        assert!(feed.next_observation().await.is_err());
+        feed.acknowledge_last().unwrap();
+        assert!(!feed.0.lock().recovery_used);
+        for sequence in 2..=(SIGNAL_CHANNEL_CAPACITY as u64 + 1) {
+            feed.set_gap_requests(&[request("future", sequence)], &[])
+                .unwrap();
+            let delivered = feed.next_observation().await.unwrap();
+            assert_eq!(delivered, row("future", sequence));
+            if sequence == 2 {
+                feed.defer_last(delivered).unwrap();
+                assert_eq!(
+                    feed.next_observation().await.unwrap(),
+                    row("future", sequence)
+                );
+            }
+            feed.acknowledge_last().unwrap();
+        }
+        assert_eq!(feed.0.lock().ordinary_rows, 0);
+        assert_eq!(feed.0.lock().ordinary_bytes, 0);
+        drop(sender);
+        assert!(matches!(
+            feed.next_observation().await,
+            Err(SignalError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn channel_byte_capacity_includes_outstanding_and_reserved_payloads() {
+        fn large(sequence: u64) -> SignalObservation {
+            let mut row = row("source", sequence);
+            row.payload
+                .reserve_exact(MAX_SIGNAL_OBSERVATION_BYTES - row.payload.len());
+            row
+        }
+        let (sender, mut feed) = signal_channel();
+        for sequence in 2..=4 {
+            sender.try_send(large(sequence)).unwrap();
+        }
+        let refused = sender.try_send(large(5)).unwrap_err();
+        assert!(matches!(&refused, SignalSendError::Full(_)));
+        assert_eq!(feed.0.lock().ordinary_rows, 3);
+        let delivered = feed.next_observation().await.unwrap();
+        assert!(matches!(
+            sender.try_send(refused.into_inner()),
+            Err(SignalSendError::Full(_))
+        ));
+        feed.defer_last(delivered).unwrap();
+        feed.set_gap_requests(&[request("source", 1)], &[]).unwrap();
+        sender.try_send(large(1)).unwrap();
+        assert_eq!(feed.next_observation().await.unwrap().sequence, 1);
+        assert!(feed.0.lock().ordinary_bytes <= SIGNAL_CHANNEL_BYTES);
+        assert!(feed.0.lock().recovery_used);
+        feed.acknowledge_last().unwrap();
+        let mut oversized = row("source", 1);
+        oversized
+            .payload
+            .reserve_exact(MAX_SIGNAL_RETAINED_BYTES + 1);
+        assert!(matches!(
+            sender.try_send(oversized),
+            Err(SignalSendError::Full(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_full_new_generation_queue_cannot_block_old_generation_catchup() {
+        let (sender, mut feed) = signal_channel();
+        for sequence in 1..=SIGNAL_CHANNEL_CAPACITY as u64 {
+            sender.try_send(row("new", sequence)).unwrap();
+        }
+        for sequence in 1..=2 {
+            feed.set_gap_requests(&[request("old", sequence)], &[StrategyId(0)])
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), feed.next_observation())
+                    .await
+                    .is_err()
+            );
+            sender.try_send(row("old", sequence)).unwrap();
+            assert_eq!(feed.next_observation().await.unwrap(), row("old", sequence));
+            feed.acknowledge_last().unwrap();
+            assert_eq!(feed.0.lock().ordinary_rows, SIGNAL_CHANNEL_CAPACITY);
+            assert!(!feed.0.lock().recovery_used);
+        }
+        feed.set_gap_requests(&[], &[]).unwrap();
+        for sequence in 1..=SIGNAL_CHANNEL_CAPACITY as u64 {
+            assert_eq!(feed.next_observation().await.unwrap(), row("new", sequence));
+            feed.acknowledge_last().unwrap();
+        }
+        assert_eq!(feed.0.lock().ordinary_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_channel_poll_and_sender_close_do_not_discard_pending_rows() {
+        let (sender, mut feed) = signal_channel();
+        feed.set_gap_requests(&[request("source", 1)], &[]).unwrap();
+        sender.try_send(row("source", 2)).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), feed.next_observation())
+                .await
+                .is_err()
+        );
+        drop(sender);
+        feed.set_gap_requests(&[request("source", 2)], &[]).unwrap();
+        assert_eq!(feed.next_observation().await.unwrap(), row("source", 2));
+        feed.acknowledge_last().unwrap();
+        assert!(matches!(
+            feed.next_observation().await,
+            Err(SignalError::Closed)
+        ));
+    }
+
+    #[test]
+    fn cancelled_spool_scan_reselects_when_the_gap_policy_changes() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let directory = crate::testpath::temp_path("signal-cancel-policy");
+            std::fs::create_dir(directory.path()).unwrap();
+            let mut feed = SpoolSignalFeed::new(directory.path());
+            let future = row("future", 2);
+            let future_path = write(&feed, &future);
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            let hold = tokio::task::spawn_blocking(move || held.recv().unwrap());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), feed.next_observation())
+                    .await
+                    .is_err()
+            );
+            assert!(feed.selection.is_some());
+            feed.set_gap_requests(&[request("future", 1)], &[]).unwrap();
+            let other = row("other", 3);
+            write(&feed, &other);
+            release.send(()).unwrap();
+            hold.await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), feed.next_observation())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                other
+            );
+            assert!(future_path.exists());
+            feed.acknowledge_last().unwrap();
+            let missing = row("future", 1);
+            write(&feed, &missing);
+            assert_eq!(feed.next_observation().await.unwrap(), missing);
+        });
+    }
+
+    #[test]
+    fn cancelled_retirement_only_removes_the_acknowledged_row() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let directory = crate::testpath::temp_path("signal-cancel-retirement");
+            std::fs::create_dir(directory.path()).unwrap();
+            let mut feed = SpoolSignalFeed::new(directory.path());
+            let first_path = write(&feed, &row("source", 1));
+            let second = row("source", 2);
+            let second_path = write(&feed, &second);
+            assert_eq!(feed.next_observation().await.unwrap().sequence, 1);
+            feed.acknowledge_last().unwrap();
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            let hold = tokio::task::spawn_blocking(move || held.recv().unwrap());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), feed.next_observation())
+                    .await
+                    .is_err()
+            );
+            assert!(feed.retirement.is_some());
+            assert!(first_path.exists());
+            release.send(()).unwrap();
+            hold.await.unwrap();
+            assert_eq!(feed.next_observation().await.unwrap(), second);
+            assert!(!first_path.exists());
+            assert!(second_path.exists());
+        });
+    }
+
+    #[test]
+    fn physical_file_limit_is_checked_before_allocating_the_envelope() {
+        let directory = crate::testpath::temp_path("signal-oversize-file");
+        std::fs::create_dir(directory.path()).unwrap();
+        let feed = SpoolSignalFeed::new(directory.path());
+        let path = feed.path_for(&row("source", 1));
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_SIGNAL_FILE_BYTES + 1)
+            .unwrap();
+        assert!(SpoolSignalFeed::read_one(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds"));
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_doorbell_during_an_empty_scan_cannot_be_overwritten_by_its_result() {
+        let directory = crate::testpath::temp_path("signal-scan-doorbell");
+        std::fs::create_dir(directory.path()).unwrap();
+        let mut feed =
+            SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_secs(30));
+        let scanner = feed.scanner.take().unwrap();
+        feed.selection = Some(tokio::task::spawn_blocking(move || {
+            (scanner, Vec::new(), Vec::new(), Ok(None))
+        }));
+        let expected = row("source", 1);
+        write(&feed, &expected);
+        feed.wake();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), feed.next_observation())
+                .await
+                .unwrap()
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn a_socket_frame_is_only_a_prompt_to_read_the_durable_spool() {
+        use tokio::io::AsyncWriteExt;
+        let directory = PathBuf::from(format!("/tmp/lm-doorbell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).unwrap();
+        let mut feed = HybridSignalFeed::new(&directory)
+            .unwrap()
+            .with_poll_interval(Duration::from_secs(30));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), feed.next_observation())
+                .await
+                .is_err()
+        );
+        let expected = row("source", 1);
+        let body = serde_json::to_vec(&expected).unwrap();
+        let mut socket = tokio::net::UnixStream::connect(directory.join("stream.sock"))
+            .await
+            .unwrap();
+        socket
+            .write_all(&(body.len() as u32).to_le_bytes())
+            .await
+            .unwrap();
+        socket.write_all(&body).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), feed.next_observation())
+                .await
+                .is_err()
+        );
+        let path = write(&feed.spool, &expected);
+        // The file is authoritative even if the producer dies partway through
+        // its next socket frame.
+        socket.write_all(&[1]).await.unwrap();
+        let start = std::time::Instant::now();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), feed.next_observation())
+                .await
+                .unwrap()
+                .unwrap(),
+            expected
+        );
+        eprintln!(
+            "durable socket wake delivery: {:?} (30s spool interval)",
+            start.elapsed()
+        );
+        assert!(path.exists());
+        drop(feed);
+        drop(socket);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

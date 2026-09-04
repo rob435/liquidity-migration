@@ -43,6 +43,7 @@ fn base(mark: &str) -> WalRecord {
         signal_observations: Vec::new(),
         signal_cursors: Vec::new(),
         signal_subscriptions: Vec::new(),
+        signal_gaps: Vec::new(),
         runtime_control_requests: Vec::new(),
         runtime_control_consumed: Vec::new(),
         open_orders: Vec::new(),
@@ -163,6 +164,70 @@ fn a_family_of_one_reads_exactly_like_a_plain_file() {
     let (chained, damaged) = replay_chain(&path).unwrap();
     assert_eq!(texts(&chained), ["only"]);
     assert!(!damaged);
+}
+
+fn write_raw_record(path: &std::path::Path, value: &serde_json::Value) -> Vec<u8> {
+    let payload = serde_json::to_vec(value).unwrap();
+    let mut bytes = b"EWAL0001".to_vec();
+    bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&crc32c::crc32c(&payload).to_le_bytes());
+    bytes.extend_from_slice(&payload);
+    fs::write(path, &bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn versioned_rotation_requires_gap_state_but_legacy_rotation_still_reads() {
+    for kind in ["segment_base", "segment_base_v2"] {
+        let dir = TempDir::new().unwrap();
+        let path = log_path(&dir);
+        let mut value = serde_json::to_value(base("required-gap-state")).unwrap();
+        value["kind"] = kind.into();
+        value.as_object_mut().unwrap().remove("signal_gaps");
+        let bytes = write_raw_record(&path, &value);
+        let result = WalWriter::open(&path);
+        if kind == "segment_base_v2" {
+            assert!(matches!(result, Err(engine_wal::WalError::Corrupt { .. })));
+        } else {
+            let (_, records) = result.unwrap();
+            assert!(
+                matches!(&records[0].1, WalRecord::SegmentBase { signal_gaps, .. } if signal_gaps.is_empty())
+            );
+        }
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn gap_record_and_rotation_keep_the_exact_missing_prefix() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let gap = engine_types::SignalGap {
+        source: "worker.g1".into(),
+        destination: engine_types::StrategyId(0),
+        next_sequence: 10,
+        observed_sequence: 11,
+    };
+    let record = WalRecord::SignalGapRecorded {
+        wall_ts_ms: 10,
+        gap: gap.clone(),
+    };
+    let (mut wal, _) = WalWriter::open(&path).unwrap();
+    wal.append(&record).unwrap();
+    wal.barrier().unwrap();
+    assert_eq!(replay(&path).unwrap()[0].1, record);
+    let mut rotated = base("gap");
+    let WalRecord::SegmentBase { signal_gaps, .. } = &mut rotated else {
+        panic!()
+    };
+    signal_gaps.push(gap);
+    wal.rotate(&rotated).unwrap();
+    drop(wal);
+    let (_, records) = open_current(&path).unwrap();
+    assert_eq!(records[0].1, rotated);
+    let bytes = fs::read(dir.path().join("engine.wal.000002")).unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes[16..]).unwrap();
+    assert_eq!(payload["kind"], "segment_base_v2");
 }
 
 /// The crash test: a rotation cut off at ANY byte leaves boot replaying the

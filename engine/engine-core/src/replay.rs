@@ -439,6 +439,13 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             observation.kind,
             observation.observation_id
         ),
+        WalRecord::SignalGapRecorded { gap, .. } => format!(
+            "signal gap {} for {}: expected {}, observed {}",
+            gap.source,
+            names.strategy(gap.destination),
+            gap.next_sequence,
+            gap.observed_sequence
+        ),
         WalRecord::SignalObservationConsumed {
             strategy,
             source,

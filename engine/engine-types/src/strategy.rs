@@ -235,11 +235,36 @@ pub enum SignalError {
     Source(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignalGapRequest {
+    pub source: String,
+    pub next_sequence: u64,
+}
+
 /// A lossless source of normalized observations. A source blocks its own task;
 /// the core polls this future beside market, private-order, timer, and venue
 /// work and never waits synchronously for the signal worker.
 #[allow(async_fn_in_trait)]
 pub trait SignalFeed {
+    /// Prefer these exact source-generation prefixes. Later rows from a listed
+    /// source remain with the feed. Other rows to blocked destinations wait
+    /// until every required prefix is complete; unrelated destinations flow.
+    fn set_gap_requests(
+        &mut self,
+        gaps: &[SignalGapRequest],
+        blocked_destinations: &[StrategyId],
+    ) -> Result<(), SignalError>;
+
+    /// Authorize retirement only after the returned row is durably accepted.
+    /// Filesystem work may run on the next cancellable poll.
+    fn acknowledge_last(&mut self) -> Result<(), SignalError>;
+
+    /// Return an unaccepted row to its source after the core durably records
+    /// why it cannot advance. Deferral must never retire its durable bytes.
+    fn defer_last(&mut self, observation: SignalObservation) -> Result<(), SignalError>;
+
+    /// At most one delivery is outstanding. The caller must acknowledge or
+    /// defer it before polling again. Dropping a pending future loses no row.
     async fn next_observation(&mut self) -> Result<SignalObservation, SignalError>;
 }
 
@@ -618,6 +643,12 @@ pub trait Strategy {
     /// decisions. A required source omitted from config is a boot error.
     fn requires_signal_feed(&self) -> bool {
         false
+    }
+
+    /// Sleeve names whose inputs this strategy uses for opening decisions.
+    /// The core resolves the transitive source dependencies once at boot.
+    fn input_dependencies(&self) -> Vec<String> {
+        Vec::new()
     }
 
     /// The committed config's entry toggle, for status reporting. Runtime

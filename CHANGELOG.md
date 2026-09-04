@@ -6,6 +6,45 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 21:36 UTC — Recover missing signal prefixes before reducer delivery (local checkpoint).**
+  - Sequence 9 followed by 11 previously delivered 11, advanced the durable
+    cursor and discarded a later 10. The regression fails on that behavior.
+    Signal feeds now require explicit acknowledgement or deferral. The
+    immutable spool owns deferred payloads; a WAL-barriered `SignalGapRecorded`
+    owns the missing prefix and observed high-water mark. `SignalState` owns
+    replay, cursors, destination routes, subscription unions and consumption.
+  - Known gaps block destination/dependent openings and opening amendments,
+    cancel affected resting entries, and defer their other source/generation
+    inputs. Native Exodus declares its CARRY dependency. Exact prefix catch-up,
+    independent destinations, private updates, own reductions and protective
+    edits remain serviceable. Runtime entry permissions also cover existing
+    entries and amendments. No capital values change.
+  - Feed count/byte admission preserves one reserved exact-prefix recovery
+    slot beyond 256 ordinary rows/64 MiB. Spool discovery uses 64-path pages
+    and 4,096 metadata entries; blocking reads/deletions retain their handles
+    across poll cancellation. Socket bytes only wake durable spool scanning.
+    Negative controls demonstrate full-queue recovery-slot failure and a lost
+    wake that otherwise waits the entire 30-second scan interval.
+  - Rotation writes `segment_base_v2` and requires explicit gap state; current
+    readers accept legacy rotations, and validate cursor/route/subscription
+    consistency. The actual `e2345ca4` baseline binary rejects both new record
+    kinds without changing scratch WAL bytes. Python venue accounting reads
+    both rotation tags. Old binaries cannot roll back across this state change
+    merely because their executable artifact is available.
+  - Explicit Rust 1.90 passes strict workspace Clippy, formatting and all
+    1,760 debug tests; the same five opt-in tests remain ignored. All 1,498
+    Python tests, Ruff, ShellCheck and mypy pass. New tests cover failed signal
+    and gap barriers, real-spool restart/rotation, generation ordering, scoped
+    cancellation/amendment/reduction, and malformed rotated routes. Full-run
+    failures exposed non-atomic test publication and two invalid doc paths;
+    both were corrected before the passing run. Optimized qualification follows
+    from a clean local checkpoint.
+  - Known gaps are enforced; already accepted legacy discontinuities cannot
+    be reconstructed. Accepted-but-unconsumed payload capacity and a producer
+    readiness handshake before boot-restored work remain open. Recovery docs
+    remove the old-generation spool-deletion shortcut. No push, deployment,
+    production access, live WAL migration or credential changes.
+
 - **2026-09-04 20:22 UTC — Qualify the local fixes with the actual pinned compiler and retain comparative latency evidence.**
   - Explicit Rust 1.90.0 paths pass rustfmt, strict workspace/all-targets
     Clippy, and all 1,726 Rust tests in each debug and optimized suite. Five

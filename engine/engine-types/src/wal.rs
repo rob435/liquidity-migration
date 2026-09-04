@@ -363,6 +363,11 @@ pub enum WalRecord {
         sequence: u64,
         observation_id: String,
     },
+    /// A missing source prefix, durable before deferring its later spool row.
+    SignalGapRecorded {
+        wall_ts_ms: i64,
+        gap: SignalGap,
+    },
     /// One operator request, durable before its gate changes in memory.
     RuntimeControlAccepted {
         wall_ts_ms: i64,
@@ -398,6 +403,7 @@ pub enum WalRecord {
     /// at that point in the stream it is exactly what the records before it
     /// already produced, which is what makes chain reads and single-segment
     /// reads agree.
+    #[serde(rename = "segment_base_v2", alias = "segment_base")]
     SegmentBase {
         wall_ts_ms: i64,
         /// The id tables, same meaning as [`WalRecord::Names`].
@@ -452,6 +458,9 @@ pub enum WalRecord {
         /// Consumption and later universe changes never remove held names.
         #[serde(default)]
         signal_subscriptions: Vec<SignalSubscriptionState>,
+        /// Source prefixes that must recover before their destination opens.
+        #[serde(default)]
+        signal_gaps: Vec<SignalGap>,
         /// Accepted runtime entry requests in append order. The whole history
         /// is retained so a retried old request id stays a no-op after
         /// rotation instead of changing the current gate again.
@@ -523,6 +532,14 @@ pub struct SignalCursor {
     pub source: String,
     pub sequence: u64,
     pub content_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalGap {
+    pub source: String,
+    pub destination: StrategyId,
+    pub next_sequence: u64,
+    pub observed_sequence: u64,
 }
 
 /// Durable subscription union from one external source to one strategy.
@@ -848,6 +865,7 @@ mod tests {
             signal_observations: Vec::new(),
             signal_cursors: Vec::new(),
             signal_subscriptions: Vec::new(),
+            signal_gaps: Vec::new(),
             runtime_control_requests: Vec::new(),
             runtime_control_consumed: Vec::new(),
             open_orders: Vec::new(),
@@ -857,6 +875,8 @@ mod tests {
             }],
         };
         let mut encoded = serde_json::to_value(&base).expect("serialize segment base");
+        assert_eq!(encoded["kind"], "segment_base_v2");
+        encoded["kind"] = serde_json::Value::String("segment_base".into());
         encoded
             .as_object_mut()
             .expect("tagged record is an object")
@@ -871,6 +891,7 @@ mod tests {
             "signal_observations",
             "signal_cursors",
             "signal_subscriptions",
+            "signal_gaps",
             "runtime_control_requests",
             "runtime_control_consumed",
             "rolling_loss_rows",

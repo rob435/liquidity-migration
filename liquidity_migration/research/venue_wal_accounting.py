@@ -303,7 +303,7 @@ def _read_segment(path: Path, index: int) -> tuple[list[dict[str, Any]], bool, b
             )
         records.append(_load_json(payload, f"{path}:frame@{frame_offset}"))
         offset += payload_len
-    if index >= 2 and records and records[0].get("kind") != "segment_base":
+    if index >= 2 and records and records[0].get("kind") not in {"segment_base", "segment_base_v2"}:
         return [], torn, raw
     return records, torn, raw
 
@@ -421,7 +421,7 @@ def parse_wal_accounting(wal: WalRead, sleeve: str = "long") -> WalAccounting:
             )
             boots.append(active_boot)
             continue
-        if kind in {"names", "segment_base"}:
+        if kind in {"names", "segment_base", "segment_base_v2"}:
             next_strategies = record.get("strategies")
             next_symbols = record.get("symbols")
             if isinstance(next_strategies, list) and isinstance(next_symbols, list):
@@ -429,7 +429,7 @@ def parse_wal_accounting(wal: WalRead, sleeve: str = "long") -> WalAccounting:
                 symbols = list(next_symbols)
             else:
                 issues.append(f"WAL sequence {row.sequence} has malformed name tables")
-            if kind == "segment_base":
+            if kind in {"segment_base", "segment_base_v2"}:
                 open_orders = record.get("open_orders")
                 if isinstance(open_orders, list):
                     for open_order in open_orders:

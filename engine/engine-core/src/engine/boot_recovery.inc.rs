@@ -87,6 +87,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 }
             }
         }
+        let signal_dependencies = crate::signal_state::dependency_closure(
+            &names, &strategies.iter().map(|strategy| strategy.input_dependencies()).collect::<Vec<_>>(),
+        ).map_err(EngineError::Boot)?;
         let prior_names = crate::replay::LogNames::of_log(replayed).strategies;
         if !sleeves.is_empty()
             && !prior_names.is_empty()
@@ -317,11 +320,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             (event.source.0 as usize) < strategies.len()
                 && (event.destination.0 as usize) < strategies.len()
         });
-        let ReplayedSignalState {
-            observations: mut signal_observations,
-            cursors: signal_cursors,
-            subscriptions: mut signal_subscriptions,
-        } = replay_signal_state(effective);
+        let signals = crate::signal_state::SignalState::replay(effective, strategies.len())
+            .map_err(EngineError::Boot)?;
         let ReplayedRuntimeControlState {
             requests: runtime_control_requests,
             consumed: runtime_control_consumed,
@@ -342,13 +342,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 )));
             }
         }
-        signal_observations.retain(|_, observation| {
-            (observation.destination.0 as usize) < strategies.len()
-        });
-        signal_subscriptions.retain(|_, row| {
-            (row.destination.0 as usize) < strategies.len()
-        });
-        for row in signal_subscriptions.values() {
+        for row in signals.subscriptions() {
             if row.subscriptions.len() > engine_types::MAX_DURABLE_SIGNAL_SUBSCRIPTIONS {
                 return Err(EngineError::Boot(format!(
                     "durable signal source {} has {} subscriptions; maximum is {}",
@@ -578,9 +572,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             strategy_checkpoints,
             strategy_global_checkpoints,
             strategy_events,
-            signal_observations,
-            signal_cursors,
-            signal_subscriptions,
+            signals,
+            signal_dependencies,
             runtime_control_requests,
             runtime_control_consumed,
             runtime_entries_enabled,

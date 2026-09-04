@@ -1074,6 +1074,7 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
         signal_observations: vec![],
         signal_cursors: vec![],
         signal_subscriptions: vec![],
+        signal_gaps: Vec::new(),
         runtime_control_requests: vec![],
         runtime_control_consumed: vec![],
         open_orders: vec![],

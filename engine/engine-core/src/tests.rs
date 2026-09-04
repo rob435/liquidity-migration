@@ -89,6 +89,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::StrategyEventConsumed { .. } => "strategy_event_consumed",
         WalRecord::SignalObservation { .. } => "signal_observation",
         WalRecord::SignalObservationConsumed { .. } => "signal_observation_consumed",
+        WalRecord::SignalGapRecorded { .. } => "signal_gap_recorded",
         WalRecord::RuntimeControlAccepted { .. } => "runtime_control_accepted",
         WalRecord::RuntimeControlConsumed { .. } => "runtime_control_consumed",
     }
@@ -186,6 +187,7 @@ struct MockWal {
     records: Rc<RefCell<Vec<WalRecord>>>,
     seq: u64,
     fail_on: Option<String>,
+    fail_barrier_after: Option<&'static str>,
     /// A tape the barrier's own thread can also write to. The ordinary tape
     /// is an `Rc` and cannot leave this thread, and the whole point of a
     /// barrier that runs beside the send is that something else finishes it.
@@ -205,6 +207,7 @@ impl MockWal {
                 records: records.clone(),
                 seq: 0,
                 fail_on: None,
+                fail_barrier_after: None,
                 crossing_tape: None,
                 barrier_takes: Duration::from_millis(30),
             },
@@ -251,6 +254,15 @@ impl Wal for MockWal {
 
     fn barrier(&mut self) -> Result<(), WalError> {
         self.tape.lock().unwrap().push(Step::Barrier);
+        if self.fail_barrier_after.is_some_and(|kind| {
+            self.records
+                .lock()
+                .unwrap()
+                .last()
+                .is_some_and(|record| kind_of(record) == kind)
+        }) {
+            return Err(WalError::Io(std::io::Error::other("test barrier failure")));
+        }
         Ok(())
     }
 

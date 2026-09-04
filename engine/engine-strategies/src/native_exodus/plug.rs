@@ -387,6 +387,10 @@ impl Strategy for NativeExodus {
         NAME
     }
 
+    fn input_dependencies(&self) -> Vec<String> {
+        vec![self.config.carry_sleeve_name.clone()]
+    }
+
     fn subscriptions(&self) -> Vec<Subscription> {
         Vec::new()
     }

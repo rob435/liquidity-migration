@@ -169,6 +169,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 );
             }
         }
+        self.queue_halted_entry_cancels()?;
         Ok(())
     }
 
@@ -185,12 +186,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 symbol,
                 checkpoint,
             } => {
-                let owner = self.strategies.get(usize::from(strategy.0)).ok_or_else(|| {
-                    EngineError::State(format!(
-                        "checkpoint names strategy {} outside the configured table",
-                        strategy.0
-                    ))
-                })?;
+                let owner = self
+                    .strategies
+                    .get(usize::from(strategy.0))
+                    .ok_or_else(|| {
+                        EngineError::State(format!(
+                            "checkpoint names strategy {} outside the configured table",
+                            strategy.0
+                        ))
+                    })?;
                 validate_strategy_checkpoint(owner.as_ref(), &checkpoint).map_err(|error| {
                     EngineError::State(format!(
                         "strategy {} refused checkpoint: {error}",
@@ -217,12 +221,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 strategy,
                 checkpoint,
             } => {
-                let owner = self.strategies.get(usize::from(strategy.0)).ok_or_else(|| {
-                    EngineError::State(format!(
-                        "global checkpoint names strategy {} outside the configured table",
-                        strategy.0
-                    ))
-                })?;
+                let owner = self
+                    .strategies
+                    .get(usize::from(strategy.0))
+                    .ok_or_else(|| {
+                        EngineError::State(format!(
+                            "global checkpoint names strategy {} outside the configured table",
+                            strategy.0
+                        ))
+                    })?;
                 validate_strategy_checkpoint(owner.as_ref(), &checkpoint).map_err(|error| {
                     EngineError::State(format!(
                         "strategy {} refused global checkpoint: {error}",
@@ -310,27 +317,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 sequence,
                 observation_id,
             } => {
-                let key = (source.clone(), sequence);
-                let Some(observation) = self.signal_observations.get(&key) else {
-                    return Ok(None);
-                };
-                if observation.destination != strategy
-                    || observation.observation_id != observation_id
+                if !self
+                    .signals
+                    .consumable(strategy, &source, sequence, &observation_id)
+                    .map_err(EngineError::State)?
                 {
-                    return Err(EngineError::State(format!(
-                        "strategy {} cannot consume signal {} #{} {}",
-                        strategy.0, source, sequence, observation_id
-                    )));
+                    return Ok(None);
                 }
                 self.wal.append(&WalRecord::SignalObservationConsumed {
                     wall_ts_ms: clock::wall_ms(),
                     strategy,
-                    source,
+                    source: source.clone(),
                     sequence,
                     observation_id,
                 })?;
                 self.wal.barrier()?;
-                self.signal_observations.remove(&key);
+                self.signals.consume(&source, sequence);
                 Ok(None)
             }
             Action::ConsumeRuntimeControl {
@@ -376,14 +378,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// actions enter the ordinary FIFO and are drained when the run starts.
     fn redeliver_durable_strategy_inputs(&mut self) {
         let events: Vec<_> = self.strategy_events.values().cloned().collect();
-        let observations: Vec<_> = self.signal_observations.values().cloned().collect();
+        let observations: Vec<_> = self.signals.observations().cloned().collect();
         let now = clock::now_ns();
         for event in events {
-            self.feed_one_strategy(
-                event.destination,
-                &EngineEvent::StrategyEvent(event),
-                now,
-            );
+            self.feed_one_strategy(event.destination, &EngineEvent::StrategyEvent(event), now);
         }
         for observation in observations {
             self.feed_one_strategy(
@@ -618,12 +616,30 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.drain(now).await
     }
 
-    /// Validate one external envelope and hold it until its requested symbol
-    /// set is aligned across every engine table. Old spool rows are ignored by
-    /// the durable per-source cursor; sequence gaps are logged and skipped.
-    fn queue_signal_observation(
+    fn update_signal_requests<F: SignalFeed>(&self, feed: &mut F) -> Result<(), EngineError> {
+        let requests: Vec<_> = self
+            .signals
+            .gaps()
+            .map(|gap| engine_types::SignalGapRequest {
+                source: gap.source.clone(),
+                next_sequence: gap.next_sequence,
+            })
+            .collect();
+        let blocked_destinations: Vec<_> = self
+            .signal_dependencies
+            .iter()
+            .enumerate()
+            .filter(|(id, _)| self.signal_inputs_blocked(StrategyId(*id as u16)))
+            .map(|(id, _)| StrategyId(id as u16))
+            .collect();
+        feed.set_gap_requests(&requests, &blocked_destinations)
+            .map_err(|error| EngineError::State(error.to_string()))
+    }
+
+    fn queue_signal_observation<F: SignalFeed>(
         &mut self,
         observation: SignalObservation,
+        feed: &mut F,
     ) -> Result<(), EngineError> {
         crate::signals::validate(&observation).map_err(EngineError::State)?;
         if observation.destination.0 as usize >= self.strategies.len() {
@@ -635,79 +651,52 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.strategies.len()
             )));
         }
-
-        let cursor = self.signal_cursors.get(&observation.source);
-        if let Some(cursor) = cursor {
-            if observation.sequence < cursor.sequence {
-                return Ok(());
+        let admission = self
+            .signals
+            .classify(&observation)
+            .map_err(EngineError::State)?;
+        if admission != crate::signal_state::Admission::Duplicate
+            && self.signal_inputs_blocked(observation.destination)
+            && !self
+                .signals
+                .gaps()
+                .any(|gap| gap.source == observation.source)
+        {
+            return feed
+                .defer_last(observation)
+                .map_err(|error| EngineError::State(error.to_string()));
+        }
+        match admission {
+            crate::signal_state::Admission::Duplicate => {
+                return feed
+                    .acknowledge_last()
+                    .map_err(|error| EngineError::State(error.to_string()));
             }
-            if observation.sequence == cursor.sequence {
-                if observation.content_sha256 != cursor.content_sha256 {
-                    return Err(EngineError::State(format!(
-                        "signal source {} rewrote durable sequence {}",
-                        observation.source, observation.sequence
-                    )));
+            crate::signal_state::Admission::Gap(gap) => {
+                if self.signals.gap_changed(&gap) {
+                    self.wal.append(&WalRecord::SignalGapRecorded {
+                        wall_ts_ms: clock::wall_ms(),
+                        gap: gap.clone(),
+                    })?;
+                    self.wal.barrier()?;
+                    tracing::error!(source = %gap.source, expected = gap.next_sequence,
+                        observed = gap.observed_sequence, strategy = gap.destination.0,
+                        "signal prefix missing; destination openings suspended until catch-up");
+                    self.signals.record_gap(gap);
+                    self.update_signal_requests(feed)?;
+                    self.queue_halted_entry_cancels()?;
                 }
-                return Ok(());
+                return feed
+                    .defer_last(observation)
+                    .map_err(|error| EngineError::State(error.to_string()));
             }
-        }
-        if let Some(queued) = self.pending_signal_deliveries.iter().find(|queued| {
-            queued.source == observation.source && queued.sequence == observation.sequence
-        }) {
-            if queued != &observation {
-                return Err(EngineError::State(format!(
-                    "signal source {} reused queued sequence {} with different bytes",
-                    observation.source, observation.sequence
-                )));
-            }
-            return Ok(());
-        }
-        let expected = self
-            .pending_signal_deliveries
-            .iter()
-            .rev()
-            .find(|queued| queued.source == observation.source)
-            .map(|queued| queued.sequence.saturating_add(1))
-            .or_else(|| cursor.map(|known| known.sequence.saturating_add(1)))
-            .unwrap_or(1);
-        if observation.sequence < expected {
-            tracing::warn!(
-                source = %observation.source,
-                sequence = observation.sequence,
-                expected,
-                "signal row is behind the rows already queued; dropped"
-            );
-            return Ok(());
-        }
-        if observation.sequence > expected {
-            // The spool no longer holds the rows in between and a restart
-            // would meet the same gap. The engine goes on from the row it
-            // has; the cursor records the jump.
-            tracing::error!(
-                source = %observation.source,
-                expected,
-                got = observation.sequence,
-                skipped = observation.sequence - expected,
-                "signal source has a sequence gap; continuing from the row on hand"
-            );
+            crate::signal_state::Admission::Ready => {}
         }
 
-        let route = (observation.source.clone(), observation.destination.0);
         let mut durable = self
-            .signal_subscriptions
-            .get(&route)
-            .map(|row| row.subscriptions.clone())
-            .unwrap_or_default();
-        for queued in self.pending_signal_deliveries.iter().filter(|queued| {
-            queued.source == observation.source
-                && queued.destination == observation.destination
-        }) {
-            for subscription in &queued.subscriptions {
-                if !durable.contains(subscription) {
-                    durable.push(subscription.clone());
-                }
-            }
-        }
+            .signals
+            .route_subscriptions(&observation.source, observation.destination)
+            .to_vec();
         for subscription in &observation.subscriptions {
             if !durable.contains(subscription) {
                 durable.push(subscription.clone());
@@ -732,7 +721,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .get(&subscription.symbol)
                 .filter(|_| subscribed)
             {
-                self.routing.add(symbol, subscription.feed, observation.destination);
+                self.routing
+                    .add(symbol, subscription.feed, observation.destination);
                 continue;
             }
             if let Some(wanted) = self
@@ -755,7 +745,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     /// Append and barrier every fully admitted signal before reducer delivery.
-    fn accept_pending_signals(&mut self) -> Result<(), EngineError> {
+    fn accept_pending_signals<F: SignalFeed>(&mut self, feed: &mut F) -> Result<(), EngineError> {
         let observations = std::mem::take(&mut self.pending_signal_deliveries);
         let now = clock::now_ns();
         for observation in observations {
@@ -788,37 +778,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 observation: observation.clone(),
             })?;
             self.wal.barrier()?;
-            self.signal_cursors.insert(
-                observation.source.clone(),
-                SignalCursor {
-                    source: observation.source.clone(),
-                    sequence: observation.sequence,
-                    content_sha256: observation.content_sha256.clone(),
-                },
-            );
-            let subscriptions = self
-                .signal_subscriptions
-                .entry((observation.source.clone(), observation.destination.0))
-                .or_insert_with(|| SignalSubscriptionState {
-                    source: observation.source.clone(),
-                    destination: observation.destination,
-                    subscriptions: Vec::new(),
-                });
-            for subscription in &observation.subscriptions {
-                if !subscriptions.subscriptions.contains(subscription) {
-                    subscriptions.subscriptions.push(subscription.clone());
-                }
-            }
-            self.signal_observations.insert(
-                (observation.source.clone(), observation.sequence),
-                observation.clone(),
-            );
+            self.signals.accept(observation.clone());
             self.feed_one_strategy(
                 observation.destination,
                 &EngineEvent::Signal(observation),
                 now,
             );
         }
+        feed.acknowledge_last()
+            .map_err(|error| EngineError::State(error.to_string()))?;
+        self.update_signal_requests(feed)?;
         Ok(())
     }
 
@@ -945,14 +914,29 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Foreign and reduce-only orders are left alone: cancelling another
     /// writer's order or a protective exit is not a safe guess.
     fn queue_halted_entry_cancels(&mut self) -> Result<(), EngineError> {
-        if self.may_open && self.private_stream_ready {
+        if self.may_open
+            && self.private_stream_ready
+            && self.signals.gaps().next().is_none()
+            && self
+                .runtime_entries_enabled
+                .values()
+                .all(|enabled| *enabled)
+            && self.halt_cancels.is_empty()
+        {
             return Ok(());
         }
         let entries: Vec<(SymbolId, String)> = self
             .orders
             .in_flight()
             .into_iter()
-            .filter(|order| !order.request.reduce_only)
+            .filter(|order| {
+                !order.request.reduce_only
+                    && (!self.may_open
+                        || !self.private_stream_ready
+                        || self
+                            .opening_permission_reason(order.request.strategy)
+                            .is_some())
+            })
             .map(|order| (order.request.symbol, order.request.client_order_id.clone()))
             .collect();
         for (symbol, client_order_id) in entries {

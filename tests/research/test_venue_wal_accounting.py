@@ -770,3 +770,26 @@ def test_report_file_is_new_and_owner_readable_only(tmp_path: Path) -> None:
     assert json.loads(path.read_text()) == {"summary": {"venue_confirmed": 1}}
     with pytest.raises(FileExistsError):
         write_report(path, {"summary": {"venue_confirmed": 0}})
+
+
+@pytest.mark.parametrize("segment_kind", ["segment_base", "segment_base_v2"])
+def test_rotated_signal_gap_schema_retains_accounting_identity(tmp_path: Path, segment_kind: str) -> None:
+    family = tmp_path / "engine.wal"
+    _write_wal(family, [_wal_records()[0]])
+    _write_wal(Path(f"{family}.000002"), [
+        {
+            "kind": segment_kind,
+            "strategies": ["carry", "long"],
+            "symbols": ["BTCUSDT"],
+            "signal_gaps": [{"source": "worker", "destination": 1,
+                             "next_sequence": 10, "observed_sequence": 11}],
+            "open_orders": [{"request": _order("restated-entry", "Buy", 2.0, False)["request"]}],
+        },
+        _fill("restated-entry", "exec-restated", "Buy", 2.0, 100.0, 0.1, 1000),
+    ])
+    wal = read_wal_family(family)
+    assert len(wal.records) == 3
+    assert not wal.issues
+    accounting = parse_wal_accounting(wal)
+    assert not accounting.issues
+    assert len(accounting.open_trades) == 1

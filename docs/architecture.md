@@ -39,14 +39,17 @@ The signal worker delivers observations to the engine as immutable spool rows, a
 | :--- | :--- | :--- |
 | 1 | Worker | Writes the row atomically (temp file, `fsync`, rename, directory `fsync`). The row is the delivery. |
 | 2 | Worker | Sends the same bytes as one frame down `stream.sock`, one `write`, 200 ms timeout. Best effort: a failed frame changes nothing. |
-| 3 | Engine | Reads frames with resumable state, so a frame split across polls of the core's `select!` is still one frame. A client that disconnects mid-frame costs only that frame. |
-| 4 | Engine | On a frame, scans the spool: rows with a lower sequence were written before it and go first; the frame waits. Sequences are per source (`<source>.long`, `<source>.carry`). |
-| 5 | Engine | Retires a delivered row on the next poll, after the WAL barrier, whichever path it arrived by. The WAL cursor drops a duplicate. |
-| 6 | Engine (down) | Nothing is lost: rows accumulate; boot drains them in order before the socket is read. |
+| 3 | Engine | Reads bounded socket chunks as wake notifications; only the immutable spool parser delivers observations. Socket-only payloads cannot advance a cursor. |
+| 4 | Engine | Scans in bounded pages and prioritizes requested missing sequences. A gap writes and barriers `SignalGapRecorded`; its later row stays on disk. |
+| 5 | Engine | Appends and barriers each contiguous observation before reducer delivery, then explicitly acknowledges it. The next poll completes deletion; cancelled reads/deletions retain resumable state. |
+| 6 | Engine | Blocks affected strategies and declared input dependents from opening/amending exposure, cancels their resting entries, and withholds their other source/generation inputs until catch-up. Exact missing-prefix rows, independent destinations, private updates and protective actions remain serviceable. |
+| 7 | Engine (restart) | Replays accepted cursors, routes and gaps from WAL; `segment_base_v2` retains these across rotation. Deferred payloads remain in the spool. |
 
 * **Must**: every observation exist as a row before any frame names it.
-* **Must never**: a read on the socket hold partial-frame state on the future's stack; the core drops that future on every market event.
-* A source sequence gap logs `signal source has a sequence gap; continuing from the row on hand`, delivers the later row, and advances the durable cursor. It does not halt entries. Missing history can therefore reach strategy state; see [the audit's signal migration requirements](tier1-audit.md#signal-migration-requirements). Diagnosis: [docs/operations.md §8](operations.md#8-incident-recovery-matrix).
+* **Must never** retire an unacknowledged spool row or advance a cursor across a known gap.
+* **Must** preserve the complete source/generation identity and its strategy destination; changing generation cannot clear an older known gap.
+* **Must** retain the spool together with WAL during recovery. WAL retains gap metadata and accepted observations; it does not copy deferred payloads. See [signal recovery](operations.md#signal-prefix-recovery).
+* **Must** treat legacy accepted cursors as an evidence boundary: history already skipped by an older engine cannot be reconstructed from a cursor.
 
 ---
 

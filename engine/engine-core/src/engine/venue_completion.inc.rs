@@ -701,6 +701,23 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 Some(_) => {}
             }
         }
+        if let Some((reason, owned_symbol)) = self
+            .orders
+            .orders
+            .get(client_order_id)
+            .filter(|order| !order.request.reduce_only)
+            .and_then(|order| {
+                self.opening_permission_reason(order.request.strategy)
+                    .map(|reason| (reason, order.request.symbol))
+            })
+        {
+            self.wal.append(&WalRecord::Note {
+                source: "risk".into(),
+                text: format!("{client_order_id} not amended: {reason}; cancellation queued"),
+            })?;
+            self.enqueue_halt_cancel(owned_symbol, client_order_id.to_string());
+            return Ok(false);
+        }
         if spec.qty.is_some() {
             self.wal.append(&WalRecord::Note {
                 source: "engine".into(),

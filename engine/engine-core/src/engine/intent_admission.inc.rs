@@ -1,4 +1,24 @@
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
+    fn signal_inputs_blocked(&self, strategy: StrategyId) -> bool {
+        self.signal_dependencies
+            .get(strategy.0 as usize)
+            .is_some_and(|dependencies| {
+                dependencies
+                    .iter()
+                    .any(|source| self.signals.blocked(*source))
+            })
+    }
+
+    fn opening_permission_reason(&self, strategy: StrategyId) -> Option<&'static str> {
+        if self.signal_inputs_blocked(strategy) {
+            Some("signal_sequence_gap")
+        } else if self.runtime_entries_enabled.get(&strategy.0).copied() == Some(false) {
+            Some("runtime_entries_disabled")
+        } else {
+            None
+        }
+    }
+
     fn symbol_owned_by_another(&self, strategy: StrategyId, symbol: SymbolId) -> bool {
         self.attribution.held_by_another(strategy, symbol)
             || self.orders.opening_owned_by_another(strategy, symbol)
@@ -55,16 +75,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(None);
         }
 
-        if !intent.reduce_only
-            && self
-                .runtime_entries_enabled
-                .get(&intent.strategy.0)
-                .copied()
-                == Some(false)
+        if let Some(reason) = self
+            .opening_permission_reason(intent.strategy)
+            .filter(|_| !intent.reduce_only)
         {
             let verdict = RiskVerdict::Deny {
                 reason: DenyReason::UnknownState {
-                    detail: "this strategy's runtime entry permission is disabled".to_string(),
+                    detail: if reason == "signal_sequence_gap" {
+                        "signal_sequence_gap: a required source has missing observations"
+                            .to_string()
+                    } else {
+                        "this strategy's runtime entry permission is disabled".to_string()
+                    },
                 },
             };
             self.wal.append(&WalRecord::Verdict {
@@ -74,9 +96,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             tracing::info!(
                 strategy = intent.strategy.0,
                 tag = %intent.tag,
-                "refused: this strategy's runtime entry permission is disabled"
+                reason,
+                "refused: this strategy cannot open exposure"
             );
-            self.tell_refused(&intent, "runtime_entries_disabled");
+            self.tell_refused(&intent, reason);
             return Ok(None);
         }
 

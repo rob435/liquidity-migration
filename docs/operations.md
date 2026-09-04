@@ -205,38 +205,27 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | **Capture Dropping Frames** | CPU/disk saturation | Check `journalctl -u liquidity-migration-forward-capture`. Budget shedding will activate. |
 | **Recorder logs `over budget with every sheddable feed shed`** (hourly) | The feeds `budget.shed` cannot reach project more than `monthly_gb` on their own (`status.json` → `budget.projected_month_gb`, `bytes.by_feed_24h`). The controller has nothing left to give up. | A config decision, not a restart: extend `shed`, shrink a tier's universe, or move allowance between the recorders (`deploy/capture/*.toml`, `[budget]`). |
 | **Stranger Position Latched** | Unattributed fill on venue | Engine halts new entries. Run `attest-flat` and audit account on exchange. |
-| **Engine logs `ERROR signal source … has a sequence gap; continuing from the row on hand`** | The delivered source prefix is incomplete; the log alone does not establish whether files are missing or source/checkpoint ordering is wrong. The engine delivers the later row and the cursor records the jump without halting entries. | Inspect source generation, producer checkpoint, spool and WAL together. If missing rows were `funding_update` (lifecycle), reconcile the CARRY book with venue state. The complete acknowledgement/catch-up correction remains open in [the platform audit](tier1-audit.md#signal-migration-requirements). |
-| **Engine exits with `signal source … rewrote durable sequence N`** and loops under `Restart=always` | A worker republished a sequence with different bytes: a checkpoint was restored from a backup older than the engine's cursor, or two workers share one spool. Restarting does not help: the cursor is durable. | Start a new worker generation (recipe below). The engine treats `<source>.g<new>` as a fresh source starting at sequence 1 and keeps the old cursor. |
-| **Engine logs `WARN invalid signal frame size; dropping the stream`** | A frame wider than 16 MiB (the worker sends none since 2026-09-03) or a lost frame boundary (fixed 2026-09-03, resumable frame state). Not fatal: the row is on disk and the spool poll delivers it. | None if the row was delivered. If it repeats every hour, a row is wider than the frame cap: shrink the payload. |
+| **Engine logs `signal prefix missing; destination openings suspended until catch-up`** | `SignalGapRecorded` retains the missing sequence and observed high-water mark. The accepted cursor stays at the contiguous prefix; affected strategies and declared input dependents cannot open or amend entries, and their resting entries are cancelled. | Preserve the spool, worker checkpoint and WAL together. Recover the exact missing source/generation rows; catch-up clears the block automatically. Independent strategies and genuine exits remain available. See signal-prefix recovery below. |
+| **Engine exits with `signal source … rewrote durable sequence N`** and loops under `Restart=always` | A worker republishes an accepted sequence with different bytes; common causes include an older checkpoint or two workers sharing one spool. The cursor is durable. | Reconcile producer ownership/checkpoint and the exact accepted hash before recovery. A new generation does not clear an older gap; do not delete pending rows or reset sequence state as a shortcut. |
+| **Engine logs a signal-doorbell error** | The socket is only a wake notification; the immutable row remains authoritative and periodic spool scanning continues. | Check the socket owner and permissions if wake latency remains high; inspect spool delivery independently. |
 | **Worker exits with `spool class preflight underestimated an emitted observation batch`** | A `WireEvent` arm is missing from `projected_spool_files` (`engine/signal-worker/src/worker.rs`) for an event that emits a spool row. Every restart replays the same input and exits again. | Add the arm; the fix is a deploy. Nothing on the host needs cleaning. |
 | **Worker logs `instrument lane: …` every hour** | One venue row failed a check and the whole snapshot was refused; the worker's instrument table stops refreshing (`instruments` in `checkpoint.json` stays stale or empty). | Read the exact message. Fix the check to the venue's real shape (see 2026-09-03 in CHANGELOG); never let one row cost the table. |
 | **Any `CRITICAL` on the funded realm** | — | The watchdog pages the on-call agent ([docs/notifications.md](notifications.md) §On-call agent). The owner reads the run's PR. |
 
-### New signal-worker generation
+### Signal-prefix recovery
 
-Use when the engine exits with `rewrote durable sequence` for a source. The worker keeps its universe and input history; only the output sequence restarts, under a new `g<generation>` in the source id. The worker republishes its current state on the next tick.
+| Condition | Recovery requirement |
+| --- | --- |
+| Missing sequence is recoverable | Restore its exact immutable envelope under the original source/generation, sequence, destination and content hash; the engine requests that prefix ahead of later rows |
+| Later rows are present | Keep them in the spool; the WAL gap record does not duplicate these payloads |
+| Worker starts a new generation | Its inputs wait while its destination or an input dependency has an older known gap; the new source cannot clear that gap |
+| Missing history is irrecoverable | Keep affected openings blocked; reconcile strategy state, venue exposure and producer history before an explicitly approved state transition. No automatic gap waiver exists |
+| Accepted legacy cursor already skipped history | The missing history is not recoverable from the cursor; assess the producer/account evidence separately |
+| Binary rollback | An older engine rejects `SignalGapRecorded` and `segment_base_v2`; artifact qualification alone does not establish WAL compatibility. Preserve state and obtain approval before adoption or migration |
+
+Must never delete later-generation rows, rewrite accepted hashes, or edit a live cursor to clear a gap. Inspect logs read-only before selecting a recovery action (`<realm>` is `demo` or `mainnet`):
 
 ```bash
-# on the host, as root; <realm> is demo or mainnet
-systemctl stop liquidity-migration-signal-worker-<realm>
-python3 - <<'EOF'
-import json, os
-path = "/var/lib/liquidity-migration-signal-worker-<realm>/checkpoint.json"
-state = json.load(open(path))
-state["source_generation"] = ""
-tmp = path + ".tmp"
-with open(tmp, "w") as fh:
-    json.dump(state, fh, separators=(",", ":"))
-    fh.flush(); os.fsync(fh.fileno())
-os.rename(tmp, path)
-EOF
-chown liquidity-signal-worker:liquidity-migration /var/lib/liquidity-migration-signal-worker-<realm>/checkpoint.json
-systemctl start liquidity-migration-signal-worker-<realm>
-# Rows of the dead generation that sit above the engine's cursor are orphans:
-# the engine would log them as a gap. Remove them before it starts.
-grep -l "\"source\":\"[^\"]*<old generation>" /var/lib/liquidity-migration/signals/<realm>/*.json | xargs -r rm -f
-systemctl restart liquidity-migration-engine<-mainnet or empty>
-journalctl -u liquidity-migration-engine<-mainnet or empty> -n 20 --no-pager
+journalctl -u liquidity-migration-signal-worker-<realm> -n 100 --no-pager
+journalctl -u liquidity-migration-engine<-mainnet or empty> -n 100 --no-pager
 ```
-
-Rows of the old generation below the cursor are harmless: the engine ignores and retires them.

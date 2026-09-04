@@ -75,9 +75,8 @@ fn fee_payload_mut(
         .as_object_mut()
 }
 
-/// Serialize the current in-memory record into the rollback-readable WAL
-/// shape. New semantic state rides on fields and record kinds an older reader
-/// already accepts; the current reader restores the richer type on replay.
+/// Preserve legacy fee/checkpoint encodings. Required signal gap state uses
+/// versioned records so an older reader refuses it without discarding it.
 fn write_record<W: Write>(writer: &mut W, record: &WalRecord) -> Result<(), WalError> {
     if let WalRecord::ExecutionHistoryCheckpoint { through_wall_ts_ms } = record {
         let mut value = serde_json::Map::new();
@@ -123,6 +122,22 @@ fn write_record<W: Write>(writer: &mut W, record: &WalRecord) -> Result<(), WalE
 }
 
 fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
+    let record = read_compatible_record(payload)?;
+    if matches!(record, WalRecord::SegmentBase { .. }) {
+        let value: serde_json::Value = serde_json::from_slice(payload)?;
+        if value.get("kind").and_then(serde_json::Value::as_str) == Some("segment_base_v2")
+            && value.get("signal_gaps").is_none()
+        {
+            return Err(serde_json::Error::io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "segment_base_v2 is missing required signal_gaps state",
+            )));
+        }
+    }
+    Ok(record)
+}
+
+fn read_compatible_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
     let has_fee_marker = payload
         .windows(FEE_KNOWN_FIELD.len())
         .any(|window| window == FEE_KNOWN_FIELD.as_bytes());

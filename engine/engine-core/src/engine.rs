@@ -42,10 +42,10 @@ use engine_types::risk::ClosedTradeRow;
 use engine_types::{
     quantize, AccountView, Action, AmendSpec, DenyReason, EngineEvent, Feed, InstrumentRule,
     Intent, MarketEvent, MarketFeed, MarketState, OrderFeed, OrderKind, OrderRequest, OrderUpdate,
-    RiskKernel, RiskVerdict, RuntimeControlFeed, Side, SignalCursor, SignalFeed, SignalObservation,
-    SignalSubscriptionState, StopSpec, Strategy, StrategyCheckpoint, StrategyEvent,
-    StrategyGlobalCheckpointState, StrategyId, Subscription, SymbolId, SymbolTable, TimeInForce,
-    VenueError, VenueGateway, Wal, WalError, WalRecord, WorkPolicy,
+    RiskKernel, RiskVerdict, RuntimeControlFeed, Side, SignalFeed, SignalObservation, StopSpec,
+    Strategy, StrategyCheckpoint, StrategyEvent, StrategyGlobalCheckpointState, StrategyId,
+    Subscription, SymbolId, SymbolTable, TimeInForce, VenueError, VenueGateway, Wal, WalError,
+    WalRecord, WorkPolicy,
 };
 
 use crate::attribution::{self, Attribution};
@@ -331,14 +331,8 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     strategy_global_checkpoints: std::collections::BTreeMap<u16, StrategyGlobalCheckpointState>,
     /// Cross-sleeve events waiting for the addressed strategy to consume them.
     strategy_events: std::collections::BTreeMap<(u16, String), StrategyEvent>,
-    /// External observations waiting for the addressed strategy to consume
-    /// them, keyed by source and contiguous sequence.
-    signal_observations: std::collections::BTreeMap<(String, u64), SignalObservation>,
-    /// Highest contiguous signal sequence durably accepted per source.
-    signal_cursors: std::collections::BTreeMap<String, SignalCursor>,
-    /// Monotonic subscription union for each external source and destination.
-    /// Consumption and later observations do not clear market-data needs.
-    signal_subscriptions: std::collections::BTreeMap<(String, u16), SignalSubscriptionState>,
+    signals: crate::signal_state::SignalState,
+    signal_dependencies: Vec<Vec<StrategyId>>,
     /// Every accepted operator command, retained for request-id idempotence
     /// across WAL rotation.
     runtime_control_requests: Vec<engine_types::RuntimeControlRequest>,
@@ -612,6 +606,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut stopped_by = StopReason::Shutdown;
         let mut signals_open = true;
         let mut controls_open = true;
+        self.update_signal_requests(signal_feed)?;
 
         // Boot-restored cross-sleeve events and external observations were
         // delivered into this FIFO only after all checkpoints were restored.
@@ -684,7 +679,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         }
                     },
                     observation = signal_feed.next_observation(), if signals_open => match observation {
-                        Ok(observation) => self.queue_signal_observation(observation)?,
+                        Ok(observation) => self.queue_signal_observation(observation, signal_feed)?,
                         Err(engine_types::SignalError::Closed) => signals_open = false,
                         Err(error) => return Err(EngineError::State(error.to_string())),
                     },
@@ -720,7 +715,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     self.admit_wanted(market_feed, order_feed).await?;
                 }
                 if !self.pending_signal_deliveries.is_empty() {
-                    self.accept_pending_signals()?;
+                    self.accept_pending_signals(signal_feed)?;
                     self.drain(clock::now_ns()).await?;
                 }
                 continue;
@@ -752,7 +747,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             self.admit_wanted(market_feed, order_feed).await?;
                         }
                         if !self.pending_signal_deliveries.is_empty() {
-                            self.accept_pending_signals()?;
+                            self.accept_pending_signals(signal_feed)?;
                             self.drain(clock::now_ns()).await?;
                         }
                         continue;
@@ -781,7 +776,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     self.admit_wanted(market_feed, order_feed).await?;
                 }
                 if !self.pending_signal_deliveries.is_empty() {
-                    self.accept_pending_signals()?;
+                    self.accept_pending_signals(signal_feed)?;
                     self.drain(clock::now_ns()).await?;
                 }
                 continue;
@@ -829,7 +824,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     }
                 },
                 observation = signal_feed.next_observation(), if signals_open => match observation {
-                    Ok(observation) => self.queue_signal_observation(observation)?,
+                    Ok(observation) => self.queue_signal_observation(observation, signal_feed)?,
                     Err(engine_types::SignalError::Closed) => signals_open = false,
                     Err(error) => return Err(EngineError::State(error.to_string())),
                 },
@@ -870,7 +865,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.admit_wanted(market_feed, order_feed).await?;
             }
             if !self.pending_signal_deliveries.is_empty() {
-                self.accept_pending_signals()?;
+                self.accept_pending_signals(signal_feed)?;
                 self.drain(clock::now_ns()).await?;
             }
         }
@@ -1204,9 +1199,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .cloned()
                 .collect(),
             strategy_events: self.strategy_events.values().cloned().collect(),
-            signal_observations: self.signal_observations.values().cloned().collect(),
-            signal_cursors: self.signal_cursors.values().cloned().collect(),
-            signal_subscriptions: self.signal_subscriptions.values().cloned().collect(),
+            signal_observations: self.signals.observations().cloned().collect(),
+            signal_cursors: self.signals.cursors().cloned().collect(),
+            signal_subscriptions: self.signals.subscriptions().cloned().collect(),
+            signal_gaps: self.signals.gaps().cloned().collect(),
             runtime_control_requests: self.runtime_control_requests.clone(),
             runtime_control_consumed: self
                 .runtime_control_consumed

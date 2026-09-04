@@ -35,17 +35,17 @@ pub use orders::{
 pub use risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
 pub use strategy::{
     CheckpointProvenance, EngineEvent, RuntimeControlCommand, RuntimeControlError,
-    RuntimeControlFeed, RuntimeControlRequest, SignalError, SignalFeed, SignalObservation,
-    Strategy, StrategyAccountSummary, StrategyCheckpoint, StrategyCheckpointIdentity, StrategyCtx,
-    StrategyEvent, StrategyImportContext, StrategyImportSource, StrategyPositionFacts,
-    TranslatedStrategyEvent, TranslatedStrategyState, MAX_DURABLE_SIGNAL_SUBSCRIPTIONS,
-    MAX_SIGNAL_OBSERVATION_BYTES, MAX_SIGNAL_SUBSCRIPTIONS, MAX_STRATEGY_EVENT_BYTES,
-    MAX_STRATEGY_STATE_BYTES, SIGNAL_OBSERVATION_SCHEMA_VERSION,
+    RuntimeControlFeed, RuntimeControlRequest, SignalError, SignalFeed, SignalGapRequest,
+    SignalObservation, Strategy, StrategyAccountSummary, StrategyCheckpoint,
+    StrategyCheckpointIdentity, StrategyCtx, StrategyEvent, StrategyImportContext,
+    StrategyImportSource, StrategyPositionFacts, TranslatedStrategyEvent, TranslatedStrategyState,
+    MAX_DURABLE_SIGNAL_SUBSCRIPTIONS, MAX_SIGNAL_OBSERVATION_BYTES, MAX_SIGNAL_SUBSCRIPTIONS,
+    MAX_STRATEGY_EVENT_BYTES, MAX_STRATEGY_STATE_BYTES, SIGNAL_OBSERVATION_SCHEMA_VERSION,
     STRATEGY_ENTRY_PERMISSION_SCHEMA_VERSION,
 };
 pub use wal::{
     AnchorState, FilledTotal, IntendedStop, OpenOrderState, RecentExecutionId, SignalCursor,
-    SignalSubscriptionState, StrategyCheckpointState, StrategyGlobalCheckpointState,
+    SignalGap, SignalSubscriptionState, StrategyCheckpointState, StrategyGlobalCheckpointState,
     StrategySymbol, SymbolTotal, Wal, WalError, WalRecord,
 };
 

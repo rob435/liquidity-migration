@@ -29,6 +29,7 @@ pub mod reconcile;
 pub mod replay;
 pub mod routing;
 pub mod runner;
+mod signal_state;
 pub mod signals;
 pub mod takeover;
 pub mod timing;

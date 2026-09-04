@@ -153,14 +153,6 @@ fn replay_strategy_events(
     active
 }
 
-/// Durable external observations still awaiting their strategy, and each
-/// source's contiguous accepted sequence.
-struct ReplayedSignalState {
-    observations: std::collections::BTreeMap<(String, u64), SignalObservation>,
-    cursors: std::collections::BTreeMap<String, SignalCursor>,
-    subscriptions: std::collections::BTreeMap<(String, u16), SignalSubscriptionState>,
-}
-
 struct ReplayedRuntimeControlState {
     requests: Vec<engine_types::RuntimeControlRequest>,
     consumed: std::collections::BTreeSet<(u16, String)>,
@@ -222,77 +214,6 @@ fn replay_runtime_control_state(
         consumed,
         entries_enabled,
     })
-}
-
-fn replay_signal_state(replayed: &[WalRecord]) -> ReplayedSignalState {
-    let mut active = std::collections::BTreeMap::new();
-    let mut cursors = std::collections::BTreeMap::new();
-    let mut subscriptions = std::collections::BTreeMap::new();
-    for record in replayed {
-        match record {
-            WalRecord::SignalObservation { observation, .. } => {
-                active.insert(
-                    (observation.source.clone(), observation.sequence),
-                    observation.clone(),
-                );
-                cursors.insert(
-                    observation.source.clone(),
-                    SignalCursor {
-                        source: observation.source.clone(),
-                        sequence: observation.sequence,
-                        content_sha256: observation.content_sha256.clone(),
-                    },
-                );
-                let row = subscriptions
-                    .entry((observation.source.clone(), observation.destination.0))
-                    .or_insert_with(|| SignalSubscriptionState {
-                        source: observation.source.clone(),
-                        destination: observation.destination,
-                        subscriptions: Vec::new(),
-                    });
-                for subscription in &observation.subscriptions {
-                    if !row.subscriptions.contains(subscription) {
-                        row.subscriptions.push(subscription.clone());
-                    }
-                }
-            }
-            WalRecord::SignalObservationConsumed {
-                source, sequence, ..
-            } => {
-                active.remove(&(source.clone(), *sequence));
-            }
-            WalRecord::SegmentBase {
-                signal_observations,
-                signal_cursors,
-                signal_subscriptions,
-                ..
-            } => {
-                active = signal_observations
-                    .iter()
-                    .map(|observation| {
-                        (
-                            (observation.source.clone(), observation.sequence),
-                            observation.clone(),
-                        )
-                    })
-                    .collect();
-                cursors = signal_cursors
-                    .iter()
-                    .map(|cursor| (cursor.source.clone(), cursor.clone()))
-                    .collect();
-                subscriptions = signal_subscriptions
-                    .iter()
-                    .map(|row| ((row.source.clone(), row.destination.0), row.clone()))
-                    .collect();
-            }
-            _ => {}
-        }
-    }
-    ReplayedSignalState {
-        observations: active,
-        cursors,
-        subscriptions,
-    }
 }
 
 pub(crate) fn venue_minus_local_ms(
