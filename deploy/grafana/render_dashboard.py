@@ -351,12 +351,12 @@ def panels() -> list[Panel]:
             bars=True,
             overrides=_names(
                 [
-                    ("demo orders", "D · O"),
-                    ("mainnet orders", "M · O"),
-                    ("demo fills", "D · F"),
-                    ("mainnet fills", "M · F"),
-                    ("demo stream resets", "D · R"),
-                    ("mainnet stream resets", "M · R"),
+                    ("demo orders", "D orders"),
+                    ("mainnet orders", "M orders"),
+                    ("demo fills", "D fills"),
+                    ("mainnet fills", "M fills"),
+                    ("demo stream resets", "D resets"),
+                    ("mainnet stream resets", "M resets"),
                 ]
             ),
         )
@@ -508,7 +508,7 @@ def dashboard() -> dict[str, Any]:
         "tags": ["liquidity-migration"],
         "timezone": "utc",
         "schemaVersion": 39,
-        "version": 5,
+        "version": 6,
         "editable": True,
         "graphTooltip": 1,
         "refresh": "1m",

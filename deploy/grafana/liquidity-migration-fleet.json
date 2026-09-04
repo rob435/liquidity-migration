@@ -7,7 +7,7 @@
   ],
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 5,
+  "version": 6,
   "editable": true,
   "graphTooltip": 1,
   "refresh": "1m",
@@ -793,7 +793,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "D \u00b7 O"
+                "value": "D orders"
               }
             ]
           },
@@ -805,7 +805,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "M \u00b7 O"
+                "value": "M orders"
               }
             ]
           },
@@ -817,7 +817,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "D \u00b7 F"
+                "value": "D fills"
               }
             ]
           },
@@ -829,7 +829,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "M \u00b7 F"
+                "value": "M fills"
               }
             ]
           },
@@ -841,7 +841,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "D \u00b7 R"
+                "value": "D resets"
               }
             ]
           },
@@ -853,7 +853,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "M \u00b7 R"
+                "value": "M resets"
               }
             ]
           }

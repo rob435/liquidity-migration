@@ -654,3 +654,15 @@ def test_time_series_legends_do_not_squeeze_the_plots() -> None:
         assert legend["displayMode"] == "list"
         assert legend["placement"] == "bottom"
         assert legend["calcs"] == []
+
+
+def test_execution_activity_legend_uses_plain_metric_names() -> None:
+    dashboard = _dashboard()
+    panel = next(panel for panel in dashboard["panels"] if panel["title"] == "Execution activity · 15m")
+    names = {
+        property_["value"]
+        for override in panel["fieldConfig"]["overrides"]
+        for property_ in override["properties"]
+        if property_["id"] == "displayName"
+    }
+    assert names == {"D orders", "M orders", "D fills", "M fills", "D resets", "M resets"}
