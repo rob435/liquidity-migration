@@ -7,15 +7,29 @@ pub type Symbol = String;
 
 /// Interned symbol index. The hot path never touches strings; every
 /// per-symbol structure is a flat vector indexed by this.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SymbolId(pub u16);
 
+impl SymbolId {
+    /// The dense vector index this id names.
+    pub const fn idx(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// Interned strategy index, assigned at engine boot in config order.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct StrategyId(pub u16);
 
+impl StrategyId {
+    /// The dense vector index this id names.
+    pub const fn idx(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// Strategy-chosen timer identity, echoed back on expiry.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TimerId(pub u32);
 
 /// Bidirectional symbol interning. Built once at boot from the union of all
@@ -42,7 +56,7 @@ impl SymbolTable {
     }
 
     pub fn name(&self, id: SymbolId) -> &str {
-        &self.names[id.0 as usize]
+        &self.names[id.idx()]
     }
 
     pub fn len(&self) -> usize {
