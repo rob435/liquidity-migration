@@ -6,6 +6,88 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 16:21 UTC — Incident `host-bf5dcb6544d0dfdc`: the demo realm's
+  own watchdog has been off since 16:17:16, and a hand restart cannot re-arm
+  what the deploy disabled.**
+  - The page, `scope=host` on `ip-208-84-103-4`, one new `CRITICAL` ref
+    `watchdog:demo`: "`demo watchdog timer is inactive (disabled)`"
+    (`scripts/runtime/check_fleet_liveness.py:566`). The routine session was
+    created 16:21:10; the same line repeats in the host journal at 16:22:41,
+    16:25:51 and 16:28:53.
+  - The cause is the takeover fault in the entry below, repaired by `6027e7c`:
+    `import_native_strategy_state` (`scripts/deploy_vps_live.sh:1231`) runs
+    after `stop_realm_units demo` (`:1230`), `fail` is `exit 1`, and
+    `rollback_after_failure` (`:338`) covers only `start_realm`, so a refused
+    takeover exits with the realm's units stopped **and** disabled.
+  - What this page adds. It fired before run `33894054427` reached the host.
+    That job's ssh opened at 16:21:31 and its `stop_realm_units demo` ran at
+    ~16:21:39; the incident POST landed at 16:21:09. The host-liveness ticks
+    either side are 16:22:41, 16:25:50 and 16:28:53 on `OnUnitActiveSec=3min`,
+    so the firing tick ran at ~16:19:41, and the demo-liveness journal in its
+    payload ends at 16:17:16 with no 16:20:16 run. The demo timers were
+    therefore already `disable --now`-ed before that deploy. `scripts/ops.sh
+    deploy` (`scripts/ops.sh:299`) execs `scripts/deploy_vps_live.sh` straight
+    over SSH and leaves no Actions record, and `stop_realm_units` (`:449`) is
+    the only path in the tree that leaves a demo unit inactive and disabled:
+    the same takeover refusal happened once out of band at ~16:18-16:19, and
+    run `33894054427` then repeated it into a log at 16:22:06. Out-of-band
+    deploys are demonstrably in use: run `33895768916`'s `vps` job exited
+    `deploy failed: another deploy is already running` at 16:40:20, so
+    something outside Actions held `/run/liquidity-migration/deploy.lock` at
+    that moment.
+  - The 16:24 hand restore started `liquidity-migration-engine.service` and
+    `liquidity-migration-signal-worker-demo.service`. It did not re-enable the
+    two demo timers. Diagnose run `33895444319`, 16:29:54:
+    `liquidity-migration-demo-liveness.timer inactive`,
+    `liquidity-migration-chaos-drill.timer inactive`, demo engine active
+    heartbeat 1 s, demo worker active heartbeat 4 s, mainnet timer and units
+    active, `real-money armed`, `deployed 1193043`. So the demo realm traded
+    from 16:17:16 with nothing reading its heartbeat ages, `may_open`, the
+    rolling-loss trip or the worker verdict; the host scope saw only that the
+    timer was down. `ops.sh restart|start` runs bare `systemctl`
+    (`scripts/ops.sh:216`), never `enable`, so a hand restart cannot restore
+    what `disable --now` stripped, and until something enables them the timers
+    do not return at boot either.
+  - No code change here, and `6027e7c` is the right repair, re-derived from
+    source: `Engine::boot`
+    (`engine/engine-core/src/engine/boot_recovery.inc.rs:90`) already required
+    only `configured.starts_with(prior)`, and `Engine::rotation_base`
+    (`engine/engine-core/src/engine.rs:1149`) rewrites the Names table from
+    the running config, so the WAL's 3-name table becomes 4 at the next
+    rotation with no migration. `start_realm` reaches both demo timers through
+    `start_unit` (`scripts/deploy_vps_live.sh:298`), which is
+    `systemctl enable --now`: a landed deploy is what re-arms them.
+  - Deploy receipt, and why this session dispatched none of its own: run
+    `33895290275` (`6027e7c`) was cancelled by the next dispatch, and run
+    `33895768916` (`2594e6b`, which contains `6027e7c`) reached the host and
+    refused the lock at 16:40:20. A third dispatch would only collide with
+    whatever holds it. The demo timers are re-armed by the first deploy that
+    completes `start_realm demo`; until one does, they are down.
+  - Host-side, by hand, only if no deploy lands: re-arm the two demo timers
+    directly, since no `ops.sh` verb enables a unit.
+    ```
+    ssh root@208.84.103.4 'systemctl enable --now \
+      liquidity-migration-demo-liveness.timer \
+      liquidity-migration-chaos-drill.timer'
+    scripts/ops.sh status
+    ```
+  - Two exposures for the owner, not built here. First,
+    `stop_realm_units` disables for a handover that is about to re-enable, and
+    the identical two lines run for the funded realm (`:1249`, `:1250`): a
+    mainnet takeover refusal would leave the funded
+    `liquidity-migration-engine-mainnet.service` stopped and disabled with
+    positions open, and no reboot would bring it back. `systemctl stop` would be enough there; `stop_mainnet_units`
+    (`:1140`) keeps `disable` for the disarm, where it is load-bearing. Second,
+    `rollback_after_failure` could cover the takeover step as it covers the
+    start. Both are risk trades on the funded path, so they are the owner's
+    call.
+  - Host-side readings that would date the out-of-band failure exactly, which
+    this session cannot take: `systemctl show
+    liquidity-migration-demo-liveness.timer -p InactiveEnterTimestamp`,
+    `journalctl -u liquidity-migration-engine.service --since 16:15`, and
+    `scripts/ops.sh curve demo 60`, whose minute samples write `state=absent`
+    for a realm with no readable heartbeat.
+
 - **2026-09-04 16:11 UTC — Incident `mainnet-014ec4a90a2fde5f`, third fire:
   nothing new in the worker, and the deploy-handoff hold turns out to be inert
   for every key it names.**
