@@ -385,14 +385,18 @@ fn append_import<W: Wal>(
     Ok(ImportOutcome::Imported)
 }
 
+// Strategy identity is append-only: a WAL name owns its id forever, and a
+// config may add ids after the ones the WAL knows. `Engine::boot` takes the
+// same rule (`configured.starts_with(prior)`), so this must too, or a deploy
+// that appends a sleeve cannot import the state of the sleeves that existed.
 fn verify_names(configured: &[String], replayed: &[WalRecord]) -> Result<(), Box<dyn Error>> {
     let logged = crate::replay::LogNames::of_log(replayed).strategies;
     if logged.is_empty() {
         return Err("the nonempty WAL has no Names strategy table".into());
     }
-    if logged != configured {
+    if !configured.starts_with(logged.as_slice()) {
         return Err(format!(
-            "config strategy order {:?} does not match WAL Names {:?}",
+            "config strategy order {:?} does not preserve the WAL Names prefix {:?}",
             configured, logged
         )
         .into());
@@ -1211,7 +1215,47 @@ mod tests {
             verify_names(&["carry".into(), "long".into(), "exodus".into()], &replayed)
                 .unwrap_err()
                 .to_string()
-                .contains("does not match")
+                .contains("does not preserve")
+        );
+    }
+
+    #[test]
+    fn an_appended_strategy_keeps_the_takeover_and_a_dropped_one_does_not() {
+        let replayed = vec![WalRecord::Names {
+            strategies: vec!["carry".into(), "long".into(), "exodus".into()],
+            symbols: vec![],
+        }];
+        verify_names(
+            &[
+                "carry".into(),
+                "long".into(),
+                "exodus".into(),
+                "probe".into(),
+            ],
+            &replayed,
+        )
+        .expect("a config that appends an id after the WAL's own may still import state");
+        assert!(
+            verify_names(&["carry".into(), "long".into()], &replayed)
+                .unwrap_err()
+                .to_string()
+                .contains("does not preserve"),
+            "dropping an id the WAL owns is not an append"
+        );
+        assert!(
+            verify_names(
+                &[
+                    "probe".into(),
+                    "carry".into(),
+                    "long".into(),
+                    "exodus".into()
+                ],
+                &replayed
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("does not preserve"),
+            "inserting before the WAL's ids renumbers them"
         );
     }
 

@@ -6,6 +6,40 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 16:22 UTC — The demo realm was left stopped by a deploy: the
+  state takeover refused the appended `probe` id the engine itself accepts.**
+  - Run `33894054427`'s `vps` job, deploying `fc22e3b`, printed
+    `engine: config strategy order ["carry", "long", "exodus", "probe"] does
+    not match WAL Names ["carry", "long", "exodus"]` twice, then
+    `deploy failed: cannot import exact LONG state for demo` and
+    `deploy failed: demo strategy-state takeover failed`, and exited 1 at
+    16:22:06. `import_native_strategy_state` runs after `stop_realm_units
+    demo` and `fail` is `exit 1`, so `liquidity-migration-engine.service` and
+    `liquidity-migration-signal-worker-demo.service` stayed down from
+    16:21:40. Mainnet was never reached: the funded engine and worker kept
+    running on `1193043` throughout, and both recorders read
+    `unchanged-left-running`.
+  - `039b781` appended `probe` as id 3 of the demo config, which is the
+    engine's own rule: `Engine::boot`
+    (`engine/engine-core/src/engine/boot_recovery.inc.rs:90`) requires only
+    that the configured names start with the WAL's prefix. `verify_names`
+    (`engine/engine-core/src/takeover.rs:388`) demanded exact equality, so the
+    `import-strategy-state` and `verify-native-strategy-state` commands the
+    deploy runs while the realm is stopped refused a config the engine would
+    have booted.
+  - `verify_names` now takes the same append-only rule: a config that extends
+    the WAL's name list keeps its takeover; dropping a logged id, reordering,
+    or inserting before one still fails, now saying `does not preserve the WAL
+    Names prefix`. Existing ids cannot be renumbered, which is what the import
+    depends on.
+  - `an_appended_strategy_keeps_the_takeover_and_a_dropped_one_does_not` fails
+    on the parent commit with the host's exact message and passes here. Local:
+    `cargo fmt --check`, `cargo clippy -p engine-core --all-targets` and all
+    510 `engine-core` library tests green.
+  - No config was reverted and no state was edited by hand. The realm comes
+    back with the next deploy of `main`, which is the same command that
+    stopped it: `gh workflow run vps-deploy.yml --ref main -f mode=deploy`.
+
 - **2026-09-04 16:02 UTC — Incident `mainnet-014ec4a90a2fde5f`: the mainnet
   half of the same cold-start page. Fixed by `fc22e3b`; the alert now says how
   short the fill is.**
