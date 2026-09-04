@@ -137,9 +137,10 @@ jobs:
   # deploy path: a red here is investigated, it does not hold a deploy.
   rust-soak-bench:
     name: Engine release tests, soak and benchmarks
-    if: >-
-      github.event_name != 'workflow_dispatch' ||
-      (inputs.mode != 'disarm-mainnet' && inputs.mode != 'diagnose')
+    # Push and PR runs exercise this exact SHA. Repeating it in a manual
+    # operation would keep the production concurrency group occupied after
+    # the VPS job has already finished.
+    if: github.event_name != 'workflow_dispatch'
     needs: [rust]
     runs-on: ubuntu-latest
     timeout-minutes: 45

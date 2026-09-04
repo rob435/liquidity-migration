@@ -284,6 +284,7 @@ def test_ci_tests_the_debug_build_on_the_gate_and_the_release_build_off_it() -> 
     assert "--release" not in rust and "--profile" not in rust
     release = workflow[workflow.index("\n  rust-soak-bench:\n") : workflow.index("\n  disarm:\n")]
     assert "cargo test --workspace --all-targets --release --locked" in release
+    assert "if: github.event_name != 'workflow_dispatch'" in release
     vps = workflow[workflow.index("\n  vps:\n") :]
     assert "needs: [ci, rust, rust-artifact]" in vps
     # Push runs never queue behind each other; only dispatched VPS operations share a group.

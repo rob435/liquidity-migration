@@ -26,6 +26,11 @@ edit STATE.md to match.
     Full local gate: repository doctor ready, Ruff, ShellCheck and mypy clean,
     1,451 Python tests pass, Rust format and Clippy clean, and every Rust
     workspace test passes.
+  - Manual deploy, rollback, and verify runs no longer repeat the release-only
+    tests, soak, and benchmark. The exact SHA's push run still performs them;
+    the manual VPS job retains its CI, Rust, release-artifact, and smoke gates.
+    This keeps an off-path job from holding the serialized production queue
+    after the host operation has finished.
 
 - **2026-09-04 16:45 UTC — The order path has a measurement again, and the
   recorder stopped dropping frames. Both verified on the host.**
