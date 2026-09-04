@@ -150,6 +150,9 @@ struct LaneState {
     funding: bool,
     whales: bool,
     repair: bool,
+    // The newest epoch the live stream has reported. Only
+    // `mark_gap_repaired(epoch)` closes the WebSocket gap, and callers that
+    // restart the repair lane without an epoch must not erase it.
     repair_epoch: Option<u64>,
     instruments_ready: bool,
     funding_ready: bool,
@@ -1173,7 +1176,7 @@ impl LiveRunner {
             }
             LaneCompletion::RepairFinished { end_ms, epoch } => {
                 lanes.repair = false;
-                let repaired_epoch = lanes.repair_epoch.take().or(epoch);
+                let repaired_epoch = lanes.repair_epoch.or(epoch);
                 let pending_committed =
                     self.flush_pending_klines_or_recover(stream, pending, lane_tx, lanes)?;
                 if !pending_committed {
@@ -1487,7 +1490,6 @@ impl LiveRunner {
                 ))
         });
         lanes.repair = true;
-        lanes.repair_epoch = epoch;
         spawn_repair_lane(
             lane_tx.clone(),
             self.bybit.clone(),
@@ -1496,7 +1498,7 @@ impl LiveRunner {
             self.config.live.max_parallel_requests,
             jobs,
             end_ms,
-            epoch,
+            lanes.repair_epoch,
         );
         Ok(())
     }
@@ -4369,6 +4371,65 @@ mod tests {
 
         assert!(lanes.repair);
         assert_eq!(lanes.repair_epoch, Some(7));
+        drop(runner);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_repair_restarted_without_an_epoch_keeps_the_live_one() {
+        // The carry catch-up and the instrument lane restart the repair lane
+        // with no epoch, and only `mark_gap_repaired(epoch)` closes the
+        // WebSocket gap. Dropping the epoch there left the gap open for the
+        // life of the process, however complete the coverage became.
+        let root = temporary_root("repair-restart-keeps-epoch");
+        let _ = std::fs::remove_dir_all(&root);
+        let options = LiveRunOptions {
+            state_dir: root.join("state"),
+            spool_dir: root.join("spool"),
+            heartbeat: root.join("heartbeat.json"),
+        };
+        let mut runner =
+            LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
+        let mut stream =
+            BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap();
+        let mut pending = BTreeMap::new();
+        let (lane_tx, _lane_rx) = tokio::sync::mpsc::channel(1);
+        let mut lanes = LaneState {
+            repair: true,
+            repair_epoch: Some(4),
+            ..LaneState::default()
+        };
+
+        runner
+            .handle_lane_completion(
+                LaneCompletion::RepairFinished {
+                    end_ms: 100 * DAY_MS,
+                    epoch: None,
+                },
+                &mut stream,
+                &mut pending,
+                &lane_tx,
+                &mut lanes,
+            )
+            .unwrap();
+        assert_eq!(
+            lanes.repair_epoch,
+            Some(4),
+            "a finished repair leaves the live epoch for the next pass"
+        );
+
+        lanes.repair = false;
+        runner
+            .start_kline_repair(&lane_tx, &mut lanes, None)
+            .unwrap();
+        assert!(lanes.repair);
+        assert_eq!(
+            lanes.repair_epoch,
+            Some(4),
+            "an epoch-less restart keeps the epoch that closes the gap"
+        );
+
+        drop(stream);
         drop(runner);
         std::fs::remove_dir_all(root).unwrap();
     }

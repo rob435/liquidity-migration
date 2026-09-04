@@ -6,6 +6,58 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 15:57 UTC — Incident `mainnet-014ec4a90a2fde5f`: the funded
+  worker's repair gap could not close after the first pass, because an
+  epoch-less restart threw the live epoch away.**
+  - The page, mainnet scope on `ip-208-84-103-4`, one `CRITICAL` ref
+    `worker-status:liquidity-migration-signal-worker-mainnet.service`: "reports
+    'degraded': Bybit WebSocket repair gap open for 4512s; carry cycle has not
+    completed", sampled 15:57:34 UTC. The journal's only stream lines are
+    `gap opened in epoch 1` with `Bybit public keep-alive was unanswered` at
+    15:57:33 and `entered epoch 2` at 15:57:34, and 4512 s is exactly the age
+    of the 14:42:22 process, so the gap dated from process start, not from the
+    reconnect. The funded engine kept its heartbeat throughout and `real-money`
+    stayed armed. This is the mainnet twin of `demo-0922e9f30da3bf98` below:
+    same pre-fix binary, same tick, same `1193043` handover at 16:00:56 that
+    replaced it, and the cold-start half of the fix is that entry's.
+  - What that entry leaves open is the fix in `66088da` itself, which closes
+    the gap only from an epoch some caller supplied.
+    `start_kline_repair` overwrote `lanes.repair_epoch` with the caller's
+    `None` (`live.rs:1490` on the parent commit) and `RepairFinished` took it
+    (`live.rs:1176`), so the two callers that restart the lane without an
+    epoch — the carry catch-up (`live.rs:2102`) and the instrument lane
+    (`live.rs:961`) — discarded the epoch the stream had reported.
+    `advance_kline_watermark` returns early while a repair runs, so with the
+    carry scorer catching up, every restart follows the previous finish and
+    nothing re-supplies it: `stream.mark_gap_repaired` is never reached and the
+    gap stays open for the life of the process however complete the coverage
+    becomes. That is the same permanently-degraded verdict this incident paged
+    on, reached a second way.
+  - The epoch is now stream state: adopted whenever the stream reports one,
+    retained across an epoch-less restart, and read rather than taken at the
+    finish, with the lane spawned from the retained value.
+    `mark_gap_repaired` already refuses an epoch that is not the live connected
+    one, so a retained epoch cannot close a gap belonging to a newer epoch.
+  - `a_repair_restarted_without_an_epoch_keeps_the_live_one` fails on the
+    parent commit twice over: `None` where the finished repair should have left
+    `Some(4)`, and `None` again after the epoch-less restart. Local: `cargo fmt
+    --check`, `cargo clippy --workspace --all-targets --locked -D warnings`,
+    and every engine test green except `market-tape`'s
+    `test_segment_writer_writes_and_compresses`, which fails identically on the
+    parent commit because this container has no `zstd`; Ruff and
+    `tests/scripts/test_scripts_check_fleet_liveness.py` green; ShellCheck and
+    mypy are not installable here.
+  - Owner action: none by hand. The deploy recorded below restarts both realms,
+    which is what puts the retained epoch into the running workers. Read the
+    result with `scripts/ops.sh status`, the worker with `scripts/ops.sh logs
+    signal-worker-mainnet 200`, and the account through the incident with
+    `scripts/ops.sh curve mainnet`.
+  - Not fixed, proposed: a warm worker reports `degraded` for as long as any gap
+    is open, so an ordinary venue reconnect — Bybit reset this process at 01:08
+    and again at 15:57 — pages `CRITICAL` whenever a 3-minute watchdog tick
+    lands before the repair closes it. Debouncing the verdict, or reading a gap
+    younger than one repair pass as healthy, is a threshold for the owner.
+
 - **2026-09-04 16:05 UTC — Incident `demo-0922e9f30da3bf98`: a cold start is
   not a degraded worker. The startup grace no longer waits on ticker coverage
   the stream has not delivered yet.**
