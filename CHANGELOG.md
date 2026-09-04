@@ -6,6 +6,25 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 20:00 UTC — Record the independent platform audit and correct durability/gap descriptions (local checkpoint).**
+  - `docs/tier1-audit.md` verifies the handoff against `e2345ca4`, separates
+    existing protections from missing capabilities, and orders the next work
+    around signal delivery, durability/release evidence, stable registries,
+    portfolio attribution, exact values, and bounded callbacks.
+  - The signal gap remains open. A memory-only inbox loses rows because the
+    feed implicitly retires the previous row on its next poll; pausing polling
+    at a full durable inbox also prevents the missing prefix from arriving,
+    including after restart. A complete explicit acknowledgement/catch-up
+    contract is required. No partial halt, buffer or WAL version is added.
+  - Current `main` is signed but unprotected; the handoff head is unsigned.
+    GitHub rejects the ruleset query with HTTP 403 requiring a plan upgrade or
+    public repository. No setting or workflow is changed.
+  - Source and operator documentation now describe actual gap continuation,
+    barrier-start versus disk-completion timing, and checksum corruption
+    refusal. Benchmark explanatory text no longer calls barrier-start timing
+    an fsync duration. These corrections leave measured segments and runtime
+    behavior unchanged; the full local gates above include this source.
+
 - **2026-09-04 19:59 UTC — Preserve exclusive symbol ownership in native planning and central admission (local checkpoint).**
   - `planner_facts` skipped another sleeve's holding but retained its price and
     instrument rule; `position_plan` interpreted the missing holding as flat

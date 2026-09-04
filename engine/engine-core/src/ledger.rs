@@ -4,8 +4,9 @@
 //!
 //! - **decide** — market message arrived (`recv_ns`) until the strategy's
 //!   intent was decided.
-//! - **durable** — intent decided until the order record is on disk, past the
-//!   barrier. This is the fsync.
+//! - **durable** — intent decided until the order group's durability barrier
+//!   is requested. Disk completion is still outstanding; this is not fsync
+//!   duration. **barrier wait** measures the later wait for that completion.
 //! - **submit result** — intent decided until `send_orders` returned (in
 //!   shadow mode, until the point where the send was skipped). This includes
 //!   the adapter's request, response, and reply parsing; it is not a socket

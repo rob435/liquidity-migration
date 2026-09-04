@@ -246,8 +246,8 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
             );
             println!("{}", result.table());
             println!(
-                "  the fsync is inside \"write it down\"; \"API round trip\" is a local socket,\n  \
-                 so the real venue's network and matching-engine time is not in these numbers."
+                "  \"write it down\" ends at barrier request; \"still waiting on the disk\" is the later wait.\n  \
+                 \"API round trip\" uses localhost; real venue network and matching time are not measured."
             );
             Ok(())
         }

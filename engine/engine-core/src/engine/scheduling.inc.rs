@@ -620,7 +620,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     /// Validate one external envelope and hold it until its requested symbol
     /// set is aligned across every engine table. Old spool rows are ignored by
-    /// the durable per-source cursor; a gap stops delivery.
+    /// the durable per-source cursor; sequence gaps are logged and skipped.
     fn queue_signal_observation(
         &mut self,
         observation: SignalObservation,

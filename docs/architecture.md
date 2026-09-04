@@ -46,7 +46,7 @@ The signal worker delivers observations to the engine as immutable spool rows, a
 
 * **Must**: every observation exist as a row before any frame names it.
 * **Must never**: a read on the socket hold partial-frame state on the future's stack; the core drops that future on every market event.
-* A sequence gap (`signal source … has sequence gap`) means a row was deleted from the spool by something other than the engine. It stops the engine. Recovery: [docs/operations.md §8](operations.md#8-incident-recovery-matrix).
+* A source sequence gap logs `signal source has a sequence gap; continuing from the row on hand`, delivers the later row, and advances the durable cursor. It does not halt entries. Missing history can therefore reach strategy state; see [the audit's signal migration requirements](tier1-audit.md#signal-migration-requirements). Diagnosis: [docs/operations.md §8](operations.md#8-incident-recovery-matrix).
 
 ---
 

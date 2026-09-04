@@ -7,13 +7,13 @@
 //!
 //! One writer — [`lock`] is how that is made true rather than assumed.
 //! Appends are buffered; [`Wal::flush`] hands the bytes to the OS,
-//! [`Wal::barrier`] also waits for the disk and is the durability point used
-//! before an order leaves the socket.
+//! [`Wal::barrier`] also waits for the disk. [`Wal::barrier_begin`] lets the
+//! caller overlap disk synchronization with venue I/O and wait later.
 //!
 //! On open the log is replayed. A tail that did not survive a crash — a short
-//! frame, a frame that runs past the end of the file, or one whose checksum
-//! does not match — is cut off, and appending resumes on that boundary. A bad
-//! header is refused instead: a file that is not ours is not ours to truncate.
+//! frame or a frame that runs past the end of the file — is cut off, and
+//! appending resumes on that boundary. A bad header, mismatched checksum, or
+//! checksum-valid unsupported record is refused without truncating the file.
 //!
 //! ## Segments
 //!
