@@ -6,6 +6,57 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 16:02 UTC — Incident `mainnet-014ec4a90a2fde5f`: the mainnet
+  half of the same cold-start page. Fixed by `fc22e3b`; the alert now says how
+  short the fill is.**
+  - The page, mainnet scope on `ip-208-84-103-4`, one `CRITICAL` ref
+    `worker-status:liquidity-migration-signal-worker-mainnet.service`:
+    "`liquidity-migration-signal-worker-mainnet.service reports 'degraded':
+    Bybit WebSocket repair gap open for 73s; ticker coverage incomplete; carry
+    cycle has not completed`". Same fault, same 16:00:56 restart, same
+    diagnosis as the `demo-0922e9f30da3bf98` entry below, reached
+    independently: `startup_runtime_status` could not grant `starting` while
+    the stream's ticker coverage was still filling, so every boot published
+    `degraded`. `fc22e3b` was already on `main` with the repair when this
+    session went to push; nothing in that fix is duplicated here.
+  - Same incident id, second fire. The ref id is per fault, and it rearms on
+    resolution: the 15:57:34 fire on the 14:42:22 process (4512 s gap) is the
+    entry below, repaired by `862a452`; this is the 16:02:13 fire on the
+    16:00:56 process that replaced it. Two distinct faults, one id.
+  - No trading fault. Only the watchdog reads this heartbeat — `grep -rl
+    liquidity_migration_signal_worker_heartbeat` finds `live.rs`,
+    `check_fleet_liveness.py` and its test — so a `degraded` verdict pages and
+    changes no order. The payload's own detail shows the worker working: no
+    disconnect, no quarantined topics, and only the carry cycle named, so the
+    LONG cycle had completed inside those 73 seconds.
+  - What changed here. `_signal_worker_detail`
+    (`scripts/runtime/check_fleet_liveness.py:232`) printed a bare "ticker
+    coverage incomplete", which could not tell a fill short by six symbols from
+    an empty one — the reason this session could not close the diagnosis from
+    the payload alone. It now prints the counts the heartbeat already carries:
+    "ticker coverage incomplete (511/517 rows, 517/517 topics accepted)".
+    `test_incomplete_ticker_coverage_says_how_short_the_fill_is` pins that and
+    the absent-field fallback; it fails on the old bare string.
+  - Two bounds the owner may want tighter, both `fc22e3b`'s deliberate choices,
+    left alone rather than re-cut by a second writer minutes later:
+    `stream_startup_inputs_healthy` requires every topic accepted and the
+    stream connected, so the dial-and-subscribe window — ~11 chunks of 100
+    topics, each with a 10 s ack timeout — still reads `degraded` from the
+    first heartbeat, 5 s after boot; and an unfinished fill now pages at the
+    120-minute `STARTUP_MAX_MS` bound rather than the ~2-3 minutes the fill
+    itself takes. A bound of the fill's own size (dial, acks, one 30 s
+    `mark_max_age_ms` window) would close both.
+  - Also unchanged and pre-existing: `reconfigure_stream` (`live.rs`) respawns
+    the stream when the hourly instrument refresh changes the symbol set, and
+    that mid-life fill reads `degraded` under both the old rule and the new,
+    because the startup budget runs from process start. Not seen in this
+    incident's journal.
+  - Host-side actions: none required. Verified with `scripts/dev.sh check`
+    green on this commit — doctor `overall: ready`, Ruff and mypy clean, 1447
+    pytest passed (`zstd` and `rsync` installed locally so the 16 tests
+    `fc22e3b` had to skip ran), rustfmt and clippy clean, every cargo suite
+    passed. Rollout receipt below.
+
 - **2026-09-04 15:57 UTC — Incident `mainnet-014ec4a90a2fde5f`: the funded
   worker's repair gap could not close after the first pass, because an
   epoch-less restart threw the live epoch away.**

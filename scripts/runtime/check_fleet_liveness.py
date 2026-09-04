@@ -230,7 +230,17 @@ def _signal_worker_detail(payload: dict[str, object], *, now: float) -> str:
             age_sec = max(0.0, now - since_ms / 1000)
             reasons.append(f"Bybit WebSocket repair gap open for {age_sec:.0f}s")
     if payload.get("bybit_ws_ticker_coverage_complete") is not True:
-        reasons.append("ticker coverage incomplete")
+        # The counts say whether the fill is short by a few symbols or empty.
+        rows = _number(payload.get("bybit_ws_ticker_rows"))
+        capacity = _number(payload.get("bybit_ws_ticker_capacity"))
+        accepted = _number(payload.get("bybit_ws_ticker_topics_accepted"))
+        if rows is None or capacity is None or accepted is None:
+            reasons.append("ticker coverage incomplete")
+        else:
+            reasons.append(
+                f"ticker coverage incomplete ({rows:g}/{capacity:g} rows, "
+                f"{accepted:g}/{capacity:g} topics accepted)"
+            )
     ticker_quarantined = _number(payload.get("bybit_ws_ticker_topics_quarantined"))
     kline_quarantined = _number(payload.get("bybit_ws_kline_topics_quarantined"))
     if ticker_quarantined is not None and ticker_quarantined > 0:

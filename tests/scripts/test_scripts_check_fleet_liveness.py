@@ -176,6 +176,34 @@ def test_signal_worker_startup_is_quiet_but_degraded_and_backpressured_page(
     assert [alert.key for alert in alerts] == ["worker-spool:worker"]
 
 
+def test_incomplete_ticker_coverage_says_how_short_the_fill_is(tmp_path: Path) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    payload = {
+        "kind": "liquidity_migration_signal_worker_heartbeat",
+        "status": "degraded",
+        "bybit_ws_connected": True,
+        "bybit_ws_gap_open": False,
+        "bybit_ws_ticker_coverage_complete": False,
+        "bybit_ws_ticker_rows": 511,
+        "bybit_ws_ticker_capacity": 517,
+        "bybit_ws_ticker_topics_accepted": 517,
+        "bybit_ws_ticker_topics_quarantined": 0,
+        "bybit_ws_kline_topics_quarantined": 0,
+        "last_long_cycle_completed_wall_ts_ms": 900_000,
+        "last_carry_cycle_completed_wall_ts_ms": 900_000,
+        "long_cycle_cadence_ms": 60_000,
+        "carry_cycle_cadence_ms": 60_000,
+    }
+    heartbeat.write_text(json.dumps(payload))
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert [alert.key for alert in alerts] == ["worker-status:worker"]
+    assert "ticker coverage incomplete (511/517 rows, 517/517 topics accepted)" in alerts[0].message
+
+    heartbeat.write_text(json.dumps({key: value for key, value in payload.items() if key != "bybit_ws_ticker_rows"}))
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert "ticker coverage incomplete" in alerts[0].message
+
+
 def test_signal_worker_unknown_status_fails_closed(tmp_path: Path) -> None:
     heartbeat = tmp_path / "heartbeat.json"
     heartbeat.write_text(
