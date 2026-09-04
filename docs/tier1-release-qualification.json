@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "qualified_commit": "15c60924abfb9f5c7848b7ee7b4c5853f2b932d3",
+  "artifact_name": "liquidity-tier1-qualified-15c60924.tar.gz",
+  "artifact_sha256": "fb305f2135197df578ac4014215d1f231e479a3127352b2ed4f70b7f95167606",
+  "qualification": {
+    "binaries": {
+      "engine": "e7be3ad3a4eb68e78800ee15d9da5484fce66ce81700f6da598afcd2912f48f2",
+      "market-tape": "814d1ac5505ac4c86045ee05541e14743958748262308698985fa633d36e3a55",
+      "signal-worker": "d76a48b53d467e691e4167c4d2c9492297288ba561198ae7c7f62fbf573a8de6"
+    },
+    "checks": [
+      "release-tests",
+      "account-state-soak",
+      "engine-bench",
+      "binary-smoke"
+    ],
+    "commit": "15c60924abfb9f5c7848b7ee7b4c5853f2b932d3",
+    "log_sha256": "6b16300ebd3eea56eef14aab71f617e150d3eb6e3d28d6e4eeab9e3077943bba",
+    "platform": [
+      "Darwin",
+      "arm64"
+    ],
+    "profile": "release",
+    "rustc": "rustc 1.90.0 (1159e78c4 2025-09-14)\nbinary: rustc\ncommit-hash: 1159e78c4747b02ef996e55082b704c09b970588\ncommit-date: 2025-09-14\nhost: aarch64-apple-darwin\nrelease: 1.90.0\nLLVM version: 20.1.8",
+    "schema_version": 1,
+    "target": "aarch64-apple-darwin",
+    "wal_compatibility": "not_assessed"
+  },
+  "release_tests": {
+    "passed": 1760,
+    "failed": 0,
+    "ignored": 5
+  },
+  "account_state_soak": {
+    "scope": "engine CPU/heap after venue response decode; network, JSON, and durable WAL excluded",
+    "build": {
+      "engine_core": "0.1.0",
+      "os": "macos",
+      "arch": "aarch64",
+      "optimized": true
+    },
+    "steady_state": {
+      "operations": 2000000,
+      "live_ids": 65536,
+      "sample_ops": 4096,
+      "final_ids": 65536,
+      "phases": [
+        {
+          "name": "early",
+          "windows": 163,
+          "p50_window_mean_ns_per_op": 159,
+          "p99_window_mean_ns_per_op": 223,
+          "max_window_mean_ns_per_op": 522
+        },
+        {
+          "name": "middle",
+          "windows": 163,
+          "p50_window_mean_ns_per_op": 161,
+          "p99_window_mean_ns_per_op": 240,
+          "max_window_mean_ns_per_op": 240
+        },
+        {
+          "name": "late",
+          "windows": 163,
+          "p50_window_mean_ns_per_op": 167,
+          "p99_window_mean_ns_per_op": 270,
+          "max_window_mean_ns_per_op": 272
+        }
+      ]
+    },
+    "cold_recovery": [
+      {
+        "history_rows": 0,
+        "repeats": 3,
+        "recovered_rows": 0,
+        "p50_ns": 68209,
+        "p99_ns": 73125,
+        "max_ns": 73125,
+        "p50_ns_per_row": null
+      },
+      {
+        "history_rows": 1000,
+        "repeats": 3,
+        "recovered_rows": 1000,
+        "p50_ns": 777916,
+        "p99_ns": 793958,
+        "max_ns": 793958,
+        "p50_ns_per_row": 777
+      },
+      {
+        "history_rows": 10000,
+        "repeats": 3,
+        "recovered_rows": 10000,
+        "p50_ns": 8368500,
+        "p99_ns": 8407958,
+        "max_ns": 8407958,
+        "p50_ns_per_row": 836
+      },
+      {
+        "history_rows": 100000,
+        "repeats": 3,
+        "recovered_rows": 100000,
+        "p50_ns": 118698708,
+        "p99_ns": 118961916,
+        "max_ns": 118961916,
+        "p50_ns_per_row": 1186
+      }
+    ]
+  },
+  "order_benchmark_output": "bench: 20000 quotes in, 1000 orders out, against a pretend venue on this box\n  what happened            count   typical(p50)  slow 1 in 10  slow 1 in 100      worst\n  think                     1000         125ns         167ns          167ns      292ns\n  write it down             1000         1.88s         3.45s          3.79s      3.83s\n  still waiting on the disk    1000        3.45ms        3.68ms         4.45ms    10.20ms\n  submit result             1000         1.88s         3.45s          3.79s      3.83s\n  API round trip            1000       100.5us       150.8us        234.6us    359.2us\n  dispatch queue            1000       163.7us       238.5us        355.6us     7.34ms\n  venue task                1000       168.6us       245.9us        366.6us    699.9us\n  core resume               1000        22.7us        30.8us         71.0us    206.1us\n  market to submit result    1000         1.88s         3.45s          3.79s      3.83s\n\n  \"write it down\" ends at barrier request; \"still waiting on the disk\" is the later wait.\n  \"API round trip\" uses localhost; real venue network and matching time are not measured.",
+  "scope": [
+    "One clean local commit; later worktree and concurrent shared-checkout changes are excluded.",
+    "macOS ARM64 with explicit Rust 1.90.0; not a Linux deployment artifact.",
+    "Soak measures decoded account-state CPU/heap; excludes network, JSON and durable WAL.",
+    "Order benchmark uses allow-all risk, local pretend venue and a fresh scratch WAL; saturation is not a latency service-level objective.",
+    "No production state, live venue, capital limit or secret was changed.",
+    "No cross-version WAL rollback compatibility is certified."
+  ]
+}

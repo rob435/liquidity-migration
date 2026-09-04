@@ -6,6 +6,24 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 21:48 UTC — Execute optimized qualification on exact local commit `15c60924` (isolated checkout).**
+  - The real qualification command builds and packages unchanged engine,
+    signal-worker and market-tape bytes, passes all 1,760 optimized Rust tests
+    (five existing opt-in skips), runs two million account-state operations,
+    checks recovery at 0/1,000/10,000/100,000 history rows, completes the local
+    order benchmark and runs all three binary smoke checks. Verification of
+    the resulting archive, compiler/platform and checksums succeeds.
+  - `docs/tier1-release-qualification.json` retains the exact commit, binary,
+    archive and log hashes, compiler, platform, test totals, soak output and
+    printed benchmark table. The source is a clean checkout of
+    `15c60924abfb9f5c7848b7ee7b4c5853f2b932d3`; subsequent work and concurrent
+    shared-checkout changes are outside this evidence.
+  - The artifact targets macOS ARM64 under Rust 1.90.0. It is not a Linux
+    deployment artifact. The saturation run sends 1,000 orders from 20,000
+    quotes and prints 3.79 seconds at p99; this is one local workload run,
+    not a speedup or production latency claim. Cross-version WAL rollback
+    remains unassessed. No push, workflow dispatch or production change.
+
 - **2026-09-04 21:38 UTC — Bind release qualification to deployed bytes (local checkpoint).**
   - Deploy and qualify now use one optimized producer: locked release tests,
     bounded account-state soak, local pretend-venue benchmark and binary smoke
