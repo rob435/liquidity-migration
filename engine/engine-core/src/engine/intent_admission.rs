@@ -1,5 +1,57 @@
 use super::*;
 
+/// Why the engine refused to open exposure before the risk kernel saw the
+/// intent. `as_str` is the word the strategy hears in `IntentRefused` and the
+/// operator reads in the heartbeat; `detail` is the sentence the verdict
+/// record carries. Both are stable: strategies and tests match on them.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OpeningRefusal {
+    /// Another strategy owns exposure or a live opening order on the symbol.
+    ForeignStrategyOwner,
+    /// A durable signal source this strategy depends on has a recorded gap.
+    SignalSequenceGap,
+    /// The operator switched this strategy's entries off.
+    RuntimeEntriesDisabled,
+    /// The private account stream has not completed gap recovery.
+    PrivateStreamUnready,
+    /// Boot found orders or exposure the log cannot account for.
+    EngineLatched,
+}
+
+impl OpeningRefusal {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ForeignStrategyOwner => "foreign_strategy_owner",
+            Self::SignalSequenceGap => "signal_sequence_gap",
+            Self::RuntimeEntriesDisabled => "runtime_entries_disabled",
+            Self::PrivateStreamUnready => "private_stream_unready",
+            Self::EngineLatched => "engine_latched",
+        }
+    }
+
+    fn detail(self) -> &'static str {
+        match self {
+            Self::ForeignStrategyOwner => {
+                "foreign_strategy_owner: another strategy owns exposure or a live opening order on this symbol"
+            }
+            Self::SignalSequenceGap => {
+                "signal_sequence_gap: a required source has missing observations"
+            }
+            Self::RuntimeEntriesDisabled => {
+                "this strategy's runtime entry permission is disabled"
+            }
+            Self::PrivateStreamUnready => "private account stream has not completed gap recovery",
+            Self::EngineLatched => "boot could not account for what this account holds",
+        }
+    }
+}
+
+impl std::fmt::Display for OpeningRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) fn signal_inputs_blocked(&self, strategy: StrategyId) -> bool {
         self.signal_dependencies
@@ -11,14 +63,26 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             })
     }
 
-    pub(super) fn opening_permission_reason(&self, strategy: StrategyId) -> Option<&'static str> {
+    /// Why this strategy in particular may not open: a signal gap or an
+    /// operator switch. Per strategy, not per symbol, and not the engine's
+    /// own state.
+    pub(super) fn opening_permission_reason(&self, strategy: StrategyId) -> Option<OpeningRefusal> {
         if self.signal_inputs_blocked(strategy) {
-            Some("signal_sequence_gap")
+            Some(OpeningRefusal::SignalSequenceGap)
         } else if self.host.entries_enabled.get(&strategy.0).copied() == Some(false) {
-            Some("runtime_entries_disabled")
+            Some(OpeningRefusal::RuntimeEntriesDisabled)
         } else {
             None
         }
+    }
+
+    /// Every reason an entry from this strategy may not open right now, in
+    /// the order they are reported: the strategy's own permission, then the
+    /// private stream, then the boot latch. Exits flow past all of them.
+    pub(super) fn opening_refusal(&self, strategy: StrategyId) -> Option<OpeningRefusal> {
+        self.opening_permission_reason(strategy)
+            .or((!self.private_stream_ready).then_some(OpeningRefusal::PrivateStreamUnready))
+            .or((!self.may_open).then_some(OpeningRefusal::EngineLatched))
     }
 
     pub(super) fn symbol_owned_by_another(&self, strategy: StrategyId, symbol: SymbolId) -> bool {
@@ -64,87 +128,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             intent: intent.clone(),
         })?;
 
-        if !intent.reduce_only && self.symbol_owned_by_another(intent.strategy, intent.symbol) {
-            self.wal.append(&WalRecord::Verdict {
-                client_order_id: None,
-                verdict: RiskVerdict::Deny {
-                    reason: DenyReason::UnknownState {
-                        detail: "foreign_strategy_owner: another strategy owns exposure or a live opening order on this symbol".into(),
-                    },
-                },
-            })?;
-            self.tell_refused(&intent, "foreign_strategy_owner");
-            return Ok(None);
-        }
-
-        if let Some(reason) = self
-            .opening_permission_reason(intent.strategy)
-            .filter(|_| !intent.reduce_only)
-        {
-            let verdict = RiskVerdict::Deny {
-                reason: DenyReason::UnknownState {
-                    detail: if reason == "signal_sequence_gap" {
-                        "signal_sequence_gap: a required source has missing observations"
-                            .to_string()
-                    } else {
-                        "this strategy's runtime entry permission is disabled".to_string()
-                    },
-                },
+        // The engine's own reasons an entry may not open, checked before the
+        // kernel sees it. Whoever owns the symbol comes first: a symbol held
+        // by another sleeve is refused however healthy this one is.
+        if !intent.reduce_only {
+            let refusal = if self.symbol_owned_by_another(intent.strategy, intent.symbol) {
+                Some(OpeningRefusal::ForeignStrategyOwner)
+            } else {
+                self.opening_refusal(intent.strategy)
             };
-            self.wal.append(&WalRecord::Verdict {
-                client_order_id: None,
-                verdict,
-            })?;
-            tracing::info!(
-                strategy = intent.strategy.0,
-                tag = %intent.tag,
-                reason,
-                "refused: this strategy cannot open exposure"
-            );
-            self.tell_refused(&intent, reason);
-            return Ok(None);
-        }
-
-        // A REST account read cannot replace a private-stream continuity
-        // proof: it may predate a fill that the disconnected stream missed.
-        // Reconnect handling refreshes the view and recovers execution
-        // history before setting this bit again.
-        if !self.private_stream_ready && !intent.reduce_only {
-            let verdict = RiskVerdict::Deny {
-                reason: DenyReason::UnknownState {
-                    detail: "private account stream has not completed gap recovery".to_string(),
-                },
-            };
-            self.wal.append(&WalRecord::Verdict {
-                client_order_id: None,
-                verdict,
-            })?;
-            tracing::warn!(tag = %intent.tag, "refused: private account stream is not ready");
-            self.tell_refused(&intent, "private_stream_unready");
-            return Ok(None);
-        }
-
-        // Boot found orders or exposure this log cannot account for, which
-        // means somebody else is on this account and every number the kernel
-        // works from is measuring their trading too. Reducing is still
-        // allowed — taking exposure off is safe whoever put it on — but
-        // nothing new is added until an operator has looked.
-        if !self.may_open && !intent.reduce_only {
-            let verdict = RiskVerdict::Deny {
-                reason: DenyReason::UnknownState {
-                    detail: "boot could not account for what this account holds".to_string(),
-                },
-            };
-            self.wal.append(&WalRecord::Verdict {
-                client_order_id: None,
-                verdict,
-            })?;
-            tracing::warn!(
-                tag = %intent.tag,
-                "refused: this engine is not opening new positions after what boot found"
-            );
-            self.tell_refused(&intent, "engine_latched");
-            return Ok(None);
+            if let Some(refusal) = refusal {
+                return self.deny_opening(&intent, refusal);
+            }
         }
 
         // The quote this decision was priced against, bounded the way the
@@ -577,6 +572,32 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             },
         );
         Ok(true)
+    }
+
+    /// Refuse an entry for an engine-level reason. The verdict is written
+    /// the way the kernel's would be, so replay and the fills report read
+    /// one shape; then the strategy hears the code.
+    fn deny_opening(
+        &mut self,
+        intent: &Intent,
+        refusal: OpeningRefusal,
+    ) -> Result<Option<PreparedOrder>, EngineError> {
+        self.wal.append(&WalRecord::Verdict {
+            client_order_id: None,
+            verdict: RiskVerdict::Deny {
+                reason: DenyReason::UnknownState {
+                    detail: refusal.detail().to_string(),
+                },
+            },
+        })?;
+        tracing::warn!(
+            strategy = intent.strategy.0,
+            tag = %intent.tag,
+            reason = refusal.as_str(),
+            "refused: this strategy cannot open exposure"
+        );
+        self.tell_refused(intent, refusal.as_str());
+        Ok(None)
     }
 
     fn refuse(

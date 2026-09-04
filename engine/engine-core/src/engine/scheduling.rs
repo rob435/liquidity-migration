@@ -831,12 +831,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .in_flight()
             .into_iter()
             .filter(|order| {
-                !order.request.reduce_only
-                    && (!self.may_open
-                        || !self.private_stream_ready
-                        || self
-                            .opening_permission_reason(order.request.strategy)
-                            .is_some())
+                !order.request.reduce_only && self.opening_refusal(order.request.strategy).is_some()
             })
             .map(|order| (order.request.symbol, order.request.client_order_id.clone()))
             .collect();
