@@ -42,6 +42,21 @@ edit STATE.md to match.
     would split a realm's history in two at the moment it went down.
     Dashboard: `deploy/grafana/liquidity-migration-fleet.json`. Setup:
     `docs/observability.md`.
+  - Grafana Cloud is live on stack `proudtortoise1017`: instance `3560818`,
+    Prometheus zone `prod-55-prod-gb-south-1`, and Influx write endpoint
+    `https://influx-prod-55-prod-gb-south-1.grafana.net/api/v1/push/influx/write`.
+    The first generated credential was read-only; at 12:16:06 UTC the service
+    reported exactly `WARNING: metrics push failed: HTTPError: HTTP Error 401: Unauthorized`.
+    It was removed from the host. Access policy
+    `liquidity-migration-metrics-write` now grants only `metrics:write`; its
+    `johor-equity-recorder` token is stored only in the root-owned host env.
+    At 12:20:44 UTC the service reported `recorded and pushed 4 samples`, and
+    every scheduled run through the 12:32 UTC verification did the same.
+    Dashboard `liqmig-fleet` is imported and bound to
+    `grafanacloud-proudtortoise1017-prom`. Its five current-value stat panels
+    use instant Prometheus queries; range queries made Grafana return empty
+    frames for the boolean cards even while the same metrics were present in
+    Explore.
   - Dormant venues: six venues are compiled, one is traded. `docs/engine.md`
     §2 now names all ten selectable realms with their readiness and what each
     is, and `engine/engine-venue/tests/dormant_venues.rs` pins which realms are

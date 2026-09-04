@@ -372,6 +372,12 @@ def test_the_dashboard_charts_metrics_the_sampler_actually_pushes() -> None:
         assert f"lm_engine_{field}" in expressions, field
     for field in ("projected_month_gb", "dropped_frames"):
         assert f"lm_recorder_{field}" in expressions, field
+    stat_panels = [panel for panel in dashboard["panels"] if panel["type"] == "stat"]
+    assert stat_panels
+    for panel in stat_panels:
+        for target in panel["targets"]:
+            assert target.get("instant") is True, panel["title"]
+            assert target.get("range") is False, panel["title"]
     # Every charted series must be a field the sampler can actually produce.
     now_ms = 1_788_000_000_000
     live = record_equity.engine_sample("mainnet", Path("/nonexistent"), now_ms)

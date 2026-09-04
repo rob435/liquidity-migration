@@ -122,8 +122,9 @@
           },
           "editorMode": "code",
           "expr": "lm_engine_up{realm=~\"$realm\"}",
+          "instant": true,
           "legendFormat": "{{realm}}",
-          "range": true,
+          "range": false,
           "refId": "A"
         }
       ],
@@ -201,8 +202,9 @@
           },
           "editorMode": "code",
           "expr": "lm_engine_may_open{realm=~\"$realm\"}",
+          "instant": true,
           "legendFormat": "{{realm}}",
-          "range": true,
+          "range": false,
           "refId": "A"
         }
       ],
@@ -280,8 +282,9 @@
           },
           "editorMode": "code",
           "expr": "lm_engine_rolling_loss_tripped{realm=~\"$realm\"}",
+          "instant": true,
           "legendFormat": "{{realm}}",
-          "range": true,
+          "range": false,
           "refId": "A"
         }
       ]
@@ -342,8 +345,9 @@
           },
           "editorMode": "code",
           "expr": "lm_engine_equity_usdt{realm=~\"$realm\"}",
+          "instant": true,
           "legendFormat": "{{realm}}",
-          "range": true,
+          "range": false,
           "refId": "A"
         }
       ]
@@ -414,8 +418,9 @@
           },
           "editorMode": "code",
           "expr": "lm_engine_position_count{realm=~\"$realm\"}",
+          "instant": true,
           "legendFormat": "{{realm}}",
-          "range": true,
+          "range": false,
           "refId": "A"
         }
       ]
