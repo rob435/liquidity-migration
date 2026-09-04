@@ -638,6 +638,19 @@ def test_account_charts_give_mainnet_an_independent_axis() -> None:
     by_title = {panel["title"]: panel for panel in dashboard["panels"]}
     for title in ("Equity", "Open exposure"):
         overrides = by_title[title]["fieldConfig"]["overrides"]
-        mainnet = next(override for override in overrides if override["matcher"]["options"] == "/mainnet/")
+        mainnet = next(override for override in overrides if override["matcher"]["options"] == "/^mainnet$/")
         properties = {row["id"]: row["value"] for row in mainnet["properties"]}
         assert properties["custom.axisPlacement"] == "right"
+        assert properties["displayName"] == "M"
+        assert by_title[title]["options"]["legend"]["showLegend"] is False
+
+
+def test_time_series_legends_do_not_squeeze_the_plots() -> None:
+    dashboard = _dashboard()
+    for panel in dashboard["panels"]:
+        if panel["type"] != "timeseries":
+            continue
+        legend = panel["options"]["legend"]
+        assert legend["displayMode"] == "list"
+        assert legend["placement"] == "bottom"
+        assert legend["calcs"] == []

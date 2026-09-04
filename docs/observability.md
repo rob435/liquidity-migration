@@ -159,6 +159,8 @@ The six-hour default view is an operator view. Change the time range for inciden
 analysis. Empty order-path windows are absent, so the latency chart marks only
 real measurements. The account charts keep real USDT values but put demo on the
 left axis and mainnet on the right so the smaller funded account remains visible.
+Their legends are hidden and the axes are labelled `D` and `M`; other legends use
+the same short realm names and sit below the plots.
 
 **`ack` is empty on demo, and that is a property of the venue path, not a
 fault in the sampler.** `engine latency --wal` is the authority and states it
