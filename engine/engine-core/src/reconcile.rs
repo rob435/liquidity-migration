@@ -293,7 +293,7 @@ pub fn reconcile(
 
     for position in &account.positions {
         let intended_px = intended
-            .get(&position.symbol.0)
+            .get(&position.symbol)
             .filter(|stop| stop.side == position.side)
             .map(|stop| stop.trigger_px)
             .filter(|px| px.is_finite() && *px > 0.0);
@@ -314,7 +314,7 @@ pub fn reconcile(
             });
         }
         let venue_qty = signed(position.side, position.qty);
-        let logged_qty = logged.get(&position.symbol.0).copied().unwrap_or(0.0);
+        let logged_qty = logged.get(&position.symbol).copied().unwrap_or(0.0);
         if (venue_qty - logged_qty).abs() > tolerance(qty_step_of(position.symbol)) {
             findings.push(Finding::UnaccountedExposure {
                 symbol: position.symbol,
@@ -432,8 +432,8 @@ fn request_stop_for_fill(
 /// request; a missing, malformed, mismatched, or reduce-only request clears
 /// repair authority instead of borrowing a sibling's stop.
 pub(crate) fn note_owned_fill(
-    exposure: &mut BTreeMap<u16, f64>,
-    intended: &mut BTreeMap<u16, IntendedPositionStop>,
+    exposure: &mut BTreeMap<SymbolId, f64>,
+    intended: &mut BTreeMap<SymbolId, IntendedPositionStop>,
     request: Option<&OrderRequest>,
     symbol: SymbolId,
     side: Side,
@@ -443,15 +443,15 @@ pub(crate) fn note_owned_fill(
         return;
     }
 
-    let prior = exposure.get(&symbol.0).copied().unwrap_or(0.0);
+    let prior = exposure.get(&symbol).copied().unwrap_or(0.0);
     let next = prior + signed(side, qty);
     if side_of(next).is_none() {
-        exposure.remove(&symbol.0);
-        intended.remove(&symbol.0);
+        exposure.remove(&symbol);
+        intended.remove(&symbol);
         return;
     }
 
-    exposure.insert(symbol.0, next);
+    exposure.insert(symbol, next);
     let next_side = side_of(next).expect("non-flat quantity has a side");
     let crossed_or_opened = side_of(prior) != Some(next_side);
     let grew = next.abs() > prior.abs() + QTY_EPS;
@@ -459,7 +459,7 @@ pub(crate) fn note_owned_fill(
         match request_stop_for_fill(request, symbol, side) {
             Some(trigger_px) => {
                 intended.insert(
-                    symbol.0,
+                    symbol,
                     IntendedPositionStop {
                         side: next_side,
                         trigger_px,
@@ -467,12 +467,12 @@ pub(crate) fn note_owned_fill(
                 );
             }
             None => {
-                intended.remove(&symbol.0);
+                intended.remove(&symbol);
             }
         }
     } else if grew {
         if let Some(candidate) = request_stop_for_fill(request, symbol, side) {
-            let trigger_px = match intended.get(&symbol.0) {
+            let trigger_px = match intended.get(&symbol) {
                 Some(current) if current.side == next_side => match next_side {
                     Side::Buy => current.trigger_px.max(candidate),
                     Side::Sell => current.trigger_px.min(candidate),
@@ -480,7 +480,7 @@ pub(crate) fn note_owned_fill(
                 _ => candidate,
             };
             intended.insert(
-                symbol.0,
+                symbol,
                 IntendedPositionStop {
                     side: next_side,
                     trigger_px,
@@ -488,31 +488,34 @@ pub(crate) fn note_owned_fill(
             );
         }
     } else if intended
-        .get(&symbol.0)
+        .get(&symbol)
         .is_some_and(|stop| stop.side != next_side)
     {
-        intended.remove(&symbol.0);
+        intended.remove(&symbol);
     }
 }
 
 fn matching_intended_stop(
     row: &engine_types::IntendedStop,
-    exposure: &BTreeMap<u16, f64>,
-) -> Option<(u16, IntendedPositionStop)> {
+    exposure: &BTreeMap<SymbolId, f64>,
+) -> Option<(SymbolId, IntendedPositionStop)> {
     let side = row.side?;
     let trigger_px = row.trigger_px;
     if !trigger_px.is_finite()
         || trigger_px <= 0.0
-        || side_of(exposure.get(&row.symbol.0).copied().unwrap_or(0.0)) != Some(side)
+        || side_of(exposure.get(&row.symbol).copied().unwrap_or(0.0)) != Some(side)
     {
         return None;
     }
-    Some((row.symbol.0, IntendedPositionStop { side, trigger_px }))
+    Some((row.symbol, IntendedPositionStop { side, trigger_px }))
 }
 
 fn position_state(
     replayed: &[WalRecord],
-) -> (BTreeMap<u16, f64>, BTreeMap<u16, IntendedPositionStop>) {
+) -> (
+    BTreeMap<SymbolId, f64>,
+    BTreeMap<SymbolId, IntendedPositionStop>,
+) {
     let mut exposure = BTreeMap::new();
     let mut intended = BTreeMap::new();
     let mut sent: HashMap<String, OrderRequest> = HashMap::new();
@@ -558,9 +561,9 @@ fn position_state(
                 symbol, trigger_px, ..
             } => {
                 if trigger_px.is_finite() && *trigger_px > 0.0 {
-                    if let Some(side) = side_of(exposure.get(&symbol.0).copied().unwrap_or(0.0)) {
+                    if let Some(side) = side_of(exposure.get(symbol).copied().unwrap_or(0.0)) {
                         intended.insert(
-                            symbol.0,
+                            *symbol,
                             IntendedPositionStop {
                                 side,
                                 trigger_px: *trigger_px,
@@ -581,7 +584,7 @@ fn position_state(
                 exposure = logged_exposure
                     .iter()
                     .filter(|row| row.signed_qty.is_finite() && row.signed_qty.abs() > QTY_EPS)
-                    .map(|row| (row.symbol.0, row.signed_qty))
+                    .map(|row| (row.symbol, row.signed_qty))
                     .collect();
                 intended = intended_stops
                     .iter()
@@ -599,7 +602,7 @@ fn position_state(
                 exposure = restated_exposure
                     .iter()
                     .filter(|row| row.signed_qty.is_finite() && row.signed_qty.abs() > QTY_EPS)
-                    .map(|row| (row.symbol.0, row.signed_qty))
+                    .map(|row| (row.symbol, row.signed_qty))
                     .collect();
                 // The operator accepted the venue's quantity, not an old
                 // order's stop provenance. Reusing a same-direction stop from
@@ -618,14 +621,14 @@ fn position_state(
 /// Foreign fills remain durable records but never become trusted engine
 /// exposure. A segment restatement is "set", not "add": at its place in the
 /// stream it is exactly what the records before it added up to.
-pub(crate) fn logged_exposure(replayed: &[WalRecord]) -> BTreeMap<u16, f64> {
+pub(crate) fn logged_exposure(replayed: &[WalRecord]) -> BTreeMap<SymbolId, f64> {
     position_state(replayed).0
 }
 
 /// The stop belonging to each trusted filled position. Merely sending an
 /// opposite-side sibling cannot alter this state; only an owned fill that
 /// grows or crosses the position can do so.
-pub(crate) fn intended_stops(replayed: &[WalRecord]) -> BTreeMap<u16, IntendedPositionStop> {
+pub(crate) fn intended_stops(replayed: &[WalRecord]) -> BTreeMap<SymbolId, IntendedPositionStop> {
     position_state(replayed).1
 }
 
@@ -1003,7 +1006,7 @@ mod tests {
 
         let stops = intended_stops(&log);
         assert_eq!(
-            stops.get(&3),
+            stops.get(&SymbolId(3)),
             Some(&IntendedPositionStop {
                 side: Side::Buy,
                 trigger_px: 90.0,
@@ -1023,7 +1026,7 @@ mod tests {
 
         let stops = intended_stops(&log);
         assert_eq!(
-            stops.get(&3),
+            stops.get(&SymbolId(3)),
             Some(&IntendedPositionStop {
                 side: Side::Sell,
                 trigger_px: 110.0,
@@ -1061,7 +1064,7 @@ mod tests {
             fill("sell", 3, Side::Sell, 1.0),
         ];
         assert_eq!(
-            intended_stops(&log).get(&3),
+            intended_stops(&log).get(&SymbolId(3)),
             Some(&IntendedPositionStop {
                 side: Side::Buy,
                 trigger_px: 90.0,
@@ -1071,7 +1074,7 @@ mod tests {
         let mut crossed = log;
         crossed.push(fill("sell", 3, Side::Sell, 2.0));
         assert_eq!(
-            intended_stops(&crossed).get(&3),
+            intended_stops(&crossed).get(&SymbolId(3)),
             Some(&IntendedPositionStop {
                 side: Side::Sell,
                 trigger_px: 110.0,
@@ -1089,7 +1092,7 @@ mod tests {
         ];
 
         assert_eq!(
-            intended_stops(&log).get(&3),
+            intended_stops(&log).get(&SymbolId(3)),
             Some(&IntendedPositionStop {
                 side: Side::Buy,
                 trigger_px: 95.0,
@@ -1107,7 +1110,7 @@ mod tests {
         ];
 
         assert_eq!(
-            intended_stops(&log).get(&3),
+            intended_stops(&log).get(&SymbolId(3)),
             Some(&IntendedPositionStop {
                 side: Side::Sell,
                 trigger_px: 105.0,
@@ -1169,7 +1172,7 @@ mod tests {
         ];
         let out = run(&log, &[], &account(vec![held(3, Side::Buy, 3.0, true)]));
 
-        assert_eq!(logged_exposure(&log).get(&3), Some(&2.0));
+        assert_eq!(logged_exposure(&log).get(&SymbolId(3)), Some(&2.0));
         assert!(out.findings.iter().any(|finding| matches!(
             finding,
             Finding::ForeignFill { client_order_id, symbol }
@@ -1192,7 +1195,7 @@ mod tests {
         ];
         let out = run(&log, &[], &account(vec![held(3, Side::Buy, 1.0, true)]));
 
-        assert_eq!(logged_exposure(&log).get(&3), Some(&2.0));
+        assert_eq!(logged_exposure(&log).get(&SymbolId(3)), Some(&2.0));
         assert!(out.findings.iter().any(|finding| matches!(
             finding,
             Finding::ForeignFill { client_order_id, symbol }
@@ -1229,7 +1232,11 @@ mod tests {
         ];
         let out = run(&log, &[], &account(vec![]));
 
-        assert_eq!(logged_exposure(&log).get(&3), None, "the stop closed it");
+        assert_eq!(
+            logged_exposure(&log).get(&SymbolId(3)),
+            None,
+            "the stop closed it"
+        );
         assert!(
             !out.findings
                 .iter()

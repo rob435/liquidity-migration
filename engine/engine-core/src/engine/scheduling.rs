@@ -90,7 +90,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if matches!(
             request.command,
             engine_types::RuntimeControlCommand::FlattenDirectional
-        ) && self.host.entries_enabled.get(&request.strategy.0).copied() != Some(false)
+        ) && self.host.entries_enabled.get(&request.strategy).copied() != Some(false)
         {
             return Err(format!(
                 "strategy {} must have a durable entries-disabled override before flatten",
@@ -115,7 +115,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             engine_types::RuntimeControlCommand::SetEntriesEnabled { entries_enabled } => {
                 self.host
                     .entries_enabled
-                    .insert(request.strategy.0, entries_enabled);
+                    .insert(request.strategy, entries_enabled);
                 self.feed_one_strategy(
                     request.strategy,
                     &EngineEvent::EntryPermission {
@@ -172,7 +172,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             .unwrap_or("unknown")
                     ))
                 })?;
-                let key = (strategy.0, symbol.0);
+                let key = (strategy, symbol);
                 if self.host.checkpoints.get(&key) != Some(&checkpoint) {
                     self.host.checkpoints.insert(key, checkpoint.clone());
                     self.wal.append(&WalRecord::StrategyCheckpoint {
@@ -212,7 +212,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 let same = self
                     .host
                     .global_checkpoints
-                    .get(&strategy.0)
+                    .get(&strategy)
                     .is_some_and(|state| state.checkpoint == checkpoint);
                 if !same {
                     let state = StrategyGlobalCheckpointState {
@@ -220,7 +220,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         checkpoint: checkpoint.clone(),
                         provenance: None,
                     };
-                    self.host.global_checkpoints.insert(strategy.0, state);
+                    self.host.global_checkpoints.insert(strategy, state);
                     self.wal.append(&WalRecord::StrategyGlobalCheckpoint {
                         wall_ts_ms: clock::wall_ms(),
                         strategy,
@@ -233,7 +233,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
             Action::PublishStrategyEvent { event } => {
                 self.validate_strategy_event(&event)?;
-                let key = (event.source.0, event.event_id.clone());
+                let key = (event.source, event.event_id.clone());
                 if let Some(known) = self.host.events.get(&key) {
                     if known != &event {
                         return Err(EngineError::State(format!(
@@ -262,7 +262,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 destination,
                 event_id,
             } => {
-                let key = (source.0, event_id.clone());
+                let key = (source, event_id.clone());
                 let Some(event) = self.host.events.get(&key) else {
                     return Ok(None);
                 };
@@ -310,7 +310,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 strategy,
                 request_id,
             } => {
-                let key = (strategy.0, request_id.clone());
+                let key = (strategy, request_id.clone());
                 if self.runtime_control_consumed.contains(&key) {
                     return Ok(None);
                 }
@@ -370,7 +370,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     engine_types::RuntimeControlCommand::FlattenDirectional
                 ) && !self
                     .runtime_control_consumed
-                    .contains(&(request.strategy.0, request.request_id.clone()))
+                    .contains(&(request.strategy, request.request_id.clone()))
             })
             .cloned()
             .collect();

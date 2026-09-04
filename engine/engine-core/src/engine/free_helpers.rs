@@ -1,7 +1,7 @@
 use super::*;
 
-pub(super) fn stop_key(symbol: SymbolId, side: Side) -> (u16, bool) {
-    (symbol.0, side == Side::Sell)
+pub(super) fn stop_key(symbol: SymbolId, side: Side) -> (SymbolId, Side) {
+    (symbol, side)
 }
 
 pub(super) fn tighter_stop(side: Side, left: f64, right: f64) -> f64 {
@@ -62,7 +62,7 @@ fn legacy_boot_ms(replayed: &[WalRecord]) -> Option<i64> {
 /// A segment base is a complete restatement; later records replace one key.
 pub(super) fn replay_strategy_checkpoints(
     replayed: &[WalRecord],
-) -> std::collections::BTreeMap<(u16, u16), StrategyCheckpoint> {
+) -> std::collections::BTreeMap<(StrategyId, SymbolId), StrategyCheckpoint> {
     let mut active = std::collections::BTreeMap::new();
     for record in replayed {
         match record {
@@ -72,7 +72,7 @@ pub(super) fn replay_strategy_checkpoints(
                 checkpoint,
                 ..
             } => {
-                active.insert((strategy.0, symbol.0), checkpoint.clone());
+                active.insert((*strategy, *symbol), checkpoint.clone());
             }
             WalRecord::SegmentBase {
                 strategy_checkpoints,
@@ -80,7 +80,7 @@ pub(super) fn replay_strategy_checkpoints(
             } => {
                 active = strategy_checkpoints
                     .iter()
-                    .map(|row| ((row.strategy.0, row.symbol.0), row.checkpoint.clone()))
+                    .map(|row| ((row.strategy, row.symbol), row.checkpoint.clone()))
                     .collect();
             }
             _ => {}
@@ -92,7 +92,7 @@ pub(super) fn replay_strategy_checkpoints(
 /// Newest whole-sleeve checkpoint after replaying records in order.
 pub(super) fn replay_strategy_global_checkpoints(
     replayed: &[WalRecord],
-) -> std::collections::BTreeMap<u16, StrategyGlobalCheckpointState> {
+) -> std::collections::BTreeMap<StrategyId, StrategyGlobalCheckpointState> {
     let mut active = std::collections::BTreeMap::new();
     for record in replayed {
         match record {
@@ -103,7 +103,7 @@ pub(super) fn replay_strategy_global_checkpoints(
                 ..
             } => {
                 active.insert(
-                    strategy.0,
+                    *strategy,
                     StrategyGlobalCheckpointState {
                         strategy: *strategy,
                         checkpoint: checkpoint.clone(),
@@ -117,7 +117,7 @@ pub(super) fn replay_strategy_global_checkpoints(
             } => {
                 active = strategy_global_checkpoints
                     .iter()
-                    .map(|row| (row.strategy.0, row.clone()))
+                    .map(|row| (row.strategy, row.clone()))
                     .collect();
             }
             _ => {}
@@ -129,24 +129,24 @@ pub(super) fn replay_strategy_global_checkpoints(
 /// Durable cross-sleeve events still awaiting their destination.
 pub(super) fn replay_strategy_events(
     replayed: &[WalRecord],
-) -> std::collections::BTreeMap<(u16, String), StrategyEvent> {
+) -> std::collections::BTreeMap<(StrategyId, String), StrategyEvent> {
     let mut active = std::collections::BTreeMap::new();
     for record in replayed {
         match record {
             WalRecord::StrategyEventPublished { event, .. } => {
-                active.insert((event.source.0, event.event_id.clone()), event.clone());
+                active.insert((event.source, event.event_id.clone()), event.clone());
             }
             WalRecord::StrategyEventConsumed {
                 source, event_id, ..
             } => {
-                active.remove(&(source.0, event_id.clone()));
+                active.remove(&(*source, event_id.clone()));
             }
             WalRecord::SegmentBase {
                 strategy_events, ..
             } => {
                 active = strategy_events
                     .iter()
-                    .map(|event| ((event.source.0, event.event_id.clone()), event.clone()))
+                    .map(|event| ((event.source, event.event_id.clone()), event.clone()))
                     .collect();
             }
             _ => {}
@@ -157,8 +157,8 @@ pub(super) fn replay_strategy_events(
 
 pub(super) struct ReplayedRuntimeControlState {
     pub(super) requests: Vec<engine_types::RuntimeControlRequest>,
-    pub(super) consumed: std::collections::BTreeSet<(u16, String)>,
-    pub(super) entries_enabled: std::collections::BTreeMap<u16, bool>,
+    pub(super) consumed: std::collections::BTreeSet<(StrategyId, String)>,
+    pub(super) entries_enabled: std::collections::BTreeMap<StrategyId, bool>,
 }
 
 pub(super) fn replay_runtime_control_state(
@@ -187,7 +187,7 @@ pub(super) fn replay_runtime_control_state(
                 request_id,
                 ..
             } => {
-                consumed.insert((strategy.0, request_id.clone()));
+                consumed.insert((*strategy, request_id.clone()));
             }
             WalRecord::SegmentBase {
                 runtime_control_requests,
@@ -195,10 +195,7 @@ pub(super) fn replay_runtime_control_state(
                 ..
             } => {
                 requests = runtime_control_requests.clone();
-                consumed = runtime_control_consumed
-                    .iter()
-                    .map(|(strategy, request_id)| (strategy.0, request_id.clone()))
-                    .collect();
+                consumed = runtime_control_consumed.iter().cloned().collect();
             }
             _ => {}
         }
@@ -209,7 +206,7 @@ pub(super) fn replay_runtime_control_state(
             entries_enabled: value,
         } = request.command
         {
-            entries_enabled.insert(request.strategy.0, value);
+            entries_enabled.insert(request.strategy, value);
         }
     }
     Ok(ReplayedRuntimeControlState {

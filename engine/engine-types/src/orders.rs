@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{StrategyId, SymbolId};
 use crate::strategy::{StrategyCheckpoint, StrategyEvent};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Side {
     Buy,
     Sell,

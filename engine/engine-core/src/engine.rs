@@ -338,7 +338,7 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// across WAL rotation.
     runtime_control_requests: Vec<engine_types::RuntimeControlRequest>,
     /// Replayable commands a reducer has durably completed.
-    runtime_control_consumed: std::collections::BTreeSet<(u16, String)>,
+    runtime_control_consumed: std::collections::BTreeSet<(StrategyId, String)>,
     /// Validated observations held until every requested symbol/feed/rule is
     /// admitted. They are not delivered or cursor-advanced before then.
     pending_signal_deliveries: VecDeque<SignalObservation>,
@@ -421,16 +421,16 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// strategies. It is what reconcile compares the venue's positions
     /// against, seeded at boot by the same scan reconcile uses and kept
     /// live by the same arithmetic, so a rotation can restate it exactly.
-    logged_exposure: std::collections::BTreeMap<u16, f64>,
+    logged_exposure: std::collections::BTreeMap<SymbolId, f64>,
     /// The stop belonging to each trusted filled position, kept live for the
     /// same reason: a stop the venue drops after a rotation must still be
     /// repairable at the level and direction the log proved. Unfilled
     /// opposite-side siblings never enter this map.
-    intended_stops: std::collections::BTreeMap<u16, reconcile::IntendedPositionStop>,
+    intended_stops: std::collections::BTreeMap<SymbolId, reconcile::IntendedPositionStop>,
     /// Stop moves the venue accepted since the latest account reading. This
     /// closes the short gap before that reading reflects the new stop without
     /// confusing a durable intent with a successful API call.
-    confirmed_stop_moves: std::collections::BTreeMap<u16, reconcile::IntendedPositionStop>,
+    confirmed_stop_moves: std::collections::BTreeMap<SymbolId, reconcile::IntendedPositionStop>,
     /// Everything the venue traded before this wall time is in the log —
     /// delivered by the stream or recovered from the venue's history.
     /// Advanced only when a recovery pass completes, and it is where the
@@ -973,7 +973,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         for position in &self.books.account.positions {
             let wanted = self
                 .intended_stops
-                .get(&position.symbol.0)
+                .get(&position.symbol)
                 .filter(|stop| stop.side == position.side)
                 .map(|stop| stop.trigger_px);
             let venue =
@@ -1184,7 +1184,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .logged_exposure
                 .iter()
                 .map(|(symbol, signed_qty)| engine_types::SymbolTotal {
-                    symbol: SymbolId(*symbol),
+                    symbol: *symbol,
                     signed_qty: *signed_qty,
                 })
                 .collect(),
@@ -1192,7 +1192,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .intended_stops
                 .iter()
                 .map(|(symbol, stop)| engine_types::IntendedStop {
-                    symbol: SymbolId(*symbol),
+                    symbol: *symbol,
                     side: Some(stop.side),
                     trigger_px: stop.trigger_px,
                 })
@@ -1206,8 +1206,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .iter()
                 .map(
                     |((strategy, symbol), checkpoint)| engine_types::StrategyCheckpointState {
-                        strategy: StrategyId(*strategy),
-                        symbol: SymbolId(*symbol),
+                        strategy: *strategy,
+                        symbol: *symbol,
                         checkpoint: checkpoint.clone(),
                     },
                 )
@@ -1219,11 +1219,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             signal_subscriptions: self.signals.subscriptions().cloned().collect(),
             signal_gaps: self.signals.gaps().cloned().collect(),
             runtime_control_requests: self.runtime_control_requests.clone(),
-            runtime_control_consumed: self
-                .runtime_control_consumed
-                .iter()
-                .map(|(strategy, request_id)| (StrategyId(*strategy), request_id.clone()))
-                .collect(),
+            runtime_control_consumed: self.runtime_control_consumed.iter().cloned().collect(),
             open_orders: self
                 .books
                 .orders

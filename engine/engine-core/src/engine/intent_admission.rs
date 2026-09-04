@@ -69,7 +69,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) fn opening_permission_reason(&self, strategy: StrategyId) -> Option<OpeningRefusal> {
         if self.signal_inputs_blocked(strategy) {
             Some(OpeningRefusal::SignalSequenceGap)
-        } else if self.host.entries_enabled.get(&strategy.0).copied() == Some(false) {
+        } else if self.host.entries_enabled.get(&strategy).copied() == Some(false) {
             Some(OpeningRefusal::RuntimeEntriesDisabled)
         } else {
             None
@@ -97,7 +97,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         &mut self,
         intent: Intent,
         origin_ns: u64,
-        batch_protection: &mut std::collections::HashMap<(u16, bool), f64>,
+        batch_protection: &mut std::collections::HashMap<(SymbolId, Side), f64>,
     ) -> Result<Option<PreparedOrder>, EngineError> {
         let decided_ns = if intent.decided_ns > 0 {
             intent.decided_ns
@@ -478,10 +478,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut prepared = Vec::with_capacity(intents.len());
         let mut batch_protection = std::collections::HashMap::new();
         for (symbol, stop) in &self.intended_stops {
-            batch_protection.insert(stop_key(SymbolId(*symbol), stop.side), stop.trigger_px);
+            batch_protection.insert(stop_key(*symbol, stop.side), stop.trigger_px);
         }
         for (key, trigger_px) in self.books.orders.tightest_opening_stops() {
-            let side = if key.1 { Side::Sell } else { Side::Buy };
+            let side = key.1;
             batch_protection
                 .entry(key)
                 .and_modify(|protected| *protected = tighter_stop(side, *protected, trigger_px))

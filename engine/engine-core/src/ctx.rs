@@ -113,14 +113,14 @@ pub struct StrategyHost {
     pub pending: VecDeque<Action>,
     /// Strategy-owned state, persisted before the action it guards and
     /// restated through rotation. The engine stores bytes, not meaning.
-    pub checkpoints: BTreeMap<(u16, u16), StrategyCheckpoint>,
+    pub checkpoints: BTreeMap<(StrategyId, SymbolId), StrategyCheckpoint>,
     /// Whole-sleeve reducer state. Separate key space: no sentinel symbol can
     /// collide with a venue name admitted later.
-    pub global_checkpoints: BTreeMap<u16, StrategyGlobalCheckpointState>,
+    pub global_checkpoints: BTreeMap<StrategyId, StrategyGlobalCheckpointState>,
     /// Cross-sleeve events waiting for the addressed strategy to consume them.
-    pub events: BTreeMap<(u16, String), StrategyEvent>,
+    pub events: BTreeMap<(StrategyId, String), StrategyEvent>,
     /// The newest durable runtime entry override per strategy.
-    pub entries_enabled: BTreeMap<u16, bool>,
+    pub entries_enabled: BTreeMap<StrategyId, bool>,
 }
 
 impl StrategyHost {
@@ -139,7 +139,7 @@ impl StrategyHost {
             global_checkpoints: &self.global_checkpoints,
             strategy_events: &self.events,
             strategy_names: &self.names,
-            runtime_entries_enabled: self.entries_enabled.get(&sid.0).copied(),
+            runtime_entries_enabled: self.entries_enabled.get(&sid).copied(),
         };
         strategy.on_event(event, &mut ctx);
     }
@@ -151,9 +151,9 @@ pub struct Ctx<'a> {
     pub strategy: StrategyId,
     pub out: &'a mut VecDeque<Action>,
     pub timers: &'a mut Timers,
-    pub checkpoints: &'a BTreeMap<(u16, u16), StrategyCheckpoint>,
-    pub global_checkpoints: &'a BTreeMap<u16, StrategyGlobalCheckpointState>,
-    pub strategy_events: &'a BTreeMap<(u16, String), StrategyEvent>,
+    pub checkpoints: &'a BTreeMap<(StrategyId, SymbolId), StrategyCheckpoint>,
+    pub global_checkpoints: &'a BTreeMap<StrategyId, StrategyGlobalCheckpointState>,
+    pub strategy_events: &'a BTreeMap<(StrategyId, String), StrategyEvent>,
     pub strategy_names: &'a [String],
     pub runtime_entries_enabled: Option<bool>,
 }
@@ -389,12 +389,12 @@ impl StrategyCtx for Ctx<'_> {
     }
 
     fn strategy_checkpoint(&self, symbol: SymbolId) -> Option<&StrategyCheckpoint> {
-        self.checkpoints.get(&(self.strategy.0, symbol.0))
+        self.checkpoints.get(&(self.strategy, symbol))
     }
 
     fn strategy_global_checkpoint(&self) -> Option<&StrategyCheckpoint> {
         self.global_checkpoints
-            .get(&self.strategy.0)
+            .get(&self.strategy)
             .map(|state| &state.checkpoint)
     }
 
@@ -478,13 +478,13 @@ mod tests {
         strategy: StrategyId,
     ) -> Ctx<'a> {
         static NO_CHECKPOINTS: OnceLock<
-            std::collections::BTreeMap<(u16, u16), StrategyCheckpoint>,
+            std::collections::BTreeMap<(StrategyId, SymbolId), StrategyCheckpoint>,
         > = OnceLock::new();
         static NO_GLOBAL_CHECKPOINTS: OnceLock<
-            std::collections::BTreeMap<u16, StrategyGlobalCheckpointState>,
+            std::collections::BTreeMap<StrategyId, StrategyGlobalCheckpointState>,
         > = OnceLock::new();
         static NO_STRATEGY_EVENTS: OnceLock<
-            std::collections::BTreeMap<(u16, String), StrategyEvent>,
+            std::collections::BTreeMap<(StrategyId, String), StrategyEvent>,
         > = OnceLock::new();
         static NO_STRATEGY_NAMES: OnceLock<Vec<String>> = OnceLock::new();
         Ctx {

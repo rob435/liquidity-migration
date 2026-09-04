@@ -88,12 +88,12 @@ pub struct LedgerOfOrders {
     pub boots: u32,
     /// Count of live opening orders per sleeve/symbol. Counts, rather than a
     /// set, ensure one terminal sibling cannot hide another still-live order.
-    opening_symbols: BTreeMap<(u16, u16), usize>,
+    opening_symbols: BTreeMap<(StrategyId, SymbolId), usize>,
     /// Live opening-stop prices grouped by (symbol, is-short). The engine asks
     /// for the tightest level before every placement batch. Keeping the
     /// multiset here makes that query proportional to active symbols instead
     /// of rescanning the process's entire order history on every decision.
-    opening_stop_levels: BTreeMap<(u16, bool), BTreeMap<StopPrice, usize>>,
+    opening_stop_levels: BTreeMap<(SymbolId, Side), BTreeMap<StopPrice, usize>>,
 }
 
 impl LedgerOfOrders {
@@ -322,11 +322,11 @@ impl LedgerOfOrders {
         }
     }
 
-    fn add_opening_symbol(&mut self, key: (u16, u16)) {
+    fn add_opening_symbol(&mut self, key: (StrategyId, SymbolId)) {
         *self.opening_symbols.entry(key).or_default() += 1;
     }
 
-    fn remove_opening_symbol(&mut self, key: (u16, u16)) {
+    fn remove_opening_symbol(&mut self, key: (StrategyId, SymbolId)) {
         let remove_key = if let Some(count) = self.opening_symbols.get_mut(&key) {
             if *count > 1 {
                 *count -= 1;
@@ -342,7 +342,7 @@ impl LedgerOfOrders {
         }
     }
 
-    fn add_opening_stop(&mut self, (key, price): ((u16, bool), StopPrice)) {
+    fn add_opening_stop(&mut self, (key, price): ((SymbolId, Side), StopPrice)) {
         *self
             .opening_stop_levels
             .entry(key)
@@ -351,7 +351,7 @@ impl LedgerOfOrders {
             .or_default() += 1;
     }
 
-    fn remove_opening_stop(&mut self, (key, price): ((u16, bool), StopPrice)) {
+    fn remove_opening_stop(&mut self, (key, price): ((SymbolId, Side), StopPrice)) {
         let remove_key = if let Some(levels) = self.opening_stop_levels.get_mut(&key) {
             if let Some(count) = levels.get_mut(&price) {
                 if *count > 1 {
@@ -450,9 +450,7 @@ impl LedgerOfOrders {
     /// Distinct sleeve/symbol pairs with at least one live opening order.
     /// Cost is bounded by current live exposure, never WAL/account history.
     pub fn opening_symbols(&self) -> impl Iterator<Item = (StrategyId, SymbolId)> + '_ {
-        self.opening_symbols
-            .keys()
-            .map(|(strategy, symbol)| (StrategyId(*strategy), SymbolId(*symbol)))
+        self.opening_symbols.keys().copied()
     }
 
     pub fn opening_owned_by_another(&self, mine: StrategyId, symbol: SymbolId) -> bool {
@@ -462,9 +460,9 @@ impl LedgerOfOrders {
 
     /// Tightest live opening-order stop per (symbol, is-short). Long
     /// protection tightens upward; short protection tightens downward.
-    pub fn tightest_opening_stops(&self) -> impl Iterator<Item = ((u16, bool), f64)> + '_ {
+    pub fn tightest_opening_stops(&self) -> impl Iterator<Item = ((SymbolId, Side), f64)> + '_ {
         self.opening_stop_levels.iter().filter_map(|(key, levels)| {
-            let (price, _) = if key.1 {
+            let (price, _) = if key.1 == Side::Sell {
                 levels.first_key_value()
             } else {
                 levels.last_key_value()
@@ -474,17 +472,15 @@ impl LedgerOfOrders {
     }
 }
 
-fn opening_stop(request: &OrderRequest) -> Option<((u16, bool), StopPrice)> {
-    request.stop.filter(|_| !request.reduce_only).map(|stop| {
-        (
-            (request.symbol.0, request.side == Side::Sell),
-            StopPrice(stop.trigger_px),
-        )
-    })
+fn opening_stop(request: &OrderRequest) -> Option<((SymbolId, Side), StopPrice)> {
+    request
+        .stop
+        .filter(|_| !request.reduce_only)
+        .map(|stop| ((request.symbol, request.side), StopPrice(stop.trigger_px)))
 }
 
-fn opening_key(request: &OrderRequest) -> Option<(u16, u16)> {
-    (!request.reduce_only).then_some((request.strategy.0, request.symbol.0))
+fn opening_key(request: &OrderRequest) -> Option<(StrategyId, SymbolId)> {
+    (!request.reduce_only).then_some((request.strategy, request.symbol))
 }
 
 fn limit_px(request: &OrderRequest) -> f64 {
@@ -780,13 +776,19 @@ mod tests {
         ]);
         assert_eq!(
             ledger.tightest_opening_stops().collect::<Vec<_>>(),
-            vec![((3, false), 95.0), ((3, true), 105.0)]
+            vec![
+                ((SymbolId(3), Side::Buy), 95.0),
+                ((SymbolId(3), Side::Sell), 105.0)
+            ]
         );
 
         ledger.apply(&fill("long-tight-a", 1.0));
         assert_eq!(
             ledger.tightest_opening_stops().collect::<Vec<_>>(),
-            vec![((3, false), 95.0), ((3, true), 105.0)],
+            vec![
+                ((SymbolId(3), Side::Buy), 95.0),
+                ((SymbolId(3), Side::Sell), 105.0)
+            ],
             "a duplicate tight level remains live"
         );
         ledger.apply(&fill("long-tight-b", 1.0));
@@ -798,7 +800,10 @@ mod tests {
         });
         assert_eq!(
             ledger.tightest_opening_stops().collect::<Vec<_>>(),
-            vec![((3, false), 90.0), ((3, true), 110.0)]
+            vec![
+                ((SymbolId(3), Side::Buy), 90.0),
+                ((SymbolId(3), Side::Sell), 110.0)
+            ]
         );
 
         ledger.apply(&WalRecord::OrderUpdate {

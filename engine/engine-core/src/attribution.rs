@@ -64,7 +64,7 @@ pub fn forced_close_owner(
 #[derive(Debug, Default)]
 pub struct Attribution {
     /// Signed filled quantity per strategy and symbol. Positive is long.
-    filled: HashMap<(u16, u16), f64>,
+    filled: HashMap<(StrategyId, SymbolId), f64>,
 }
 
 impl Attribution {
@@ -153,7 +153,7 @@ impl Attribution {
     pub fn restate(&mut self, rows: &[FilledTotal]) {
         self.filled = rows
             .iter()
-            .map(|row| ((row.strategy.0, row.symbol.0), row.signed_qty))
+            .map(|row| ((row.strategy, row.symbol), row.signed_qty))
             .collect();
     }
 
@@ -163,7 +163,7 @@ impl Attribution {
     /// sleeve, making it undroppable.
     pub fn forget(&mut self, rows: &[FilledTotal]) {
         for row in rows {
-            self.filled.remove(&(row.strategy.0, row.symbol.0));
+            self.filled.remove(&(row.strategy, row.symbol));
         }
     }
 
@@ -174,7 +174,7 @@ impl Attribution {
         self.filled.retain(|(_, symbol), _| {
             restated
                 .iter()
-                .any(|row| row.symbol.0 == *symbol && row.signed_qty.abs() >= FLAT)
+                .any(|row| row.symbol == *symbol && row.signed_qty.abs() >= FLAT)
         });
     }
 
@@ -183,9 +183,9 @@ impl Attribution {
         let mut rows: Vec<(StrategyId, SymbolId, f64)> = self
             .filled
             .iter()
-            .map(|((strategy, symbol), qty)| (StrategyId(*strategy), SymbolId(*symbol), *qty))
+            .map(|((strategy, symbol), qty)| (*strategy, *symbol, *qty))
             .collect();
-        rows.sort_by_key(|(strategy, symbol, _)| (strategy.0, symbol.0));
+        rows.sort_by_key(|(strategy, symbol, _)| (*strategy, *symbol));
         rows
     }
 
@@ -213,7 +213,7 @@ impl Attribution {
             Side::Buy => qty,
             Side::Sell => -qty,
         };
-        let key = (strategy.0, symbol.0);
+        let key = (strategy, symbol);
         let total = self.filled.entry(key).or_insert(0.0);
         *total += signed;
         if total.abs() < FLAT {
@@ -223,10 +223,7 @@ impl Attribution {
 
     /// Signed quantity this strategy's own orders opened in this symbol.
     pub fn signed(&self, strategy: StrategyId, symbol: SymbolId) -> f64 {
-        self.filled
-            .get(&(strategy.0, symbol.0))
-            .copied()
-            .unwrap_or(0.0)
+        self.filled.get(&(strategy, symbol)).copied().unwrap_or(0.0)
     }
 
     /// Symbols this strategy still has a non-flat fill claim on.
@@ -234,14 +231,14 @@ impl Attribution {
         self.filled
             .iter()
             .filter_map(move |((owner, symbol), qty)| {
-                (*owner == strategy.0 && qty.abs() >= FLAT).then_some(SymbolId(*symbol))
+                (*owner == strategy && qty.abs() >= FLAT).then_some(*symbol)
             })
     }
 
     /// The only sleeve with a non-flat claim on this symbol.
     pub fn sole_owner(&self, symbol: SymbolId) -> Option<StrategyId> {
         let mut owners = self.filled.iter().filter_map(|((strategy, held), qty)| {
-            (*held == symbol.0 && qty.abs() >= FLAT).then_some(StrategyId(*strategy))
+            (*held == symbol && qty.abs() >= FLAT).then_some(*strategy)
         });
         let owner = owners.next()?;
         owners.next().is_none().then_some(owner)
@@ -265,14 +262,14 @@ impl Attribution {
     ) -> Vec<(StrategyId, SymbolId, f64)> {
         let mut dropped: Vec<(StrategyId, SymbolId, f64)> = Vec::new();
         self.filled.retain(|(strategy, symbol), qty| {
-            if flat(SymbolId(*symbol)) {
-                dropped.push((StrategyId(*strategy), SymbolId(*symbol), *qty));
+            if flat(*symbol) {
+                dropped.push((*strategy, *symbol, *qty));
                 false
             } else {
                 true
             }
         });
-        dropped.sort_by_key(|(strategy, symbol, _)| (strategy.0, symbol.0));
+        dropped.sort_by_key(|(strategy, symbol, _)| (*strategy, *symbol));
         dropped
     }
 
@@ -285,7 +282,7 @@ impl Attribution {
     /// The one who got there first keeps it until it is flat.
     pub fn held_by_another(&self, mine: StrategyId, symbol: SymbolId) -> bool {
         self.filled.iter().any(|((strategy, held), qty)| {
-            *held == symbol.0 && *strategy != mine.0 && qty.abs() >= FLAT
+            *held == symbol && *strategy != mine && qty.abs() >= FLAT
         })
     }
 }

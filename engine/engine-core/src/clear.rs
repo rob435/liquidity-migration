@@ -119,7 +119,7 @@ pub async fn run(config_path: &Path, note: &str, execute: bool) -> Result<(), Bo
             names.symbol(row.symbol),
             row.signed_qty,
             reconcile::logged_exposure(&replayed)
-                .get(&row.symbol.0)
+                .get(&row.symbol)
                 .copied()
                 .unwrap_or(0.0)
         );

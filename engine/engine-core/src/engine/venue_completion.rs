@@ -580,7 +580,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         let remembered = self
             .intended_stops
-            .get(&symbol.0)
+            .get(&symbol)
             .filter(|stop| stop.side == position.side)
             .map(|stop| stop.trigger_px);
         let venue_stop =
@@ -588,7 +588,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .then_some(position.stop_px);
         let confirmed_stop = self
             .confirmed_stop_moves
-            .get(&symbol.0)
+            .get(&symbol)
             .filter(|stop| stop.side == position.side)
             .map(|stop| stop.trigger_px);
         let baseline = match (position.side, remembered, venue_stop) {
@@ -624,7 +624,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             wall_ts_ms: clock::wall_ms(),
         })?;
         self.intended_stops.insert(
-            symbol.0,
+            symbol,
             reconcile::IntendedPositionStop {
                 side: position.side,
                 trigger_px,
@@ -633,7 +633,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         match self.venue.set_stop(symbol, trigger_px).await {
             Ok(()) => {
                 self.confirmed_stop_moves.insert(
-                    symbol.0,
+                    symbol,
                     reconcile::IntendedPositionStop {
                         side: position.side,
                         trigger_px,

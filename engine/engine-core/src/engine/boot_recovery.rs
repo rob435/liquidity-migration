@@ -119,23 +119,25 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         let restored_symbol_checkpoints = replay_strategy_checkpoints(replayed);
         for ((owner, _), checkpoint) in &restored_symbol_checkpoints {
-            let strategy = strategies.get(usize::from(*owner)).ok_or_else(|| {
+            let strategy = strategies.get(owner.idx()).ok_or_else(|| {
                 EngineError::Boot(format!(
-                    "checkpoint names strategy {owner} outside the configured table"
+                    "checkpoint names strategy {} outside the configured table",
+                    owner.0
                 ))
             })?;
             validate_strategy_checkpoint(strategy.as_ref(), checkpoint).map_err(|error| {
                 EngineError::Boot(format!(
                     "strategy {} refused its restored checkpoint: {error}",
-                    names[usize::from(*owner)]
+                    names[owner.idx()]
                 ))
             })?;
         }
         let restored_global_before_boot = replay_strategy_global_checkpoints(replayed);
         for (owner, state) in &restored_global_before_boot {
-            let strategy = strategies.get(usize::from(*owner)).ok_or_else(|| {
+            let strategy = strategies.get(owner.idx()).ok_or_else(|| {
                 EngineError::Boot(format!(
-                    "global checkpoint names strategy {owner} outside the configured table"
+                    "global checkpoint names strategy {} outside the configured table",
+                    owner.0
                 ))
             })?;
             if state
@@ -145,14 +147,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             {
                 return Err(EngineError::Boot(format!(
                     "strategy {} has an incomplete stopped-runtime import",
-                    names[usize::from(*owner)]
+                    names[owner.idx()]
                 )));
             }
             validate_strategy_checkpoint(strategy.as_ref(), &state.checkpoint).map_err(
                 |error| {
                     EngineError::Boot(format!(
                         "strategy {} refused its restored global checkpoint: {error}",
-                        names[usize::from(*owner)]
+                        names[owner.idx()]
                     ))
                 },
             )?;
@@ -160,8 +162,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut initial_global_checkpoints = std::collections::BTreeMap::new();
         if replayed.is_empty() {
             for (index, strategy) in strategies.iter().enumerate() {
-                let id = u16::try_from(index)
-                    .map_err(|_| EngineError::Boot("more than 65535 strategies".to_string()))?;
+                let id =
+                    StrategyId(u16::try_from(index).map_err(|_| {
+                        EngineError::Boot("more than 65535 strategies".to_string())
+                    })?);
                 match strategy.initial_checkpoint() {
                     Some(checkpoint) => {
                         validate_strategy_checkpoint(strategy.as_ref(), &checkpoint).map_err(
@@ -175,7 +179,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         initial_global_checkpoints.insert(
                             id,
                             StrategyGlobalCheckpointState {
-                                strategy: StrategyId(id),
+                                strategy: id,
                                 checkpoint,
                                 provenance: None,
                             },
@@ -193,11 +197,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         } else {
             for (index, strategy) in strategies.iter().enumerate() {
                 if strategy.checkpoint_identity().is_some()
-                    && !restored_global_before_boot.contains_key(
-                        &u16::try_from(index).map_err(|_| {
+                    && !restored_global_before_boot.contains_key(&StrategyId(
+                        u16::try_from(index).map_err(|_| {
                             EngineError::Boot("more than 65535 strategies".to_string())
                         })?,
-                    )
+                    ))
                 {
                     return Err(EngineError::Boot(format!(
                         "strategy {} has no whole-sleeve checkpoint in this nonempty WAL; import retired state while the engine is stopped",
@@ -316,11 +320,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let intended_stops = crate::reconcile::intended_stops(effective);
         let mut strategy_checkpoints = replay_strategy_checkpoints(effective);
         strategy_checkpoints.retain(|(strategy, symbol), _| {
-            (*strategy as usize) < strategies.len() && (*symbol as usize) < market.table.len()
+            strategy.idx() < strategies.len() && symbol.idx() < market.table.len()
         });
         let mut strategy_global_checkpoints = replay_strategy_global_checkpoints(effective);
         strategy_global_checkpoints.extend(initial_global_checkpoints);
-        strategy_global_checkpoints.retain(|strategy, _| (*strategy as usize) < strategies.len());
+        strategy_global_checkpoints.retain(|strategy, _| strategy.idx() < strategies.len());
         let mut strategy_events = replay_strategy_events(effective);
         strategy_events.retain(|_, event| {
             (event.source.0 as usize) < strategies.len()

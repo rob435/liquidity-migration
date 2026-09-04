@@ -91,7 +91,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .iter()
             .enumerate()
             .filter_map(|(index, strategy)| {
-                let id = u16::try_from(index).ok()?;
+                let id = StrategyId(u16::try_from(index).ok()?);
                 Some((
                     names.get(index)?.clone(),
                     !rolling_loss_tripped
@@ -107,7 +107,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     request.command,
                     engine_types::RuntimeControlCommand::FlattenDirectional
                 ) && !runtime_control_consumed
-                    .contains(&(request.strategy.0, request.request_id.clone()))
+                    .contains(&(request.strategy, request.request_id.clone()))
             })
             .filter_map(|request| {
                 Some((
