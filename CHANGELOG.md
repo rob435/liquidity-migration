@@ -112,6 +112,27 @@ edit STATE.md to match.
     free. If non-tape growth is what crossed it, this fix makes the recorders
     delete tape to buy the engine headroom, which is correct but is not a size
     decision — that is `deploy/capture/*.toml`, and the owner's.
+  - **Merged and undeployed.** The fix is `1d8fad9a` on `main`. The push
+    started no cloud job (by design since `a487af06`), and the dispatched
+    deploy, run `33928248402`, failed 5 s after it was created at 23:06:57 UTC:
+    `ci`, `rust` and `Deploy artifact` each died in 3–4 s and their log
+    downloads return HTTP 404, so the jobs never started and `vps` was skipped
+    along with every other job. That is the same account-payment refusal
+    STATE.md already carries, not a test failure — nothing in this change was
+    ever run by a runner. Deployed commit stays `65ee75a7`, so **the recorders
+    on the host still have the 300-second sleep and will lose tape on the next
+    crossing.**
+  - The SSH path needs no runner:
+
+    ```bash
+    EXPECTED_COMMIT=1d8fad9a26dbabf6bf9865d805c3c20a1fc78d3c scripts/ops.sh deploy
+    ```
+
+    This change is Python under `market_tape/`, so it restarts the two
+    recorders and nothing else. The same deploy also carries `697341e4` and
+    `10ed1bd2`, which do change the `engine` tree and so hand over both realms
+    and restart the funded engine — that cost belongs to those commits, not
+    this one.
   - Host-side, by hand:
 
     ```bash
