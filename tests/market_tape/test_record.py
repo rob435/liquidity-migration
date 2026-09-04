@@ -866,6 +866,9 @@ def test_the_status_file_carries_what_the_host_watchdog_reads(tmp_path: Path) ->
     assert payload["venue"] == "bybit" and payload["market"] == "linear"
     assert payload["config"] == "deploy/capture/bybit-linear.toml"
     assert payload["last_receive_ns"] == BASE_NS
+    # The watchdog reads silence and socket loss against this, so a recorder
+    # seconds old does not page as a dead venue.
+    assert payload["started_at_ns"] == recorder.started_at_ns > 0
     assert payload["received_frames"] == 1
     assert payload["dropped_frames"] == 1
     assert payload["disk_dropped_frames"] == 3

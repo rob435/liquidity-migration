@@ -67,8 +67,8 @@ python -m market_tape book   SOURCE --hour 2026-09-02T22 --symbol BTCUSDT
 manifest.jsonl                                         Receipts: row count, bytes, SHA-256
 status.json                                            Health status updated every 30s
 ```
-* `status.json` schema: `last_receive_ns`, `disk_blocked`, `dropped_frames`, `disk_dropped_frames`, `shards[].connected`, `budget.projected_month_gb`, `budget.over`, `budget.shed`, `budget.shed_gb_month`.
-* `status.json` is this unit's heartbeat: the watchdog reads its mtime and its `last_receive_ns` (`deploy/fleet_manifest.tsv`, limit 120 s). The maintenance tick that writes it **must never walk the tape** — `Retention.writable()` is one `statvfs`. Retention itself is the `tape-retention` thread, one pass every `RETENTION_INTERVAL_SECONDS` (300); a pass stats each file once, reads free space once, and carries free space forward by the bytes it unlinks.
+* `status.json` schema: `started_at_ns`, `last_receive_ns`, `disk_blocked`, `dropped_frames`, `disk_dropped_frames`, `shards[].connected`, `budget.projected_month_gb`, `budget.over`, `budget.shed`, `budget.shed_gb_month`.
+* `status.json` is this unit's heartbeat: the watchdog reads its mtime and its `last_receive_ns` (`deploy/fleet_manifest.tsv`, limit 120 s). `started_at_ns` is when this process began recording; the watchdog measures silence and socket loss from it, so a recorder younger than the 120 s limit reads as starting up, not as a dead venue. The maintenance tick that writes it **must never walk the tape** — `Retention.writable()` is one `statvfs`. Retention itself is the `tape-retention` thread, one pass every `RETENTION_INTERVAL_SECONDS` (300); a pass stats each file once, reads free space once, and carries free space forward by the bytes it unlinks.
 
 ### Budget (`[budget]` in the capture config)
 

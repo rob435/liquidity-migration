@@ -338,6 +338,11 @@ def evaluate_capture_status(
     copy holds this run's, so a drop pages once per increase, not forever.
     `label` tells one recorder's alerts and counters from another's when the
     host runs several.
+
+    Silence and socket loss are measured from `started_at_ns`: a recorder that
+    has just started has no frames and no connected sockets yet, and neither is
+    a fault until it has been up longer than `max_silence_sec`. A status file
+    with no `started_at_ns` predates the field and gets no grace.
     """
 
     def key(name: str) -> str:
@@ -353,9 +358,22 @@ def evaluate_capture_status(
     if not isinstance(payload, dict):
         return [Alert(key("capture-status"), "CRITICAL", f"{who} status is not a JSON object")], counters
     alerts = []
+    started_at_ns = _number(payload.get("started_at_ns"))
+    uptime = None if started_at_ns is None or started_at_ns <= 0 else now - started_at_ns / 1e9
+    warming_up = uptime is not None and uptime < max_silence_sec
     last_receive_ns = _number(payload.get("last_receive_ns"))
     if last_receive_ns is None or last_receive_ns <= 0:
-        alerts.append(Alert(key("capture-silent"), "CRITICAL", f"{who} has received no market frame yet"))
+        if uptime is None:
+            alerts.append(Alert(key("capture-silent"), "CRITICAL", f"{who} has received no market frame yet"))
+        elif not warming_up:
+            alerts.append(
+                Alert(
+                    key("capture-silent"),
+                    "CRITICAL",
+                    f"{who} has received no market frame in the {uptime:.0f}s since it started "
+                    f"(limit {max_silence_sec:.0f}s)",
+                )
+            )
     else:
         silence = now - last_receive_ns / 1e9
         if silence > max_silence_sec:
@@ -389,7 +407,9 @@ def evaluate_capture_status(
                 )
             )
     shards = payload.get("shards")
-    if isinstance(shards, list):
+    # A shard's socket connects a moment after the process opens it, so
+    # connectivity says nothing about the venue until the grace window is out.
+    if isinstance(shards, list) and not warming_up:
         down = [shard for shard in shards if isinstance(shard, dict) and shard.get("connected") is False]
         if down and len(down) == len(shards):
             alerts.append(Alert(key("capture-shards"), "CRITICAL", f"{who} has no live venue connection"))

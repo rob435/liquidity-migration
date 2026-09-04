@@ -35,6 +35,92 @@ edit STATE.md to match.
     soak. Focused Python and signal-worker tests pass; the full repository gate,
     push, rollout, and live receipts follow below before this entry is closed.
 
+- **2026-09-04 15:32 UTC — Incident `host-84246120f8ea8c9f`: the host watchdog
+  read a two-second-old recorder as a dead venue. Silence and socket loss are
+  now measured from the recorder's own start.**
+  - The alert, on `ip-208-84-103-4`, host scope, two `CRITICAL` refs on the
+    Binance recorder: `capture-shards:forward-market-binance` — "recorder
+    forward-market-binance has no live venue connection" — and
+    `capture-silent:forward-market-binance` — "recorder forward-market-binance
+    has received no market frame yet" — beside a `WARNING capture-shards`
+    "recorder has 1 of 16 venue connections down" on the Bybit recorder. No
+    trading fault: neither engine, signal worker, nor
+    `liquidity-migration-engine-mainnet.service` appears in the payload.
+  - No fault existed. Run `33889491439`'s `vps` job held the host 15:31:36 to
+    15:32:34 UTC and finished `success`; it carried `bf30fd6`, which changes
+    `market_tape/`, so the deploy restarted the recorders. The journal is the
+    whole incident: `Stopped` at 15:32:31, `Started` at 15:32:31, the first
+    `capture status frames=0 rows=0` at 15:32:35,374, then nine `Websocket
+    connected` lines from 15:32:35,648 to 15:32:35,709 — every shard live
+    inside 400 ms. The watchdog's 3-minute run landed in that 274 ms window
+    and read the newborn status file.
+  - Diagnosis. `Recorder.run` (`market_tape/record.py:649` on the parent
+    commit) starts the maintenance thread right after `_reconcile_shards()`,
+    so `_maintenance` → `_write_status` (`record.py:1159`, parent) publishes
+    `last_receive_ns = 0` and `shards[].connected = False` for every shard
+    before the sockets have finished their handshake. That file is accurate.
+    What was wrong is how it was read: in the watchdog running on the host at
+    the time (`bf30fd6`), `evaluate_capture_status`
+    (`scripts/runtime/check_fleet_liveness.py:260`) paged `CRITICAL` on
+    `last_receive_ns <= 0` with no reference to how long the recorder had been
+    up, and `check_fleet_liveness.py:297` paged `CRITICAL` when every shard was
+    `connected: False`. Both read "has not started yet" as "has stopped" — the
+    same false page as `host-bf5dcb6544d0dfdc`, in a different check. The
+    deploy lock that `66088da` made the maintenance boundary does not cover
+    this: it short-circuits `evaluate_watchdog_chain` alone, and the recorder
+    checks run whether or not a deploy holds the lock.
+  - What changed. `status.json` gains `started_at_ns`, the moment the process
+    began recording (`record.py:627`, in the payload at `record.py:1172`).
+    `evaluate_capture_status` computes the recorder's uptime from it
+    (`check_fleet_liveness.py:361`) and holds both readings — silence and
+    shard connectivity, the `WARNING` half included — until the recorder has been up longer than
+    `--max-capture-silence-sec` (120 s). Past that, a recorder with no frame
+    pages with the time it has been up ("no market frame in the 300s since it
+    started"), and a recorder with every socket down still pages `CRITICAL`.
+    Nothing else is graced: blocked storage, new drops, and the byte budget
+    page as soon as the file says so. A status file without `started_at_ns`
+    predates the field and keeps the old reading, so the check cannot be
+    quieted by a missing key.
+  - Proof. `test_a_recorder_seconds_old_is_not_a_dead_venue`
+    (`tests/scripts/test_scripts_check_fleet_liveness.py`) replays this
+    payload — 0.02 s of uptime, no frames, both shards down — and asserts no
+    alert, then asserts the same file at 300 s of uptime pages both refs, that
+    `disk_blocked` still pages inside the window, and that a payload with the
+    key deleted keeps the old message. `started_at_ns` is asserted in
+    `test_the_status_file_carries_what_the_host_watchdog_reads`
+    (`tests/market_tape/test_record.py`). Both fail on the parent commit
+    (`KeyError: 'started_at_ns'`, and the newborn payload raising two
+    `CRITICAL`s) and pass here. Locally: Ruff, mypy, and the whole
+    `tests/scripts` and `tests/market_tape` suites green, 1,436 of 1,438
+    Python tests overall. The two that did not run are
+    `test_backup_snapshots_locally_then_mirrors_to_the_drive_with_history` and
+    `test_backup_refuses_a_credential_file_and_a_non_rclone_destination`:
+    `rsync` is not installable in this on-call container
+    (`rsync_3.2.7-1ubuntu1.2_amd64.deb` 404s on the mirror), so
+    `backup_state.sh` exits 2 before either assertion. Neither touches the
+    recorder or the watchdog; the repository gate on the push covers them.
+  - Detection cost, and the owner's call. A venue that is dead when the
+    recorder starts now pages 120 s later instead of at once. That is the same
+    latency the check already accepted for a venue that dies while the
+    recorder runs, and 120 s of tape is what a restart costs anyway.
+  - Not established from the payload: whether the Bybit recorder's 1-of-16
+    `WARNING` was the same startup artifact or a real reconnect. Its journal
+    was not in the payload — `_incident_units`
+    (`check_fleet_liveness.py:715`) attaches a unit's journal only for
+    `CRITICAL` refs. The host reading that settles it:
+    `sudo journalctl -u liquidity-migration-forward-capture.service --since
+    '2026-09-04 15:30' | grep -E 'Websocket|shard|Started'`. Either way it is
+    a warning, it did not fire this routine, and the next run's `RESOLVED
+    capture-shards` line will say it cleared.
+  - No host action is required beyond the deploy. Both recorders were up and
+    connected within four seconds of the restart, the alerts self-resolved on
+    the next 3-minute run, and no positions were touched.
+  - `scripts/ops.sh curve mainnet` is the owner's reading for the funded
+    account through 15:26-15:36 UTC: the equity sampler is `independent` and
+    ran through the deploy, so a minute written `state=absent` there would say
+    an engine actually lost its heartbeat during the restart window, which no
+    alert claimed.
+
 - **2026-09-04 14:49 UTC — Incident `host-08ad9d5834fa6d2f`: the recorder's
   heartbeat sat behind a full walk of the tape. Retention now has its own
   thread and its own cadence.**

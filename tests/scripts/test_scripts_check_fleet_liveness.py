@@ -419,6 +419,47 @@ def test_recorder_status_pages_on_silence_blocked_storage_and_new_drops(tmp_path
     assert [alert.key for alert in alerts] == ["capture-status"]
 
 
+def test_a_recorder_seconds_old_is_not_a_dead_venue(tmp_path: Path) -> None:
+    """A restarted recorder has no frames and no connected socket yet. Both
+    become faults once it has been up past the silence limit, not before."""
+
+    status = tmp_path / "status.json"
+    now = 1_800_000_000.0
+    label = "forward-market-binance"
+
+    def read(payload: dict[str, object]) -> dict[str, liveness.Alert]:
+        status.write_text(json.dumps(payload))
+        alerts, _ = liveness.evaluate_capture_status(
+            status, now=now, max_silence_sec=120, counters={}, label=label
+        )
+        return {alert.key: alert for alert in alerts}
+
+    newborn: dict[str, object] = {
+        "started_at_ns": int((now - 0.02) * 1e9),
+        "last_receive_ns": 0,
+        "disk_blocked": False,
+        "shards": [{"connected": False}, {"connected": False}],
+    }
+    assert read(newborn) == {}
+    # Partial connectivity inside the window is not a reading either.
+    assert read(dict(newborn, shards=[{"connected": True}, {"connected": False}])) == {}
+    # The grace covers connectivity and silence, nothing else.
+    assert set(read(dict(newborn, disk_blocked=True))) == {f"capture-disk:{label}"}
+
+    stalled = read(dict(newborn, started_at_ns=int((now - 300) * 1e9)))
+    assert stalled[f"capture-silent:{label}"].severity == "CRITICAL"
+    assert "no market frame in the 300s since it started" in stalled[f"capture-silent:{label}"].message
+    assert stalled[f"capture-shards:{label}"].severity == "CRITICAL"
+    assert "no live venue connection" in stalled[f"capture-shards:{label}"].message
+
+    # A status file written before the field existed keeps the old reading.
+    older = dict(newborn)
+    del older["started_at_ns"]
+    legacy = read(older)
+    assert legacy[f"capture-silent:{label}"].message.endswith("no market frame yet")
+    assert legacy[f"capture-shards:{label}"].severity == "CRITICAL"
+
+
 def test_upload_receipt_ages_and_low_drive_space_warn(tmp_path: Path) -> None:
     stamp = tmp_path / "market-tape-upload.last-success"
     now = time.time()

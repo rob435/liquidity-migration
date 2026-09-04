@@ -621,7 +621,11 @@ class Recorder:
                 self.static_symbols[tier.name] = symbols
         self.tables: dict[str, list[dict[str, Any]]] | None = None
         self.live = LiveState(history_ns=int(config.history_hours * 3600 * 1e9 * 1.25))
-        self.meter = ByteMeter(time.time_ns())
+        # When this process began recording. The watchdog measures silence and
+        # socket loss from here, so a recorder younger than its silence limit
+        # does not read as a dead venue.
+        self.started_at_ns = time.time_ns()
+        self.meter = ByteMeter(self.started_at_ns)
         self.budget = BudgetController(config.budget, self.meter)
         self.members: dict[str, set[str]] = {tier.name: set() for tier in config.tiers}
         self.qualified_ns: dict[str, dict[str, int]] = {tier.name: {} for tier in config.tiers}
@@ -1165,6 +1169,7 @@ class Recorder:
             "venue": self.adapter.name,
             "market": self.adapter.market,
             "config": str(self.config.source_path) if self.config.source_path else None,
+            "started_at_ns": self.started_at_ns,
             "recorded_at_ns": now_ns,
             "status_interval_seconds": self.config.storage.status_interval_seconds,
             "tiers": [self.tier_status(tier) for tier in self.config.tiers],
