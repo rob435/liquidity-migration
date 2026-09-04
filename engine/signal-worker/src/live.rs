@@ -787,14 +787,9 @@ impl LiveRunner {
                 _ = heartbeat_tick.tick() => {
                     let health = stream.health();
                     let now_ms = wall_ms()?;
-                    let base_status = runtime_status(
+                    let status = heartbeat_status(
                         &health,
                         lanes.repair,
-                        now_ms,
-                        self.config.sources.mark_max_age_ms,
-                    );
-                    let status = startup_runtime_status(
-                        base_status,
                         [
                             (
                                 self.last_long_cycle_completed_wall_ts_ms,
@@ -805,13 +800,9 @@ impl LiveRunner {
                                 self.config.live.kline_cadence_ms,
                             ),
                         ],
-                        stream_inputs_healthy(
-                            &health,
-                            now_ms,
-                            self.config.sources.mark_max_age_ms,
-                        ),
                         run_started_at_ms,
                         now_ms,
+                        self.config.sources.mark_max_age_ms,
                     );
                     self.write_heartbeat(status, Some(health))?;
                 }
@@ -2737,16 +2728,48 @@ fn runtime_status(
 }
 
 fn stream_inputs_healthy(health: &StreamHealth, now_ms: i64, max_frame_age_ms: i64) -> bool {
+    stream_startup_inputs_healthy(health, now_ms, max_frame_age_ms)
+        && health.ticker_coverage_complete
+}
+
+/// Stream input a cold start can actually have: the socket is up, every topic
+/// this worker asked for was accepted, none was refused, and frames are
+/// arriving. Ticker coverage is not in it — it fills symbol by symbol from the
+/// stream, so a booting worker never has it, and requiring it here would make
+/// every restart page inside one watchdog interval.
+fn stream_startup_inputs_healthy(
+    health: &StreamHealth,
+    now_ms: i64,
+    max_frame_age_ms: i64,
+) -> bool {
     let frame_fresh = health
         .last_frame_ts_ms
         .is_some_and(|last| last <= now_ms && now_ms.saturating_sub(last) <= max_frame_age_ms);
     health.connected
-        && health.ticker_coverage_complete
         && health.ticker_topics_quarantined == 0
         && health.kline_topics_quarantined == 0
         && health.ticker_topics_accepted == health.ticker_capacity
         && health.kline_topics_accepted == health.ticker_capacity
         && frame_fresh
+}
+
+/// The status one heartbeat carries: the live verdict, held at `starting` for
+/// the bounded cold start while the stream itself is sound.
+fn heartbeat_status(
+    health: &StreamHealth,
+    repair_running: bool,
+    cycles: [(Option<i64>, u64); 2],
+    started_at_ms: i64,
+    now_ms: i64,
+    max_frame_age_ms: i64,
+) -> &'static str {
+    startup_runtime_status(
+        runtime_status(health, repair_running, now_ms, max_frame_age_ms),
+        cycles,
+        stream_startup_inputs_healthy(health, now_ms, max_frame_age_ms),
+        started_at_ms,
+        now_ms,
+    )
 }
 
 fn startup_runtime_status(
@@ -4115,9 +4138,9 @@ mod tests {
     use super::{
         bounded_instrument_source_ranges, carry_required_lanes_pending, closed_kline_end,
         complete_funding_coverage, complete_whale_coverage, coverage_repair_start,
-        funding_job_chunks, kline_job_chunks, runtime_status, send_repair_chunk_and_wait,
-        send_whale_chunk_and_wait, source_coverage_contains, source_grid_slots,
-        startup_runtime_status, trading_intervals_contain,
+        funding_job_chunks, heartbeat_status, kline_job_chunks, runtime_status,
+        send_repair_chunk_and_wait, send_whale_chunk_and_wait, source_coverage_contains,
+        source_grid_slots, startup_runtime_status, trading_intervals_contain,
         validate_instrument_source_against_state, validate_source_grid_timestamp,
         validate_source_page_rows, whale_fetch_bounds, whale_job_chunks, FetchedFunding,
         FetchedFundingBatch, FetchedInstruments, FetchedKlineBatch, FetchedKlineJobs,
@@ -4244,6 +4267,82 @@ mod tests {
             ),
             "degraded",
             "a future cycle timestamp is not fresh"
+        );
+    }
+
+    #[test]
+    fn a_cold_start_still_filling_ticker_coverage_is_starting_not_degraded() {
+        let started_at_ms = 1_000_000;
+        let now_ms = started_at_ms + 274_000;
+        // What a worker 274 s into its cold start has: socket up, every topic
+        // accepted, frames arriving, the boot repair gap still open and the
+        // ticker cache still filling.
+        let booting = StreamHealth {
+            connected: true,
+            epoch: 1,
+            gap_open: true,
+            gap_open_since_ms: Some(started_at_ms + 13_000),
+            last_frame_ts_ms: Some(now_ms - 1),
+            ticker_capacity: 2,
+            ticker_coverage_complete: false,
+            ticker_topics_accepted: 2,
+            kline_topics_accepted: 2,
+            ..StreamHealth::default()
+        };
+        let cycles = [(None, 60_000), (None, 60_000)];
+        assert_eq!(runtime_status(&booting, true, now_ms, 30_000), "degraded");
+        assert_eq!(
+            heartbeat_status(&booting, true, cycles, started_at_ms, now_ms, 30_000),
+            "starting",
+            "a sound stream that has not finished filling coverage is warmup, not a fault"
+        );
+
+        let disconnected = StreamHealth {
+            connected: false,
+            ..booting.clone()
+        };
+        assert_eq!(
+            heartbeat_status(&disconnected, true, cycles, started_at_ms, now_ms, 30_000),
+            "degraded",
+            "a disconnected stream is a fault from the first heartbeat"
+        );
+
+        let refused = StreamHealth {
+            ticker_topics_quarantined: 1,
+            ..booting.clone()
+        };
+        assert_eq!(
+            heartbeat_status(&refused, true, cycles, started_at_ms, now_ms, 30_000),
+            "degraded",
+            "a refused topic never fills, so it is not warmup"
+        );
+
+        assert_eq!(
+            heartbeat_status(
+                &booting,
+                true,
+                cycles,
+                started_at_ms,
+                started_at_ms + STARTUP_MAX_MS,
+                30_000
+            ),
+            "degraded",
+            "past the cold-start bound an unfinished backfill is a fault"
+        );
+        assert_eq!(
+            heartbeat_status(
+                &booting,
+                false,
+                [
+                    (Some(now_ms - 1_000), 60_000),
+                    (Some(now_ms - 1_000), 60_000)
+                ],
+                started_at_ms,
+                now_ms,
+                30_000
+            ),
+            "degraded",
+            "once both cycles have run, incomplete coverage is the live verdict again"
         );
     }
 

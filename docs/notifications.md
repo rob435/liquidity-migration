@@ -22,7 +22,7 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | :--- | :--- | :--- |
 | Realm | Unit state | Expected manifest unit is not active |
 | Realm | Heartbeat | Engine or signal-worker artifact exceeds 60 s, is not a JSON object, or omits its producer-specific health verdict |
-| Realm | Signal worker | `starting` is allowed for at most 120 min while the live stream is complete and fresh; `degraded`, `stopped`, an unknown verdict, or spool backpressure is `CRITICAL` |
+| Realm | Signal worker | `starting` is allowed for at most 120 min while the stream is connected, has every topic accepted and none refused, and frames are arriving — ticker coverage is still filling then and does not have to be complete; `degraded`, `stopped`, an unknown verdict, or spool backpressure is `CRITICAL` |
 | Realm | Admission | Engine reports `may_open != true` |
 | Realm | Circuit breaker | Engine reports `rolling_loss_tripped=true` |
 | Host | Recorders | Status unreadable, no frames for 2 min, connection loss, blocked storage, or new drops. Silence and connection loss are measured from the recorder's `started_at_ns`, so a restarted recorder reads as starting up for its first 2 min |

@@ -6,6 +6,74 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 16:05 UTC — Incident `demo-0922e9f30da3bf98`: a cold start is
+  not a degraded worker. The startup grace no longer waits on ticker coverage
+  the stream has not delivered yet.**
+  - The page, `scope=demo` on `ip-208-84-103-4`, one `CRITICAL` ref
+    `worker-status:liquidity-migration-signal-worker-demo.service`:
+    "`liquidity-migration-signal-worker-demo.service reports 'degraded': Bybit
+    WebSocket repair gap open for 4530s; carry cycle has not completed`". It
+    was true. The demo worker (PID 2139543) had run since 14:41:52 on the
+    binary the 2f4af5e handover built, its repair gap open since 14:42:05 —
+    process start — because that binary predates the epoch adoption in
+    `66088da`. The `dc69448` and `bf30fd6` deploys both left the realm
+    `unchanged-left-running`, so nothing replaced it. Run `33891965516` did:
+    `deploy-ok commit=1193043` at 16:01:04, demo worker restarted 16:00:26,
+    mainnet 16:00:56, `real-money armed`. That closes the pre-fix process.
+  - The same deploy carried the new semantic worker check to the host at
+    ~15:57:2x, before the realm handover, and the demo liveness timer's
+    15:57:34 tick graded the old process with it. The page is that tick.
+  - The restarted workers then paged on their own boot state:
+    `CRITICAL worker-status:…-mainnet.service … 'degraded': Bybit WebSocket
+    repair gap open for 73s; ticker coverage incomplete; carry cycle has not
+    completed` at 16:02:13, the demo equivalent at 274 s at 16:05:13, each
+    firing another on-call session, with `ok scope=demo` at 16:02:11 and `ok
+    scope=mainnet` at 16:05:12 between them. Not a deploy artefact: the deploy
+    lock was released at 16:01:05, and the realm scopes never consult it.
+  - `startup_runtime_status` (`engine/signal-worker/src/live.rs`) held a worker
+    at `starting` for the 120-minute cold-start budget only while
+    `stream_inputs_healthy` was true, and that predicate requires
+    `ticker_coverage_complete`. Coverage fills symbol by symbol from the
+    stream and needs a fresh mark for all ~517 symbols, so a booting worker
+    never has it: the grace could not apply at the one moment it exists for,
+    and `runtime_status`'s live `degraded` reached the watchdog inside one
+    3-minute interval of every restart.
+  - The startup gate is now `stream_startup_inputs_healthy`: connected, every
+    ticker and kline topic accepted, none quarantined, frames arriving.
+    `stream_inputs_healthy` is that plus complete coverage and still decides
+    `ready`. `heartbeat_status` composes the two so the heartbeat's status has
+    one definition. A disconnected stream or a refused topic is `degraded`
+    from the first heartbeat, past the 120-minute bound an unfinished backfill
+    is a fault, and once both cycles have run incomplete coverage is the live
+    verdict again.
+  - Cost: a worker whose ticker coverage never completes pages at the
+    120-minute bound instead of within 3 minutes of boot. The open repair gap
+    and the incomplete coverage stay in the heartbeat throughout.
+  - `a_cold_start_still_filling_ticker_coverage_is_starting_not_degraded`
+    fails on the parent commit — `degraded` where `starting` is required — and
+    passes here. Local: `cargo fmt --check`, workspace
+    `cargo clippy --all-targets` and the 114 `signal-worker` library tests
+    green; Ruff, mypy and 1421 Python tests green. 16 Python tests cannot run
+    in this container — the `market_tape` load and fixture-hour tests need the
+    `zstd` binary and the backup tests need `rclone`/`rsync`; none touch the
+    signal worker or the liveness check, and the deploy gate runs them.
+  - Not changed, and the owner's call: the `demo` and `mainnet` liveness
+    scopes still evaluate through a sanctioned deploy, so a handover window
+    can page on a process the deploy is about to replace. Suppressing a funded
+    realm's worker verdict during a deploy is a risk trade, not a repair.
+  - Also in the payload, not a fault: `instrument lane: 691 instrument row(s)
+    left out of the table (BTC-01DEC23: input: invalid symbol …)` hourly.
+    Bybit's linear list carries dated futures beside the perpetuals and
+    `normalize_instruments_reporting` leaves them out by design rather than
+    refusing the snapshot.
+  - Host-side readings the owner can take: `scripts/ops.sh status` for the
+    deployed commit and heartbeat ages, `scripts/ops.sh curve mainnet` for the
+    account's equity through the window, and
+    `jq '{status, bybit_ws_gap_open, bybit_ws_ticker_coverage_complete,
+    last_carry_cycle_completed_wall_ts_ms}'
+    /var/lib/liquidity-migration-signal-worker-mainnet/heartbeat.json` for the
+    verdict this entry is about. No hand action is required.
+
 - **2026-09-04 — The order path is measured every quarter hour, every sleeve
   is a series, and the Bybit recorder stops starving itself.**
   - What the first dashboard showed against what was true. "Open positions by
