@@ -121,12 +121,30 @@ edit STATE.md to match.
     `worker-status:`, `worker-spool:`, `may-open:`, `rolling-loss:` and the
     fleet's own `unit:`/`heartbeat:` keys, and the mainnet watchdog paged for
     units the host's own deploy was restarting. Every scope now consults the
-    lock (`scripts/runtime/check_fleet_liveness.py:988`); the hold is bounded
-    by the deploy script's own lifetime, since `flock` releases on exit even
-    when the deploy fails, and a lock held past `_MAX_DEPLOY_AGE_SEC` still
-    pages through the host scope's `deploy-lock` check. This page arrived ten
-    minutes after the 16:01:05 release, so the hold would not have suppressed
-    it.
+    lock (`scripts/runtime/check_fleet_liveness.py:988`); a lock held past
+    `_MAX_DEPLOY_AGE_SEC` pages through the host scope's `deploy-lock` check
+    and the hold lifts at the same bound, so the worst case is 30 minutes of
+    realm-scope silence, not indefinite. This page arrived ten minutes after
+    the 16:01:05 release, so the hold would not have suppressed it.
+  - Correcting this entry as first written: it said the hold is bounded by the
+    deploy script's own lifetime because `flock` releases on exit. That is
+    true of the script but not of the lock, and the evidence arrived minutes
+    later — run `33895768916`'s `vps` job exited `deploy failed: another deploy
+    is already running` at 16:40:20 against a lock no GitHub run held, from the
+    out-of-band deploy `1861e808` identifies. `_MAX_DEPLOY_AGE_SEC` is the
+    bound that actually holds, which is why it is stated that way above.
+  - Deployed and verified. The out-of-band deploy landed `2594e6b`, which
+    carries `92058e7`; `diagnose` run `33896781856` read the host at 16:44:21
+    UTC: `deployed 2594e6b`, `real-money armed`, mainnet engine heartbeat 5 s
+    and worker 1 s, demo engine 0 s and worker 2 s, every timer `active`,
+    `systemctl --failed` empty, 32 GB free. The fix is visible in its own
+    receipt: `mainnet-liveness` printed
+    `ok scope=mainnet sanctioned-deploy-in-progress` at 16:41:03 and 16:43:21
+    and demo the same at 16:42:51 — a line the realm scopes could not print
+    before this change — then `ok scope=mainnet units-and-heartbeats-healthy`
+    at 16:44:21. `worker-status:` is resolved and the host scope's
+    `CRITICAL watchdog:demo` of 16:38:03 has cleared with the demo timers
+    `active` again.
   - `test_a_realm_scope_holds_the_fleet_through_a_deploy_handoff` fails on the
     parent commit — the mainnet scope reads the manifest mid-handoff and prints
     a `CRITICAL manifest` — and passes here. Local: Ruff, mypy and 1422 Python
