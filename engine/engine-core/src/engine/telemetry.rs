@@ -37,28 +37,36 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) fn beat(&mut self, now_ns: u64) {
         let Engine {
             heartbeat,
+            host,
+            books,
             ledger,
             fills,
-            names,
             may_open,
             private_stream_ready,
             events_seen,
             orders_sent,
-            account,
-            market,
-            strategies,
-            attribution,
-            orders,
-            covers,
             risk,
             amends_confirmed,
             amends_pulled_unconfirmed,
             stream_resets,
-            runtime_entries_enabled,
             runtime_control_requests,
             runtime_control_consumed,
             ..
         } = self;
+        let StrategyHost {
+            strategies,
+            names,
+            entries_enabled: runtime_entries_enabled,
+            ..
+        } = host;
+        let Books {
+            account,
+            market,
+            attribution,
+            orders,
+            covers,
+            ..
+        } = books;
         let Some(heartbeat) = heartbeat.as_mut() else {
             return;
         };
@@ -210,7 +218,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     pub fn strategy_names(&self) -> &[String] {
-        &self.names
+        &self.host.names
     }
 
     /// What the fills have cost so far this run.

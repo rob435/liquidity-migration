@@ -52,7 +52,7 @@ use crate::attribution::{self, Attribution};
 use crate::clock;
 use crate::config::EngineSection;
 use crate::covers::CoverBook;
-use crate::ctx::{Ctx, Timers};
+use crate::ctx::{Books, StrategyHost, Timers};
 use crate::execution::{self, Fills};
 use crate::execution_ids::{ExecutionIds, RECOVERY_PAD_MS, RECOVERY_REACH_MS};
 use crate::heartbeat::{self, Heartbeat};
@@ -310,32 +310,17 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// origin therefore survive a slow venue round trip.
     ready_actions: VecDeque<(Action, u64)>,
     _venue: std::marker::PhantomData<V>,
-    strategies: Vec<Box<dyn Strategy>>,
-    names: Vec<String>,
-    market: MarketState,
+    /// The strategies and what the engine holds on their behalf: timers,
+    /// pending actions, checkpoints, cross-sleeve events, entry overrides.
+    host: StrategyHost,
+    /// What every strategy reads and none may edit: the market, the account
+    /// reading, instrument rules, and the books about orders and ownership.
+    books: Books,
     routing: Routing,
-    rules: Vec<Option<InstrumentRule>>,
-    timers: Timers,
-    pending: VecDeque<Action>,
     /// Present only after a venue mutation has completed while the same
     /// strategy wake still has actions. The run loop polls the private stream
     /// and a due account-refresh tick before resuming it.
     drain_progress: Option<DrainProgress>,
-    account: AccountView,
-    registry: OrderRegistry,
-    orders: LedgerOfOrders,
-    /// Whose each position is. The account reading is per symbol and
-    /// carries no strategy on it, so this is summed from the fills of the
-    /// orders each strategy placed, and rebuilt from the log at boot.
-    attribution: Attribution,
-    /// Strategy-owned state, persisted before the action it guards and
-    /// restated through rotation. The engine stores bytes, not meaning.
-    strategy_checkpoints: std::collections::BTreeMap<(u16, u16), StrategyCheckpoint>,
-    /// Whole-sleeve reducer state. Separate key space: no sentinel symbol can
-    /// collide with a venue name admitted later.
-    strategy_global_checkpoints: std::collections::BTreeMap<u16, StrategyGlobalCheckpointState>,
-    /// Cross-sleeve events waiting for the addressed strategy to consume them.
-    strategy_events: std::collections::BTreeMap<(u16, String), StrategyEvent>,
     signals: crate::signal_state::SignalState,
     signal_dependencies: Vec<Vec<StrategyId>>,
     /// Every accepted operator command, retained for request-id idempotence
@@ -343,16 +328,9 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     runtime_control_requests: Vec<engine_types::RuntimeControlRequest>,
     /// Replayable commands a reducer has durably completed.
     runtime_control_consumed: std::collections::BTreeSet<(u16, String)>,
-    /// The newest durable runtime entry override per strategy.
-    runtime_entries_enabled: std::collections::BTreeMap<u16, bool>,
     /// Validated observations held until every requested symbol/feed/rule is
     /// admitted. They are not delivered or cursor-advanced before then.
     pending_signal_deliveries: VecDeque<SignalObservation>,
-    /// What each strategy has sent that the account reading has not yet
-    /// absorbed, per (strategy, symbol). Booked at the send, released by
-    /// rejects, cancels, refused exits, and the reading catching up; read by
-    /// strategies as `ctx.in_flight`. The rules live in `covers.rs`.
-    covers: CoverBook,
     /// The resting entries this engine is advancing. Empty unless a strategy
     /// asked for one to be worked.
     working: WorkingOrders,
@@ -493,7 +471,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     pub fn in_flight_ids(&self) -> Vec<&str> {
-        self.orders.in_flight_ids()
+        self.books.orders.in_flight_ids()
     }
 
     pub fn ledger(&self) -> &LatencyLedger {
@@ -501,11 +479,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     pub fn market(&self) -> &MarketState {
-        &self.market
+        &self.books.market
     }
 
     pub fn account(&self) -> &AccountView {
-        &self.account
+        &self.books.account
     }
 
     /// Run until shutdown resolves or the market feed closes.
@@ -615,12 +593,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
         // Boot-restored cross-sleeve events and external observations were
         // delivered into this FIFO only after all checkpoints were restored.
-        if !self.pending.is_empty() {
+        if !self.host.pending.is_empty() {
             self.drain(clock::now_ns()).await?;
         }
 
         loop {
             let timer_wait = self
+                .host
                 .timers
                 .next_deadline()
                 .map(|deadline| Duration::from_nanos(deadline.saturating_sub(clock::now_ns())));
@@ -948,10 +927,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.verify_leverage_against_view(&view.positions)
             }
         }
-        self.account = view;
+        self.books.account = view;
         // A cover the fresh reading has caught up with is released, so the
         // strategies woken after this read one truthful in-flight number.
-        self.covers.absorb(&self.account);
+        self.books.covers.absorb(&self.books.account);
     }
 
     /// Keep a venue-global position stop at least as protective as the
@@ -961,7 +940,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     async fn enforce_position_stop_intent(&mut self) -> Result<(), EngineError> {
         let mut repairs = Vec::new();
         let mut failures = Vec::new();
-        for position in &self.account.positions {
+        for position in &self.books.account.positions {
             let wanted = self
                 .intended_stops
                 .get(&position.symbol.0)
@@ -971,6 +950,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 (position.stop_attached && position.stop_px.is_finite() && position.stop_px > 0.0)
                     .then_some(position.stop_px);
             let tolerance = self
+                .books
                 .rules
                 .get(position.symbol.0 as usize)
                 .and_then(|rule| rule.as_ref())
@@ -985,7 +965,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 }
                 (None, None) => failures.push(format!(
                     "{}: held {:?} position has no venue stop and no fill-owned durable stop intent",
-                    self.market.table.name(position.symbol),
+                    self.books.market.table.name(position.symbol),
                     position.side
                 )),
                 _ => {}
@@ -996,6 +976,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             match self.venue.set_stop(symbol, trigger_px).await {
                 Ok(()) => {
                     if let Some(position) = self
+                        .books
                         .account
                         .positions
                         .iter_mut()
@@ -1008,14 +989,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         source: "stop-supervisor".into(),
                         text: format!(
                             "restored {} {:?} position stop to durable level {trigger_px}",
-                            self.market.table.name(symbol),
+                            self.books.market.table.name(symbol),
                             side
                         ),
                     })?;
                 }
                 Err(error) => failures.push(format!(
                     "{}: failed to restore {:?} position stop {trigger_px}: {error}",
-                    self.market.table.name(symbol),
+                    self.books.market.table.name(symbol),
                     side
                 )),
             }
@@ -1044,12 +1025,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// history has closed the stream gap.
     fn invalidate_private_stream(&mut self) -> Result<(), EngineError> {
         self.private_stream_ready = false;
-        self.account.observed_ns = 0;
+        self.books.account.observed_ns = 0;
         self.queue_halted_entry_cancels()
     }
 
     fn is_live_opening(&self, client_order_id: &str) -> bool {
-        self.orders
+        self.books
+            .orders
             .orders
             .get(client_order_id)
             .is_some_and(|order| !order.request.reduce_only && order.in_flight())
@@ -1070,7 +1052,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             };
             if (venue_says - we_set).abs() > 1e-9 {
                 tracing::error!(
-                    symbol = self.market.table.name(position.symbol),
+                    symbol = self.books.market.table.name(position.symbol),
                     we_set,
                     venue_says,
                     "a held position's leverage is not what this engine set — \
@@ -1082,7 +1064,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     text: format!(
                         "position {} runs at {venue_says}x, engine set {we_set}x; \
                          trust evicted, next entry re-confirms",
-                        self.market.table.name(position.symbol)
+                        self.books.market.table.name(position.symbol)
                     ),
                 });
                 self.leverage_at.remove(&position.symbol);
@@ -1121,9 +1103,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     fn mint_id(&mut self) -> String {
-        let orders = &self.orders;
+        let orders = &self.books.orders;
         mint_unused(
-            self.registry.prefix(),
+            self.books.registry.prefix(),
             &mut self.next_order_n,
             |candidate| orders.contains(candidate),
         )
@@ -1149,15 +1131,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(crate) fn rotation_base(&self, wall_ts_ms: i64) -> WalRecord {
         WalRecord::SegmentBase {
             wall_ts_ms,
-            strategies: self.names.clone(),
-            symbols: (0..self.market.table.len())
-                .map(|i| self.market.table.name(SymbolId(i as u16)).to_string())
+            strategies: self.host.names.clone(),
+            symbols: (0..self.books.market.table.len())
+                .map(|i| self.books.market.table.name(SymbolId(i as u16)).to_string())
                 .collect(),
             may_open: self.may_open,
             // Older WALs may contain anchors from the retired daily-loss
             // feature. Reading remains compatible; rotation scrubs them.
             control_anchors: Vec::new(),
             attribution: self
+                .books
                 .attribution
                 .rows()
                 .into_iter()
@@ -1188,7 +1171,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             execution_history_through_ms: Some(self.recovered_until_ms),
             target_book_latches: Vec::new(),
             strategy_checkpoints: self
-                .strategy_checkpoints
+                .host
+                .checkpoints
                 .iter()
                 .map(
                     |((strategy, symbol), checkpoint)| engine_types::StrategyCheckpointState {
@@ -1198,12 +1182,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     },
                 )
                 .collect(),
-            strategy_global_checkpoints: self
-                .strategy_global_checkpoints
-                .values()
-                .cloned()
-                .collect(),
-            strategy_events: self.strategy_events.values().cloned().collect(),
+            strategy_global_checkpoints: self.host.global_checkpoints.values().cloned().collect(),
+            strategy_events: self.host.events.values().cloned().collect(),
             signal_observations: self.signals.observations().cloned().collect(),
             signal_cursors: self.signals.cursors().cloned().collect(),
             signal_subscriptions: self.signals.subscriptions().cloned().collect(),
@@ -1215,6 +1195,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .map(|(strategy, request_id)| (StrategyId(*strategy), request_id.clone()))
                 .collect(),
             open_orders: self
+                .books
                 .orders
                 .in_flight()
                 .into_iter()

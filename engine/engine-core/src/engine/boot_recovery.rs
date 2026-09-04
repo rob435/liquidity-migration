@@ -563,31 +563,35 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             deferred_actions: HashMap::new(),
             ready_actions: VecDeque::new(),
             _venue: std::marker::PhantomData,
-            strategies,
-            names,
-            market,
+            host: StrategyHost {
+                strategies,
+                names,
+                timers: Timers::default(),
+                pending: VecDeque::new(),
+                checkpoints: strategy_checkpoints,
+                global_checkpoints: strategy_global_checkpoints,
+                events: strategy_events,
+                entries_enabled: runtime_entries_enabled,
+            },
+            books: Books {
+                market,
+                account,
+                rules,
+                orders,
+                registry,
+                attribution,
+                // Empty on purpose: boot compares the log against the venue
+                // directly, which is a better answer than a memory of what was
+                // in flight.
+                covers: CoverBook::default(),
+            },
             routing,
-            rules,
-            timers: Timers::default(),
-            pending: VecDeque::new(),
             drain_progress: None,
-            account,
-            registry,
-            orders,
-            attribution,
-            strategy_checkpoints,
-            strategy_global_checkpoints,
-            strategy_events,
             signals,
             signal_dependencies,
             runtime_control_requests,
             runtime_control_consumed,
-            runtime_entries_enabled,
             pending_signal_deliveries: VecDeque::new(),
-            // Empty on purpose: boot compares the log against the venue
-            // directly, which is a better answer than a memory of what was
-            // in flight.
-            covers: CoverBook::default(),
             // Deliberately not restored from the log. The window is measured
             // from a monotonic clock that does not survive a restart, and the
             // venue's own creation time is not something this engine can ask
@@ -634,7 +638,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         };
         engine
             .fills
-            .learn(&names_record(&engine.names, &engine.market));
+            .learn(&names_record(&engine.host.names, &engine.books.market));
         engine.wake_restored_strategies()?;
         engine.redeliver_durable_strategy_inputs();
         engine.queue_halted_entry_cancels()?;
@@ -1039,7 +1043,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.recovered_exec_ids
                 .can_insert(&exec.exec_id, now_ms)
                 .map_err(|e| EngineError::State(e.to_string()))?;
-            let Some(symbol) = self.market.table.get(&exec.symbol) else {
+            let Some(symbol) = self.books.market.table.get(&exec.symbol) else {
                 let finding = Self::foreign_unmapped_execution_line(
                     &exec.exec_id,
                     &exec.client_order_id,
@@ -1055,7 +1059,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 recovered += 1;
                 continue;
             };
-            if let Err(reason) = self.orders.validate_fill(
+            if let Err(reason) = self.books.orders.validate_fill(
                 &exec.client_order_id,
                 symbol,
                 exec.side,
@@ -1092,21 +1096,26 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.recovered_exec_ids.insert(exec.exec_id.clone(), now_ms);
             // The order ledger first; then, for a close the venue itself
             // started, the position it reduced.
-            let owner = self.orders.owner_of(&exec.client_order_id).or_else(|| {
-                attribution::forced_close_owner(
-                    &self.attribution,
-                    &exec.client_order_id,
-                    symbol,
-                    exec.side,
-                    exec.forced_close,
-                )
-            });
+            let owner = self
+                .books
+                .orders
+                .owner_of(&exec.client_order_id)
+                .or_else(|| {
+                    attribution::forced_close_owner(
+                        &self.books.attribution,
+                        &exec.client_order_id,
+                        symbol,
+                        exec.side,
+                        exec.forced_close,
+                    )
+                });
             let owned_request = self
+                .books
                 .orders
                 .orders
                 .get(&exec.client_order_id)
                 .map(|order| order.request.clone());
-            self.orders.apply(&record);
+            self.books.orders.apply(&record);
             if let Some(sid) = owner {
                 reconcile::note_owned_fill(
                     &mut self.logged_exposure,
@@ -1116,7 +1125,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     exec.side,
                     exec.qty,
                 );
-                self.attribution.note(sid, symbol, exec.side, exec.qty);
+                self.books
+                    .attribution
+                    .note(sid, symbol, exec.side, exec.qty);
                 // What it cost is the same question whichever way it arrived,
                 // and the anchor is the book its own order left at.
                 let late_ns = now_ms

@@ -8,11 +8,11 @@
 //! it fires replaces the old one.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
 
 use engine_types::{
-    AccountView, Action, InstrumentRule, MarketState, PositionView, Quote, RestingOrder,
-    StrategyAccountSummary, StrategyCheckpoint, StrategyCtx, StrategyEvent,
+    AccountView, Action, EngineEvent, InstrumentRule, MarketState, PositionView, Quote,
+    RestingOrder, Strategy, StrategyAccountSummary, StrategyCheckpoint, StrategyCtx, StrategyEvent,
     StrategyGlobalCheckpointState, StrategyId, StrategyPositionFacts, SymbolId, Ticker, TimerId,
 };
 
@@ -76,63 +76,112 @@ impl Timers {
 }
 
 /// Handed to one strategy for the length of one callback.
-pub struct Ctx<'a> {
-    pub market: &'a MarketState,
+/// What every strategy reads and none may edit: one market, one account
+/// reading, the venue's rules, and the books the engine keeps about orders,
+/// their owners, and what is in flight ahead of the reading.
+pub struct Books {
+    pub market: MarketState,
     /// The engine's own account reading, the same one the risk kernel judges
     /// against. Shared rather than copied per strategy: one reading, one
     /// truth, and nobody can edit it on the way past.
-    pub account: &'a AccountView,
+    pub account: AccountView,
     /// The venue's instrument rules, indexed by symbol, exactly as the
     /// engine quantizes against.
-    pub rules: &'a [Option<InstrumentRule>],
+    pub rules: Vec<Option<InstrumentRule>>,
+    /// What the log says is still out there. Filtered by the registry below
+    /// before a strategy is shown any of it.
+    pub orders: LedgerOfOrders,
+    /// Who placed each order. Without it one strategy could read, and then
+    /// cancel, another's working orders.
+    pub registry: OrderRegistry,
+    /// Whose each position is, summed from the fills of the orders each
+    /// strategy placed. The account reading is per symbol and says nothing
+    /// about whose a position is.
+    pub attribution: Attribution,
+    /// What each strategy has sent that the account reading has not yet
+    /// absorbed. The engine books and releases these; a strategy reads its
+    /// own sum through `in_flight`.
+    pub covers: CoverBook,
+}
+
+/// The strategies and what the engine holds on their behalf.
+pub struct StrategyHost {
+    pub strategies: Vec<Box<dyn Strategy>>,
+    pub names: Vec<String>,
+    pub timers: Timers,
+    /// Actions emitted and not yet drained, in emission order.
+    pub pending: VecDeque<Action>,
+    /// Strategy-owned state, persisted before the action it guards and
+    /// restated through rotation. The engine stores bytes, not meaning.
+    pub checkpoints: BTreeMap<(u16, u16), StrategyCheckpoint>,
+    /// Whole-sleeve reducer state. Separate key space: no sentinel symbol can
+    /// collide with a venue name admitted later.
+    pub global_checkpoints: BTreeMap<u16, StrategyGlobalCheckpointState>,
+    /// Cross-sleeve events waiting for the addressed strategy to consume them.
+    pub events: BTreeMap<(u16, String), StrategyEvent>,
+    /// The newest durable runtime entry override per strategy.
+    pub entries_enabled: BTreeMap<u16, bool>,
+}
+
+impl StrategyHost {
+    /// Wake one strategy with an event. Its actions land in `pending`.
+    pub fn feed(&mut self, books: &Books, sid: StrategyId, event: &EngineEvent, now_ns: u64) {
+        let Some(strategy) = self.strategies.get_mut(sid.idx()) else {
+            return;
+        };
+        let mut ctx = Ctx {
+            books,
+            now_ns,
+            strategy: sid,
+            out: &mut self.pending,
+            timers: &mut self.timers,
+            checkpoints: &self.checkpoints,
+            global_checkpoints: &self.global_checkpoints,
+            strategy_events: &self.events,
+            strategy_names: &self.names,
+            runtime_entries_enabled: self.entries_enabled.get(&sid.0).copied(),
+        };
+        strategy.on_event(event, &mut ctx);
+    }
+}
+
+pub struct Ctx<'a> {
+    pub books: &'a Books,
     pub now_ns: u64,
     pub strategy: StrategyId,
     pub out: &'a mut VecDeque<Action>,
     pub timers: &'a mut Timers,
-    /// What the log says is still out there. Read-only, and filtered by the
-    /// registry below before a strategy is shown any of it.
-    pub orders: &'a LedgerOfOrders,
-    /// Who placed each order. Without it one strategy could read — and then
-    /// cancel — another's working orders.
-    pub registry: &'a OrderRegistry,
-    /// Whose each position is, summed from the fills of the orders each
-    /// strategy placed. The account reading above is per symbol and says
-    /// nothing about whose a position is.
-    pub attribution: &'a Attribution,
-    /// What each strategy has sent that the account reading has not yet
-    /// absorbed. The engine books and releases these; a strategy reads its
-    /// own sum through `in_flight`.
-    pub covers: &'a CoverBook,
-    pub checkpoints: &'a std::collections::BTreeMap<(u16, u16), StrategyCheckpoint>,
-    pub global_checkpoints: &'a std::collections::BTreeMap<u16, StrategyGlobalCheckpointState>,
-    pub strategy_events: &'a std::collections::BTreeMap<(u16, String), StrategyEvent>,
+    pub checkpoints: &'a BTreeMap<(u16, u16), StrategyCheckpoint>,
+    pub global_checkpoints: &'a BTreeMap<u16, StrategyGlobalCheckpointState>,
+    pub strategy_events: &'a BTreeMap<(u16, String), StrategyEvent>,
     pub strategy_names: &'a [String],
     pub runtime_entries_enabled: Option<bool>,
 }
 
 impl StrategyCtx for Ctx<'_> {
     fn quote(&self, symbol: SymbolId) -> &Quote {
-        self.market.quote(symbol)
+        self.books.market.quote(symbol)
     }
 
     fn depth(&self, symbol: SymbolId) -> &engine_types::Depth {
-        self.market.depth(symbol)
+        self.books.market.depth(symbol)
     }
 
     fn trade_flow(&self, symbol: SymbolId) -> &engine_types::TradeFlow {
-        self.market.trade_flow(symbol)
+        self.books.market.trade_flow(symbol)
     }
 
     fn ticker(&self, symbol: SymbolId) -> &Ticker {
-        self.market.ticker(symbol)
+        self.books.market.ticker(symbol)
     }
 
     fn symbol_id(&self, name: &str) -> Option<SymbolId> {
-        self.market.table.get(name)
+        self.books.market.table.get(name)
     }
 
     fn symbol_name(&self, symbol: SymbolId) -> Option<&str> {
-        ((symbol.0 as usize) < self.market.table.len()).then(|| self.market.table.name(symbol))
+        ((symbol.0 as usize) < self.books.market.table.len())
+            .then(|| self.books.market.table.name(symbol))
     }
 
     fn now_ns(&self) -> u64 {
@@ -145,16 +194,17 @@ impl StrategyCtx for Ctx<'_> {
 
     fn account_summary(&self) -> StrategyAccountSummary {
         StrategyAccountSummary {
-            equity_usdt: self.account.equity_usdt,
-            available_margin_usdt: self.account.available_usdt,
-            observed_ns: self.account.observed_ns,
+            equity_usdt: self.books.account.equity_usdt,
+            available_margin_usdt: self.books.account.available_usdt,
+            observed_ns: self.books.account.observed_ns,
         }
     }
 
     fn position(&self, symbol: SymbolId) -> Option<PositionView> {
         // A row saying zero is a flat symbol, and flat is not a position: an
         // exit sized off one would be an order for nothing.
-        self.account
+        self.books
+            .account
             .positions
             .iter()
             .find(|p| p.symbol == symbol && p.qty > 0.0)
@@ -162,31 +212,37 @@ impl StrategyCtx for Ctx<'_> {
     }
 
     fn foreign_position(&self, symbol: SymbolId) -> bool {
-        self.attribution.held_by_another(self.strategy, symbol)
-            || self.orders.opening_owned_by_another(self.strategy, symbol)
+        self.books
+            .attribution
+            .held_by_another(self.strategy, symbol)
+            || self
+                .books
+                .orders
+                .opening_owned_by_another(self.strategy, symbol)
     }
 
     fn my_position(&self, symbol: SymbolId) -> f64 {
-        self.attribution.signed(self.strategy, symbol)
+        self.books.attribution.signed(self.strategy, symbol)
     }
 
     fn my_position_names<'a>(&'a self, out: &mut Vec<&'a str>) {
         let start = out.len();
         out.extend(
-            self.attribution
+            self.books
+                .attribution
                 .symbols(self.strategy)
-                .map(|symbol| self.market.table.name(symbol)),
+                .map(|symbol| self.books.market.table.name(symbol)),
         );
         out[start..].sort_unstable();
     }
 
     fn in_flight(&self, symbol: SymbolId) -> f64 {
-        self.covers.in_flight(self.strategy, symbol)
+        self.books.covers.in_flight(self.strategy, symbol)
     }
 
     fn my_position_facts(&self, symbol: SymbolId) -> Option<StrategyPositionFacts> {
-        let attributed_signed_qty = self.attribution.signed(self.strategy, symbol);
-        let in_flight_signed_qty = self.covers.in_flight(self.strategy, symbol);
+        let attributed_signed_qty = self.books.attribution.signed(self.strategy, symbol);
+        let in_flight_signed_qty = self.books.covers.in_flight(self.strategy, symbol);
         if attributed_signed_qty == 0.0 && in_flight_signed_qty == 0.0 {
             return None;
         }
@@ -200,11 +256,17 @@ impl StrategyCtx for Ctx<'_> {
 
     fn my_positions(&self, out: &mut Vec<StrategyPositionFacts>) {
         let mut symbols: std::collections::BTreeSet<u16> = self
+            .books
             .attribution
             .symbols(self.strategy)
             .map(|symbol| symbol.0)
             .collect();
-        symbols.extend(self.covers.symbols(self.strategy).map(|symbol| symbol.0));
+        symbols.extend(
+            self.books
+                .covers
+                .symbols(self.strategy)
+                .map(|symbol| symbol.0),
+        );
         out.extend(
             symbols
                 .into_iter()
@@ -213,7 +275,7 @@ impl StrategyCtx for Ctx<'_> {
     }
 
     fn instrument(&self, symbol: SymbolId) -> Option<InstrumentRule> {
-        self.rules.get(symbol.0 as usize).copied().flatten()
+        self.books.rules.get(symbol.0 as usize).copied().flatten()
     }
 
     fn wall_ms(&self) -> i64 {
@@ -288,10 +350,10 @@ impl StrategyCtx for Ctx<'_> {
     }
 
     fn resting<'a>(&'a self, out: &mut Vec<RestingOrder<'a>>) {
-        for (id, order) in &self.orders.orders {
+        for (id, order) in &self.books.orders.orders {
             // Someone else's order is none of this strategy's business, and
             // an order the log has already ended cannot be pulled or moved.
-            if !order.in_flight() || self.registry.owner_of(id) != Some(self.strategy) {
+            if !order.in_flight() || self.books.registry.owner_of(id) != Some(self.strategy) {
                 continue;
             }
             let request = &order.request;
@@ -313,7 +375,7 @@ impl StrategyCtx for Ctx<'_> {
         // `owner_of` prefers it: terminal news can arrive for an order an
         // earlier boot sent. Another strategy's order stays none of this
         // one's business.
-        let order = self.orders.orders.get(client_order_id)?;
+        let order = self.books.orders.orders.get(client_order_id)?;
         if order.request.strategy != self.strategy {
             return None;
         }
@@ -395,20 +457,26 @@ mod tests {
 
     /// One context over a hand-built book, so the filters can be read off
     /// directly instead of through a whole engine run.
+    /// Books over a hand-built order book: flat account, nobody attributed,
+    /// nothing in flight, which is what every test not about those means.
+    fn books_over(market: MarketState, orders: LedgerOfOrders, registry: OrderRegistry) -> Books {
+        Books {
+            market,
+            account: flat_account(),
+            rules: Vec::new(),
+            orders,
+            registry,
+            attribution: Attribution::default(),
+            covers: CoverBook::default(),
+        }
+    }
+
     fn ctx_over<'a>(
-        market: &'a MarketState,
+        books: &'a Books,
         out: &'a mut VecDeque<Action>,
         timers: &'a mut Timers,
-        orders: &'a LedgerOfOrders,
-        registry: &'a OrderRegistry,
         strategy: StrategyId,
     ) -> Ctx<'a> {
-        /// An empty attribution: no fill has been charged to anybody, which is
-        /// what every test that is not about attribution means.
-        static NOBODY: OnceLock<Attribution> = OnceLock::new();
-        static FLAT: OnceLock<AccountView> = OnceLock::new();
-        /// An empty cover book: nothing sent ahead of the reading.
-        static NO_COVERS: OnceLock<CoverBook> = OnceLock::new();
         static NO_CHECKPOINTS: OnceLock<
             std::collections::BTreeMap<(u16, u16), StrategyCheckpoint>,
         > = OnceLock::new();
@@ -420,17 +488,11 @@ mod tests {
         > = OnceLock::new();
         static NO_STRATEGY_NAMES: OnceLock<Vec<String>> = OnceLock::new();
         Ctx {
-            market,
-            account: FLAT.get_or_init(flat_account),
-            rules: &[],
+            books,
             now_ns: 42,
             strategy,
             out,
             timers,
-            orders,
-            registry,
-            attribution: NOBODY.get_or_init(Attribution::default),
-            covers: NO_COVERS.get_or_init(CoverBook::default),
             checkpoints: NO_CHECKPOINTS.get_or_init(Default::default),
             global_checkpoints: NO_GLOBAL_CHECKPOINTS.get_or_init(Default::default),
             strategy_events: NO_STRATEGY_EVENTS.get_or_init(Default::default),
@@ -470,14 +532,8 @@ mod tests {
         let mut timers = Timers::default();
         let orders = LedgerOfOrders::default();
         let registry = OrderRegistry::default();
-        let mut ctx = ctx_over(
-            &market,
-            &mut out,
-            &mut timers,
-            &orders,
-            &registry,
-            StrategyId(3),
-        );
+        let books = books_over(market, orders, registry);
+        let mut ctx = ctx_over(&books, &mut out, &mut timers, StrategyId(3));
         ctx.place(Intent {
             strategy: StrategyId(9),
             symbol: SymbolId(0),
@@ -505,14 +561,8 @@ mod tests {
         let mut timers = Timers::default();
         let orders = LedgerOfOrders::default();
         let registry = OrderRegistry::default();
-        let mut ctx = ctx_over(
-            &market,
-            &mut out,
-            &mut timers,
-            &orders,
-            &registry,
-            StrategyId(3),
-        );
+        let books = books_over(market, orders, registry);
+        let mut ctx = ctx_over(&books, &mut out, &mut timers, StrategyId(3));
         ctx.cancel(SymbolId(1), "eng-7");
         assert_eq!(
             out.pop_front(),
@@ -556,14 +606,8 @@ mod tests {
         registry.own("theirs", StrategyId(2));
 
         let mut out = VecDeque::new();
-        let ctx = ctx_over(
-            &market,
-            &mut out,
-            &mut timers,
-            &orders,
-            &registry,
-            StrategyId(1),
-        );
+        let books = books_over(market, orders, registry);
+        let ctx = ctx_over(&books, &mut out, &mut timers, StrategyId(1));
         let mut seen = Vec::new();
         ctx.resting(&mut seen);
         let ids: Vec<&str> = seen.iter().map(|o| o.client_order_id).collect();
@@ -577,14 +621,7 @@ mod tests {
         assert!(!seen[0].acked, "no ack has arrived for it");
 
         let mut out = VecDeque::new();
-        let ctx = ctx_over(
-            &market,
-            &mut out,
-            &mut timers,
-            &orders,
-            &registry,
-            StrategyId(2),
-        );
+        let ctx = ctx_over(&books, &mut out, &mut timers, StrategyId(2));
         let mut seen = Vec::new();
         ctx.resting(&mut seen);
         let ids: Vec<&str> = seen.iter().map(|o| o.client_order_id).collect();
@@ -628,18 +665,21 @@ mod tests {
         let global_checkpoints = std::collections::BTreeMap::new();
         let strategy_events = std::collections::BTreeMap::new();
         let strategy_names = Vec::new();
+        let books = Books {
+            market,
+            account,
+            rules: rules.to_vec(),
+            orders,
+            registry,
+            attribution,
+            covers,
+        };
         let ctx = Ctx {
-            market: &market,
-            account: &account,
-            rules: &rules,
+            books: &books,
             now_ns: 42,
             strategy: StrategyId(0),
             out: &mut out,
             timers: &mut timers,
-            orders: &orders,
-            registry: &registry,
-            attribution: &attribution,
-            covers: &covers,
             checkpoints: &checkpoints,
             global_checkpoints: &global_checkpoints,
             strategy_events: &strategy_events,
@@ -706,18 +746,21 @@ mod tests {
         let global_checkpoints = std::collections::BTreeMap::new();
         let strategy_events = std::collections::BTreeMap::new();
         let strategy_names = Vec::new();
+        let books = Books {
+            market,
+            account,
+            rules: Vec::new(),
+            orders,
+            registry,
+            attribution,
+            covers,
+        };
         let ctx = Ctx {
-            market: &market,
-            account: &account,
-            rules: &[],
+            books: &books,
             now_ns: 42,
             strategy: StrategyId(0),
             out: &mut out,
             timers: &mut timers,
-            orders: &orders,
-            registry: &registry,
-            attribution: &attribution,
-            covers: &covers,
             checkpoints: &checkpoints,
             global_checkpoints: &global_checkpoints,
             strategy_events: &strategy_events,
@@ -737,14 +780,8 @@ mod tests {
         let mut registry = OrderRegistry::default();
         registry.own("a", StrategyId(0));
         let mut out = VecDeque::new();
-        let ctx = ctx_over(
-            &market,
-            &mut out,
-            &mut timers,
-            &orders,
-            &registry,
-            StrategyId(0),
-        );
+        let books = books_over(market, orders, registry);
+        let ctx = ctx_over(&books, &mut out, &mut timers, StrategyId(0));
         let mut seen = Vec::with_capacity(8);
         ctx.resting(&mut seen);
         ctx.resting(&mut seen);

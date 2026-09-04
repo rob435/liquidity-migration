@@ -3,7 +3,7 @@ use super::*;
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) fn wake_restored_strategies(&mut self) -> Result<(), EngineError> {
         let now = clock::now_ns();
-        for index in 0..self.strategies.len() {
+        for index in 0..self.host.strategies.len() {
             let id = u16::try_from(index).map_err(|_| {
                 EngineError::Boot("configured strategy count exceeds the strategy-id range".into())
             })?;
@@ -13,56 +13,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     fn feed_one_strategy(&mut self, sid: StrategyId, event: &EngineEvent, now_ns: u64) {
-        let Engine {
-            strategies,
-            market,
-            timers,
-            pending,
-            orders,
-            registry,
-            attribution,
-            covers,
-            strategy_checkpoints,
-            strategy_global_checkpoints,
-            strategy_events,
-            runtime_entries_enabled,
-            names,
-            account,
-            rules,
-            ..
-        } = self;
-        feed_strategy(
-            strategies,
-            market,
-            account,
-            rules,
-            timers,
-            pending,
-            orders,
-            registry,
-            attribution,
-            covers,
-            strategy_checkpoints,
-            strategy_global_checkpoints,
-            strategy_events,
-            names,
-            runtime_entries_enabled,
-            sid,
-            event,
-            now_ns,
-        );
+        self.host.feed(&self.books, sid, event, now_ns);
     }
 
     fn validate_strategy_event(&self, event: &StrategyEvent) -> Result<(), EngineError> {
-        if event.source.0 as usize >= self.strategies.len()
-            || event.destination.0 as usize >= self.strategies.len()
+        if event.source.0 as usize >= self.host.strategies.len()
+            || event.destination.0 as usize >= self.host.strategies.len()
         {
             return Err(EngineError::State(format!(
                 "strategy event {} routes from {} to {}, outside {} configured strategies",
                 event.event_id,
                 event.source.0,
                 event.destination.0,
-                self.strategies.len()
+                self.host.strategies.len()
             )));
         }
         if event.kind.is_empty() || event.kind.len() > 256 {
@@ -95,14 +58,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         request: &engine_types::RuntimeControlRequest,
     ) -> Result<bool, String> {
         crate::controls::validate(request)?;
-        let expected_name = self.names.get(request.strategy.0 as usize).ok_or_else(|| {
-            format!(
-                "runtime control request {:?} names strategy {} outside {} configured sleeves",
-                request.request_id,
-                request.strategy.0,
-                self.names.len()
-            )
-        })?;
+        let expected_name = self
+            .host
+            .names
+            .get(request.strategy.0 as usize)
+            .ok_or_else(|| {
+                format!(
+                    "runtime control request {:?} names strategy {} outside {} configured sleeves",
+                    request.request_id,
+                    request.strategy.0,
+                    self.host.names.len()
+                )
+            })?;
         if expected_name != &request.strategy_name {
             return Err(format!(
                 "runtime control request {:?} binds strategy {} to {:?}, expected {:?}",
@@ -123,11 +90,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if matches!(
             request.command,
             engine_types::RuntimeControlCommand::FlattenDirectional
-        ) && self
-            .runtime_entries_enabled
-            .get(&request.strategy.0)
-            .copied()
-            != Some(false)
+        ) && self.host.entries_enabled.get(&request.strategy.0).copied() != Some(false)
         {
             return Err(format!(
                 "strategy {} must have a durable entries-disabled override before flatten",
@@ -150,7 +113,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.runtime_control_requests.push(request.clone());
         match request.command {
             engine_types::RuntimeControlCommand::SetEntriesEnabled { entries_enabled } => {
-                self.runtime_entries_enabled
+                self.host
+                    .entries_enabled
                     .insert(request.strategy.0, entries_enabled);
                 self.feed_one_strategy(
                     request.strategy,
@@ -189,6 +153,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 checkpoint,
             } => {
                 let owner = self
+                    .host
                     .strategies
                     .get(usize::from(strategy.0))
                     .ok_or_else(|| {
@@ -200,15 +165,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 validate_strategy_checkpoint(owner.as_ref(), &checkpoint).map_err(|error| {
                     EngineError::State(format!(
                         "strategy {} refused checkpoint: {error}",
-                        self.names
+                        self.host
+                            .names
                             .get(usize::from(strategy.0))
                             .map(String::as_str)
                             .unwrap_or("unknown")
                     ))
                 })?;
                 let key = (strategy.0, symbol.0);
-                if self.strategy_checkpoints.get(&key) != Some(&checkpoint) {
-                    self.strategy_checkpoints.insert(key, checkpoint.clone());
+                if self.host.checkpoints.get(&key) != Some(&checkpoint) {
+                    self.host.checkpoints.insert(key, checkpoint.clone());
                     self.wal.append(&WalRecord::StrategyCheckpoint {
                         wall_ts_ms: clock::wall_ms(),
                         strategy,
@@ -224,6 +190,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 checkpoint,
             } => {
                 let owner = self
+                    .host
                     .strategies
                     .get(usize::from(strategy.0))
                     .ok_or_else(|| {
@@ -235,14 +202,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 validate_strategy_checkpoint(owner.as_ref(), &checkpoint).map_err(|error| {
                     EngineError::State(format!(
                         "strategy {} refused global checkpoint: {error}",
-                        self.names
+                        self.host
+                            .names
                             .get(usize::from(strategy.0))
                             .map(String::as_str)
                             .unwrap_or("unknown")
                     ))
                 })?;
                 let same = self
-                    .strategy_global_checkpoints
+                    .host
+                    .global_checkpoints
                     .get(&strategy.0)
                     .is_some_and(|state| state.checkpoint == checkpoint);
                 if !same {
@@ -251,7 +220,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         checkpoint: checkpoint.clone(),
                         provenance: None,
                     };
-                    self.strategy_global_checkpoints.insert(strategy.0, state);
+                    self.host.global_checkpoints.insert(strategy.0, state);
                     self.wal.append(&WalRecord::StrategyGlobalCheckpoint {
                         wall_ts_ms: clock::wall_ms(),
                         strategy,
@@ -265,7 +234,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             Action::PublishStrategyEvent { event } => {
                 self.validate_strategy_event(&event)?;
                 let key = (event.source.0, event.event_id.clone());
-                if let Some(known) = self.strategy_events.get(&key) {
+                if let Some(known) = self.host.events.get(&key) {
                     if known != &event {
                         return Err(EngineError::State(format!(
                             "strategy {} reused event id {} with different bytes",
@@ -279,7 +248,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     event: event.clone(),
                 })?;
                 self.wal.barrier()?;
-                self.strategy_events.insert(key, event.clone());
+                self.host.events.insert(key, event.clone());
                 let destination = event.destination;
                 self.feed_one_strategy(
                     destination,
@@ -294,7 +263,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 event_id,
             } => {
                 let key = (source.0, event_id.clone());
-                let Some(event) = self.strategy_events.get(&key) else {
+                let Some(event) = self.host.events.get(&key) else {
                     return Ok(None);
                 };
                 if event.destination != destination {
@@ -310,7 +279,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     event_id,
                 })?;
                 self.wal.barrier()?;
-                self.strategy_events.remove(&key);
+                self.host.events.remove(&key);
                 Ok(None)
             }
             Action::ConsumeSignalObservation {
@@ -379,7 +348,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// global checkpoint and attributed account state. Their acknowledge
     /// actions enter the ordinary FIFO and are drained when the run starts.
     pub(super) fn redeliver_durable_strategy_inputs(&mut self) {
-        let events: Vec<_> = self.strategy_events.values().cloned().collect();
+        let events: Vec<_> = self.host.events.values().cloned().collect();
         let observations: Vec<_> = self.signals.observations().cloned().collect();
         let now = clock::now_ns();
         for event in events {
@@ -470,7 +439,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     pub(super) async fn on_market(&mut self, event: MarketEvent) -> Result<(), EngineError> {
         let now = clock::now_ns();
-        self.market.apply(&event);
+        self.books.market.apply(&event);
         match event {
             MarketEvent::Quote { symbol, quote } if quote.bid_px > 0.0 && quote.ask_px > 0.0 => {
                 self.risk
@@ -496,66 +465,26 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let origin_ns = arrival_ns(&event, now);
         let engine_event = EngineEvent::Market(event);
         {
-            let Engine {
-                strategies,
-                market,
-                timers,
-                pending,
-                routing,
-                orders,
-                registry,
-                attribution,
-                covers,
-                strategy_checkpoints,
-                strategy_global_checkpoints,
-                strategy_events,
-                runtime_entries_enabled,
-                names,
-                account,
-                rules,
-                ..
-            } = self;
-            let count = strategies.len();
-            let mut feed = |sid| {
-                feed_strategy(
-                    strategies,
-                    market,
-                    account,
-                    rules,
-                    timers,
-                    pending,
-                    orders,
-                    registry,
-                    attribution,
-                    covers,
-                    strategy_checkpoints,
-                    strategy_global_checkpoints,
-                    strategy_events,
-                    names,
-                    runtime_entries_enabled,
-                    sid,
-                    &engine_event,
-                    now,
-                )
-            };
+            let count = self.host.strategies.len();
+            let mut feed = |sid| self.host.feed(&self.books, sid, &engine_event, now);
             match event {
                 MarketEvent::Quote { symbol, .. } => {
-                    for sid in routing.quote_listeners(symbol) {
+                    for sid in self.routing.quote_listeners(symbol) {
                         feed(*sid);
                     }
                 }
                 MarketEvent::Depth { symbol, .. } => {
-                    for sid in routing.depth_listeners(symbol) {
+                    for sid in self.routing.depth_listeners(symbol) {
                         feed(*sid);
                     }
                 }
                 MarketEvent::Trades { symbol, .. } => {
-                    for sid in routing.trade_listeners(symbol) {
+                    for sid in self.routing.trade_listeners(symbol) {
                         feed(*sid);
                     }
                 }
                 MarketEvent::Ticker { symbol, .. } => {
-                    for sid in routing.ticker_listeners(symbol) {
+                    for sid in self.routing.ticker_listeners(symbol) {
                         feed(*sid);
                     }
                 }
@@ -571,49 +500,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     pub(super) async fn on_timers(&mut self) -> Result<(), EngineError> {
         let now = clock::now_ns();
-        while let Some((sid, timer)) = self.timers.pop_due(now) {
+        while let Some((sid, timer)) = self.host.timers.pop_due(now) {
             let event = EngineEvent::Timer {
                 id: timer,
                 now_ns: now,
             };
-            let Engine {
-                strategies,
-                market,
-                timers,
-                pending,
-                orders,
-                registry,
-                attribution,
-                covers,
-                strategy_checkpoints,
-                strategy_global_checkpoints,
-                strategy_events,
-                runtime_entries_enabled,
-                names,
-                account,
-                rules,
-                ..
-            } = self;
-            feed_strategy(
-                strategies,
-                market,
-                account,
-                rules,
-                timers,
-                pending,
-                orders,
-                registry,
-                attribution,
-                covers,
-                strategy_checkpoints,
-                strategy_global_checkpoints,
-                strategy_events,
-                names,
-                runtime_entries_enabled,
-                sid,
-                &event,
-                now,
-            );
+            self.host.feed(&self.books, sid, &event, now);
         }
         self.drain(now).await
     }
@@ -647,13 +539,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         feed: &mut F,
     ) -> Result<(), EngineError> {
         crate::signals::validate(&observation).map_err(EngineError::State)?;
-        if observation.destination.0 as usize >= self.strategies.len() {
+        if observation.destination.0 as usize >= self.host.strategies.len() {
             return Err(EngineError::State(format!(
                 "signal {} #{} addresses strategy {}, but only {} are configured",
                 observation.source,
                 observation.sequence,
                 observation.destination.0,
-                self.strategies.len()
+                self.host.strategies.len()
             )));
         }
         let admission = self
@@ -721,6 +613,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             let listener = (observation.destination, subscription.feed);
             let subscribed = self.subscriptions.contains(subscription);
             if let Some(symbol) = self
+                .books
                 .market
                 .table
                 .get(&subscription.symbol)
@@ -758,7 +651,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let now = clock::now_ns();
         for observation in observations {
             for subscription in &observation.subscriptions {
-                let Some(symbol) = self.market.table.get(&subscription.symbol) else {
+                let Some(symbol) = self.books.market.table.get(&subscription.symbol) else {
                     return Err(EngineError::State(format!(
                         "signal {} #{} symbol {} was not admitted",
                         observation.source, observation.sequence, subscription.symbol
@@ -766,6 +659,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 };
                 if !self.subscriptions.contains(subscription)
                     || self
+                        .books
                         .rules
                         .get(symbol.0 as usize)
                         .copied()
@@ -824,7 +718,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut admitted = 0usize;
         for wanted in wanted {
             let name = wanted.name;
-            let core_id = self.market.add_symbol(&name);
+            let core_id = self.books.market.add_symbol(&name);
             let venue_id = self.venue.add_symbol_async(&name).await?;
             let mut feeds = Vec::new();
             for (_, feed) in &wanted.listeners {
@@ -851,7 +745,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 )));
             }
             order_feed.learn(&name, core_id);
-            self.routing.size_to(self.market.table.len());
+            self.routing.size_to(self.books.market.table.len());
             for (strategy, feed) in wanted.listeners {
                 self.routing.add(core_id, feed, strategy);
             }
@@ -872,19 +766,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         // The table grew, so say what it is now. Ids are only appended, so
         // this is the earlier one plus the new names.
-        let names = names_record(&self.names, &self.market);
+        let names = names_record(&self.host.names, &self.books.market);
         self.wal.append(&names)?;
         self.fills.learn(&names);
         // One venue read covers everything admitted this pass. Without a rule
         // there is no way to quantize, so the symbol is followed but nothing
         // can be sent for it — which is the same state as a symbol whose rule
         // was missing at boot.
-        self.rules.resize(self.market.table.len(), None);
+        self.books.rules.resize(self.books.market.table.len(), None);
         match self.venue.instrument_rules().await {
             Ok(fetched) => {
                 for (name, rule) in fetched {
-                    if let Some(id) = self.market.table.get(&name) {
-                        self.rules[id.0 as usize] = Some(rule);
+                    if let Some(id) = self.books.market.table.get(&name) {
+                        self.books.rules[id.0 as usize] = Some(rule);
                     }
                 }
             }
@@ -896,10 +790,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         for observation in &self.pending_signal_deliveries {
             for subscription in &observation.subscriptions {
-                let Some(symbol) = self.market.table.get(&subscription.symbol) else {
+                let Some(symbol) = self.books.market.table.get(&subscription.symbol) else {
                     continue;
                 };
                 if self
+                    .books
                     .rules
                     .get(symbol.0 as usize)
                     .copied()
@@ -925,15 +820,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if self.may_open
             && self.private_stream_ready
             && self.signals.gaps().next().is_none()
-            && self
-                .runtime_entries_enabled
-                .values()
-                .all(|enabled| *enabled)
+            && self.host.entries_enabled.values().all(|enabled| *enabled)
             && self.halt_cancels.is_empty()
         {
             return Ok(());
         }
         let entries: Vec<(SymbolId, String)> = self
+            .books
             .orders
             .in_flight()
             .into_iter()
@@ -1034,7 +927,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // Any markout whose horizon has come round. Written down because a log
         // holds no prices: this is the one execution number that cannot be
         // worked out later from the records already in it.
-        for mark in self.fills.due(now, &self.market) {
+        for mark in self.fills.due(now, &self.books.market) {
             self.wal.append(&mark.to_record())?;
         }
         self.checkpoint_history_if_due().await?;
@@ -1046,22 +939,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // before it is old by the time we get here.
         let now = clock::now_ns();
         if self.may_open && self.private_stream_ready {
-            let Engine {
-                working,
-                market,
-                rules,
-                orders,
-                pending,
-                ..
-            } = self;
-            working.pass(now, market, rules, orders, pending);
+            self.working.pass(
+                now,
+                &self.books.market,
+                &self.books.rules,
+                &self.books.orders,
+                &mut self.host.pending,
+            );
         }
         // Through the ordinary queue, so the flood cap counts these too.
         self.drain(now).await
     }
 
     fn account_refresh_due(&self, now_ns: u64) -> bool {
-        now_ns.saturating_sub(self.account.observed_ns) >= self.refresh_after_ns
+        now_ns.saturating_sub(self.books.account.observed_ns) >= self.refresh_after_ns
     }
 
     pub(super) async fn refresh_account_if_due(&mut self, now_ns: u64) -> Result<(), EngineError> {
@@ -1091,10 +982,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut cancellations = Vec::new();
         let mut hard_cap_hit = false;
         loop {
-            if self.pending.is_empty() {
+            if self.host.pending.is_empty() {
                 self.load_ready_wake(&mut progress);
             }
-            while let Some(action) = self.pending.pop_front() {
+            while let Some(action) = self.host.pending.pop_front() {
                 let Some(action) = self.handle_durable_action(action)? else {
                     continue;
                 };
@@ -1110,8 +1001,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     continue;
                 }
                 if progress.handled > MAX_INTENTS_PER_WAKE * 4 {
-                    let dropped = self.pending.len() + 1;
-                    self.pending.clear();
+                    let dropped = self.host.pending.len() + 1;
+                    self.host.pending.clear();
                     hard_cap_hit = true;
                     tracing::error!(
                         dropped,
@@ -1145,7 +1036,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         .await?;
                     if sent {
                         progress.handled -= 1;
-                        self.pending.push_front(action);
+                        self.host.pending.push_front(action);
                         return self.pause_drain(progress);
                     }
                 }
@@ -1161,7 +1052,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         .await?;
                     if sent {
                         progress.handled -= 1;
-                        self.pending.push_front(action);
+                        self.host.pending.push_front(action);
                         return self.pause_drain(progress);
                     }
                 }
@@ -1175,7 +1066,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                                     progress.origin_ns,
                                 )
                                 .await?;
-                            if sent && !self.pending.is_empty() {
+                            if sent && !self.host.pending.is_empty() {
                                 return self.pause_drain(progress);
                             }
                         }
@@ -1189,7 +1080,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             let sent = self
                                 .process_cancels(std::mem::take(&mut cancellations))
                                 .await?;
-                            if sent && !self.pending.is_empty() {
+                            if sent && !self.host.pending.is_empty() {
                                 return self.pause_drain(progress);
                             }
                         }
@@ -1204,13 +1095,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             .await?;
                         self.working
                             .amended(&client_order_id, spec.px, taken, clock::now_ns());
-                        if !self.pending.is_empty() {
+                        if !self.host.pending.is_empty() {
                             return self.pause_drain(progress);
                         }
                     }
                     Action::SetStop { symbol, trigger_px } => {
                         self.process_set_stop(symbol, trigger_px).await?;
-                        if !self.pending.is_empty() {
+                        if !self.host.pending.is_empty() {
                             return self.pause_drain(progress);
                         }
                     }
@@ -1232,20 +1123,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             let sent = self
                 .process_intents(std::mem::take(&mut placements), progress.origin_ns)
                 .await?;
-            if sent && !hard_cap_hit && !self.pending.is_empty() {
+            if sent && !hard_cap_hit && !self.host.pending.is_empty() {
                 return self.pause_drain(progress);
             }
             let cancelled = self
                 .process_cancels(std::mem::take(&mut cancellations))
                 .await?;
-            if cancelled && !hard_cap_hit && !self.pending.is_empty() {
+            if cancelled && !hard_cap_hit && !self.host.pending.is_empty() {
                 return self.pause_drain(progress);
             }
-            if !hard_cap_hit && self.pending.is_empty() && !self.ready_actions.is_empty() {
+            if !hard_cap_hit && self.host.pending.is_empty() && !self.ready_actions.is_empty() {
                 self.load_ready_wake(&mut progress);
                 continue;
             }
-            if hard_cap_hit || self.pending.is_empty() {
+            if hard_cap_hit || self.host.pending.is_empty() {
                 break;
             }
         }
@@ -1357,14 +1248,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             handled: 0,
             adding_dropped: 0,
         };
-        self.pending.push_back(action);
+        self.host.pending.push_back(action);
         while self
             .ready_actions
             .front()
             .is_some_and(|(_, queued_origin)| *queued_origin == origin_ns)
         {
             let (action, _) = self.ready_actions.pop_front().expect("front checked above");
-            self.pending.push_back(action);
+            self.host.pending.push_back(action);
         }
     }
 

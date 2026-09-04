@@ -14,7 +14,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) fn opening_permission_reason(&self, strategy: StrategyId) -> Option<&'static str> {
         if self.signal_inputs_blocked(strategy) {
             Some("signal_sequence_gap")
-        } else if self.runtime_entries_enabled.get(&strategy.0).copied() == Some(false) {
+        } else if self.host.entries_enabled.get(&strategy.0).copied() == Some(false) {
             Some("runtime_entries_disabled")
         } else {
             None
@@ -22,8 +22,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     pub(super) fn symbol_owned_by_another(&self, strategy: StrategyId, symbol: SymbolId) -> bool {
-        self.attribution.held_by_another(strategy, symbol)
-            || self.orders.opening_owned_by_another(strategy, symbol)
+        self.books.attribution.held_by_another(strategy, symbol)
+            || self.books.orders.opening_owned_by_another(strategy, symbol)
     }
 
     /// Judge and reserve one sibling, appending its send record to the WAL.
@@ -162,6 +162,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // through here at all.
         if !intent.reduce_only {
             let quote_ns = self
+                .books
                 .market
                 .quotes
                 .get(intent.symbol.0 as usize)
@@ -181,7 +182,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 })?;
                 tracing::warn!(
                     tag = %intent.tag,
-                    symbol = self.market.table.name(intent.symbol),
+                    symbol = self.books.market.table.name(intent.symbol),
                     age_ms = age_ns / 1_000_000,
                     never_quoted = quote_ns == 0,
                     "refused: the quote this entry was decided against is too old to open on"
@@ -199,10 +200,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut intent = intent;
         let work = self.plan_resting_entry(&mut intent);
 
-        let verdict = {
-            let Engine { risk, account, .. } = self;
-            risk.assess(&intent, account)
-        };
+        let verdict = { self.risk.assess(&intent, &self.books.account) };
         let verdict = durable_risk_verdict(verdict, intent.qty, false);
         let allowed_qty = match &verdict {
             RiskVerdict::Allow { qty } => *qty,
@@ -240,7 +238,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(None);
         }
 
-        let Some(rule) = self.rules.get(intent.symbol.0 as usize).copied().flatten() else {
+        let Some(rule) = self
+            .books
+            .rules
+            .get(intent.symbol.0 as usize)
+            .copied()
+            .flatten()
+        else {
             self.refuse(
                 &client_order_id,
                 &intent,
@@ -256,6 +260,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             },
         };
         let mut held = self
+            .books
             .account
             .positions
             .iter()
@@ -358,6 +363,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if let Some(stop) = request.stop.filter(|_| !request.reduce_only) {
             let key = stop_key(request.symbol, request.side);
             let tolerance = self
+                .books
                 .rules
                 .get(request.symbol.0 as usize)
                 .and_then(|rule| rule.as_ref())
@@ -396,26 +402,26 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             arrival_mid: self.decision_mid(request.symbol),
         };
         self.wal.append(&sent_record)?;
-        self.orders.apply(&sent_record);
-        self.registry.own(&client_order_id, intent.strategy);
+        self.books.orders.apply(&sent_record);
+        self.books.registry.own(&client_order_id, intent.strategy);
         // The engine's own note of what just went out, at the size that
         // actually went — strategies read it back as `ctx.in_flight`, so the
         // window between a fill and the next account reading cannot look flat.
         if request.reduce_only {
-            self.covers.register_reduce(
+            self.books.covers.register_reduce(
                 intent.strategy,
                 request.symbol,
                 request.side,
                 qty,
-                &self.account,
+                &self.books.account,
             );
         } else {
-            self.covers.register(
+            self.books.covers.register(
                 intent.strategy,
                 request.symbol,
                 request.side,
                 qty,
-                &self.account,
+                &self.books.account,
             );
         }
         self.risk.register_order(&client_order_id, &intent, qty);
@@ -479,14 +485,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         for (symbol, stop) in &self.intended_stops {
             batch_protection.insert(stop_key(SymbolId(*symbol), stop.side), stop.trigger_px);
         }
-        for (key, trigger_px) in self.orders.tightest_opening_stops() {
+        for (key, trigger_px) in self.books.orders.tightest_opening_stops() {
             let side = if key.1 { Side::Sell } else { Side::Buy };
             batch_protection
                 .entry(key)
                 .and_modify(|protected| *protected = tighter_stop(side, *protected, trigger_px))
                 .or_insert(trigger_px);
         }
-        for position in &self.account.positions {
+        for position in &self.books.account.positions {
             if !position.stop_attached || !position.stop_px.is_finite() || position.stop_px <= 0.0 {
                 continue;
             }
@@ -514,7 +520,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     text: format!("intent {} refused: {reason}", intent.tag),
                 })?;
                 tracing::error!(
-                    symbol = self.market.table.name(intent.symbol),
+                    symbol = self.books.market.table.name(intent.symbol),
                     tag = %intent.tag,
                     "refused leverage-conflicting sibling batch"
                 );
@@ -626,7 +632,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // truthful in-flight number. A refused exit drops every cover on the
         // symbol; a refused entry has none to drop, because covers are booked
         // at the send and a refusal never reaches it.
-        self.covers
+        self.books
+            .covers
             .intent_refused(intent.strategy, intent.symbol, intent.reduce_only);
         let event = EngineEvent::IntentRefused {
             symbol: intent.symbol,
@@ -634,44 +641,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             reason: reason.to_string(),
         };
         let now = clock::now_ns();
-        let Engine {
-            strategies,
-            market,
-            timers,
-            pending,
-            orders,
-            registry,
-            attribution,
-            covers,
-            strategy_checkpoints,
-            strategy_global_checkpoints,
-            strategy_events,
-            runtime_entries_enabled,
-            names,
-            account,
-            rules,
-            ..
-        } = self;
-        feed_strategy(
-            strategies,
-            market,
-            account,
-            rules,
-            timers,
-            pending,
-            orders,
-            registry,
-            attribution,
-            covers,
-            strategy_checkpoints,
-            strategy_global_checkpoints,
-            strategy_events,
-            names,
-            runtime_entries_enabled,
-            intent.strategy,
-            &event,
-            now,
-        );
+        self.host.feed(&self.books, intent.strategy, &event, now);
     }
 
     /// Turn an entry the strategy asked to have worked into the resting limit
@@ -682,11 +652,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// resting to pay for itself.
     fn plan_resting_entry(&self, intent: &mut Intent) -> Option<WorkPolicy> {
         let rule = self
+            .books
             .rules
             .get(intent.symbol.0 as usize)
             .copied()
             .flatten()?;
         let touch = self
+            .books
             .market
             .quotes
             .get(intent.symbol.0 as usize)
@@ -712,7 +684,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// The mid this order was decided against, or zero when the book was not
     /// two-sided. Only the early cross reads it, and it stays off at zero.
     fn decision_mid(&self, symbol: SymbolId) -> f64 {
-        let quote = self.market.quote(symbol);
+        let quote = self.books.market.quote(symbol);
         if quote.bid_px > 0.0 && quote.ask_px > quote.bid_px {
             (quote.bid_px + quote.ask_px) / 2.0
         } else {
@@ -724,11 +696,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if let OrderKind::Limit { px, .. } = kind {
             return Some(*px);
         }
-        let quote = self.market.quote(symbol);
+        let quote = self.books.market.quote(symbol);
         if quote.bid_px > 0.0 && quote.ask_px > 0.0 {
             return Some((quote.bid_px + quote.ask_px) / 2.0);
         }
-        let ticker = self.market.ticker(symbol);
+        let ticker = self.books.market.ticker(symbol);
         [ticker.last_px, ticker.mark_px]
             .into_iter()
             .find(|px| *px > 0.0)
@@ -738,7 +710,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// ledger no longer holds, which makes every arrival number for its fills
     /// missing rather than wrong.
     pub(super) fn arrival_mid_of(&self, client_order_id: &str) -> f64 {
-        self.orders
+        self.books
+            .orders
             .orders
             .get(client_order_id)
             .map(|order| order.arrival_mid)

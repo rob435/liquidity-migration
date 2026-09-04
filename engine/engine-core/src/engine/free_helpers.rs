@@ -285,51 +285,6 @@ pub(crate) fn named_strategy_errors(
     errors
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn feed_strategy(
-    strategies: &mut [Box<dyn Strategy>],
-    market: &MarketState,
-    account: &AccountView,
-    rules: &[Option<InstrumentRule>],
-    timers: &mut Timers,
-    pending: &mut VecDeque<Action>,
-    orders: &LedgerOfOrders,
-    registry: &OrderRegistry,
-    attribution: &Attribution,
-    covers: &CoverBook,
-    checkpoints: &std::collections::BTreeMap<(u16, u16), StrategyCheckpoint>,
-    global_checkpoints: &std::collections::BTreeMap<u16, StrategyGlobalCheckpointState>,
-    strategy_events: &std::collections::BTreeMap<(u16, String), StrategyEvent>,
-    strategy_names: &[String],
-    runtime_entries_enabled: &std::collections::BTreeMap<u16, bool>,
-    sid: StrategyId,
-    event: &EngineEvent,
-    now_ns: u64,
-) {
-    let Some(strategy) = strategies.get_mut(sid.0 as usize) else {
-        return;
-    };
-    let mut ctx = Ctx {
-        market,
-        account,
-        rules,
-        now_ns,
-        strategy: sid,
-        out: pending,
-        timers,
-        orders,
-        registry,
-        attribution,
-        covers,
-        checkpoints,
-        global_checkpoints,
-        strategy_events,
-        strategy_names,
-        runtime_entries_enabled: runtime_entries_enabled.get(&sid.0).copied(),
-    };
-    strategy.on_event(event, &mut ctx);
-}
-
 /// Drop the remembered leverage of every symbol the reading shows flat.
 ///
 /// A symbol with no position may be reopened at any leverage by anyone holding
