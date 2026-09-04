@@ -6,6 +6,99 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 ~21:14 UTC — Demo signal worker paged `degraded`; its hourly
+  instrument refresh had been dropped for four hours because the funding lane
+  was in flight at every tick.**
+  - Incident `demo-0922e9f30da3bf98`, scope `demo`, host `ip-208-84-103-4`,
+    ref `worker-status:liquidity-migration-signal-worker-demo.service`. Exact
+    alert text: `CRITICAL liquidity-migration-signal-worker-demo.service
+    reports 'degraded': Bybit WebSocket repair gap open for 7235s; carry cycle
+    has not completed`. The funded engine was not named, did not page, and is
+    not implicated. No unit was down and no heartbeat was stale.
+  - What the page's clause set proves, read against `_signal_worker_detail`
+    (`scripts/runtime/check_fleet_liveness.py:248`): the clauses that are
+    absent are as load-bearing as the two that are present. `bybit_ws_connected`
+    is true, `bybit_ws_ticker_coverage_complete` is true, both quarantine counts
+    are zero, and the LONG cycle is inside its 3× cadence window. So the
+    transport is sound; what is stuck is the carry cycle
+    (`last_carry_cycle_completed_wall_ts_ms` is `None` — never completed since
+    the 17:15:34 start) and the WebSocket repair gap, open since 19:13:25 UTC
+    (7235 s before the page). The gap's own age is evidence: the boot gap
+    `SharedState::prepare_epoch` opens (`engine/signal-worker/src/bybit_ws.rs:305`)
+    would have dated to 17:15:34, so `mark_gap_repaired` did close it once —
+    complete kline coverage was reached in this process — and it is the
+    19:13:25 `Connection reset by peer` that reopened it.
+  - Diagnosis, from what the journal does *not* contain. Every lane-local
+    source failure is an `eprintln!` (`lane_source_failure`,
+    `engine/signal-worker/src/live.rs:270`), and a successful instrument lane
+    prints the rejection summary unconditionally
+    (`engine/signal-worker/src/live.rs:1773`). `instrument_cadence_ms` is
+    `3600000` (`configs/signal-worker.demo.json`), and the demo venue's list
+    yields `691 instrument row(s)` + `40 ticker row(s)` rejected on every pass.
+    The payload's 40 journal lines cover 15:58:15 through 21:14 unbroken, and
+    the last process (pid 2223359, started 17:15:34) printed that summary once
+    at 17:15:36 and never again. No failure line either. So the instrument lane
+    neither completed nor failed at ~18:15, ~19:15 or ~20:15: **it was never
+    spawned.** The spawn had one guard, `if !lanes.instruments && !lanes.funding`, and
+    `lanes.instruments` cannot stick because it is cleared first thing in its
+    own completion arm (`live.rs:953`). That leaves `lanes.funding`, set every
+    `funding_cadence_ms` = `60000` (`live.rs:772`). A tick that lost that race
+    was dropped outright — there was no retry — so the next attempt was a full
+    hour later, into the same race. The instrument table and the traded
+    universe stopped refreshing, silently, with no alert of their own.
+  - Changed. `LaneState` gains `instruments_due`, and the hourly tick now
+    records the request instead of discarding it
+    (`engine/signal-worker/src/live.rs:762`).
+    `LiveRunner::start_instrument_lane_if_due` (`live.rs:1549`) starts the owed
+    refresh as soon as the venue is free, and `LaneCompletion::FundingFinished`
+    (`live.rs:1091`) calls it before
+    the carry attempt that may spawn the next funding pass, so the refresh
+    outranks it. An in-flight instrument lane satisfies the request rather than
+    queueing a second one. The funding/instrument mutual exclusion itself is
+    unchanged, as are every cadence, threshold and health definition.
+  - Tests. `live::tests::an_instrument_refresh_held_off_by_funding_starts_when_that_pass_ends`
+    holds the funding lane, fires the tick, and asserts the refresh survives
+    and then starts at `FundingFinished`. Without the call it fails at
+    `the owed instrument refresh starts as the funding pass ends`. Full
+    `cargo test -p signal-worker`: 118 passed, 0 failed.
+  - What this does not settle, honestly. The page's two symptoms are one step
+    further down than this fix reaches. `lanes.funding` being true at three
+    consecutive hourly ticks is either a funding pass that runs longer than its
+    60 s cadence — which this fix handles — or a funding lane wedged inside
+    `fetch_funding_batches` that never sends `FundingFinished`, which it does
+    not. The open repair gap is a third question: `mark_gap_repaired` runs only
+    when a finished repair sees `kline_repair_jobs(current_end)` empty
+    (`live.rs:1196`), and nothing logs or publishes that count, so a gap held
+    open by one unfillable range is unattributable from the page. Neither can
+    be reached from the payload; both are host readings.
+  - Owner action, on the host. Nothing to restart for the fix — it lands with
+    the deploy. To settle the two open questions, read the minute samples the
+    fleet already records (`worker_sample`,
+    `scripts/runtime/record_equity.py:219`):
+
+    ```bash
+    # Did carry ever complete, and how old is the gap, minute by minute?
+    grep '"kind": *"worker"' \
+      /var/lib/liquidity-migration/equity/worker-demo-$(date -u +%Y-%m).jsonl \
+      | jq -c 'select(.ts_ms >= 1788541200000)
+               | {t: (.ts_ms/1000 | strftime("%H:%M")), status, ws_connected,
+                  ws_gap_age_ms, ws_last_frame_age_ms, carry_cycle_age_ms,
+                  long_cycle_age_ms}'
+
+    # Is the funding lane slow or wedged? A wedged lane logs nothing at all.
+    scripts/ops.sh logs signal-worker-demo 400
+
+    # And the account through the same window.
+    scripts/ops.sh curve demo
+    ```
+
+    A `ws_gap_age_ms` that keeps climbing across a deploy restart says the
+    stuck range is durable state, not a live-socket accident. If the demo
+    worker needs to be picked up on the new binary sooner than the deploy
+    takes it: `scripts/ops.sh restart signal-worker-demo` — a restart resets
+    the carry cycle to `None` and reopens the boot gap for the cold-fill
+    window, so expect `starting` for up to 120 min afterwards.
+
 - **2026-09-04 19:20 UTC — Per-commit Actions work is removed from the funded
   release path.**
   - The prior 24 hours contained 67 commits and 90 workflow runs. Their jobs

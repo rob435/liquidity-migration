@@ -159,6 +159,11 @@ struct LaneState {
     // `mark_gap_repaired(epoch)` closes the WebSocket gap, and callers that
     // restart the repair lane without an epoch must not erase it.
     repair_epoch: Option<u64>,
+    // An instrument refresh the hourly cadence asked for that a busy lane held
+    // off. The cadence is `instrument_cadence_ms` (1 h) while the funding lane
+    // that blocks it runs every `funding_cadence_ms` (60 s), so a dropped tick
+    // is the table standing still for an hour or longer.
+    instruments_due: bool,
     instruments_ready: bool,
     funding_ready: bool,
     repair_failure_count: usize,
@@ -755,16 +760,8 @@ impl LiveRunner {
                     }
                 }
                 _ = instrument_tick.tick() => {
-                    if !lanes.instruments && !lanes.funding {
-                        lanes.instruments = true;
-                        spawn_instrument_lane(
-                            lane_tx.clone(),
-                            self.bybit_instruments.clone(),
-                            self.bybit.clone(),
-                            self.config.sources.bybit_category.clone(),
-                            self.config.live.instrument_max_pages,
-                        );
-                    }
+                    lanes.instruments_due = true;
+                    self.start_instrument_lane_if_due(&lane_tx, &mut lanes);
                 }
                 _ = gate_tick.tick() => {
                     if self.config.llm_gate.enabled && !lanes.gate && lanes.instruments_ready {
@@ -1094,6 +1091,9 @@ impl LiveRunner {
             LaneCompletion::FundingFinished { succeeded } => {
                 lanes.funding = false;
                 lanes.funding_ready = succeeded;
+                // Before the carry attempt, which may spawn the next funding
+                // pass: a refresh the cadence already asked for outranks it.
+                self.start_instrument_lane_if_due(lane_tx, lanes);
                 self.try_carry_watermark(lanes, Some(lane_tx))?;
             }
             LaneCompletion::WhaleChunk { result, resume } => {
@@ -1539,6 +1539,38 @@ impl LiveRunner {
                     })
             })
             .collect()
+    }
+
+    /// Start the instrument lane when the cadence has asked for it and the
+    /// lanes it shares a venue with are idle. The request survives a busy lane:
+    /// dropping it instead leaves the instrument table and the traded universe
+    /// frozen until the next hourly tick, and the funding lane that blocks it
+    /// runs every 60 s, so a dropped tick repeats.
+    fn start_instrument_lane_if_due(
+        &self,
+        lane_tx: &mpsc::Sender<LaneCompletion>,
+        lanes: &mut LaneState,
+    ) {
+        if !lanes.instruments_due {
+            return;
+        }
+        if lanes.instruments {
+            // A refresh already in flight is the refresh this tick asked for.
+            lanes.instruments_due = false;
+            return;
+        }
+        if lanes.funding {
+            return;
+        }
+        lanes.instruments_due = false;
+        lanes.instruments = true;
+        spawn_instrument_lane(
+            lane_tx.clone(),
+            self.bybit_instruments.clone(),
+            self.bybit.clone(),
+            self.config.sources.bybit_category.clone(),
+            self.config.live.instrument_max_pages,
+        );
     }
 
     fn spawn_funding_lane(&self, lane_tx: mpsc::Sender<LaneCompletion>) -> Result<(), WorkerError> {
@@ -5062,6 +5094,57 @@ mod tests {
             .long_watermark(available_at_ms, Vec::new())
             .expect("LONG remains runnable after optional source failures");
         assert_eq!(runner.durable.worker().state().last_input_sequence, 1);
+
+        drop(stream);
+        drop(runner);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_instrument_refresh_held_off_by_funding_starts_when_that_pass_ends() {
+        let root = temporary_root("instrument-cadence-deferred");
+        let _ = std::fs::remove_dir_all(&root);
+        let options = LiveRunOptions {
+            state_dir: root.join("state"),
+            spool_dir: root.join("spool"),
+            heartbeat: root.join("heartbeat.json"),
+        };
+        let mut runner =
+            LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
+        let mut stream =
+            BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap();
+        let mut pending = BTreeMap::new();
+        let (lane_tx, _lane_rx) = tokio::sync::mpsc::channel(1);
+        let mut lanes = LaneState {
+            funding: true,
+            instruments_ready: true,
+            ..LaneState::default()
+        };
+
+        // The hourly instrument tick lands inside a funding pass. Funding runs
+        // every 60 s and instruments every hour, so dropping this tick is the
+        // table standing still until the next one, and that one lands inside a
+        // funding pass too.
+        lanes.instruments_due = true;
+        runner.start_instrument_lane_if_due(&lane_tx, &mut lanes);
+        assert!(!lanes.instruments, "the funding pass still holds the venue");
+        assert!(lanes.instruments_due, "the refresh is owed, not dropped");
+
+        runner
+            .handle_lane_completion(
+                LaneCompletion::FundingFinished { succeeded: true },
+                &mut stream,
+                &mut pending,
+                &lane_tx,
+                &mut lanes,
+            )
+            .unwrap();
+        assert!(!lanes.funding);
+        assert!(
+            lanes.instruments,
+            "the owed instrument refresh starts as the funding pass ends"
+        );
+        assert!(!lanes.instruments_due);
 
         drop(stream);
         drop(runner);
