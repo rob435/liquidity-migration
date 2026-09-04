@@ -6,6 +6,129 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 22:54 UTC — Both tape recorders crossed the 25 GiB free-space
+  floor on `/var/lib` and threw away every frame for the rest of the pruner's
+  300-second sleep: 313 938 Bybit frames and 95 873 Binance frames of tape,
+  gone because detection was instant and the only remedy was on an unwakeable
+  timer.**
+  - Incident `host-ecbac293ecc90d5e`, scope `host`, host `ip-208-84-103-4`,
+    new critical refs `capture-disk` and `capture-disk:forward-market-binance`.
+    Exact alert text: `CRITICAL recorder storage is blocked; frames are counted
+    but not written`, `CRITICAL recorder forward-market-binance storage is
+    blocked; frames are counted but not written`, `WARNING recorder dropped
+    313907 frames since the last check (storage was blocked)`, `WARNING
+    recorder forward-market-binance dropped 95869 frames since the last check
+    (storage was blocked)`.
+  - **The funded engine is not implicated.** No engine, worker or timer is
+    named in the page, no engine unit appears in the payload, and mainnet
+    neither paged nor restarted. Both refs are `market_tape` recorders, which
+    are research tape and sit outside the order path.
+  - Timeline, from the two journals. Bybit's last clean tick is 22:54:21
+    (`disk_blocked=False`, `disk_dropped=0`); its first blocked tick is
+    22:54:51 with `disk_dropped=54`, and by the payload's last line at 22:57:21
+    it reads `disk_dropped=313938`. Binance's last clean tick is 22:54:25 and
+    its first blocked tick 22:54:55 with `disk_dropped=2`, reaching
+    `disk_dropped=95873` at 22:56:55. In both, `rows` freezes at the crossing
+    and never moves again — Bybit at 31 927 482, Binance at 10 939 653 — while
+    `frames` keeps climbing. The Bybit journal's four shard disconnects
+    (22:54:26, 22:55:17–18) are the venue's own and are unrelated: three
+    reconnected inside 4 s and one inside 2 s, and the block spans them.
+  - Diagnosis. Neither journal carries `capture storage blocked; frames will be
+    counted but not written` (`market_tape/record.py:1115`), so the writer's
+    `OSError` path never fired. The flag was set by the maintenance tick at
+    `market_tape/record.py:1157`, `not self.retention.writable()`, and
+    `Retention.writable`
+    (`market_tape/storage.py:408`) is `shutil.disk_usage(self.root).free >=
+    self.min_free_bytes` against `min_free_disk_gb = 25` in both
+    `deploy/capture/bybit-linear.toml:28` and
+    `deploy/capture/binance-usdm.toml:32`. Two processes with separate roots
+    (`/var/lib/liquidity-migration/forward-market` and
+    `…/forward-market-binance`) flipping within 34 s of each other is one
+    shared filesystem crossing that floor, not two write errors. Every frame
+    from there on is dropped at `market_tape/record.py:1088-1090`, before it is
+    ever normalised or written.
+  - The recorders stopping is the reservation working, and that is the point of
+    the floor: mainnet's WAL is
+    `/var/lib/liquidity-migration-engine-mainnet/engine.wal`
+    (`deploy/engine.mainnet.toml.template:18`), on the same filesystem, so the
+    25 GiB is headroom held for the funded engine against the tape. The fault
+    is what came next.
+  - Root cause. `_retention_loop` (`market_tape/record.py:1128`) ran
+    `self.stop.wait(RETENTION_INTERVAL_SECONDS)` — 300 s, wakeable only by a
+    shutdown. `prune` is the only thing in the process that frees room, so the
+    recorder detected "no room" in milliseconds and then did nothing about it
+    for up to five minutes, discarding every frame that arrived meanwhile. The
+    comment at `record.py:93-99` justified the 300 s on the tape's own growth
+    rate ("the disk cannot run out inside one interval"), which is true of the
+    tape and false of the floor: `min_free_disk_gb` is free space on the whole
+    filesystem, which anything sharing it can cross.
+  - Changed. `Recorder.prune_now` (`market_tape/record.py:638`) is a
+    `threading.Event` the pruner waits on instead of `stop`, so a pass can be
+    started before the routine interval. The maintenance tick sets it on the
+    crossing into blocked (`record.py:1159`) and the writer's first failed
+    append sets it too (`record.py:1114`), that being the earliest detector of
+    a full disk — it fails on the next append, where the free-space tick is a
+    whole `status_interval_seconds` behind. It is set on the crossing and not
+    on every blocked tick: while blocked nothing is written, so a repeat pass
+    has nothing new to delete and level-triggering would walk tens of thousands
+    of files every 30 s during exactly the incident that can least afford it.
+    `run`'s shutdown sets it alongside `stop` so a stop still does not wait out
+    an interval. The blocked window is now one prune pass plus one status tick,
+    not up to 300 s. No floor, cap, cadence, budget or shed order changed.
+  - Tests. `test_a_disk_under_the_free_floor_prunes_now_instead_of_waiting_out_the_interval`
+    runs the real pruner thread with `RETENTION_INTERVAL_SECONDS` pinned to
+    3600 s, so a second pass can only come from the wake; without the fix it
+    fails on `the pruner slept out its interval while the disk was blocked`.
+    It also asserts a writable disk does not wake it and that a block a pass
+    cannot clear does not re-arm.
+    `test_a_failed_append_blocks_the_disk_and_asks_for_a_pass` drives
+    `_write_loop` with an append raising `OSError(28, "No space left on
+    device")` and fails without the fix on `a full disk left the pruner
+    asleep`.
+    Local gate: `tests/market_tape/test_record.py` 53 passed, 3 skipped (`zstd`
+    absent); `ruff check` and `ruff format --check` clean; `mypy market_tape`
+    clean. `scripts/dev.sh check` reports 6 pre-existing `unused-ignore` mypy
+    errors in `liquidity_migration/` and 12 pre-existing failures in
+    `tests/market_tape/test_load.py` and
+    `tests/scripts/test_observability_hygiene.py`; all are identical on a clean
+    tree and are this sandbox missing `zstd`, `rclone`, `shellcheck`, `polars`
+    and `numpy`. The change touches no Rust and no `liquidity_migration/`.
+  - Diagnosed, not fixed, because it did not contribute. `projected_gb` *falls*
+    while blocked — Bybit 1511.6 → 1491.1, Binance 497.0 → 489.9 — because
+    `_meter` is only reached on the write path
+    (`market_tape/record.py:1094`, `:1097`), which the drop at `:1088-1090`
+    skips. The budget measures inbound bytes against the month's line and those
+    bytes arrived over the wire whether or not they were written, so the
+    projection under-reads exactly when the recorder is losing the most. Here
+    it changed nothing: both projections sat far under their caps (2400 and
+    700 GB) with no feed shed, so no tier was un-shed. It is a
+    budget-accounting and reporting bug, and it is the owner's call whether to
+    meter the dropped frames.
+  - Open, and only the host can settle it: whether the floor was crossed by the
+    tape exceeding its own caps or by non-tape files taking the room.
+    `max_disk_gb` is 60 (Bybit) plus 18 (Binance) = 78 GB of tape, which with
+    the 25 GiB floor leaves about 15 GB of a 118 GB disk for the OS, the venv,
+    engine artifacts, WALs and archives; STATE.md's 18:13 UTC reading was 32 GB
+    free. If non-tape growth is what crossed it, this fix makes the recorders
+    delete tape to buy the engine headroom, which is correct but is not a size
+    decision — that is `deploy/capture/*.toml`, and the owner's.
+  - Host-side, by hand:
+
+    ```bash
+    # What the floor is actually reading, and who holds the space
+    scripts/ops.sh status
+    du -sh /var/lib/liquidity-migration/forward-market \
+           /var/lib/liquidity-migration/forward-market-binance
+    df -h /var/lib
+
+    # Did the funded account keep its heartbeat through the incident
+    scripts/ops.sh curve mainnet
+
+    # After the deploy, both recorders should read disk_blocked=False
+    scripts/ops.sh logs forward-capture.service 50
+    scripts/ops.sh logs forward-capture-binance.service 50
+    ```
+
 - **2026-09-04 ~21:24 UTC — Mainnet signal worker paged `degraded` when its
   120-minute grace expired, and the transport clauses in the page were the
   hourly universe refresh rebuilding the stream, not an outage.**

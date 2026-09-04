@@ -90,10 +90,12 @@ REANCHOR_TOPICS_PER_TICK = 40
 #: Topics dropped and re-taken together. One venue message carries ten, so a
 #: chunk is one message each way and a symbol's gap is one round trip.
 REANCHOR_CHUNK = 10
-#: Seconds between retention passes, on the pruner thread. The tape gains a
-#: few hundred megabytes in that time against a `min_free_disk_gb` measured in
-#: tens of gigabytes, so the disk cannot run out inside one interval, and the
-#: walk costs a tenth of what it did at the status cadence.
+#: Seconds between routine retention passes, on the pruner thread. This is the
+#: housekeeping cadence only: `min_free_disk_gb` is free space on the whole
+#: filesystem, which anything sharing it can cross, and every second the
+#: recorder is under that floor is thrown-away tape. So a maintenance tick that
+#: finds the disk unwritable sets `prune_now` and the pruner runs at once
+#: instead of sleeping out the rest of this interval.
 RETENTION_INTERVAL_SECONDS = 300.0
 LANES = "lanes"
 QueueItem = tuple[str, Any, int, str]
@@ -631,6 +633,9 @@ class Recorder:
         )
         self.frames: queue.Queue[QueueItem | None] = queue.Queue(storage.queue_frames)
         self.stop = threading.Event()
+        # Set to run a retention pass before the next routine interval, and on
+        # shutdown so the pruner's wait is not what a stop waits out.
+        self.prune_now = threading.Event()
         self.static_symbols: dict[str, tuple[str, ...]] = {}
         for tier in config.tiers:
             if tier.universe.kind == "symbols":
@@ -685,6 +690,7 @@ class Recorder:
             self.stop.wait()
         finally:
             self.stop.set()
+            self.prune_now.set()
             self.lane_stop.set()
             for shard in self._all_shards():
                 shard.close()
@@ -1102,6 +1108,10 @@ class Recorder:
                 self.disk_blocked = True
                 self.disk_dropped_frames += 1
                 if first:
+                    # This is the first detector of a full disk: the next append
+                    # fails milliseconds in, where the free-space tick is up to
+                    # `status_interval_seconds` behind it.
+                    self.prune_now.set()
                     logging.error("capture storage blocked; frames will be counted but not written: %s", exc)
             except Exception:  # noqa: BLE001 - one malformed frame cannot stop the tape
                 logging.exception("failed to record one public frame")
@@ -1118,7 +1128,8 @@ class Recorder:
     def _retention_loop(self) -> None:
         while not self.stop.is_set():
             self._retention_pass()
-            self.stop.wait(RETENTION_INTERVAL_SECONDS)
+            self.prune_now.wait(RETENTION_INTERVAL_SECONDS)
+            self.prune_now.clear()
 
     def _retention_pass(self) -> None:
         """One retention pass, on its own thread. A failed pass is the next
@@ -1138,7 +1149,16 @@ class Recorder:
             self.stop.wait(self.config.storage.status_interval_seconds)
 
     def _maintenance(self) -> None:
-        self.disk_blocked = not self.retention.writable()
+        blocked = not self.retention.writable()
+        # Crossing the free floor drops every frame from here on, so the only
+        # thing that frees room runs now rather than at the next interval. On
+        # the crossing, not on every blocked tick: while blocked nothing is
+        # written, so a repeated pass has nothing new to delete and would only
+        # walk the tape every status tick. The tick itself stays O(1) — the
+        # pruner owns the walk.
+        if blocked and not self.disk_blocked:
+            self.prune_now.set()
+        self.disk_blocked = blocked
         now_ns = time.time_ns()
         if self.stop.is_set():
             return

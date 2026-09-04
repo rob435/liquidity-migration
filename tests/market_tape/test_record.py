@@ -1029,6 +1029,67 @@ def test_the_maintenance_tick_writes_the_heartbeat_without_walking_the_tape(
     assert not expired.exists()
 
 
+def test_a_disk_under_the_free_floor_prunes_now_instead_of_waiting_out_the_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`min_free_disk_gb` is free space on the whole filesystem, so anything
+    sharing it can put the recorder under the floor, and under the floor every
+    frame is counted and thrown away. The tick that sees it must start the only
+    thing that frees room rather than leave the pruner asleep for the rest of
+    `RETENTION_INTERVAL_SECONDS`."""
+
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+
+    def refuse() -> dict[str, list[dict[str, Any]]]:
+        raise RuntimeError("venue refused")
+
+    recorder.adapter.fetch_tables = refuse  # type: ignore[method-assign]
+    monkeypatch.setattr(recorder, "_reconcile_tier", lambda name, topics: None)
+    # Long enough that a pass inside it can only come from the wake, never the clock.
+    monkeypatch.setattr(record, "RETENTION_INTERVAL_SECONDS", 3600.0)
+
+    started = threading.Event()
+    woken = threading.Event()
+    passes: list[int] = []
+
+    def counted(now: float | None = None) -> list[Path]:
+        passes.append(len(passes))
+        (started if len(passes) == 1 else woken).set()
+        return []
+
+    monkeypatch.setattr(recorder.retention, "prune", counted)
+    # A daemon thread, so a failed assertion below reports itself rather than
+    # the teardown that a missing wake would trip over.
+    pruner = threading.Thread(target=recorder._retention_loop, name="test-retention", daemon=True)
+    pruner.start()
+    assert started.wait(5.0), "the pruner never made its first pass"
+
+    # A writable disk leaves the pruner on its routine interval.
+    recorder.retention.min_free_bytes = 1
+    recorder._maintenance()
+    assert recorder.disk_blocked is False
+    assert not woken.wait(0.5)
+
+    # Now nothing on this filesystem is enough.
+    recorder.retention.min_free_bytes = 1 << 62
+    recorder._maintenance()
+    assert recorder.disk_blocked is True
+    assert woken.wait(5.0), "the pruner slept out its interval while the disk was blocked"
+
+    # The wake is the crossing, not the level: a block that a pass cannot clear
+    # must not walk the tape again on every status tick.
+    recorder.prune_now.clear()
+    recorder._maintenance()
+    assert recorder.disk_blocked is True
+    assert not recorder.prune_now.is_set()
+
+    # A stop wakes the pruner: shutdown never waits out a retention interval.
+    recorder.stop.set()
+    recorder.prune_now.set()
+    pruner.join(5.0)
+    assert not pruner.is_alive()
+
+
 def test_a_retention_pass_that_cannot_delete_leaves_the_pruner_thread_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1066,6 +1127,40 @@ def test_a_row_handed_in_by_a_side_lane_reaches_the_writer_queue(tmp_path: Path)
     assert tier == "lanes"
     assert recorder.received_frames == 1
     assert recorder.last_receive_ns == BASE_NS
+
+
+def test_a_failed_append_blocks_the_disk_and_asks_for_a_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The append is the first detector of a full disk — it fails milliseconds
+    in, where the free-space tick is a status interval behind — so it is also
+    what starts the pass that frees room."""
+
+    recorder = build(tmp_path, Tier("wide", (Feed("ticker"),), Universe("listed", quote="USDT")))
+
+    def no_space(row: Any) -> list[Any]:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(recorder.writer, "append", no_space)
+    frame = json.dumps(
+        {
+            "topic": "tickers.AGIUSDT",
+            "type": "delta",
+            "ts": 1_800_000_000_000,
+            "data": {"symbol": "AGIUSDT", "fundingRate": "-0.0015"},
+        }
+    )
+    recorder.frames.put(("frame", frame, BASE_NS, "wide"))
+    recorder.frames.put(None)
+
+    with caplog.at_level(logging.ERROR):
+        recorder._write_loop()
+
+    assert recorder.disk_blocked is True
+    assert recorder.written_rows == 0
+    assert recorder.disk_dropped_frames == 1
+    assert "No space left on device" in caplog.text
+    assert recorder.prune_now.is_set(), "a full disk left the pruner asleep"
 
 
 @needs_zstd
