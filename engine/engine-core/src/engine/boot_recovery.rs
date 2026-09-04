@@ -1,3 +1,5 @@
+use super::*;
+
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Come up: read the log back, say who we are in it, learn what the
     /// strategies want, then ask the venue for the instrument rules and the
@@ -88,8 +90,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
         let signal_dependencies = crate::signal_state::dependency_closure(
-            &names, &strategies.iter().map(|strategy| strategy.input_dependencies()).collect::<Vec<_>>(),
-        ).map_err(EngineError::Boot)?;
+            &names,
+            &strategies
+                .iter()
+                .map(|strategy| strategy.input_dependencies())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(EngineError::Boot)?;
         let prior_names = crate::replay::LogNames::of_log(replayed).strategies;
         if !sleeves.is_empty()
             && !prior_names.is_empty()
@@ -313,8 +320,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         });
         let mut strategy_global_checkpoints = replay_strategy_global_checkpoints(effective);
         strategy_global_checkpoints.extend(initial_global_checkpoints);
-        strategy_global_checkpoints
-            .retain(|strategy, _| (*strategy as usize) < strategies.len());
+        strategy_global_checkpoints.retain(|strategy, _| (*strategy as usize) < strategies.len());
         let mut strategy_events = replay_strategy_events(effective);
         strategy_events.retain(|_, event| {
             (event.source.0 as usize) < strategies.len()
@@ -955,7 +961,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok((may_open, found.vanished()))
     }
 
-    async fn checkpoint_history_if_due(&mut self) -> Result<(), EngineError> {
+    pub(super) async fn checkpoint_history_if_due(&mut self) -> Result<(), EngineError> {
         if clock::wall_ms() < self.next_history_checkpoint_ms {
             return Ok(());
         }
@@ -969,7 +975,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     /// After a private-stream gap: ask the venue what traded while the stream
     /// was away. The same pass also renews the quiet-run checkpoint.
-    async fn recover_gap_fills(&mut self) -> Result<(), EngineError> {
+    pub(super) async fn recover_gap_fills(&mut self) -> Result<(), EngineError> {
         self.recover_history("after a private-stream gap").await
     }
 
@@ -1181,7 +1187,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 
-    fn foreign_fill_line(client_order_id: &str, symbol: SymbolId) -> String {
+    pub(super) fn foreign_fill_line(client_order_id: &str, symbol: SymbolId) -> String {
         format!(
             "symbol {}: a fill names an order this engine did not send ({})",
             symbol.0,
@@ -1210,7 +1216,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         )
     }
 
-    fn untrusted_fill_line(
+    pub(super) fn untrusted_fill_line(
         exec_id: &str,
         client_order_id: &str,
         symbol: SymbolId,

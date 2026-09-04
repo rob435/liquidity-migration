@@ -1,3 +1,5 @@
+use super::*;
+
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Write down what any position that just closed made, and tell the risk
     /// kernel what it lost.
@@ -7,7 +9,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// kernel hears every priced trip for the same reason — the rolling loss
     /// window counts what this engine did, not what somebody chose to file.
     /// An unpriced close carries no number to count.
-    fn record_trades(&mut self) {
+    pub(super) fn record_trades(&mut self) {
         let closed = self.fills.take_closed();
         if closed.is_empty() {
             return;
@@ -32,7 +34,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// should change: the file is how something outside tells whether this
     /// engine is well, and an engine that stopped trading because it could
     /// not describe itself would be a worse answer than one nobody can see.
-    fn beat(&mut self, now_ns: u64) {
+    pub(super) fn beat(&mut self, now_ns: u64) {
         let Engine {
             heartbeat,
             ledger,

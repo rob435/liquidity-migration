@@ -1,5 +1,7 @@
+use super::*;
+
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
-    fn wake_restored_strategies(&mut self) -> Result<(), EngineError> {
+    pub(super) fn wake_restored_strategies(&mut self) -> Result<(), EngineError> {
         let now = clock::now_ns();
         for index in 0..self.strategies.len() {
             let id = u16::try_from(index).map_err(|_| {
@@ -88,7 +90,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// command — never an engine fault; the caller retires the refused
     /// request and keeps running. `Ok(false)` means this exact request was
     /// already accepted and needs no new WAL record.
-    fn admit_runtime_control(
+    pub(super) fn admit_runtime_control(
         &self,
         request: &engine_types::RuntimeControlRequest,
     ) -> Result<bool, String> {
@@ -136,7 +138,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     /// Journal and apply one admitted request. Errors here are engine faults.
-    fn apply_runtime_control(
+    pub(super) fn apply_runtime_control(
         &mut self,
         request: engine_types::RuntimeControlRequest,
     ) -> Result<(), EngineError> {
@@ -376,7 +378,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Redeliver WAL-restored messages after every strategy can see its restored
     /// global checkpoint and attributed account state. Their acknowledge
     /// actions enter the ordinary FIFO and are drained when the run starts.
-    fn redeliver_durable_strategy_inputs(&mut self) {
+    pub(super) fn redeliver_durable_strategy_inputs(&mut self) {
         let events: Vec<_> = self.strategy_events.values().cloned().collect();
         let observations: Vec<_> = self.signals.observations().cloned().collect();
         let now = clock::now_ns();
@@ -414,7 +416,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
     }
 
-    async fn take_completion_turn<O: OrderFeed>(
+    pub(super) async fn take_completion_turn<O: OrderFeed>(
         &mut self,
         completion: MutationCompletion,
         order_feed: &mut O,
@@ -441,7 +443,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.drain(clock::now_ns()).await
     }
 
-    async fn settle_after_market_close<O: OrderFeed>(
+    pub(super) async fn settle_after_market_close<O: OrderFeed>(
         &mut self,
         order_feed: &mut O,
     ) -> Result<(), EngineError> {
@@ -466,7 +468,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 
-    async fn on_market(&mut self, event: MarketEvent) -> Result<(), EngineError> {
+    pub(super) async fn on_market(&mut self, event: MarketEvent) -> Result<(), EngineError> {
         let now = clock::now_ns();
         self.market.apply(&event);
         match event {
@@ -567,7 +569,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.drain(origin_ns).await
     }
 
-    async fn on_timers(&mut self) -> Result<(), EngineError> {
+    pub(super) async fn on_timers(&mut self) -> Result<(), EngineError> {
         let now = clock::now_ns();
         while let Some((sid, timer)) = self.timers.pop_due(now) {
             let event = EngineEvent::Timer {
@@ -616,7 +618,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.drain(now).await
     }
 
-    fn update_signal_requests<F: SignalFeed>(&self, feed: &mut F) -> Result<(), EngineError> {
+    pub(super) fn update_signal_requests<F: SignalFeed>(
+        &self,
+        feed: &mut F,
+    ) -> Result<(), EngineError> {
         let requests: Vec<_> = self
             .signals
             .gaps()
@@ -636,7 +641,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .map_err(|error| EngineError::State(error.to_string()))
     }
 
-    fn queue_signal_observation<F: SignalFeed>(
+    pub(super) fn queue_signal_observation<F: SignalFeed>(
         &mut self,
         observation: SignalObservation,
         feed: &mut F,
@@ -745,7 +750,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     /// Append and barrier every fully admitted signal before reducer delivery.
-    fn accept_pending_signals<F: SignalFeed>(&mut self, feed: &mut F) -> Result<(), EngineError> {
+    pub(super) fn accept_pending_signals<F: SignalFeed>(
+        &mut self,
+        feed: &mut F,
+    ) -> Result<(), EngineError> {
         let observations = std::mem::take(&mut self.pending_signal_deliveries);
         let now = clock::now_ns();
         for observation in observations {
@@ -803,7 +811,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// that all four agree before the symbol is usable. A disagreement drops
     /// the symbol rather than trading it: the engine carries on with the names
     /// it already had, and says loudly which one it refused.
-    async fn admit_wanted<M, O>(
+    pub(super) async fn admit_wanted<M, O>(
         &mut self,
         market_feed: &mut M,
         order_feed: &mut O,
@@ -913,7 +921,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// reconciliation state is written before this queue reaches the venue.
     /// Foreign and reduce-only orders are left alone: cancelling another
     /// writer's order or a protective exit is not a safe guess.
-    fn queue_halted_entry_cancels(&mut self) -> Result<(), EngineError> {
+    pub(super) fn queue_halted_entry_cancels(&mut self) -> Result<(), EngineError> {
         if self.may_open
             && self.private_stream_ready
             && self.signals.gaps().next().is_none()
@@ -959,7 +967,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 
-    fn enqueue_halt_cancel(&mut self, symbol: SymbolId, client_order_id: String) {
+    pub(super) fn enqueue_halt_cancel(&mut self, symbol: SymbolId, client_order_id: String) {
         if self.halt_cancels.contains_key(&client_order_id) {
             return;
         }
@@ -968,7 +976,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.halt_cancel_queue.push_back((symbol, client_order_id));
     }
 
-    async fn dispatch_halt_cancel_group(&mut self) -> Result<(), EngineError> {
+    pub(super) async fn dispatch_halt_cancel_group(&mut self) -> Result<(), EngineError> {
         let mut requests = Vec::with_capacity(MAX_CANCELS_PER_BATCH);
         while requests.len() < MAX_CANCELS_PER_BATCH {
             let Some((symbol, client_order_id)) = self.halt_cancel_queue.pop_front() else {
@@ -989,7 +997,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.process_cancels(requests).await.map(|_| ())
     }
 
-    async fn on_tick(&mut self) -> Result<(), EngineError> {
+    pub(super) async fn on_tick(&mut self) -> Result<(), EngineError> {
         self.wal.flush()?;
         // Rotation is decided here, on the group-flush tick, and nowhere
         // else. The loop is one thread and one task, so this can never fall
@@ -1056,7 +1064,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         now_ns.saturating_sub(self.account.observed_ns) >= self.refresh_after_ns
     }
 
-    async fn refresh_account_if_due(&mut self, now_ns: u64) -> Result<(), EngineError> {
+    pub(super) async fn refresh_account_if_due(&mut self, now_ns: u64) -> Result<(), EngineError> {
         if !self.account_refresh_due(now_ns) {
             return Ok(());
         }
@@ -1072,7 +1080,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 
-    async fn drain(&mut self, origin_ns: u64) -> Result<(), EngineError> {
+    pub(super) async fn drain(&mut self, origin_ns: u64) -> Result<(), EngineError> {
         self.pull_unconfirmed_amends()?;
         let mut progress = self.drain_progress.take().unwrap_or(DrainProgress {
             origin_ns,
@@ -1360,13 +1368,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
     }
 
-    fn mark_symbols_busy(&mut self, symbols: impl IntoIterator<Item = SymbolId>) {
+    pub(super) fn mark_symbols_busy(&mut self, symbols: impl IntoIterator<Item = SymbolId>) {
         for symbol in symbols {
             *self.busy_symbols.entry(symbol).or_default() += 1;
         }
     }
 
-    fn release_symbols(&mut self, symbols: impl IntoIterator<Item = SymbolId>) {
+    pub(super) fn release_symbols(&mut self, symbols: impl IntoIterator<Item = SymbolId>) {
         let mut ready = Vec::new();
         for symbol in symbols {
             let Some(count) = self.busy_symbols.get_mut(&symbol) else {

@@ -1,15 +1,17 @@
-fn stop_key(symbol: SymbolId, side: Side) -> (u16, bool) {
+use super::*;
+
+pub(super) fn stop_key(symbol: SymbolId, side: Side) -> (u16, bool) {
     (symbol.0, side == Side::Sell)
 }
 
-fn tighter_stop(side: Side, left: f64, right: f64) -> f64 {
+pub(super) fn tighter_stop(side: Side, left: f64, right: f64) -> f64 {
     match side {
         Side::Buy => left.max(right),
         Side::Sell => left.min(right),
     }
 }
 
-fn stop_is_looser(side: Side, candidate: f64, protected: f64, tolerance: f64) -> bool {
+pub(super) fn stop_is_looser(side: Side, candidate: f64, protected: f64, tolerance: f64) -> bool {
     match side {
         Side::Buy => candidate + tolerance < protected,
         Side::Sell => candidate - tolerance > protected,
@@ -19,7 +21,7 @@ fn stop_is_looser(side: Side, candidate: f64, protected: f64, tolerance: f64) ->
 /// The newest boundary a successful execution-history read proved. No generic
 /// wall stamp belongs here: a fill, rotation, or graceful stop does not prove
 /// that an otherwise empty interval was scanned.
-fn execution_history_through_ms(replayed: &[WalRecord]) -> Option<i64> {
+pub(super) fn execution_history_through_ms(replayed: &[WalRecord]) -> Option<i64> {
     let mut newest = None;
     for record in replayed {
         let stamp = match record {
@@ -58,7 +60,7 @@ fn legacy_boot_ms(replayed: &[WalRecord]) -> Option<i64> {
 
 /// Newest strategy checkpoint after replaying records in order.
 /// A segment base is a complete restatement; later records replace one key.
-fn replay_strategy_checkpoints(
+pub(super) fn replay_strategy_checkpoints(
     replayed: &[WalRecord],
 ) -> std::collections::BTreeMap<(u16, u16), StrategyCheckpoint> {
     let mut active = std::collections::BTreeMap::new();
@@ -88,7 +90,7 @@ fn replay_strategy_checkpoints(
 }
 
 /// Newest whole-sleeve checkpoint after replaying records in order.
-fn replay_strategy_global_checkpoints(
+pub(super) fn replay_strategy_global_checkpoints(
     replayed: &[WalRecord],
 ) -> std::collections::BTreeMap<u16, StrategyGlobalCheckpointState> {
     let mut active = std::collections::BTreeMap::new();
@@ -125,7 +127,7 @@ fn replay_strategy_global_checkpoints(
 }
 
 /// Durable cross-sleeve events still awaiting their destination.
-fn replay_strategy_events(
+pub(super) fn replay_strategy_events(
     replayed: &[WalRecord],
 ) -> std::collections::BTreeMap<(u16, String), StrategyEvent> {
     let mut active = std::collections::BTreeMap::new();
@@ -153,13 +155,13 @@ fn replay_strategy_events(
     active
 }
 
-struct ReplayedRuntimeControlState {
-    requests: Vec<engine_types::RuntimeControlRequest>,
-    consumed: std::collections::BTreeSet<(u16, String)>,
-    entries_enabled: std::collections::BTreeMap<u16, bool>,
+pub(super) struct ReplayedRuntimeControlState {
+    pub(super) requests: Vec<engine_types::RuntimeControlRequest>,
+    pub(super) consumed: std::collections::BTreeSet<(u16, String)>,
+    pub(super) entries_enabled: std::collections::BTreeMap<u16, bool>,
 }
 
-fn replay_runtime_control_state(
+pub(super) fn replay_runtime_control_state(
     replayed: &[WalRecord],
 ) -> Result<ReplayedRuntimeControlState, EngineError> {
     let mut requests: Vec<engine_types::RuntimeControlRequest> = Vec::new();
@@ -203,8 +205,9 @@ fn replay_runtime_control_state(
     }
     let mut entries_enabled = std::collections::BTreeMap::new();
     for request in &requests {
-        if let engine_types::RuntimeControlCommand::SetEntriesEnabled { entries_enabled: value } =
-            request.command
+        if let engine_types::RuntimeControlCommand::SetEntriesEnabled {
+            entries_enabled: value,
+        } = request.command
         {
             entries_enabled.insert(request.strategy.0, value);
         }
@@ -270,7 +273,10 @@ pub(crate) fn named_strategy_errors(
             continue;
         };
         let Some(strategy_name) = names.get(index) else {
-            tracing::error!(index, "strategy has no configured name; omitting its health error");
+            tracing::error!(
+                index,
+                "strategy has no configured name; omitting its health error"
+            );
             continue;
         };
         errors.push((strategy_name.clone(), error.to_owned()));
@@ -280,7 +286,7 @@ pub(crate) fn named_strategy_errors(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn feed_strategy(
+pub(super) fn feed_strategy(
     strategies: &mut [Box<dyn Strategy>],
     market: &MarketState,
     account: &AccountView,
@@ -356,7 +362,7 @@ pub(crate) fn mint_unused(prefix: &str, next_n: &mut u64, taken: impl Fn(&str) -
 }
 
 /// The first non-finite number an intent carries, named, or None.
-fn unreal_number(intent: &Intent) -> Option<&'static str> {
+pub(super) fn unreal_number(intent: &Intent) -> Option<&'static str> {
     if !intent.qty.is_finite() {
         return Some("quantity");
     }
@@ -373,7 +379,7 @@ fn unreal_number(intent: &Intent) -> Option<&'static str> {
     None
 }
 
-fn arrival_ns(event: &MarketEvent, fallback: u64) -> u64 {
+pub(super) fn arrival_ns(event: &MarketEvent, fallback: u64) -> u64 {
     let stamp = match event {
         MarketEvent::Quote { quote, .. } => quote.recv_ns,
         MarketEvent::Depth { depth, .. } => depth.recv_ns,
@@ -427,7 +433,7 @@ pub(crate) fn durable_risk_verdict(
 
 /// Both id tables as a log record, so every number in the log can be turned
 /// back into a sleeve and a coin.
-fn names_record(strategies: &[String], market: &MarketState) -> WalRecord {
+pub(super) fn names_record(strategies: &[String], market: &MarketState) -> WalRecord {
     WalRecord::Names {
         strategies: strategies.to_vec(),
         symbols: (0..market.table.len())
@@ -435,16 +441,14 @@ fn names_record(strategies: &[String], market: &MarketState) -> WalRecord {
             .collect(),
     }
 }
-fn validate_strategy_checkpoint(
+pub(super) fn validate_strategy_checkpoint(
     strategy: &dyn Strategy,
     checkpoint: &StrategyCheckpoint,
 ) -> Result<(), String> {
     if checkpoint.schema_version == 0 {
         return Err("checkpoint schema_version must be positive".to_string());
     }
-    if checkpoint.decision_fingerprint.is_empty()
-        || checkpoint.decision_fingerprint.len() > 256
-    {
+    if checkpoint.decision_fingerprint.is_empty() || checkpoint.decision_fingerprint.len() > 256 {
         return Err("checkpoint fingerprint must contain 1..=256 bytes".to_string());
     }
     if checkpoint.payload.len() > engine_types::MAX_STRATEGY_STATE_BYTES {

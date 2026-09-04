@@ -198,7 +198,7 @@ recorded fill is keyed on that id.
 * **Must**: a config's strategy list *extend* the logged table — every id the
   log already names keeps the same name in the same position. Appending a
   block is how a running realm gains a sleeve. Both gates take this rule:
-  `Engine::boot` (`engine/engine-core/src/engine/boot_recovery.inc.rs`) and
+  `Engine::boot` (`engine/engine-core/src/engine/boot_recovery.rs`) and
   the takeover's `verify_names` (`engine/engine-core/src/takeover.rs`), which
   fails with `does not preserve the WAL Names prefix`.
 * **Must Never**: a rename, a reorder, an insertion before an existing block,

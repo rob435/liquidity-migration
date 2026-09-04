@@ -1,5 +1,7 @@
+use super::*;
+
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
-    async fn take_venue_completion(
+    pub(super) async fn take_venue_completion(
         &mut self,
         completion: MutationCompletion,
     ) -> Result<(), EngineError> {
@@ -421,7 +423,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// and the venue's round trip is longer than the disk's. What it costs
     /// when it is not free is recorded, because that is the number that says
     /// whether running the barrier beside the send is buying anything.
-    fn settle_barrier(&mut self) -> Result<(), EngineError> {
+    pub(super) fn settle_barrier(&mut self) -> Result<(), EngineError> {
         let Some(pending) = self.pending_barrier.take() else {
             return Ok(());
         };
@@ -465,7 +467,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// explained. The fallback is exactly what an unamendable venue gets:
     /// take the order down, because an order resting at a price the engine
     /// cannot name is one it cannot price its own book against.
-    fn pull_unconfirmed_amends(&mut self) -> Result<(), EngineError> {
+    pub(super) fn pull_unconfirmed_amends(&mut self) -> Result<(), EngineError> {
         if self.amends_awaiting_price.is_empty() {
             return Ok(());
         }
@@ -514,7 +516,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// boot's repair puts that one back rather than the distance the position
     /// opened at. A failed call is logged and dropped -- the old stop is still
     /// standing, the position is still covered, and the next wake asks again.
-    async fn process_set_stop(
+    pub(super) async fn process_set_stop(
         &mut self,
         symbol: SymbolId,
         trigger_px: f64,
@@ -630,7 +632,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Record a bounded cancel group, then use the adapter's fastest safe
     /// route. Every answer stays joined to its own client id and the working
     /// supervisor only marks a pull accepted on `Ok`.
-    async fn process_cancels(
+    pub(super) async fn process_cancels(
         &mut self,
         requests: Vec<(SymbolId, String)>,
     ) -> Result<bool, EngineError> {
@@ -664,7 +666,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(true)
     }
 
-    async fn process_amend(
+    pub(super) async fn process_amend(
         &mut self,
         symbol: SymbolId,
         client_order_id: &str,
@@ -931,7 +933,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     /// Every order update, wherever it came from, goes through here.
-    async fn take_update(&mut self, update: OrderUpdate) -> Result<(), EngineError> {
+    pub(super) async fn take_update(&mut self, update: OrderUpdate) -> Result<(), EngineError> {
         // Before anything is done with news about an order: the record of the
         // order that earned it is on the disk. This is the wait the send no
         // longer pays.

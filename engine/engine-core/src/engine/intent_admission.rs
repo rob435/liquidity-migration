@@ -1,5 +1,7 @@
+use super::*;
+
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
-    fn signal_inputs_blocked(&self, strategy: StrategyId) -> bool {
+    pub(super) fn signal_inputs_blocked(&self, strategy: StrategyId) -> bool {
         self.signal_dependencies
             .get(strategy.0 as usize)
             .is_some_and(|dependencies| {
@@ -9,7 +11,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             })
     }
 
-    fn opening_permission_reason(&self, strategy: StrategyId) -> Option<&'static str> {
+    pub(super) fn opening_permission_reason(&self, strategy: StrategyId) -> Option<&'static str> {
         if self.signal_inputs_blocked(strategy) {
             Some("signal_sequence_gap")
         } else if self.runtime_entries_enabled.get(&strategy.0).copied() == Some(false) {
@@ -19,7 +21,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
     }
 
-    fn symbol_owned_by_another(&self, strategy: StrategyId, symbol: SymbolId) -> bool {
+    pub(super) fn symbol_owned_by_another(&self, strategy: StrategyId, symbol: SymbolId) -> bool {
         self.attribution.held_by_another(strategy, symbol)
             || self.orders.opening_owned_by_another(strategy, symbol)
     }
@@ -435,7 +437,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }))
     }
 
-    async fn process_intents(
+    pub(super) async fn process_intents(
         &mut self,
         intents: Vec<Intent>,
         origin_ns: u64,
@@ -735,7 +737,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// `M0` for an order of ours, off the order ledger. Zero for one the
     /// ledger no longer holds, which makes every arrival number for its fills
     /// missing rather than wrong.
-    fn arrival_mid_of(&self, client_order_id: &str) -> f64 {
+    pub(super) fn arrival_mid_of(&self, client_order_id: &str) -> f64 {
         self.orders
             .orders
             .get(client_order_id)

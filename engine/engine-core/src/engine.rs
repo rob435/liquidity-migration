@@ -99,7 +99,12 @@ const AMEND_CONFIRM_NS: u64 = 2_000_000_000;
 #[cfg(test)]
 const AMEND_CONFIRM_NS: u64 = 25_000_000;
 
-include!("engine/free_helpers.inc.rs");
+mod free_helpers;
+use free_helpers::*;
+pub(crate) use free_helpers::{
+    durable_risk_verdict, forget_leverage_where_flat, mint_unused, named_entry_blockers,
+    named_strategy_errors, venue_minus_local_ms,
+};
 
 pub const ENGINE_VERSION: &str = concat!("engine-core ", env!("CARGO_PKG_VERSION"));
 /// The git commit this binary was built from (build.rs), "-dirty" when the
@@ -465,11 +470,11 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     subscriptions: Vec<Subscription>,
 }
 
-include!("engine/boot_recovery.inc.rs");
-include!("engine/scheduling.inc.rs");
-include!("engine/telemetry.inc.rs");
-include!("engine/intent_admission.inc.rs");
-include!("engine/venue_completion.inc.rs");
+mod boot_recovery;
+mod intent_admission;
+mod scheduling;
+mod telemetry;
+mod venue_completion;
 
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub fn subscriptions(&self) -> &[Subscription] {
