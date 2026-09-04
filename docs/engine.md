@@ -24,30 +24,30 @@ The engine workspace is under `engine/`:
 
 ### `engine-core` Module Map
 
-| Module | Owns |
+| Module (repository path) | Owns |
 | :--- | :--- |
-| `engine.rs` | `Engine`, the `select!` loop, one handler per loop arm, the `StopReason` |
-| `engine/boot_recovery.rs` | `Engine::boot`, WAL replay into engine state, missed-fill recovery, venue reconciliation at boot |
-| `engine/scheduling.rs` | Strategy wakes, timers, durable actions, the per-wake drain |
-| `engine/signal_intake.rs` | Durable signal admission: cursor check, symbol admission across the four id tables, barrier, delivery |
-| `engine/intent_admission.rs` | `prepare_intent`, `OpeningRefusal` codes, risk verdicts, order minting and placement groups |
-| `engine/venue_completion.rs` | Venue command completions, `VenueTiming` journaling, private-stream updates, stop maintenance |
-| `engine/telemetry.rs` | Heartbeat and closed-trade rows |
-| `engine/free_helpers.rs` | Replay builders and pure helpers the modules above share |
-| `ctx.rs` | `Books` (what strategies read), `StrategyHost` (the plugs and what is held for them), `Ctx`, `Timers` |
-| `inflight.rs` | The order ledger and registry: what the log says is still out there, and whose it is |
-| `covers.rs` | What each strategy has sent that the account reading has not yet absorbed |
-| `attribution.rs` | Which strategy's fills a venue position came from |
-| `working.rs` | Resting entries being worked at the venue |
-| `reconcile.rs` | The log's exposure and intended stops against the venue's positions |
-| `signal_state.rs` | Durable signal cursors, gaps and subscriptions per source |
-| `signals/` | Signal feeds: validation, in-process channel, spool, socket doorbell |
-| `venue_runtime.rs` | The venue task that owns blocking venue I/O |
-| `ledger.rs`, `timing.rs` | Latency segments live, and read back from the log |
-| `execution.rs`, `trades.rs` | Fill costs and closed round trips |
-| `assembly.rs`, `runner.rs`, `config.rs` | Wiring feeds, venue, risk and strategies into one process |
-| `replay.rs`, `takeover.rs`, `clear.rs`, `canary.rs`, `controls.rs` | Operator commands over a WAL or a live engine |
-| `backtest/` | The live loop on a recorded tape against a simulated venue |
+| `engine/engine-core/src/engine.rs` | `Engine`, the `select!` loop, one handler per loop arm, the `StopReason` |
+| `engine/engine-core/src/engine/boot_recovery.rs` | `Engine::boot`, WAL replay into engine state, missed-fill recovery, venue reconciliation at boot |
+| `engine/engine-core/src/engine/scheduling.rs` | Strategy wakes, at most 64 due timer callbacks per turn, durable actions, the per-wake drain |
+| `engine/engine-core/src/engine/signal_intake.rs` | Durable signal admission: cursor and availability checks, symbol admission across the four id tables, barrier, delivery, acknowledgement |
+| `engine/engine-core/src/engine/intent_admission.rs` | `prepare_intent`, `OpeningRefusal` codes, risk verdicts, order minting and placement groups |
+| `engine/engine-core/src/engine/venue_completion.rs` | Venue command completions, `VenueTiming` journaling, private-stream updates, stop maintenance |
+| `engine/engine-core/src/engine/telemetry.rs` | Heartbeat and closed-trade rows |
+| `engine/engine-core/src/engine/free_helpers.rs` | Replay builders and pure helpers the modules above share |
+| `engine/engine-core/src/ctx.rs` | `Books` (what strategies read), `StrategyHost` (the plugs and what is held for them), `Ctx`, `Timers` |
+| `engine/engine-core/src/inflight.rs` | The order ledger and registry: what the log says is still out there, and whose it is |
+| `engine/engine-core/src/covers.rs` | What each strategy has sent that the account reading has not yet absorbed |
+| `engine/engine-core/src/attribution.rs` | Which strategy's fills a venue position came from |
+| `engine/engine-core/src/working.rs` | Resting entries being worked at the venue |
+| `engine/engine-core/src/reconcile.rs` | The log's exposure and intended stops against the venue's positions |
+| `engine/engine-core/src/signal_state.rs` | Durable signal cursors, gaps and subscriptions per source |
+| `engine/engine-core/src/signals/` | Signal feeds: validation, availability deadlines, in-process channel, spool, socket doorbell |
+| `engine/engine-core/src/venue_runtime.rs` | The venue task that owns blocking venue I/O |
+| `engine/engine-core/src/ledger.rs`, `engine/engine-core/src/timing.rs` | Latency segments live, and read back from the log |
+| `engine/engine-core/src/execution.rs`, `engine/engine-core/src/trades.rs` | Fill costs and closed round trips |
+| `engine/engine-core/src/assembly.rs`, `engine/engine-core/src/runner.rs`, `engine/engine-core/src/config.rs` | Wiring feeds, venue, risk and strategies into one process |
+| `engine/engine-core/src/replay.rs`, `engine/engine-core/src/takeover.rs`, `engine/engine-core/src/clear.rs`, `engine/engine-core/src/canary.rs`, `engine/engine-core/src/controls.rs` | Operator commands over a WAL or a live engine |
+| `engine/engine-core/src/backtest/` | The live loop on a recorded tape against a simulated venue |
 
 ---
 

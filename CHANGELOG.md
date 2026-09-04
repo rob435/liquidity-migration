@@ -6,6 +6,29 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 23:02 UTC — Verify the combined modularity and audit changes for local integration.**
+  - Audit checkpoints are rebased onto Claude's `efb5a9a5` module extraction,
+    typed maps, `Books`/`StrategyHost`, shared native `SleeveCore` and worker
+    history. Timer storage/dispatch retains its bounded-rearm and cooperative
+    scheduling behavior. Availability checks and acknowledgement live in the
+    split signal feeds and `engine/signal_intake.rs`; obsolete `signals.rs`
+    stays removed. The p99.9 change applies without alteration.
+  - Independent source review preserves native checkpoint serialization,
+    state/effect ordering and history calculation behavior, except the candle
+    replacement regression fixed in `86512ea9`. All 1,788 Rust workspace/all-
+    target tests pass in both debug and optimized builds under actual Rust
+    1.90.0, with five existing opt-in skips in each run. Strict Clippy and
+    formatting pass. All 1,499 Python tests, Ruff, mypy over 100 files,
+    ShellCheck and documentation checks pass; the initial Python run caught
+    incorrect module-map paths, now corrected alongside stale audit references.
+  - Recovery branches retain the original audit tip
+    `codex/tier1-before-integration-13be4c52` and unrelated uncommitted on-call
+    edits at `codex/preserve-oncall-20260904` (`e571f9c4`). These on-call edits
+    are excluded from the integration. The qualified `15c60924` archive stays
+    available; its byte qualification does not cover the combined source.
+  - Local integration and worktree cleanup do not push, deploy, arm trading,
+    change capital, migrate live WAL state or alter production credentials.
+
 - **2026-09-04 23:00 UTC — Preserve candle coverage replacement during worker integration (local checkpoint).**
   - The shared history extraction returned before clearing candle coverage
     when `BybitKlineBatch` supplied `replace_coverage=true` with no frontier.
