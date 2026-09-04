@@ -679,6 +679,26 @@ def test_time_series_legends_do_not_squeeze_the_plots() -> None:
         assert legend["calcs"] == []
 
 
+def test_tape_loss_is_a_five_minute_time_series_for_both_venues() -> None:
+    dashboard = _dashboard()
+    panel = next(panel for panel in dashboard["panels"] if panel["title"] == "Tape loss · 5m")
+    expressions = [target["expr"] for target in panel["targets"]]
+
+    assert panel["type"] == "timeseries"
+    assert panel["gridPos"] == {"x": 15, "y": 24, "w": 9, "h": 8}
+    assert all("[5m]" in expression for expression in expressions)
+    assert "lm_recorder_dropped_frames" in expressions[0]
+    assert "lm_recorder_disk_dropped_frames" in expressions[0]
+    assert "lm_recorder_reconnects" in expressions[1]
+    names = {
+        property_["value"]
+        for override in panel["fieldConfig"]["overrides"]
+        for property_ in override["properties"]
+        if property_["id"] == "displayName"
+    }
+    assert names == {"BN loss", "BY loss", "BN gap", "BY gap"}
+
+
 def test_execution_activity_legend_uses_plain_metric_names() -> None:
     dashboard = _dashboard()
     panel = next(panel for panel in dashboard["panels"] if panel["title"] == "Execution activity · 15m")

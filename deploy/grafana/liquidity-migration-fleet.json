@@ -7,7 +7,7 @@
   ],
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 10,
+  "version": 11,
   "editable": true,
   "graphTooltip": 1,
   "refresh": "1m",
@@ -1601,7 +1601,7 @@
       "gridPos": {
         "x": 0,
         "y": 24,
-        "w": 9,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
@@ -1763,16 +1763,16 @@
     {
       "type": "bargauge",
       "id": 42,
-      "title": "Capacity",
-      "description": "Capacity used.",
+      "title": "Load",
+      "description": "Queue and byte-budget use.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
-        "x": 9,
+        "x": 8,
         "y": 24,
-        "w": 8,
+        "w": 7,
         "h": 8
       },
       "fieldConfig": {
@@ -1789,11 +1789,11 @@
               },
               {
                 "color": "orange",
-                "value": 0.75
+                "value": 0.9
               },
               {
                 "color": "red",
-                "value": 0.9
+                "value": 1.0
               }
             ]
           },
@@ -1931,111 +1931,148 @@
       ]
     },
     {
-      "type": "stat",
+      "type": "timeseries",
       "id": 43,
-      "title": "Faults \u00b7 1h",
-      "description": "Shards down and events.",
+      "title": "Tape loss \u00b7 5m",
+      "description": "Dropped frames and reconnect gaps.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
-        "x": 17,
+        "x": 15,
         "y": 24,
-        "w": 7,
+        "w": 9,
         "h": 8
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 10
-              }
-            ]
+            "mode": "palette-classic"
           },
           "unit": "short",
-          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 4,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          },
           "decimals": 0
         },
         "overrides": [
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^binance \u00b7 shards down$/"
+              "options": "/^binance \u00b7 loss$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "BN \u00b7 shards"
+                "value": "BN loss"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^binance \u00b7 events$/"
+              "options": "/^binance \u00b7 gap$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "BN \u00b7 events"
+                "value": "BN gap"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^bybit \u00b7 shards down$/"
+              "options": "/^bybit \u00b7 loss$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "BY \u00b7 shards"
+                "value": "BY loss"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^bybit \u00b7 events$/"
+              "options": "/^bybit \u00b7 gap$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "BY \u00b7 events"
+                "value": "BY gap"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/ \u00b7 gap$/"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    6
+                  ]
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
               }
             ]
           }
         ]
       },
       "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "auto",
-        "text": {},
-        "textMode": "value_and_name",
-        "wideLayout": true,
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -2045,10 +2082,10 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_recorder_shards - lm_recorder_shards_connected",
-          "instant": true,
-          "legendFormat": "{{realm}} \u00b7 shards down",
-          "range": false,
+          "expr": "increase(lm_recorder_dropped_frames[5m]) + increase(lm_recorder_disk_dropped_frames[5m])",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 loss",
+          "range": true,
           "refId": "A"
         },
         {
@@ -2057,10 +2094,10 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "increase(lm_recorder_dropped_frames[1h]) + increase(lm_recorder_disk_dropped_frames[1h]) + increase(lm_recorder_reconnects[1h])",
-          "instant": true,
-          "legendFormat": "{{realm}} \u00b7 events",
-          "range": false,
+          "expr": "increase(lm_recorder_reconnects[5m])",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 gap",
+          "range": true,
           "refId": "B"
         }
       ]

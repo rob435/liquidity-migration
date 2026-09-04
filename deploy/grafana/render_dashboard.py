@@ -461,7 +461,7 @@ def panels() -> list[Panel]:
             41,
             "Data freshness",
             "Current age.",
-            _grid(0, y, 9, 8),
+            _grid(0, y, 8, 8),
             [
                 (f"lm_engine_account_age_ms{{{REALM}}}", "engine {{realm}} · account"),
                 (f"lm_worker_ws_last_frame_age_ms{{{REALM}}}", "worker {{realm}} · market frame"),
@@ -485,9 +485,9 @@ def panels() -> list[Panel]:
     out.append(
         bar_gauge(
             42,
-            "Capacity",
-            "Capacity used.",
-            _grid(9, y, 8, 8),
+            "Load",
+            "Queue and byte-budget use.",
+            _grid(8, y, 7, 8),
             [
                 (
                     f"max by (realm) (lm_worker_ws_queue_fill{{{REALM}}} or "
@@ -501,7 +501,7 @@ def panels() -> list[Panel]:
                 ),
                 ("lm_recorder_queue_fill", "recorder {{realm}} · writer queue"),
             ],
-            thresholds=[("green", None), ("orange", 0.75), ("red", 0.9)],
+            thresholds=[("green", None), ("orange", 0.9), ("red", 1.0)],
             overrides=_names(
                 [
                     ("demo · worker", "D · worker"),
@@ -515,29 +515,38 @@ def panels() -> list[Panel]:
         )
     )
     out.append(
-        stat(
+        timeseries(
             43,
-            "Faults · 1h",
-            "Shards down and events.",
-            _grid(17, y, 7, 8),
+            "Tape loss · 5m",
+            "Dropped frames and reconnect gaps.",
+            _grid(15, y, 9, 8),
             [
-                ("lm_recorder_shards - lm_recorder_shards_connected", "{{realm}} · shards down"),
                 (
-                    f"{_increase('lm_recorder_dropped_frames', window='1h', realm=False)} + "
-                    f"{_increase('lm_recorder_disk_dropped_frames', window='1h', realm=False)} + "
-                    f"{_increase('lm_recorder_reconnects', window='1h', realm=False)}",
-                    "{{realm}} · events",
+                    f"{_increase('lm_recorder_dropped_frames', window='5m', realm=False)} + "
+                    f"{_increase('lm_recorder_disk_dropped_frames', window='5m', realm=False)}",
+                    "{{realm}} · loss",
                 ),
+                (_increase("lm_recorder_reconnects", window="5m", realm=False), "{{realm}} · gap"),
             ],
             decimals=0,
-            thresholds=[("green", None), ("orange", 1), ("red", 10)],
-            overrides=_names(
+            points=True,
+            fill_opacity=4,
+            overrides=_name_colors(
                 [
-                    (f"{realm} · {source}", f"{short} · {display}")
-                    for realm, short in (("binance", "BN"), ("bybit", "BY"))
-                    for source, display in (("shards down", "shards"), ("events", "events"))
+                    (f"{realm} · {source}", f"{short} {display}", color)
+                    for realm, short, color in (("binance", "BN", "blue"), ("bybit", "BY", "orange"))
+                    for source, display in (("loss", "loss"), ("gap", "gap"))
                 ]
-            ),
+            )
+            + [
+                {
+                    "matcher": {"id": "byRegexp", "options": "/ · gap$/"},
+                    "properties": [
+                        {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [8, 6]}},
+                        {"id": "custom.lineWidth", "value": 1},
+                    ],
+                }
+            ],
         )
     )
     return out
@@ -551,7 +560,7 @@ def dashboard() -> dict[str, Any]:
         "tags": ["liquidity-migration"],
         "timezone": "utc",
         "schemaVersion": 39,
-        "version": 10,
+        "version": 11,
         "editable": True,
         "graphTooltip": 1,
         "refresh": "1m",

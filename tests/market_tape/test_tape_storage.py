@@ -20,6 +20,7 @@ from market_tape.storage import (
     Retention,
     SegmentWriter,
     Snapshots,
+    discard_file_cache,
     segment_identity,
     utc_day,
     utc_day_hour,
@@ -33,6 +34,23 @@ HOUR = 3_600_000_000_000
 
 def trade(received_ns: int, symbol: str = "AGIUSDT") -> dict[str, object]:
     return {"kind": "public_trade", "symbol": symbol, "local_receive_ts_ns": received_ns}
+
+
+def test_durable_tape_pages_are_released_from_the_recorder_cgroup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[int, int, int, int]] = []
+    monkeypatch.setattr(os, "POSIX_FADV_DONTNEED", 4, raising=False)
+    monkeypatch.setattr(os, "posix_fadvise", lambda *args: calls.append(args), raising=False)
+    path = tmp_path / "segment"
+    with path.open("wb") as handle:
+        handle.write(b"durable")
+        handle.flush()
+        os.fsync(handle.fileno())
+        descriptor = handle.fileno()
+        discard_file_cache(handle)
+
+    assert calls == [(descriptor, 0, 0, 4)]
 
 
 def test_segments_roll_on_the_hour_and_idle_hours_close(tmp_path: Path) -> None:

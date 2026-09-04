@@ -35,9 +35,9 @@ ProtectProc=invisible
 ProcSubset=pid
 ProtectSystem=strict
 ProtectHome=true
-# systemd counts the page cache of the files this process writes against the
-# cap, and the recorder writes several gigabytes a day; 512M sat at the cap.
-MemoryMax=1G
+# systemd charges the tape's page cache to this unit. Leave room for clean
+# write pages and the 262144-frame volatility buffer under a hard ceiling.
+MemoryMax=2G
 LimitNOFILE=65536
 TasksMax=256
 Nice=12

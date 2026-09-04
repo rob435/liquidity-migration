@@ -16,10 +16,9 @@ market = "linear"
 
 [storage]
 segment_max_mb = 64
-# Frames wait here for the writer. A US-session burst is a minute at 5k
-# frames/s of ~260 bytes; the default 32768 overran daily and every overrun
-# is a reconnect and a fresh book snapshot.
-queue_frames = 131072
+# Frames wait here for the writer. At 5k frames/s this holds about 52 seconds;
+# every overrun loses a frame, reconnects that shard, and re-snapshots its books.
+queue_frames = 262144
 # 30 days is the ceiling; max_disk_gb is what binds on this host, and the two
 # recorders' caps must sum under the filesystem or they race min_free_disk_gb.
 # Bybit is the venue we replay, so it holds the larger share: 60 GB is about

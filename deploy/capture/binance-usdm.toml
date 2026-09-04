@@ -20,6 +20,9 @@ market = "usdm"
 
 [storage]
 segment_max_mb = 64
+# Binance has less traffic than Bybit, but volatility hits both venues at once.
+# This holds more than two minutes at its normal 900 frames/s rate.
+queue_frames = 131072
 # 30 days is the ceiling; max_disk_gb is what binds on this host, and the two
 # recorders' caps must sum under the filesystem or they race min_free_disk_gb.
 retention_days = 30

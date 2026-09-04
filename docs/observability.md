@@ -153,7 +153,7 @@ the script renders.
 | **Status** | engine, entry permission, worker verdict and coverage, recorder state | `lm_engine_{up,may_open}`, `lm_worker_{status_healthy,ticker_coverage_complete}`, `lm_recorder_up` |
 | **Account** | current equity and OI with one locally scaled sparkline per metric and realm | `equity_usdt`, `position_entry_notional_usdt` |
 | **Execution** | current orders, fills, and stream resets over 15 minutes with isolated sparklines; p99 order-path latency with end-to-end emphasized | `increase({orders_sent,fills,stream_resets}[15m])`, `{end_to_end,ack,durable,decide}_p99_ns` |
-| **Data pipeline** | current market-data age, peak worker capacity, recorder traffic and queue capacity, and recorder faults | engine, worker, and recorder ages; worker and recorder fill ratios; recorder shard, drop, and reconnect series |
+| **Data pipeline** | current market-data age; worker, recorder, and byte-budget load; five-minute Bybit/Binance tape loss and reconnect gaps | engine, worker, and recorder ages; worker and recorder fill ratios; recorder drop and reconnect increases |
 
 The six-hour default view is an operator view. Change the time range for incident
 analysis. Empty order-path windows are absent, so the latency chart marks only

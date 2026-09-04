@@ -39,6 +39,21 @@ from market_tape.schema import SNAPSHOT_INSTRUMENTS, SNAPSHOT_TICKERS, snapshot_
 META_DIRECTORY = "_meta"
 
 
+def discard_file_cache(handle: Any) -> None:
+    """Release clean tape pages after they are durable; replay reads archived files, not hot writes."""
+
+    advise = getattr(os, "posix_fadvise", None)
+    dont_need = getattr(os, "POSIX_FADV_DONTNEED", None)
+    if advise is None or dont_need is None:
+        return
+    try:
+        advise(handle.fileno(), 0, 0, dont_need)
+    except OSError:
+        # Cache eviction is a throughput hint. Durability already came from
+        # fsync, so an unsupported filesystem must not stop the tape.
+        return
+
+
 def utc_day(ns: int) -> str:
     return datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc).date().isoformat()
 
@@ -120,6 +135,7 @@ class SegmentWriter:
         if segment.unsynced >= self.fsync_every:
             segment.handle.flush()
             os.fsync(segment.handle.fileno())
+            discard_file_cache(segment.handle)
             segment.unsynced = 0
         return closed
 
@@ -150,6 +166,7 @@ class SegmentWriter:
         segment = self.active.pop(symbol)
         segment.handle.flush()
         os.fsync(segment.handle.fileno())
+        discard_file_cache(segment.handle)
         segment.handle.close()
         final = segment.path.with_suffix("")
         os.replace(segment.path, final)
@@ -236,6 +253,7 @@ def zstd_compress(source: Path, output: Path) -> str:
     with temporary.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             hasher.update(block)
+        discard_file_cache(handle)
     os.replace(temporary, output)
     sync_directory(output.parent)
     return hasher.hexdigest()
