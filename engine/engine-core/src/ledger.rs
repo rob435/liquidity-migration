@@ -38,6 +38,7 @@ pub struct Quantiles {
     pub p50_ns: u64,
     pub p90_ns: u64,
     pub p99_ns: u64,
+    pub p999_ns: u64,
     pub max_ns: u64,
 }
 
@@ -152,6 +153,7 @@ impl LatencyLedger {
             p50_ns: h.value_at_quantile(0.50),
             p90_ns: h.value_at_quantile(0.90),
             p99_ns: h.value_at_quantile(0.99),
+            p999_ns: h.value_at_quantile(0.999),
             max_ns: h.max(),
         }
     }
@@ -184,22 +186,31 @@ impl LatencyLedger {
             events: self.events,
             decide_p50_ns: decide.p50_ns,
             decide_p99_ns: decide.p99_ns,
+            decide_p999_ns: (decide.count > 0).then_some(decide.p999_ns),
             durable_p50_ns: durable.p50_ns,
             durable_p99_ns: durable.p99_ns,
+            durable_p999_ns: (durable.count > 0).then_some(durable.p999_ns),
             barrier_wait_p50_ns: barrier_wait.p50_ns,
             barrier_wait_p99_ns: barrier_wait.p99_ns,
+            barrier_wait_p999_ns: (barrier_wait.count > 0).then_some(barrier_wait.p999_ns),
             wire_p50_ns: wire.p50_ns,
             wire_p99_ns: wire.p99_ns,
+            wire_p999_ns: (wire.count > 0).then_some(wire.p999_ns),
             ack_p50_ns: ack.p50_ns,
             ack_p99_ns: ack.p99_ns,
+            ack_p999_ns: (ack.count > 0).then_some(ack.p999_ns),
             dispatch_queue_p50_ns: dispatch_queue.p50_ns,
             dispatch_queue_p99_ns: dispatch_queue.p99_ns,
+            dispatch_queue_p999_ns: (dispatch_queue.count > 0).then_some(dispatch_queue.p999_ns),
             venue_task_p50_ns: venue_task.p50_ns,
             venue_task_p99_ns: venue_task.p99_ns,
+            venue_task_p999_ns: (venue_task.count > 0).then_some(venue_task.p999_ns),
             core_resume_p50_ns: core_resume.p50_ns,
             core_resume_p99_ns: core_resume.p99_ns,
+            core_resume_p999_ns: (core_resume.count > 0).then_some(core_resume.p999_ns),
             end_to_end_p50_ns: end_to_end.p50_ns,
             end_to_end_p99_ns: end_to_end.p99_ns,
+            end_to_end_p999_ns: (end_to_end.count > 0).then_some(end_to_end.p999_ns),
         }
     }
 
@@ -226,10 +237,11 @@ impl LatencyLedger {
                 continue;
             }
             parts.push(format!(
-                "{} usually {}, slow one in a hundred {}",
+                "{} usually {}, slow one in a hundred {}, slow one in a thousand {}",
                 segment.plain_name(),
                 pretty(q.p50_ns),
-                pretty(q.p99_ns)
+                pretty(q.p99_ns),
+                pretty(q.p999_ns)
             ));
         }
         parts.join("; ")
@@ -279,6 +291,73 @@ mod tests {
         assert!(q.p50_ns > 490_000 && q.p50_ns < 510_000, "p50 {}", q.p50_ns);
         assert!(q.p99_ns > 980_000, "p99 {}", q.p99_ns);
         assert!(q.max_ns >= 1_000_000);
+    }
+
+    #[test]
+    fn p999_is_measured_for_every_segment_and_written_to_the_wal() {
+        let mut ledger = LatencyLedger::new(0);
+        let segments = [
+            (Segment::Decide, "decide"),
+            (Segment::Durable, "durable"),
+            (Segment::BarrierWait, "barrier_wait"),
+            (Segment::Wire, "wire"),
+            (Segment::Ack, "ack"),
+            (Segment::DispatchQueue, "dispatch_queue"),
+            (Segment::VenueTask, "venue_task"),
+            (Segment::CoreResume, "core_resume"),
+            (Segment::EndToEnd, "end_to_end"),
+            (Segment::QuotaHold, "quota_hold"),
+        ];
+        for (index, (segment, _)) in segments.iter().enumerate() {
+            let offset = index as u64 * 10;
+            for (count, ns) in [(9_900, 100), (90, 1_000), (9, 10_000), (1, 100_000)] {
+                for _ in 0..count {
+                    ledger.record(*segment, ns + offset);
+                }
+            }
+            let q = ledger.quantiles(*segment);
+            assert_eq!(q.count, 10_000);
+            assert_eq!(q.p99_ns, 100 + offset);
+            assert_eq!(q.p999_ns, 1_000 + offset);
+            assert!(q.p999_ns < q.max_ns);
+        }
+        let row = serde_json::to_value(ledger.record_for_wal(WINDOW_NS)).unwrap();
+        for (index, (_, name)) in segments[..9].iter().enumerate() {
+            assert_eq!(row[format!("{name}_p999_ns")], 1_000 + index as u64 * 10);
+        }
+        let line = ledger.plain_line(WINDOW_NS);
+        assert_eq!(
+            line.matches("slow one in a thousand").count(),
+            segments.len()
+        );
+    }
+
+    #[test]
+    fn wal_p999_distinguishes_empty_and_measured_zero_segments() {
+        let mut ledger = LatencyLedger::new(0);
+        let empty = serde_json::to_value(ledger.record_for_wal(WINDOW_NS)).unwrap();
+        assert!(!empty
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|key| key.ends_with("p999_ns")));
+        for segment in Segment::ALL {
+            ledger.record(segment, 0);
+        }
+        let measured = serde_json::to_value(ledger.record_for_wal(WINDOW_NS)).unwrap();
+        let p999: Vec<_> = measured
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| key.ends_with("p999_ns"))
+            .collect();
+        assert_eq!(p999.len(), 9);
+        assert!(p999.iter().all(|(_, value)| value.as_u64() == Some(0)));
+        ledger.reset(WINDOW_NS);
+        assert_eq!(
+            serde_json::to_value(ledger.record_for_wal(2 * WINDOW_NS)).unwrap(),
+            empty
+        );
     }
 
     #[test]

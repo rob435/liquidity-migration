@@ -271,12 +271,20 @@ impl Heartbeat {
                 figure(facts.decide.count, facts.decide.p99_ns),
             ),
             (
+                "decide_p999_ns",
+                figure(facts.decide.count, facts.decide.p999_ns),
+            ),
+            (
                 "durable_p50_ns",
                 figure(facts.durable.count, facts.durable.p50_ns),
             ),
             (
                 "durable_p99_ns",
                 figure(facts.durable.count, facts.durable.p99_ns),
+            ),
+            (
+                "durable_p999_ns",
+                figure(facts.durable.count, facts.durable.p999_ns),
             ),
             ("entry_blockers", blockers(facts.entry_blockers)),
             ("strategy_errors", strategy_errors(facts.strategy_errors)),
@@ -384,9 +392,11 @@ impl Heartbeat {
             ("wall_ts_ms", wall_ts_ms.to_string()),
             ("wire_p50_ns", figure(facts.wire.count, facts.wire.p50_ns)),
             ("wire_p99_ns", figure(facts.wire.count, facts.wire.p99_ns)),
+            ("wire_p999_ns", figure(facts.wire.count, facts.wire.p999_ns)),
             ("working_entries", working_entries(facts.working_entries)),
             ("ack_p50_ns", figure(facts.ack.count, facts.ack.p50_ns)),
             ("ack_p99_ns", figure(facts.ack.count, facts.ack.p99_ns)),
+            ("ack_p999_ns", figure(facts.ack.count, facts.ack.p999_ns)),
             (
                 "dispatch_queue_p50_ns",
                 figure(facts.dispatch_queue.count, facts.dispatch_queue.p50_ns),
@@ -394,6 +404,10 @@ impl Heartbeat {
             (
                 "dispatch_queue_p99_ns",
                 figure(facts.dispatch_queue.count, facts.dispatch_queue.p99_ns),
+            ),
+            (
+                "dispatch_queue_p999_ns",
+                figure(facts.dispatch_queue.count, facts.dispatch_queue.p999_ns),
             ),
             (
                 "venue_task_p50_ns",
@@ -404,12 +418,20 @@ impl Heartbeat {
                 figure(facts.venue_task.count, facts.venue_task.p99_ns),
             ),
             (
+                "venue_task_p999_ns",
+                figure(facts.venue_task.count, facts.venue_task.p999_ns),
+            ),
+            (
                 "core_resume_p50_ns",
                 figure(facts.core_resume.count, facts.core_resume.p50_ns),
             ),
             (
                 "core_resume_p99_ns",
                 figure(facts.core_resume.count, facts.core_resume.p99_ns),
+            ),
+            (
+                "core_resume_p999_ns",
+                figure(facts.core_resume.count, facts.core_resume.p999_ns),
             ),
             (
                 "end_to_end_p50_ns",
@@ -420,12 +442,24 @@ impl Heartbeat {
                 figure(facts.end_to_end.count, facts.end_to_end.p99_ns),
             ),
             (
+                "end_to_end_p999_ns",
+                figure(facts.end_to_end.count, facts.end_to_end.p999_ns),
+            ),
+            (
                 "barrier_wait_p99_ns",
                 figure(facts.barrier_wait.count, facts.barrier_wait.p99_ns),
             ),
             (
+                "barrier_wait_p999_ns",
+                figure(facts.barrier_wait.count, facts.barrier_wait.p999_ns),
+            ),
+            (
                 "quota_hold_p99_ns",
                 figure(facts.quota_hold.count, facts.quota_hold.p99_ns),
+            ),
+            (
+                "quota_hold_p999_ns",
+                figure(facts.quota_hold.count, facts.quota_hold.p999_ns),
             ),
             ("amends_confirmed", facts.amends_confirmed.to_string()),
             (
@@ -652,25 +686,32 @@ mod tests {
     use crate::testpath::temp_path;
 
     /// Every key the file carries, in the order it must read in.
-    const KEYS: [&str; 56] = [
+    const KEYS: [&str; 66] = [
         "account_available_usdt",
         "account_equity_usdt",
         "account_observed_wall_ts_ms",
         "account_user_id",
         "ack_p50_ns",
+        "ack_p999_ns",
         "ack_p99_ns",
         "amends_confirmed",
         "amends_pulled_unconfirmed",
+        "barrier_wait_p999_ns",
         "barrier_wait_p99_ns",
         "core_resume_p50_ns",
+        "core_resume_p999_ns",
         "core_resume_p99_ns",
         "decide_p50_ns",
+        "decide_p999_ns",
         "decide_p99_ns",
         "dispatch_queue_p50_ns",
+        "dispatch_queue_p999_ns",
         "dispatch_queue_p99_ns",
         "durable_p50_ns",
+        "durable_p999_ns",
         "durable_p99_ns",
         "end_to_end_p50_ns",
+        "end_to_end_p999_ns",
         "end_to_end_p99_ns",
         "engine_commit",
         "engine_version",
@@ -689,6 +730,7 @@ mod tests {
         "pending_flatten_requests",
         "pid",
         "positions",
+        "quota_hold_p999_ns",
         "quota_hold_p99_ns",
         "realm",
         "rolling_loss_limit_usdt",
@@ -704,9 +746,11 @@ mod tests {
         "venue",
         "venue_clock_offset_ms",
         "venue_task_p50_ns",
+        "venue_task_p999_ns",
         "venue_task_p99_ns",
         "wall_ts_ms",
         "wire_p50_ns",
+        "wire_p999_ns",
         "wire_p99_ns",
         "working_entries",
     ];
@@ -717,6 +761,7 @@ mod tests {
             p50_ns,
             p90_ns: p50_ns,
             p99_ns,
+            p999_ns: p99_ns,
             max_ns: p99_ns,
         }
     }
@@ -789,6 +834,60 @@ mod tests {
             working_entries: NO_WORKING.get_or_init(Vec::new),
             rolling_loss: None,
         }
+    }
+
+    #[test]
+    fn p999_reaches_the_heartbeat_without_turning_absence_into_zero() {
+        let strategies = vec!["long".to_string()];
+        let held = Vec::new();
+        let mut facts = facts(&strategies, &held);
+        let stages = [
+            ("decide", &mut facts.decide),
+            ("durable", &mut facts.durable),
+            ("wire", &mut facts.wire),
+            ("ack", &mut facts.ack),
+            ("dispatch_queue", &mut facts.dispatch_queue),
+            ("venue_task", &mut facts.venue_task),
+            ("core_resume", &mut facts.core_resume),
+            ("end_to_end", &mut facts.end_to_end),
+            ("barrier_wait", &mut facts.barrier_wait),
+            ("quota_hold", &mut facts.quota_hold),
+        ];
+        let expected: Vec<_> = stages
+            .into_iter()
+            .map(|(name, q)| {
+                q.p999_ns = q.p99_ns + 10;
+                q.max_ns = q.p999_ns;
+                (format!("{name}_p999_ns"), q.p999_ns)
+            })
+            .collect();
+        let heartbeat = Heartbeat::new("unused.json".into(), None, None);
+        let measured = parsed(&heartbeat.render(&facts, 1));
+        for (key, ns) in &expected {
+            assert_eq!(measured[key].as_u64(), Some(*ns), "{key}");
+        }
+        for q in [
+            &mut facts.decide,
+            &mut facts.durable,
+            &mut facts.wire,
+            &mut facts.ack,
+            &mut facts.dispatch_queue,
+            &mut facts.venue_task,
+            &mut facts.core_resume,
+            &mut facts.end_to_end,
+            &mut facts.barrier_wait,
+            &mut facts.quota_hold,
+        ] {
+            q.count = 0;
+        }
+        let empty = parsed(&heartbeat.render(&facts, 2));
+        for (key, _) in &expected {
+            assert_eq!(empty.get(key), Some(&serde_json::Value::Null), "{key}");
+        }
+        facts.decide.count = 1;
+        facts.decide.p999_ns = 0;
+        let zero = parsed(&heartbeat.render(&facts, 3));
+        assert_eq!(zero["decide_p999_ns"], 0);
     }
 
     #[test]

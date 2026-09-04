@@ -6,6 +6,25 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 22:16 UTC — Carry measured p99.9 through local latency reports.**
+  - The existing HDR histograms now report p99.9 in benchmark JSON/tables,
+    heartbeat output, optional WAL summary fields, replay text, the equity
+    sampler and the generated Grafana dashboard. Existing metric fields and
+    per-sample recording stay unchanged. Summary generation performs one
+    additional percentile scan.
+  - Empty segments and older rows without p99.9 remain null/absent or display
+    `unavailable`; an observed zero stays zero. Historical p50/p99/max summaries
+    cannot reconstruct the new percentile. The existing per-command
+    `engine latency --wal` path already reconstructs exact p99.9 separately.
+  - The original regression fails on a missing field; the fixed synthetic
+    distribution distinguishes p99 at 100 ns, p99.9 at 1,000 ns and a maximum
+    of at least 100,000 ns. Explicit Rust 1.90 passes 48 focused consumer tests,
+    seven WAL type tests and the framed variant round trip. All 29 Python
+    sampler/dashboard tests, Ruff, formatting and dashboard regeneration pass.
+    A large finite timing sample appends within the existing 4,096-byte cap.
+  - No stable-host latency threshold or production performance claim is added.
+    This checkpoint remains local and does not update a running dashboard.
+
 - **2026-09-04 22:04 UTC — Bound timer storage and return between timer turns (isolated local checkpoint).**
   - Replacing one timer removes its old ordered node; 50,000 distinct rearms
     retain one node and produce one firing. A deterministic 20,000-step

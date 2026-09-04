@@ -231,42 +231,60 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             events,
             decide_p50_ns,
             decide_p99_ns,
+            decide_p999_ns,
             durable_p50_ns,
             barrier_wait_p50_ns,
             barrier_wait_p99_ns,
+            barrier_wait_p999_ns,
             durable_p99_ns,
+            durable_p999_ns,
             wire_p50_ns,
             wire_p99_ns,
+            wire_p999_ns,
             ack_p50_ns,
             ack_p99_ns,
+            ack_p999_ns,
             dispatch_queue_p50_ns,
             dispatch_queue_p99_ns,
+            dispatch_queue_p999_ns,
             venue_task_p50_ns,
             venue_task_p99_ns,
+            venue_task_p999_ns,
             core_resume_p50_ns,
             core_resume_p99_ns,
+            core_resume_p999_ns,
             end_to_end_p50_ns,
             end_to_end_p99_ns,
+            end_to_end_p999_ns,
         } => format!(
-            "latency    {window_s}s, {events} messages; think {} / {}, durable {} / {}, still waiting on the disk {} / {}, dispatch {} / {}, venue {} / {}, API round trip {} / {}, core resume {} / {}, submit result {} / {}, end to end {} / {}",
+            "latency    {window_s}s, {events} messages; p50 / p99 / p99.9: think {} / {} / {}, durable {} / {} / {}, still waiting on the disk {} / {} / {}, dispatch {} / {} / {}, venue {} / {} / {}, API round trip {} / {} / {}, core resume {} / {} / {}, submit result {} / {} / {}, end to end {} / {} / {}",
             pretty(*decide_p50_ns),
             pretty(*decide_p99_ns),
+            decide_p999_ns.map(pretty).unwrap_or_else(|| "unavailable".into()),
             pretty(*durable_p50_ns),
             pretty(*durable_p99_ns),
+            durable_p999_ns.map(pretty).unwrap_or_else(|| "unavailable".into()),
             pretty(*barrier_wait_p50_ns),
             pretty(*barrier_wait_p99_ns),
+            barrier_wait_p999_ns.map(pretty).unwrap_or_else(|| "unavailable".into()),
             pretty(*dispatch_queue_p50_ns),
             pretty(*dispatch_queue_p99_ns),
+            dispatch_queue_p999_ns.map(pretty).unwrap_or_else(|| "unavailable".into()),
             pretty(*venue_task_p50_ns),
             pretty(*venue_task_p99_ns),
+            venue_task_p999_ns.map(pretty).unwrap_or_else(|| "unavailable".into()),
             pretty(*ack_p50_ns),
             pretty(*ack_p99_ns),
+            ack_p999_ns.map(pretty).unwrap_or_else(|| "unavailable".into()),
             pretty(*core_resume_p50_ns),
             pretty(*core_resume_p99_ns),
+            core_resume_p999_ns.map(pretty).unwrap_or_else(|| "unavailable".into()),
             pretty(*wire_p50_ns),
             pretty(*wire_p99_ns),
+            wire_p999_ns.map(pretty).unwrap_or_else(|| "unavailable".into()),
             pretty(*end_to_end_p50_ns),
             pretty(*end_to_end_p99_ns),
+            end_to_end_p999_ns.map(pretty).unwrap_or_else(|| "unavailable".into()),
         ),
         WalRecord::VenueTiming {
             operation,
@@ -588,6 +606,32 @@ mod tests {
             reduce_only: false,
             close_position: false,
         }
+    }
+
+    #[test]
+    fn latency_replay_labels_old_p999_unavailable_and_preserves_a_measured_zero() {
+        let old = serde_json::json!({
+            "kind": "latency_ledger", "window_s": 60, "events": 42,
+            "decide_p50_ns": 100, "decide_p99_ns": 200,
+            "wire_p50_ns": 300, "wire_p99_ns": 400,
+        });
+        let record: WalRecord = serde_json::from_value(old.clone()).unwrap();
+        let text = describe(&[record], false).lines.join("\n");
+        assert!(text.contains("p50 / p99 / p99.9:"), "{text}");
+        assert!(text.contains("think 100ns / 200ns / unavailable"), "{text}");
+        assert_eq!(text.matches("unavailable").count(), 9);
+
+        let mut measured = old;
+        measured["decide_p999_ns"] = 900.into();
+        measured["barrier_wait_p999_ns"] = 0.into();
+        let record: WalRecord = serde_json::from_value(measured).unwrap();
+        let text = describe(&[record], false).lines.join("\n");
+        assert!(text.contains("think 100ns / 200ns / 900ns"), "{text}");
+        assert!(
+            text.contains("still waiting on the disk 0ns / 0ns / 0ns"),
+            "{text}"
+        );
+        assert_eq!(text.matches("unavailable").count(), 7);
     }
 
     #[test]

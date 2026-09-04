@@ -47,7 +47,9 @@ noise, and the history is the point.
 | `rolling_loss_net_usdt`, `rolling_loss_limit_usdt`, `rolling_loss_tripped`, `rolling_loss_trades` | The 24h breaker against its ceiling |
 | `uptime_s`, `market_events`, `orders_sent`, `fills`, `stream_resets`, `amends_confirmed`, `amends_pulled_unconfirmed` | Since-boot counters; all reset on restart. The dashboard reads them as `increase()` |
 | `fills_maker_share`, `fill_all_in_arrival_bps`, `fill_arrival_shortfall_bps`, `fill_fee_coverage`, `fill_markout_1m_our_way_bps` | What the trading cost |
-| `decide_*`, `durable_*`, `wire_*`, `ack_*`, `dispatch_queue_*`, `venue_task_*`, `core_resume_*`, `end_to_end_*` (`_p50_ns`, `_p99_ns`), `barrier_wait_p99_ns`, `quota_hold_p99_ns` | The order path step by step, from the engine's 60-second latency ledger. Null in the file and **absent from the push** in a minute nothing went out: an empty window is no measurement, never zero. `wire` is the whole venue task (decision to completion) and so contains the round trip; `ack` is the round trip alone and records only where the adapter stamped the socket write — see the note below |
+| `decide_*`, `durable_*`, `wire_*`, `ack_*`, `dispatch_queue_*`, `venue_task_*`, `core_resume_*`, `end_to_end_*` (`_p50_ns`, `_p99_ns`, `_p999_ns`), `barrier_wait_*`, `quota_hold_*` (`_p99_ns`, `_p999_ns`) | The order path step by step, from the engine's 60-second latency ledger; `_p999_ns` is p99.9. Null in the file and **absent from the push** for an empty segment or a p99.9 field an older heartbeat does not contain. `wire` spans decision to submit result and includes the round trip; `ack` is the stamped socket-write-to-ack round trip alone |
+| `engine bench`: per-segment `count`, `p50_ns`, `p90_ns`, `p99_ns`, `p999_ns`, `max_ns` | Empirical HDR histogram quantiles, three significant digits, durations saturated at 60 seconds. `p999_ns` is null at count zero; fewer than 1,000 samples place p99.9 at the observed maximum. A sample quantile is not a stable-host SLO |
+| WAL `latency_ledger`: optional `*_p999_ns` for the nine existing recorded stages | Missing means unmeasured; `engine replay` prints `unavailable`. Historical p50/p99/max summaries cannot reconstruct p99.9. Per-command `venue_timing` records independently support exact nearest-rank reconstruction through `engine latency --wal` |
 | `status_healthy`, `status_ready`, `status_starting`, `status_recovering`, `heartbeat_age_ms` | Worker rows only: the bounded producer verdict and heartbeat freshness; `starting` is cold fill, while `recovering` is a live repair inside its two-minute bound |
 | `ws_connected`, `ws_gap_open`, `ws_gap_age_ms`, `ws_last_frame_age_ms`, `ticker_coverage_complete` | Worker rows only: raw transport and coverage state. A coverage miss remains visible while the producer applies its two-minute persistence bound |
 | `ticker_rows`, `ticker_capacity`, `*_topics_accepted`, `*_topics_quarantined`, `ws_queue_fill` | Worker rows only: exact subscription and bounded in-memory queue facts |
@@ -70,6 +72,8 @@ noise, and the history is the point.
   at zero, not a missing line.
 * **Must Never**: an empty latency window be pushed as zero. The ledger's null
   is absent from the line; the dashboard plots the order path as points.
+* **Must Never**: substitute p99 or the maximum for a missing p99.9 field, or
+  aggregate per-window quantiles as if they were the underlying samples.
 * **Must Never**: the probe page or message anybody. It reports through
   `entry_blockers`, never `strategy_errors`, and `notify_book_changes.py` hides
   its sleeve.
@@ -152,7 +156,7 @@ the script renders.
 | :--- | :--- | :--- |
 | **Status** | engine, entry permission, worker verdict and coverage, recorder state | `lm_engine_{up,may_open}`, `lm_worker_{status_healthy,ticker_coverage_complete}`, `lm_recorder_up` |
 | **Account** | current equity and OI with one locally scaled sparkline per metric and realm | `equity_usdt`, `position_entry_notional_usdt` |
-| **Execution** | current orders, fills, and stream resets over 15 minutes with isolated sparklines; p99 order-path latency with end-to-end emphasized | `increase({orders_sent,fills,stream_resets}[15m])`, `{end_to_end,ack,durable,decide}_p99_ns` |
+| **Execution** | current orders, fills, and stream resets over 15 minutes with isolated sparklines; p99 and p99.9 order-path latency with end-to-end emphasized | `increase({orders_sent,fills,stream_resets}[15m])`, `{end_to_end,ack,durable,decide}_{p99,p999}_ns` |
 | **Data pipeline** | current market-data age; worker, recorder, and byte-budget load; five-minute Bybit/Binance tape loss and reconnect gaps | engine, worker, and recorder ages; worker and recorder fill ratios; recorder drop and reconnect increases |
 
 The six-hour default view is an operator view. Change the time range for incident

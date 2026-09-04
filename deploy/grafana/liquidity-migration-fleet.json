@@ -1362,8 +1362,8 @@
     {
       "type": "timeseries",
       "id": 32,
-      "title": "Order-path latency \u00b7 p99",
-      "description": "Milliseconds \u00b7 E2E emphasized.",
+      "title": "Order-path latency \u00b7 p99 / p99.9",
+      "description": "Milliseconds \u00b7 E2E emphasized. Empty or older unmeasured p99.9 windows stay absent.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
@@ -1395,96 +1395,192 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^demo \u00b7 end-to-end$/"
+              "options": "/^demo \u00b7 end-to-end p99$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "D \u00b7 E2E"
+                "value": "D \u00b7 E2E p99"
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^demo \u00b7 venue ack$/"
+              "options": "/^demo \u00b7 venue ack p99$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "D \u00b7 ACK"
+                "value": "D \u00b7 ACK p99"
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^demo \u00b7 durable$/"
+              "options": "/^demo \u00b7 durable p99$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "D \u00b7 WAL"
+                "value": "D \u00b7 WAL p99"
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^demo \u00b7 decide$/"
+              "options": "/^demo \u00b7 decide p99$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "D \u00b7 DEC"
+                "value": "D \u00b7 DEC p99"
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^mainnet \u00b7 end-to-end$/"
+              "options": "/^demo \u00b7 end-to-end p99.9$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "M \u00b7 E2E"
+                "value": "D \u00b7 E2E p99.9"
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^mainnet \u00b7 venue ack$/"
+              "options": "/^demo \u00b7 venue ack p99.9$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "M \u00b7 ACK"
+                "value": "D \u00b7 ACK p99.9"
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^mainnet \u00b7 durable$/"
+              "options": "/^demo \u00b7 durable p99.9$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "M \u00b7 WAL"
+                "value": "D \u00b7 WAL p99.9"
               }
             ]
           },
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^mainnet \u00b7 decide$/"
+              "options": "/^demo \u00b7 decide p99.9$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "M \u00b7 DEC"
+                "value": "D \u00b7 DEC p99.9"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^mainnet \u00b7 end-to-end p99$/"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "M \u00b7 E2E p99"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^mainnet \u00b7 venue ack p99$/"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "M \u00b7 ACK p99"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^mainnet \u00b7 durable p99$/"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "M \u00b7 WAL p99"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^mainnet \u00b7 decide p99$/"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "M \u00b7 DEC p99"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^mainnet \u00b7 end-to-end p99.9$/"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "M \u00b7 E2E p99.9"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^mainnet \u00b7 venue ack p99.9$/"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "M \u00b7 ACK p99.9"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^mainnet \u00b7 durable p99.9$/"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "M \u00b7 WAL p99.9"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^mainnet \u00b7 decide p99.9$/"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "M \u00b7 DEC p99.9"
               }
             ]
           },
@@ -1534,7 +1630,7 @@
           "editorMode": "code",
           "expr": "lm_engine_end_to_end_p99_ns{realm=~\"$realm\"} / 1000000",
           "instant": false,
-          "legendFormat": "{{realm}} \u00b7 end-to-end",
+          "legendFormat": "{{realm}} \u00b7 end-to-end p99",
           "range": true,
           "refId": "A"
         },
@@ -1546,7 +1642,7 @@
           "editorMode": "code",
           "expr": "lm_engine_ack_p99_ns{realm=~\"$realm\"} / 1000000",
           "instant": false,
-          "legendFormat": "{{realm}} \u00b7 venue ack",
+          "legendFormat": "{{realm}} \u00b7 venue ack p99",
           "range": true,
           "refId": "B"
         },
@@ -1558,7 +1654,7 @@
           "editorMode": "code",
           "expr": "lm_engine_durable_p99_ns{realm=~\"$realm\"} / 1000000",
           "instant": false,
-          "legendFormat": "{{realm}} \u00b7 durable",
+          "legendFormat": "{{realm}} \u00b7 durable p99",
           "range": true,
           "refId": "C"
         },
@@ -1570,9 +1666,57 @@
           "editorMode": "code",
           "expr": "lm_engine_decide_p99_ns{realm=~\"$realm\"} / 1000000",
           "instant": false,
-          "legendFormat": "{{realm}} \u00b7 decide",
+          "legendFormat": "{{realm}} \u00b7 decide p99",
           "range": true,
           "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_end_to_end_p999_ns{realm=~\"$realm\"} / 1000000",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 end-to-end p99.9",
+          "range": true,
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_ack_p999_ns{realm=~\"$realm\"} / 1000000",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 venue ack p99.9",
+          "range": true,
+          "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_durable_p999_ns{realm=~\"$realm\"} / 1000000",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 durable p99.9",
+          "range": true,
+          "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_decide_p999_ns{realm=~\"$realm\"} / 1000000",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 decide p99.9",
+          "range": true,
+          "refId": "H"
         }
       ]
     },

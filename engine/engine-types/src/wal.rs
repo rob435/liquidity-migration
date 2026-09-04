@@ -143,15 +143,20 @@ pub enum WalRecord {
         features: QuoteFillFeatures,
     },
     /// Periodic latency ledger line: histogram quantiles in nanoseconds.
+    /// Missing p99.9 means an older writer or an empty segment, never zero latency.
     LatencyLedger {
         window_s: u32,
         events: u64,
         decide_p50_ns: u64,
         decide_p99_ns: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decide_p999_ns: Option<u64>,
         #[serde(default)]
         durable_p50_ns: u64,
         #[serde(default)]
         durable_p99_ns: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        durable_p999_ns: Option<u64>,
         /// What the order path actually waited for the disk. The barrier runs
         /// beside the send, so this is the residue: how often, and by how
         /// much, the disk outlasted the flight to the venue.
@@ -159,28 +164,42 @@ pub enum WalRecord {
         barrier_wait_p50_ns: u64,
         #[serde(default)]
         barrier_wait_p99_ns: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        barrier_wait_p999_ns: Option<u64>,
         wire_p50_ns: u64,
         wire_p99_ns: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wire_p999_ns: Option<u64>,
         #[serde(default)]
         ack_p50_ns: u64,
         #[serde(default)]
         ack_p99_ns: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ack_p999_ns: Option<u64>,
         #[serde(default)]
         dispatch_queue_p50_ns: u64,
         #[serde(default)]
         dispatch_queue_p99_ns: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dispatch_queue_p999_ns: Option<u64>,
         #[serde(default)]
         venue_task_p50_ns: u64,
         #[serde(default)]
         venue_task_p99_ns: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        venue_task_p999_ns: Option<u64>,
         #[serde(default)]
         core_resume_p50_ns: u64,
         #[serde(default)]
         core_resume_p99_ns: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        core_resume_p999_ns: Option<u64>,
         #[serde(default)]
         end_to_end_p50_ns: u64,
         #[serde(default)]
         end_to_end_p99_ns: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_to_end_p999_ns: Option<u64>,
     },
     /// Exact monotonic timing marks for one venue mutation item. These are
     /// the reconstructable measurements; histogram rows above are only the
@@ -690,6 +709,52 @@ pub trait Wal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_latency_rows_keep_p999_unmeasured_and_preserve_known_zero() {
+        let old = serde_json::json!({
+            "kind": "latency_ledger", "window_s": 60, "events": 42,
+            "decide_p50_ns": 100, "decide_p99_ns": 200,
+            "wire_p50_ns": 300, "wire_p99_ns": 400,
+        });
+        let record: WalRecord = serde_json::from_value(old.clone()).unwrap();
+        let rendered = serde_json::to_value(&record).unwrap();
+        assert!(!rendered
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|key| key.ends_with("p999_ns")));
+        for (key, value) in old.as_object().unwrap() {
+            assert_eq!(&rendered[key], value);
+        }
+        for stage in [
+            "decide",
+            "durable",
+            "barrier_wait",
+            "wire",
+            "ack",
+            "dispatch_queue",
+            "venue_task",
+            "core_resume",
+            "end_to_end",
+        ] {
+            let key = format!("{stage}_p999_ns");
+            for value in [0, 900] {
+                let mut with_p999 = old.clone();
+                with_p999[&key] = value.into();
+                let decoded: WalRecord = serde_json::from_value(with_p999).unwrap();
+                let roundtrip = serde_json::to_value(decoded).unwrap();
+                assert_eq!(roundtrip[&key], value);
+                assert_eq!(roundtrip["decide_p99_ns"], 200);
+            }
+            let mut explicit_null = old.clone();
+            explicit_null[&key] = serde_json::Value::Null;
+            assert_eq!(
+                serde_json::from_value::<WalRecord>(explicit_null).unwrap(),
+                record
+            );
+        }
+    }
 
     /// The exact bytes a live log already holds. A refusal is written whole,
     /// so every reason the kernel has ever produced is frozen into the format

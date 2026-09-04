@@ -1,6 +1,6 @@
 //! What each step of the order path actually took, read back from the log.
 //!
-//! The live ledger keeps a 60-second rolling histogram and writes p50 and p99
+//! The live ledger keeps a 60-second rolling histogram and writes p50, p99 and p99.9
 //! of it. That is the glance. This is the reconstruction: every
 //! [`WalRecord::VenueTiming`] the run wrote, split into the steps between its
 //! stamps, grouped by what the command was, and reported at the tail as well

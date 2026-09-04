@@ -91,16 +91,21 @@ pub struct BenchResult {
 impl BenchResult {
     pub fn table(&self) -> String {
         let mut out = String::from(
-            "  what happened            count   typical(p50)  slow 1 in 10  slow 1 in 100      worst\n",
+            "  what happened            count   typical(p50)  slow 1 in 10  slow 1 in 100         p99.9      worst\n",
         );
         for (segment, q) in &self.segments {
             out.push_str(&format!(
-                "  {:<22} {:>7}  {:>12}  {:>12}  {:>13}  {:>9}\n",
+                "  {:<22} {:>7}  {:>12}  {:>12}  {:>13}  {:>12}  {:>9}\n",
                 segment.plain_name(),
                 q.count,
                 pretty(q.p50_ns),
                 pretty(q.p90_ns),
                 pretty(q.p99_ns),
+                if q.count > 0 {
+                    pretty(q.p999_ns)
+                } else {
+                    "unavailable".into()
+                },
                 pretty(q.max_ns)
             ));
         }
@@ -113,12 +118,13 @@ impl BenchResult {
             .iter()
             .map(|(segment, q)| {
                 format!(
-                    "\"{}\":{{\"count\":{},\"p50_ns\":{},\"p90_ns\":{},\"p99_ns\":{},\"max_ns\":{}}}",
+                    "\"{}\":{{\"count\":{},\"p50_ns\":{},\"p90_ns\":{},\"p99_ns\":{},\"p999_ns\":{},\"max_ns\":{}}}",
                     segment.plain_name(),
                     q.count,
                     q.p50_ns,
                     q.p90_ns,
                     q.p99_ns,
+                    if q.count > 0 { q.p999_ns.to_string() } else { "null".into() },
                     q.max_ns
                 )
             })
@@ -848,6 +854,47 @@ fn sign(key: &[u8], message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn benchmark_reports_p999_distinct_from_p99_and_max() {
+        let mut ledger = LatencyLedger::new(0);
+        for (count, ns) in [(9_900, 100), (90, 1_000), (9, 10_000), (1, 100_000)] {
+            for _ in 0..count {
+                ledger.record(Segment::Decide, ns);
+            }
+        }
+        let result = summarise(&ledger, 10_000, 10_000);
+        let json: serde_json::Value = serde_json::from_str(&result.as_json()).unwrap();
+        let decide = &json[Segment::Decide.plain_name()];
+        assert_eq!(decide["count"].as_u64(), Some(10_000));
+        assert_eq!(decide["p99_ns"].as_u64(), Some(100));
+        assert_eq!(decide["p999_ns"].as_u64(), Some(1_000));
+        assert!(decide["max_ns"].as_u64().unwrap() >= 100_000);
+        assert!(result.table().contains("p99.9"));
+    }
+
+    #[test]
+    fn benchmark_p999_distinguishes_empty_from_measured_zero() {
+        let mut ledger = LatencyLedger::new(0);
+        ledger.record(Segment::Decide, 0);
+        let result = summarise(&ledger, 1, 1);
+        let json: serde_json::Value = serde_json::from_str(&result.as_json()).unwrap();
+        assert_eq!(json[Segment::Decide.plain_name()]["p999_ns"], 0);
+        for (segment, q) in &result.segments {
+            if *segment == Segment::Decide {
+                continue;
+            }
+            assert_eq!(q.count, 0);
+            assert_eq!(
+                json[segment.plain_name()].get("p999_ns"),
+                Some(&serde_json::Value::Null)
+            );
+        }
+        assert_eq!(
+            result.table().matches("unavailable").count(),
+            result.segments.len() - 1
+        );
+    }
 
     #[test]
     fn signing_is_hmac_sha256() {

@@ -210,6 +210,39 @@ def test_a_realm_with_no_heartbeat_is_recorded_and_pushed_as_down(tmp_path: Path
     assert line.endswith(str(now_ms * 1_000_000))
 
 
+def test_p999_preserves_old_missing_empty_and_measured_zero_windows(tmp_path: Path) -> None:
+    now_ms = 1_788_000_000_000
+    beat = tmp_path / "heartbeat.json"
+    stages = (
+        "decide", "durable", "wire", "ack", "dispatch_queue", "venue_task",
+        "core_resume", "end_to_end", "barrier_wait", "quota_hold",
+    )
+    keys = {f"{stage}_p999_ns" for stage in stages}
+    for values in ({}, {key: None for key in keys}, {key: 0 for key in keys}):
+        beat.write_text(json.dumps(_heartbeat(now_ms, **values)), encoding="utf-8")
+        sample = record_equity.engine_sample("mainnet", beat, now_ms)
+        fields = dict(pair.split("=", 1) for pair in record_equity.line_protocol(sample).split(" ")[1].split(","))
+        for key in keys:
+            assert key in sample
+            if values.get(key) == 0:
+                assert sample[key] == 0.0
+                assert fields[key] == "0.0"
+            else:
+                assert sample[key] is None
+                assert key not in fields
+        assert sample["decide_p99_ns"] == 90_000.0
+
+    measured = {key: 100_000 + i for i, key in enumerate(sorted(keys))}
+    beat.write_text(json.dumps(_heartbeat(now_ms, **measured)), encoding="utf-8")
+    sample = record_equity.engine_sample("mainnet", beat, now_ms)
+    fields = dict(pair.split("=", 1) for pair in record_equity.line_protocol(sample).split(" ")[1].split(","))
+    for key, value in measured.items():
+        assert sample[key] == float(value)
+        assert fields[key] == str(float(value))
+    path = record_equity.append(tmp_path, sample)
+    assert json.loads(path.read_text(encoding="utf-8")) == sample
+
+
 def test_an_unparsable_heartbeat_is_a_sample_not_a_crash(tmp_path: Path) -> None:
     beat = tmp_path / "heartbeat.json"
     beat.write_text("{half a li", encoding="utf-8")
@@ -601,6 +634,10 @@ def test_the_dashboard_charts_only_fields_the_sampler_actually_pushes(tmp_path: 
         "ack_p99_ns",
         "durable_p99_ns",
         "decide_p99_ns",
+        "end_to_end_p999_ns",
+        "ack_p999_ns",
+        "durable_p999_ns",
+        "decide_p999_ns",
     ):
         assert field in charted_engine, field
     for field in ("projected_month_gb", "dropped_frames", "reconnects", "queue_fill"):

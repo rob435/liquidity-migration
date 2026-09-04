@@ -415,14 +415,18 @@ def panels() -> list[Panel]:
     out.append(
         timeseries(
             32,
-            "Order-path latency · p99",
-            "Milliseconds · E2E emphasized.",
+            "Order-path latency · p99 / p99.9",
+            "Milliseconds · E2E emphasized. Empty or older unmeasured p99.9 windows stay absent.",
             _grid(10, y, 14, 9),
             [
-                (f"lm_engine_end_to_end_p99_ns{{{REALM}}} / 1000000", "{{realm}} · end-to-end"),
-                (f"lm_engine_ack_p99_ns{{{REALM}}} / 1000000", "{{realm}} · venue ack"),
-                (f"lm_engine_durable_p99_ns{{{REALM}}} / 1000000", "{{realm}} · durable"),
-                (f"lm_engine_decide_p99_ns{{{REALM}}} / 1000000", "{{realm}} · decide"),
+                (f"lm_engine_{step}_{field}_ns{{{REALM}}} / 1000000", f"{{{{realm}}}} · {name} {label}")
+                for field, label in (("p99", "p99"), ("p999", "p99.9"))
+                for step, name in (
+                    ("end_to_end", "end-to-end"),
+                    ("ack", "venue ack"),
+                    ("durable", "durable"),
+                    ("decide", "decide"),
+                )
             ],
             unit="ms",
             decimals=2,
@@ -430,8 +434,9 @@ def panels() -> list[Panel]:
             fill_opacity=4,
             overrides=_names(
                 [
-                    (f"{realm} · {source}", f"{short} · {display}")
+                    (f"{realm} · {source} {quantile}", f"{short} · {display} {quantile}")
                     for realm, short in (("demo", "D"), ("mainnet", "M"))
+                    for quantile in ("p99", "p99.9")
                     for source, display in (
                         ("end-to-end", "E2E"),
                         ("venue ack", "ACK"),
