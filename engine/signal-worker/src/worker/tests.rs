@@ -4,7 +4,7 @@ use crate::config::{
 };
 use crate::model::{
     BinanceWhaleObservation, BinanceWhaleWire, BybitFundingWire, BybitInstrumentWire,
-    BybitTickerWire, Readiness, SourceCoverage, UniverseMode,
+    BybitTickerWire, HourlyKline, Readiness, SourceCoverage, UniverseMode,
 };
 use crate::store::{AtomicJsonStore, SpoolWriter};
 use serde_json::Value;
@@ -1734,14 +1734,14 @@ fn duplicate_history_keeps_first_availability_and_rejects_rewrite() {
         available_at_ms: 86_400_100,
         long_short_ratio: Some(1.0),
     };
-    merge_whale(&mut rows, row.clone()).unwrap();
+    merge_row(&mut rows, row.clone()).unwrap();
     let mut later = row.clone();
     later.available_at_ms += 100;
-    merge_whale(&mut rows, later).unwrap();
+    merge_row(&mut rows, later).unwrap();
     assert_eq!(rows[&row.day_end_ms].available_at_ms, row.available_at_ms);
     let mut conflict = row;
     conflict.long_short_ratio = Some(2.0);
-    assert!(merge_whale(&mut rows, conflict).is_err());
+    assert!(merge_row(&mut rows, conflict).is_err());
 }
 
 #[test]

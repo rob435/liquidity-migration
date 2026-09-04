@@ -14,11 +14,12 @@ use crate::features::{
     build_carry_features, build_carry_features_at, build_carry_replay_features,
     build_long_features, FundingHistory, KlineHistory, WhaleHistory,
 };
+use crate::history::{merge_row, CoverageMut, CoverageRef};
 use crate::model::{
-    BinanceWhaleObservation, BootstrapCoverage, CoverageInterval, DataRejection, HourlyKline,
-    InstrumentObservation, InstrumentTradingInterval, MarketMark, NormalizedObservation,
-    ObservationPayload, PresettlementPublicObservation, Readiness, SettledFunding,
-    SignalPayloadEnvelope, TickerObservation, UniverseIdentity, WireEvent,
+    BootstrapCoverage, CoverageInterval, DataRejection, InstrumentObservation,
+    InstrumentTradingInterval, MarketMark, NormalizedObservation, ObservationPayload,
+    PresettlementPublicObservation, Readiness, SettledFunding, SignalPayloadEnvelope,
+    TickerObservation, UniverseIdentity, WireEvent,
 };
 use crate::normalize::{
     normalize_funding_rows, normalize_instruments, normalize_kline_rows, normalize_tickers,
@@ -206,6 +207,57 @@ pub struct WorkerState {
 }
 
 impl WorkerState {
+    pub(crate) fn kline_coverage(&self) -> CoverageRef<'_> {
+        CoverageRef::new(
+            &self.kline_checked_from_ms,
+            &self.kline_checked_through_ms,
+            &self.kline_coverage_intervals,
+        )
+    }
+
+    pub(crate) fn funding_coverage(&self) -> CoverageRef<'_> {
+        CoverageRef::new(
+            &self.funding_checked_from_ms,
+            &self.funding_checked_through_ms,
+            &self.funding_coverage_intervals,
+        )
+    }
+
+    pub(crate) fn whale_coverage(&self) -> CoverageRef<'_> {
+        CoverageRef::new(
+            &self.whale_checked_from_ms,
+            &self.whale_checked_through_ms,
+            &self.whale_coverage_intervals,
+        )
+    }
+
+    pub(crate) fn kline_coverage_mut(&mut self) -> CoverageMut<'_> {
+        CoverageMut::new(
+            &mut self.kline_checked_from_ms,
+            &mut self.kline_checked_through_ms,
+            &mut self.kline_coverage_intervals,
+            "kline",
+        )
+    }
+
+    pub(crate) fn funding_coverage_mut(&mut self) -> CoverageMut<'_> {
+        CoverageMut::new(
+            &mut self.funding_checked_from_ms,
+            &mut self.funding_checked_through_ms,
+            &mut self.funding_coverage_intervals,
+            "funding",
+        )
+    }
+
+    pub(crate) fn whale_coverage_mut(&mut self) -> CoverageMut<'_> {
+        CoverageMut::new(
+            &mut self.whale_checked_from_ms,
+            &mut self.whale_checked_through_ms,
+            &mut self.whale_coverage_intervals,
+            "whale",
+        )
+    }
+
     fn new(
         config: &SignalWorkerConfig,
         universe: UniverseIdentity,
@@ -344,56 +396,25 @@ impl SignalWorker {
             return Err(WorkerError::state("checkpoint sequence is exhausted"));
         }
         let mut state = state;
-        let legacy_symbols = state
-            .kline_checked_from_ms
-            .keys()
-            .chain(state.kline_checked_through_ms.keys())
+        let mut kline_symbols = state
+            .universe
+            .long_symbols
+            .iter()
+            .chain(&state.universe.carry_symbols)
             .cloned()
             .collect::<BTreeSet<_>>();
-        if legacy_symbols.iter().any(|symbol| {
-            state.kline_checked_from_ms.contains_key(symbol)
-                != state.kline_checked_through_ms.contains_key(symbol)
-        }) {
-            return Err(WorkerError::state(
-                "checkpoint kline coverage has only one legacy boundary",
-            ));
-        }
-        if state.kline_coverage_intervals.is_empty() {
-            for (symbol, checked_from_ms) in &state.kline_checked_from_ms {
-                if let Some(checked_through_ms) =
-                    state.kline_checked_through_ms.get(symbol).copied()
-                {
-                    state.kline_coverage_intervals.insert(
-                        symbol.clone(),
-                        vec![CoverageInterval {
-                            checked_from_ms: *checked_from_ms,
-                            checked_through_ms,
-                        }],
-                    );
-                }
-            }
-        }
-        validate_kline_coverage_intervals(&mut state, &config.long.regime_symbol)?;
+        kline_symbols.insert("BTCUSDT".to_owned());
+        kline_symbols.insert("ETHUSDT".to_owned());
+        kline_symbols.insert(config.long.regime_symbol.clone());
+        state.kline_coverage_mut().restore(&kline_symbols)?;
         let carry_symbols = state
             .universe
             .carry_symbols
             .iter()
             .cloned()
             .collect::<BTreeSet<_>>();
-        restore_source_coverage_intervals(
-            &mut state.funding_checked_from_ms,
-            &mut state.funding_checked_through_ms,
-            &mut state.funding_coverage_intervals,
-            &carry_symbols,
-            "funding",
-        )?;
-        restore_source_coverage_intervals(
-            &mut state.whale_checked_from_ms,
-            &mut state.whale_checked_through_ms,
-            &mut state.whale_coverage_intervals,
-            &carry_symbols,
-            "whale",
-        )?;
+        state.funding_coverage_mut().restore(&carry_symbols)?;
+        state.whale_coverage_mut().restore(&carry_symbols)?;
         restore_instrument_trading_intervals(&mut state, &config)?;
         if state.last_carry_scorer_ts_ms.is_none() {
             state.last_carry_scorer_ts_ms = state.last_carry_decision_ts_ms;
@@ -515,46 +536,18 @@ impl SignalWorker {
             } => {
                 let normalized = normalize_kline_rows(&symbol, available_at_ms, &rows)?;
                 for row in normalized {
-                    merge_kline(
+                    merge_row(
                         self.state.klines.entry(row.symbol.clone()).or_default(),
                         row,
                     )?;
                 }
-                if replace_coverage {
-                    self.state.kline_checked_from_ms.remove(&symbol);
-                    self.state.kline_checked_through_ms.remove(&symbol);
-                    self.state.kline_coverage_intervals.remove(&symbol);
-                }
-                if checked_from_ms.is_some() != checked_through_ms.is_some() {
-                    return Err(WorkerError::input(
-                        "kline coverage frontier has only one boundary",
-                    ));
-                }
-                if let (Some(checked_from_ms), Some(checked_through_ms)) =
-                    (checked_from_ms, checked_through_ms)
-                {
-                    if checked_from_ms <= 0
-                        || checked_from_ms % HOUR_MS != 0
-                        || checked_through_ms % HOUR_MS != 0
-                        || checked_from_ms >= checked_through_ms
-                        || checked_through_ms > available_at_ms
-                    {
-                        return Err(WorkerError::input(
-                            "kline coverage frontier has an invalid clock",
-                        ));
-                    }
-                    merge_coverage_interval(
-                        self.state
-                            .kline_coverage_intervals
-                            .entry(symbol.clone())
-                            .or_default(),
-                        CoverageInterval {
-                            checked_from_ms,
-                            checked_through_ms,
-                        },
-                    );
-                    sync_legacy_kline_coverage(&mut self.state, &symbol);
-                }
+                self.state.kline_coverage_mut().merge(
+                    &symbol,
+                    checked_from_ms,
+                    checked_through_ms,
+                    available_at_ms,
+                    replace_coverage,
+                )?;
                 self.state.last_observed_ts_ms =
                     self.state.last_observed_ts_ms.max(available_at_ms);
                 let prune_clock_ms = self.state.last_observed_ts_ms;
@@ -573,7 +566,7 @@ impl SignalWorker {
                 let normalized = normalize_funding_rows(&symbol, available_at_ms, &rows)?;
                 let mut inserted = Vec::new();
                 for row in normalized {
-                    if merge_funding(
+                    if merge_row(
                         self.state.funding.entry(row.symbol.clone()).or_default(),
                         row.clone(),
                     )? {
@@ -609,16 +602,12 @@ impl SignalWorker {
                         )?);
                     }
                 }
-                merge_source_coverage(
-                    &mut self.state.funding_checked_from_ms,
-                    &mut self.state.funding_checked_through_ms,
-                    &mut self.state.funding_coverage_intervals,
+                self.state.funding_coverage_mut().merge(
                     &symbol,
                     checked_from_ms,
                     checked_through_ms,
                     available_at_ms,
                     replace_coverage,
-                    "funding",
                 )?;
                 self.state.last_observed_ts_ms =
                     self.state.last_observed_ts_ms.max(available_at_ms);
@@ -754,25 +743,18 @@ impl SignalWorker {
                 ..
             } => {
                 for row in normalize_whales(available_at_ms, &rows)? {
-                    merge_whale(
+                    merge_row(
                         self.state.whales.entry(row.symbol.clone()).or_default(),
                         row,
                     )?;
                 }
                 for item in coverage {
-                    if item.replace_coverage {
-                        self.state.whale_coverage_intervals.remove(&item.symbol);
-                    }
-                    merge_source_coverage(
-                        &mut self.state.whale_checked_from_ms,
-                        &mut self.state.whale_checked_through_ms,
-                        &mut self.state.whale_coverage_intervals,
+                    self.state.whale_coverage_mut().merge(
                         &item.symbol,
                         Some(item.checked_from_ms),
                         Some(item.checked_through_ms),
                         available_at_ms,
                         item.replace_coverage,
-                        "whale",
                     )?;
                 }
                 self.state.last_observed_ts_ms =
@@ -1695,14 +1677,8 @@ impl SignalWorker {
             .klines
             .retain(|symbol, _| symbols.contains(symbol));
         self.state
-            .kline_checked_from_ms
-            .retain(|symbol, _| symbols.contains(symbol));
-        self.state
-            .kline_checked_through_ms
-            .retain(|symbol, _| symbols.contains(symbol));
-        self.state
-            .kline_coverage_intervals
-            .retain(|symbol, _| symbols.contains(symbol));
+            .kline_coverage_mut()
+            .retain_symbols(|symbol| symbols.contains(symbol));
         for symbol in symbols {
             let long_cutoff = long_symbols.contains(&symbol).then(|| {
                 retained_through_ms.saturating_sub(
@@ -1741,26 +1717,17 @@ impl SignalWorker {
                         .any(|(from, through)| from <= timestamp && timestamp < through)
                 });
             }
-            if let Some(intervals) = self.state.kline_coverage_intervals.get_mut(&symbol) {
-                retain_coverage_windows(intervals, &windows);
-            }
-            sync_legacy_kline_coverage(&mut self.state, &symbol);
+            self.state
+                .kline_coverage_mut()
+                .retain_windows(&symbol, &windows);
         }
-        self.state
-            .kline_coverage_intervals
-            .retain(|_, intervals| !intervals.is_empty());
+        self.state.kline_coverage_mut().drop_empty();
         let funding_hours = required_carry_history_hours(&self.config, &self.state);
         let funding_cutoff =
             carry_retained_through_ms.saturating_sub(funding_hours.saturating_mul(HOUR_MS));
         self.state
-            .funding_checked_from_ms
-            .retain(|symbol, _| carry_symbols.contains(symbol));
-        self.state
-            .funding_checked_through_ms
-            .retain(|symbol, _| carry_symbols.contains(symbol));
-        self.state
-            .funding_coverage_intervals
-            .retain(|symbol, _| carry_symbols.contains(symbol));
+            .funding_coverage_mut()
+            .retain_symbols(|symbol| carry_symbols.contains(symbol));
         let current_funding_cutoff =
             retained_through_ms.saturating_sub(funding_hours.saturating_mul(HOUR_MS));
         let funding_windows = [
@@ -1775,19 +1742,11 @@ impl SignalWorker {
             });
         }
         for symbol in &carry_symbols {
-            if let Some(intervals) = self.state.funding_coverage_intervals.get_mut(symbol) {
-                retain_coverage_windows(intervals, &funding_windows);
-            }
-            sync_legacy_source_coverage(
-                &mut self.state.funding_checked_from_ms,
-                &mut self.state.funding_checked_through_ms,
-                &self.state.funding_coverage_intervals,
-                symbol,
-            );
+            self.state
+                .funding_coverage_mut()
+                .retain_windows(symbol, &funding_windows);
         }
-        self.state
-            .funding_coverage_intervals
-            .retain(|_, intervals| !intervals.is_empty());
+        self.state.funding_coverage_mut().drop_empty();
         let whale_cutoff = carry_retained_through_ms.saturating_sub(
             (self.config.carry.whale_change_lookback_hours
                 + self.config.carry.whale_freshness_hours
@@ -1795,14 +1754,8 @@ impl SignalWorker {
                 .saturating_mul(HOUR_MS),
         );
         self.state
-            .whale_checked_from_ms
-            .retain(|symbol, _| carry_symbols.contains(symbol));
-        self.state
-            .whale_checked_through_ms
-            .retain(|symbol, _| carry_symbols.contains(symbol));
-        self.state
-            .whale_coverage_intervals
-            .retain(|symbol, _| carry_symbols.contains(symbol));
+            .whale_coverage_mut()
+            .retain_symbols(|symbol| carry_symbols.contains(symbol));
         let current_whale_cutoff = retained_through_ms.saturating_sub(
             (self.config.carry.whale_change_lookback_hours
                 + self.config.carry.whale_freshness_hours
@@ -1821,19 +1774,11 @@ impl SignalWorker {
             });
         }
         for symbol in &carry_symbols {
-            if let Some(intervals) = self.state.whale_coverage_intervals.get_mut(symbol) {
-                retain_coverage_windows(intervals, &whale_windows);
-            }
-            sync_legacy_source_coverage(
-                &mut self.state.whale_checked_from_ms,
-                &mut self.state.whale_checked_through_ms,
-                &self.state.whale_coverage_intervals,
-                symbol,
-            );
+            self.state
+                .whale_coverage_mut()
+                .retain_windows(symbol, &whale_windows);
         }
-        self.state
-            .whale_coverage_intervals
-            .retain(|_, intervals| !intervals.is_empty());
+        self.state.whale_coverage_mut().drop_empty();
         for (symbol, intervals) in &mut self.state.instrument_trading_intervals {
             let Some(retained_from_ms) = instrument_retained_from_ms.get(symbol) else {
                 intervals.clear();
@@ -1849,72 +1794,6 @@ impl SignalWorker {
             .instrument_trading_intervals
             .retain(|_, intervals| !intervals.is_empty());
     }
-}
-
-fn merge_kline(rows: &mut BTreeMap<i64, HourlyKline>, row: HourlyKline) -> Result<(), WorkerError> {
-    let key = row.open_ts_ms;
-    if let Some(existing) = rows.get_mut(&key) {
-        let same = existing.symbol == row.symbol
-            && existing.open_ts_ms == row.open_ts_ms
-            && existing.open == row.open
-            && existing.high == row.high
-            && existing.low == row.low
-            && existing.close == row.close
-            && existing.volume_base == row.volume_base
-            && existing.turnover_quote == row.turnover_quote;
-        if !same {
-            return Err(WorkerError::input(format!(
-                "kline history rewrote timestamp {key}"
-            )));
-        }
-        existing.available_at_ms = existing.available_at_ms.min(row.available_at_ms);
-        return Ok(());
-    }
-    rows.insert(key, row);
-    Ok(())
-}
-
-fn merge_funding(
-    rows: &mut BTreeMap<i64, SettledFunding>,
-    row: SettledFunding,
-) -> Result<bool, WorkerError> {
-    let key = row.settlement_ts_ms;
-    if let Some(existing) = rows.get_mut(&key) {
-        let same = existing.symbol == row.symbol
-            && existing.settlement_ts_ms == row.settlement_ts_ms
-            && existing.rate == row.rate
-            && existing.funding_interval_min == row.funding_interval_min;
-        if !same {
-            return Err(WorkerError::input(format!(
-                "funding history rewrote timestamp {key}"
-            )));
-        }
-        existing.available_at_ms = existing.available_at_ms.min(row.available_at_ms);
-        return Ok(false);
-    }
-    rows.insert(key, row);
-    Ok(true)
-}
-
-fn merge_whale(
-    rows: &mut BTreeMap<i64, BinanceWhaleObservation>,
-    row: BinanceWhaleObservation,
-) -> Result<(), WorkerError> {
-    let key = row.day_end_ms;
-    if let Some(existing) = rows.get_mut(&key) {
-        let same = existing.symbol == row.symbol
-            && existing.day_end_ms == row.day_end_ms
-            && existing.long_short_ratio == row.long_short_ratio;
-        if !same {
-            return Err(WorkerError::input(format!(
-                "whale history rewrote timestamp {key}"
-            )));
-        }
-        existing.available_at_ms = existing.available_at_ms.min(row.available_at_ms);
-        return Ok(());
-    }
-    rows.insert(key, row);
-    Ok(())
 }
 
 /// Bybit publishes `deliveryTime: "0"` on a perpetual and a real clock on a
@@ -2153,22 +2032,6 @@ fn merge_ticker_observation(
     existing.available_at_ms = existing.available_at_ms.max(incoming.available_at_ms);
 }
 
-fn merge_coverage_interval(intervals: &mut Vec<CoverageInterval>, incoming: CoverageInterval) {
-    intervals.push(incoming);
-    intervals.sort_by_key(|interval| interval.checked_from_ms);
-    let mut merged = Vec::<CoverageInterval>::with_capacity(intervals.len());
-    for interval in intervals.drain(..) {
-        if let Some(last) = merged.last_mut() {
-            if interval.checked_from_ms <= last.checked_through_ms {
-                last.checked_through_ms = last.checked_through_ms.max(interval.checked_through_ms);
-                continue;
-            }
-        }
-        merged.push(interval);
-    }
-    *intervals = merged;
-}
-
 fn close_active_trading_interval(
     intervals: &mut Vec<InstrumentTradingInterval>,
     unknown_at_ms: i64,
@@ -2192,230 +2055,6 @@ fn close_active_trading_interval(
     } else if let Some(last) = intervals.last_mut() {
         last.trading_through_ms = Some(through);
     }
-}
-
-fn retain_coverage_windows(intervals: &mut Vec<CoverageInterval>, windows: &[(i64, i64)]) {
-    let mut retained = Vec::new();
-    for interval in intervals.iter() {
-        for (from, through) in windows {
-            let checked_from_ms = interval.checked_from_ms.max(*from);
-            let checked_through_ms = interval.checked_through_ms.min(*through);
-            if checked_from_ms < checked_through_ms {
-                merge_coverage_interval(
-                    &mut retained,
-                    CoverageInterval {
-                        checked_from_ms,
-                        checked_through_ms,
-                    },
-                );
-            }
-        }
-    }
-    *intervals = retained;
-}
-
-fn validate_kline_coverage_intervals(
-    state: &mut WorkerState,
-    regime_symbol: &str,
-) -> Result<(), WorkerError> {
-    let mut allowed = state
-        .universe
-        .long_symbols
-        .iter()
-        .chain(&state.universe.carry_symbols)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    allowed.insert("BTCUSDT".to_owned());
-    allowed.insert("ETHUSDT".to_owned());
-    allowed.insert(regime_symbol.to_owned());
-    for (symbol, intervals) in &mut state.kline_coverage_intervals {
-        if !allowed.contains(symbol) || intervals.is_empty() {
-            return Err(WorkerError::state(
-                "checkpoint kline coverage cardinality is invalid",
-            ));
-        }
-        let mut prior_through = None;
-        for interval in intervals.iter() {
-            if interval.checked_from_ms <= 0
-                || interval.checked_from_ms % HOUR_MS != 0
-                || interval.checked_through_ms % HOUR_MS != 0
-                || interval.checked_from_ms >= interval.checked_through_ms
-                || prior_through.is_some_and(|through| through >= interval.checked_from_ms)
-            {
-                return Err(WorkerError::state(
-                    "checkpoint kline coverage intervals are not canonical",
-                ));
-            }
-            prior_through = Some(interval.checked_through_ms);
-        }
-    }
-    state.kline_checked_from_ms.clear();
-    state.kline_checked_through_ms.clear();
-    let symbols = state
-        .kline_coverage_intervals
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    for symbol in symbols {
-        sync_legacy_kline_coverage(state, &symbol);
-    }
-    Ok(())
-}
-
-fn restore_source_coverage_intervals(
-    checked_from: &mut BTreeMap<String, i64>,
-    checked_through: &mut BTreeMap<String, i64>,
-    intervals_by_symbol: &mut BTreeMap<String, Vec<CoverageInterval>>,
-    allowed: &BTreeSet<String>,
-    label: &str,
-) -> Result<(), WorkerError> {
-    let legacy_symbols = checked_from
-        .keys()
-        .chain(checked_through.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if legacy_symbols
-        .iter()
-        .any(|symbol| checked_from.contains_key(symbol) != checked_through.contains_key(symbol))
-    {
-        return Err(WorkerError::state(format!(
-            "checkpoint {label} coverage has only one boundary"
-        )));
-    }
-    if intervals_by_symbol.is_empty() {
-        for symbol in legacy_symbols {
-            intervals_by_symbol.insert(
-                symbol.clone(),
-                vec![CoverageInterval {
-                    checked_from_ms: checked_from[&symbol],
-                    checked_through_ms: checked_through[&symbol],
-                }],
-            );
-        }
-    }
-    for (symbol, intervals) in intervals_by_symbol.iter_mut() {
-        if !allowed.contains(symbol) || intervals.is_empty() {
-            return Err(WorkerError::state(format!(
-                "checkpoint {label} coverage cardinality is invalid"
-            )));
-        }
-        let mut prior_through = None;
-        for interval in intervals.iter() {
-            if interval.checked_from_ms <= 0
-                || interval.checked_from_ms % HOUR_MS != 0
-                || interval.checked_through_ms % HOUR_MS != 0
-                || interval.checked_from_ms >= interval.checked_through_ms
-                || prior_through.is_some_and(|through| through >= interval.checked_from_ms)
-            {
-                return Err(WorkerError::state(format!(
-                    "checkpoint {label} coverage intervals are not canonical"
-                )));
-            }
-            prior_through = Some(interval.checked_through_ms);
-        }
-    }
-    checked_from.clear();
-    checked_through.clear();
-    for (symbol, intervals) in intervals_by_symbol.iter() {
-        if let [interval] = intervals.as_slice() {
-            checked_from.insert(symbol.clone(), interval.checked_from_ms);
-            checked_through.insert(symbol.clone(), interval.checked_through_ms);
-        }
-    }
-    Ok(())
-}
-
-fn sync_legacy_kline_coverage(state: &mut WorkerState, symbol: &str) {
-    match state
-        .kline_coverage_intervals
-        .get(symbol)
-        .map(Vec::as_slice)
-    {
-        Some([interval]) => {
-            state
-                .kline_checked_from_ms
-                .insert(symbol.to_owned(), interval.checked_from_ms);
-            state
-                .kline_checked_through_ms
-                .insert(symbol.to_owned(), interval.checked_through_ms);
-        }
-        _ => {
-            state.kline_checked_from_ms.remove(symbol);
-            state.kline_checked_through_ms.remove(symbol);
-        }
-    }
-}
-
-fn sync_legacy_source_coverage(
-    checked_from: &mut BTreeMap<String, i64>,
-    checked_through: &mut BTreeMap<String, i64>,
-    intervals_by_symbol: &BTreeMap<String, Vec<CoverageInterval>>,
-    symbol: &str,
-) {
-    match intervals_by_symbol.get(symbol).map(Vec::as_slice) {
-        Some([interval]) => {
-            checked_from.insert(symbol.to_owned(), interval.checked_from_ms);
-            checked_through.insert(symbol.to_owned(), interval.checked_through_ms);
-        }
-        _ => {
-            checked_from.remove(symbol);
-            checked_through.remove(symbol);
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn merge_source_coverage(
-    checked_from: &mut BTreeMap<String, i64>,
-    checked_through: &mut BTreeMap<String, i64>,
-    intervals_by_symbol: &mut BTreeMap<String, Vec<CoverageInterval>>,
-    symbol: &str,
-    new_from: Option<i64>,
-    new_through: Option<i64>,
-    available_at_ms: i64,
-    replace_coverage: bool,
-    label: &str,
-) -> Result<(), WorkerError> {
-    if new_from.is_some() != new_through.is_some() {
-        return Err(WorkerError::input(format!(
-            "{label} coverage frontier has only one boundary"
-        )));
-    }
-    let (Some(new_from), Some(new_through)) = (new_from, new_through) else {
-        return Ok(());
-    };
-    if new_from <= 0
-        || new_from % HOUR_MS != 0
-        || new_through % HOUR_MS != 0
-        || new_from >= new_through
-        || new_through > available_at_ms
-    {
-        return Err(WorkerError::input(format!(
-            "{label} coverage frontier has an invalid clock"
-        )));
-    }
-    if replace_coverage {
-        intervals_by_symbol.remove(symbol);
-    }
-    let intervals = intervals_by_symbol.entry(symbol.to_owned()).or_default();
-    merge_coverage_interval(
-        intervals,
-        CoverageInterval {
-            checked_from_ms: new_from,
-            checked_through_ms: new_through,
-        },
-    );
-    match intervals.as_slice() {
-        [interval] => {
-            checked_from.insert(symbol.to_owned(), interval.checked_from_ms);
-            checked_through.insert(symbol.to_owned(), interval.checked_through_ms);
-        }
-        _ => {
-            checked_from.remove(symbol);
-            checked_through.remove(symbol);
-        }
-    }
-    Ok(())
 }
 
 fn carry_funding_coverage(

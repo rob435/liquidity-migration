@@ -1339,14 +1339,9 @@ impl LiveRunner {
             let state = self.durable.worker().state();
             let replace_coverage = false;
             let coverage_advances = match (batch.checked_from_ms, batch.checked_through_ms) {
-                (Some(from), Some(through)) => !source_coverage_contains(
-                    &state.funding_checked_from_ms,
-                    &state.funding_checked_through_ms,
-                    &state.funding_coverage_intervals,
-                    &symbol,
-                    from,
-                    through,
-                ),
+                (Some(from), Some(through)) => {
+                    !state.funding_coverage().contains(&symbol, from, through)
+                }
                 (None, None) => false,
                 _ => return Err(WorkerError::state("funding fetch coverage is incomplete")),
             };
@@ -1392,10 +1387,7 @@ impl LiveRunner {
             coverage.replace_coverage = false;
         }
         let coverage_advances = fetched.coverage.iter().any(|coverage| {
-            !source_coverage_contains(
-                &state.whale_checked_from_ms,
-                &state.whale_checked_through_ms,
-                &state.whale_coverage_intervals,
+            !state.whale_coverage().contains(
                 &coverage.symbol,
                 coverage.checked_from_ms,
                 coverage.checked_through_ms,
@@ -1518,8 +1510,7 @@ impl LiveRunner {
                 self.required_kline_ranges(&symbol, end_ms)
                     .into_iter()
                     .filter_map(move |(required_start, required_end)| {
-                        let start = kline_coverage_repair_start(
-                            state,
+                        let start = state.kline_coverage().repair_start(
                             &symbol,
                             required_start,
                             required_end,
@@ -1629,26 +1620,17 @@ impl LiveRunner {
                 if required_start >= end_ms {
                     continue;
                 }
-                if source_coverage_contains(
-                    &state.funding_checked_from_ms,
-                    &state.funding_checked_through_ms,
-                    &state.funding_coverage_intervals,
-                    symbol,
-                    required_start,
-                    end_ms,
-                ) {
+                if state
+                    .funding_coverage()
+                    .contains(symbol, required_start, end_ms)
+                {
                     continue;
                 }
-                let start = source_coverage_repair_start(
-                    &state.funding_checked_from_ms,
-                    &state.funding_checked_through_ms,
-                    &state.funding_coverage_intervals,
-                    symbol,
-                    required_start,
-                    end_ms,
-                )
-                .min(end_ms.saturating_sub(interval_ms))
-                .max(required_start);
+                let start = state
+                    .funding_coverage()
+                    .repair_start(symbol, required_start, end_ms)
+                    .min(end_ms.saturating_sub(interval_ms))
+                    .max(required_start);
                 if start < end_ms {
                     jobs.push((symbol.clone(), start, end_ms, emit_lifecycle));
                 }
@@ -1696,24 +1678,16 @@ impl LiveRunner {
                 ));
             }
             for (required_start, end_ms) in ranges {
-                if source_coverage_contains(
-                    &state.whale_checked_from_ms,
-                    &state.whale_checked_through_ms,
-                    &state.whale_coverage_intervals,
-                    symbol,
-                    required_start,
-                    end_ms,
-                ) {
+                if state
+                    .whale_coverage()
+                    .contains(symbol, required_start, end_ms)
+                {
                     continue;
                 }
-                let append_from = source_coverage_repair_start(
-                    &state.whale_checked_from_ms,
-                    &state.whale_checked_through_ms,
-                    &state.whale_coverage_intervals,
-                    symbol,
-                    required_start,
-                    end_ms,
-                );
+                let append_from =
+                    state
+                        .whale_coverage()
+                        .repair_start(symbol, required_start, end_ms);
                 let start = append_from
                     .min(end_ms.saturating_sub(DAY_MS))
                     .max(required_start);
@@ -2083,17 +2057,10 @@ impl LiveRunner {
                     funding_interval_ms,
                 );
                 !kline_ranges.iter().all(|(start, through)| {
-                    kline_coverage_contains(state, symbol, *start, *through)
+                    state.kline_coverage().contains(symbol, *start, *through)
                         && first_missing_kline_hour(state, symbol, *start, *through).is_none()
                 }) || !funding_ranges.iter().all(|(start, through)| {
-                    source_coverage_contains(
-                        &state.funding_checked_from_ms,
-                        &state.funding_checked_through_ms,
-                        &state.funding_coverage_intervals,
-                        symbol,
-                        *start,
-                        *through,
-                    )
+                    state.funding_coverage().contains(symbol, *start, *through)
                 })
             })
             .cloned()
@@ -2174,7 +2141,7 @@ impl LiveRunner {
             );
             if ranges.is_empty()
                 || ranges.iter().any(|(start, through)| {
-                    !kline_coverage_contains(state, symbol, *start, *through)
+                    !state.kline_coverage().contains(symbol, *start, *through)
                         || first_missing_kline_hour(state, symbol, *start, *through).is_some()
                 })
             {
@@ -2203,7 +2170,7 @@ impl LiveRunner {
                     );
                     ranges.is_empty()
                         || ranges.iter().any(|(start, through)| {
-                            !kline_coverage_contains(state, symbol, *start, *through)
+                            !state.kline_coverage().contains(symbol, *start, *through)
                                 || first_missing_kline_hour(state, symbol, *start, *through)
                                     .is_some()
                         })
@@ -2460,7 +2427,9 @@ impl LiveRunner {
             self.required_kline_ranges(symbol, coverage.kline_end_ms)
                 .into_iter()
                 .any(|(required_start, required_through)| {
-                    !kline_coverage_contains(state, symbol, required_start, required_through)
+                    !state
+                        .kline_coverage()
+                        .contains(symbol, required_start, required_through)
                         || first_missing_kline_hour(state, symbol, required_start, required_through)
                             .is_some()
                 })
@@ -2484,16 +2453,7 @@ impl LiveRunner {
                 interval_ms,
             )
             .into_iter()
-            .any(|(start, through)| {
-                !source_coverage_contains(
-                    &state.funding_checked_from_ms,
-                    &state.funding_checked_through_ms,
-                    &state.funding_coverage_intervals,
-                    symbol,
-                    start,
-                    through,
-                )
-            })
+            .any(|(start, through)| !state.funding_coverage().contains(symbol, start, through))
         });
         let instruments_incomplete = state
             .universe
@@ -3657,119 +3617,6 @@ fn align_down(value: i64, alignment: i64) -> i64 {
     value.saturating_sub(value.rem_euclid(alignment))
 }
 
-fn coverage_contains(
-    checked_from: &BTreeMap<String, i64>,
-    checked_through: &BTreeMap<String, i64>,
-    symbol: &str,
-    required_from_ms: i64,
-    required_through_ms: i64,
-) -> bool {
-    matches!(
-        (
-            checked_from.get(symbol).copied(),
-            checked_through.get(symbol).copied(),
-        ),
-        (Some(from), Some(through))
-            if from <= required_from_ms && through >= required_through_ms
-    )
-}
-
-fn source_coverage_contains(
-    checked_from: &BTreeMap<String, i64>,
-    checked_through: &BTreeMap<String, i64>,
-    intervals_by_symbol: &BTreeMap<String, Vec<crate::model::CoverageInterval>>,
-    symbol: &str,
-    required_from_ms: i64,
-    required_through_ms: i64,
-) -> bool {
-    intervals_by_symbol.get(symbol).is_some_and(|intervals| {
-        intervals.iter().any(|interval| {
-            interval.checked_from_ms <= required_from_ms
-                && interval.checked_through_ms >= required_through_ms
-        })
-    }) || coverage_contains(
-        checked_from,
-        checked_through,
-        symbol,
-        required_from_ms,
-        required_through_ms,
-    )
-}
-
-fn source_coverage_repair_start(
-    checked_from: &BTreeMap<String, i64>,
-    checked_through: &BTreeMap<String, i64>,
-    intervals_by_symbol: &BTreeMap<String, Vec<crate::model::CoverageInterval>>,
-    symbol: &str,
-    required_start_ms: i64,
-    required_through_ms: i64,
-) -> i64 {
-    if let Some(interval) = intervals_by_symbol.get(symbol).and_then(|intervals| {
-        intervals.iter().find(|interval| {
-            interval.checked_from_ms <= required_start_ms
-                && interval.checked_through_ms > required_start_ms
-        })
-    }) {
-        return interval.checked_through_ms.min(required_through_ms);
-    }
-    coverage_repair_start(
-        required_start_ms,
-        required_through_ms,
-        checked_from.get(symbol).copied(),
-        checked_through.get(symbol).copied(),
-    )
-}
-
-fn kline_coverage_contains(
-    state: &crate::worker::WorkerState,
-    symbol: &str,
-    required_from_ms: i64,
-    required_through_ms: i64,
-) -> bool {
-    state
-        .kline_coverage_intervals
-        .get(symbol)
-        .is_some_and(|intervals| {
-            intervals.iter().any(|interval| {
-                interval.checked_from_ms <= required_from_ms
-                    && interval.checked_through_ms >= required_through_ms
-            })
-        })
-        || coverage_contains(
-            &state.kline_checked_from_ms,
-            &state.kline_checked_through_ms,
-            symbol,
-            required_from_ms,
-            required_through_ms,
-        )
-}
-
-fn kline_coverage_repair_start(
-    state: &crate::worker::WorkerState,
-    symbol: &str,
-    required_start_ms: i64,
-    required_through_ms: i64,
-) -> i64 {
-    if let Some(interval) = state
-        .kline_coverage_intervals
-        .get(symbol)
-        .and_then(|intervals| {
-            intervals.iter().find(|interval| {
-                interval.checked_from_ms <= required_start_ms
-                    && interval.checked_through_ms > required_start_ms
-            })
-        })
-    {
-        return interval.checked_through_ms.min(required_through_ms);
-    }
-    coverage_repair_start(
-        required_start_ms,
-        required_through_ms,
-        state.kline_checked_from_ms.get(symbol).copied(),
-        state.kline_checked_through_ms.get(symbol).copied(),
-    )
-}
-
 fn first_missing_kline_hour(
     state: &crate::worker::WorkerState,
     symbol: &str,
@@ -3792,20 +3639,6 @@ fn first_missing_kline_hour(
 fn closed_kline_end(now_ms: i64) -> i64 {
     let publishable_ms = now_ms.saturating_sub(KLINE_PUBLICATION_LAG_MS);
     publishable_ms - publishable_ms.rem_euclid(HOUR_MS)
-}
-
-fn coverage_repair_start(
-    required_start: i64,
-    end_ms: i64,
-    checked_from: Option<i64>,
-    checked_through: Option<i64>,
-) -> i64 {
-    match (checked_from, checked_through) {
-        (Some(from), Some(through)) if from <= required_start => {
-            through.max(required_start).min(end_ms)
-        }
-        _ => required_start,
-    }
 }
 
 fn source_grid_slots(

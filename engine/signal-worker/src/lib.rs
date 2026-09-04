@@ -8,6 +8,7 @@
 pub mod bybit_ws;
 pub mod config;
 pub mod features;
+mod history;
 pub mod http;
 pub mod live;
 pub mod model;

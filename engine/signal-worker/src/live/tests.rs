@@ -1,19 +1,19 @@
 use super::{
     bounded_instrument_source_ranges, carry_required_lanes_pending, closed_kline_end,
-    complete_funding_coverage, complete_whale_coverage, coverage_repair_start, funding_job_chunks,
-    heartbeat_status, kline_job_chunks, runtime_status, send_repair_chunk_and_wait,
-    send_whale_chunk_and_wait, source_coverage_contains, source_grid_slots, startup_runtime_status,
-    stream_transport_healthy, trading_intervals_contain, transient_recovery_acceptable,
-    validate_instrument_source_against_state, validate_source_grid_timestamp,
-    validate_source_page_rows, whale_fetch_bounds, whale_job_chunks, FetchedFunding,
-    FetchedFundingBatch, FetchedInstruments, FetchedKlineBatch, FetchedKlineJobs, FetchedTickers,
-    FetchedUniverseInputs, FetchedWhales, LaneCompletion, LaneState, LiveRunOptions, LiveRunner,
-    StreamEvent, StreamHealth, TickerSample, FUNDING_FETCH_CHUNK_SIZE, KLINE_FETCH_CHUNK_SIZE,
-    LANE_COMPLETION_QUEUE_CAPACITY, STARTUP_MAX_MS, TRANSIENT_RECOVERY_MAX_MS,
-    WHALE_FETCH_CHUNK_SIZE,
+    complete_funding_coverage, complete_whale_coverage, funding_job_chunks, heartbeat_status,
+    kline_job_chunks, runtime_status, send_repair_chunk_and_wait, send_whale_chunk_and_wait,
+    source_grid_slots, startup_runtime_status, stream_transport_healthy, trading_intervals_contain,
+    transient_recovery_acceptable, validate_instrument_source_against_state,
+    validate_source_grid_timestamp, validate_source_page_rows, whale_fetch_bounds,
+    whale_job_chunks, FetchedFunding, FetchedFundingBatch, FetchedInstruments, FetchedKlineBatch,
+    FetchedKlineJobs, FetchedTickers, FetchedUniverseInputs, FetchedWhales, LaneCompletion,
+    LaneState, LiveRunOptions, LiveRunner, StreamEvent, StreamHealth, TickerSample,
+    FUNDING_FETCH_CHUNK_SIZE, KLINE_FETCH_CHUNK_SIZE, LANE_COMPLETION_QUEUE_CAPACITY,
+    STARTUP_MAX_MS, TRANSIENT_RECOVERY_MAX_MS, WHALE_FETCH_CHUNK_SIZE,
 };
 use crate::bybit_ws::BybitPublicStream;
 use crate::config::SignalWorkerConfig;
+use crate::history::{coverage_repair_start, CoverageRef};
 use crate::model::{
     BinanceWhaleWire, BootstrapCoverage, BybitFundingWire, BybitInstrumentWire, BybitTickerWire,
     CoverageInterval, HourlyKline, InstrumentTradingInterval, ObservationPayload, SettledFunding,
@@ -1372,22 +1372,16 @@ fn retained_fragmented_coverage_converges_without_refetching_a_known_run() {
     let empty = BTreeMap::new();
 
     for interval in &intervals {
-        assert!(source_coverage_contains(
-            &empty,
-            &empty,
-            &coverage,
+        assert!(CoverageRef::new(&empty, &empty, &coverage).contains(
             "BTCUSDT",
             interval.checked_from_ms,
-            interval.checked_through_ms,
+            interval.checked_through_ms
         ));
     }
-    assert!(!source_coverage_contains(
-        &empty,
-        &empty,
-        &coverage,
+    assert!(!CoverageRef::new(&empty, &empty, &coverage).contains(
         "BTCUSDT",
         base + HOUR_MS,
-        base + 2 * HOUR_MS,
+        base + 2 * HOUR_MS
     ));
 }
 
