@@ -224,6 +224,23 @@ edit STATE.md to match.
     deleting pass leaves the most directories for the second walk to try to
     `rmdir`. That second walk now runs only when a pass deleted something,
     once per 300 s rather than per 30 s.
+  - Deploy receipt. `bf30fd6` deployed by run `33889491439`, `Run VPS mode`
+    15:31:36-15:32:34 UTC: `deploy-ok commit=bf30fd67…`, rollback target
+    `dc69448`, `real-money armed`. Neither realm's fingerprint moved, so
+    `demo-ok` and `mainnet-ok result=unchanged-left-running`; the recorders
+    are what this change touches and both took it —
+    `capture-ok unit=liquidity-migration-forward-capture.service
+    result=restarted`, same for the Binance unit. In the same receipt every
+    unit is `active`: engines 2 s and 3 s, signal workers 1 s and 4 s, the
+    Bybit recorder 12 s, the Binance recorder 3 s. The Bybit recorder's
+    12 s reading is the fix's first evidence — it wrote `status.json` within
+    seconds of a restart, where before this change the first maintenance tick
+    carried a whole cold-cache prune. Disk `118G 78G 35G 70% /`, 35 GB free
+    against the 25 GB floor and 36 GB at 15:07.
+  - Still open, not this fix's to close: the disk is falling about 2 GB an
+    hour and the watchdog's floor is 25 GB. Retention holds the tape under
+    `max_disk_gb`; nothing here holds the *host* under its floor, and a
+    `capture-disk` CRITICAL is what the fleet gets if it crosses.
 
 - **2026-09-04 — Incident `host-bf5dcb6544d0dfdc`: the new watchdog-chain check
   paged CRITICAL on its own deploy. Requirement now reads systemd enablement,

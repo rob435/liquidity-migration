@@ -6,13 +6,13 @@ Current operational snapshot of the live trading fleet and host environment.
 
 ## 1. Live Deployment Snapshot
 
-Verified against the running host on 2026-09-04 15:07 UTC:
+Verified against the running host on 2026-09-04 15:32 UTC:
 
 | Property | Value | Description |
 | :--- | :--- | :--- |
-| **Host** | `ip-208-84-103-4.my-advin.com` (`208.84.103.4`) | 4 vCPU, 8 GB RAM, 118 GB disk (69% used, 36 GB free — 64 GB free at 00:10 UTC the same day; the watchdog's floor is 25 GB on `/var/lib`). |
-| **Deployed Commit** | `dc69448` (a realm watchdog is required while it is enabled, not while its realm runs) | Deployed 15:07:45 UTC 2026-09-04. Neither realm's fingerprint moved, so both engines kept running: `demo-ok` and `mainnet-ok result=unchanged-left-running`. Verified on the host in the same receipt: both liveness timers `active`, both engines and both signal workers `active` with heartbeats 0–2 s, `real-money armed`. |
-| **Rollback Target** | `2f4af5e5ee50de1df226701454ac1b8f4764d511` | Stored in `/opt/liquidity-migration-engine/previous-commit`. |
+| **Host** | `ip-208-84-103-4.my-advin.com` (`208.84.103.4`) | 4 vCPU, 8 GB RAM, 118 GB disk (70% used, 35 GB free — 64 GB free at 00:10 UTC and 36 GB at 15:07 the same day; the watchdog's floor is 25 GB on `/var/lib`). |
+| **Deployed Commit** | `bf30fd6` (the recorder's heartbeat no longer waits on a walk of the tape) | Deployed 15:32:34 UTC 2026-09-04 by run `33889491439`. Neither realm's fingerprint moved, so both engines kept running: `demo-ok` and `mainnet-ok result=unchanged-left-running`. Both recorders `result=restarted` — the change is theirs. Verified on the host in the same receipt: both engines `active` with 2 s and 3 s heartbeats, both signal workers 1 s and 4 s, the Bybit recorder 12 s and the Binance recorder 3 s, every timer `active`, `real-money armed`. |
+| **Rollback Target** | `dc69448474325163afc6f4ca48ef30bd64315a3d` | Stored in `/opt/liquidity-migration-engine/previous-commit`. |
 | **Funded Status** | `real-money armed` | `REAL_MONEY=true`. The engine is running with healthy heartbeats. |
 | **Equity History** | `liquidity-migration-equity-recorder.timer`, every minute | One sample per engine and per tape recorder to `/var/lib/liquidity-migration/equity/<kind>-<realm>-<YYYY-MM>.jsonl`; a realm with no readable heartbeat is written as `state=absent`. `scripts/ops.sh curve mainnet` reads it on the host. Each run also pushes four samples to Grafana Cloud stack `proudtortoise1017` through `influx-prod-55-prod-gb-south-1`; `/etc/liquidity-migration/observability.env` is `root:liquidity-migration` mode `0640`, and the dedicated access policy grants only `metrics:write`. Verified through 12:32 UTC on 2026-09-04: every scheduled run reports `recorded and pushed 4 samples`. Dashboard UID `liqmig-fleet` is bound to `grafanacloud-proudtortoise1017-prom`. [docs/observability.md](docs/observability.md). |
 | **Signal IPC** | spool row + `stream.sock` doorbell | Every observation is a spool row first; the socket frame only saves the engine its next poll. Worker generations were renewed on both realms on 2026-09-03 after the desync; the old `g805c44f0…` (mainnet) and `gc4d0071f…` (demo) cursors stay in the WAL. |
