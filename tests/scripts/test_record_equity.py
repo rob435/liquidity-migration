@@ -631,3 +631,13 @@ def test_status_panels_read_the_instant_and_counters_are_charted_as_increases() 
     for expr in _expressions(dashboard):
         if "lm_recorder_" in expr:
             assert "$realm" not in expr, expr
+
+
+def test_account_charts_give_mainnet_an_independent_axis() -> None:
+    dashboard = _dashboard()
+    by_title = {panel["title"]: panel for panel in dashboard["panels"]}
+    for title in ("Equity", "Open exposure"):
+        overrides = by_title[title]["fieldConfig"]["overrides"]
+        mainnet = next(override for override in overrides if override["matcher"]["options"] == "/mainnet/")
+        properties = {row["id"]: row["value"] for row in mainnet["properties"]}
+        assert properties["custom.axisPlacement"] == "right"

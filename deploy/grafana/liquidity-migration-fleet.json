@@ -385,7 +385,7 @@
       "type": "timeseries",
       "id": 11,
       "title": "Equity",
-      "description": "Current venue account equity over the selected time range.",
+      "description": "Current venue account equity. Demo uses the left axis and mainnet the right; both retain their real USDT values but scale independently so each account's movement stays readable.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
@@ -413,7 +413,35 @@
           },
           "decimals": 2
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/mainnet/"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisColorMode",
+                "value": "series"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -449,7 +477,7 @@
       "type": "timeseries",
       "id": 12,
       "title": "Open exposure",
-      "description": "Current absolute entry notional across open positions. This is exposure, not margin or PnL.",
+      "description": "Current absolute entry notional across open positions. Demo uses the left axis and mainnet the right; both retain their real USDT values but scale independently. This is exposure, not margin or PnL.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
@@ -477,7 +505,35 @@
           },
           "decimals": 2
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/mainnet/"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisColorMode",
+                "value": "series"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {

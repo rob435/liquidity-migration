@@ -211,6 +211,20 @@ def _increase(metric: str, *, window: str = "15m", realm: bool = True) -> str:
     return f"increase({metric}{selector}[{window}])"
 
 
+def _mainnet_axis() -> list[dict[str, Any]]:
+    return [
+        {
+            "matcher": {"id": "byRegexp", "options": "/mainnet/"},
+            "properties": [
+                {"id": "custom.axisPlacement", "value": "right"},
+                {"id": "custom.axisColorMode", "value": "series"},
+                {"id": "custom.lineWidth", "value": 3},
+                {"id": "color", "value": {"mode": "fixed", "fixedColor": "yellow"}},
+            ],
+        }
+    ]
+
+
 def panels() -> list[Panel]:
     out: list[Panel] = []
     y = 0
@@ -267,7 +281,8 @@ def panels() -> list[Panel]:
         timeseries(
             11,
             "Equity",
-            "Current venue account equity over the selected time range.",
+            "Current venue account equity. Demo uses the left axis and mainnet the right; both retain their "
+            "real USDT values but scale independently so each account's movement stays readable.",
             _grid(0, y, 12, 8),
             [(f"lm_engine_equity_usdt{{{REALM}}}", "{{realm}}")],
             unit="currencyUSD",
@@ -275,19 +290,23 @@ def panels() -> list[Panel]:
             min_zero=False,
             legend_table=True,
             fill_opacity=14,
+            overrides=_mainnet_axis(),
         )
     )
     out.append(
         timeseries(
             12,
             "Open exposure",
-            "Current absolute entry notional across open positions. This is exposure, not margin or PnL.",
+            "Current absolute entry notional across open positions. Demo uses the left axis and mainnet the "
+            "right; both retain their real USDT values but scale independently. This is exposure, not margin "
+            "or PnL.",
             _grid(12, y, 12, 8),
             [(f"lm_engine_position_entry_notional_usdt{{{REALM}}}", "{{realm}}")],
             unit="currencyUSD",
             decimals=2,
             legend_table=True,
             fill_opacity=14,
+            overrides=_mainnet_axis(),
         )
     )
     y += 8

@@ -157,7 +157,8 @@ the script renders.
 
 The six-hour default view is an operator view. Change the time range for incident
 analysis. Empty order-path windows are absent, so the latency chart marks only
-real measurements.
+real measurements. The account charts keep real USDT values but put demo on the
+left axis and mainnet on the right so the smaller funded account remains visible.
 
 **`ack` is empty on demo, and that is a property of the venue path, not a
 fault in the sampler.** `engine latency --wal` is the authority and states it
