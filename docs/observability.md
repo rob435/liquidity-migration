@@ -47,7 +47,7 @@ noise, and the history is the point.
 | `rolling_loss_net_usdt`, `rolling_loss_limit_usdt`, `rolling_loss_tripped`, `rolling_loss_trades` | The 24h breaker against its ceiling |
 | `uptime_s`, `market_events`, `orders_sent`, `fills`, `stream_resets`, `amends_confirmed`, `amends_pulled_unconfirmed` | Since-boot counters; all reset on restart. The dashboard reads them as `increase()` |
 | `fills_maker_share`, `fill_all_in_arrival_bps`, `fill_arrival_shortfall_bps`, `fill_fee_coverage`, `fill_markout_1m_our_way_bps` | What the trading cost |
-| `decide_*`, `durable_*`, `wire_*`, `ack_*`, `dispatch_queue_*`, `venue_task_*`, `core_resume_*`, `end_to_end_*` (`_p50_ns`, `_p99_ns`), `barrier_wait_p99_ns`, `quota_hold_p99_ns` | The order path step by step, from the engine's 60-second latency ledger. Null in the file and **absent from the push** in a minute nothing went out: an empty window is no measurement, never zero |
+| `decide_*`, `durable_*`, `wire_*`, `ack_*`, `dispatch_queue_*`, `venue_task_*`, `core_resume_*`, `end_to_end_*` (`_p50_ns`, `_p99_ns`), `barrier_wait_p99_ns`, `quota_hold_p99_ns` | The order path step by step, from the engine's 60-second latency ledger. Null in the file and **absent from the push** in a minute nothing went out: an empty window is no measurement, never zero. `wire` is the whole venue task (decision to completion) and so contains the round trip; `ack` is the round trip alone and records only where the adapter stamped the socket write — see the note below |
 | `status_healthy`, `status_ready`, `status_starting`, `status_recovering`, `heartbeat_age_ms` | Worker rows only: the bounded producer verdict and heartbeat freshness; `starting` is cold fill, while `recovering` is a live repair inside its two-minute bound |
 | `ws_connected`, `ws_gap_open`, `ws_gap_age_ms`, `ws_last_frame_age_ms`, `ticker_coverage_complete` | Worker rows only: raw transport and coverage state. A coverage miss remains visible while the producer applies its two-minute persistence bound |
 | `ticker_rows`, `ticker_capacity`, `*_topics_accepted`, `*_topics_quarantined`, `ws_queue_fill` | Worker rows only: exact subscription and bounded in-memory queue facts |
@@ -161,6 +161,20 @@ the script renders.
 "Order path last measured" is the panel to read when the engines are quiet:
 demo should never show more than about 16 minutes (the probe), mainnet shows
 how long the funded engine has gone without sending anything.
+
+**`ack` is empty on demo, and that is a property of the venue path, not a
+fault in the sampler.** `engine latency --wal` is the authority and states it
+outright: on the demo WAL every `place` "carries no transport stamps, so their
+venue round trip is inside `all of it`", while on the mainnet WAL 317 of 320
+places carry the stamp and report a round trip of their own. So a demo number
+is decision-to-completion including the round trip; a mainnet number breaks
+the round trip out. Check before comparing the two:
+
+```bash
+scripts/ops.sh deploy verify   # or, on the host, per realm:
+/opt/liquidity-migration-engine/bin/engine latency \
+  --wal /var/lib/liquidity-migration-engine/engine.wal
+```
 
 ### Metric Names
 

@@ -35,15 +35,38 @@ edit STATE.md to match.
     timer active and enabled. Demo runs four sleeves: the appended `probe` id
     3 is the first sleeve added to a realm with a non-empty WAL, which is what
     the append-only name check exists for.
-  - The probe fired at 16:45:00 UTC, on the wall-clock boundary, and the
-    sampler at 16:45:21 read the measurement out of the engine's 60-second
-    ledger: **end to end p50 11.84 ms**, `wire` p99 11.74 ms, WAL barrier
-    p99 0.36 ms, `decide` under a microsecond. `wire` is 99% of it, so the
-    socket write is where this box's order path spends its time — the venue's
-    own round trip is the separate `ack` step. By 16:46 the ledger was null
-    again, which is the window doing its job: the probe at :00 and the sampler
-    at :20 catch each other exactly once, and that is why the probe fires on
-    the wall clock rather than on an interval since boot.
+  - The probe fired at 16:45:00 and again at 17:00:00.000780 UTC, on the
+    wall-clock boundary, logging `probe rested symbol=BTCUSDT px=77314.0
+    qty=0.001`, and the sampler at :21 read each measurement out of the
+    engine's 60-second ledger: `end_to_end` p50 11.84 then 11.29 ms, `wire`
+    p99 11.74 then 11.20 ms, WAL barrier p99 0.36 then 0.23 ms, `decide` under
+    a microsecond. By the following minute the ledger was null again, which is
+    the window doing its job: the probe at :00 and the sampler at :20 catch
+    each other exactly once, and that is why the probe fires on the wall clock
+    rather than on an interval since boot.
+  - **Correction to this entry as first written.** It said `wire` is the socket
+    write and the venue's round trip is the separate `ack` step, so this box's
+    order path spends its time on the socket write. Both halves are wrong.
+    `Segment::Wire` is recorded as `completed_ns - decided_ns`
+    (`engine/engine-core/src/engine/venue_completion.inc.rs:56`) — the whole
+    venue task, round trip included — and `Segment::Ack` records only when the
+    adapter stamped `sent_ns`. `engine latency --wal` states it plainly: on the
+    demo WAL all 107 `place` commands "carry no transport stamps, so their
+    venue round trip is inside `all of it`", where it is p50 9.67 ms over those
+    107. So an 11 ms demo reading is decision-to-completion including the round
+    trip, not a socket write.
+  - What the same tool says about the funded realm, which the probe does not
+    touch: 317 of 320 mainnet places do carry the stamp, and their venue round
+    trip is p50 3.74 ms, p99 59.48 ms, worst 429.76 ms, inside an `all of it`
+    of p50 3.95 ms, p99 429.92 ms. The tail is the venue's, not the engine's.
+    Named, not acted on: whether demo's places should carry the same stamp as
+    mainnet's is a venue-adapter question and the owner's call.
+  - On BTCUSDT the venue floor is `minOrderQty` 0.001 BTC, about 77 USDT at
+    today's price, which dominates the 5 USDT `minNotionalValue`. The probe's
+    `notional_usdt = 5.5` is therefore a floor the venue overrides, and each
+    demo probe rests about 77 USDT of notional 3% under the bid for two
+    seconds. Immaterial against 1,629 USDT of demo equity, and it never
+    reaches the funded account, which has no probe.
   - Recorder, since the 16:19 restart carrying `skip_utf8_validation` and
     `queue_frames = 131072`: **0 queue overruns, 0 ping/pong timeouts, 0 shard
     reconnects, 0 dropped frames**, 16 of 16 shards connected, queue fill

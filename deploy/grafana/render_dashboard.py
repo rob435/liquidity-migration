@@ -374,8 +374,10 @@ def panels() -> list[Panel]:
         timeseries(
             33,
             "Order path, end to end",
-            "From the strategy's decision to the venue's acknowledgement, p50 and p99 over the ledger's "
-            "60-second window. Plotted as points: there is a value only in a minute an order went out.",
+            "The engine's own `end_to_end`: market event to submitted order, p50 and p99 over the ledger's "
+            "60-second window. Plotted as points: there is a value only in a minute an order went out. It stops "
+            "at the submit, so the venue's round trip is not in it — read `ack` below for that, and note that "
+            "`ack` is empty on a venue path that leaves no transport stamp.",
             _grid(12, y, 12, 8),
             [
                 (f"lm_engine_end_to_end_p50_ns{{{REALM}}}", "{{realm}} p50"),
@@ -391,10 +393,13 @@ def panels() -> list[Panel]:
         timeseries(
             34,
             "Order path by step, p99",
-            "Where the time goes. decide is the strategy; durable is the log barrier; wire is encode and send; "
-            "ack is the venue's round trip; dispatch queue, venue task and core resume are the hand-offs "
-            "between them. barrier wait is what the order actually waited on the disk; quota hold is time the "
-            "adapter held a command back to stay inside the venue's request quota.",
+            "Where the time goes. decide is the strategy; durable is the log barrier; wire is the whole venue "
+            "task, decision to completion, so it contains the round trip; ack is the round trip on its own and "
+            "is recorded only when the adapter stamped the socket write — mainnet's places carry that stamp, "
+            "demo's do not, so demo shows no ack line and its round trip sits inside wire. dispatch queue, "
+            "venue task and core resume are the hand-offs. barrier wait is what the order actually waited on "
+            "the disk; quota hold is time the adapter held a command back to stay inside the request quota. "
+            "`engine latency --wal PATH` is the authority and says how many commands carry stamps.",
             _grid(0, y, 16, 9),
             [
                 (f"lm_engine_decide_p99_ns{{{REALM}}}", "{{realm}} decide"),

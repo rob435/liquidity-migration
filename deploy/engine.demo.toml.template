@@ -129,6 +129,8 @@ symbol = "BTCUSDT"
 every_s = 900
 rest_ms = 2000
 offset_bps = 300
+# A floor, not a target: the venue's own minimum wins. On BTCUSDT that is
+# minOrderQty 0.001 BTC, about 77 USDT, well above the 5 USDT minNotionalValue.
 notional_usdt = 5.5
 stop_loss_fraction = 0.08
 enabled = true
