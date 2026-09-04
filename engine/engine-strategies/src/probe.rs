@@ -8,8 +8,9 @@
 //! and cancels it `rest_ms` later. Post-only and that far from the touch, the
 //! order is not meant to fill; if it does, the inventory is closed at market
 //! at once and the heartbeat shows the sleeve blocked until it is flat. It
-//! never raises a strategy error: the watchdog pages on those, and a probe
-//! must never page anybody.
+//! never raises a strategy error: that field means a broken reducer
+//! (`engine-core`'s `named_strategy_errors`), and a probe that filled is
+//! expected state which clears itself.
 //!
 //! Wall-clock boundaries rather than "every N seconds since boot", so the
 //! minute sampler that reads the heartbeat's 60-second latency window at :20

@@ -411,8 +411,8 @@ def panels() -> list[Panel]:
             35,
             "Working orders, blockers, faults",
             "Orders resting at the venue right now, entry blockers across every sleeve, flatten requests not "
-            "yet acknowledged, and strategy errors. A strategy error is a broken reducer and pages; the rest "
-            "is ordinary state.",
+            "yet acknowledged, and strategy errors. A blocker is ordinary trading state; a strategy error "
+            "means a reducer could not reduce its inputs, and is the one to read first.",
             _grid(16, y, 8, 9),
             [
                 (f"lm_engine_working_entries{{{REALM}}}", "{{realm}} working orders"),
