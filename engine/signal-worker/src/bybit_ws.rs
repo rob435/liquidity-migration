@@ -67,6 +67,31 @@ pub struct StreamHealth {
     pub queue_capacity: usize,
 }
 
+/// The transport history a replacement stream must continue. Epoch numbering
+/// is the token `mark_gap_repaired` matches, so it must never restart while
+/// repair lanes from the outgoing stream are still in flight; the gap stamp and
+/// the two counters are what the heartbeat and the on-call page read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamContinuity {
+    pub epoch: u64,
+    pub gap_open: bool,
+    pub gap_open_since_ms: Option<i64>,
+    pub reconnect_count: u64,
+    pub fault_count: u64,
+}
+
+impl From<&StreamHealth> for StreamContinuity {
+    fn from(health: &StreamHealth) -> Self {
+        Self {
+            epoch: health.epoch,
+            gap_open: health.gap_open,
+            gap_open_since_ms: health.gap_open_since_ms,
+            reconnect_count: health.reconnect_count,
+            fault_count: health.fault_count,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TickerSample {
     pub observed_ts_ms: i64,
@@ -89,10 +114,28 @@ impl BybitPublicStream {
         request_timeout_ms: u64,
         retry_base_ms: u64,
     ) -> Result<Self, WorkerError> {
-        Self::with_url(
+        Self::spawn_continuing(
+            symbols,
+            request_timeout_ms,
+            retry_base_ms,
+            StreamContinuity::default(),
+        )
+    }
+
+    /// The successor of a stream this process is replacing. It keeps the
+    /// outgoing stream's epoch numbering, gap stamp, and fault clocks: a symbol
+    /// set changing is not the transport recovering.
+    pub fn spawn_continuing(
+        symbols: Vec<String>,
+        request_timeout_ms: u64,
+        retry_base_ms: u64,
+        continuity: StreamContinuity,
+    ) -> Result<Self, WorkerError> {
+        Self::with_url_continuing(
             PUBLIC_LINEAR_URL,
             symbols,
             StreamOptions::production(request_timeout_ms, retry_base_ms),
+            continuity,
         )
     }
 
@@ -108,22 +151,35 @@ impl BybitPublicStream {
             symbols: symbols.clone(),
             events,
             control,
-            shared: Arc::new(Mutex::new(SharedState::new(&symbols))),
+            shared: Arc::new(Mutex::new(SharedState::continuing(
+                &symbols,
+                StreamContinuity::default(),
+            ))),
             worker: tokio::spawn(async {}),
             queue_capacity,
         })
     }
 
+    #[cfg(test)]
     fn with_url(
         url: impl Into<String>,
         symbols: Vec<String>,
         options: StreamOptions,
     ) -> Result<Self, WorkerError> {
+        Self::with_url_continuing(url, symbols, options, StreamContinuity::default())
+    }
+
+    fn with_url_continuing(
+        url: impl Into<String>,
+        symbols: Vec<String>,
+        options: StreamOptions,
+        continuity: StreamContinuity,
+    ) -> Result<Self, WorkerError> {
         let symbols = normalize_symbols(symbols)?;
         let queue_capacity = stream_event_capacity(symbols.len());
         let (tx, events) = mpsc::channel(queue_capacity);
         let (control_tx, control) = watch::channel(ControlState::default());
-        let shared = Arc::new(Mutex::new(SharedState::new(&symbols)));
+        let shared = Arc::new(Mutex::new(SharedState::continuing(&symbols, continuity)));
         let worker = StreamWorker {
             url: url.into(),
             topics: topics(&symbols),
@@ -134,7 +190,7 @@ impl BybitPublicStream {
             events: tx,
             control: control_tx,
             options,
-            epoch: 0,
+            epoch: continuity.epoch,
             next_request_nonce: 0,
             backoff: options.backoff_start,
             next_ping_at: Instant::now() + options.ping_interval,
@@ -291,11 +347,16 @@ struct SharedState {
 }
 
 impl SharedState {
-    fn new(symbols: &BTreeSet<String>) -> Self {
+    fn continuing(symbols: &BTreeSet<String>, continuity: StreamContinuity) -> Self {
         let tickers = TickerCache::new(symbols.clone());
         Self {
             health: StreamHealth {
                 ticker_capacity: tickers.capacity(),
+                epoch: continuity.epoch,
+                gap_open: continuity.gap_open,
+                gap_open_since_ms: continuity.gap_open_since_ms,
+                reconnect_count: continuity.reconnect_count,
+                fault_count: continuity.fault_count,
                 ..StreamHealth::default()
             },
             tickers,
@@ -1443,6 +1504,44 @@ mod tests {
             start + HOUR_MS - 1,
             start + HOUR_MS,
         )
+    }
+
+    #[test]
+    fn a_replacement_stream_continues_the_epoch_and_the_gap_clock() {
+        // A universe refresh replaces the stream object, and the health record
+        // lives in it. A successor that starts fresh reuses epoch numbers a
+        // repair lane spawned for the outgoing stream still carries, and dates
+        // the gap from the refresh instead of from the outage.
+        let symbols = BTreeSet::from(["BTCUSDT".to_owned(), "ETHUSDT".to_owned()]);
+        let outgoing = StreamHealth {
+            connected: true,
+            epoch: 3,
+            gap_open: true,
+            gap_open_since_ms: Some(1_788_538_993_000),
+            reconnect_count: 2,
+            fault_count: 5,
+            ..StreamHealth::default()
+        };
+
+        let restarted = SharedState::continuing(&symbols, StreamContinuity::default());
+        assert_eq!(restarted.health.epoch, 0);
+        assert_eq!(restarted.health.gap_open_since_ms, None);
+
+        let mut successor = SharedState::continuing(&symbols, StreamContinuity::from(&outgoing));
+        assert_eq!(successor.health.reconnect_count, 2);
+        assert_eq!(successor.health.fault_count, 5);
+        assert!(successor.health.gap_open);
+        successor.prepare_epoch(successor.health.epoch + 1, 1_788_546_193_000);
+
+        assert_eq!(
+            successor.health.epoch, 4,
+            "the successor's first epoch is above every epoch an in-flight repair still holds"
+        );
+        assert_eq!(
+            successor.health.gap_open_since_ms,
+            Some(1_788_538_993_000),
+            "the gap is as old as the transport's, not as old as the rebuild"
+        );
     }
 
     #[test]

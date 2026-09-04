@@ -6,6 +6,114 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 ~21:24 UTC — Mainnet signal worker paged `degraded` when its
+  120-minute grace expired, and the transport clauses in the page were the
+  hourly universe refresh rebuilding the stream, not an outage.**
+  - Incident `mainnet-014ec4a90a2fde5f`, scope `mainnet`, host
+    `ip-208-84-103-4`, ref
+    `worker-status:liquidity-migration-signal-worker-mainnet.service`. Exact
+    alert text: `CRITICAL liquidity-migration-signal-worker-mainnet.service
+    reports 'degraded': Bybit WebSocket repair gap open for 75s; ticker
+    coverage incomplete (169/169 rows, 169/169 topics accepted); carry cycle
+    has not completed`. The funded engine was not named, did not page, and is
+    not implicated. No unit was down and no heartbeat was stale.
+  - Timeline. The payload carries no page timestamp; every time below is
+    derived from its journal, which runs unbroken to 21:23:19. The unit was
+    stopped 19:22:53 and started 19:23:13 (pid 2264838). `STARTUP_MAX_MS` is
+    120 min (`engine/signal-worker/src/live.rs:34`), so the grace ended
+    21:23:13; with `last_carry_cycle_completed_wall_ts_ms` still `None`,
+    `startup_runtime_status` (`live.rs:2859`) stops returning `starting` at
+    that instant and the 3-minute watchdog paged at its first run after it.
+    That is the whole verdict. The transport clauses are not why it paged.
+  - Diagnosis. 75 s before the page puts the gap's open stamp within seconds
+    of 21:23:19, the two instrument-lane rejection lines
+    (`live.rs:1775`, `live.rs:1783`, inside `commit_universe_inputs`), which
+    the Instruments arm calls at `live.rs:957` immediately before
+    `reconfigure_stream` at `live.rs:966`. Nothing else can stamp a
+    75-second-old gap: `open_gap` (`bybit_ws.rs:415`), `mark_source_fault`
+    (`bybit_ws.rs:261`) and `prepare_epoch` (`bybit_ws.rs:366`) all use
+    `gap_open_since_ms.get_or_insert`, so an already-open gap keeps its
+    original stamp, and the journal carries no `gap opened in epoch` line and
+    no lane failure between the 19:23:13 start and 21:23:19. What did happen
+    is `reconfigure_stream` replacing the whole `BybitPublicStream` because
+    the refreshed universe moved the symbol set. The health record lives in
+    that object, so `gap_open_since_ms`, `reconnect_count`, `fault_count` and
+    `epoch` all reset, and the successor's first epoch is 1, whose
+    `reconnected: self.epoch > 1` (`bybit_ws.rs:768`) is false — no journal
+    line marks the rebuild either.
+  - Two consequences, the second worse than the page. The gap age the on-call
+    page reads is the age of the last universe refresh, so a two-hour outage
+    can read as seconds old and this incident's two pages (3651 s at 17:58,
+    75 s here) are not comparable. And epoch numbering restarting at 1 defeats
+    the token `mark_gap_repaired` matches on (`bybit_ws.rs:247`): `repair_epoch`
+    still holds the outgoing stream's epoch, a stream that never disconnected
+    sits at epoch 1, so a repair lane in flight across a rebuild can close the
+    successor's boot gap on a token minted for a different subscription —
+    coverage declared complete on one that was never verified.
+  - Changed. `StreamContinuity` (`bybit_ws.rs:75`) is the transport history a
+    replacement stream carries: epoch, gap flag and stamp, reconnect and fault
+    counts. `BybitPublicStream::spawn_continuing` (`bybit_ws.rs:128`) seeds
+    both the shared state (`SharedState::continuing`, `bybit_ws.rs:350`) and
+    the worker's epoch counter from it, so the successor's first epoch is above
+    every epoch an in-flight repair still holds and its boot gap keeps the
+    older stamp. `LiveRunner::stream_reconfiguration` (`live.rs:2296`) returns
+    the moved symbol set with the outgoing stream's history and
+    `reconfigure_stream` (`live.rs:2310`) hands it over. No cadence, threshold,
+    grace window or health definition changed.
+  - Tests.
+    `bybit_ws::tests::a_replacement_stream_continues_the_epoch_and_the_gap_clock`
+    fails without the fix at `left: 0, right: 2` on the carried reconnect count,
+    and asserts the successor's first epoch is 4 above an outgoing 3 and its
+    gap stamp is the outgoing one.
+    `live::tests::a_universe_refresh_hands_the_replacement_stream_the_old_transport_history`
+    fails with `StreamContinuity { epoch: 0, gap_open: false, gap_open_since_ms:
+    None, reconnect_count: 0, fault_count: 0 }` against the outgoing stream's
+    `gap_open: true, gap_open_since_ms: Some(8640000000), fault_count: 1`.
+    Local gate: `cargo test -p signal-worker` 120 passed (118 before these
+    two), `cargo test --workspace` all green, `cargo fmt --check` and
+    `cargo clippy --workspace --all-targets -D warnings` clean, Ruff clean, and
+    `tests/scripts/test_scripts_check_fleet_liveness.py` 39 passed. The rest of
+    pytest cannot collect in this sandbox — `certifi`, `numpy`, `polars` and 22
+    other pinned packages are absent — which is a sandbox limit, not this
+    change: it touches no Python.
+  - Not fixed here, and it is the larger half. Why a mainnet cold fill has no
+    completed carry cycle after 120 min is the same open question the demo page
+    left at 19:16, and the payload does not reach it. Also unresolved by design:
+    `ticker coverage incomplete (169/169 rows, 169/169 topics accepted)` is not
+    a contradiction — `ticker_coverage_complete` turns on two inputs those
+    counts do not measure, every sampled row carrying a mark price fresher than
+    `mark_max_age_ms` (`sample_tickers`, `bybit_ws.rs:224`) and every cached row
+    having been seen in a WebSocket snapshot (`TickerCache::ws_coverage_complete`,
+    `bybit_ws.rs:634`). A cache refilled by the REST fallback after a rebuild
+    reads 169/169 with coverage false. Publishing those two numerators would
+    make the next page readable; it is instrumentation the owner has not asked
+    for, so it is proposed here, not added.
+  - Not the cause, for the next reader: the missing ~20:23 instrument-lane
+    summary between 19:23:19 and 21:23:19 is the dropped hourly tick already
+    fixed on `main` as `b29fd37` and undeployed. It is why the 21:23:19 refresh
+    carried two hours of membership drift and moved the symbol set. The hourly
+    `691 instrument row(s) left out of the table` and `40 ticker row(s)` lines
+    are Bybit's dated futures kept out of a perpetuals table by design
+    (`engine/signal-worker/src/normalize.rs:136`).
+  - Owner action, on the host. The minute samples hold what the page cannot:
+
+    ```bash
+    # The transport and the cold fill through the two hours before the page.
+    grep '"kind": *"worker"' \
+      /var/lib/liquidity-migration/equity/worker-mainnet-$(date -u +%Y-%m).jsonl \
+      | jq -c 'select(.ts_ms >= 1788549600000)
+               | {t: (.ts_ms/1000 | strftime("%H:%M")), status, ws_connected,
+                  ws_gap_age_ms, ws_last_frame_age_ms, kline_topics_accepted,
+                  ticker_capacity, carry_cycle_age_ms, long_cycle_age_ms}'
+
+    # And the account through the same window.
+    scripts/ops.sh curve mainnet
+    ```
+
+    A `ws_gap_age_ms` that drops to near zero at 21:23 without the carry cycle
+    ever leaving `None` confirms the rebuild reset the clock rather than the
+    transport recovering.
+
 - **2026-09-04 ~20:25 UTC — Demo signal worker paged `degraded` 62 minutes
   into a fresh process, which proves a transport blip the page still cannot
   name: one Bybit frame drought longer than 30 s and shorter than the socket's

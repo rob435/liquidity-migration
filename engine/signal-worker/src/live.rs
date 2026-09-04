@@ -10,7 +10,8 @@ use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 
 use crate::bybit_ws::{
-    ticker_wire, BybitPublicStream, ConfirmedKline, StreamEvent, StreamHealth, TickerSample,
+    ticker_wire, BybitPublicStream, ConfirmedKline, StreamContinuity, StreamEvent, StreamHealth,
+    TickerSample,
 };
 use crate::config::SignalWorkerConfig;
 use crate::http::{percent_encode, wall_ms, PublicHttpClient};
@@ -2290,15 +2291,31 @@ impl LiveRunner {
         critical.into_iter().collect()
     }
 
-    fn reconfigure_stream(&self, stream: &mut BybitPublicStream) -> Result<(), WorkerError> {
+    /// The symbol set a universe refresh moved to, with the transport history
+    /// the replacement stream must carry over. `None` when the set is unchanged.
+    fn stream_reconfiguration(
+        &self,
+        stream: &BybitPublicStream,
+    ) -> Option<(Vec<String>, StreamContinuity)> {
         let desired = self.stream_symbols().into_iter().collect::<BTreeSet<_>>();
         if &desired == stream.symbols() {
-            return Ok(());
+            return None;
         }
-        *stream = BybitPublicStream::spawn(
+        Some((
             desired.into_iter().collect(),
+            StreamContinuity::from(&stream.health()),
+        ))
+    }
+
+    fn reconfigure_stream(&self, stream: &mut BybitPublicStream) -> Result<(), WorkerError> {
+        let Some((desired, continuity)) = self.stream_reconfiguration(stream) else {
+            return Ok(());
+        };
+        *stream = BybitPublicStream::spawn_continuing(
+            desired,
             self.config.live.request_timeout_ms,
             self.config.live.retry_base_ms,
+            continuity,
         )?;
         Ok(())
     }
@@ -4217,7 +4234,7 @@ mod tests {
         FUNDING_FETCH_CHUNK_SIZE, KLINE_FETCH_CHUNK_SIZE, LANE_COMPLETION_QUEUE_CAPACITY,
         STARTUP_MAX_MS, TRANSIENT_RECOVERY_MAX_MS, WHALE_FETCH_CHUNK_SIZE,
     };
-    use crate::bybit_ws::BybitPublicStream;
+    use crate::bybit_ws::{BybitPublicStream, StreamContinuity};
     use crate::config::SignalWorkerConfig;
     use crate::model::{
         BinanceWhaleWire, BootstrapCoverage, BybitFundingWire, BybitInstrumentWire,
@@ -4527,6 +4544,49 @@ mod tests {
         );
 
         drop(stream);
+        drop(runner);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_universe_refresh_hands_the_replacement_stream_the_old_transport_history() {
+        // The hourly instrument lane replaces the stream whenever membership
+        // moves. The gap stamp and the fault clocks belong to the process, not
+        // to the stream object, so a page read seconds after a refresh reported
+        // a seconds-old gap over an outage that had been open for hours.
+        let root = temporary_root("reconfigure-keeps-transport-history");
+        let _ = std::fs::remove_dir_all(&root);
+        let options = LiveRunOptions {
+            state_dir: root.join("state"),
+            spool_dir: root.join("spool"),
+            heartbeat: root.join("heartbeat.json"),
+        };
+        let runner =
+            LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
+        let outgoing = BybitPublicStream::inert_for_test(vec!["BTCUSDT".into()]).unwrap();
+        let gap_opened_at_ms = 100 * DAY_MS;
+        outgoing.mark_source_fault(gap_opened_at_ms);
+
+        let (symbols, continuity) = runner
+            .stream_reconfiguration(&outgoing)
+            .expect("a moved symbol set rebuilds the stream");
+
+        assert!(symbols.contains(&"ETHUSDT".to_owned()));
+        assert_eq!(
+            continuity,
+            StreamContinuity::from(&outgoing.health()),
+            "the replacement continues the outgoing stream, it does not start a new one"
+        );
+        assert_eq!(continuity.gap_open_since_ms, Some(gap_opened_at_ms));
+        assert!(continuity.gap_open);
+        assert_eq!(continuity.fault_count, 1);
+        assert_ne!(
+            continuity,
+            StreamContinuity::default(),
+            "a fresh history is what reset the on-call page's gap clock"
+        );
+
+        drop(outgoing);
         drop(runner);
         std::fs::remove_dir_all(root).unwrap();
     }
