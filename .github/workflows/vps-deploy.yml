@@ -19,13 +19,12 @@ permissions:
   contents: read
 
 concurrency:
-  # Dispatched VPS operations share one queue per ref, so a safety disarm can
-  # preempt a deploy and two deploys never interleave. Push and PR checks get a
-  # group of their own per run: their artifacts are per commit, nothing they do
-  # touches the host, and queueing them behind the previous run's release-test
-  # job only made the next deploy wait on a job that is not on its path.
+  # Mutating VPS operations share one queue per ref, so a safety disarm can
+  # preempt a deploy and two deploys never interleave. Read-only diagnosis and
+  # push/PR checks get a group per run: an incident read must not wait behind an
+  # unrelated release soak after the host handover has already finished.
   group: >-
-    ${{ github.event_name == 'workflow_dispatch'
+    ${{ github.event_name == 'workflow_dispatch' && inputs.mode != 'diagnose'
         && format('liquidity-migration-vps-{0}', github.ref)
         || format('liquidity-migration-ci-{0}', github.run_id) }}
   # A funded disarm is the safety interrupt: it requests cancellation of the

@@ -207,8 +207,22 @@ edit STATE.md to match.
     production SSH identity, and returns unit/watchdog evidence. The routine
     prompt requires that receipt before diagnosis and after deploy; delivery
     drills are explicit no-op events.
+  - The first live rollout completed at 14:43 UTC on commit `2f4af5e5`: all
+    three watchdog scopes returned `ok`, the new private route files were
+    `root:root 0600`, both engines retained five positions with `may_open=true`,
+    and Grafana accepted four fresh samples. Independent inspection then found
+    both fresh signal-worker heartbeats self-reporting `degraded`, with their
+    Bybit repair gaps still open. The old watchdog parsed engine admission but
+    ignored the worker's own verdict, so it printed a false `ok`.
+  - Realm liveness now accepts only the worker's bounded `starting` state or
+    `ready`; `degraded`, `stopped`, an unknown verdict, malformed heartbeat
+    shape, or spool backpressure is `CRITICAL`. The incident includes the
+    worker journal and names source, cycle, coverage, quarantine, and gap-age
+    evidence. The read-only `diagnose` dispatch now has a per-run concurrency
+    group: the first live attempt exposed that the supposedly off-path release
+    soak still held the mutating-workflow queue after host handover.
   - Proof before rollout: focused on-call/deploy tests pass, followed by the
-    full `scripts/dev.sh check` gate: Ruff, ShellCheck, mypy, 1,423 Python
+    full `scripts/dev.sh check` gate: Ruff, ShellCheck, mypy, 1,427 Python
     tests, Rust formatting, Clippy, and the complete Rust workspace tests.
 
 - **2026-09-04 — The fleet keeps an equity history: one sample a minute to

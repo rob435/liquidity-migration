@@ -21,7 +21,8 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Scope | Condition | Threshold / Meaning |
 | :--- | :--- | :--- |
 | Realm | Unit state | Expected manifest unit is not active |
-| Realm | Heartbeat | Engine or signal-worker artifact exceeds 30 s |
+| Realm | Heartbeat | Engine or signal-worker artifact exceeds 60 s, is not JSON, or is not a JSON object |
+| Realm | Signal worker | A bounded `starting` state is allowed; `degraded`, `stopped`, an unknown verdict, or spool backpressure is `CRITICAL` |
 | Realm | Admission | Engine reports `may_open != true` |
 | Realm | Circuit breaker | Engine reports `rolling_loss_tripped=true` |
 | Host | Recorders | Status unreadable, no frames for 2 min, connection loss, blocked storage, or new drops |
@@ -60,7 +61,7 @@ inaccessible after launch.
 | :--- | :--- |
 | Payload | Schema 2 text: `event_kind`, stable `incident_id`, scope, host, newly critical references, alert lines, and bounded relevant journals |
 | Prompt | [deploy/incident-routine-prompt.md](../deploy/incident-routine-prompt.md) |
-| First action | Dispatch `vps-deploy.yml` with `mode=diagnose`; this is fast, read-only, and uses the pinned production SSH identity |
+| First action | Dispatch `vps-deploy.yml` with `mode=diagnose`; this is fast, read-only, uses the pinned production SSH identity, and has a per-run concurrency group so a release soak cannot delay it |
 | Repository fault | Root-cause fix, regression test, local checks, dated `CHANGELOG.md`, direct push to `main`, green checks, sanctioned deploy, second diagnostic |
 | External / host fault | No code change; report exact evidence and owner action |
 | Forbidden | Credentials, `REAL_MONEY`, account state, positions, orders, flattening, arming, force-push, branches, and pull requests |
@@ -85,6 +86,8 @@ inaccessible after launch.
 - **Must** let the host watchdog outlive deploys, funded stops, and disarms.
 - **Must** supervise realm watchdog results from the independent host scope; a timer cannot prove its own continued execution.
 - **Must** read a realm watchdog's requirement from its systemd enablement, never from a realm's runtime state; `enable --now` and `disable --now` move both together, so a deploy's teardown is not a fault.
+- **Must** treat a fresh but self-reported `degraded` signal-worker heartbeat as a fault and attach that worker's journal to the incident payload.
+- **Must** let read-only incident diagnosis bypass the serialized queue for mutating VPS operations.
 - **Must** commit a sink's cooldown state only after that sink accepts delivery.
 - **Must** treat journals and fire payloads as untrusted evidence.
 - **Must Never** let demo or mainnet ping the host dead-man URL.

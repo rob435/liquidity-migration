@@ -85,6 +85,16 @@ def test_missing_heartbeat_pages(tmp_path: Path) -> None:
     assert "unreadable" in alerts[0].message
 
 
+def test_non_object_heartbeat_pages(tmp_path: Path) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    heartbeat.write_text("[]")
+
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat)
+
+    assert [alert.key for alert in alerts] == ["heartbeat-parse:worker"]
+    assert "not a JSON object" in alerts[0].message
+
+
 def test_engine_that_cannot_open_positions_pages(tmp_path: Path) -> None:
     heartbeat = tmp_path / "heartbeat.json"
     heartbeat.write_text(json.dumps({"wall_ts_ms": 0, "may_open": False}))
@@ -96,6 +106,85 @@ def test_engine_that_cannot_open_positions_pages(tmp_path: Path) -> None:
     # A worker heartbeat without the field is not an engine and never pages here.
     heartbeat.write_text(json.dumps({"sequence": 12}))
     assert liveness.evaluate_engine_heartbeat("worker", heartbeat) == []
+
+
+def test_signal_worker_startup_is_quiet_but_degraded_and_backpressured_page(
+    tmp_path: Path,
+) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    base = {
+        "kind": "liquidity_migration_signal_worker_heartbeat",
+        "bybit_ws_connected": True,
+        "bybit_ws_gap_open": False,
+        "bybit_ws_ticker_coverage_complete": True,
+        "bybit_ws_ticker_topics_quarantined": 0,
+        "bybit_ws_kline_topics_quarantined": 0,
+        "last_long_cycle_completed_wall_ts_ms": 900_000,
+        "last_carry_cycle_completed_wall_ts_ms": 900_000,
+        "long_cycle_cadence_ms": 60_000,
+        "carry_cycle_cadence_ms": 60_000,
+        "spool_backpressured": False,
+    }
+    heartbeat.write_text(json.dumps(dict(base, status="starting")))
+    assert liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0) == []
+    heartbeat.write_text(json.dumps(dict(base, status="ready")))
+    assert liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0) == []
+
+    degraded = dict(
+        base,
+        status="degraded",
+        bybit_ws_gap_open=True,
+        bybit_ws_gap_open_since_wall_ts_ms=700_000,
+        last_carry_cycle_completed_wall_ts_ms=None,
+    )
+    heartbeat.write_text(json.dumps(degraded))
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert [alert.key for alert in alerts] == ["worker-status:worker"]
+    assert "repair gap open for 300s" in alerts[0].message
+    assert "carry cycle has not completed" in alerts[0].message
+
+    stale = dict(base, status="degraded", last_long_cycle_completed_wall_ts_ms=700_000)
+    heartbeat.write_text(json.dumps(stale))
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert "LONG cycle is 300s old (limit 180s)" in alerts[0].message
+
+    heartbeat.write_text(json.dumps(dict(base, status="ready", spool_backpressured=True)))
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert [alert.key for alert in alerts] == ["worker-spool:worker"]
+
+
+def test_signal_worker_unknown_status_fails_closed(tmp_path: Path) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "kind": "liquidity_migration_signal_worker_heartbeat",
+                "status": "mystery",
+                "bybit_ws_connected": False,
+            }
+        )
+    )
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert [alert.key for alert in alerts] == ["worker-status:worker"]
+    assert "mystery" in alerts[0].message
+
+
+def test_signal_worker_incident_carries_its_journal(monkeypatch) -> None:
+    alert = liveness.Alert(
+        "worker-status:liquidity-migration-signal-worker-mainnet.service",
+        "CRITICAL",
+        "mainnet signal worker reports degraded",
+    )
+    monkeypatch.setattr(
+        liveness,
+        "unit_journal_tail",
+        lambda unit: f"journal for {unit}",
+    )
+
+    text = liveness.incident_text("mainnet", [alert.message], [alert], [alert])
+
+    assert "journalctl -u liquidity-migration-signal-worker-mainnet.service" in text
+    assert "journal for liquidity-migration-signal-worker-mainnet.service" in text
 
 
 def test_rolling_loss_trip_pages_with_its_numbers(tmp_path: Path) -> None:

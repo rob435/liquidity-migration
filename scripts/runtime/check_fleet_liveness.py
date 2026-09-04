@@ -3,8 +3,9 @@
 
 Scope is ``demo``, ``mainnet``, or ``host``. The realm scopes read the fleet
 manifest, require every always-on unit in the realm to be active, require each
-heartbeat-bearing unit's heartbeat file to be fresh, and alert when an engine
-reports it can no longer open positions or that its rolling-loss trip is on.
+heartbeat-bearing unit's heartbeat file to be fresh, require each signal worker
+to leave its bounded startup and report ready, and alert when an engine reports
+it can no longer open positions or that its rolling-loss trip is on.
 The ``host`` scope watches the units the manifest marks independent — the
 market recorder, its hourly upload, the state backup — plus disk space, the
 off-box backup stamp, the recorder's own status file, the upload receipt, and
@@ -48,6 +49,7 @@ from liquidity_migration.policy.oncall_environment import (  # noqa: E402
 
 _MANIFEST = _REPO_ROOT / "deploy" / "fleet_manifest.tsv"
 _ACCOUNT_SCOPES = ("demo", "mainnet", "host")
+_SIGNAL_WORKER_HEARTBEAT_KIND = "liquidity_migration_signal_worker_heartbeat"
 
 
 @dataclass(frozen=True)
@@ -179,7 +181,7 @@ def evaluate_heartbeats(
                 )
             )
             continue
-        alerts.extend(evaluate_engine_heartbeat(row.unit, path))
+        alerts.extend(evaluate_engine_heartbeat(row.unit, path, now=now))
     return alerts
 
 
@@ -201,18 +203,82 @@ def _rolling_loss_detail(payload: dict[str, object]) -> str:
     return f"own closed trades lost {abs(net):.2f} USDT inside {window} against a {limit:.2f} USDT limit"
 
 
-def evaluate_engine_heartbeat(unit: str, path: Path) -> list[Alert]:
-    # A fresh engine heartbeat can still say the engine latched itself out of
-    # opening positions, or that its rolling-loss trip is on — states every
-    # other check here reads as healthy. A heartbeat carrying neither field is
-    # a worker's, a recorder's, or an older engine's, and pages for neither.
+def _signal_worker_detail(payload: dict[str, object], *, now: float) -> str:
+    reasons: list[str] = []
+    if payload.get("bybit_ws_connected") is not True:
+        reasons.append("Bybit WebSocket disconnected")
+    if payload.get("bybit_ws_gap_open") is True:
+        since_ms = _number(payload.get("bybit_ws_gap_open_since_wall_ts_ms"))
+        if since_ms is None:
+            reasons.append("Bybit WebSocket repair gap open")
+        else:
+            age_sec = max(0.0, now - since_ms / 1000)
+            reasons.append(f"Bybit WebSocket repair gap open for {age_sec:.0f}s")
+    if payload.get("bybit_ws_ticker_coverage_complete") is not True:
+        reasons.append("ticker coverage incomplete")
+    ticker_quarantined = _number(payload.get("bybit_ws_ticker_topics_quarantined"))
+    kline_quarantined = _number(payload.get("bybit_ws_kline_topics_quarantined"))
+    if ticker_quarantined is not None and ticker_quarantined > 0:
+        reasons.append(f"{ticker_quarantined:g} ticker topics quarantined")
+    if kline_quarantined is not None and kline_quarantined > 0:
+        reasons.append(f"{kline_quarantined:g} kline topics quarantined")
+    now_ms = now * 1000
+    for lane, completed_key, cadence_key in (
+        ("LONG", "last_long_cycle_completed_wall_ts_ms", "long_cycle_cadence_ms"),
+        ("carry", "last_carry_cycle_completed_wall_ts_ms", "carry_cycle_cadence_ms"),
+    ):
+        completed_ms = _number(payload.get(completed_key))
+        cadence_ms = _number(payload.get(cadence_key))
+        if completed_ms is None:
+            reasons.append(f"{lane} cycle has not completed")
+        elif completed_ms > now_ms:
+            reasons.append(f"{lane} cycle timestamp is in the future")
+        elif cadence_ms is not None and now_ms - completed_ms > cadence_ms * 3:
+            reasons.append(
+                f"{lane} cycle is {(now_ms - completed_ms) / 1000:.0f}s old "
+                f"(limit {cadence_ms * 3 / 1000:.0f}s)"
+            )
+    return "; ".join(reasons) or "worker self-check is degraded"
+
+
+def evaluate_engine_heartbeat(
+    unit: str, path: Path, *, now: float | None = None
+) -> list[Alert]:
+    # Freshness alone is not health. Signal workers publish their own verdict;
+    # engines publish entry and loss latches. Other heartbeat-bearing units do
+    # not carry these fields and receive only the structural JSON check here.
     try:
         payload = json.loads(path.read_bytes())
     except (OSError, ValueError):
         return [Alert(f"heartbeat-parse:{unit}", "CRITICAL", f"{unit} heartbeat is not JSON")]
     if not isinstance(payload, dict):
-        return []
+        return [
+            Alert(
+                f"heartbeat-parse:{unit}",
+                "CRITICAL",
+                f"{unit} heartbeat is not a JSON object",
+            )
+        ]
     alerts = []
+    if payload.get("kind") == _SIGNAL_WORKER_HEARTBEAT_KIND:
+        status = payload.get("status")
+        if status not in ("starting", "ready"):
+            alerts.append(
+                Alert(
+                    f"worker-status:{unit}",
+                    "CRITICAL",
+                    f"{unit} reports {status!r}: "
+                    f"{_signal_worker_detail(payload, now=time.time() if now is None else now)}",
+                )
+            )
+        if payload.get("spool_backpressured") is True:
+            alerts.append(
+                Alert(
+                    f"worker-spool:{unit}",
+                    "CRITICAL",
+                    f"{unit} signal spool is backpressured",
+                )
+            )
     if "may_open" in payload and payload.get("may_open") is not True:
         alerts.append(Alert(f"may-open:{unit}", "CRITICAL", f"{unit} cannot open positions"))
     if payload.get("rolling_loss_tripped") is True:
@@ -540,12 +606,21 @@ def unit_journal_tail(unit: str, lines: int = 40) -> str:
 
 
 def _incident_units(scope: str, alerts: list[Alert]) -> list[str]:
+    unit_alert_prefixes = (
+        "unit:",
+        "heartbeat:",
+        "heartbeat-parse:",
+        "may-open:",
+        "rolling-loss:",
+        "worker-status:",
+        "worker-spool:",
+    )
     units = sorted(
         {
             alert.key.split(":", 1)[1]
             for alert in alerts
             if alert.severity == "CRITICAL"
-            and alert.key.startswith(("unit:", "heartbeat:"))
+            and alert.key.startswith(unit_alert_prefixes)
             and alert.key.endswith(".service")
         }
     )
