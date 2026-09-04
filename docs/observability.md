@@ -151,16 +151,17 @@ the script renders.
 | Section | Panels | Reads |
 | :--- | :--- | :--- |
 | **Status** | engine, entry permission, worker verdict and coverage, recorder state | `lm_engine_{up,may_open}`, `lm_worker_{status_healthy,ticker_coverage_complete}`, `lm_recorder_up` |
-| **Account** | current equity and open exposure with a compact value header and one sparkline per metric and realm | `equity_usdt`, `position_entry_notional_usdt` |
+| **Account** | current equity and OI with one locally scaled sparkline per metric and realm | `equity_usdt`, `position_entry_notional_usdt` |
 | **Execution** | current orders, fills, and stream resets over 15 minutes with isolated sparklines; p99 order-path latency with end-to-end emphasized | `increase({orders_sent,fills,stream_resets}[15m])`, `{end_to_end,ack,durable,decide}_p99_ns` |
 | **Data pipeline** | current market-data age, peak worker capacity, recorder traffic and queue capacity, and recorder faults | engine, worker, and recorder ages; worker and recorder fill ratios; recorder shard, drop, and reconnect series |
 
 The six-hour default view is an operator view. Change the time range for incident
 analysis. Empty order-path windows are absent, so the latency chart marks only
-real measurements. Each account card keeps its current USDT value at the top
-right and its own sparkline scale, so `D` and `M` never overlap or flatten each
-other. Open exposure is the entry notional of the current open position. Other
-labels use the same short realm names.
+real measurements. Each account card puts its label and colored USDT value on
+one top line. Its range adds padding around the observed minimum and maximum, so
+a flat nonzero series stays centered instead of sitting on the floor. `OI` is
+the entry notional of the current open position. Other labels use the same short
+realm names.
 
 **`ack` is empty on demo, and that is a property of the venue path, not a
 fault in the sampler.** `engine latency --wal` is the authority and states it

@@ -123,6 +123,7 @@ def stat(
     justify_mode: str = "center",
     orientation: str = "auto",
     text: dict[str, int] | None = None,
+    color_mode: str | None = None,
 ) -> Panel:
     steps = [{"color": color, "value": value} for color, value in (thresholds or [("text", None)])]
     defaults: dict[str, Any] = {
@@ -152,7 +153,7 @@ def stat(
         "gridPos": grid,
         "fieldConfig": {"defaults": defaults, "overrides": overrides or []},
         "options": {
-            "colorMode": "background" if mappings else ("value" if thresholds else "none"),
+            "colorMode": color_mode or ("background" if mappings else ("value" if thresholds else "none")),
             "graphMode": "area" if sparkline else "none",
             "justifyMode": justify_mode,
             "orientation": orientation,
@@ -239,6 +240,27 @@ def _name_colors(rows: list[tuple[str, str, str]]) -> list[dict[str, Any]]:
     ]
 
 
+def _padded_sparkline_bounds(selector: str) -> tuple[str, str]:
+    low = f"min_over_time({selector}[$__range])"
+    high = f"max_over_time({selector}[$__range])"
+    pad = f"(({high}) - ({low})) * 0.10 + ({high}) * 0.01"
+    return f"clamp_min(({low}) - ({pad}), 0)", f"({high}) + ({pad})"
+
+
+def _config_from_query(ref_id: str, field_name: str, handler: str, apply_to: str) -> dict[str, Any]:
+    return {
+        "id": "configFromData",
+        "options": {
+            "configRefId": ref_id,
+            "applyTo": {"id": "byName", "options": apply_to},
+            "mappings": [
+                {"fieldName": "Time", "handlerKey": "__ignore"},
+                {"fieldName": field_name, "handlerKey": handler, "reducerId": "lastNotNull"},
+            ],
+        },
+    }
+
+
 def panels() -> list[Panel]:
     out: list[Panel] = []
     y = 0
@@ -299,46 +321,69 @@ def panels() -> list[Panel]:
     )
     y += 5
 
-    for panel_id, x, realm, metric, title, description, color in (
-        (11, 0, "demo", "lm_engine_equity_usdt", "D · Equity", "Current account equity · USDT.", "green"),
-        (13, 6, "mainnet", "lm_engine_equity_usdt", "M · Equity", "Current account equity · USDT.", "yellow"),
+    for panel_id, x, panel_y, realm, metric, label, description, color in (
+        (11, 0, y, "demo", "lm_engine_equity_usdt", "D · Equity", "Current account equity · USDT.", "green"),
+        (
+            13,
+            12,
+            y,
+            "mainnet",
+            "lm_engine_equity_usdt",
+            "M · Equity",
+            "Current account equity · USDT.",
+            "yellow",
+        ),
         (
             12,
-            12,
+            0,
+            y + 4,
             "demo",
             "lm_engine_position_entry_notional_usdt",
-            "D · Open exposure",
+            "D · OI",
             "Entry notional of the current open position · USDT.",
             "green",
         ),
         (
             14,
-            18,
+            12,
+            y + 4,
             "mainnet",
             "lm_engine_position_entry_notional_usdt",
-            "M · Open exposure",
+            "M · OI",
             "Entry notional of the current open position · USDT.",
             "yellow",
         ),
     ):
-        out.append(
-            stat(
-                panel_id,
-                title,
-                description,
-                _grid(x, y, 6, 4),
-                [(f'{metric}{{realm="{realm}",{REALM}}}', "Now")],
-                unit="currencyUSD",
-                decimals=2,
-                sparkline=True,
-                text_mode="value_and_name",
-                justify_mode="auto",
-                orientation="horizontal",
-                text={"titleSize": 11, "valueSize": 24},
-                overrides=_name_colors([("Now", "Now", color)]),
-            )
+        selector = f'{metric}{{realm="{realm}",{REALM}}}'
+        lower, upper = _padded_sparkline_bounds(selector)
+        panel = stat(
+            panel_id,
+            "",
+            description,
+            _grid(x, panel_y, 12, 4),
+            [(selector, label)],
+            unit="currencyUSD",
+            decimals=2,
+            sparkline=True,
+            text_mode="value_and_name",
+            justify_mode="auto",
+            orientation="horizontal",
+            text={"titleSize": 14, "valueSize": 14},
+            color_mode="value",
+            overrides=_name_colors([(label, label, color)]),
         )
-    y += 4
+        panel["targets"].extend(
+            [
+                _target(lower, "Min", instant=True, ref="B"),
+                _target(upper, "Max", instant=True, ref="C"),
+            ]
+        )
+        panel["transformations"] = [
+            _config_from_query("B", "Min", "min", label),
+            _config_from_query("C", "Max", "max", label),
+        ]
+        out.append(panel)
+    y += 8
 
     out.append(row(30, "Execution", y))
     y += 1
@@ -506,7 +551,7 @@ def dashboard() -> dict[str, Any]:
         "tags": ["liquidity-migration"],
         "timezone": "utc",
         "schemaVersion": 39,
-        "version": 9,
+        "version": 10,
         "editable": True,
         "graphTooltip": 1,
         "refresh": "1m",

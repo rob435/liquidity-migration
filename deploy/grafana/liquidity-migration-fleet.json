@@ -7,7 +7,7 @@
   ],
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 9,
+  "version": 10,
   "editable": true,
   "graphTooltip": 1,
   "refresh": "1m",
@@ -516,7 +516,7 @@
     {
       "type": "stat",
       "id": 11,
-      "title": "D \u00b7 Equity",
+      "title": "",
       "description": "Current account equity \u00b7 USDT.",
       "datasource": {
         "type": "prometheus",
@@ -525,7 +525,7 @@
       "gridPos": {
         "x": 0,
         "y": 5,
-        "w": 6,
+        "w": 12,
         "h": 4
       },
       "fieldConfig": {
@@ -550,12 +550,12 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^Now$/"
+              "options": "/^D \u00b7 Equity$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "Now"
+                "value": "D \u00b7 Equity"
               },
               {
                 "id": "color",
@@ -569,13 +569,13 @@
         ]
       },
       "options": {
-        "colorMode": "none",
+        "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "horizontal",
         "text": {
-          "titleSize": 11,
-          "valueSize": 24
+          "titleSize": 14,
+          "valueSize": 14
         },
         "textMode": "value_and_name",
         "wideLayout": true,
@@ -596,25 +596,93 @@
           "editorMode": "code",
           "expr": "lm_engine_equity_usdt{realm=\"demo\",realm=~\"$realm\"}",
           "instant": false,
-          "legendFormat": "Now",
+          "legendFormat": "D \u00b7 Equity",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "clamp_min((min_over_time(lm_engine_equity_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range])) - (((max_over_time(lm_engine_equity_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range])) - (min_over_time(lm_engine_equity_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range]))) * 0.10 + (max_over_time(lm_engine_equity_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range])) * 0.01), 0)",
+          "instant": true,
+          "legendFormat": "Min",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "(max_over_time(lm_engine_equity_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range])) + (((max_over_time(lm_engine_equity_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range])) - (min_over_time(lm_engine_equity_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range]))) * 0.10 + (max_over_time(lm_engine_equity_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range])) * 0.01)",
+          "instant": true,
+          "legendFormat": "Max",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "configFromData",
+          "options": {
+            "configRefId": "B",
+            "applyTo": {
+              "id": "byName",
+              "options": "D \u00b7 Equity"
+            },
+            "mappings": [
+              {
+                "fieldName": "Time",
+                "handlerKey": "__ignore"
+              },
+              {
+                "fieldName": "Min",
+                "handlerKey": "min",
+                "reducerId": "lastNotNull"
+              }
+            ]
+          }
+        },
+        {
+          "id": "configFromData",
+          "options": {
+            "configRefId": "C",
+            "applyTo": {
+              "id": "byName",
+              "options": "D \u00b7 Equity"
+            },
+            "mappings": [
+              {
+                "fieldName": "Time",
+                "handlerKey": "__ignore"
+              },
+              {
+                "fieldName": "Max",
+                "handlerKey": "max",
+                "reducerId": "lastNotNull"
+              }
+            ]
+          }
         }
       ]
     },
     {
       "type": "stat",
       "id": 13,
-      "title": "M \u00b7 Equity",
+      "title": "",
       "description": "Current account equity \u00b7 USDT.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
-        "x": 6,
+        "x": 12,
         "y": 5,
-        "w": 6,
+        "w": 12,
         "h": 4
       },
       "fieldConfig": {
@@ -639,12 +707,12 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^Now$/"
+              "options": "/^M \u00b7 Equity$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "Now"
+                "value": "M \u00b7 Equity"
               },
               {
                 "id": "color",
@@ -658,13 +726,13 @@
         ]
       },
       "options": {
-        "colorMode": "none",
+        "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "horizontal",
         "text": {
-          "titleSize": 11,
-          "valueSize": 24
+          "titleSize": 14,
+          "valueSize": 14
         },
         "textMode": "value_and_name",
         "wideLayout": true,
@@ -685,25 +753,93 @@
           "editorMode": "code",
           "expr": "lm_engine_equity_usdt{realm=\"mainnet\",realm=~\"$realm\"}",
           "instant": false,
-          "legendFormat": "Now",
+          "legendFormat": "M \u00b7 Equity",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "clamp_min((min_over_time(lm_engine_equity_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range])) - (((max_over_time(lm_engine_equity_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range])) - (min_over_time(lm_engine_equity_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range]))) * 0.10 + (max_over_time(lm_engine_equity_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range])) * 0.01), 0)",
+          "instant": true,
+          "legendFormat": "Min",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "(max_over_time(lm_engine_equity_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range])) + (((max_over_time(lm_engine_equity_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range])) - (min_over_time(lm_engine_equity_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range]))) * 0.10 + (max_over_time(lm_engine_equity_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range])) * 0.01)",
+          "instant": true,
+          "legendFormat": "Max",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "configFromData",
+          "options": {
+            "configRefId": "B",
+            "applyTo": {
+              "id": "byName",
+              "options": "M \u00b7 Equity"
+            },
+            "mappings": [
+              {
+                "fieldName": "Time",
+                "handlerKey": "__ignore"
+              },
+              {
+                "fieldName": "Min",
+                "handlerKey": "min",
+                "reducerId": "lastNotNull"
+              }
+            ]
+          }
+        },
+        {
+          "id": "configFromData",
+          "options": {
+            "configRefId": "C",
+            "applyTo": {
+              "id": "byName",
+              "options": "M \u00b7 Equity"
+            },
+            "mappings": [
+              {
+                "fieldName": "Time",
+                "handlerKey": "__ignore"
+              },
+              {
+                "fieldName": "Max",
+                "handlerKey": "max",
+                "reducerId": "lastNotNull"
+              }
+            ]
+          }
         }
       ]
     },
     {
       "type": "stat",
       "id": 12,
-      "title": "D \u00b7 Open exposure",
+      "title": "",
       "description": "Entry notional of the current open position \u00b7 USDT.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
-        "x": 12,
-        "y": 5,
-        "w": 6,
+        "x": 0,
+        "y": 9,
+        "w": 12,
         "h": 4
       },
       "fieldConfig": {
@@ -728,12 +864,12 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^Now$/"
+              "options": "/^D \u00b7 OI$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "Now"
+                "value": "D \u00b7 OI"
               },
               {
                 "id": "color",
@@ -747,13 +883,13 @@
         ]
       },
       "options": {
-        "colorMode": "none",
+        "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "horizontal",
         "text": {
-          "titleSize": 11,
-          "valueSize": 24
+          "titleSize": 14,
+          "valueSize": 14
         },
         "textMode": "value_and_name",
         "wideLayout": true,
@@ -774,25 +910,93 @@
           "editorMode": "code",
           "expr": "lm_engine_position_entry_notional_usdt{realm=\"demo\",realm=~\"$realm\"}",
           "instant": false,
-          "legendFormat": "Now",
+          "legendFormat": "D \u00b7 OI",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "clamp_min((min_over_time(lm_engine_position_entry_notional_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range])) - (((max_over_time(lm_engine_position_entry_notional_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range])) - (min_over_time(lm_engine_position_entry_notional_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range]))) * 0.10 + (max_over_time(lm_engine_position_entry_notional_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range])) * 0.01), 0)",
+          "instant": true,
+          "legendFormat": "Min",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "(max_over_time(lm_engine_position_entry_notional_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range])) + (((max_over_time(lm_engine_position_entry_notional_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range])) - (min_over_time(lm_engine_position_entry_notional_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range]))) * 0.10 + (max_over_time(lm_engine_position_entry_notional_usdt{realm=\"demo\",realm=~\"$realm\"}[$__range])) * 0.01)",
+          "instant": true,
+          "legendFormat": "Max",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "configFromData",
+          "options": {
+            "configRefId": "B",
+            "applyTo": {
+              "id": "byName",
+              "options": "D \u00b7 OI"
+            },
+            "mappings": [
+              {
+                "fieldName": "Time",
+                "handlerKey": "__ignore"
+              },
+              {
+                "fieldName": "Min",
+                "handlerKey": "min",
+                "reducerId": "lastNotNull"
+              }
+            ]
+          }
+        },
+        {
+          "id": "configFromData",
+          "options": {
+            "configRefId": "C",
+            "applyTo": {
+              "id": "byName",
+              "options": "D \u00b7 OI"
+            },
+            "mappings": [
+              {
+                "fieldName": "Time",
+                "handlerKey": "__ignore"
+              },
+              {
+                "fieldName": "Max",
+                "handlerKey": "max",
+                "reducerId": "lastNotNull"
+              }
+            ]
+          }
         }
       ]
     },
     {
       "type": "stat",
       "id": 14,
-      "title": "M \u00b7 Open exposure",
+      "title": "",
       "description": "Entry notional of the current open position \u00b7 USDT.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
-        "x": 18,
-        "y": 5,
-        "w": 6,
+        "x": 12,
+        "y": 9,
+        "w": 12,
         "h": 4
       },
       "fieldConfig": {
@@ -817,12 +1021,12 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/^Now$/"
+              "options": "/^M \u00b7 OI$/"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "Now"
+                "value": "M \u00b7 OI"
               },
               {
                 "id": "color",
@@ -836,13 +1040,13 @@
         ]
       },
       "options": {
-        "colorMode": "none",
+        "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "horizontal",
         "text": {
-          "titleSize": 11,
-          "valueSize": 24
+          "titleSize": 14,
+          "valueSize": 14
         },
         "textMode": "value_and_name",
         "wideLayout": true,
@@ -863,9 +1067,77 @@
           "editorMode": "code",
           "expr": "lm_engine_position_entry_notional_usdt{realm=\"mainnet\",realm=~\"$realm\"}",
           "instant": false,
-          "legendFormat": "Now",
+          "legendFormat": "M \u00b7 OI",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "clamp_min((min_over_time(lm_engine_position_entry_notional_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range])) - (((max_over_time(lm_engine_position_entry_notional_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range])) - (min_over_time(lm_engine_position_entry_notional_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range]))) * 0.10 + (max_over_time(lm_engine_position_entry_notional_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range])) * 0.01), 0)",
+          "instant": true,
+          "legendFormat": "Min",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "(max_over_time(lm_engine_position_entry_notional_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range])) + (((max_over_time(lm_engine_position_entry_notional_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range])) - (min_over_time(lm_engine_position_entry_notional_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range]))) * 0.10 + (max_over_time(lm_engine_position_entry_notional_usdt{realm=\"mainnet\",realm=~\"$realm\"}[$__range])) * 0.01)",
+          "instant": true,
+          "legendFormat": "Max",
+          "range": false,
+          "refId": "C"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "configFromData",
+          "options": {
+            "configRefId": "B",
+            "applyTo": {
+              "id": "byName",
+              "options": "M \u00b7 OI"
+            },
+            "mappings": [
+              {
+                "fieldName": "Time",
+                "handlerKey": "__ignore"
+              },
+              {
+                "fieldName": "Min",
+                "handlerKey": "min",
+                "reducerId": "lastNotNull"
+              }
+            ]
+          }
+        },
+        {
+          "id": "configFromData",
+          "options": {
+            "configRefId": "C",
+            "applyTo": {
+              "id": "byName",
+              "options": "M \u00b7 OI"
+            },
+            "mappings": [
+              {
+                "fieldName": "Time",
+                "handlerKey": "__ignore"
+              },
+              {
+                "fieldName": "Max",
+                "handlerKey": "max",
+                "reducerId": "lastNotNull"
+              }
+            ]
+          }
         }
       ]
     },
@@ -876,7 +1148,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 9,
+        "y": 13,
         "w": 24,
         "h": 1
       },
@@ -893,7 +1165,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 10,
+        "y": 14,
         "w": 10,
         "h": 9
       },
@@ -1098,7 +1370,7 @@
       },
       "gridPos": {
         "x": 10,
-        "y": 10,
+        "y": 14,
         "w": 14,
         "h": 9
       },
@@ -1311,7 +1583,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 19,
+        "y": 23,
         "w": 24,
         "h": 1
       },
@@ -1328,7 +1600,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 20,
+        "y": 24,
         "w": 9,
         "h": 8
       },
@@ -1499,7 +1771,7 @@
       },
       "gridPos": {
         "x": 9,
-        "y": 20,
+        "y": 24,
         "w": 8,
         "h": 8
       },
@@ -1669,7 +1941,7 @@
       },
       "gridPos": {
         "x": 17,
-        "y": 20,
+        "y": 24,
         "w": 7,
         "h": 8
       },

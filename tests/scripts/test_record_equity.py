@@ -616,6 +616,10 @@ def test_stats_read_the_instant_and_sparklines_read_the_range() -> None:
     for panel in stats:
         sparkline = panel["options"]["graphMode"] == "area"
         for target in panel["targets"]:
+            if panel["id"] in {11, 12, 13, 14} and target["refId"] in {"B", "C"}:
+                assert target.get("instant") is True, panel["title"]
+                assert target.get("range") is False, panel["title"]
+                continue
             assert target.get("instant") is not sparkline, panel["title"]
             assert target.get("range") is sparkline, panel["title"]
     # A since-boot counter drawn raw is a cliff at every restart; the view
@@ -636,18 +640,32 @@ def test_stats_read_the_instant_and_sparklines_read_the_range() -> None:
 
 def test_account_cards_isolate_demo_and_mainnet_sparklines() -> None:
     dashboard = _dashboard()
-    by_title = {panel["title"]: panel for panel in dashboard["panels"]}
-    for title in ("D · Equity", "M · Equity", "D · Open exposure", "M · Open exposure"):
-        panel = by_title[title]
+    by_id = {panel["id"]: panel for panel in dashboard["panels"]}
+    for panel_id, label, x, y in (
+        (11, "D · Equity", 0, 5),
+        (13, "M · Equity", 12, 5),
+        (12, "D · OI", 0, 9),
+        (14, "M · OI", 12, 9),
+    ):
+        panel = by_id[panel_id]
         assert panel["type"] == "stat"
+        assert panel["title"] == ""
         assert panel["options"]["graphMode"] == "area"
         assert panel["options"]["textMode"] == "value_and_name"
         assert panel["options"]["justifyMode"] == "auto"
         assert panel["options"]["orientation"] == "horizontal"
-        assert panel["options"]["text"] == {"titleSize": 11, "valueSize": 24}
-        assert panel["gridPos"]["h"] == 4
-        assert panel["targets"][0]["legendFormat"] == "Now"
-        assert len(panel["targets"]) == 1
+        assert panel["options"]["text"] == {"titleSize": 14, "valueSize": 14}
+        assert panel["options"]["colorMode"] == "value"
+        assert panel["gridPos"] == {"x": x, "y": y, "w": 12, "h": 4}
+        assert panel["targets"][0]["legendFormat"] == label
+        assert [target["legendFormat"] for target in panel["targets"]] == [label, "Min", "Max"]
+        assert "min_over_time" in panel["targets"][1]["expr"]
+        assert "max_over_time" in panel["targets"][2]["expr"]
+        assert [transform["options"]["mappings"][1]["handlerKey"] for transform in panel["transformations"]] == [
+            "min",
+            "max",
+        ]
+        assert all(transform["options"]["applyTo"]["options"] == label for transform in panel["transformations"])
 
 
 def test_time_series_legends_do_not_squeeze_the_plots() -> None:
