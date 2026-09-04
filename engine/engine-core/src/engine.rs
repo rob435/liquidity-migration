@@ -40,12 +40,13 @@ use std::time::Duration;
 
 use engine_types::risk::ClosedTradeRow;
 use engine_types::{
-    quantize, AccountView, Action, AmendSpec, DenyReason, EngineEvent, Feed, InstrumentRule,
-    Intent, MarketEvent, MarketFeed, MarketState, OrderFeed, OrderKind, OrderRequest, OrderUpdate,
-    RiskKernel, RiskVerdict, RuntimeControlFeed, Side, SignalFeed, SignalObservation, StopSpec,
-    Strategy, StrategyCheckpoint, StrategyEvent, StrategyGlobalCheckpointState, StrategyId,
-    Subscription, SymbolId, SymbolTable, TimeInForce, VenueError, VenueGateway, Wal, WalError,
-    WalRecord, WorkPolicy,
+    quantize, AccountView, Action, AmendSpec, DenyReason, EngineEvent, Feed, FeedError,
+    InstrumentRule, Intent, MarketEvent, MarketFeed, MarketState, OrderFeed, OrderKind,
+    OrderRequest, OrderUpdate, RiskKernel, RiskVerdict, RuntimeControlError, RuntimeControlFeed,
+    RuntimeControlRequest, Side, SignalError, SignalFeed, SignalObservation, StopSpec, Strategy,
+    StrategyCheckpoint, StrategyEvent, StrategyGlobalCheckpointState, StrategyId, Subscription,
+    SymbolId, SymbolTable, TimeInForce, VenueError, VenueGateway, Wal, WalError, WalRecord,
+    WorkPolicy,
 };
 
 use crate::attribution::{self, Attribution};
@@ -291,6 +292,16 @@ struct Refusal {
 /// How long an unchanged refusal stays collapsed before it is written again,
 /// so a condition that never clears still leaves a periodic trace.
 const REFUSAL_REPEAT_NS: u64 = 60_000_000_000;
+
+/// What one loop turn decided about the next.
+enum Turn {
+    Continue,
+    /// The private stream erred without closing. The turn's follow-up work
+    /// still runs, but a suspended drain is not resumed on a stream that
+    /// just broke.
+    Hiccup,
+    Stop(StopReason),
+}
 
 pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     pub wal: W,
@@ -586,7 +597,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     {
         tokio::pin!(shutdown);
         let mut flush_tick = timer.interval(self.group_flush);
-        let mut stopped_by = StopReason::Shutdown;
         let mut signals_open = true;
         let mut controls_open = true;
         self.update_signal_requests(signal_feed)?;
@@ -597,7 +607,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.drain(clock::now_ns()).await?;
         }
 
-        loop {
+        let stopped_by = loop {
             let timer_wait = self
                 .host
                 .timers
@@ -616,92 +626,39 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 // observing the update first avoids a false timeout.
                 tokio::select! {
                     biased;
-                    _ = &mut shutdown, if self.drain_progress.is_none() => break,
-                    update = order_feed.next_update() => match update {
-                        Ok(update) => {
-                            let now = clock::now_ns();
-                            self.take_update(update).await?;
-                            self.drain(now).await?;
+                    _ = &mut shutdown, if self.drain_progress.is_none() => break StopReason::Shutdown,
+                    update = order_feed.next_update() => {
+                        if let Turn::Stop(reason) = self.on_order_feed(update, true).await? {
+                            break reason;
                         }
-                        Err(engine_types::FeedError::Closed) => {
-                            tracing::error!("order feed closed; stopping for supervised recovery");
-                            stopped_by = StopReason::FeedClosed;
-                            break;
-                        }
-                        Err(e) => {
-                            self.invalidate_private_stream()?;
-                            tracing::warn!(error = %e, "order feed hiccup");
-                            tokio::time::sleep(Duration::from_millis(1)).await;
-                        }
-                    },
+                    }
                     completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
-                        let completion = completion.ok_or_else(|| EngineError::State(
-                            "venue task stopped with mutations still outstanding".to_string()
-                        ))?;
-                        self.take_completion_turn(completion, order_feed).await?;
-                    },
+                        self.on_completion(completion, order_feed).await?;
+                    }
                     _ = flush_tick.tick() => self.on_tick().await?,
                     _ = timer.sleep(timer_wait.unwrap_or(Duration::MAX)), if timer_wait.is_some() => {
                         self.on_timers().await?;
-                    },
+                    }
                     _ = std::future::ready(()), if !self.halt_cancel_queue.is_empty() => {
                         self.dispatch_halt_cancel_group().await?;
                     }
                     _ = std::future::ready(()), if self.drain_progress.is_some() => {
                         self.drain(clock::now_ns()).await?;
                     }
-                    event = market_feed.next_event() => match event {
-                        Ok(event) => self.on_market(event).await?,
-                        Err(engine_types::FeedError::Closed) => {
-                            self.settle_after_market_close(order_feed).await?;
-                            stopped_by = StopReason::FeedClosed;
-                            break;
+                    event = market_feed.next_event() => {
+                        if let Turn::Stop(reason) = self.on_market_feed(event, order_feed).await? {
+                            break reason;
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "market feed hiccup");
-                            tokio::time::sleep(Duration::from_millis(1)).await;
-                        }
-                    },
-                    observation = signal_feed.next_observation(), if signals_open => match observation {
-                        Ok(observation) => self.queue_signal_observation(observation, signal_feed)?,
-                        Err(engine_types::SignalError::Closed) => signals_open = false,
-                        Err(error) => return Err(EngineError::State(error.to_string())),
-                    },
-                    request = control_feed.next_request(), if controls_open => match request {
-                        // A refused request is retired, never fatal: the spool
-                        // is durable, so a request the engine will never
-                        // accept would otherwise poison every restart.
-                        Ok(request) => match self.admit_runtime_control(&request) {
-                            Err(refusal) => {
-                                tracing::error!(
-                                    request_id = %request.request_id,
-                                    strategy = %request.strategy_name,
-                                    refusal,
-                                    "refusing durable runtime control request"
-                                );
-                                control_feed.reject_last().await.map_err(|error| {
-                                    EngineError::State(error.to_string())
-                                })?;
-                            }
-                            Ok(fresh) => {
-                                if fresh {
-                                    self.apply_runtime_control(request)?;
-                                }
-                                self.drain(clock::now_ns()).await?;
-                            }
-                        },
-                        Err(engine_types::RuntimeControlError::Closed) => controls_open = false,
-                        Err(error) => return Err(EngineError::State(error.to_string())),
+                    }
+                    observation = signal_feed.next_observation(), if signals_open => {
+                        self.on_signal_feed(observation, signal_feed, &mut signals_open)?;
+                    }
+                    request = control_feed.next_request(), if controls_open => {
+                        self.on_control_feed(request, control_feed, &mut controls_open).await?;
                     }
                 }
-
-                if !self.wanted_symbols.is_empty() {
-                    self.admit_wanted(market_feed, order_feed).await?;
-                }
-                if !self.pending_signal_deliveries.is_empty() {
-                    self.accept_pending_signals(signal_feed)?;
-                    self.drain(clock::now_ns()).await?;
-                }
+                self.after_turn(market_feed, order_feed, signal_feed)
+                    .await?;
                 continue;
             }
 
@@ -716,27 +673,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     update = order_feed.next_update() => Some(update),
                     _ = std::future::ready(()) => None,
                 };
-                match private_update {
-                    Some(Ok(update)) => self.take_update(update).await?,
-                    Some(Err(engine_types::FeedError::Closed)) => {
-                        tracing::error!("order feed closed; stopping for supervised recovery");
-                        stopped_by = StopReason::FeedClosed;
-                        break;
-                    }
-                    Some(Err(e)) => {
-                        self.invalidate_private_stream()?;
-                        tracing::warn!(error = %e, "order feed hiccup");
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                        if !self.wanted_symbols.is_empty() {
-                            self.admit_wanted(market_feed, order_feed).await?;
+                if let Some(update) = private_update {
+                    match self.on_order_feed(update, false).await? {
+                        Turn::Stop(reason) => break reason,
+                        Turn::Hiccup => {
+                            self.after_turn(market_feed, order_feed, signal_feed)
+                                .await?;
+                            continue;
                         }
-                        if !self.pending_signal_deliveries.is_empty() {
-                            self.accept_pending_signals(signal_feed)?;
-                            self.drain(clock::now_ns()).await?;
-                        }
-                        continue;
+                        Turn::Continue => {}
                     }
-                    None => {}
                 }
 
                 // Do not infer account freshness from timer readiness. An
@@ -755,104 +701,42 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     _ = flush_tick.tick() => self.on_tick().await?,
                     _ = std::future::ready(()) => self.drain(now).await?,
                 }
-
-                if !self.wanted_symbols.is_empty() {
-                    self.admit_wanted(market_feed, order_feed).await?;
-                }
-                if !self.pending_signal_deliveries.is_empty() {
-                    self.accept_pending_signals(signal_feed)?;
-                    self.drain(clock::now_ns()).await?;
-                }
+                self.after_turn(market_feed, order_feed, signal_feed)
+                    .await?;
                 continue;
             }
 
             tokio::select! {
                 biased;
-                _ = &mut shutdown => break,
-                update = order_feed.next_update() => match update {
-                    Ok(update) => {
-                        let now = clock::now_ns();
-                        self.take_update(update).await?;
-                        self.drain(now).await?;
+                _ = &mut shutdown => break StopReason::Shutdown,
+                update = order_feed.next_update() => {
+                    if let Turn::Stop(reason) = self.on_order_feed(update, true).await? {
+                        break reason;
                     }
-                    Err(engine_types::FeedError::Closed) => {
-                        tracing::error!("order feed closed; stopping for supervised recovery");
-                        stopped_by = StopReason::FeedClosed;
-                        break;
-                    }
-                    Err(e) => {
-                        self.invalidate_private_stream()?;
-                        tracing::warn!(error = %e, "order feed hiccup");
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                    }
-                },
+                }
                 completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
-                    let completion = completion.ok_or_else(|| EngineError::State(
-                        "venue task stopped with mutations still outstanding".to_string()
-                    ))?;
-                    self.take_completion_turn(completion, order_feed).await?;
-                },
-                event = market_feed.next_event() => match event {
-                    Ok(event) => self.on_market(event).await?,
-                    Err(engine_types::FeedError::Closed) => {
-                        self.settle_after_market_close(order_feed).await?;
-                        stopped_by = StopReason::FeedClosed;
-                        break;
+                    self.on_completion(completion, order_feed).await?;
+                }
+                event = market_feed.next_event() => {
+                    if let Turn::Stop(reason) = self.on_market_feed(event, order_feed).await? {
+                        break reason;
                     }
-                    // A feed that errors without closing is expected to be
-                    // reconnecting inside. Wait a moment so a broken one
-                    // cannot spin the loop.
-                    Err(e) => {
-                        tracing::warn!(error = %e, "market feed hiccup");
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                    }
-                },
-                observation = signal_feed.next_observation(), if signals_open => match observation {
-                    Ok(observation) => self.queue_signal_observation(observation, signal_feed)?,
-                    Err(engine_types::SignalError::Closed) => signals_open = false,
-                    Err(error) => return Err(EngineError::State(error.to_string())),
-                },
-                request = control_feed.next_request(), if controls_open => match request {
-                    // A refused request is retired, never fatal: the spool is
-                    // durable, so a request the engine will never accept
-                    // would otherwise poison every restart.
-                    Ok(request) => match self.admit_runtime_control(&request) {
-                        Err(refusal) => {
-                            tracing::error!(
-                                request_id = %request.request_id,
-                                strategy = %request.strategy_name,
-                                refusal,
-                                "refusing durable runtime control request"
-                            );
-                            control_feed.reject_last().await.map_err(|error| {
-                                EngineError::State(error.to_string())
-                            })?;
-                        }
-                        Ok(fresh) => {
-                            if fresh {
-                                self.apply_runtime_control(request)?;
-                            }
-                            self.drain(clock::now_ns()).await?;
-                        }
-                    },
-                    Err(engine_types::RuntimeControlError::Closed) => controls_open = false,
-                    Err(error) => return Err(EngineError::State(error.to_string())),
-                },
+                }
+                observation = signal_feed.next_observation(), if signals_open => {
+                    self.on_signal_feed(observation, signal_feed, &mut signals_open)?;
+                }
+                request = control_feed.next_request(), if controls_open => {
+                    self.on_control_feed(request, control_feed, &mut controls_open).await?;
+                }
                 _ = timer.sleep(timer_wait.unwrap_or(Duration::MAX)), if timer_wait.is_some() => {
                     self.on_timers().await?;
                 }
                 _ = flush_tick.tick() => self.on_tick().await?,
             }
-
             // Outside the select!, where the feeds are borrowable again.
-            if !self.wanted_symbols.is_empty() {
-                self.admit_wanted(market_feed, order_feed).await?;
-            }
-            if !self.pending_signal_deliveries.is_empty() {
-                self.accept_pending_signals(signal_feed)?;
-                self.drain(clock::now_ns()).await?;
-            }
-        }
+            self.after_turn(market_feed, order_feed, signal_feed)
+                .await?;
+        };
 
         self.finish().await?;
         Ok(RunOutcome {
@@ -860,6 +744,152 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             market_events: self.events_seen,
             orders_sent: self.orders_sent,
         })
+    }
+
+    /// One private-stream result. `drain_after` says whether the actions the
+    /// update released are drained at once or left for the caller's own
+    /// drain step.
+    async fn on_order_feed(
+        &mut self,
+        update: Result<OrderUpdate, FeedError>,
+        drain_after: bool,
+    ) -> Result<Turn, EngineError> {
+        match update {
+            Ok(update) => {
+                let now = clock::now_ns();
+                self.take_update(update).await?;
+                if drain_after {
+                    self.drain(now).await?;
+                }
+                Ok(Turn::Continue)
+            }
+            Err(FeedError::Closed) => {
+                tracing::error!("order feed closed; stopping for supervised recovery");
+                Ok(Turn::Stop(StopReason::FeedClosed))
+            }
+            Err(e) => {
+                self.invalidate_private_stream()?;
+                tracing::warn!(error = %e, "order feed hiccup");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                Ok(Turn::Hiccup)
+            }
+        }
+    }
+
+    /// One public-feed result. A feed that errors without closing is
+    /// expected to be reconnecting inside; the pause keeps a broken one from
+    /// spinning the loop.
+    async fn on_market_feed<O: OrderFeed>(
+        &mut self,
+        event: Result<MarketEvent, FeedError>,
+        order_feed: &mut O,
+    ) -> Result<Turn, EngineError> {
+        match event {
+            Ok(event) => {
+                self.on_market(event).await?;
+                Ok(Turn::Continue)
+            }
+            Err(FeedError::Closed) => {
+                self.settle_after_market_close(order_feed).await?;
+                Ok(Turn::Stop(StopReason::FeedClosed))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "market feed hiccup");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                Ok(Turn::Continue)
+            }
+        }
+    }
+
+    /// The venue task answered a mutation. A closed channel with mutations
+    /// still outstanding is the task having died mid-flight.
+    async fn on_completion<O: OrderFeed>(
+        &mut self,
+        completion: Option<MutationCompletion>,
+        order_feed: &mut O,
+    ) -> Result<(), EngineError> {
+        let completion = completion.ok_or_else(|| {
+            EngineError::State("venue task stopped with mutations still outstanding".to_string())
+        })?;
+        self.take_completion_turn(completion, order_feed).await
+    }
+
+    fn on_signal_feed<F: SignalFeed>(
+        &mut self,
+        observation: Result<SignalObservation, SignalError>,
+        signal_feed: &mut F,
+        signals_open: &mut bool,
+    ) -> Result<(), EngineError> {
+        match observation {
+            Ok(observation) => self.queue_signal_observation(observation, signal_feed),
+            Err(SignalError::Closed) => {
+                *signals_open = false;
+                Ok(())
+            }
+            Err(error) => Err(EngineError::State(error.to_string())),
+        }
+    }
+
+    /// A refused request is retired, never fatal: the spool is durable, so a
+    /// request the engine will never accept would otherwise poison every
+    /// restart.
+    async fn on_control_feed<C: RuntimeControlFeed>(
+        &mut self,
+        request: Result<RuntimeControlRequest, RuntimeControlError>,
+        control_feed: &mut C,
+        controls_open: &mut bool,
+    ) -> Result<(), EngineError> {
+        match request {
+            Ok(request) => match self.admit_runtime_control(&request) {
+                Err(refusal) => {
+                    tracing::error!(
+                        request_id = %request.request_id,
+                        strategy = %request.strategy_name,
+                        refusal,
+                        "refusing durable runtime control request"
+                    );
+                    control_feed
+                        .reject_last()
+                        .await
+                        .map_err(|error| EngineError::State(error.to_string()))
+                }
+                Ok(fresh) => {
+                    if fresh {
+                        self.apply_runtime_control(request)?;
+                    }
+                    self.drain(clock::now_ns()).await
+                }
+            },
+            Err(RuntimeControlError::Closed) => {
+                *controls_open = false;
+                Ok(())
+            }
+            Err(error) => Err(EngineError::State(error.to_string())),
+        }
+    }
+
+    /// What every turn does once the feeds are borrowable again: follow the
+    /// symbols a durable signal named, then deliver the signals that were
+    /// waiting on them.
+    async fn after_turn<M, O, F>(
+        &mut self,
+        market_feed: &mut M,
+        order_feed: &mut O,
+        signal_feed: &mut F,
+    ) -> Result<(), EngineError>
+    where
+        M: MarketFeed,
+        O: OrderFeed,
+        F: SignalFeed,
+    {
+        if !self.wanted_symbols.is_empty() {
+            self.admit_wanted(market_feed, order_feed).await?;
+        }
+        if !self.pending_signal_deliveries.is_empty() {
+            self.accept_pending_signals(signal_feed)?;
+            self.drain(clock::now_ns()).await?;
+        }
+        Ok(())
     }
 
     /// Last ledger line on the way out, and the whole tail forced to disk:
