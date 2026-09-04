@@ -120,9 +120,14 @@ configuration and prints `no metrics sink configured`.
 
 Line protocol `lm_engine,realm=mainnet equity_usdt=130.28` arrives as the
 Prometheus series `lm_engine_equity_usdt{realm="mainnet"}` — measurement,
-underscore, field. Every sample field in §2 becomes one series, tagged
-`realm`, `state`, and — when live — `venue` and `mode`. `lm_engine_up` and
-`lm_recorder_up` are 1 or 0.
+underscore, field. Every numeric sample field in §2 becomes one series.
+`lm_engine_up` and `lm_recorder_up` are 1 or 0.
+
+`realm` is the only label, deliberately: a label that changes value starts a
+new series, so labelling `state` or a `venue` known only while the engine is
+up would split a realm's history in two at the moment it went down. The
+identity fields (`venue`, `mode`, `engine_commit`, `account_user_id`) stay in
+the host record, which is where a forensic question is answered anyway.
 
 Confirm the names the sink actually chose before trusting an empty panel:
 **Explore** → the stack's Prometheus datasource → metrics browser → type

@@ -109,7 +109,7 @@ def test_a_realm_with_no_heartbeat_is_recorded_and_pushed_as_down(tmp_path: Path
 
     assert sample == {"ts_ms": now_ms, "realm": "demo", "kind": "engine", "state": "absent"}
     line = record_equity.line_protocol(sample)
-    assert line.startswith("lm_engine,realm=demo,state=absent up=0")
+    assert line.startswith("lm_engine,realm=demo up=0")
     assert line.endswith(str(now_ms * 1_000_000))
 
 
@@ -132,7 +132,7 @@ def test_every_live_sample_field_becomes_one_metric_field(tmp_path: Path) -> Non
     line = record_equity.line_protocol(record_equity.engine_sample("mainnet", beat, now_ms))
     head, fields, stamp = line.split(" ")
 
-    assert head == "lm_engine,mode=live,realm=mainnet,state=live,venue=bybit"
+    assert head == "lm_engine,realm=mainnet"
     assert stamp == str(now_ms * 1_000_000)
     keys = {pair.split("=", 1)[0] for pair in fields.split(",")}
     assert {"up", "equity_usdt", "available_usdt", "position_count", "may_open"} <= keys
@@ -178,6 +178,29 @@ def test_tag_values_with_line_protocol_metacharacters_are_escaped() -> None:
     assert r"realm=one\ two\,three\=four" in line
 
 
+def test_realm_is_the_only_tag_so_one_realm_is_one_series_through_an_outage() -> None:
+    # A tag that changes value starts a new series. Tagging `state`, or a
+    # `venue` only known while the engine is up, would split a realm's history
+    # in two at the moment it went down -- the moment the history is for.
+    now_ms = 1_788_000_000_000
+    down = record_equity.engine_sample("mainnet", Path("/nonexistent"), now_ms)
+    up_head = "lm_engine,realm=mainnet"
+    assert record_equity.line_protocol(down).split(" ")[0] == up_head
+
+    beat = Path(__file__).parent / "does-not-exist"
+    assert not beat.exists()
+    live = {
+        "ts_ms": now_ms,
+        "realm": "mainnet",
+        "kind": "engine",
+        "state": "live",
+        "venue": "bybit",
+        "mode": "live",
+        "equity_usdt": 130.0,
+    }
+    assert record_equity.line_protocol(live).split(" ")[0] == up_head
+
+
 def test_the_recorder_sample_carries_the_budget_and_the_drops(tmp_path: Path) -> None:
     now_ms = 1_788_000_000_000
     status = tmp_path / "status.json"
@@ -209,7 +232,9 @@ def test_the_recorder_sample_carries_the_budget_and_the_drops(tmp_path: Path) ->
     assert sample["shed_feeds"] == 0
     assert sample["status_age_ms"] == 1_000
     assert sample["receive_age_ms"] == 500
-    assert record_equity.line_protocol(sample).startswith("lm_recorder,realm=bybit,state=live,venue=bybit")
+    line = record_equity.line_protocol(sample)
+    assert line.startswith("lm_recorder,realm=bybit ")
+    assert ",up=1.0," in line
 
 
 def test_a_run_with_no_sink_configured_records_and_exits_zero(tmp_path: Path, capsys, monkeypatch) -> None:

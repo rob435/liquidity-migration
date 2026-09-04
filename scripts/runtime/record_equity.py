@@ -218,18 +218,20 @@ def _escape_tag(value: str) -> str:
 
 
 def line_protocol(sample: dict[str, Any]) -> str:
-    """One InfluxDB line: `lm_<kind>,tags fields timestamp_ns`.
+    """One InfluxDB line: `lm_<kind>,realm=<realm> fields timestamp_ns`.
 
-    Only finite numbers become fields; strings become tags. Every sample
-    carries `up`, so a realm with no heartbeat pushes `up=0` rather than
-    nothing: a remote that receives nothing cannot tell a dead engine from a
-    dead recorder.
+    Only finite numbers become fields; everything else is dropped. Every
+    sample carries `up`, so a realm with no heartbeat pushes `up=0` rather
+    than nothing: a remote that receives nothing cannot tell a dead engine
+    from a dead recorder.
+
+    `realm` is the only tag, and deliberately. A tag that changes value starts
+    a new series, so tagging the sample's `state` -- or a `venue` that is only
+    known while the engine is up -- would split one realm's history in two at
+    the exact moment it went down, which is the moment the history is for.
+    The identity fields are in the local record; the remote needs continuity.
     """
-    tags = {"realm": str(sample["realm"]), "state": str(sample.get("state", "unknown"))}
-    for key in ("venue", "mode"):
-        value = sample.get(key)
-        if isinstance(value, str) and value:
-            tags[key] = value
+    tags = {"realm": str(sample["realm"])}
     fields: dict[str, float] = {"up": 1.0 if sample.get("state") == "live" else 0.0}
     for key, value in sorted(sample.items()):
         if key in {"ts_ms", "realm", "kind", "state", "error"}:

@@ -37,6 +37,9 @@ edit STATE.md to match.
     10k series and this fleet pushes about 70. Every sample carries `up`, so a
     dead engine pushes `up=0` rather than nothing. The push is best-effort:
     the local append happens first and a failed push exits 0 with a `WARNING`.
+    `realm` is the only label: a label that changes value starts a new series,
+    so labelling `state`, or a `venue` known only while the engine is up,
+    would split a realm's history in two at the moment it went down.
     Dashboard: `deploy/grafana/liquidity-migration-fleet.json`. Setup:
     `docs/observability.md`.
   - Dormant venues: six venues are compiled, one is traded. `docs/engine.md`
