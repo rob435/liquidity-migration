@@ -29,7 +29,7 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Host | Upload | Receipt exceeds 3 h or destination has less than 200 GB free |
 | Host | Backup | Receipt exceeds 8 h |
 | Host | Machine | `/var/lib` has less than 25 GB free or NTP is unsynchronised |
-| Host | Watchdog plane | Required realm watchdog timer is inactive or its last run failed |
+| Host | Watchdog plane | An enabled realm watchdog timer is inactive or its last run failed |
 | External | Host watchdog | `ONCALL_DEADMAN_URL` receives no healthy host-scope ping |
 
 ### Delivery State
@@ -84,6 +84,7 @@ inaccessible after launch.
 - **Must** keep the automated-responder token outside Telegram-only services.
 - **Must** let the host watchdog outlive deploys, funded stops, and disarms.
 - **Must** supervise realm watchdog results from the independent host scope; a timer cannot prove its own continued execution.
+- **Must** read a realm watchdog's requirement from its systemd enablement, never from a realm's runtime state; `enable --now` and `disable --now` move both together, so a deploy's teardown is not a fault.
 - **Must** commit a sink's cooldown state only after that sink accepts delivery.
 - **Must** treat journals and fire payloads as untrusted evidence.
 - **Must Never** let demo or mainnet ping the host dead-man URL.

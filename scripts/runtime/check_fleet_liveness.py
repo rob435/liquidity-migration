@@ -359,24 +359,25 @@ def unit_result(unit: str) -> str:
 
 
 def evaluate_watchdog_chain() -> list[Alert]:
-    """The host watchdog supervises the realm watchdogs that cannot see themselves."""
+    """The host watchdog supervises the realm watchdogs that cannot see themselves.
+
+    A realm watchdog is required exactly while systemd is enabled to run it.
+    `systemctl enable --now` and `disable --now` move enablement and activation
+    in one step, so the deploy's stop and start halves never leave a window
+    where this check demands a timer the deploy has legitimately torn down. The
+    manifest's `always` activation scopes a unit to its realm's activation set,
+    not to every minute of the host's life.
+    """
 
     timers = {
         "demo": "liquidity-migration-demo-liveness.timer",
         "mainnet": "liquidity-migration-mainnet-liveness.timer",
     }
-    active = unit_states(
-        [*timers.values(), "liquidity-migration-engine-mainnet.service"]
-    )
+    active = unit_states(list(timers.values()))
     alerts: list[Alert] = []
     for realm, timer in timers.items():
         enabled = unit_enabled_state(timer)
-        expected = realm == "demo" or enabled.startswith("enabled")
-        if realm == "mainnet" and active.get(
-            "liquidity-migration-engine-mainnet.service"
-        ) == "active":
-            expected = True
-        if not expected:
+        if not enabled.startswith("enabled"):
             continue
         state = active.get(timer, "unknown")
         if state != "active":

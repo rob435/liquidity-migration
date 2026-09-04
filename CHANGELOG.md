@@ -6,6 +6,66 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 — Incident `host-bf5dcb6544d0dfdc`: the new watchdog-chain check
+  paged CRITICAL on its own deploy. Requirement now reads systemd enablement,
+  not a realm's runtime state.**
+  - Alert, host scope, `ip-208-84-103-4`, shortly after 14:40:22 UTC:
+    `CRITICAL demo watchdog timer is inactive (disabled)`, ref `watchdog:demo`,
+    alongside `RESOLVED capture-silent` and
+    `RESOLVED heartbeat:liquidity-migration-forward-capture.service`. The fire
+    launched an on-call session. No trading fault: the funded engine was never
+    named, `liquidity-migration-demo-liveness.service` logged
+    `ok scope=demo units-and-heartbeats-healthy` on every three-minute run
+    through 14:40:22 UTC, and the two `RESOLVED` lines are the recorders coming
+    back after the same deploy restarted them.
+  - Diagnosis. `2f4af5e` was committed 14:25:35 UTC and deployed at ~14:40 UTC.
+    It changed `deploy/systemd` and the fleet manifest, so both realm
+    fingerprints changed and the deploy ran `stop_realm_units` →
+    `start_realm` on each realm ([docs/operations.md](docs/operations.md)
+    §Deployment Flow, step 4). `stop_realm_units`
+    (`scripts/deploy_vps_live.sh:409`) runs `systemctl disable --now` on every
+    realm unit, so mid-deploy the demo liveness timer reads
+    `inactive` + `disabled`. The independent host watchdog samples every three
+    minutes and landed inside that window. In
+    `scripts/runtime/check_fleet_liveness.py:374`,
+    `expected = realm == "demo" or enabled.startswith("enabled")` made the demo
+    watchdog timer unconditionally required, so the deploy's own teardown read
+    as a fault. Mainnet stayed silent only because its branch was gated on
+    enablement and on `liquidity-migration-engine-mainnet.service` being
+    active. That gate was not correct either: `start_realm` starts the owner
+    before it enables the realm's timers, so the same false page was waiting
+    for mainnet in the start half of every deploy.
+  - Root cause: the check read a realm's transient runtime state as its
+    requirement. The manifest's `always` activation scopes a unit to its
+    realm's activation set, not to every minute of the host's life.
+    `evaluate_watchdog_chain` now requires a realm watchdog timer exactly while
+    systemd is enabled to run it, symmetrically for both realms, and no longer
+    queries the mainnet engine. `systemctl enable --now` and `disable --now`
+    move enablement and activation in one step, so neither half of a deploy
+    leaves a window where the check demands a timer the deploy has legitimately
+    torn down; an enabled timer that is not running, or whose last run did not
+    exit `success`, still pages.
+  - Trade-off, stated rather than hidden: a watchdog timer disabled by hand
+    while its realm keeps trading is no longer caught by the host scope. The
+    previous mainnet clause covered that case at the cost of a false page on
+    every deploy. Restoring it race-free needs `start_realm` to enable a
+    realm's liveness timer before its owner unit; that is a deploy-ordering
+    change and the owner's call, not something this fix assumes.
+  - Proof: `tests/scripts/test_scripts_check_fleet_liveness.py` gains
+    `test_host_watchdog_chain_ignores_a_realm_a_deploy_has_torn_down` and
+    `test_host_watchdog_chain_reads_enablement_not_the_engine`; both fail on
+    the previous code (`watchdog:demo` fires on a torn-down realm;
+    `watchdog:mainnet` fires off the engine's state) and pass with the fix.
+    Focused file: 26 passed. Full `scripts/dev.sh check` gate run before push.
+  - Host-side, by hand, read-only — confirm the deploy left the demo timer
+    enabled and armed, and that the incident is not masking a real stop:
+
+    ```sh
+    scripts/ops.sh units
+    scripts/ops.sh status
+    scripts/ops.sh curve mainnet 60
+    ```
+
 - **2026-09-04 — On-call is one supervised delivery plane, not three optional
   watchdog side effects.**
   - Live diagnosis found the host scope only loaded the absent

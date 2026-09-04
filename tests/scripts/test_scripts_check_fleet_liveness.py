@@ -496,6 +496,39 @@ def test_host_supervises_realm_watchdog_results(monkeypatch) -> None:
     assert all(alert.severity == "CRITICAL" for alert in alerts)
 
 
+def test_host_watchdog_chain_ignores_a_realm_a_deploy_has_torn_down(monkeypatch) -> None:
+    # `stop_fleet` runs `systemctl disable --now` on every realm unit, so the
+    # deploy window reads disabled+inactive on both realms and is not a fault.
+    monkeypatch.setattr(
+        liveness, "unit_states", lambda units: dict.fromkeys(units, "inactive")
+    )
+    monkeypatch.setattr(liveness, "unit_enabled_state", lambda _unit: "disabled")
+    monkeypatch.setattr(liveness, "unit_result", lambda _unit: "success")
+
+    assert liveness.evaluate_watchdog_chain() == []
+
+
+def test_host_watchdog_chain_reads_enablement_not_the_engine(monkeypatch) -> None:
+    queried: list[str] = []
+
+    def states(units: list[str]) -> dict[str, str]:
+        queried.extend(units)
+        return dict.fromkeys(units, "active")
+
+    monkeypatch.setattr(liveness, "unit_states", states)
+    monkeypatch.setattr(
+        liveness,
+        "unit_enabled_state",
+        lambda unit: "disabled" if "mainnet" in unit else "enabled-runtime",
+    )
+    monkeypatch.setattr(liveness, "unit_result", lambda _unit: "exit-code")
+
+    alerts = liveness.evaluate_watchdog_chain()
+
+    assert {alert.key for alert in alerts} == {"watchdog:demo"}
+    assert "liquidity-migration-engine-mainnet.service" not in queried
+
+
 def test_host_incident_carries_the_recorder_journal(monkeypatch) -> None:
     monkeypatch.setattr(
         liveness, "unit_journal_tail", lambda unit, lines=40: f"journal of {unit}"
