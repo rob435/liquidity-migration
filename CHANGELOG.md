@@ -69,6 +69,38 @@ edit STATE.md to match.
     remove the old-generation spool-deletion shortcut. No push, deployment,
     production access, live WAL migration or credential changes.
 
+- **2026-09-04 22:33 UTC — Restructure the engine core, the signal path and the native plugs for modularity; no behaviour change (fourteen local commits after `15c60924`).**
+  - `engine-core`: the five `include!` bodies are child modules under
+    `engine/`; `Engine` drops from 64 fields to 51 with its strategy-facing
+    state in `ctx.rs::{Books, StrategyHost}`, signal intake in its own
+    `engine/signal_intake.rs`, and the 18-argument
+    `feed_strategy` replaced by `StrategyHost::feed`; the run loop has one
+    named handler per `select!` arm and returns its `StopReason` as a value;
+    engine-side entry refusals are `OpeningRefusal` (codes and verdict text
+    unchanged); venue completions journal `VenueTiming` from one place; maps
+    are keyed by `SymbolId`, `StrategyId` and `(SymbolId, Side)` instead of
+    raw `u16` and `(u16, bool)`.
+  - Signals: `signals.rs` (2,214 lines) is `signals/{mod,channel,spool,unix}.rs`
+    with its tests beside it; `EngineSignalFeed` is gone,
+    `HybridSignalFeed::for_directory` carries the spool-only fallback. This
+    also removes the `large_enum_variant` the pinned clippy flagged.
+  - `signal-worker`: the kline, funding and whale pipelines share
+    `history.rs` (`HistoryRow`/`merge_row`, `CoverageRef`/`CoverageMut`);
+    the checkpoint layout is unchanged. Inline test modules of `worker.rs`,
+    `live.rs`, `bybit_ws.rs`, `features.rs` and marketdata's `bybit/feed.rs`
+    moved to sibling `tests.rs` files (same test counts).
+  - `engine-strategies`: `NativeLong`, `NativeCarry`, `NativeExodus` compose
+    `native_common::sleeve::SleeveCore`; registered reducers in `plan.rs`
+    untouched.
+  - Workspace `[lints.clippy]` denies eight restriction lints the tree
+    already satisfies; `docs/engine.md` gains an `engine-core` module map.
+  - Receipts: pinned Rust 1.90.0 rustfmt clean; pinned clippy
+    `--workspace --all-targets --locked -D warnings` clean; 1,744 Rust tests pass, 0 failures, 5 ignored (Homebrew Rust 1.97.1 runner).
+    Deferred with reasons in the commit messages: `boot_as` and
+    `take_update` length, the worker's `LaneCompletion`/`spawn_*_lane`
+    generics (checkpoint format), `unwrap_used`/`expect_used` (44 sites).
+    No push, deploy, or production access.
+
 - **2026-09-04 20:22 UTC — Qualify the local fixes with the actual pinned compiler and retain comparative latency evidence.**
   - Explicit Rust 1.90.0 paths pass rustfmt, strict workspace/all-targets
     Clippy, and all 1,726 Rust tests in each debug and optimized suite. Five
