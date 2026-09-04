@@ -1,13 +1,13 @@
 {
   "title": "liquidity-migration fleet",
   "uid": "liqmig-fleet",
-  "description": "The funded and demo engines, sampled once a minute by scripts/runtime/record_equity.py. The JSONL under /var/lib/liquidity-migration/equity on the host is the record; this is a view.",
+  "description": "The funded and demo engines and the tape recorders, sampled once a minute by scripts/runtime/record_equity.py. The JSONL under /var/lib/liquidity-migration/equity on the host is the record; this is a view. Rendered by deploy/grafana/render_dashboard.py.",
   "tags": [
     "liquidity-migration"
   ],
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "graphTooltip": 1,
   "refresh": "1m",
@@ -51,9 +51,10 @@
   },
   "panels": [
     {
-      "type": "stat",
+      "type": "state-timeline",
       "id": 1,
-      "title": "Engine live",
+      "title": "Health",
+      "description": "One lane per fact, sampled every minute. Green is the good state: a readable heartbeat, may_open true, the 24h loss breaker not tripped, a live recorder. A red minute is a real minute: the sampler writes the line whether or not the engine is up.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
@@ -61,8 +62,8 @@
       "gridPos": {
         "x": 0,
         "y": 0,
-        "w": 4,
-        "h": 4
+        "w": 16,
+        "h": 8
       },
       "fieldConfig": {
         "defaults": {
@@ -82,387 +83,40 @@
               }
             ]
           },
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "color": "red",
-                  "index": 0,
-                  "text": "no heartbeat"
-                },
-                "1": {
-                  "color": "green",
-                  "index": 1,
-                  "text": "live"
-                }
-              },
-              "type": "value"
-            }
-          ]
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_up{realm=~\"$realm\"}",
-          "instant": true,
-          "legendFormat": "{{realm}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "description": "0 means the minute sampler found no readable heartbeat for that realm."
-    },
-    {
-      "type": "stat",
-      "id": 2,
-      "title": "May open",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 4,
-        "y": 0,
-        "w": 4,
-        "h": 4
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "color": "red",
-                  "index": 0,
-                  "text": "blocked"
-                },
-                "1": {
-                  "color": "green",
-                  "index": 1,
-                  "text": "yes"
-                }
-              },
-              "type": "value"
-            }
-          ]
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_may_open{realm=~\"$realm\"}",
-          "instant": true,
-          "legendFormat": "{{realm}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "description": "False means boot found exposure the log could not account for. Exits still run."
-    },
-    {
-      "type": "stat",
-      "id": 3,
-      "title": "Rolling loss breaker",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 8,
-        "y": 0,
-        "w": 4,
-        "h": 4
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "color": "green",
-                  "index": 0,
-                  "text": "clear"
-                },
-                "1": {
-                  "color": "red",
-                  "index": 1,
-                  "text": "TRIPPED"
-                }
-              },
-              "type": "value"
-            }
-          ]
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_rolling_loss_tripped{realm=~\"$realm\"}",
-          "instant": true,
-          "legendFormat": "{{realm}}",
-          "range": false,
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "stat",
-      "id": 4,
-      "title": "Equity",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 0,
-        "w": 6,
-        "h": 4
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_equity_usdt{realm=~\"$realm\"}",
-          "instant": true,
-          "legendFormat": "{{realm}}",
-          "range": false,
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "stat",
-      "id": 5,
-      "title": "Open positions",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 18,
-        "y": 0,
-        "w": 6,
-        "h": 4
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "mappings": [
-            {
-              "options": {
-                "match": "null",
-                "result": {
-                  "text": "-"
-                }
-              },
-              "type": "special"
-            }
-          ]
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_position_count{realm=~\"$realm\"}",
-          "instant": true,
-          "legendFormat": "{{realm}}",
-          "range": false,
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "id": 10,
-      "title": "Equity",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 4,
-        "w": 12,
-        "h": 9
-      },
-      "fieldConfig": {
-        "defaults": {
           "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "showPoints": "never",
-            "spanNulls": false
+            "fillOpacity": 80,
+            "lineWidth": 0
           },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "currencyUSD"
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "NOT ok",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "ok",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
       "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "alignValue": "center",
+        "rowHeight": 0.8,
         "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+          "showLegend": false
         },
         "tooltip": {
-          "mode": "multi",
+          "mode": "single",
           "sort": "none"
         }
       },
@@ -473,7 +127,183 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
+          "expr": "lm_engine_up{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 engine heartbeat",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_may_open{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 may open",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "1 - lm_engine_rolling_loss_tripped{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 loss breaker clear",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_recorder_up",
+          "instant": false,
+          "legendFormat": "recorder {{realm}} \u00b7 live",
+          "range": true,
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Equity",
+      "description": "Mark to market from the venue's own account reading, as the heartbeat carries it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD",
+          "mappings": [],
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
           "expr": "lm_engine_equity_usdt{realm=~\"$realm\"}",
+          "instant": true,
+          "legendFormat": "{{realm}}",
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 10,
+      "title": "Account",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Equity and available margin",
+      "description": "Sampled once a minute from the heartbeat. A gap is a minute with no live heartbeat. Available under equity is margin posted against open positions; negative available is normal while the owner holds hand positions.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": null
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_equity_usdt{realm=~\"$realm\"}",
+          "instant": false,
           "legendFormat": "{{realm}} equity",
           "range": true,
           "refId": "A"
@@ -485,52 +315,77 @@
           },
           "editorMode": "code",
           "expr": "lm_engine_available_usdt{realm=~\"$realm\"}",
+          "instant": false,
           "legendFormat": "{{realm}} available",
           "range": true,
           "refId": "B"
         }
-      ],
-      "description": "Mark to market, sampled every minute from the engine heartbeat. Gaps are minutes with no live heartbeat."
+      ]
     },
     {
       "type": "timeseries",
-      "id": 11,
+      "id": 12,
       "title": "Rolling 24h loss against its ceiling",
+      "description": "Net realized loss in the trailing 24 hours next to the breaker's limit. Touching the limit trips the breaker: every sleeve shows entries_enabled false until it clears.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
         "x": 12,
-        "y": 4,
+        "y": 9,
         "w": 12,
-        "h": 9
+        "h": 8
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "color": {
             "mode": "palette-classic"
           },
-          "unit": "currencyUSD"
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": null
+          }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* limit"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
-          "sort": "none"
+          "sort": "desc"
         }
       },
       "targets": [
@@ -541,6 +396,7 @@
           },
           "editorMode": "code",
           "expr": "lm_engine_rolling_loss_net_usdt{realm=~\"$realm\"}",
+          "instant": false,
           "legendFormat": "{{realm}} net",
           "range": true,
           "refId": "A"
@@ -552,40 +408,57 @@
           },
           "editorMode": "code",
           "expr": "lm_engine_rolling_loss_limit_usdt{realm=~\"$realm\"}",
+          "instant": false,
           "legendFormat": "{{realm}} limit",
           "range": true,
           "refId": "B"
         }
-      ],
-      "description": "Net of own closed round trips inside the window. Reaching the limit blocks entries across every sleeve; exits continue."
+      ]
+    },
+    {
+      "type": "row",
+      "id": 20,
+      "title": "Sleeves",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
     },
     {
       "type": "timeseries",
-      "id": 20,
+      "id": 21,
       "title": "Open positions by sleeve",
+      "description": "How many positions each configured sleeve holds, zero included, so a flat sleeve is a line at zero rather than a missing one. `unattributed` is exposure no sleeve owns: the owner's hand trades.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
         "x": 0,
-        "y": 13,
+        "y": 18,
         "w": 8,
         "h": 8
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "color": {
             "mode": "palette-classic"
           },
-          "min": 0
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          },
+          "decimals": 0
         },
         "overrides": []
       },
@@ -593,10 +466,98 @@
         "legend": {
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "label_replace({__name__=~\"lm_engine_sleeve_.*_positions\", realm=~\"$realm\"}, \"sleeve\", \"$1\", \"__name__\", \"lm_engine_sleeve_(.*)_positions\")",
+          "instant": false,
+          "legendFormat": "{{realm}} {{sleeve}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "state-timeline",
+      "id": 22,
+      "title": "Entries enabled by sleeve",
+      "description": "The effective entry gate per sleeve after committed config and the newest durable runtime override. Off means the sleeve may exit and settle but not open or grow.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 18,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "off",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "on",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "alignValue": "center",
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
           "sort": "none"
         }
       },
@@ -607,8 +568,9 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "{__name__=~\"lm_engine_sleeve_.*_positions\", realm=~\"$realm\"}",
-          "legendFormat": "{{realm}} {{__name__}}",
+          "expr": "label_replace({__name__=~\"lm_engine_sleeve_.*_entries_enabled\", realm=~\"$realm\"}, \"sleeve\", \"$1\", \"__name__\", \"lm_engine_sleeve_(.*)_entries_enabled\")",
+          "instant": false,
+          "legendFormat": "{{realm}} {{sleeve}}",
           "range": true,
           "refId": "A"
         }
@@ -616,31 +578,35 @@
     },
     {
       "type": "timeseries",
-      "id": 21,
-      "title": "Order path, end to end",
+      "id": 23,
+      "title": "Entry blockers by sleeve",
+      "description": "Per-symbol reasons a sleeve is not opening right now, counted per sleeve. Expected trading state (inside a resize band, entry window closed), not faults; faults are strategy errors below.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
-        "x": 8,
-        "y": 13,
+        "x": 16,
+        "y": 18,
         "w": 8,
         "h": 8
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "color": {
             "mode": "palette-classic"
           },
-          "unit": "ns"
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          },
+          "decimals": 0
         },
         "overrides": []
       },
@@ -648,11 +614,226 @@
         "legend": {
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
-          "sort": "none"
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "label_replace({__name__=~\"lm_engine_sleeve_.*_blockers\", realm=~\"$realm\"}, \"sleeve\", \"$1\", \"__name__\", \"lm_engine_sleeve_(.*)_blockers\")",
+          "instant": false,
+          "legendFormat": "{{realm}} {{sleeve}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 30,
+      "title": "Order path",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 31,
+      "title": "Order path last measured",
+      "description": "How long since the engine's latency ledger last held an order. The ledger is a 60-second window: it is only populated in a minute an order went out. The demo probe rests one order every 15 minutes, so demo should never read above about 16 minutes; mainnet reads the time since the funded engine last sent anything.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1200
+              },
+              {
+                "color": "red",
+                "value": 3600
+              }
+            ]
+          },
+          "unit": "s",
+          "mappings": [],
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "time() - timestamp(last_over_time(lm_engine_end_to_end_p50_ns{realm=~\"$realm\"}[30d]))",
+          "instant": true,
+          "legendFormat": "{{realm}}",
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 32,
+      "title": "Orders sent since boot",
+      "description": "The engine's own since-boot counter. It resets to zero on every restart, so read it next to uptime.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 27,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "mappings": [],
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_orders_sent{realm=~\"$realm\"}",
+          "instant": true,
+          "legendFormat": "{{realm}}",
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 33,
+      "title": "Order path, end to end",
+      "description": "From the strategy's decision to the venue's acknowledgement, p50 and p99 over the ledger's 60-second window. Plotted as points: there is a value only in a minute an order went out.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 27,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "ns",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -663,6 +844,7 @@
           },
           "editorMode": "code",
           "expr": "lm_engine_end_to_end_p50_ns{realm=~\"$realm\"}",
+          "instant": false,
           "legendFormat": "{{realm}} p50",
           "range": true,
           "refId": "A"
@@ -674,40 +856,203 @@
           },
           "editorMode": "code",
           "expr": "lm_engine_end_to_end_p99_ns{realm=~\"$realm\"}",
+          "instant": false,
           "legendFormat": "{{realm}} p99",
           "range": true,
           "refId": "B"
         }
-      ],
-      "description": "Decide through venue ack, from the engine's own latency ledger."
+      ]
     },
     {
       "type": "timeseries",
-      "id": 22,
-      "title": "Heartbeat and account age",
+      "id": 34,
+      "title": "Order path by step, p99",
+      "description": "Where the time goes. decide is the strategy; durable is the log barrier; wire is encode and send; ack is the venue's round trip; dispatch queue, venue task and core resume are the hand-offs between them. barrier wait is what the order actually waited on the disk; quota hold is time the adapter held a command back to stay inside the venue's request quota.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 16,
+        "h": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "ns",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_decide_p99_ns{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} decide",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_durable_p99_ns{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} durable",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_wire_p99_ns{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} wire",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_ack_p99_ns{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} ack",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_dispatch_queue_p99_ns{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} dispatch queue",
+          "range": true,
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_venue_task_p99_ns{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} venue task",
+          "range": true,
+          "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_core_resume_p99_ns{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} core resume",
+          "range": true,
+          "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_barrier_wait_p99_ns{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} barrier wait",
+          "range": true,
+          "refId": "H"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_quota_hold_p99_ns{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} quota hold",
+          "range": true,
+          "refId": "I"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 35,
+      "title": "Working orders, blockers, faults",
+      "description": "Orders resting at the venue right now, entry blockers across every sleeve, flatten requests not yet acknowledged, and strategy errors. A strategy error is a broken reducer and pages; the rest is ordinary state.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
         "x": 16,
-        "y": 13,
+        "y": 35,
         "w": 8,
-        "h": 8
+        "h": 9
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "color": {
             "mode": "palette-classic"
           },
-          "unit": "ms"
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          },
+          "decimals": 0
         },
         "overrides": []
       },
@@ -715,11 +1060,125 @@
         "legend": {
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
-          "sort": "none"
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_working_entries{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} working orders",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_entry_blockers{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} entry blockers",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_pending_flatten_requests{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} pending flattens",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_strategy_errors{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} strategy errors",
+          "range": true,
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 40,
+      "title": "Engine",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 41,
+      "title": "Heartbeat and account reading age",
+      "description": "Age of the heartbeat file when sampled (written every 5 s) and of the venue's account reading inside it. Both climbing together is the engine wedged; only the account age climbing is the private stream gone quiet.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 45,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -730,6 +1189,7 @@
           },
           "editorMode": "code",
           "expr": "lm_engine_heartbeat_age_ms{realm=~\"$realm\"}",
+          "instant": false,
           "legendFormat": "{{realm}} heartbeat",
           "range": true,
           "refId": "A"
@@ -741,39 +1201,44 @@
           },
           "editorMode": "code",
           "expr": "lm_engine_account_age_ms{realm=~\"$realm\"}",
+          "instant": false,
           "legendFormat": "{{realm}} account reading",
           "range": true,
           "refId": "B"
         }
-      ],
-      "description": "Age at sample time. The account reading going stale blocks new risk."
+      ]
     },
     {
       "type": "timeseries",
-      "id": 30,
-      "title": "Since boot: orders, fills, stream resets",
+      "id": 42,
+      "title": "Orders, fills, stream resets (per 5 min)",
+      "description": "Since-boot counters read as increases, so a restart is a flat line, not a cliff. A stream reset is a recovered private-stream gap.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
-        "x": 0,
-        "y": 21,
-        "w": 12,
+        "x": 8,
+        "y": 45,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "color": {
             "mode": "palette-classic"
-          }
+          },
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 2,
+            "fillOpacity": 60,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          },
+          "decimals": 0
         },
         "overrides": []
       },
@@ -781,11 +1246,14 @@
         "legend": {
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
-          "sort": "none"
+          "sort": "desc"
         }
       },
       "targets": [
@@ -795,8 +1263,9 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_engine_orders_sent{realm=~\"$realm\"}",
-          "legendFormat": "{{realm}} orders sent",
+          "expr": "increase(lm_engine_orders_sent{realm=~\"$realm\"}[5m])",
+          "instant": false,
+          "legendFormat": "{{realm}} orders",
           "range": true,
           "refId": "A"
         },
@@ -806,7 +1275,8 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_engine_fills{realm=~\"$realm\"}",
+          "expr": "increase(lm_engine_fills{realm=~\"$realm\"}[5m])",
+          "instant": false,
           "legendFormat": "{{realm}} fills",
           "range": true,
           "refId": "B"
@@ -817,53 +1287,76 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_engine_stream_resets{realm=~\"$realm\"}",
+          "expr": "increase(lm_engine_stream_resets{realm=~\"$realm\"}[5m])",
+          "instant": false,
           "legendFormat": "{{realm}} stream resets",
           "range": true,
           "refId": "C"
         }
-      ],
-      "description": "All three reset to zero on restart; a sawtooth is a redeploy."
+      ]
     },
     {
       "type": "timeseries",
-      "id": 31,
-      "title": "Venue clock offset",
+      "id": 43,
+      "title": "Market events per second and venue clock offset",
+      "description": "Public market messages the engine consumed, as a rate; and the venue's clock minus this box's, off the freshest quote. A box that drifts makes every venue-stamp comparison quietly wrong.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
-        "x": 12,
-        "y": 21,
-        "w": 12,
+        "x": 16,
+        "y": 45,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "color": {
             "mode": "palette-classic"
           },
-          "unit": "ms"
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": null
+          }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*clock offset.*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
-          "sort": "none"
+          "sort": "desc"
         }
       },
       "targets": [
@@ -873,53 +1366,103 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_engine_venue_clock_offset_ms{realm=~\"$realm\"}",
-          "legendFormat": "{{realm}}",
+          "expr": "increase(lm_engine_market_events{realm=~\"$realm\"}[5m]) / 300",
+          "instant": false,
+          "legendFormat": "{{realm}} market events/s",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_venue_clock_offset_ms{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}} clock offset (ms)",
+          "range": true,
+          "refId": "B"
         }
-      ],
-      "description": "Venue stamp minus this box's clock. Drift makes every venue comparison quietly wrong."
+      ]
+    },
+    {
+      "type": "row",
+      "id": 50,
+      "title": "Tape recorders",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 53,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
     },
     {
       "type": "timeseries",
-      "id": 40,
-      "title": "Tape recorder: projected month against allowance",
+      "id": 51,
+      "title": "Recorder: projected month against allowance",
+      "description": "What the month's inbound bytes project to at the current pace, next to the budget's allowance. Over the line, the budget controller sheds feeds in its configured order.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
         "x": 0,
-        "y": 29,
-        "w": 12,
+        "y": 54,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "color": {
             "mode": "palette-classic"
           },
-          "unit": "decgbytes"
+          "unit": "decgbytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* allowance"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
-          "sort": "none"
+          "sort": "desc"
         }
       },
       "targets": [
@@ -930,6 +1473,7 @@
           },
           "editorMode": "code",
           "expr": "lm_recorder_projected_month_gb",
+          "instant": false,
           "legendFormat": "{{realm}} projected",
           "range": true,
           "refId": "A"
@@ -941,39 +1485,44 @@
           },
           "editorMode": "code",
           "expr": "lm_recorder_monthly_gb",
+          "instant": false,
           "legendFormat": "{{realm}} allowance",
           "range": true,
           "refId": "B"
         }
-      ],
-      "description": "Crossing the allowance sheds feeds in a fixed order; the core band and every ticker are never shed."
+      ]
     },
     {
       "type": "timeseries",
-      "id": 41,
-      "title": "Tape recorder: dropped frames and shed feeds",
+      "id": 52,
+      "title": "Recorder: frames dropped and reconnects (per 5 min)",
+      "description": "Since-boot counters read as increases. A dropped frame is the writer queue overrunning; each overrun reconnects the shard for fresh snapshots, so drops and reconnects rise together when the recorder is starved. Dropped at disk is storage refusing writes.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
-        "x": 12,
-        "y": 29,
-        "w": 12,
+        "x": 8,
+        "y": 54,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "color": {
             "mode": "palette-classic"
-          }
+          },
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 2,
+            "fillOpacity": 60,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          },
+          "decimals": 0
         },
         "overrides": []
       },
@@ -981,11 +1530,14 @@
         "legend": {
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
-          "sort": "none"
+          "sort": "desc"
         }
       },
       "targets": [
@@ -995,7 +1547,8 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_recorder_dropped_frames",
+          "expr": "increase(lm_recorder_dropped_frames[5m])",
+          "instant": false,
           "legendFormat": "{{realm}} dropped",
           "range": true,
           "refId": "A"
@@ -1006,7 +1559,8 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_recorder_disk_dropped_frames",
+          "expr": "increase(lm_recorder_disk_dropped_frames[5m])",
+          "instant": false,
           "legendFormat": "{{realm}} dropped at disk",
           "range": true,
           "refId": "B"
@@ -1017,13 +1571,120 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
+          "expr": "increase(lm_recorder_reconnects[5m])",
+          "instant": false,
+          "legendFormat": "{{realm}} reconnects",
+          "range": true,
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 53,
+      "title": "Recorder: queue fill, shards, shed feeds",
+      "description": "How full the writer queue was at the sample (1.0 is an overrun), shards connected of shards configured, and feeds currently shed by the budget controller.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 54,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* shed feeds"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_recorder_queue_fill",
+          "instant": false,
+          "legendFormat": "{{realm}} queue fill",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_recorder_shards_connected / lm_recorder_shards",
+          "instant": false,
+          "legendFormat": "{{realm}} shards connected",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
           "expr": "lm_recorder_shed_feeds",
+          "instant": false,
           "legendFormat": "{{realm}} shed feeds",
           "range": true,
           "refId": "C"
         }
-      ],
-      "description": "Any nonzero drop count is lost tape that cannot be recovered."
+      ]
     }
   ]
 }

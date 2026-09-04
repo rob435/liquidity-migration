@@ -47,6 +47,28 @@ _PUSH_TIMEOUT_S = 10.0
 # One append is one line, well under PIPE_BUF, and this is the only writer.
 _MAX_LINE_BYTES = 4096
 
+#: The heartbeat's latency ledger, one key per step and quantile.
+ORDER_PATH_FIELDS = (
+    "decide_p50_ns",
+    "decide_p99_ns",
+    "durable_p50_ns",
+    "durable_p99_ns",
+    "wire_p50_ns",
+    "wire_p99_ns",
+    "ack_p50_ns",
+    "ack_p99_ns",
+    "dispatch_queue_p50_ns",
+    "dispatch_queue_p99_ns",
+    "venue_task_p50_ns",
+    "venue_task_p99_ns",
+    "core_resume_p50_ns",
+    "core_resume_p99_ns",
+    "end_to_end_p50_ns",
+    "end_to_end_p99_ns",
+    "barrier_wait_p99_ns",
+    "quota_hold_p99_ns",
+)
+
 
 @dataclass(frozen=True)
 class Source:
@@ -110,19 +132,35 @@ def engine_sample(realm: str, path: Path, now_ms: int) -> dict[str, Any]:
 
     written_ms = _number(beat.get("wall_ts_ms"))
     observed_ms = _number(beat.get("account_observed_wall_ts_ms"))
+    raw_strategies = beat.get("strategies")
+    configured: list[str] = (
+        [name for name in raw_strategies if isinstance(name, str) and name] if isinstance(raw_strategies, list) else []
+    )
     raw_positions = beat.get("positions")
     positions: list[Any] = raw_positions if isinstance(raw_positions, list) else []
     notional = 0.0
-    sleeves: dict[str, int] = {}
+    # Every configured sleeve gets a count, zero included: a sleeve that has
+    # held nothing since the sampler started must still be a series, or the
+    # chart cannot show it is flat.
+    sleeves: dict[str, int] = {name: 0 for name in configured}
     for position in positions:
         if not isinstance(position, dict):
             continue
         qty = _number(position.get("qty")) or 0.0
         entry = _number(position.get("entry_px")) or 0.0
         notional += abs(qty * entry)
-        sleeve = position.get("strategy")
-        key = sleeve if isinstance(sleeve, str) and sleeve else "unattributed"
-        sleeves[key] = sleeves.get(key, 0) + 1
+        sleeves[_sleeve_key(position.get("strategy"))] = sleeves.get(_sleeve_key(position.get("strategy")), 0) + 1
+    entries: dict[str, int] = {}
+    raw_entries = beat.get("strategy_entries_enabled")
+    for row in raw_entries if isinstance(raw_entries, list) else []:
+        if isinstance(row, dict) and isinstance(row.get("strategy"), str) and row["strategy"]:
+            entries[row["strategy"]] = 1 if row.get("entries_enabled") is True else 0
+    blockers: dict[str, int] = {name: 0 for name in configured}
+    raw_blockers = beat.get("entry_blockers")
+    for row in raw_blockers if isinstance(raw_blockers, list) else []:
+        if isinstance(row, dict):
+            key = _sleeve_key(row.get("strategy"))
+            blockers[key] = blockers.get(key, 0) + 1
 
     sample.update(
         {
@@ -138,25 +176,42 @@ def engine_sample(realm: str, path: Path, now_ms: int) -> dict[str, Any]:
             "position_count": len(positions),
             "position_entry_notional_usdt": round(notional, 8),
             "sleeve_positions": sleeves,
+            "sleeve_entries_enabled": entries,
+            "sleeve_blockers": blockers,
             "may_open": _number(beat.get("may_open")),
             "rolling_loss_net_usdt": _number(beat.get("rolling_loss_net_usdt")),
             "rolling_loss_limit_usdt": _number(beat.get("rolling_loss_limit_usdt")),
             "rolling_loss_tripped": _number(beat.get("rolling_loss_tripped")),
+            "rolling_loss_trades": _number(beat.get("rolling_loss_trades")),
             "entry_blockers": _count(beat.get("entry_blockers")),
             "strategy_errors": _count(beat.get("strategy_errors")),
+            "working_entries": _count(beat.get("working_entries")),
+            "pending_flatten_requests": _count(beat.get("pending_flatten_requests")),
             "uptime_s": _number(beat.get("uptime_s")),
             "market_events": _number(beat.get("market_events")),
             "orders_sent": _number(beat.get("orders_sent")),
             "fills": _number(beat.get("fills")),
             "stream_resets": _number(beat.get("stream_resets")),
+            "amends_confirmed": _number(beat.get("amends_confirmed")),
+            "amends_pulled_unconfirmed": _number(beat.get("amends_pulled_unconfirmed")),
             "venue_clock_offset_ms": _number(beat.get("venue_clock_offset_ms")),
             "fills_maker_share": _number(beat.get("fills_maker_share")),
             "fill_all_in_arrival_bps": _number(beat.get("fill_all_in_arrival_bps")),
-            "end_to_end_p50_ns": _number(beat.get("end_to_end_p50_ns")),
-            "end_to_end_p99_ns": _number(beat.get("end_to_end_p99_ns")),
+            "fill_arrival_shortfall_bps": _number(beat.get("fill_arrival_shortfall_bps")),
+            "fill_fee_coverage": _number(beat.get("fill_fee_coverage")),
+            "fill_markout_1m_our_way_bps": _number(beat.get("fill_markout_1m_our_way_bps")),
         }
     )
+    # The order path, step by step, as the engine's 60-second ledger has it.
+    # Null when nothing went out in the window, and the field is then absent
+    # from the line: an empty minute is "no measurement", never zero.
+    for key in ORDER_PATH_FIELDS:
+        sample[key] = _number(beat.get(key))
     return sample
+
+
+def _sleeve_key(strategy: Any) -> str:
+    return strategy if isinstance(strategy, str) and strategy else "unattributed"
 
 
 def recorder_sample(name: str, path: Path, now_ms: int) -> dict[str, Any]:
@@ -171,6 +226,12 @@ def recorder_sample(name: str, path: Path, now_ms: int) -> dict[str, Any]:
         return {**sample, "state": "unreadable", "error": "status is not an object"}
     raw_budget = status.get("budget")
     budget: dict[str, Any] = raw_budget if isinstance(raw_budget, dict) else {}
+    raw_shards = status.get("shards")
+    shards: list[dict[str, Any]] = (
+        [shard for shard in raw_shards if isinstance(shard, dict)] if isinstance(raw_shards, list) else []
+    )
+    raw_traffic = status.get("bytes")
+    traffic: dict[str, Any] = raw_traffic if isinstance(raw_traffic, dict) else {}
     recorded_ns = _number(status.get("recorded_at_ns"))
     receive_ns = _number(status.get("last_receive_ns"))
     sample.update(
@@ -190,9 +251,25 @@ def recorder_sample(name: str, path: Path, now_ms: int) -> dict[str, Any]:
             "disk_dropped_frames": _number(status.get("disk_dropped_frames")),
             "snapshot_failures": _number(status.get("snapshot_failures")),
             "free_disk_bytes": _number(status.get("free_disk_bytes")),
+            "disk_blocked": 1.0 if status.get("disk_blocked") is True else 0.0,
+            "queue_capacity": _number(status.get("queue_capacity")),
+            "queue_fill": _ratio(_number(status.get("queued_frames")), _number(status.get("queue_capacity"))),
+            "shards": len(shards),
+            "shards_connected": sum(1 for shard in shards if shard.get("connected") is True),
+            # Summed over shards, since boot. A reconnect is a gap in the tape
+            # and a fresh book snapshot; a storm of them is the recorder
+            # starved, not the venue.
+            "reconnects": sum(int(_number(shard.get("reconnects")) or 0) for shard in shards),
+            "bytes_24h": _number(traffic.get("received_24h")),
         }
     )
     return sample
+
+
+def _ratio(part: float | None, whole: float | None) -> float | None:
+    if part is None or whole is None or whole <= 0:
+        return None
+    return round(part / whole, 6)
 
 
 def sample_path(state_dir: Path, sample: dict[str, Any]) -> Path:
@@ -236,9 +313,10 @@ def line_protocol(sample: dict[str, Any]) -> str:
     for key, value in sorted(sample.items()):
         if key in {"ts_ms", "realm", "kind", "state", "error"}:
             continue
-        if key == "sleeve_positions" and isinstance(value, dict):
+        if key.startswith("sleeve_") and isinstance(value, dict):
+            suffix = key[len("sleeve_") :]
             for sleeve, count in sorted(value.items()):
-                fields[f"sleeve_{sleeve}_positions"] = float(count)
+                fields[f"sleeve_{sleeve}_{suffix}"] = float(count)
             continue
         number = _number(value)
         if number is not None and number == number and abs(number) != float("inf"):

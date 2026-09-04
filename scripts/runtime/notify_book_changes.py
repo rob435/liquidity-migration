@@ -53,7 +53,7 @@ DIRECTIONAL_SLEEVES = frozenset({"carry", "long", "exodus"})
 
 #: Sleeves that exist to exercise the machinery rather than to make money.
 #: Their trades reach the log and nothing else — not a message, not a total.
-HIDDEN_SLEEVES = frozenset({"maker_canary"})
+HIDDEN_SLEEVES = frozenset({"maker_canary", "probe"})
 
 #: Telegram refuses a message past 4096 characters; a batch is split under it.
 MAX_MESSAGE_CHARS = 3_500

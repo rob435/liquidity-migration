@@ -474,6 +474,31 @@ def unstarted_shard(recorder: Recorder, tier: str, topics: list[str], index: int
     )
 
 
+def test_a_shard_reads_frames_without_pure_python_utf8_validation(tmp_path: Path, monkeypatch) -> None:
+    # websocket-client validates every text frame byte by byte in Python; at
+    # five thousand frames a second that was half a shard's CPU and starved the
+    # pong reads, and json.loads rejects a malformed frame anyway.
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+    shard = unstarted_shard(recorder, "deep", ["publicTrade.BTCUSDT"])
+    seen: dict[str, object] = {}
+
+    class FakeApp:
+        def __init__(self, url: str, **callbacks: object) -> None:
+            seen["url"] = url
+            seen["callbacks"] = set(callbacks)
+
+        def run_forever(self, **kwargs: object) -> None:
+            seen["run_forever"] = kwargs
+
+    monkeypatch.setattr(record.websocket, "WebSocketApp", FakeApp)
+
+    shard._connect_once()
+
+    assert seen["callbacks"] == {"on_open", "on_message", "on_error"}
+    assert seen["run_forever"] == {"ping_interval": 20, "ping_timeout": 10, "skip_utf8_validation": True}
+    assert shard.socket is None, "the app is dropped when its run loop returns"
+
+
 def test_a_live_shard_changes_its_subscription_in_place(tmp_path: Path) -> None:
     recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
     shard = unstarted_shard(recorder, "deep", ["publicTrade.BTCUSDT", "publicTrade.ETHUSDT"])

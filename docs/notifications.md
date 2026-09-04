@@ -74,7 +74,7 @@ inaccessible after launch.
 | :--- | :--- |
 | Opening | Fresh heartbeat contains a newly attributed `LONG`, `CARRY`, or `EXODUS` position |
 | Close | `trades.jsonl` gains a closed round trip; message includes sleeve, symbol, side, hold, net realized PnL, return, and slippage |
-| `maker_canary` | Recorded but excluded from Telegram trade messages |
+| `maker_canary`, `probe` | Recorded but excluded from Telegram trade messages; neither is a directional sleeve, so neither can produce an Opening |
 | Daily digest | 00:00 UTC realized totals split by demo and mainnet |
 | `/status` | Unit, heartbeat, and entry-permission summary |
 | `/pause_demo` / `/resume_demo` | Disable or restore demo entries; exits and settlement continue |

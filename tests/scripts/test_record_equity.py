@@ -45,8 +45,24 @@ def _heartbeat(now_ms: int, **overrides: Any) -> dict[str, Any]:
             {"symbol": "NEARUSDT", "side": "long", "qty": 20.7, "entry_px": 2.0, "strategy": "long"},
             {"symbol": "AAVEUSDT", "side": "short", "qty": -1.0, "entry_px": 100.0, "strategy": "carry"},
         ],
+        "strategies": ["carry", "long", "exodus"],
+        "strategy_entries_enabled": [
+            {"strategy": "carry", "entries_enabled": True},
+            {"strategy": "long", "entries_enabled": True},
+            {"strategy": "exodus", "entries_enabled": False},
+        ],
         "entry_blockers": [{"strategy": "long", "symbol": "NEARUSDT", "reason": "inside_resize_band"}],
         "strategy_errors": [],
+        "working_entries": [{"strategy": "carry", "symbol": "AAVEUSDT"}],
+        "pending_flatten_requests": [],
+        "decide_p50_ns": 41_000,
+        "decide_p99_ns": 90_000,
+        "durable_p99_ns": 2_100_000,
+        "wire_p99_ns": 310_000,
+        "ack_p99_ns": 48_000_000,
+        "end_to_end_p50_ns": 44_000_000,
+        "end_to_end_p99_ns": 51_000_000,
+        "quota_hold_p99_ns": None,
     }
     beat.update(overrides)
     return beat
@@ -78,7 +94,7 @@ def test_a_live_heartbeat_becomes_the_numbers_a_curve_needs(tmp_path: Path) -> N
     assert sample["position_count"] == 2
     # Absolute exposure at entry: a short counts as size held, not negative.
     assert sample["position_entry_notional_usdt"] == 141.4
-    assert sample["sleeve_positions"] == {"long": 1, "carry": 1}
+    assert sample["sleeve_positions"] == {"carry": 1, "long": 1, "exodus": 0}
     assert sample["may_open"] == 1.0
     assert sample["rolling_loss_tripped"] == 0.0
     assert sample["entry_blockers"] == 1
@@ -96,8 +112,50 @@ def test_a_hand_position_the_engine_does_not_own_is_still_counted_once(tmp_path:
 
     sample = record_equity.engine_sample("mainnet", beat, now_ms)
 
-    assert sample["sleeve_positions"] == {"unattributed": 1}
+    assert sample["sleeve_positions"] == {"carry": 0, "long": 0, "exodus": 0, "unattributed": 1}
     assert sample["position_count"] == 1
+
+
+def test_every_configured_sleeve_is_a_series_even_while_it_holds_nothing(tmp_path: Path) -> None:
+    # Exodus holds nothing most of the month. A chart that only shows sleeves
+    # with positions cannot show that; a zero can.
+    now_ms = 1_788_000_000_000
+    beat = tmp_path / "heartbeat.json"
+    beat.write_text(json.dumps(_heartbeat(now_ms)), encoding="utf-8")
+
+    sample = record_equity.engine_sample("mainnet", beat, now_ms)
+    line = record_equity.line_protocol(sample)
+
+    assert sample["sleeve_entries_enabled"] == {"carry": 1, "long": 1, "exodus": 0}
+    assert sample["sleeve_blockers"] == {"carry": 0, "long": 1, "exodus": 0}
+    for field in (
+        "sleeve_exodus_positions=0.0",
+        "sleeve_exodus_entries_enabled=0.0",
+        "sleeve_long_entries_enabled=1.0",
+        "sleeve_long_blockers=1.0",
+        "sleeve_exodus_blockers=0.0",
+    ):
+        assert f",{field}," in f",{line.split(' ')[1]},", field
+
+
+def test_the_order_path_steps_pass_through_and_an_empty_window_is_absent_not_zero(tmp_path: Path) -> None:
+    now_ms = 1_788_000_000_000
+    beat = tmp_path / "heartbeat.json"
+    beat.write_text(json.dumps(_heartbeat(now_ms)), encoding="utf-8")
+
+    sample = record_equity.engine_sample("mainnet", beat, now_ms)
+    fields = dict(pair.split("=", 1) for pair in record_equity.line_protocol(sample).split(" ")[1].split(","))
+
+    assert sample["decide_p99_ns"] == 90_000.0
+    assert sample["end_to_end_p99_ns"] == 51_000_000.0
+    assert sample["working_entries"] == 1
+    assert sample["pending_flatten_requests"] == 0
+    assert fields["ack_p99_ns"] == "48000000.0"
+    # The ledger wrote null: nothing was measured, and nothing must be charted.
+    assert sample["quota_hold_p99_ns"] is None
+    assert "quota_hold_p99_ns" not in fields
+    assert "wire_p50_ns" not in fields
+    assert set(record_equity.ORDER_PATH_FIELDS) <= set(sample)
 
 
 def test_a_realm_with_no_heartbeat_is_recorded_and_pushed_as_down(tmp_path: Path) -> None:
@@ -217,7 +275,15 @@ def test_the_recorder_sample_carries_the_budget_and_the_drops(tmp_path: Path) ->
                 "queued_frames": 2,
                 "snapshot_failures": 0,
                 "free_disk_bytes": 54_422_888_448,
+                "disk_blocked": False,
+                "queue_capacity": 131072,
                 "budget": {"projected_month_gb": 1670.2, "monthly_gb": 2400.0, "over": False, "shed": []},
+                "shards": [
+                    {"index": 0, "connected": True, "reconnects": 2},
+                    {"index": 1, "connected": True, "reconnects": 499},
+                    {"index": 2, "connected": False, "reconnects": 0},
+                ],
+                "bytes": {"received_24h": 53_045_936_545, "window_seconds": 60_197},
             }
         ),
         encoding="utf-8",
@@ -227,6 +293,13 @@ def test_the_recorder_sample_carries_the_budget_and_the_drops(tmp_path: Path) ->
 
     assert sample["state"] == "live"
     assert sample["projected_month_gb"] == 1670.2
+    assert sample["queue_capacity"] == 131072.0
+    assert sample["queue_fill"] == round(2 / 131072, 6)
+    assert sample["shards"] == 3
+    assert sample["shards_connected"] == 2
+    assert sample["reconnects"] == 501
+    assert sample["bytes_24h"] == 53_045_936_545.0
+    assert sample["disk_blocked"] == 0.0
     assert sample["monthly_gb"] == 2400.0
     assert sample["budget_over"] == 0.0
     assert sample["shed_feeds"] == 0
@@ -360,25 +433,106 @@ def test_the_sink_variables_are_documented_and_templated() -> None:
     assert "METRICS_PUSH_TOKEN=\n" in template
 
 
-def test_the_dashboard_charts_metrics_the_sampler_actually_pushes() -> None:
-    dashboard = json.loads(
-        (ROOT / "deploy" / "grafana" / "liquidity-migration-fleet.json").read_text(encoding="utf-8")
+def _dashboard() -> dict[str, Any]:
+    return json.loads((ROOT / "deploy" / "grafana" / "liquidity-migration-fleet.json").read_text(encoding="utf-8"))
+
+
+def _expressions(dashboard: dict[str, Any]) -> list[str]:
+    return [str(target.get("expr", "")) for panel in dashboard["panels"] for target in panel.get("targets", [])]
+
+
+def test_the_dashboard_json_is_what_its_renderer_renders() -> None:
+    spec = importlib.util.spec_from_file_location("render_dashboard", ROOT / "deploy" / "grafana" / "render_dashboard.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    committed = (ROOT / "deploy" / "grafana" / "liquidity-migration-fleet.json").read_text(encoding="utf-8")
+    assert module.render() == committed, "run deploy/grafana/render_dashboard.py and commit the JSON"
+
+
+def test_the_dashboard_charts_only_fields_the_sampler_actually_pushes(tmp_path: Path) -> None:
+    import re
+
+    dashboard = _dashboard()
+    expressions = " ".join(_expressions(dashboard))
+    now_ms = 1_788_000_000_000
+    beat = tmp_path / "heartbeat.json"
+    # A heartbeat with every field present, so the set of series the sampler
+    # can produce is the full one.
+    counters = {
+        "uptime_s": 1,
+        "market_events": 1,
+        "orders_sent": 1,
+        "fills": 1,
+        "stream_resets": 0,
+        "amends_confirmed": 0,
+        "amends_pulled_unconfirmed": 0,
+        "rolling_loss_trades": 0,
+        "venue_clock_offset_ms": 1,
+        "fills_maker_share": 1.0,
+        "fill_all_in_arrival_bps": 1.0,
+        "fill_arrival_shortfall_bps": 1.0,
+        "fill_fee_coverage": 1.0,
+        "fill_markout_1m_our_way_bps": 1.0,
+    }
+    ledger = {key: 1 for key in record_equity.ORDER_PATH_FIELDS}
+    beat.write_text(json.dumps(_heartbeat(now_ms, **counters, **ledger)), encoding="utf-8")
+    engine_line = record_equity.line_protocol(record_equity.engine_sample("mainnet", beat, now_ms))
+    engine_fields = {pair.split("=", 1)[0] for pair in engine_line.split(" ")[1].split(",")}
+    status = tmp_path / "status.json"
+    status.write_text(
+        json.dumps(
+            {
+                "venue": "bybit",
+                "recorded_at_ns": now_ms * 1_000_000,
+                "last_receive_ns": now_ms * 1_000_000,
+                "received_frames": 1,
+                "written_rows": 1,
+                "queued_frames": 0,
+                "dropped_frames": 0,
+                "disk_dropped_frames": 0,
+                "snapshot_failures": 0,
+                "free_disk_bytes": 1,
+                "queue_capacity": 1,
+                "budget": {"projected_month_gb": 1.0, "monthly_gb": 2.0, "over": False, "shed": []},
+                "shards": [{"connected": True, "reconnects": 0}],
+                "bytes": {"received_24h": 1},
+            }
+        ),
+        encoding="utf-8",
     )
-    expressions = " ".join(
-        str(target.get("expr", "")) for panel in dashboard["panels"] for target in panel["targets"]
-    )
-    assert expressions.count("lm_engine_up") >= 1
-    for field in ("equity_usdt", "available_usdt", "position_count", "may_open", "rolling_loss_net_usdt"):
-        assert f"lm_engine_{field}" in expressions, field
-    for field in ("projected_month_gb", "dropped_frames"):
-        assert f"lm_recorder_{field}" in expressions, field
-    stat_panels = [panel for panel in dashboard["panels"] if panel["type"] == "stat"]
-    assert stat_panels
-    for panel in stat_panels:
+    recorder_line = record_equity.line_protocol(record_equity.recorder_sample("bybit", status, now_ms))
+    recorder_fields = {pair.split("=", 1)[0] for pair in recorder_line.split(" ")[1].split(",")}
+
+    charted_engine = set(re.findall(r"lm_engine_([a-z0-9_]+)", expressions))
+    charted_recorder = set(re.findall(r"lm_recorder_([a-z0-9_]+)", expressions))
+    # `lm_engine_sleeve_.*_positions` is a regex over the per-sleeve series.
+    charted_engine = {field for field in charted_engine if not field.startswith("sleeve_")}
+    assert charted_engine <= engine_fields, sorted(charted_engine - engine_fields)
+    assert charted_recorder <= recorder_fields, sorted(charted_recorder - recorder_fields)
+    for suffix in ("positions", "entries_enabled", "blockers"):
+        assert f'lm_engine_sleeve_(.*)_{suffix}' in expressions, suffix
+        assert any(field.endswith(f"_{suffix}") and field.startswith("sleeve_") for field in engine_fields)
+    for field in ("equity_usdt", "available_usdt", "may_open", "rolling_loss_net_usdt", "end_to_end_p99_ns"):
+        assert field in charted_engine, field
+    for field in ("projected_month_gb", "dropped_frames", "reconnects", "queue_fill"):
+        assert field in charted_recorder, field
+
+
+def test_stat_panels_read_the_instant_and_counters_are_charted_as_increases() -> None:
+    dashboard = _dashboard()
+    stats = [panel for panel in dashboard["panels"] if panel["type"] == "stat"]
+    assert stats
+    for panel in stats:
         for target in panel["targets"]:
             assert target.get("instant") is True, panel["title"]
             assert target.get("range") is False, panel["title"]
-    # Every charted series must be a field the sampler can actually produce.
-    now_ms = 1_788_000_000_000
-    live = record_equity.engine_sample("mainnet", Path("/nonexistent"), now_ms)
-    assert live["state"] == "absent"
+    # A since-boot counter drawn raw is a cliff at every restart; the view
+    # reads them as increases so a restart is a flat line.
+    for counter in ("lm_engine_fills", "lm_engine_stream_resets", "lm_recorder_dropped_frames", "lm_recorder_reconnects"):
+        assert f"increase({counter}" in " ".join(_expressions(dashboard)), counter
+    # The realm variable is fed by lm_engine_up; recorder realms are venues
+    # and a realm filter on them would hide every recorder series.
+    for expr in _expressions(dashboard):
+        if "lm_recorder_" in expr:
+            assert "$realm" not in expr, expr

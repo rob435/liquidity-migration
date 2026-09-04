@@ -16,7 +16,13 @@ fn build_err(result: Result<Box<dyn Strategy>, BuildError>) -> BuildError {
 fn registry_contains_only_current_runtime_strategies() {
     assert_eq!(
         known_strategies(),
-        ["carry_native", "long_native", "exodus_native", "quoter"]
+        [
+            "carry_native",
+            "long_native",
+            "exodus_native",
+            "quoter",
+            "probe"
+        ]
     );
     for retired in ["target_book", "touch_sniper", "template"] {
         assert!(matches!(

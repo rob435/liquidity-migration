@@ -458,7 +458,10 @@ class Shard:
             self.adapter.connection_url(topics), on_open=opened, on_message=message, on_error=error
         )
         try:
-            self.socket.run_forever(ping_interval=20, ping_timeout=10)
+            # websocket-client validates UTF-8 in pure Python, one byte at a
+            # time, and that is half of a shard's CPU per frame; json.loads
+            # rejects a malformed frame anyway.
+            self.socket.run_forever(ping_interval=20, ping_timeout=10, skip_utf8_validation=True)
         except Exception as exc:  # noqa: BLE001 - one shard's teardown noise must not stop the others
             if not self.stop.is_set():
                 logging.warning("shard %d run loop ended: %s", self.index, exc)

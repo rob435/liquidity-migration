@@ -6,6 +6,58 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 — The order path is measured every quarter hour, every sleeve
+  is a series, and the Bybit recorder stops starving itself.**
+  - What the first dashboard showed against what was true. "Open positions by
+    sleeve" had no Exodus line because the sampler only emitted sleeves that
+    held something; "dropped frames" read as a flat 326 because it charted a
+    since-boot counter; the order-path panels were empty because the engine's
+    latency ledger is a 60-second window and the funded engine sent two orders
+    in fourteen hours. Both engines' `end_to_end_*` were null in every sample
+    since the 00:08 deploy.
+  - The recorder was the real fault. In the 24 h to 14:45 UTC the Bybit
+    recorder logged 348 `overran the capture queue`, 160 `ping/pong timed out`
+    and 501 shard reconnects across 21 shards, all since the 22:11 restart that
+    raised `monthly_gb` from 1300 to 2400 and stopped shedding; Binance logged
+    one. The queue hit 31,606 of 32,768 frames at 13:35 and again at 14:00,
+    and every ping timeout came in a burst across every shard at once, which
+    is the interpreter, not the network. `py-spy --gil` on the live process
+    (12 s, 436 samples) put ~73% of interpreter time in websocket-client's
+    receive path and ~10% in normalize and write. A local benchmark against
+    Bybit's public stream (40 names, book/trades/ticker, 25 s each) measured
+    0.22 ms CPU per frame with the library's defaults, 0.10 ms with
+    `skip_utf8_validation=True`, and 0.13 ms on the `websockets` sync client
+    with its C speedups; the flag wins and adds no dependency. Fix: the flag,
+    and `queue_frames = 131072` in `deploy/capture/bybit-linear.toml` so a
+    US-session burst buffers instead of overrunning, reconnecting and
+    re-snapshotting every book on the shard. `json.loads` rejects a malformed
+    frame regardless.
+  - The order path is now measured on a clock. New `probe` plug in
+    `engine-strategies`: on the **demo** engine only, every 15 minutes on the
+    wall clock it rests one venue-minimum post-only `BTCUSDT` buy 3% under the
+    bid with the stop the risk kernel requires, and pulls it two seconds
+    later. It is `[[strategy]] probe`, id 3 in the demo config, appended after
+    Exodus; mainnet's config is untouched. A fill is closed at market at once
+    and shows only as an entry blocker, never a strategy error, and
+    `notify_book_changes.py` hides the sleeve: the probe cannot page or
+    message. Twelve plug tests pin the schedule, the price, the size, the pull,
+    the refusal path, the drain and its retry, and the strict parameter table.
+  - The sampler now emits every sleeve the heartbeat lists, zero included, and
+    per sleeve its entry gate and blocker count; the whole latency ledger
+    (`decide`, `durable`, `wire`, `ack`, `dispatch_queue`, `venue_task`,
+    `core_resume`, `end_to_end` at p50/p99, `barrier_wait` and `quota_hold`
+    p99), working orders, pending flattens, amend outcomes and fill costs; and
+    for each recorder the queue capacity and fill, shards configured and
+    connected, reconnects since boot and bytes in 24 h. A null ledger field is
+    absent from the push, never zero. About 160 series, 6 MB a day on the host.
+  - The dashboard is rendered by `deploy/grafana/render_dashboard.py` and the
+    committed JSON must match it. Health is a state timeline with one lane per
+    fact; sleeves are three panels through `label_replace`; the order path has
+    a "last measured" stat (`time() - timestamp(last_over_time(...[30d]))`),
+    end-to-end and per-step p99 plotted as points; every since-boot counter is
+    charted as `increase(...[5m])`; recorder panels add reconnects, queue fill
+    and shards connected. A test refuses any expression naming a field the
+    sampler does not push.
 - **2026-09-04 — Observability follows producer verdicts, and watchdog
   maintenance follows the deploy lock.**
   - The first `2f4af5e5` rollout returned `ok` in all three liveness scopes,

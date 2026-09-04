@@ -9,6 +9,7 @@ What the fleet records about itself, where it lands, and how to see it.
 | Surface | Unit | Cadence | Output | Authority |
 | :--- | :--- | :--- | :--- | :--- |
 | **Equity & recorder samples** | `liquidity-migration-equity-recorder.timer` | Every minute at :20 | JSONL under `/var/lib/liquidity-migration/equity`, plus one optional HTTP push | Read-only; loads no venue environment |
+| **Order-path probe** | the `probe` sleeve of the **demo** engine | Every 15 min at :00, :15, :30, :45 | One venue-minimum post-only `BTCUSDT` buy 3% under the bid, pulled 2 s later: one measurement in the engine's latency ledger, read by the :20 sample | Demo only; never a page, never a Telegram message ([trading_logic.md](trading_logic.md) §1) |
 | **Engine heartbeat** | the engine itself | Every 5 s | `heartbeat.json`, overwritten | The engine's own statement of health |
 | **Closed trades** | the engine itself | Per closed round trip | `trades.jsonl`, appended | Realized accounting authority |
 | **Liveness alerts** | `*-liveness.timer` | Every 3 min | Telegram, plus the on-call agent | See [notifications.md](notifications.md) |
@@ -28,7 +29,7 @@ declares and appends one line per artifact per run.
 | `engine-<realm>-<YYYY-MM>.jsonl` | always, one line per realm per minute |
 | `recorder-<venue>-<YYYY-MM>.jsonl` | always, one line per tape recorder per minute |
 
-Four lines a minute, about 2.4 KB: **3.4 MB a day, 1.2 GB a year**, in monthly
+Four lines a minute, about 4.2 KB: **6 MB a day, 2.2 GB a year**, in monthly
 files. Nothing rotates or prunes them — next to 1.7 TB a month of tape this is
 noise, and the history is the point.
 
@@ -38,13 +39,16 @@ noise, and the history is the point.
 | `state` | `live`, or `absent` / `unreadable` / `unparsable` with an `error` |
 | `equity_usdt`, `available_usdt` | The venue's own reading, from the heartbeat |
 | `heartbeat_age_ms`, `account_age_ms` | Age of the heartbeat, and of the venue reading inside it |
-| `position_count`, `position_entry_notional_usdt`, `sleeve_positions` | Holdings, and how many each sleeve owns |
-| `may_open`, `entry_blockers`, `strategy_errors` | Whether new risk is admitted, and why not |
-| `rolling_loss_net_usdt`, `rolling_loss_limit_usdt`, `rolling_loss_tripped` | The 24h breaker against its ceiling |
-| `uptime_s`, `market_events`, `orders_sent`, `fills`, `stream_resets` | Since-boot counters; all reset on restart |
-| `fills_maker_share`, `fill_all_in_arrival_bps` | What the trading cost |
-| `end_to_end_p50_ns`, `end_to_end_p99_ns` | The order path, from the engine's latency ledger |
-| `projected_month_gb`, `monthly_gb`, `shed_feeds`, `dropped_frames` | Recorder rows only: inbound projection against allowance |
+| `position_count`, `position_entry_notional_usdt`, `sleeve_positions` | Holdings, and how many each **configured** sleeve owns, zero included; `unattributed` is the owner's hand exposure |
+| `sleeve_entries_enabled`, `sleeve_blockers` | Per configured sleeve: the effective entry gate (1/0) and how many symbols it is blocked on |
+| `may_open`, `entry_blockers`, `strategy_errors`, `working_entries`, `pending_flatten_requests` | Whether new risk is admitted and why not; orders resting at the venue; flattens not yet acknowledged |
+| `rolling_loss_net_usdt`, `rolling_loss_limit_usdt`, `rolling_loss_tripped`, `rolling_loss_trades` | The 24h breaker against its ceiling |
+| `uptime_s`, `market_events`, `orders_sent`, `fills`, `stream_resets`, `amends_confirmed`, `amends_pulled_unconfirmed` | Since-boot counters; all reset on restart. The dashboard reads them as `increase()` |
+| `fills_maker_share`, `fill_all_in_arrival_bps`, `fill_arrival_shortfall_bps`, `fill_fee_coverage`, `fill_markout_1m_our_way_bps` | What the trading cost |
+| `decide_*`, `durable_*`, `wire_*`, `ack_*`, `dispatch_queue_*`, `venue_task_*`, `core_resume_*`, `end_to_end_*` (`_p50_ns`, `_p99_ns`), `barrier_wait_p99_ns`, `quota_hold_p99_ns` | The order path step by step, from the engine's 60-second latency ledger. Null in the file and **absent from the push** in a minute nothing went out: an empty window is no measurement, never zero |
+| `projected_month_gb`, `monthly_gb`, `budget_over`, `shed_feeds` | Recorder rows only: inbound projection against allowance |
+| `received_frames`, `written_rows`, `dropped_frames`, `disk_dropped_frames`, `queued_frames`, `queue_capacity`, `queue_fill`, `disk_blocked` | Recorder rows only: the writer queue. A dropped frame is an overrun, and every overrun reconnects the shard |
+| `shards`, `shards_connected`, `reconnects`, `bytes_24h`, `free_disk_bytes`, `snapshot_failures` | Recorder rows only: the connections and the disk. `reconnects` is since boot, summed over shards |
 | `started_at_ns`, `pid` | Recorder status only: startup grace and process identity used by liveness and deploy readiness checks |
 
 ## 3. Invariants
@@ -55,6 +59,14 @@ noise, and the history is the point.
   with a `WARNING` on the journal. The file is the record; the remote is a view.
 * **Must**: realms and artifact paths come from `deploy/fleet_manifest.tsv`, so
   the sampler cannot drift from the fleet the deploy installs.
+* **Must**: every sleeve the heartbeat lists in `strategies` be a series, zero
+  included. A sleeve that has held nothing since the sampler started is a line
+  at zero, not a missing line.
+* **Must Never**: an empty latency window be pushed as zero. The ledger's null
+  is absent from the line; the dashboard plots the order path as points.
+* **Must Never**: the probe page or message anybody. It reports through
+  `entry_blockers`, never `strategy_errors`, and `notify_book_changes.py` hides
+  its sleeve.
 * **Must Never**: this unit load a venue credential file. It reads published
   artifacts and pushes numbers; its credential surface is empty by construction.
 * **Must Never**: a missed minute be replayed. `Persistent=false`; the gap is
@@ -83,7 +95,7 @@ tail -3 /var/lib/liquidity-migration/equity/engine-mainnet-$(date -u +%Y-%m).jso
 ## 5. Grafana Cloud
 
 The free tier is enough: it holds 10k active series and this fleet pushes about
-70. Metrics retention there is 14 days, which is why the host files are the
+160. Metrics retention there is 14 days, which is why the host files are the
 record and the dashboard is the view.
 
 ### One-Time Setup
@@ -94,7 +106,7 @@ record and the dashboard is the view.
 | 2 | the stack's **Metrics** / Prometheus page | Copy the **Influx** write URL (ends `/api/v1/push/influx/write`) and the numeric instance ID beside it |
 | 3 | **Access Policies** → create token | Scope `metrics:write`, copy the token once |
 | 4 | the host | Put all three in `/etc/liquidity-migration/observability.env` (below) |
-| 5 | Dashboards → **New** → **Import** | Upload `deploy/grafana/liquidity-migration-fleet.json`, pick the stack's Prometheus datasource |
+| 5 | Dashboards → **New** → **Import** | Upload `deploy/grafana/liquidity-migration-fleet.json`, pick the stack's Prometheus datasource. Re-import after a change; the UID `liqmig-fleet` is stable, so it replaces in place |
 
 ```bash
 # On the host, as root. The template ships the same three keys with comments.
@@ -120,12 +132,36 @@ journalctl -u liquidity-migration-equity-recorder.service -n 5 --no-pager
 All three empty or missing means local files only, which is a supported
 configuration and prints `no metrics sink configured`.
 
+### The Dashboard
+
+`deploy/grafana/liquidity-migration-fleet.json` is rendered by
+`deploy/grafana/render_dashboard.py`; edit the script, run it, commit both.
+`render_dashboard.py --check` and the test suite refuse a JSON that is not what
+the script renders.
+
+| Section | Panels | Reads |
+| :--- | :--- | :--- |
+| **Health** | state timeline, one lane per fact; equity with sparkline | `lm_engine_up`, `may_open`, `1 - rolling_loss_tripped`, `lm_recorder_up`, `equity_usdt` |
+| **Account** | equity and available; rolling 24h loss against its ceiling | `equity_usdt`, `available_usdt`, `rolling_loss_*` |
+| **Sleeves** | positions by sleeve; entries enabled by sleeve (state timeline); blockers by sleeve | `lm_engine_sleeve_<name>_{positions,entries_enabled,blockers}` through `label_replace` |
+| **Order path** | seconds since the ledger last held an order; orders since boot; end to end p50/p99; every step at p99; working orders, blockers, faults | `time() - timestamp(last_over_time(end_to_end_p50_ns[30d]))`, the `*_p99_ns` steps, `working_entries`, `strategy_errors` |
+| **Engine** | heartbeat and account age; orders/fills/resets per 5 min; market events per second and venue clock offset | ages in ms; `increase(...[5m])` over the since-boot counters |
+| **Tape recorders** | projected month against allowance; frames dropped and reconnects per 5 min; queue fill, shards connected, shed feeds | `lm_recorder_*`, unfiltered by realm |
+
+"Order path last measured" is the panel to read when the engines are quiet:
+demo should never show more than about 16 minutes (the probe), mainnet shows
+how long the funded engine has gone without sending anything.
+
 ### Metric Names
 
 Line protocol `lm_engine,realm=mainnet equity_usdt=130.28` arrives as the
 Prometheus series `lm_engine_equity_usdt{realm="mainnet"}` — measurement,
 underscore, field. Every numeric sample field in §2 becomes one series.
-`lm_engine_up` and `lm_recorder_up` are 1 or 0.
+`lm_engine_up` and `lm_recorder_up` are 1 or 0. The per-sleeve dictionaries
+flatten to `lm_engine_sleeve_<name>_positions`,
+`lm_engine_sleeve_<name>_entries_enabled` and `lm_engine_sleeve_<name>_blockers`,
+one series per configured sleeve, and the dashboard turns the name back into a
+`sleeve` label with `label_replace`.
 
 `realm` is the only label, deliberately: a label that changes value starts a
 new series, so labelling `state` or a `venue` known only while the engine is
@@ -145,4 +181,11 @@ sampler.
 scripts/ops.sh curve mainnet
 scripts/ops.sh logs equity-recorder.service 50
 scripts/ops.sh units | grep equity-recorder
+
+# The probe, on the demo engine: one "probe rested" a quarter hour at debug,
+# refusals and fills at warn
+scripts/ops.sh logs engine.service 400 | grep -i probe
+
+# The dashboard JSON is what the renderer says it is
+python deploy/grafana/render_dashboard.py --check
 ```

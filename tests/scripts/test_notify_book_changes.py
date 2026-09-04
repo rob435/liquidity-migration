@@ -309,6 +309,7 @@ class TestTheCanaryStaysOffThePhone:
     def test_the_sleeve_name_is_matched_however_it_is_cased(self) -> None:
         assert notify.hidden({"sleeve": "MAKER_CANARY"})
         assert notify.hidden({"sleeve": "maker_canary"})
+        assert notify.hidden({"sleeve": "probe"}), "the order-path probe is machinery, not a trade"
         assert not notify.hidden({"sleeve": "carry"})
         assert not notify.hidden({})
 

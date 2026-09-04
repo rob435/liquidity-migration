@@ -14,6 +14,8 @@ market = "linear"              # bybit: linear ; binance: usdm
 [storage]
 root = "/var/lib/liquidity-migration/forward-market"   # `record --root` overrides
 segment_max_mb = 64
+queue_frames = 32768            # frames waiting for the writer before a shard
+                               # overruns and reconnects for fresh snapshots
 retention_days = 30
 max_disk_gb = 60
 min_free_disk_gb = 25

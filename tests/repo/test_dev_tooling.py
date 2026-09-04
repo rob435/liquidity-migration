@@ -253,6 +253,7 @@ def test_dev_router_uses_selected_python_and_preserves_arguments(tmp_path: Path)
         "market_tape",
         "scripts",
         "tests",
+        "deploy",
         "--fix",
     ]
 

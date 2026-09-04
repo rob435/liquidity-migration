@@ -6,14 +6,17 @@ Mathematical models, entry/exit criteria, sizing rules, and collision invariants
 
 ## 1. Strategy Sleeve Registry
 
-Strategy blocks are declared in `engine.toml`. Strategy ID order is immutable identity in the WAL:
+Strategy blocks are declared in `engine.toml`. A block's ID is its position in
+that realm's config and is immutable identity in that realm's WAL: every new
+block appends, nothing is inserted, and the two realms' tails differ.
 
-| ID | Crate / Reducer | Sleeve | Deployed State | Core Mandate |
-| :---: | :--- | :--- | :--- | :--- |
-| **0** | `carry_native` | **CARRY** | Active | Captures extreme negative funding crowd fees (sticky 48h hold). |
-| **1** | `long_native` | **LONG** | Active | Momentum breakouts on top turnover liquid perpetuals. |
-| **2** | `exodus_native` | **EXODUS** | Active | Short entry on distressed CARRY pairs prior to settlement. |
-| **3** | `quoter` | **MAKER** | Disabled | High-frequency two-sided liquidity provision around fair mid. |
+| ID | Crate / Reducer | Sleeve | Realm | Deployed State | Core Mandate |
+| :---: | :--- | :--- | :--- | :--- | :--- |
+| **0** | `carry_native` | **CARRY** | demo, mainnet | Active | Captures extreme negative funding crowd fees (sticky 48h hold). |
+| **1** | `long_native` | **LONG** | demo, mainnet | Active | Momentum breakouts on top turnover liquid perpetuals. |
+| **2** | `exodus_native` | **EXODUS** | demo, mainnet | Active | Short entry on distressed CARRY pairs prior to settlement. |
+| **3** | `quoter` | **MAKER** | mainnet | Disabled | High-frequency two-sided liquidity provision around fair mid. |
+| **3** | `probe` | **PROBE** | demo | Active | Order-path benchmark, not a trading sleeve: one venue-minimum post-only `BTCUSDT` buy 3% under the bid every 15 min on the wall clock, pulled 2 s later, so `decide`/`durable`/`wire`/`ack`/`end_to_end` are measured on a day no sleeve trades. A fill is closed at market at once and shows only as an entry blocker; it never raises a strategy error or a Telegram message. |
 
 ---
 

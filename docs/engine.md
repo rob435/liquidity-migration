@@ -15,7 +15,7 @@ The engine workspace is under `engine/`:
 | **`engine-risk`** | Lib | Account-wide admission, gross/margin limits, quote freshness, and rolling-loss breaker. |
 | **`engine-venue`** | Lib | Order gateways, private streams, and the venue registry for all six venues (§2); account lease locking. |
 | **`engine-marketdata`**| Lib | Public market feeds and book rebuild per venue: quotes, trades, level-50 books, funding. |
-| **`engine-strategies`**| Lib | Pure strategy reducers (`LONG`, `CARRY`, `EXODUS`, `MAKER`) and runtime plugs. |
+| **`engine-strategies`**| Lib | Pure strategy reducers (`LONG`, `CARRY`, `EXODUS`, `MAKER`) and runtime plugs, plus the `PROBE` order-path plug ([trading_logic.md](trading_logic.md) §1). |
 | **`engine-core`** | Lib | Event loop, boot recovery, command execution, controls, heartbeat, and trade reporting. |
 | **`engine`** | Binary (`bin`) | Production engine runner, takeover tools, and config renderer. |
 | **`signal-worker`** | Binary (`bin`) | Credential-free public market collector and observation streamer. |

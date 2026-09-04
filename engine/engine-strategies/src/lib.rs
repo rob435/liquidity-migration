@@ -14,10 +14,13 @@ pub mod native_exodus;
 pub mod native_long;
 mod params;
 pub mod position_plan;
+pub mod probe;
 pub mod quoter;
 
 #[cfg(test)]
 mod mock_ctx;
+#[cfg(test)]
+mod probe_tests;
 #[cfg(test)]
 mod registry_tests;
 
@@ -51,6 +54,9 @@ const PLUGS: &[(&str, Builder)] = &[
     }),
     (quoter::plug::NAME, |id, params| {
         Ok(Box::new(quoter::Quoter::from_params(id, params)?))
+    }),
+    (probe::NAME, |id, params| {
+        Ok(Box::new(probe::Probe::from_params(id, params)?))
     }),
 ];
 
