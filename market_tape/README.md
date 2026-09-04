@@ -68,6 +68,7 @@ manifest.jsonl                                         Receipts: row count, byte
 status.json                                            Health status updated every 30s
 ```
 * `status.json` schema: `last_receive_ns`, `disk_blocked`, `dropped_frames`, `disk_dropped_frames`, `shards[].connected`, `budget.projected_month_gb`, `budget.over`, `budget.shed`, `budget.shed_gb_month`.
+* `status.json` is this unit's heartbeat: the watchdog reads its mtime and its `last_receive_ns` (`deploy/fleet_manifest.tsv`, limit 120 s). The maintenance tick that writes it **must never walk the tape** — `Retention.writable()` is one `statvfs`. Retention itself is the `tape-retention` thread, one pass every `RETENTION_INTERVAL_SECONDS` (300); a pass stats each file once, reads free space once, and carries free space forward by the bytes it unlinks.
 
 ### Budget (`[budget]` in the capture config)
 

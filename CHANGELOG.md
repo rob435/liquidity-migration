@@ -6,6 +6,99 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 14:49 UTC — Incident `host-08ad9d5834fa6d2f`: the recorder's
+  heartbeat sat behind a full walk of the tape. Retention now has its own
+  thread and its own cadence.**
+  - The alert, on `ip-208-84-103-4`, host scope, two `CRITICAL` refs at once:
+    `capture-silent` — "recorder has received no market frame for 126s (limit
+    120s)" — and
+    `heartbeat:liquidity-migration-forward-capture.service` — "heartbeat is
+    126s old (limit 120s)". No funded engine unit alerted;
+    `liquidity-migration-engine-mainnet.service` was not involved.
+  - Both readings come from one file. `evaluate_heartbeats`
+    (`scripts/runtime/check_fleet_liveness.py:154`) stats the unit's
+    `output_artifact`, which for this unit is
+    `/var/lib/liquidity-migration/forward-market/status.json`
+    (`deploy/fleet_manifest.tsv:11`), and `evaluate_capture_status`
+    (`check_fleet_liveness.py:229`) reads `last_receive_ns` out of the same
+    file. Identical ages of 126 s mean the file was 126 s old, not that the
+    venue went quiet — and the journal agrees: shards reconnect and subscribe
+    through 14:49:07 ("shard 1 connected with 150 topics"), while not one
+    `capture status frames=…` line appears in the 95 s the excerpt covers,
+    where `status_interval_seconds = 30` should have produced three.
+  - Diagnosis: `Recorder._maintenance` (`market_tape/record.py:1065` on the
+    parent commit) opened every tick with
+    `self.disk_blocked = not self.retention.writable()` and closed it with
+    `self._write_status()`. `Retention.writable()`
+    (`market_tape/storage.py:363`, parent commit) ran a full
+    `prune()` first. `prune()` walked the whole tape with `rglob("*.zst")`
+    and spent three `stat()` calls per file — the sort key, the size sum, and
+    the `expired` test — plus a `shutil.disk_usage` **per file** at
+    `storage.py:343` while the tape was under `max_disk_gb`, and, on every
+    tick that deleted anything, a second full walk of the tree in
+    `remove_empty_directories`. On this host that covers 517 USDT perpetuals ×
+    24 hourly directories × the ~3 days that `max_disk_gb = 60` holds: tens of
+    thousands of compressed segments, three to four syscalls each, every 30
+    seconds, growing with the tape. When one pass ran past 120 s the heartbeat
+    aged past the watchdog's limit and both refs fired together.
+  - What changed. `Retention.writable()` is now the question its name asks:
+    one `statvfs`, no walk, no deletions. `Retention.prune()` stats each file
+    once, reads free space once, and carries free space forward by the bytes
+    it unlinks — which is also truer than re-reading `statvfs`, since a
+    filesystem need not release a deleted file's blocks at once — and only
+    walks for empty directories when it deleted something. `Recorder` runs
+    retention on a new `tape-retention` thread every
+    `RETENTION_INTERVAL_SECONDS = 300`, catching and logging a failed pass the
+    way the writer and compressor threads already do, so neither the cost nor
+    the failure of housekeeping can hold or kill the thread that writes the
+    heartbeat. The tape gains a few hundred MB in 300 s against a 25 GB
+    `min_free_disk_gb` floor, so the longer cadence cannot run the disk out.
+  - Proof. Five tests, each failing on the parent commit and passing here:
+    `test_writable_asks_the_free_space_question_and_walks_nothing`,
+    `test_a_prune_stats_each_file_once_and_reads_free_space_once` (1
+    `disk_usage` call per pass, not one per file),
+    `test_disk_pressure_stops_once_the_unlinked_bytes_clear_the_free_floor`
+    (the carried-forward free space stops the pass instead of emptying the
+    tape), `test_the_maintenance_tick_writes_the_heartbeat_without_walking_the_tape`,
+    and `test_a_retention_pass_that_cannot_delete_leaves_the_pruner_thread_running`.
+    Then the full `scripts/dev.sh check`: Ruff, ShellCheck, mypy over 98
+    files, 1,428 Python tests, rustfmt, Clippy, and the whole Rust workspace.
+  - Not established from the payload, and worth the owner's eye: whether the
+    maintenance thread was merely slow or had already died on an exception
+    out of `prune()` — the loop had no error containment, so an unlinkable
+    file would have killed it silently. Both readings are on the host:
+    `sudo journalctl -u liquidity-migration-forward-capture.service --since
+    '2026-09-04 14:00' | grep -E 'tape-maintenance|Traceback|capture status'`
+    tells them apart, and `scripts/ops.sh curve mainnet` shows which minutes
+    of the incident recorded no recorder sample at all. Either way this change
+    fixes it: the pass is cheap, off the heartbeat's thread, and cannot raise
+    out of its loop.
+  - The tape did lose frames. Eight shards logged "overran the capture queue;
+    reconnecting for fresh snapshots" at 14:47:43, so the writer thread fell
+    the full `queue_frames = 32768` behind and those frames are gone from the
+    14:00 hour. The writer is a different thread from the maintainer, so this
+    is not the same code path; it is consistent with the same pass — a
+    syscall storm over tens of thousands of files on the filesystem the writer
+    is appending to — and a mass reconnect re-subscribes 150 topics a shard,
+    whose snapshot burst can overrun the queue again on its own. Which of the
+    two drove it is not decidable from the payload. `dropped_frames` in
+    `status.json` is the counter to watch after the deploy: it should stop
+    climbing.
+  - No host action is required beyond the deploy. The recorder was not
+    restarted by hand, and the shards were connected throughout.
+  - Why it fired here, from the entry below and `dd25715`. The `2f4af5e`
+    deploy held the host 14:41:13-14:42:29 UTC and restarted both recorders —
+    the same restart the entry below records as `RESOLVED capture-silent`. So
+    this recorder was minutes old, walking a cold page cache. A 126 s age read
+    at about 14:49 puts the last status write near 14:46:5x, which makes the
+    first pass after restart roughly four minutes long; the 14:47:43 overrun
+    falls inside the second. The disk trend `dd25715` recorded — 64 GB free at
+    00:10 UTC, 36 GB at 15:07 — puts the tape at or near `max_disk_gb = 60`,
+    which is the pass's most expensive mode: it deletes on every tick, and
+    every tick that deletes then walked the tree a second time in
+    `remove_empty_directories`. That walk now runs only when a pass deleted
+    something, once per 300 s rather than per 30 s.
+
 - **2026-09-04 — Incident `host-bf5dcb6544d0dfdc`: the new watchdog-chain check
   paged CRITICAL on its own deploy. Requirement now reads systemd enablement,
   not a realm's runtime state.**

@@ -20,11 +20,16 @@ projection is over the allowance, gives up the configured `tier:feed` pairs in
 order, one an hour, restoring them in reverse once under pace.
 
 Threads: one per shard (websocket), one writer, one compressor, one
-maintainer (status, retention, snapshots, universes, budget), plus whatever
-side lanes the venue adapter starts and the short-lived threads that fetch
-REST book snapshots after a subscribe. Frames cross from the shards to the
-writer through one bounded queue; when it overruns, the shard reconnects for
-fresh snapshots and the overrun is counted in the status file.
+maintainer (status, snapshots, universes, budget), one pruner (retention),
+plus whatever side lanes the venue adapter starts and the short-lived threads
+that fetch REST book snapshots after a subscribe. Frames cross from the shards
+to the writer through one bounded queue; when it overruns, the shard
+reconnects for fresh snapshots and the overrun is counted in the status file.
+
+Retention has its own thread because `status.json` is this unit's heartbeat:
+the maintainer writes it every `status_interval_seconds`, and a pass over a
+tape holding days of hours across hundreds of symbols takes longer than the
+watchdog's freshness limit.
 """
 
 from __future__ import annotations
@@ -84,6 +89,11 @@ REANCHOR_TOPICS_PER_TICK = 40
 #: Topics dropped and re-taken together. One venue message carries ten, so a
 #: chunk is one message each way and a symbol's gap is one round trip.
 REANCHOR_CHUNK = 10
+#: Seconds between retention passes, on the pruner thread. The tape gains a
+#: few hundred megabytes in that time against a `min_free_disk_gb` measured in
+#: tens of gigabytes, so the disk cannot run out inside one interval, and the
+#: walk costs a tenth of what it did at the status cadence.
+RETENTION_INTERVAL_SECONDS = 300.0
 LANES = "lanes"
 QueueItem = tuple[str, Any, int, str]
 
@@ -632,6 +642,7 @@ class Recorder:
         self.snapshot_failures = 0
         self.worker = threading.Thread(target=self._write_loop, name="tape-writer", daemon=True)
         self.maintainer = threading.Thread(target=self._maintenance_loop, name="tape-maintenance", daemon=True)
+        self.pruner = threading.Thread(target=self._retention_loop, name="tape-retention", daemon=True)
 
     # ------------------------------------------------------------ lifecycle
 
@@ -643,6 +654,7 @@ class Recorder:
         self._reconcile_shards()
         self._start_lanes()
         self.maintainer.start()
+        self.pruner.start()
         try:
             self.stop.wait()
         finally:
@@ -655,6 +667,9 @@ class Recorder:
             for lane in self.lanes:
                 lane.join(10.0)
             self.maintainer.join()
+            # A pass mid-walk only unlinks whole compressed files, so shutdown
+            # does not wait the length of one out.
+            self.pruner.join(10.0)
             self.frames.put(None)
             self.worker.join()
             for segment in self.writer.close():
@@ -1055,6 +1070,23 @@ class Recorder:
             logging.error("could not close an idle segment: %s", exc)
 
     # ---------------------------------------------------------- maintenance
+
+    def _retention_loop(self) -> None:
+        while not self.stop.is_set():
+            self._retention_pass()
+            self.stop.wait(RETENTION_INTERVAL_SECONDS)
+
+    def _retention_pass(self) -> None:
+        """One retention pass, on its own thread. A failed pass is the next
+        pass's problem: this thread must outlive an unlinkable file."""
+
+        try:
+            deleted = self.retention.prune()
+        except OSError as exc:
+            logging.error("tape retention pass failed: %s", exc)
+            return
+        if deleted:
+            logging.info("retention removed %d tape files", len(deleted))
 
     def _maintenance_loop(self) -> None:
         while not self.stop.is_set():

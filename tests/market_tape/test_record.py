@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import threading
 import time
@@ -908,6 +909,56 @@ def test_the_status_file_carries_what_the_host_watchdog_reads(tmp_path: Path) ->
     assert payload["budget"]["shed"] == ["wide:ticker"]
     assert payload["budget"]["over"] is False
     assert set(payload["bytes"]) == {"received_total", "received_24h", "window_seconds", "by_tier_24h", "by_feed_24h"}
+
+
+def test_the_maintenance_tick_writes_the_heartbeat_without_walking_the_tape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`status.json` is this unit's heartbeat and the watchdog's silence
+    reading both. Retention walks tens of thousands of files on the host, so
+    the tick that writes the heartbeat may not wait on a pass; the pruner
+    thread owns it."""
+
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+
+    def refuse() -> dict[str, list[dict[str, Any]]]:
+        raise RuntimeError("venue refused")
+
+    recorder.adapter.fetch_tables = refuse  # type: ignore[method-assign]
+    monkeypatch.setattr(recorder, "_reconcile_tier", lambda name, topics: None)
+    # The free floor is the developer box's, not the host's: pin it so the tick
+    # reads `disk_blocked` from the code under test and not from this disk.
+    recorder.retention.min_free_bytes = 1
+    directory = tmp_path / "2027-01-15" / "10" / "BTCUSDT"
+    directory.mkdir(parents=True)
+    expired = directory / "segment-000000.jsonl.zst"
+    expired.write_bytes(b"long past retention")
+    os.utime(expired, (1_000_000, 1_000_000))
+
+    recorder._maintenance()
+
+    assert (tmp_path / "status.json").exists()
+    assert recorder.disk_blocked is False
+    assert expired.exists()
+
+    recorder._retention_pass()
+
+    assert not expired.exists()
+
+
+def test_a_retention_pass_that_cannot_delete_leaves_the_pruner_thread_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+
+    def refuse(now: float | None = None) -> list[Path]:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(recorder.retention, "prune", refuse)
+    with caplog.at_level(logging.ERROR):
+        recorder._retention_pass()
+
+    assert "tape retention pass failed" in caplog.text
 
 
 def test_a_wide_tier_lists_its_count_and_not_every_name(tmp_path: Path) -> None:

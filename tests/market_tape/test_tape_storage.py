@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -227,6 +229,93 @@ def test_disk_pressure_spares_the_venue_table_snapshots_and_age_names_them(tmp_p
     assert deleted == [snapshot.relative_to(tmp_path)]
     receipts = [json.loads(line) for line in (tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [(receipt["kind"], receipt["reason"]) for receipt in receipts] == [("segment_deleted", "disk_limit"), ("snapshot_deleted", "age")]
+
+
+def test_writable_asks_the_free_space_question_and_walks_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`writable()` is read on the tick that writes the recorder's heartbeat,
+    so it may not walk the tape or delete anything on the way."""
+
+    manifest = Manifest(tmp_path)
+    directory = tmp_path / "2027-01-15" / "10" / "AGIUSDT"
+    directory.mkdir(parents=True)
+    expired = directory / "segment-000000.jsonl.zst"
+    expired.write_bytes(b"old")
+    os.utime(expired, (1_000_000, 1_000_000))
+    walked = 0
+    original = Path.rglob
+
+    def counted(self: Path, pattern: str) -> Any:
+        nonlocal walked
+        walked += 1
+        return original(self, pattern)
+
+    monkeypatch.setattr(Path, "rglob", counted)
+
+    retention = Retention(tmp_path, manifest, retention_days=1, max_bytes=10**12, min_free_bytes=1)
+    assert retention.writable() is True
+
+    assert walked == 0
+    assert expired.exists()
+    assert not (tmp_path / "manifest.jsonl").exists()
+
+
+def test_a_prune_stats_each_file_once_and_reads_free_space_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pass is a walk over tens of thousands of files on the host; a
+    statvfs or a second stat per file is what makes it take minutes."""
+
+    manifest = Manifest(tmp_path)
+    directory = tmp_path / "2027-01-15" / "10" / "AGIUSDT"
+    directory.mkdir(parents=True)
+    for index in range(8):
+        path = directory / f"segment-{index:06d}.jsonl.zst"
+        path.write_bytes(b"kept")
+        os.utime(path, (1_000_000 + index, 1_000_000 + index))
+    usages = 0
+    original_usage = shutil.disk_usage
+    stats: list[str] = []
+    original_stat = Path.stat
+
+    def counted_usage(path: Any) -> Any:
+        nonlocal usages
+        usages += 1
+        return original_usage(path)
+
+    def counted_stat(self: Path, **kwargs: Any) -> Any:
+        if self.suffix == ".zst":
+            stats.append(str(self))
+        return original_stat(self, **kwargs)
+
+    monkeypatch.setattr("market_tape.storage.shutil.disk_usage", counted_usage)
+    monkeypatch.setattr(Path, "stat", counted_stat)
+
+    retention = Retention(tmp_path, manifest, retention_days=36_500, max_bytes=10**12, min_free_bytes=1)
+    assert retention.prune(1_000_100.0) == []
+
+    assert usages == 1
+    assert sorted(stats) == sorted({path for path in stats})
+
+
+def test_disk_pressure_stops_once_the_unlinked_bytes_clear_the_free_floor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Free space is carried forward by what was unlinked, so a pass under the
+    free floor deletes what it needs and stops — it does not empty the tape."""
+
+    manifest = Manifest(tmp_path)
+    directory = tmp_path / "2027-01-15" / "10" / "AGIUSDT"
+    directory.mkdir(parents=True)
+    for index in range(4):
+        path = directory / f"segment-{index:06d}.jsonl.zst"
+        path.write_bytes(b"x" * 100)
+        os.utime(path, (1_000_000 + index, 1_000_000 + index))
+    monkeypatch.setattr(
+        "market_tape.storage.shutil.disk_usage",
+        lambda path: SimpleNamespace(total=1_000, used=150, free=850),
+    )
+
+    retention = Retention(tmp_path, manifest, retention_days=36_500, max_bytes=10**12, min_free_bytes=1_000)
+    deleted = retention.prune(1_000_100.0)
+
+    assert [path.name for path in deleted] == ["segment-000000.jsonl.zst", "segment-000001.jsonl.zst"]
+    assert (directory / "segment-000002.jsonl.zst").exists()
 
 
 @needs_zstd

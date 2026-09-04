@@ -327,26 +327,45 @@ class Retention:
         self.min_free_bytes = min_free_bytes
 
     def prune(self, now: float | None = None) -> list[Path]:
+        """Delete what is expired, then what the disk has no room for.
+
+        A pass walks the whole tape, so it stats each file once and reads the
+        filesystem's free space once, carrying both forward as it deletes. On
+        a host holding days of hours across hundreds of symbols the walk is
+        tens of thousands of files: a stat or a statvfs per file per pass is
+        the difference between seconds and minutes. Free space is tracked by
+        the sizes unlinked rather than re-read, which is also the truer
+        number — a filesystem need not release a deleted file's blocks by the
+        time the next statvfs returns.
+        """
+
         now = time.time() if now is None else now
-        files = sorted(
-            (path for path in self.root.rglob("*.zst") if not path.name.endswith(".tmp")),
-            key=lambda path: (path.stat().st_mtime_ns, str(path)),
-        )
-        total = sum(path.stat().st_size for path in files)
+        found: list[tuple[int, str, Path, int, float]] = []
+        for path in self.root.rglob("*.zst"):
+            if path.name.endswith(".tmp"):
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            found.append((stat.st_mtime_ns, str(path), path, stat.st_size, stat.st_mtime))
+        files = sorted(found, key=lambda item: (item[0], item[1]))
+        total = sum(item[3] for item in files)
+        free = shutil.disk_usage(self.root).free
         cutoff = now - self.retention_days * 86_400
         deleted: list[Path] = []
-        for path in files:
+        for _, _, path, size, mtime in files:
             # A venue table snapshot is the point-in-time reference for every
             # hour after it and weighs kilobytes: it goes with age, never for room.
             snapshot = path.parent.name == META_DIRECTORY
-            expired = path.stat().st_mtime < cutoff
-            pressured = total > self.max_bytes or shutil.disk_usage(self.root).free < self.min_free_bytes
+            expired = mtime < cutoff
+            pressured = total > self.max_bytes or free < self.min_free_bytes
             if not expired and not (pressured and not snapshot):
                 continue
-            size = path.stat().st_size
             relative = path.relative_to(self.root)
             path.unlink()
             total -= size
+            free += size
             deleted.append(relative)
             self.manifest.append(
                 {
@@ -357,11 +376,17 @@ class Retention:
                     "reason": "age" if expired else "disk_limit",
                 }
             )
-        remove_empty_directories(self.root)
+        if deleted:
+            remove_empty_directories(self.root)
         return deleted
 
     def writable(self) -> bool:
-        self.prune()
+        """Is there room to keep writing: one statvfs, no filesystem walk.
+
+        The recorder asks this on the tick that writes its heartbeat, so this
+        must stay O(1). `prune` is the housekeeping and runs on its own thread.
+        """
+
         return shutil.disk_usage(self.root).free >= self.min_free_bytes
 
 
