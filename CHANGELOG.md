@@ -9,7 +9,7 @@ edit STATE.md to match.
 - **2026-09-04 — Incident `host-bf5dcb6544d0dfdc`: the new watchdog-chain check
   paged CRITICAL on its own deploy. Requirement now reads systemd enablement,
   not a realm's runtime state.**
-  - Alert, host scope, `ip-208-84-103-4`, shortly after 14:40:22 UTC:
+  - Alert, host scope, `ip-208-84-103-4`, inside 14:41:13-14:42:29 UTC:
     `CRITICAL demo watchdog timer is inactive (disabled)`, ref `watchdog:demo`,
     alongside `RESOLVED capture-silent` and
     `RESOLVED heartbeat:liquidity-migration-forward-capture.service`. The fire
@@ -18,7 +18,8 @@ edit STATE.md to match.
     `ok scope=demo units-and-heartbeats-healthy` on every three-minute run
     through 14:40:22 UTC, and the two `RESOLVED` lines are the recorders coming
     back after the same deploy restarted them.
-  - Diagnosis. `2f4af5e` was committed 14:25:35 UTC and deployed at ~14:40 UTC.
+  - Diagnosis. `2f4af5e` was committed 14:25:35 UTC; run `33884568238`'s `vps`
+    job held the host from 14:41:13 to 14:42:29 UTC and finished `success`.
     It changed `deploy/systemd` and the fleet manifest, so both realm
     fingerprints changed and the deploy ran `stop_realm_units` →
     `start_realm` on each realm ([docs/operations.md](docs/operations.md)
@@ -57,13 +58,25 @@ edit STATE.md to match.
     the previous code (`watchdog:demo` fires on a torn-down realm;
     `watchdog:mainnet` fires off the engine's state) and pass with the fix.
     Focused file: 26 passed. Full `scripts/dev.sh check` gate run before push.
-  - Host-side, by hand, read-only — confirm the deploy left the demo timer
-    enabled and armed, and that the incident is not masking a real stop:
+  - Deploy receipt. `dc69448` deployed by run `33887114107` at 15:07:45 UTC.
+    Neither realm's fingerprint moved — the fix is a watchdog script, not
+    engine input — so both engines kept running:
+    `demo-ok result=unchanged-left-running`,
+    `mainnet-ok result=unchanged-left-running`, `deploy-ok commit=dc69448…`,
+    `real-money armed`, rollback target `2f4af5e`. Both liveness timers
+    `active`, both engines `active` with 0 s and 2 s heartbeats. This deploy
+    therefore never entered the teardown window that produced the page.
+  - Watch the disk. The same receipt reads `/dev/sda2 118G 77G 36G 69% /`,
+    against 64 GB free at 00:10 UTC the same day — roughly 28 GB in 15 h. The
+    host watchdog's floor is 25 GB free on `/var/lib`; at that rate it is
+    hours away. Not diagnosed here, and not this incident's cause.
+  - Host-side, by hand, read-only — confirm what the account was worth through
+    the incident and which minutes had no heartbeat, and check the disk trend:
 
     ```sh
-    scripts/ops.sh units
-    scripts/ops.sh status
     scripts/ops.sh curve mainnet 60
+    scripts/ops.sh status
+    scripts/ops.sh units
     ```
 
 - **2026-09-04 — On-call is one supervised delivery plane, not three optional
