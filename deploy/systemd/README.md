@@ -22,7 +22,7 @@ Defined canonically in [`deploy/fleet_manifest.tsv`](../fleet_manifest.tsv):
 | `liquidity-migration-telegram-controls` | Global | `multi-user.target` | `liquidity-controls:liquidity-controls` | Long-polling Telegram bot helper. |
 | `liquidity-migration-demo-liveness` | Demo | Timer (periodic) | `liquidity-observer:liquidity-migration` | Realm-level SLA & heartbeat monitoring. |
 | `liquidity-migration-mainnet-liveness` | Mainnet | Timer (periodic) | `liquidity-observer:liquidity-migration` | Realm-level SLA & heartbeat monitoring. |
-| `liquidity-migration-host-liveness` | Global | Timer (periodic) | `liquidity-observer:liquidity-migration` | Host-level disk, tape, and clock monitoring. |
+| `liquidity-migration-host-liveness` | Global | Timer (periodic) | `liquidity-observer:liquidity-migration` | Host, recorder, realm-watchdog supervision, and the one external dead-man ping. |
 | `liquidity-migration-chaos-drill` | Demo | Timer (weekly) | `root:root` | Automated demo restart & state recovery drill. |
 
 ---
@@ -42,3 +42,4 @@ The 5 unit families marked `independent` (`forward-capture`, `forward-capture-bi
 2. **Environment Scrubbing**: Signal worker units explicitly unset venue API credentials, real-money switches, and Telegram tokens.
 3. **No Private Leaks in Backups**: Off-box backup scripts strictly ignore `*.env` files to prevent credentials from leaving the host.
 4. **Arming Protection**: `engine-mainnet.service` requires `REAL_MONEY=true` in `/etc/liquidity-migration/bybit-mainnet.env` to start.
+5. **Notification Isolation**: Observer and control units load `/etc/liquidity-migration/notifications.env`; liveness units additionally load `/etc/liquidity-migration/oncall.env`. They never load venue credential files.

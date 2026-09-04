@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -194,6 +195,20 @@ def test_cooldown_suppresses_repeats_and_reports_resolution() -> None:
     )
     assert lines == ["RESOLVED unit:engine"]
     assert state == {}
+
+
+def test_agent_fires_once_per_fault_lifetime_and_rearms_after_resolution() -> None:
+    alert = liveness.Alert("unit:engine", "CRITICAL", "engine is inactive")
+    due, state = liveness.select_incidents_to_fire([alert], state={}, now=1000.0)
+    assert due == [alert]
+    due, state = liveness.select_incidents_to_fire(
+        [alert], state=state, now=5000.0
+    )
+    assert due == [], "Telegram may repeat; a duplicate agent must not launch"
+    due, state = liveness.select_incidents_to_fire([], state=state, now=5100.0)
+    assert due == [] and state == {}
+    due, _ = liveness.select_incidents_to_fire([alert], state=state, now=5200.0)
+    assert due == [alert]
 
 
 def test_backup_stamp_ages_into_a_warning(tmp_path: Path) -> None:
@@ -393,3 +408,119 @@ def test_a_new_critical_fires_the_on_call_routine_once(monkeypatch, capsys) -> N
         cooldown_sec=3600,
     )
     assert not any(line.startswith("CRITICAL") for line in lines)
+
+
+def test_failed_telegram_retries_without_launching_a_second_agent(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    row = liveness.FleetUnit(
+        unit="liquidity-migration-engine.service",
+        kind="service",
+        realm="demo",
+        activation="always",
+        health="active",
+        output_artifact="-",
+    )
+    monkeypatch.setattr(liveness, "load_fleet_manifest", lambda: [row])
+    monkeypatch.setattr(
+        liveness, "unit_states", lambda units: {unit: "inactive" for unit in units}
+    )
+    monkeypatch.setattr(liveness, "unit_journal_tail", lambda *_args: "journal")
+    for key, value in {
+        "TELEGRAM_BOT_TOKEN": "123:token",
+        "TELEGRAM_ALERT_CHAT_ID": "-1001",
+        "INCIDENT_ROUTINE_FIRE_URL": (
+            "https://api.anthropic.com/v1/claude_code/routines/trig_1/fire"
+        ),
+        "INCIDENT_ROUTINE_FIRE_TOKEN": "sk-ant-test",
+        "ONCALL_DEADMAN_URL": "https://hc-ping.com/check-id",
+    }.items():
+        monkeypatch.setenv(key, value)
+    telegram_results = iter((False, True))
+    monkeypatch.setattr(
+        liveness,
+        "send_telegram_message",
+        lambda *_args, **_kwargs: next(telegram_results),
+    )
+    routine_calls: list[str] = []
+    monkeypatch.setattr(
+        liveness,
+        "fire_incident_routine",
+        lambda _url, _token, text: routine_calls.append(text) or "session",
+    )
+    state_file = tmp_path / "state.json"
+    argv = [
+        "check_fleet_liveness.py",
+        "--account-scope",
+        "demo",
+        "--require-oncall",
+        "--state-file",
+        str(state_file),
+    ]
+
+    monkeypatch.setattr(sys, "argv", argv)
+    assert liveness.main() == 1
+    assert not state_file.exists(), "a failed Telegram call must not consume cooldown"
+    assert len(routine_calls) == 1
+
+    monkeypatch.setattr(sys, "argv", argv)
+    assert liveness.main() == 0
+    assert state_file.exists()
+    assert len(routine_calls) == 1, "the accepted incident must not launch twice"
+    assert "cannot deliver alerts" in capsys.readouterr().out
+
+
+def test_host_supervises_realm_watchdog_results(monkeypatch) -> None:
+    monkeypatch.setattr(
+        liveness,
+        "unit_states",
+        lambda units: {
+            unit: (
+                "active"
+                if unit != "liquidity-migration-mainnet-liveness.timer"
+                else "inactive"
+            )
+            for unit in units
+        },
+    )
+    monkeypatch.setattr(liveness, "unit_enabled_state", lambda _unit: "enabled")
+    monkeypatch.setattr(
+        liveness,
+        "unit_result",
+        lambda unit: "exit-code" if "demo" in unit else "success",
+    )
+
+    alerts = liveness.evaluate_watchdog_chain()
+
+    assert {alert.key for alert in alerts} == {"watchdog:demo", "watchdog:mainnet"}
+    assert all(alert.severity == "CRITICAL" for alert in alerts)
+
+
+def test_host_incident_carries_the_recorder_journal(monkeypatch) -> None:
+    monkeypatch.setattr(
+        liveness, "unit_journal_tail", lambda unit, lines=40: f"journal of {unit}"
+    )
+    alert = liveness.Alert(
+        "capture-silent:forward-market-binance",
+        "CRITICAL",
+        "recorder has received no frame",
+    )
+    text = liveness.incident_text(
+        "host", ["CRITICAL recorder has received no frame"], [alert], [alert]
+    )
+    assert "event_kind=incident" in text
+    assert "liquidity-migration-forward-capture-binance.service" in text
+    assert "journal of liquidity-migration-forward-capture-binance.service" in text
+
+
+def test_transport_errors_never_log_a_secret_url() -> None:
+    error = urllib.error.HTTPError(
+        "https://api.telegram.org/botSECRET/sendMessage",
+        401,
+        "unauthorized",
+        None,
+        None,
+    )
+    rendered = liveness.transport_error(error)
+    assert rendered == "HTTP 401"
+    assert "SECRET" not in rendered

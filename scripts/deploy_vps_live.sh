@@ -156,6 +156,9 @@ ENGINE_MAINNET_ENVIRONMENT=/etc/liquidity-migration/engine-mainnet.env
 ENGINE_MAINNET_CONFIG=/etc/liquidity-migration/engine-mainnet.toml
 MAINNET_CREDENTIAL_ENV=/etc/liquidity-migration/bybit-mainnet.env
 MAINNET_TELEGRAM_ENV=/etc/liquidity-migration/telegram-mainnet.env
+NOTIFICATIONS_ENVIRONMENT=/etc/liquidity-migration/notifications.env
+ONCALL_ENVIRONMENT=/etc/liquidity-migration/oncall.env
+LEGACY_LIVENESS_ENVIRONMENT=/etc/liquidity-migration/liveness.env
 SIGNAL_WORKER_DEMO_ENV=/etc/liquidity-migration/signal-worker-demo.env
 SIGNAL_WORKER_MAINNET_ENV=/etc/liquidity-migration/signal-worker-mainnet.env
 DEMO_SIGNAL_SOURCE_ENV=/etc/liquidity-migration/signal-worker-demo-source.env
@@ -595,6 +598,19 @@ start_independent_units() {
 }
 
 # ------------------------------------------------------------ realm inputs
+
+prepare_oncall_inputs() {
+    "$PYTHON" -m liquidity_migration.policy.oncall_environment \
+        --notifications "$NOTIFICATIONS_ENVIRONMENT" \
+        --oncall "$ONCALL_ENVIRONMENT" \
+        --legacy-telegram /etc/liquidity-migration/bybit-demo.env \
+        --legacy-liveness "$LEGACY_LIVENESS_ENVIRONMENT" \
+        --execute \
+        || fail "notification and on-call routing is incomplete"
+    chown root:root "$NOTIFICATIONS_ENVIRONMENT" "$ONCALL_ENVIRONMENT" \
+        && chmod 0600 "$NOTIFICATIONS_ENVIRONMENT" "$ONCALL_ENVIRONMENT" \
+        || fail "cannot secure notification and on-call routing"
+}
 
 # Project the allowlisted worker inputs from the private source env into the
 # root-owned env systemd hands the credential-free worker.
@@ -1160,6 +1176,7 @@ deploy_mode() {
     # handed over only when what it runs from changed; otherwise it is left
     # trading and picks the new binary up at its own next restart.
     install_release
+    prepare_oncall_inputs
     install_units
     start_independent_units
     prepare_demo_inputs

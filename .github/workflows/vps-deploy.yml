@@ -9,11 +9,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Deploy, roll back to the last finished deploy, read-only verification, or the funded safety disarm.
+        description: Deploy, roll back, verify, collect on-call diagnostics, or disarm funded trading.
         required: true
         default: verify
         type: choice
-        options: [deploy, rollback, verify, disarm-mainnet]
+        options: [deploy, rollback, verify, diagnose, disarm-mainnet]
 
 permissions:
   contents: read
@@ -37,7 +37,9 @@ concurrency:
 
 jobs:
   ci:
-    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'disarm-mainnet'
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      (inputs.mode != 'disarm-mainnet' && inputs.mode != 'diagnose')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -66,7 +68,9 @@ jobs:
   # The Rust execution engine. Independent of `ci`: a Python failure should not
   # hide an engine failure, or the other way round.
   rust:
-    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'disarm-mainnet'
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      (inputs.mode != 'disarm-mainnet' && inputs.mode != 'diagnose')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -98,7 +102,9 @@ jobs:
   # still blocks the deploy that consumes this artifact.
   rust-artifact:
     name: Deploy artifact
-    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'disarm-mainnet'
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      (inputs.mode != 'disarm-mainnet' && inputs.mode != 'diagnose')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -132,7 +138,9 @@ jobs:
   # deploy path: a red here is investigated, it does not hold a deploy.
   rust-soak-bench:
     name: Engine release tests, soak and benchmarks
-    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'disarm-mainnet'
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      (inputs.mode != 'disarm-mainnet' && inputs.mode != 'diagnose')
     needs: [rust]
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -215,10 +223,60 @@ jobs:
           SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3" \
           scripts/deploy_vps_live.sh disarm-mainnet
 
+  diagnose:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'diagnose' &&
+      github.repository == 'rob435/liquidity-migration' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      VPS_HOST: ${{ vars.VPS_HOST || '208.84.103.4' }}
+      VPS_USER: ${{ vars.VPS_USER || 'root' }}
+      VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:WkfDoTe+g+IfcsH/tzXkd5BiasYJliBm0n1x9raLAfs' }}
+      GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT: SHA256:Gki6YjdsUksh/TozZ/55sxSwimK7T9MOf2pgWSbqFNU
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Configure pinned SSH identity
+        env:
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        run: |
+          test -n "$VPS_SSH_PRIVATE_KEY"
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/vps_deploy_key
+          chmod 600 ~/.ssh/vps_deploy_key
+          ssh-keygen -y -f ~/.ssh/vps_deploy_key > ~/.ssh/vps_deploy_key.pub
+          ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256 |
+            grep -F "$GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT"
+          ssh-keyscan -T 10 -t ed25519 -- "$VPS_HOST" > ~/.ssh/known_hosts.candidate
+          test -s ~/.ssh/known_hosts.candidate
+          host_fingerprints="$(ssh-keygen -lf ~/.ssh/known_hosts.candidate -E sha256 | awk '{print $2}' | sort -u)"
+          test "$host_fingerprints" = "$VPS_ED25519_FINGERPRINT"
+          mv ~/.ssh/known_hosts.candidate ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+      - name: Read fleet and watchdog state
+        run: |
+          set -euo pipefail
+          EXPECTED_COMMIT="$GITHUB_SHA" \
+          BRANCH=main \
+          SSH_TARGET="$VPS_USER@$VPS_HOST" \
+          SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o ConnectTimeout=10" \
+          scripts/deploy_vps_live.sh verify
+          ssh -i ~/.ssh/vps_deploy_key \
+            -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$VPS_USER@$VPS_HOST" \
+            'systemctl --failed --no-pager; for unit in liquidity-migration-demo-liveness.service liquidity-migration-mainnet-liveness.service liquidity-migration-host-liveness.service liquidity-migration-equity-recorder.service; do systemctl show "$unit" --property=Id,Result,ExecMainStatus,ActiveEnterTimestamp --no-pager; journalctl -u "$unit" -n 12 --no-pager -o short-iso; done'
+
   vps:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       inputs.mode != 'disarm-mainnet' &&
+      inputs.mode != 'diagnose' &&
       github.repository == 'rob435/liquidity-migration' &&
       github.ref == 'refs/heads/main'
     needs: [ci, rust, rust-artifact]

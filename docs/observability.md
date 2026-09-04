@@ -58,6 +58,9 @@ noise, and the history is the point.
   artifacts and pushes numbers; its credential surface is empty by construction.
 * **Must Never**: a missed minute be replayed. `Persistent=false`; the gap is
   the fact worth keeping.
+* **Must Never**: Grafana be the only pager. It is a remote view fed by this
+  host; Telegram, the incident routine, and the watchdog-plane dead-man are
+  independent delivery paths defined in [notifications.md](notifications.md).
 
 ## 4. Reading the Curve on the Host
 

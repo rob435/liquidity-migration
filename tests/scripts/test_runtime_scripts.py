@@ -129,6 +129,36 @@ def test_deploy_starts_the_funded_realm_only_when_armed() -> None:
     assert "real-money off: funded units stay stopped" in deploy_body
 
 
+def test_deploy_prepares_oncall_routes_before_starting_independent_watchdog() -> None:
+    remote = _remote_script()
+    deploy_body = remote[remote.index("deploy_mode()") :]
+    assert "liquidity_migration.policy.oncall_environment" in remote
+    assert deploy_body.index("prepare_oncall_inputs") < deploy_body.index(
+        "start_independent_units"
+    )
+
+
+def test_observers_load_dedicated_notification_files_not_venue_credentials() -> None:
+    units = [
+        "liquidity-migration-demo-liveness.service",
+        "liquidity-migration-mainnet-liveness.service",
+        "liquidity-migration-host-liveness.service",
+        "liquidity-migration-trade-notify.service",
+        "liquidity-migration-telegram-controls.service",
+    ]
+    for name in units:
+        text = (SYSTEMD / name).read_text(encoding="utf-8")
+        assert "EnvironmentFile=/etc/liquidity-migration/notifications.env" in text
+        assert "EnvironmentFile=/etc/liquidity-migration/bybit-demo.env" not in text
+        assert "EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env" not in text
+    for realm in ("demo", "mainnet", "host"):
+        text = (
+            SYSTEMD / f"liquidity-migration-{realm}-liveness.service"
+        ).read_text(encoding="utf-8")
+        assert "EnvironmentFile=/etc/liquidity-migration/oncall.env" in text
+        assert "--require-oncall" in text
+
+
 def test_every_service_execstart_is_an_absolute_committed_command() -> None:
     for path in sorted(SYSTEMD.glob("*.service")):
         text = path.read_text(encoding="utf-8")
@@ -162,11 +192,15 @@ def test_control_helper_parses_and_keeps_the_fixed_action_surface() -> None:
     assert "activation.complete" not in text
 
 
-def test_ci_workflow_dispatch_covers_deploy_rollback_verify_and_disarm() -> None:
+def test_ci_workflow_dispatch_covers_operations_and_fast_diagnostics() -> None:
     workflow = (ROOT / ".github" / "workflows" / "vps-deploy.yml").read_text(encoding="utf-8")
-    assert "options: [deploy, rollback, verify, disarm-mainnet]" in workflow
+    assert "options: [deploy, rollback, verify, diagnose, disarm-mainnet]" in workflow
     assert "deploy|rollback|verify) ;;" in workflow
     assert "disarm-mainnet" in workflow
+    diagnose = workflow[workflow.index("\n  diagnose:\n") : workflow.index("\n  vps:\n")]
+    assert "scripts/deploy_vps_live.sh verify" in diagnose
+    assert "journalctl" in diagnose
+    assert "systemctl --failed" in diagnose
     assert "rollout" not in workflow.replace("# pending slot", "")
 
 

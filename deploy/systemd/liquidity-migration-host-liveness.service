@@ -16,13 +16,11 @@ Group=liquidity-migration
 # 40 journal lines to the on-call agent.
 SupplementaryGroups=systemd-journal
 WorkingDirectory=/opt/liquidity-migration
-# The Telegram token rides in the demo credential file; the API keys in it are
-# unset below. This watchdog reads files and systemd state, never the venue.
-EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
-# Optional: a second dead-man's-switch URL of its own, LIVENESS_HEARTBEAT_URL=...
-# It must not share the demo scope's URL, or a dead demo fleet would be masked
-# by a healthy recorder.
-EnvironmentFile=-/etc/liquidity-migration/host-liveness.env
+# This independent scope owns the one external dead-man. It also supervises
+# the realm watchdogs, so one successful host ping represents the monitoring
+# plane rather than whichever realm happened to run last.
+EnvironmentFile=/etc/liquidity-migration/notifications.env
+EnvironmentFile=/etc/liquidity-migration/oncall.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY
 Environment=TELEGRAM_ENABLED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
@@ -31,6 +29,7 @@ PrivateTmp=true
 ProtectProc=invisible
 ProtectSystem=strict
 ProtectHome=true
+InaccessiblePaths=-/etc/liquidity-migration/notifications.env -/etc/liquidity-migration/oncall.env -/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env
 StateDirectory=liquidity-migration/liveness-host
 Environment=LIVENESS_STATE_FILE=/var/lib/liquidity-migration/liveness-host/state.json
 ReadWritePaths=/var/lib/liquidity-migration/liveness-host
@@ -39,7 +38,7 @@ MemoryMax=512M
 # that trades.
 Nice=10
 ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/check_fleet_liveness.py \
-    --account-scope host --cooldown-min 60 --host-clock-check --telegram \
+    --account-scope host --cooldown-min 60 --host-clock-check --require-oncall \
     --max-heartbeat-age-sec 120 \
     --capture-status-file /var/lib/liquidity-migration/forward-market/status.json \
     --capture-status-file /var/lib/liquidity-migration/forward-market-binance/status.json \

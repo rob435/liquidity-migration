@@ -10,7 +10,7 @@ Type=simple
 User=liquidity-controls
 Group=liquidity-controls
 WorkingDirectory=/opt/liquidity-migration
-EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+EnvironmentFile=/etc/liquidity-migration/notifications.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=TELEGRAM_CONTROLS_STATE_DIR=/var/lib/liquidity-migration-telegram-controls
@@ -30,7 +30,7 @@ ProtectProc=invisible
 ProcSubset=pid
 ProtectSystem=strict
 ProtectHome=true
-InaccessiblePaths=-/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env -/etc/liquidity-migration/bybit-mainnet-attestor.env -/etc/liquidity-migration/engine.env -/etc/liquidity-migration/engine-mainnet.env -/etc/liquidity-migration/engine.toml -/etc/liquidity-migration/engine-mainnet.toml -/etc/liquidity-migration/signal-worker-demo.env -/etc/liquidity-migration/signal-worker-mainnet.env -/etc/liquidity-migration/telegram-mainnet.env
+InaccessiblePaths=-/etc/liquidity-migration/notifications.env -/etc/liquidity-migration/oncall.env -/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env -/etc/liquidity-migration/bybit-mainnet-attestor.env -/etc/liquidity-migration/engine.env -/etc/liquidity-migration/engine-mainnet.env -/etc/liquidity-migration/engine.toml -/etc/liquidity-migration/engine-mainnet.toml -/etc/liquidity-migration/signal-worker-demo.env -/etc/liquidity-migration/signal-worker-mainnet.env -/etc/liquidity-migration/telegram-mainnet.env
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true

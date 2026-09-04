@@ -6,6 +6,44 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 — On-call is one supervised delivery plane, not three optional
+  watchdog side effects.**
+  - Live diagnosis found the host scope only loaded the absent
+    `/etc/liquidity-migration/host-liveness.env`, while demo and mainnet both
+    loaded one `/etc/liquidity-migration/liveness.env`. The shared
+    `hc-ping.com` URL let either realm mask the other, and a host disk,
+    recorder, upload, backup, or clock `CRITICAL` could reach Telegram but
+    could not fire the incident routine. All three timers still reported
+    `active`, so unit state alone falsely looked complete.
+  - Delivery also consumed Telegram cooldown state before Telegram accepted
+    the message, swallowed every dead-man transport error, and launched a new
+    Claude Code session for the same unresolved fault every cooldown hour.
+    A broken route therefore looked successful, suppressed its own retry, or
+    created duplicate engineers.
+  - `/etc/liquidity-migration/notifications.env` now owns Telegram transport;
+    `/etc/liquidity-migration/oncall.env` owns the routine URL/token and the
+    one watchdog-plane dead-man. Deploy atomically projects both from the
+    existing private files on first use, validates exact keys, file mode, HTTPS
+    endpoints, and the Anthropic routine host/path, then every observer loads
+    only the dedicated files. No watchdog, trade notifier, or control bot
+    receives a venue key or `REAL_MONEY`.
+  - The independent host scope alone pings the external check and now
+    supervises demo/mainnet watchdog timer state and last result. Telegram and
+    incident-routine delivery have separate state: a failed sink retries on
+    the next three-minute run; Telegram repeats after 60 minutes; an accepted
+    agent fire rearms only after that critical reference resolves. Transport
+    errors log only an exception class or HTTP status, never a URL carrying a
+    Telegram bot token.
+  - Incident payload schema 2 carries a stable incident id, the newly critical
+    references, and relevant recorder/watchdog journals. `vps-deploy.yml`
+    adds a fast read-only `diagnose` mode that skips builds, uses the pinned
+    production SSH identity, and returns unit/watchdog evidence. The routine
+    prompt requires that receipt before diagnosis and after deploy; delivery
+    drills are explicit no-op events.
+  - Proof before rollout: focused on-call/deploy tests pass, followed by the
+    full `scripts/dev.sh check` gate: Ruff, ShellCheck, mypy, 1,423 Python
+    tests, Rust formatting, Clippy, and the complete Rust workspace tests.
+
 - **2026-09-04 — The fleet keeps an equity history: one sample a minute to
   disk, a curve readable on the host, and an optional push to Grafana Cloud.
   Every venue adapter that is not traded is declared dormant and pinned by a

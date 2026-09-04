@@ -12,9 +12,8 @@ TimeoutStartSec=120
 User=liquidity-observer
 Group=liquidity-migration
 WorkingDirectory=/opt/liquidity-migration
-# The Telegram token rides in the venue env file; the venue credentials are
-# stripped right back out -- this unit talks to the phone, never the account.
-EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+# Notification transport is independent of every venue credential.
+EnvironmentFile=/etc/liquidity-migration/notifications.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY
 Environment=TELEGRAM_ENABLED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
@@ -24,6 +23,7 @@ ProtectProc=invisible
 ProcSubset=pid
 ProtectSystem=strict
 ProtectHome=true
+InaccessiblePaths=-/etc/liquidity-migration/notifications.env -/etc/liquidity-migration/oncall.env -/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env
 StateDirectory=liquidity-migration/trade-notify
 ReadWritePaths=/var/lib/liquidity-migration/trade-notify
 MemoryMax=256M

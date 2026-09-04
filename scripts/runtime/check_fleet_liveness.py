@@ -10,21 +10,21 @@ market recorder, its hourly upload, the state backup — plus disk space, the
 off-box backup stamp, the recorder's own status file, the upload receipt, and
 the host clock. It runs whether or not the trading fleet is up.
 
-Alerts are de-duplicated with a cooldown state file: a new condition alerts
-immediately, a persisting one re-alerts at most every --cooldown-min, and a
-cleared one sends a one-line "resolved" note. --heartbeat-url (or
-LIVENESS_HEARTBEAT_URL) is pinged on every healthy run so an external
-dead-man's-switch catches a box death the on-box watchdog cannot. Telegram
-delivery uses TELEGRAM_BOT_TOKEN with TELEGRAM_ALERT_CHAT_ID (falling back to
-TELEGRAM_CHAT_ID).
+Telegram alerts repeat at most every --cooldown-min, while the incident routine
+fires once per active fault and rearms only after resolution. Each sink keeps
+its own delivery state: a failed call retries on the next timer run. The host
+scope alone pings ONCALL_DEADMAN_URL on healthy runs so an external check catches
+a dead box or watchdog plane without one surviving realm masking another.
 
-Exits 0 always (a watchdog must not crash-loop); a failure to verify degrades
-to an alert.
+Health faults exit 0 after they are reported. Broken routing or an unreachable
+dead-man exits non-zero so systemd and the independent dead-man expose a broken
+watchdog rather than painting it green.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -39,6 +39,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from liquidity_migration.ops.telegram import as_block, send_telegram_message  # noqa: E402
+from liquidity_migration.policy.oncall_environment import (  # noqa: E402
+    NOTIFICATION_KEYS,
+    ONCALL_KEYS,
+    validate_notifications,
+    validate_oncall,
+)
 
 _MANIFEST = _REPO_ROOT / "deploy" / "fleet_manifest.tsv"
 _ACCOUNT_SCOPES = ("demo", "mainnet", "host")
@@ -332,6 +338,69 @@ def evaluate_host_clock() -> list[Alert]:
     return []
 
 
+def unit_enabled_state(unit: str) -> str:
+    result = subprocess.run(
+        ["systemctl", "is-enabled", unit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() or "unknown"
+
+
+def unit_result(unit: str) -> str:
+    result = subprocess.run(
+        ["systemctl", "show", unit, "--property=Result", "--value"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
+def evaluate_watchdog_chain() -> list[Alert]:
+    """The host watchdog supervises the realm watchdogs that cannot see themselves."""
+
+    timers = {
+        "demo": "liquidity-migration-demo-liveness.timer",
+        "mainnet": "liquidity-migration-mainnet-liveness.timer",
+    }
+    active = unit_states(
+        [*timers.values(), "liquidity-migration-engine-mainnet.service"]
+    )
+    alerts: list[Alert] = []
+    for realm, timer in timers.items():
+        enabled = unit_enabled_state(timer)
+        expected = realm == "demo" or enabled.startswith("enabled")
+        if realm == "mainnet" and active.get(
+            "liquidity-migration-engine-mainnet.service"
+        ) == "active":
+            expected = True
+        if not expected:
+            continue
+        state = active.get(timer, "unknown")
+        if state != "active":
+            alerts.append(
+                Alert(
+                    f"watchdog:{realm}",
+                    "CRITICAL",
+                    f"{realm} watchdog timer is {state} ({enabled})",
+                )
+            )
+            continue
+        service = f"liquidity-migration-{realm}-liveness.service"
+        result = unit_result(service)
+        if result not in {"", "success"}:
+            alerts.append(
+                Alert(
+                    f"watchdog:{realm}",
+                    "CRITICAL",
+                    f"{realm} watchdog last run result is {result}",
+                )
+            )
+    return alerts
+
+
 def evaluate_backup_stamp(
     *, stamp_path: Path, now: float, max_age_hours: float
 ) -> list[Alert]:
@@ -428,17 +497,25 @@ def select_alerts_to_send(
     return lines, next_state
 
 
+def select_incidents_to_fire(
+    alerts: list[Alert], *, state: dict[str, float], now: float
+) -> tuple[list[Alert], dict[str, float]]:
+    """Return critical faults not yet handed to an agent in this lifetime."""
+
+    current = {alert.key: alert for alert in alerts if alert.severity == "CRITICAL"}
+    due = [current[key] for key in sorted(current) if key not in state]
+    next_state = {key: state.get(key, now) for key in current}
+    return due, next_state
+
+
 def ping_heartbeat(url: str) -> None:
-    try:
-        with urllib.request.urlopen(url, timeout=10):
-            pass
-    except OSError:
+    with urllib.request.urlopen(url, timeout=10):
         pass
 
 
 # The Claude Code routine API: one POST fires one agent run with the text as
-# its untrusted payload. Both values come from /etc/liquidity-migration/liveness.env,
-# written by the owner; the token is per routine and is never an argument.
+# its untrusted payload. Both values come from the dedicated oncall.env; the
+# token is per routine and is never an argument or log field.
 INCIDENT_FIRE_URL_ENV = "INCIDENT_ROUTINE_FIRE_URL"
 INCIDENT_FIRE_TOKEN_ENV = "INCIDENT_ROUTINE_FIRE_TOKEN"
 INCIDENT_FIRE_BETA = "experimental-cc-routine-2026-04-01"
@@ -461,7 +538,7 @@ def unit_journal_tail(unit: str, lines: int = 40) -> str:
     return completed.stdout.strip()
 
 
-def incident_text(scope: str, lines: list[str], alerts: list[Alert]) -> str:
+def _incident_units(scope: str, alerts: list[Alert]) -> list[str]:
     units = sorted(
         {
             alert.key.split(":", 1)[1]
@@ -471,15 +548,60 @@ def incident_text(scope: str, lines: list[str], alerts: list[Alert]) -> str:
             and alert.key.endswith(".service")
         }
     )
+    keys = {alert.key for alert in alerts if alert.severity == "CRITICAL"}
+    if any(key.startswith("capture") and "forward-market-binance" in key for key in keys):
+        units.append("liquidity-migration-forward-capture-binance.service")
+    if any(key.startswith("capture") and "forward-market-binance" not in key for key in keys):
+        units.append("liquidity-migration-forward-capture.service")
+    if any(key.startswith("tape-upload") for key in keys):
+        units.append("liquidity-migration-market-tape-upload.service")
+    if "backup" in keys:
+        units.append("liquidity-migration-backup.service")
+    if scope == "host" and any(key.startswith("watchdog:") for key in keys):
+        for key in keys:
+            if key.startswith("watchdog:"):
+                units.append(f"liquidity-migration-{key.split(':', 1)[1]}-liveness.service")
+    return sorted(set(units))
+
+
+def incident_text(
+    scope: str,
+    lines: list[str],
+    alerts: list[Alert],
+    due: list[Alert] | None = None,
+) -> str:
+    new_alerts = due if due is not None else [
+        alert for alert in alerts if alert.severity == "CRITICAL"
+    ]
+    incident_key = "\n".join([scope, *(alert.key for alert in new_alerts)])
+    incident_id = hashlib.sha256(incident_key.encode()).hexdigest()[:16]
     parts = [
-        f"fleet liveness ({scope}) raised a CRITICAL alert on host {os.uname().nodename}.",
+        "schema_version=2",
+        "event_kind=incident",
+        f"incident_id={scope}-{incident_id}",
+        f"scope={scope}",
+        f"host={os.uname().nodename}",
+        "new_critical_refs=" + ",".join(alert.key for alert in new_alerts),
         "",
         *lines,
     ]
-    for unit in units:
+    for unit in _incident_units(scope, alerts):
         parts += ["", f"--- journalctl -u {unit} -n 40", unit_journal_tail(unit)]
     text = "\n".join(parts)
     return text[:INCIDENT_TEXT_MAX]
+
+
+def validate_runtime_routing() -> list[str]:
+    errors: list[str] = []
+    try:
+        validate_notifications({key: os.environ.get(key, "") for key in NOTIFICATION_KEYS})
+    except ValueError as exc:
+        errors.append(str(exc))
+    try:
+        validate_oncall({key: os.environ.get(key, "") for key in ONCALL_KEYS})
+    except ValueError as exc:
+        errors.append(str(exc))
+    return errors
 
 
 def fire_incident_routine(url: str, token: str, text: str) -> str:
@@ -499,6 +621,60 @@ def fire_incident_routine(url: str, token: str, text: str) -> str:
     with urllib.request.urlopen(request, timeout=20) as response:
         payload = json.loads(response.read().decode() or "{}")
     return str(payload.get("claude_code_session_url") or "")
+
+
+def transport_error(error: BaseException) -> str:
+    code = getattr(error, "code", None)
+    if isinstance(code, int):
+        return f"HTTP {code}"
+    return type(error).__name__
+
+
+def run_delivery_drill(scope: str, deadman_url: str | None) -> int:
+    if scope != "host":
+        print("delivery drill requires --account-scope host", file=sys.stderr)
+        return 2
+    failed = False
+    message = (
+        "ON-CALL DRILL\n"
+        f"host {os.uname().nodename}\n"
+        "Telegram, incident routine, and external dead-man delivery test; no fault."
+    )
+    try:
+        if not send_telegram_message(as_block(message), channel="alerts", parse_mode="HTML"):
+            raise RuntimeError("Telegram route is not configured")
+        print("delivery drill: telegram accepted")
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"delivery drill: telegram failed ({transport_error(error)})")
+        failed = True
+    try:
+        session = fire_incident_routine(
+            os.environ[INCIDENT_FIRE_URL_ENV],
+            os.environ[INCIDENT_FIRE_TOKEN_ENV],
+            "\n".join(
+                (
+                    "schema_version=2",
+                    "event_kind=drill",
+                    "incident_id=delivery-drill",
+                    f"scope={scope}",
+                    f"host={os.uname().nodename}",
+                    "No incident exists. Acknowledge receipt and make no changes.",
+                )
+            ),
+        )
+        print(f"delivery drill: incident routine accepted ({session or 'no session URL'})")
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"delivery drill: incident routine failed ({transport_error(error)})")
+        failed = True
+    try:
+        if not deadman_url:
+            raise RuntimeError("dead-man route is not configured")
+        ping_heartbeat(deadman_url)
+        print("delivery drill: dead-man accepted")
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"delivery drill: dead-man failed ({transport_error(error)})")
+        failed = True
+    return 1 if failed else 0
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -527,6 +703,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="send alerts via Telegram (else stdout only)",
     )
     p.add_argument(
+        "--require-oncall",
+        action="store_true",
+        help="fail when any Telegram, incident-routine, or dead-man route is missing",
+    )
+    p.add_argument(
+        "--delivery-drill",
+        action="store_true",
+        help="exercise all three routes without evaluating fleet health (host scope only)",
+    )
+    p.add_argument(
         "--host-clock-check",
         action="store_true",
         help=(
@@ -536,8 +722,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--heartbeat-url",
-        default=os.environ.get("LIVENESS_HEARTBEAT_URL") or None,
-        help="ping this URL on a healthy run (external dead-man's-switch)",
+        default=None,
+        help="override the host scope's ONCALL_DEADMAN_URL",
     )
     p.add_argument(
         "--backup-stamp-file",
@@ -595,6 +781,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_arg_parser().parse_args()
     scope = args.account_scope
+    deadman_url = args.heartbeat_url or (
+        os.environ.get("ONCALL_DEADMAN_URL") if scope == "host" else None
+    )
+    if args.require_oncall:
+        errors = validate_runtime_routing()
+        if errors:
+            for error in errors:
+                print(f"CRITICAL oncall-config: {error}")
+            return 2
+        args.telegram = True
+    if args.delivery_drill:
+        if not args.require_oncall:
+            print("delivery drill requires --require-oncall", file=sys.stderr)
+            return 2
+        return run_delivery_drill(scope, deadman_url)
     now = time.time()
     state_file = args.state_file or (
         _REPO_ROOT / "data" / ".cache" / f"liveness-{scope}.json"
@@ -612,6 +813,7 @@ def main() -> int:
         alerts.append(Alert("manifest", "CRITICAL", f"cannot read the fleet manifest: {error}"))
     if scope == "host":
         alerts.extend(evaluate_disk())
+        alerts.extend(evaluate_watchdog_chain())
     if args.host_clock_check:
         alerts.extend(evaluate_host_clock())
     if args.backup_stamp_file:
@@ -650,47 +852,89 @@ def main() -> int:
             )
         )
 
+    if deadman_url and not any(alert.severity == "CRITICAL" for alert in alerts):
+        try:
+            ping_heartbeat(deadman_url)
+        except (OSError, ValueError) as error:
+            alerts.append(
+                Alert(
+                    "deadman",
+                    "CRITICAL",
+                    f"external dead-man ping failed ({transport_error(error)})",
+                )
+            )
+
     state = load_state(state_file)
     lines, next_state = select_alerts_to_send(
         alerts, state=state, now=now, cooldown_sec=args.cooldown_min * 60
     )
-    save_state(state_file, next_state)
+    routine_state_file = state_file.with_name(state_file.stem + ".routine.json")
+    routine_state = load_state(routine_state_file)
+    if not routine_state_file.exists():
+        current_critical = {
+            alert.key for alert in alerts if alert.severity == "CRITICAL"
+        }
+        routine_state = {
+            key: sent_at for key, sent_at in state.items() if key in current_critical
+        }
+    due_incidents, next_routine_state = select_incidents_to_fire(
+        alerts, state=routine_state, now=now
+    )
 
     for alert in alerts:
         print(f"{alert.severity} {alert.key}: {alert.message}")
+    routing_failed = any(alert.key == "deadman" for alert in alerts)
     if lines:
         message = f"fleet liveness ({scope})\n" + "\n".join(lines)
         if args.telegram:
             try:
-                send_telegram_message(
+                delivered = send_telegram_message(
                     as_block(message), channel="alerts", parse_mode="HTML"
                 )
-            except OSError as error:
-                print(f"CRITICAL telegram: cannot deliver alerts: {error}")
+                if not delivered:
+                    raise RuntimeError("Telegram route is not configured")
+            except (OSError, RuntimeError, ValueError) as error:
+                print(
+                    "CRITICAL telegram: cannot deliver alerts "
+                    f"({transport_error(error)})"
+                )
+                routing_failed = True
+            else:
+                save_state(state_file, next_state)
         else:
             print(message)
-        # A CRITICAL that just cleared its cooldown wakes the on-call agent.
-        # The cooldown is the rate limit: a persisting fault fires once per
-        # --cooldown-min, not once per run.
-        fire_url = os.environ.get(INCIDENT_FIRE_URL_ENV)
-        fire_token = os.environ.get(INCIDENT_FIRE_TOKEN_ENV)
-        if fire_url and fire_token and any(line.startswith("CRITICAL") for line in lines):
-            try:
-                session = fire_incident_routine(
-                    fire_url, fire_token, incident_text(scope, lines, alerts)
-                )
-                print(f"incident routine fired: {session or 'accepted'}")
-            except (OSError, ValueError) as error:
-                print(f"CRITICAL incident-routine: cannot fire the on-call agent: {error}")
+            save_state(state_file, next_state)
+    if due_incidents and args.require_oncall:
+        try:
+            session = fire_incident_routine(
+                os.environ[INCIDENT_FIRE_URL_ENV],
+                os.environ[INCIDENT_FIRE_TOKEN_ENV],
+                incident_text(scope, lines, alerts, due_incidents),
+            )
+            print(f"incident routine fired: {session or 'accepted'}")
+        except (KeyError, OSError, RuntimeError, ValueError) as error:
+            print(
+                "CRITICAL incident-routine: cannot fire the on-call agent "
+                f"({transport_error(error)})"
+            )
+            routing_failed = True
+            retained = {
+                key: fired_at
+                for key, fired_at in routine_state.items()
+                if key in next_routine_state
+            }
+            save_state(routine_state_file, retained)
+        else:
+            save_state(routine_state_file, next_routine_state)
+    elif args.require_oncall:
+        save_state(routine_state_file, next_routine_state)
     has_critical = any(alert.severity == "CRITICAL" for alert in alerts)
     if not has_critical:
         if not alerts:
             print(f"ok scope={scope} units-and-heartbeats-healthy")
         else:
             print(f"ok scope={scope} warnings-present-no-critical")
-        if args.heartbeat_url:
-            ping_heartbeat(args.heartbeat_url)
-    return 0
+    return 1 if routing_failed else 0
 
 
 if __name__ == "__main__":
