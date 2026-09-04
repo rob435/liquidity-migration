@@ -95,6 +95,24 @@ edit STATE.md to match.
     `691 instrument row(s) left out of the table` and `40 ticker row(s)` lines
     are Bybit's dated futures kept out of a perpetuals table by design
     (`engine/signal-worker/src/normalize.rs:136`).
+  - Deploy: **blocked, not done.** `vps-deploy.yml --ref main -f mode=deploy`
+    dispatched run `33922197522` on `aaea42da` at 21:40:49 UTC. `ci`, `rust`
+    and `Deploy artifact` each failed 3–4 s later with no log content at all
+    (log download returns HTTP 404 on every one), and `vps`, `diagnose`,
+    `disarm` and the qualification job were all skipped behind them. Same
+    external block STATE.md already records — GitHub will not start hosted work
+    while the account's payments are failing — and the same shape as
+    `33921858031` at 21:36 and `33911912004` at 19:35. Deployed commit stays
+    `65ee75a7`; mainnet stays on uninterrupted process commit `218905d4`. This
+    fix is on `main` and unshipped.
+  - Owner action, to deploy without a runner. Note what it costs: the realm
+    fingerprint hashes the whole `engine` tree, so both realms take a real
+    handover and the funded engine restarts.
+
+    ```bash
+    EXPECTED_COMMIT=10ed1bd2488570055a37b53b7b92dd959e863850 scripts/ops.sh deploy
+    ```
+
   - Owner action, on the host. The minute samples hold what the page cannot:
 
     ```bash
