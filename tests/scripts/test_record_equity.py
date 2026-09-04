@@ -590,15 +590,18 @@ def test_the_dashboard_charts_only_fields_the_sampler_actually_pushes(tmp_path: 
     charted_engine = set(re.findall(r"lm_engine_([a-z0-9_]+)", expressions))
     charted_recorder = set(re.findall(r"lm_recorder_([a-z0-9_]+)", expressions))
     charted_worker = set(re.findall(r"lm_worker_([a-z0-9_]+)", expressions))
-    # `lm_engine_sleeve_.*_positions` is a regex over the per-sleeve series.
-    charted_engine = {field for field in charted_engine if not field.startswith("sleeve_")}
     assert charted_engine <= engine_fields, sorted(charted_engine - engine_fields)
     assert charted_recorder <= recorder_fields, sorted(charted_recorder - recorder_fields)
     assert charted_worker <= worker_fields, sorted(charted_worker - worker_fields)
-    for suffix in ("positions", "entries_enabled", "blockers"):
-        assert f"lm_engine_sleeve_(.*)_{suffix}" in expressions, suffix
-        assert any(field.endswith(f"_{suffix}") and field.startswith("sleeve_") for field in engine_fields)
-    for field in ("equity_usdt", "available_usdt", "may_open", "rolling_loss_net_usdt", "end_to_end_p99_ns"):
+    for field in (
+        "equity_usdt",
+        "position_entry_notional_usdt",
+        "may_open",
+        "end_to_end_p99_ns",
+        "ack_p99_ns",
+        "durable_p99_ns",
+        "decide_p99_ns",
+    ):
         assert field in charted_engine, field
     for field in ("projected_month_gb", "dropped_frames", "reconnects", "queue_fill"):
         assert field in charted_recorder, field
@@ -606,7 +609,7 @@ def test_the_dashboard_charts_only_fields_the_sampler_actually_pushes(tmp_path: 
         assert field in charted_worker, field
 
 
-def test_stat_panels_read_the_instant_and_counters_are_charted_as_increases() -> None:
+def test_status_panels_read_the_instant_and_counters_are_charted_as_increases() -> None:
     dashboard = _dashboard()
     stats = [panel for panel in dashboard["panels"] if panel["type"] == "stat"]
     assert stats

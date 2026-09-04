@@ -7,12 +7,12 @@
   ],
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 4,
   "editable": true,
   "graphTooltip": 1,
   "refresh": "1m",
   "time": {
-    "from": "now-24h",
+    "from": "now-6h",
     "to": "now"
   },
   "templating": {
@@ -22,8 +22,11 @@
         "label": "Metrics source",
         "type": "datasource",
         "query": "prometheus",
-        "current": {},
-        "hide": 0,
+        "current": {
+          "text": "grafanacloud-proudtortoise1017-prom",
+          "value": "grafanacloud-prom"
+        },
+        "hide": 2,
         "refresh": 1
       },
       {
@@ -51,10 +54,10 @@
   },
   "panels": [
     {
-      "type": "state-timeline",
+      "type": "stat",
       "id": 1,
-      "title": "Health",
-      "description": "One lane per fact, sampled every minute. Green is the good state: a readable heartbeat, may_open true, the 24h loss breaker not tripped, a healthy signal worker, a live recorder. A red minute is a real minute: the sampler writes the line whether or not a producer is up.",
+      "title": "Engines",
+      "description": "Current engine heartbeat state for each selected realm. Red means the minute sampler could not read a live engine heartbeat.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
@@ -62,141 +65,8 @@
       "gridPos": {
         "x": 0,
         "y": 0,
-        "w": 16,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "custom": {
-            "fillOpacity": 80,
-            "lineWidth": 0
-          },
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "NOT ok",
-                  "color": "red",
-                  "index": 0
-                },
-                "1": {
-                  "text": "ok",
-                  "color": "green",
-                  "index": 1
-                }
-              }
-            }
-          ]
-        },
-        "overrides": []
-      },
-      "options": {
-        "mergeValues": true,
-        "showValue": "never",
-        "alignValue": "center",
-        "rowHeight": 0.8,
-        "legend": {
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_up{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} \u00b7 engine heartbeat",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_may_open{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} \u00b7 may open",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "1 - lm_engine_rolling_loss_tripped{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} \u00b7 loss breaker clear",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_worker_status_healthy{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} \u00b7 signal worker healthy",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_recorder_up",
-          "instant": false,
-          "legendFormat": "recorder {{realm}} \u00b7 live",
-          "range": true,
-          "refId": "E"
-        }
-      ]
-    },
-    {
-      "type": "stat",
-      "id": 2,
-      "title": "Equity",
-      "description": "Mark to market from the venue's own account reading, as the heartbeat carries it.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 0,
-        "w": 8,
-        "h": 8
+        "w": 6,
+        "h": 5
       },
       "fieldConfig": {
         "defaults": {
@@ -212,15 +82,30 @@
               }
             ]
           },
-          "unit": "currencyUSD",
-          "mappings": [],
-          "decimals": 2
+          "unit": "short",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "ONLINE",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
       "options": {
-        "colorMode": "none",
-        "graphMode": "area",
+        "colorMode": "background",
+        "graphMode": "none",
         "justifyMode": "center",
         "textMode": "value_and_name",
         "wideLayout": true,
@@ -239,7 +124,7 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_engine_equity_usdt{realm=~\"$realm\"}",
+          "expr": "lm_engine_up{realm=~\"$realm\"}",
           "instant": true,
           "legendFormat": "{{realm}}",
           "range": false,
@@ -248,275 +133,19 @@
       ]
     },
     {
-      "type": "row",
-      "id": 10,
-      "title": "Account",
-      "collapsed": false,
-      "gridPos": {
-        "x": 0,
-        "y": 8,
-        "w": 24,
-        "h": 1
-      },
-      "panels": []
-    },
-    {
-      "type": "timeseries",
-      "id": 11,
-      "title": "Equity and available margin",
-      "description": "Sampled once a minute from the heartbeat. A gap is a minute with no live heartbeat. Available under equity is margin posted against open positions; negative available is normal while the owner holds hand positions.",
+      "type": "stat",
+      "id": 2,
+      "title": "New orders",
+      "description": "The effective account-level entry gate. Paused engines may still reduce or close exposure.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
-        "x": 0,
-        "y": 9,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "currencyUSD",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": null
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_equity_usdt{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} equity",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_available_usdt{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} available",
-          "range": true,
-          "refId": "B"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "id": 12,
-      "title": "Rolling 24h loss against its ceiling",
-      "description": "Net realized loss in the trailing 24 hours next to the breaker's limit. Touching the limit trips the breaker: every sleeve shows entries_enabled false until it clears.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 9,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "currencyUSD",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": null
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* limit"
-            },
-            "properties": [
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "fill": "dash",
-                  "dash": [
-                    10,
-                    10
-                  ]
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_rolling_loss_net_usdt{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} net",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_rolling_loss_limit_usdt{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} limit",
-          "range": true,
-          "refId": "B"
-        }
-      ]
-    },
-    {
-      "type": "row",
-      "id": 20,
-      "title": "Sleeves",
-      "collapsed": false,
-      "gridPos": {
-        "x": 0,
-        "y": 17,
-        "w": 24,
-        "h": 1
-      },
-      "panels": []
-    },
-    {
-      "type": "timeseries",
-      "id": 21,
-      "title": "Open positions by sleeve",
-      "description": "How many positions each configured sleeve holds, zero included, so a flat sleeve is a line at zero rather than a missing one. `unattributed` is exposure no sleeve owns: the owner's hand trades.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 18,
-        "w": 8,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "label_replace({__name__=~\"lm_engine_sleeve_.*_positions\", realm=~\"$realm\"}, \"sleeve\", \"$1\", \"__name__\", \"lm_engine_sleeve_(.*)_positions\")",
-          "instant": false,
-          "legendFormat": "{{realm}} {{sleeve}}",
-          "range": true,
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "state-timeline",
-      "id": 22,
-      "title": "Entries enabled by sleeve",
-      "description": "The effective entry gate per sleeve after committed config and the newest durable runtime override. Off means the sleeve may exit and settle but not open or grow.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 8,
-        "y": 18,
-        "w": 8,
-        "h": 8
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 5
       },
       "fieldConfig": {
         "defaults": {
@@ -527,30 +156,23 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "text",
                 "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
               }
             ]
           },
-          "custom": {
-            "fillOpacity": 80,
-            "lineWidth": 0
-          },
+          "unit": "short",
           "mappings": [
             {
               "type": "value",
               "options": {
                 "0": {
-                  "text": "off",
-                  "color": "red",
+                  "text": "PAUSED",
+                  "color": "orange",
                   "index": 0
                 },
                 "1": {
-                  "text": "on",
+                  "text": "OPEN",
                   "color": "green",
                   "index": 1
                 }
@@ -561,16 +183,17 @@
         "overrides": []
       },
       "options": {
-        "mergeValues": true,
-        "showValue": "never",
-        "alignValue": "center",
-        "rowHeight": 0.8,
-        "legend": {
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         }
       },
       "targets": [
@@ -580,9 +203,243 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "label_replace({__name__=~\"lm_engine_sleeve_.*_entries_enabled\", realm=~\"$realm\"}, \"sleeve\", \"$1\", \"__name__\", \"lm_engine_sleeve_(.*)_entries_enabled\")",
+          "expr": "lm_engine_may_open{realm=~\"$realm\"}",
+          "instant": true,
+          "legendFormat": "{{realm}}",
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Signal workers",
+      "description": "The worker verdict and ticker coverage. Starting and bounded recovery count as healthy; a coverage miss remains visible beside the verdict.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "ATTENTION",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "HEALTHY",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_worker_status_healthy{realm=~\"$realm\"}",
+          "instant": true,
+          "legendFormat": "{{realm}} verdict",
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_worker_ticker_coverage_complete{realm=~\"$realm\"}",
+          "instant": true,
+          "legendFormat": "{{realm}} coverage",
+          "range": false,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "Tape recorders",
+      "description": "The minute sampler can read each recorder's current status file. Detailed capacity and gap signals are below.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "RECORDING",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_recorder_up",
+          "instant": true,
+          "legendFormat": "{{realm}}",
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Equity",
+      "description": "Current venue account equity over the selected time range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 14,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": null
+          },
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_equity_usdt{realm=~\"$realm\"}",
           "instant": false,
-          "legendFormat": "{{realm}} {{sleeve}}",
+          "legendFormat": "{{realm}}",
           "range": true,
           "refId": "A"
         }
@@ -590,18 +447,95 @@
     },
     {
       "type": "timeseries",
-      "id": 23,
-      "title": "Entry blockers by sleeve",
-      "description": "Per-symbol reasons a sleeve is not opening right now, counted per sleeve. Expected trading state (inside a resize band, entry window closed), not faults; faults are strategy errors below.",
+      "id": 12,
+      "title": "Open exposure",
+      "description": "Current absolute entry notional across open positions. This is exposure, not margin or PnL.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
-        "x": 16,
-        "y": 18,
-        "w": 8,
+        "x": 12,
+        "y": 5,
+        "w": 12,
         "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 14,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          },
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_position_entry_notional_usdt{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "{{realm}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 30,
+      "title": "Execution",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 31,
+      "title": "Execution activity \u00b7 15m",
+      "description": "New orders, fills, and recovered private-stream resets in each 15-minute window. Since-boot counters are read as increases so a restart does not draw a false cliff.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 10,
+        "h": 9
       },
       "fieldConfig": {
         "defaults": {
@@ -610,9 +544,9 @@
           },
           "unit": "short",
           "custom": {
-            "drawStyle": "line",
+            "drawStyle": "bars",
             "lineWidth": 2,
-            "fillOpacity": 8,
+            "fillOpacity": 60,
             "showPoints": "never",
             "pointSize": 4,
             "spanNulls": false,
@@ -643,40 +577,287 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "label_replace({__name__=~\"lm_engine_sleeve_.*_blockers\", realm=~\"$realm\"}, \"sleeve\", \"$1\", \"__name__\", \"lm_engine_sleeve_(.*)_blockers\")",
+          "expr": "increase(lm_engine_orders_sent{realm=~\"$realm\"}[15m])",
           "instant": false,
-          "legendFormat": "{{realm}} {{sleeve}}",
+          "legendFormat": "{{realm}} orders",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "increase(lm_engine_fills{realm=~\"$realm\"}[15m])",
+          "instant": false,
+          "legendFormat": "{{realm}} fills",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "increase(lm_engine_stream_resets{realm=~\"$realm\"}[15m])",
+          "instant": false,
+          "legendFormat": "{{realm}} stream resets",
+          "range": true,
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 32,
+      "title": "Order-path latency \u00b7 p99",
+      "description": "Measured order-path windows only. The emphasized end-to-end line contains decision, durability, dispatch, venue work, and the return to the strategy core.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 14,
+        "w": 14,
+        "h": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 4,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          },
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/end-to-end/"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 4
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 18
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_end_to_end_p99_ns{realm=~\"$realm\"} / 1000000",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 end-to-end",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_ack_p99_ns{realm=~\"$realm\"} / 1000000",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 venue ack",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_durable_p99_ns{realm=~\"$realm\"} / 1000000",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 durable",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_decide_p99_ns{realm=~\"$realm\"} / 1000000",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 decide",
+          "range": true,
+          "refId": "D"
         }
       ]
     },
     {
       "type": "row",
-      "id": 30,
-      "title": "Order path",
+      "id": 40,
+      "title": "Data pipeline",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 26,
+        "y": 23,
         "w": 24,
         "h": 1
       },
       "panels": []
     },
     {
-      "type": "stat",
-      "id": 31,
-      "title": "Order path last measured",
-      "description": "How long since the engine's latency ledger last held an order. The ledger is a 60-second window: it is only populated in a minute an order went out. The demo probe rests one order every 15 minutes, so demo should never read above about 16 minutes; mainnet reads the time since the funded engine last sent anything.",
+      "type": "timeseries",
+      "id": 41,
+      "title": "Data freshness",
+      "description": "Age of the account reading, the worker's last market frame, any open repair gap, and each recorder's last received frame. Low and flat is healthy.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_METRICS}"
       },
       "gridPos": {
         "x": 0,
-        "y": 27,
-        "w": 6,
+        "y": 24,
+        "w": 10,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_engine_account_age_ms{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "engine {{realm}} \u00b7 account",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_worker_ws_last_frame_age_ms{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "worker {{realm}} \u00b7 market frame",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_worker_ws_gap_age_ms{realm=~\"$realm\"}",
+          "instant": false,
+          "legendFormat": "worker {{realm}} \u00b7 repair gap",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_recorder_receive_age_ms",
+          "instant": false,
+          "legendFormat": "recorder {{realm}} \u00b7 market frame",
+          "range": true,
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "id": 42,
+      "title": "Pipeline pressure",
+      "description": "Current worker queues, durable spool, recorder queue, and projected monthly traffic. Orange means headroom is shrinking; red means the cap is near.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 24,
+        "w": 7,
         "h": 8
       },
       "fieldConfig": {
@@ -693,760 +874,33 @@
               },
               {
                 "color": "orange",
-                "value": 1200
+                "value": 0.75
               },
               {
                 "color": "red",
-                "value": 3600
+                "value": 0.9
               }
             ]
-          },
-          "unit": "s",
-          "mappings": [],
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "textMode": "value_and_name",
-        "wideLayout": true,
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "time() - max_over_time(timestamp(lm_engine_end_to_end_p50_ns{realm=~\"$realm\"})[7d:1m])",
-          "instant": true,
-          "legendFormat": "{{realm}}",
-          "range": false,
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "stat",
-      "id": 32,
-      "title": "Orders sent since boot",
-      "description": "The engine's own since-boot counter. It resets to zero on every restart, so read it next to uptime.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 6,
-        "y": 27,
-        "w": 6,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short",
-          "mappings": [],
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "none",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "textMode": "value_and_name",
-        "wideLayout": true,
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_orders_sent{realm=~\"$realm\"}",
-          "instant": true,
-          "legendFormat": "{{realm}}",
-          "range": false,
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "id": 33,
-      "title": "Order path, end to end",
-      "description": "The engine's own `end_to_end`: market event to submitted order, p50 and p99 over the ledger's 60-second window. Plotted as points: there is a value only in a minute an order went out. It stops at the submit, so the venue's round trip is not in it \u2014 read `ack` below for that, and note that `ack` is empty on a venue path that leaves no transport stamp.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 27,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "ns",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "always",
-            "pointSize": 6,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_end_to_end_p50_ns{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} p50",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_end_to_end_p99_ns{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} p99",
-          "range": true,
-          "refId": "B"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "id": 34,
-      "title": "Order path by step, p99",
-      "description": "Where the time goes. decide is the strategy; durable is the log barrier; wire is the whole venue task, decision to completion, so it contains the round trip; ack is the round trip on its own and is recorded only when the adapter stamped the socket write \u2014 mainnet's places carry that stamp, demo's do not, so demo shows no ack line and its round trip sits inside wire. dispatch queue, venue task and core resume are the hand-offs. barrier wait is what the order actually waited on the disk; quota hold is time the adapter held a command back to stay inside the request quota. `engine latency --wal PATH` is the authority and says how many commands carry stamps.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 35,
-        "w": 16,
-        "h": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "ns",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "always",
-            "pointSize": 6,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_decide_p99_ns{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} decide",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_durable_p99_ns{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} durable",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_wire_p99_ns{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} wire",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_ack_p99_ns{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} ack",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_dispatch_queue_p99_ns{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} dispatch queue",
-          "range": true,
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_venue_task_p99_ns{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} venue task",
-          "range": true,
-          "refId": "F"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_core_resume_p99_ns{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} core resume",
-          "range": true,
-          "refId": "G"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_barrier_wait_p99_ns{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} barrier wait",
-          "range": true,
-          "refId": "H"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_quota_hold_p99_ns{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} quota hold",
-          "range": true,
-          "refId": "I"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "id": 35,
-      "title": "Working orders, blockers, faults",
-      "description": "Orders resting at the venue right now, entry blockers across every sleeve, flatten requests not yet acknowledged, and strategy errors. A blocker is ordinary trading state; a strategy error means a reducer could not reduce its inputs, and is the one to read first.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 35,
-        "w": 8,
-        "h": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_working_entries{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} working orders",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_entry_blockers{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} entry blockers",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_pending_flatten_requests{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} pending flattens",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_strategy_errors{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} strategy errors",
-          "range": true,
-          "refId": "D"
-        }
-      ]
-    },
-    {
-      "type": "row",
-      "id": 36,
-      "title": "Signal workers",
-      "collapsed": false,
-      "gridPos": {
-        "x": 0,
-        "y": 44,
-        "w": 24,
-        "h": 1
-      },
-      "panels": []
-    },
-    {
-      "type": "state-timeline",
-      "id": 37,
-      "title": "Worker transport and verdict",
-      "description": "The worker's own bounded verdict next to its raw transport facts. Starting is healthy while cold fill is inside its bound; recovering is healthy for two minutes during a later gap, repair, or coverage miss. Socket, topic quarantine, and spool faults remain immediate.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 45,
-        "w": 8,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "custom": {
-            "fillOpacity": 80,
-            "lineWidth": 0
-          },
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "NOT ok",
-                  "color": "red",
-                  "index": 0
-                },
-                "1": {
-                  "text": "ok",
-                  "color": "green",
-                  "index": 1
-                }
-              }
-            }
-          ]
-        },
-        "overrides": []
-      },
-      "options": {
-        "mergeValues": true,
-        "showValue": "never",
-        "alignValue": "center",
-        "rowHeight": 0.8,
-        "legend": {
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_worker_up{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} \u00b7 heartbeat",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_worker_status_healthy{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} \u00b7 verdict",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_worker_ws_connected{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} \u00b7 socket",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_worker_ticker_coverage_complete{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} \u00b7 ticker coverage",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "1 - lm_worker_spool_backpressured{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} \u00b7 spool writable",
-          "range": true,
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "1 - clamp_max(lm_worker_ticker_topics_quarantined{realm=~\"$realm\"} + lm_worker_kline_topics_quarantined{realm=~\"$realm\"}, 1)",
-          "instant": false,
-          "legendFormat": "{{realm}} \u00b7 topics clean",
-          "range": true,
-          "refId": "F"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "id": 38,
-      "title": "Worker freshness and repair age",
-      "description": "Heartbeat and last-frame age should stay low. Repair-gap age exists while causal history is being closed; LONG and carry cycle age show whether reducers continue completing during that repair.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 8,
-        "y": 45,
-        "w": 8,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "ms",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_worker_heartbeat_age_ms{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} heartbeat",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_worker_ws_last_frame_age_ms{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} last frame",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_worker_ws_gap_age_ms{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} repair gap",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_worker_long_cycle_age_ms{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} LONG cycle",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_worker_carry_cycle_age_ms{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} carry cycle",
-          "range": true,
-          "refId": "E"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "id": 39,
-      "title": "Worker queue and durable spool fill",
-      "description": "Fraction of each bounded buffer in use. The WebSocket queue absorbs bursts; the durable spool holds observations until the engine acknowledges them. One means the corresponding hard cap.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 45,
-        "w": 8,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
           },
           "unit": "percentunit",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          }
+          "decimals": 0,
+          "min": 0
         },
         "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "showUnfilled": true,
+        "valueMode": "color",
+        "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
+          ],
+          "fields": "",
+          "values": false
         }
       },
       "targets": [
@@ -1457,9 +911,9 @@
           },
           "editorMode": "code",
           "expr": "lm_worker_ws_queue_fill{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} WebSocket queue",
-          "range": true,
+          "instant": true,
+          "legendFormat": "{{realm}} \u00b7 WebSocket queue",
+          "range": false,
           "refId": "A"
         },
         {
@@ -1469,9 +923,9 @@
           },
           "editorMode": "code",
           "expr": "lm_worker_spool_file_fill{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} spool files",
-          "range": true,
+          "instant": true,
+          "legendFormat": "{{realm}} \u00b7 spool files",
+          "range": false,
           "refId": "B"
         },
         {
@@ -1481,85 +935,10 @@
           },
           "editorMode": "code",
           "expr": "lm_worker_spool_byte_fill{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} spool bytes",
-          "range": true,
+          "instant": true,
+          "legendFormat": "{{realm}} \u00b7 spool bytes",
+          "range": false,
           "refId": "C"
-        }
-      ]
-    },
-    {
-      "type": "row",
-      "id": 40,
-      "title": "Engine",
-      "collapsed": false,
-      "gridPos": {
-        "x": 0,
-        "y": 53,
-        "w": 24,
-        "h": 1
-      },
-      "panels": []
-    },
-    {
-      "type": "timeseries",
-      "id": 41,
-      "title": "Heartbeat and account reading age",
-      "description": "Age of the heartbeat file when sampled (written every 5 s) and of the venue's account reading inside it. Both climbing together is the engine wedged; only the account age climbing is the private stream gone quiet.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 54,
-        "w": 8,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "ms",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_heartbeat_age_ms{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} heartbeat",
-          "range": true,
-          "refId": "A"
         },
         {
           "datasource": {
@@ -1567,454 +946,12 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_engine_account_age_ms{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} account reading",
-          "range": true,
-          "refId": "B"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "id": 42,
-      "title": "Orders, fills, stream resets (per 5 min)",
-      "description": "Since-boot counters read as increases, so a restart is a flat line, not a cliff. A stream reset is a recovered private-stream gap.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 8,
-        "y": 54,
-        "w": 8,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short",
-          "custom": {
-            "drawStyle": "bars",
-            "lineWidth": 2,
-            "fillOpacity": 60,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          },
-          "decimals": 0
+          "expr": "sum by (realm) (last_over_time(lm_recorder_projected_month_gb[24h])) / sum by (realm) (last_over_time(lm_recorder_monthly_gb[24h]))",
+          "instant": true,
+          "legendFormat": "recorder {{realm}} \u00b7 monthly traffic",
+          "range": false,
+          "refId": "D"
         },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "increase(lm_engine_orders_sent{realm=~\"$realm\"}[5m])",
-          "instant": false,
-          "legendFormat": "{{realm}} orders",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "increase(lm_engine_fills{realm=~\"$realm\"}[5m])",
-          "instant": false,
-          "legendFormat": "{{realm}} fills",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "increase(lm_engine_stream_resets{realm=~\"$realm\"}[5m])",
-          "instant": false,
-          "legendFormat": "{{realm}} stream resets",
-          "range": true,
-          "refId": "C"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "id": 43,
-      "title": "Market events per second and venue clock offset",
-      "description": "Public market messages the engine consumed, as a rate; and the venue's clock minus this box's, off the freshest quote. A box that drifts makes every venue-stamp comparison quietly wrong.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 54,
-        "w": 8,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": null
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*clock offset.*"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "ms"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "increase(lm_engine_market_events{realm=~\"$realm\"}[5m]) / 300",
-          "instant": false,
-          "legendFormat": "{{realm}} market events/s",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_engine_venue_clock_offset_ms{realm=~\"$realm\"}",
-          "instant": false,
-          "legendFormat": "{{realm}} clock offset (ms)",
-          "range": true,
-          "refId": "B"
-        }
-      ]
-    },
-    {
-      "type": "row",
-      "id": 50,
-      "title": "Tape recorders",
-      "collapsed": false,
-      "gridPos": {
-        "x": 0,
-        "y": 62,
-        "w": 24,
-        "h": 1
-      },
-      "panels": []
-    },
-    {
-      "type": "timeseries",
-      "id": 51,
-      "title": "Recorder: projected month against allowance",
-      "description": "What the month's inbound bytes project to at the current pace, next to the budget's allowance. Over the line, the budget controller sheds feeds in its configured order.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 63,
-        "w": 8,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "decgbytes",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* allowance"
-            },
-            "properties": [
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "fill": "dash",
-                  "dash": [
-                    10,
-                    10
-                  ]
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_recorder_projected_month_gb",
-          "instant": false,
-          "legendFormat": "{{realm}} projected",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "lm_recorder_monthly_gb",
-          "instant": false,
-          "legendFormat": "{{realm}} allowance",
-          "range": true,
-          "refId": "B"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "id": 52,
-      "title": "Recorder: frames dropped and reconnects (per 5 min)",
-      "description": "Since-boot counters read as increases. A dropped frame is the writer queue overrunning; each overrun reconnects the shard for fresh snapshots, so drops and reconnects rise together when the recorder is starved. Dropped at disk is storage refusing writes.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 8,
-        "y": 63,
-        "w": 8,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short",
-          "custom": {
-            "drawStyle": "bars",
-            "lineWidth": 2,
-            "fillOpacity": 60,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "increase(lm_recorder_dropped_frames[5m])",
-          "instant": false,
-          "legendFormat": "{{realm}} dropped",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "increase(lm_recorder_disk_dropped_frames[5m])",
-          "instant": false,
-          "legendFormat": "{{realm}} dropped at disk",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_METRICS}"
-          },
-          "editorMode": "code",
-          "expr": "increase(lm_recorder_reconnects[5m])",
-          "instant": false,
-          "legendFormat": "{{realm}} reconnects",
-          "range": true,
-          "refId": "C"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "id": 53,
-      "title": "Recorder: queue fill, shards, shed feeds",
-      "description": "How full the writer queue was at the sample (1.0 is an overrun), shards connected of shards configured, and feeds currently shed by the budget controller.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_METRICS}"
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 63,
-        "w": 8,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "percentunit",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "pointSize": 4,
-            "spanNulls": false,
-            "axisSoftMin": 0
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".* shed feeds"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "short"
-              },
-              {
-                "id": "decimals",
-                "value": 0
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
@@ -2022,8 +959,71 @@
           },
           "editorMode": "code",
           "expr": "lm_recorder_queue_fill",
+          "instant": true,
+          "legendFormat": "recorder {{realm}} \u00b7 writer queue",
+          "range": false,
+          "refId": "E"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 43,
+      "title": "Recorder faults \u00b7 1h",
+      "description": "Disconnected shards now, plus dropped frames and reconnects during the last hour. Every value should be zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_METRICS}"
+      },
+      "gridPos": {
+        "x": 17,
+        "y": 24,
+        "w": 7,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 2,
+            "fillOpacity": 60,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisSoftMin": 0
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "lm_recorder_shards - lm_recorder_shards_connected",
           "instant": false,
-          "legendFormat": "{{realm}} queue fill",
+          "legendFormat": "{{realm}} \u00b7 shards down",
           "range": true,
           "refId": "A"
         },
@@ -2033,9 +1033,9 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_recorder_shards_connected / lm_recorder_shards",
+          "expr": "increase(lm_recorder_dropped_frames[1h])",
           "instant": false,
-          "legendFormat": "{{realm}} shards connected",
+          "legendFormat": "{{realm}} \u00b7 dropped",
           "range": true,
           "refId": "B"
         },
@@ -2045,11 +1045,23 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_recorder_shed_feeds",
+          "expr": "increase(lm_recorder_disk_dropped_frames[1h])",
           "instant": false,
-          "legendFormat": "{{realm}} shed feeds",
+          "legendFormat": "{{realm}} \u00b7 disk drops",
           "range": true,
           "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_METRICS}"
+          },
+          "editorMode": "code",
+          "expr": "increase(lm_recorder_reconnects[1h])",
+          "instant": false,
+          "legendFormat": "{{realm}} \u00b7 reconnects",
+          "range": true,
+          "refId": "D"
         }
       ]
     }

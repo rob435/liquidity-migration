@@ -73,6 +73,8 @@ def timeseries(
     bars: bool = False,
     min_zero: bool = True,
     legend_table: bool = False,
+    line_width: int = 2,
+    fill_opacity: int | None = None,
     overrides: list[dict[str, Any]] | None = None,
 ) -> Panel:
     defaults: dict[str, Any] = {
@@ -80,8 +82,8 @@ def timeseries(
         "unit": unit,
         "custom": {
             "drawStyle": "bars" if bars else "line",
-            "lineWidth": 2,
-            "fillOpacity": 60 if bars else 8,
+            "lineWidth": line_width,
+            "fillOpacity": fill_opacity if fill_opacity is not None else (60 if bars else 8),
             "showPoints": "always" if points else "never",
             "pointSize": 6 if points else 4,
             "spanNulls": False,
@@ -118,7 +120,6 @@ def stat(
     unit: str = "short",
     decimals: int | None = None,
     thresholds: list[tuple[str, float | None]] | None = None,
-    sparkline: bool = False,
     mappings: dict[str, tuple[str, str]] | None = None,
 ) -> Panel:
     steps = [{"color": color, "value": value} for color, value in (thresholds or [("text", None)])]
@@ -150,7 +151,7 @@ def stat(
         "fieldConfig": {"defaults": defaults, "overrides": []},
         "options": {
             "colorMode": "background" if mappings else ("value" if thresholds else "none"),
-            "graphMode": "area" if sparkline else "none",
+            "graphMode": "none",
             "justifyMode": "center",
             "textMode": "value_and_name",
             "wideLayout": True,
@@ -160,18 +161,23 @@ def stat(
     }
 
 
-def state_timeline(
+def bar_gauge(
     panel_id: int,
     title: str,
     description: str,
     grid: dict[str, int],
     rows: list[tuple[str, str]],
     *,
-    on_text: str,
-    off_text: str,
+    unit: str = "percentunit",
+    decimals: int = 0,
+    thresholds: list[tuple[str, float | None]] | None = None,
 ) -> Panel:
+    steps = [
+        {"color": color, "value": value}
+        for color, value in (thresholds or [("green", None), ("orange", 0.75), ("red", 1.0)])
+    ]
     return {
-        "type": "state-timeline",
+        "type": "bargauge",
         "id": panel_id,
         "title": title,
         "description": description,
@@ -180,46 +186,29 @@ def state_timeline(
         "fieldConfig": {
             "defaults": {
                 "color": {"mode": "thresholds"},
-                "thresholds": {
-                    "mode": "absolute",
-                    "steps": [{"color": "red", "value": None}, {"color": "green", "value": 1}],
-                },
-                "custom": {"fillOpacity": 80, "lineWidth": 0},
-                "mappings": [
-                    {
-                        "type": "value",
-                        "options": {
-                            "0": {"text": off_text, "color": "red", "index": 0},
-                            "1": {"text": on_text, "color": "green", "index": 1},
-                        },
-                    }
-                ],
+                "thresholds": {"mode": "absolute", "steps": steps},
+                "unit": unit,
+                "decimals": decimals,
+                "min": 0,
             },
             "overrides": [],
         },
         "options": {
-            "mergeValues": True,
-            "showValue": "never",
-            "alignValue": "center",
-            "rowHeight": 0.8,
-            "legend": {"showLegend": False},
-            "tooltip": {"mode": "single", "sort": "none"},
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "minVizHeight": 10,
+            "minVizWidth": 0,
+            "showUnfilled": True,
+            "valueMode": "color",
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
         },
-        "targets": _targets(rows),
+        "targets": _targets(rows, instant=True),
     }
 
 
-def _sleeve(metric_suffix: str) -> str:
-    """Pull the sleeve name out of `lm_engine_sleeve_<name>_<suffix>` as a label."""
-    return (
-        f'label_replace({{__name__=~"lm_engine_sleeve_.*_{metric_suffix}", {REALM}}}, '
-        f'"sleeve", "$1", "__name__", "lm_engine_sleeve_(.*)_{metric_suffix}")'
-    )
-
-
-def _rate_5m(metric: str, realm: bool = True) -> str:
+def _increase(metric: str, *, window: str = "15m", realm: bool = True) -> str:
     selector = f"{{{REALM}}}" if realm else ""
-    return f"increase({metric}{selector}[5m])"
+    return f"increase({metric}{selector}[{window}])"
 
 
 def panels() -> list[Panel]:
@@ -227,393 +216,190 @@ def panels() -> list[Panel]:
     y = 0
 
     out.append(
-        state_timeline(
+        stat(
             1,
-            "Health",
-            "One lane per fact, sampled every minute. Green is the good state: a readable heartbeat, "
-            "may_open true, the 24h loss breaker not tripped, a healthy signal worker, a live recorder. A red "
-            "minute is a real minute: the sampler writes the line whether or not a producer is up.",
-            _grid(0, y, 16, 8),
-            [
-                (f"lm_engine_up{{{REALM}}}", "{{realm}} · engine heartbeat"),
-                (f"lm_engine_may_open{{{REALM}}}", "{{realm}} · may open"),
-                (f"1 - lm_engine_rolling_loss_tripped{{{REALM}}}", "{{realm}} · loss breaker clear"),
-                (f"lm_worker_status_healthy{{{REALM}}}", "{{realm}} · signal worker healthy"),
-                ("lm_recorder_up", "recorder {{realm}} · live"),
-            ],
-            on_text="ok",
-            off_text="NOT ok",
+            "Engines",
+            "Current engine heartbeat state for each selected realm. Red means the minute sampler could not "
+            "read a live engine heartbeat.",
+            _grid(0, y, 6, 5),
+            [(f"lm_engine_up{{{REALM}}}", "{{realm}}")],
+            mappings={"0": ("DOWN", "red"), "1": ("ONLINE", "green")},
         )
     )
     out.append(
         stat(
             2,
-            "Equity",
-            "Mark to market from the venue's own account reading, as the heartbeat carries it.",
-            _grid(16, y, 8, 8),
-            [(f"lm_engine_equity_usdt{{{REALM}}}", "{{realm}}")],
-            unit="currencyUSD",
-            decimals=2,
-            sparkline=True,
+            "New orders",
+            "The effective account-level entry gate. Paused engines may still reduce or close exposure.",
+            _grid(6, y, 6, 5),
+            [(f"lm_engine_may_open{{{REALM}}}", "{{realm}}")],
+            mappings={"0": ("PAUSED", "orange"), "1": ("OPEN", "green")},
         )
     )
-    y += 8
+    out.append(
+        stat(
+            3,
+            "Signal workers",
+            "The worker verdict and ticker coverage. Starting and bounded recovery count as healthy; a "
+            "coverage miss remains visible beside the verdict.",
+            _grid(12, y, 6, 5),
+            [
+                (f"lm_worker_status_healthy{{{REALM}}}", "{{realm}} verdict"),
+                (f"lm_worker_ticker_coverage_complete{{{REALM}}}", "{{realm}} coverage"),
+            ],
+            mappings={"0": ("ATTENTION", "red"), "1": ("HEALTHY", "green")},
+        )
+    )
+    out.append(
+        stat(
+            4,
+            "Tape recorders",
+            "The minute sampler can read each recorder's current status file. Detailed capacity and gap "
+            "signals are below.",
+            _grid(18, y, 6, 5),
+            [("lm_recorder_up", "{{realm}}")],
+            mappings={"0": ("DOWN", "red"), "1": ("RECORDING", "green")},
+        )
+    )
+    y += 5
 
-    out.append(row(10, "Account", y))
-    y += 1
     out.append(
         timeseries(
             11,
-            "Equity and available margin",
-            "Sampled once a minute from the heartbeat. A gap is a minute with no live heartbeat. "
-            "Available under equity is margin posted against open positions; negative available is normal "
-            "while the owner holds hand positions.",
+            "Equity",
+            "Current venue account equity over the selected time range.",
             _grid(0, y, 12, 8),
-            [
-                (f"lm_engine_equity_usdt{{{REALM}}}", "{{realm}} equity"),
-                (f"lm_engine_available_usdt{{{REALM}}}", "{{realm}} available"),
-            ],
+            [(f"lm_engine_equity_usdt{{{REALM}}}", "{{realm}}")],
             unit="currencyUSD",
+            decimals=2,
             min_zero=False,
+            legend_table=True,
+            fill_opacity=14,
         )
     )
     out.append(
         timeseries(
             12,
-            "Rolling 24h loss against its ceiling",
-            "Net realized loss in the trailing 24 hours next to the breaker's limit. Touching the limit trips "
-            "the breaker: every sleeve shows entries_enabled false until it clears.",
+            "Open exposure",
+            "Current absolute entry notional across open positions. This is exposure, not margin or PnL.",
             _grid(12, y, 12, 8),
-            [
-                (f"lm_engine_rolling_loss_net_usdt{{{REALM}}}", "{{realm}} net"),
-                (f"lm_engine_rolling_loss_limit_usdt{{{REALM}}}", "{{realm}} limit"),
-            ],
+            [(f"lm_engine_position_entry_notional_usdt{{{REALM}}}", "{{realm}}")],
             unit="currencyUSD",
-            min_zero=False,
+            decimals=2,
+            legend_table=True,
+            fill_opacity=14,
+        )
+    )
+    y += 8
+
+    out.append(row(30, "Execution", y))
+    y += 1
+    out.append(
+        timeseries(
+            31,
+            "Execution activity · 15m",
+            "New orders, fills, and recovered private-stream resets in each 15-minute window. Since-boot "
+            "counters are read as increases so a restart does not draw a false cliff.",
+            _grid(0, y, 10, 9),
+            [
+                (_increase("lm_engine_orders_sent"), "{{realm}} orders"),
+                (_increase("lm_engine_fills"), "{{realm}} fills"),
+                (_increase("lm_engine_stream_resets"), "{{realm}} stream resets"),
+            ],
+            decimals=0,
+            bars=True,
+        )
+    )
+    out.append(
+        timeseries(
+            32,
+            "Order-path latency · p99",
+            "Measured order-path windows only. The emphasized end-to-end line contains decision, durability, "
+            "dispatch, venue work, and the return to the strategy core.",
+            _grid(10, y, 14, 9),
+            [
+                (f"lm_engine_end_to_end_p99_ns{{{REALM}}} / 1000000", "{{realm}} · end-to-end"),
+                (f"lm_engine_ack_p99_ns{{{REALM}}} / 1000000", "{{realm}} · venue ack"),
+                (f"lm_engine_durable_p99_ns{{{REALM}}} / 1000000", "{{realm}} · durable"),
+                (f"lm_engine_decide_p99_ns{{{REALM}}} / 1000000", "{{realm}} · decide"),
+            ],
+            unit="ms",
+            decimals=2,
+            points=True,
+            legend_table=True,
+            fill_opacity=4,
             overrides=[
                 {
-                    "matcher": {"id": "byRegexp", "options": ".* limit"},
-                    "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}],
+                    "matcher": {"id": "byRegexp", "options": "/end-to-end/"},
+                    "properties": [
+                        {"id": "custom.lineWidth", "value": 4},
+                        {"id": "custom.fillOpacity", "value": 18},
+                        {"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}},
+                    ],
                 }
             ],
         )
     )
-    y += 8
-
-    out.append(row(20, "Sleeves", y))
-    y += 1
-    out.append(
-        timeseries(
-            21,
-            "Open positions by sleeve",
-            "How many positions each configured sleeve holds, zero included, so a flat sleeve is a line at "
-            "zero rather than a missing one. `unattributed` is exposure no sleeve owns: the owner's hand trades.",
-            _grid(0, y, 8, 8),
-            [(_sleeve("positions"), "{{realm}} {{sleeve}}")],
-            decimals=0,
-        )
-    )
-    out.append(
-        state_timeline(
-            22,
-            "Entries enabled by sleeve",
-            "The effective entry gate per sleeve after committed config and the newest durable runtime "
-            "override. Off means the sleeve may exit and settle but not open or grow.",
-            _grid(8, y, 8, 8),
-            [(_sleeve("entries_enabled"), "{{realm}} {{sleeve}}")],
-            on_text="on",
-            off_text="off",
-        )
-    )
-    out.append(
-        timeseries(
-            23,
-            "Entry blockers by sleeve",
-            "Per-symbol reasons a sleeve is not opening right now, counted per sleeve. Expected trading state "
-            "(inside a resize band, entry window closed), not faults; faults are strategy errors below.",
-            _grid(16, y, 8, 8),
-            [(_sleeve("blockers"), "{{realm}} {{sleeve}}")],
-            decimals=0,
-        )
-    )
-    y += 8
-
-    out.append(row(30, "Order path", y))
-    y += 1
-    out.append(
-        stat(
-            31,
-            "Order path last measured",
-            "How long since the engine's latency ledger last held an order. The ledger is a 60-second window: "
-            "it is only populated in a minute an order went out. The demo probe rests one order every 15 "
-            "minutes, so demo should never read above about 16 minutes; mainnet reads the time since the "
-            "funded engine last sent anything.",
-            _grid(0, y, 6, 8),
-            # A subquery, not `timestamp(last_over_time(...))`: a range-vector
-            # function stamps its result at evaluation time, so that reads 0
-            # forever. Inside a subquery `timestamp()` is evaluated at each
-            # step and returns the sample's own time, which `max_over_time`
-            # then takes the newest of.
-            [(f"time() - max_over_time(timestamp(lm_engine_end_to_end_p50_ns{{{REALM}}})[7d:1m])", "{{realm}}")],
-            unit="s",
-            decimals=0,
-            thresholds=[("green", None), ("orange", 1_200), ("red", 3_600)],
-        )
-    )
-    out.append(
-        stat(
-            32,
-            "Orders sent since boot",
-            "The engine's own since-boot counter. It resets to zero on every restart, so read it next to uptime.",
-            _grid(6, y, 6, 8),
-            [(f"lm_engine_orders_sent{{{REALM}}}", "{{realm}}")],
-            decimals=0,
-        )
-    )
-    out.append(
-        timeseries(
-            33,
-            "Order path, end to end",
-            "The engine's own `end_to_end`: market event to submitted order, p50 and p99 over the ledger's "
-            "60-second window. Plotted as points: there is a value only in a minute an order went out. It stops "
-            "at the submit, so the venue's round trip is not in it — read `ack` below for that, and note that "
-            "`ack` is empty on a venue path that leaves no transport stamp.",
-            _grid(12, y, 12, 8),
-            [
-                (f"lm_engine_end_to_end_p50_ns{{{REALM}}}", "{{realm}} p50"),
-                (f"lm_engine_end_to_end_p99_ns{{{REALM}}}", "{{realm}} p99"),
-            ],
-            unit="ns",
-            points=True,
-            legend_table=True,
-        )
-    )
-    y += 8
-    out.append(
-        timeseries(
-            34,
-            "Order path by step, p99",
-            "Where the time goes. decide is the strategy; durable is the log barrier; wire is the whole venue "
-            "task, decision to completion, so it contains the round trip; ack is the round trip on its own and "
-            "is recorded only when the adapter stamped the socket write — mainnet's places carry that stamp, "
-            "demo's do not, so demo shows no ack line and its round trip sits inside wire. dispatch queue, "
-            "venue task and core resume are the hand-offs. barrier wait is what the order actually waited on "
-            "the disk; quota hold is time the adapter held a command back to stay inside the request quota. "
-            "`engine latency --wal PATH` is the authority and says how many commands carry stamps.",
-            _grid(0, y, 16, 9),
-            [
-                (f"lm_engine_decide_p99_ns{{{REALM}}}", "{{realm}} decide"),
-                (f"lm_engine_durable_p99_ns{{{REALM}}}", "{{realm}} durable"),
-                (f"lm_engine_wire_p99_ns{{{REALM}}}", "{{realm}} wire"),
-                (f"lm_engine_ack_p99_ns{{{REALM}}}", "{{realm}} ack"),
-                (f"lm_engine_dispatch_queue_p99_ns{{{REALM}}}", "{{realm}} dispatch queue"),
-                (f"lm_engine_venue_task_p99_ns{{{REALM}}}", "{{realm}} venue task"),
-                (f"lm_engine_core_resume_p99_ns{{{REALM}}}", "{{realm}} core resume"),
-                (f"lm_engine_barrier_wait_p99_ns{{{REALM}}}", "{{realm}} barrier wait"),
-                (f"lm_engine_quota_hold_p99_ns{{{REALM}}}", "{{realm}} quota hold"),
-            ],
-            unit="ns",
-            points=True,
-            legend_table=True,
-        )
-    )
-    out.append(
-        timeseries(
-            35,
-            "Working orders, blockers, faults",
-            "Orders resting at the venue right now, entry blockers across every sleeve, flatten requests not "
-            "yet acknowledged, and strategy errors. A blocker is ordinary trading state; a strategy error "
-            "means a reducer could not reduce its inputs, and is the one to read first.",
-            _grid(16, y, 8, 9),
-            [
-                (f"lm_engine_working_entries{{{REALM}}}", "{{realm}} working orders"),
-                (f"lm_engine_entry_blockers{{{REALM}}}", "{{realm}} entry blockers"),
-                (f"lm_engine_pending_flatten_requests{{{REALM}}}", "{{realm}} pending flattens"),
-                (f"lm_engine_strategy_errors{{{REALM}}}", "{{realm}} strategy errors"),
-            ],
-            decimals=0,
-        )
-    )
     y += 9
 
-    out.append(row(36, "Signal workers", y))
-    y += 1
-    out.append(
-        state_timeline(
-            37,
-            "Worker transport and verdict",
-            "The worker's own bounded verdict next to its raw transport facts. Starting is healthy while cold "
-            "fill is inside its bound; recovering is healthy for two minutes during a later gap, repair, or "
-            "coverage miss. Socket, topic quarantine, and spool faults remain immediate.",
-            _grid(0, y, 8, 8),
-            [
-                (f"lm_worker_up{{{REALM}}}", "{{realm}} · heartbeat"),
-                (f"lm_worker_status_healthy{{{REALM}}}", "{{realm}} · verdict"),
-                (f"lm_worker_ws_connected{{{REALM}}}", "{{realm}} · socket"),
-                (f"lm_worker_ticker_coverage_complete{{{REALM}}}", "{{realm}} · ticker coverage"),
-                (f"1 - lm_worker_spool_backpressured{{{REALM}}}", "{{realm}} · spool writable"),
-                (
-                    f"1 - clamp_max(lm_worker_ticker_topics_quarantined{{{REALM}}} + "
-                    f"lm_worker_kline_topics_quarantined{{{REALM}}}, 1)",
-                    "{{realm}} · topics clean",
-                ),
-            ],
-            on_text="ok",
-            off_text="NOT ok",
-        )
-    )
-    out.append(
-        timeseries(
-            38,
-            "Worker freshness and repair age",
-            "Heartbeat and last-frame age should stay low. Repair-gap age exists while causal history is being "
-            "closed; LONG and carry cycle age show whether reducers continue completing during that repair.",
-            _grid(8, y, 8, 8),
-            [
-                (f"lm_worker_heartbeat_age_ms{{{REALM}}}", "{{realm}} heartbeat"),
-                (f"lm_worker_ws_last_frame_age_ms{{{REALM}}}", "{{realm}} last frame"),
-                (f"lm_worker_ws_gap_age_ms{{{REALM}}}", "{{realm}} repair gap"),
-                (f"lm_worker_long_cycle_age_ms{{{REALM}}}", "{{realm}} LONG cycle"),
-                (f"lm_worker_carry_cycle_age_ms{{{REALM}}}", "{{realm}} carry cycle"),
-            ],
-            unit="ms",
-            legend_table=True,
-        )
-    )
-    out.append(
-        timeseries(
-            39,
-            "Worker queue and durable spool fill",
-            "Fraction of each bounded buffer in use. The WebSocket queue absorbs bursts; the durable spool holds "
-            "observations until the engine acknowledges them. One means the corresponding hard cap.",
-            _grid(16, y, 8, 8),
-            [
-                (f"lm_worker_ws_queue_fill{{{REALM}}}", "{{realm}} WebSocket queue"),
-                (f"lm_worker_spool_file_fill{{{REALM}}}", "{{realm}} spool files"),
-                (f"lm_worker_spool_byte_fill{{{REALM}}}", "{{realm}} spool bytes"),
-            ],
-            unit="percentunit",
-        )
-    )
-    y += 8
-
-    out.append(row(40, "Engine", y))
+    out.append(row(40, "Data pipeline", y))
     y += 1
     out.append(
         timeseries(
             41,
-            "Heartbeat and account reading age",
-            "Age of the heartbeat file when sampled (written every 5 s) and of the venue's account reading "
-            "inside it. Both climbing together is the engine wedged; only the account age climbing is the "
-            "private stream gone quiet.",
-            _grid(0, y, 8, 8),
+            "Data freshness",
+            "Age of the account reading, the worker's last market frame, any open repair gap, and each "
+            "recorder's last received frame. Low and flat is healthy.",
+            _grid(0, y, 10, 8),
             [
-                (f"lm_engine_heartbeat_age_ms{{{REALM}}}", "{{realm}} heartbeat"),
-                (f"lm_engine_account_age_ms{{{REALM}}}", "{{realm}} account reading"),
+                (f"lm_engine_account_age_ms{{{REALM}}}", "engine {{realm}} · account"),
+                (f"lm_worker_ws_last_frame_age_ms{{{REALM}}}", "worker {{realm}} · market frame"),
+                (f"lm_worker_ws_gap_age_ms{{{REALM}}}", "worker {{realm}} · repair gap"),
+                ("lm_recorder_receive_age_ms", "recorder {{realm}} · market frame"),
             ],
             unit="ms",
+            legend_table=True,
         )
     )
     out.append(
-        timeseries(
+        bar_gauge(
             42,
-            "Orders, fills, stream resets (per 5 min)",
-            "Since-boot counters read as increases, so a restart is a flat line, not a cliff. A stream reset is "
-            "a recovered private-stream gap.",
-            _grid(8, y, 8, 8),
+            "Pipeline pressure",
+            "Current worker queues, durable spool, recorder queue, and projected monthly traffic. Orange means "
+            "headroom is shrinking; red means the cap is near.",
+            _grid(10, y, 7, 8),
             [
-                (_rate_5m("lm_engine_orders_sent"), "{{realm}} orders"),
-                (_rate_5m("lm_engine_fills"), "{{realm}} fills"),
-                (_rate_5m("lm_engine_stream_resets"), "{{realm}} stream resets"),
+                (f"lm_worker_ws_queue_fill{{{REALM}}}", "{{realm}} · WebSocket queue"),
+                (f"lm_worker_spool_file_fill{{{REALM}}}", "{{realm}} · spool files"),
+                (f"lm_worker_spool_byte_fill{{{REALM}}}", "{{realm}} · spool bytes"),
+                (
+                    "sum by (realm) (last_over_time(lm_recorder_projected_month_gb[24h])) / "
+                    "sum by (realm) (last_over_time(lm_recorder_monthly_gb[24h]))",
+                    "recorder {{realm}} · monthly traffic",
+                ),
+                ("lm_recorder_queue_fill", "recorder {{realm}} · writer queue"),
             ],
-            decimals=0,
-            bars=True,
+            thresholds=[("green", None), ("orange", 0.75), ("red", 0.9)],
         )
     )
     out.append(
         timeseries(
             43,
-            "Market events per second and venue clock offset",
-            "Public market messages the engine consumed, as a rate; and the venue's clock minus this box's, "
-            "off the freshest quote. A box that drifts makes every venue-stamp comparison quietly wrong.",
-            _grid(16, y, 8, 8),
+            "Recorder faults · 1h",
+            "Disconnected shards now, plus dropped frames and reconnects during the last hour. Every value "
+            "should be zero.",
+            _grid(17, y, 7, 8),
             [
-                (f"{_rate_5m('lm_engine_market_events')} / 300", "{{realm}} market events/s"),
-                (f"lm_engine_venue_clock_offset_ms{{{REALM}}}", "{{realm}} clock offset (ms)"),
-            ],
-            min_zero=False,
-            overrides=[
-                {
-                    "matcher": {"id": "byRegexp", "options": ".*clock offset.*"},
-                    "properties": [{"id": "unit", "value": "ms"}, {"id": "custom.axisPlacement", "value": "right"}],
-                }
-            ],
-        )
-    )
-    y += 8
-
-    out.append(row(50, "Tape recorders", y))
-    y += 1
-    out.append(
-        timeseries(
-            51,
-            "Recorder: projected month against allowance",
-            "What the month's inbound bytes project to at the current pace, next to the budget's allowance. "
-            "Over the line, the budget controller sheds feeds in its configured order.",
-            _grid(0, y, 8, 8),
-            [
-                ("lm_recorder_projected_month_gb", "{{realm}} projected"),
-                ("lm_recorder_monthly_gb", "{{realm}} allowance"),
-            ],
-            unit="decgbytes",
-            overrides=[
-                {
-                    "matcher": {"id": "byRegexp", "options": ".* allowance"},
-                    "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}],
-                }
-            ],
-        )
-    )
-    out.append(
-        timeseries(
-            52,
-            "Recorder: frames dropped and reconnects (per 5 min)",
-            "Since-boot counters read as increases. A dropped frame is the writer queue overrunning; each "
-            "overrun reconnects the shard for fresh snapshots, so drops and reconnects rise together when the "
-            "recorder is starved. Dropped at disk is storage refusing writes.",
-            _grid(8, y, 8, 8),
-            [
-                (_rate_5m("lm_recorder_dropped_frames", realm=False), "{{realm}} dropped"),
-                (_rate_5m("lm_recorder_disk_dropped_frames", realm=False), "{{realm}} dropped at disk"),
-                (_rate_5m("lm_recorder_reconnects", realm=False), "{{realm}} reconnects"),
+                ("lm_recorder_shards - lm_recorder_shards_connected", "{{realm}} · shards down"),
+                (_increase("lm_recorder_dropped_frames", window="1h", realm=False), "{{realm}} · dropped"),
+                (
+                    _increase("lm_recorder_disk_dropped_frames", window="1h", realm=False),
+                    "{{realm}} · disk drops",
+                ),
+                (_increase("lm_recorder_reconnects", window="1h", realm=False), "{{realm}} · reconnects"),
             ],
             decimals=0,
             bars=True,
-        )
-    )
-    out.append(
-        timeseries(
-            53,
-            "Recorder: queue fill, shards, shed feeds",
-            "How full the writer queue was at the sample (1.0 is an overrun), shards connected of shards "
-            "configured, and feeds currently shed by the budget controller.",
-            _grid(16, y, 8, 8),
-            [
-                ("lm_recorder_queue_fill", "{{realm}} queue fill"),
-                ("lm_recorder_shards_connected / lm_recorder_shards", "{{realm}} shards connected"),
-                ("lm_recorder_shed_feeds", "{{realm}} shed feeds"),
-            ],
-            unit="percentunit",
-            overrides=[
-                {
-                    "matcher": {"id": "byRegexp", "options": ".* shed feeds"},
-                    "properties": [
-                        {"id": "unit", "value": "short"},
-                        {"id": "decimals", "value": 0},
-                        {"id": "custom.axisPlacement", "value": "right"},
-                    ],
-                }
-            ],
         )
     )
     return out
@@ -631,11 +417,11 @@ def dashboard() -> dict[str, Any]:
         "tags": ["liquidity-migration"],
         "timezone": "utc",
         "schemaVersion": 39,
-        "version": 2,
+        "version": 4,
         "editable": True,
         "graphTooltip": 1,
         "refresh": "1m",
-        "time": {"from": "now-24h", "to": "now"},
+        "time": {"from": "now-6h", "to": "now"},
         "templating": {
             "list": [
                 {
@@ -643,8 +429,8 @@ def dashboard() -> dict[str, Any]:
                     "label": "Metrics source",
                     "type": "datasource",
                     "query": "prometheus",
-                    "current": {},
-                    "hide": 0,
+                    "current": {"text": "grafanacloud-proudtortoise1017-prom", "value": "grafanacloud-prom"},
+                    "hide": 2,
                     "refresh": 1,
                 },
                 {
