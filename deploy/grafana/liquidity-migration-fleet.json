@@ -728,7 +728,7 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "time() - timestamp(last_over_time(lm_engine_end_to_end_p50_ns{realm=~\"$realm\"}[30d]))",
+          "expr": "time() - max_over_time(timestamp(lm_engine_end_to_end_p50_ns{realm=~\"$realm\"})[7d:1m])",
           "instant": true,
           "legendFormat": "{{realm}}",
           "range": false,

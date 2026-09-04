@@ -349,7 +349,12 @@ def panels() -> list[Panel]:
             "minutes, so demo should never read above about 16 minutes; mainnet reads the time since the "
             "funded engine last sent anything.",
             _grid(0, y, 6, 8),
-            [(f"time() - timestamp(last_over_time(lm_engine_end_to_end_p50_ns{{{REALM}}}[30d]))", "{{realm}}")],
+            # A subquery, not `timestamp(last_over_time(...))`: a range-vector
+            # function stamps its result at evaluation time, so that reads 0
+            # forever. Inside a subquery `timestamp()` is evaluated at each
+            # step and returns the sample's own time, which `max_over_time`
+            # then takes the newest of.
+            [(f"time() - max_over_time(timestamp(lm_engine_end_to_end_p50_ns{{{REALM}}})[7d:1m])", "{{realm}}")],
             unit="s",
             decimals=0,
             thresholds=[("green", None), ("orange", 1_200), ("red", 3_600)],

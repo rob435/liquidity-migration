@@ -153,7 +153,7 @@ the script renders.
 | **Health** | state timeline, one lane per fact; equity with sparkline | `lm_engine_up`, `may_open`, `1 - rolling_loss_tripped`, `lm_worker_status_healthy`, `lm_recorder_up`, `equity_usdt` |
 | **Account** | equity and available; rolling 24h loss against its ceiling | `equity_usdt`, `available_usdt`, `rolling_loss_*` |
 | **Sleeves** | positions by sleeve; entries enabled by sleeve (state timeline); blockers by sleeve | `lm_engine_sleeve_<name>_{positions,entries_enabled,blockers}` through `label_replace` |
-| **Order path** | seconds since the ledger last held an order; orders since boot; end to end p50/p99; every step at p99; working orders, blockers, faults | `time() - timestamp(last_over_time(end_to_end_p50_ns[30d]))`, the `*_p99_ns` steps, `working_entries`, `strategy_errors` |
+| **Order path** | seconds since the ledger last held an order; orders since boot; end to end p50/p99; every step at p99; working orders, blockers, faults | `time() - max_over_time(timestamp(end_to_end_p50_ns)[7d:1m])`, the `*_p99_ns` steps, `working_entries`, `strategy_errors` |
 | **Signal workers** | verdict and raw transport timeline; heartbeat/frame/repair/cycle ages; WebSocket queue and durable spool fill | `lm_worker_*` |
 | **Engine** | heartbeat and account age; orders/fills/resets per 5 min; market events per second and venue clock offset | ages in ms; `increase(...[5m])` over the since-boot counters |
 | **Tape recorders** | projected month against allowance; frames dropped and reconnects per 5 min; queue fill, shards connected, shed feeds | `lm_recorder_*`, unfiltered by realm |
