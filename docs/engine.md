@@ -21,6 +21,33 @@ The engine workspace is under `engine/`:
 | **`signal-worker`** | Binary (`bin`) | Credential-free public market collector and observation streamer. |
 | **`market-tape`** | Binary (`bin`) | High-throughput market data capture engine and zstd segment writer. |
 
+
+### `engine-core` Module Map
+
+| Module | Owns |
+| :--- | :--- |
+| `engine.rs` | `Engine`, the `select!` loop, one handler per loop arm, the `StopReason` |
+| `engine/boot_recovery.rs` | `Engine::boot`, WAL replay into engine state, missed-fill recovery, venue reconciliation at boot |
+| `engine/scheduling.rs` | Strategy wakes, timers, durable actions, signal intake and admission, the per-wake drain |
+| `engine/intent_admission.rs` | `prepare_intent`, `OpeningRefusal` codes, risk verdicts, order minting and placement groups |
+| `engine/venue_completion.rs` | Venue command completions, `VenueTiming` journaling, private-stream updates, stop maintenance |
+| `engine/telemetry.rs` | Heartbeat and closed-trade rows |
+| `engine/free_helpers.rs` | Replay builders and pure helpers the modules above share |
+| `ctx.rs` | `Books` (what strategies read), `StrategyHost` (the plugs and what is held for them), `Ctx`, `Timers` |
+| `inflight.rs` | The order ledger and registry: what the log says is still out there, and whose it is |
+| `covers.rs` | What each strategy has sent that the account reading has not yet absorbed |
+| `attribution.rs` | Which strategy's fills a venue position came from |
+| `working.rs` | Resting entries being worked at the venue |
+| `reconcile.rs` | The log's exposure and intended stops against the venue's positions |
+| `signal_state.rs` | Durable signal cursors, gaps and subscriptions per source |
+| `signals/` | Signal feeds: validation, in-process channel, spool, socket doorbell |
+| `venue_runtime.rs` | The venue task that owns blocking venue I/O |
+| `ledger.rs`, `timing.rs` | Latency segments live, and read back from the log |
+| `execution.rs`, `trades.rs` | Fill costs and closed round trips |
+| `assembly.rs`, `runner.rs`, `config.rs` | Wiring feeds, venue, risk and strategies into one process |
+| `replay.rs`, `takeover.rs`, `clear.rs`, `canary.rs`, `controls.rs` | Operator commands over a WAL or a live engine |
+| `backtest/` | The live loop on a recorded tape against a simulated venue |
+
 ---
 
 ## 2. Venue Adapters & Readiness
