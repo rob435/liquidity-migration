@@ -294,11 +294,17 @@ edit STATE.md to match.
     parent commit because this container has no `zstd`; Ruff and
     `tests/scripts/test_scripts_check_fleet_liveness.py` green; ShellCheck and
     mypy are not installable here.
-  - Owner action: none by hand. The deploy recorded below restarts both realms,
-    which is what puts the retained epoch into the running workers. Read the
-    result with `scripts/ops.sh status`, the worker with `scripts/ops.sh logs
-    signal-worker-mainnet 200`, and the account through the incident with
-    `scripts/ops.sh curve mainnet`.
+  - Owner action: none by hand. Read the result with `scripts/ops.sh status`,
+    the worker with `scripts/ops.sh logs signal-worker-mainnet 200`, and the
+    account through the incident with `scripts/ops.sh curve mainnet`.
+  - Receipt: `862a452` reached the host inside `2594e6b`, read as `deployed
+    2594e6b` at 16:44:21 UTC by `diagnose` run `33896781856` with both workers
+    restarted (mainnet heartbeat 1 s, demo 2 s) and `ok scope=mainnet
+    units-and-heartbeats-healthy`. That handover was an out-of-band run of the
+    deploy script, not a workflow run: the sanctioned deploy of this commit,
+    run `33895768916`, exited "deploy failed: another deploy is already
+    running" at 16:40:20 against its lock. The 16:44 entry above holds the
+    fleet reading.
   - Not fixed, proposed: a warm worker reports `degraded` for as long as any gap
     is open, so an ordinary venue reconnect — Bybit reset this process at 01:08
     and again at 15:57 — pages `CRITICAL` whenever a 3-minute watchdog tick
