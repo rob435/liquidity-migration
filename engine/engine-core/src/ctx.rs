@@ -7,8 +7,7 @@
 //! both use timer 1 without colliding, and re-arming the same number before
 //! it fires replaces the old one.
 
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use engine_types::{
     AccountView, Action, EngineEvent, InstrumentRule, MarketState, PositionView, Quote,
@@ -29,45 +28,46 @@ struct Pending {
 
 #[derive(Default)]
 pub struct Timers {
-    heap: BinaryHeap<Reverse<Pending>>,
+    scheduled: BTreeSet<Pending>,
     armed: HashMap<(u16, u32), u64>,
 }
 
 impl Timers {
     pub fn arm(&mut self, strategy: StrategyId, timer: TimerId, deadline_ns: u64) {
-        self.armed.insert((strategy.0, timer.0), deadline_ns);
-        self.heap.push(Reverse(Pending {
+        if let Some(previous) = self.armed.insert((strategy.0, timer.0), deadline_ns) {
+            if previous == deadline_ns {
+                return;
+            }
+            self.scheduled.remove(&Pending {
+                deadline_ns: previous,
+                strategy: strategy.0,
+                timer: timer.0,
+            });
+        }
+        self.scheduled.insert(Pending {
             deadline_ns,
             strategy: strategy.0,
             timer: timer.0,
-        }));
+        });
     }
 
-    /// When the next live timer is due, ignoring entries left behind by a
-    /// re-arm.
+    /// Earliest deadline among the currently armed timers.
     pub fn next_deadline(&mut self) -> Option<u64> {
-        loop {
-            let top = self.heap.peek()?.0;
-            if self.armed.get(&(top.strategy, top.timer)) == Some(&top.deadline_ns) {
-                return Some(top.deadline_ns);
-            }
-            self.heap.pop();
-        }
+        self.scheduled.first().map(|pending| pending.deadline_ns)
     }
 
     pub fn pop_due(&mut self, now_ns: u64) -> Option<(StrategyId, TimerId)> {
-        loop {
-            let top = self.heap.peek()?.0;
-            let live = self.armed.get(&(top.strategy, top.timer)) == Some(&top.deadline_ns);
-            if live && top.deadline_ns > now_ns {
-                return None;
-            }
-            self.heap.pop();
-            if live {
-                self.armed.remove(&(top.strategy, top.timer));
-                return Some((StrategyId(top.strategy), TimerId(top.timer)));
-            }
+        let top = self.scheduled.first().copied()?;
+        if top.deadline_ns > now_ns {
+            return None;
         }
+        self.scheduled.pop_first();
+        self.armed.remove(&(top.strategy, top.timer));
+        Some((StrategyId(top.strategy), TimerId(top.timer)))
+    }
+
+    pub(crate) fn is_armed(&self, strategy: StrategyId, timer: TimerId) -> bool {
+        self.armed.contains_key(&(strategy.0, timer.0))
     }
 
     pub fn armed_count(&self) -> usize {
@@ -523,6 +523,142 @@ mod tests {
         assert_eq!(timers.pop_due(200), None);
         assert_eq!(timers.pop_due(600), Some((StrategyId(0), TimerId(7))));
         assert_eq!(timers.pop_due(600), None, "only one firing");
+    }
+
+    #[test]
+    fn rearming_one_timer_retains_only_one_scheduled_node() {
+        let mut timers = Timers::default();
+        for deadline_ns in 100_000..150_000 {
+            timers.arm(StrategyId(3), TimerId(7), deadline_ns);
+        }
+        assert_eq!(timers.armed_count(), 1);
+        assert_eq!(timers.scheduled.len(), timers.armed_count());
+        assert_eq!(timers.next_deadline(), Some(149_999));
+        assert_eq!(timers.pop_due(149_998), None);
+        assert_eq!(timers.pop_due(149_999), Some((StrategyId(3), TimerId(7))));
+        assert_eq!(timers.pop_due(u64::MAX), None);
+        assert_eq!(timers.armed_count(), 0);
+        assert!(timers.scheduled.is_empty());
+    }
+
+    #[test]
+    fn timer_ties_keep_strategy_then_timer_order_after_rearms() {
+        let mut timers = Timers::default();
+        for (strategy, timer, deadline) in [
+            (9, 3, 10),
+            (1, u32::MAX, 10),
+            (0, 7, 11),
+            (1, 0, 10),
+            (u16::MAX, 0, 10),
+            (0, 2, 10),
+            (0, 7, 10),
+            (0, 2, 11),
+            (0, 7, 10),
+        ] {
+            timers.arm(StrategyId(strategy), TimerId(timer), deadline);
+        }
+        assert_eq!(timers.armed_count(), 6);
+        assert_eq!(timers.scheduled.len(), 6);
+        assert_eq!(timers.pop_due(9), None);
+        for (strategy, timer) in [(0, 7), (1, 0), (1, u32::MAX), (9, 3), (u16::MAX, 0)] {
+            assert_eq!(timers.next_deadline(), Some(10));
+            assert_eq!(
+                timers.pop_due(10),
+                Some((StrategyId(strategy), TimerId(timer)))
+            );
+        }
+        assert_eq!(timers.next_deadline(), Some(11));
+        assert_eq!(timers.pop_due(10), None);
+        assert_eq!(timers.pop_due(11), Some((StrategyId(0), TimerId(2))));
+        assert_eq!(timers.next_deadline(), None);
+    }
+
+    #[test]
+    fn is_armed_distinguishes_a_popped_timer_from_its_replacement() {
+        let mut timers = Timers::default();
+        let strategy = StrategyId(4);
+        let timer = TimerId(7);
+        assert!(!timers.is_armed(strategy, timer));
+        timers.arm(strategy, timer, 100);
+        assert!(timers.is_armed(strategy, timer));
+        assert!(!timers.is_armed(StrategyId(5), timer));
+        assert!(!timers.is_armed(strategy, TimerId(8)));
+        assert_eq!(timers.pop_due(99), None);
+        assert!(timers.is_armed(strategy, timer));
+        assert_eq!(timers.pop_due(100), Some((strategy, timer)));
+        assert!(!timers.is_armed(strategy, timer));
+        timers.arm(strategy, timer, 100);
+        assert!(timers.is_armed(strategy, timer));
+        assert_eq!(timers.pop_due(100), Some((strategy, timer)));
+        assert!(!timers.is_armed(strategy, timer));
+    }
+
+    #[test]
+    fn timer_rearms_and_pops_match_a_last_arm_reference_model() {
+        fn pop_reference(
+            current: &mut std::collections::BTreeMap<(u16, u32), u64>,
+            now_ns: u64,
+        ) -> Option<(StrategyId, TimerId)> {
+            let (deadline, strategy, timer) = current
+                .iter()
+                .map(|(&(strategy, timer), &deadline)| (deadline, strategy, timer))
+                .min()?;
+            if deadline > now_ns {
+                return None;
+            }
+            current.remove(&(strategy, timer));
+            Some((StrategyId(strategy), TimerId(timer)))
+        }
+
+        let mut timers = Timers::default();
+        let mut current = std::collections::BTreeMap::new();
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        for step in 0..20_000 {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let strategy = [0, 1, 2, u16::MAX][((seed >> 32) & 3) as usize];
+            let timer = if step % 31 == 0 {
+                u32::MAX
+            } else {
+                ((seed >> 40) % 17) as u32
+            };
+            if step % 5 < 3 {
+                let deadline = match step % 7 {
+                    0 => 0,
+                    1 => u64::MAX,
+                    2 => current.get(&(strategy, timer)).copied().unwrap_or(99),
+                    _ => seed & 511,
+                };
+                current.insert((strategy, timer), deadline);
+                timers.arm(StrategyId(strategy), TimerId(timer), deadline);
+            } else {
+                let now = if step % 13 == 0 {
+                    u64::MAX
+                } else {
+                    (seed >> 16) & 511
+                };
+                assert_eq!(
+                    timers.pop_due(now),
+                    pop_reference(&mut current, now),
+                    "step {step}"
+                );
+            }
+            assert_eq!(
+                timers.next_deadline(),
+                current.values().copied().min(),
+                "step {step}"
+            );
+            assert_eq!(timers.armed_count(), current.len(), "step {step}");
+            assert_eq!(timers.scheduled.len(), current.len(), "step {step}");
+        }
+        while !current.is_empty() {
+            assert_eq!(
+                timers.pop_due(u64::MAX),
+                pop_reference(&mut current, u64::MAX)
+            );
+        }
+        assert_eq!(timers.pop_due(u64::MAX), None);
+        assert_eq!(timers.armed_count(), 0);
+        assert!(timers.scheduled.is_empty());
     }
 
     #[test]

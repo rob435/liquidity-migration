@@ -500,14 +500,29 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     pub(super) async fn on_timers(&mut self) -> Result<(), EngineError> {
         let now = clock::now_ns();
-        while let Some((sid, timer)) = self.host.timers.pop_due(now) {
+        let mut due = [None; MAX_TIMER_CALLBACKS_PER_TURN];
+        for slot in &mut due {
+            let Some(timer) = self.host.timers.pop_due(now) else {
+                break;
+            };
+            *slot = Some(timer);
+        }
+        for (sid, timer) in due.into_iter().flatten() {
+            // A callback may replace a timer already in this turn's snapshot.
+            // Newly armed timers fire in a later turn, including zero-delay ones.
+            if self.host.timers.is_armed(sid, timer) {
+                continue;
+            }
             let event = EngineEvent::Timer {
                 id: timer,
                 now_ns: now,
             };
             self.host.feed(&self.books, sid, &event, now);
         }
-        self.drain(now).await
+        self.drain(now).await?;
+        // Immediately ready timers must also let feed tasks reach the executor.
+        tokio::task::yield_now().await;
+        Ok(())
     }
 
     /// Pull every still-live opening order when reconciliation has latched new

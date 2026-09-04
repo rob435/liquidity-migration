@@ -6,6 +6,26 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 22:04 UTC — Bound timer storage and return between timer turns (isolated local checkpoint).**
+  - Replacing one timer removes its old ordered node; 50,000 distinct rearms
+    retain one node and produce one firing. A deterministic 20,000-step
+    reference model preserves deadline/strategy/timer ordering, replacement
+    semantics and zero/maximum-value boundaries.
+  - Dispatch snapshots at most 64 due keys on the stack. Newly armed timers
+    wait for another turn; an earlier callback can replace another key in the
+    snapshot. This intentionally changes zero-delay callback timing so private
+    input can be polled between turns. The loop also yields to the executor
+    after draining the turn, allowing private-feed tasks to run.
+  - Three negative controls reproduce obsolete-node growth, 1,000 zero-delay
+    callbacks before private-input polling, and 1,000 callbacks before a
+    separate feed task can run. The fixed engine passes all 558 optimized core
+    tests under explicit Rust 1.90.0. These checks establish storage and
+    cooperative scheduling behavior, not a wall-time callback bound or a
+    production latency improvement. Synchronous callbacks, durable-action
+    fairness and limits on distinct timer IDs remain open.
+  - Changes live on `codex/tier1-runtime-fairness` in a separate worktree;
+    concurrent engine/signal edits in the shared checkout remain untouched.
+
 - **2026-09-04 21:48 UTC — Execute optimized qualification on exact local commit `15c60924` (isolated checkout).**
   - The real qualification command builds and packages unchanged engine,
     signal-worker and market-tape bytes, passes all 1,760 optimized Rust tests

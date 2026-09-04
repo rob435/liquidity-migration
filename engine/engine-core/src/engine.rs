@@ -71,6 +71,8 @@ use crate::working::{self, WorkingOrders};
 /// market.
 pub const MAX_INTENTS_PER_WAKE: usize = 64;
 
+pub(crate) const MAX_TIMER_CALLBACKS_PER_TURN: usize = 64;
+
 /// Largest set of placements that may share one risk reservation, WAL
 /// barrier, and concurrent venue submission. It matches Bybit's conservative
 /// per-UID create-order window. A larger strategy burst is re-evaluated in

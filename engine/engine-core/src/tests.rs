@@ -1262,6 +1262,7 @@ mod resting_orders;
 mod rolling_loss;
 mod rotation;
 mod runtime_controls;
+mod scheduler_fairness;
 mod strategy_checkpoints;
 mod strategy_events;
 mod worked_entries;
