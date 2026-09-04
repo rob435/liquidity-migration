@@ -25,7 +25,7 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Realm | Signal worker | `starting` is allowed for at most 120 min during cold fill; `recovering` is allowed for at most 2 min for a live gap, repair, or coverage miss. Both require a connected, fresh stream with every topic accepted and none refused. Disconnected, stale, mismatched, or quarantined transport is immediately `degraded`; `degraded`, `stopped`, an unknown verdict, or spool backpressure is `CRITICAL` |
 | Realm | Admission | Engine reports `may_open != true` |
 | Realm | Circuit breaker | Engine reports `rolling_loss_tripped=true` |
-| Host | Recorders | Status unreadable, no frames for 2 min, connection loss, blocked storage, or new drops. Silence and connection loss are measured from the recorder's `started_at_ns`, so a restarted recorder reads as starting up for its first 2 min |
+| Host | Recorders | Status unreadable, no frames for 2 min, complete connection loss, blocked storage, or new drops are immediate. Partial shard loss warns after two consecutive 3-min readings, so a dynamic tier's sub-second socket start does not page and resolve. Startup silence and connection loss use `started_at_ns`, so a restarted recorder reads as starting up for its first 2 min |
 | Host | Tape budget | Projected monthly ingress exceeds the recorder budget |
 | Host | Upload | Receipt exceeds 3 h or destination has less than 200 GB free |
 | Host | Backup | Receipt exceeds 8 h |

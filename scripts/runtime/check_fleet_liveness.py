@@ -348,8 +348,9 @@ def evaluate_capture_status(
 ) -> tuple[list[Alert], dict[str, float]]:
     """A recorder's own status file: is data arriving, and is any being lost.
 
-    `counters` holds the drop counts seen on the previous run; the returned
-    copy holds this run's, so a drop pages once per increase, not forever.
+    `counters` holds the drop counts and partial shard loss seen on the
+    previous run. A drop warns once per increase; partial shard loss must
+    persist for two runs, while complete connection loss remains immediate.
     `label` tells one recorder's alerts and counters from another's when the
     host runs several.
 
@@ -423,11 +424,17 @@ def evaluate_capture_status(
     shards = payload.get("shards")
     # A shard's socket connects a moment after the process opens it, so
     # connectivity says nothing about the venue until the grace window is out.
-    if isinstance(shards, list) and not warming_up:
+    # Dynamic tiers also publish their new shard before its socket connects;
+    # require partial loss on two host ticks so that sub-second handoff cannot
+    # create a warning and resolution pair. Total loss remains immediate.
+    if isinstance(shards, list):
         down = [shard for shard in shards if isinstance(shard, dict) and shard.get("connected") is False]
-        if down and len(down) == len(shards):
+        down_key = key("shards_down")
+        previous_down = counters.get(down_key)
+        next_counters[down_key] = float(len(down))
+        if not warming_up and down and len(down) == len(shards):
             alerts.append(Alert(key("capture-shards"), "CRITICAL", f"{who} has no live venue connection"))
-        elif down:
+        elif not warming_up and down and previous_down is not None and previous_down > 0:
             alerts.append(
                 Alert(
                     key("capture-shards"), "WARNING", f"{who} has {len(down)} of {len(shards)} venue connections down"

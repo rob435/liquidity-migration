@@ -441,7 +441,7 @@ def test_recorder_status_pages_on_silence_blocked_storage_and_new_drops(tmp_path
     status.write_text(json.dumps(healthy))
     alerts, counters = liveness.evaluate_capture_status(status, now=now, max_silence_sec=120, counters={})
     assert alerts == []
-    assert counters == {"dropped_frames": 3.0, "disk_dropped_frames": 0.0}
+    assert counters == {"dropped_frames": 3.0, "disk_dropped_frames": 0.0, "shards_down": 0.0}
 
     silent = dict(healthy, last_receive_ns=int((now - 600) * 1e9), disk_blocked=True, dropped_frames=5)
     silent["shards"] = [{"connected": False}, {"connected": True}]
@@ -452,11 +452,15 @@ def test_recorder_status_pages_on_silence_blocked_storage_and_new_drops(tmp_path
     assert "no market frame for 600s" in keys["capture-silent"].message
     assert keys["capture-disk"].severity == "CRITICAL"
     assert "dropped 2 frames" in keys["capture-dropped_frames"].message
-    assert "1 of 2 venue connections down" in keys["capture-shards"].message
+    assert "capture-shards" not in keys
     assert counters["dropped_frames"] == 5.0
-    # The same count again is not a new drop.
+    assert counters["shards_down"] == 1.0
+    # The same count again is not a new drop, but the persistent partial
+    # connection loss now warns.
     alerts, _ = liveness.evaluate_capture_status(status, now=now, max_silence_sec=120, counters=counters)
-    assert "capture-dropped_frames" not in {alert.key for alert in alerts}
+    repeated = {alert.key: alert for alert in alerts}
+    assert "capture-dropped_frames" not in repeated
+    assert "1 of 2 venue connections down" in repeated["capture-shards"].message
 
     status.write_text("not json")
     alerts, _ = liveness.evaluate_capture_status(status, now=now, max_silence_sec=120, counters={})

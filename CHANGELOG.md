@@ -31,6 +31,33 @@ edit STATE.md to match.
     the manual VPS job retains its CI, Rust, release-artifact, and smoke gates.
     This keeps an off-path job from holding the serialized production queue
     after the host operation has finished.
+  - Deploy receipt: run `33898806448` installed `16d52f88` at 17:15:42 UTC.
+    CI passed in 1m51s, Rust in 4m05s, the verified release artifact in 5m31s,
+    and the release-soak job was skipped in 0s. The VPS job finished in 1m04s:
+    demo imported state and published fresh worker and engine heartbeats;
+    mainnet and both recorders were `unchanged-left-running`; rollback target
+    `218905d4`; `real-money armed`; every timer active.
+  - Host verification: the installed handover contains `systemctl stop` and
+    no `disable --now`; both realm workers and engines, both recorders,
+    Telegram controls, trade notifications, and all three watchdog timers are
+    active; every watchdog timer is enabled; `systemctl --failed` is empty.
+    Demo and mainnet liveness plus the independent host scope each return
+    `ok scope=<scope> units-and-heartbeats-healthy`. Mainnet kept its five
+    positions, `may_open=true`, no rolling-loss trip, no strategy errors, and
+    no pending flatten.
+  - Live delivery drill: invocation `232a3630119b4907a9c8145b6512b904`
+    returned `telegram accepted`, created no-change Claude Code session
+    `session_01Jf15281KD9pJvLF32sFJGw`, and returned `dead-man accepted` in
+    2.9 s. A post-release sampler run returned `recorded and pushed 6 samples`;
+    both worker rows are durable locally and report connected, full ticker
+    coverage, and no spool backpressure.
+  - The 17:19:44 scheduled host tick exposed one remaining noisy edge:
+    `WARNING capture-shards:forward-market-binance` reported 2 of 12 sockets
+    down. At 17:19:34.625 the recorder published the newly expanded 12-shard
+    topology; both sockets connected at 17:19:34.857/.863, and the next status
+    was 12/12 with zero queue or disk drops. Partial shard loss now must appear
+    on two consecutive host ticks before warning. Complete connection loss,
+    stale frames, blocked storage, and drops remain immediate.
 
 - **2026-09-04 16:45 UTC — The order path has a measurement again, and the
   recorder stopped dropping frames. Both verified on the host.**
