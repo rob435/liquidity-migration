@@ -6,6 +6,57 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 16:11 UTC — Incident `mainnet-014ec4a90a2fde5f`, third fire:
+  nothing new in the worker, and the deploy-handoff hold turns out to be inert
+  for every key it names.**
+  - The page, mainnet scope on `ip-208-84-103-4`, one `CRITICAL` ref
+    `worker-status:liquidity-migration-signal-worker-mainnet.service`:
+    "`liquidity-migration-signal-worker-mainnet.service reports 'degraded':
+    Bybit WebSocket repair gap open for 618s; ticker coverage incomplete; carry
+    cycle has not completed`". Same id, same 16:00:56 process as the 16:02
+    entry below, 618 s of gap instead of 73 s: the third fire of one flapping
+    fault, and `fc22e3b` already carries the repair. The startup gate is
+    `stream_startup_inputs_healthy`, which excludes ticker coverage, so a
+    booting worker with a dipped coverage count and neither cycle run now
+    publishes `starting`. Nothing in the worker is changed here.
+  - What the flap adds to the diagnosis, from the payload alone. The mainnet
+    timer is `OnUnitActiveSec=3min` and `select_incidents_to_fire` fires once
+    per fault lifetime, rearming on resolution, so the runs at 16:05 and 16:08
+    read `ok` — which means `stream_inputs_healthy`, ticker coverage included,
+    was **true** at those instants. The socket was up and fully subscribed
+    throughout; only the mark-freshness clause of coverage moved.
+    `tickers.<symbol>` pushes a field only when it changes, so one quiet symbol
+    aging past `mark_max_age_ms = 30000` between REST reconciles is enough
+    (`engine/signal-worker/src/bybit_ws.rs:179`). The old gate turned that
+    30-second dip into a page; the new one cannot see it.
+  - Not the cause of this page, fixed because it is wrong as written. The
+    deploy-handoff hold added in `1193043` computed `deploy_maintenance` only
+    under `scope == "host"`, but every key in
+    `_DEPLOY_TRANSITIONAL_ALERT_PREFIXES` except `capture-`, `watchdog:` and
+    `manifest` is produced by the realm scopes alone — host watches only the
+    units the manifest marks `independent`, and `deploy/fleet_manifest.tsv`
+    marks no engine or signal worker so. The hold was therefore inert for
+    `worker-status:`, `worker-spool:`, `may-open:`, `rolling-loss:` and the
+    fleet's own `unit:`/`heartbeat:` keys, and the mainnet watchdog paged for
+    units the host's own deploy was restarting. Every scope now consults the
+    lock (`scripts/runtime/check_fleet_liveness.py:988`); the hold is bounded
+    by the deploy script's own lifetime, since `flock` releases on exit even
+    when the deploy fails, and a lock held past `_MAX_DEPLOY_AGE_SEC` still
+    pages through the host scope's `deploy-lock` check. This page arrived ten
+    minutes after the 16:01:05 release, so the hold would not have suppressed
+    it.
+  - `test_a_realm_scope_holds_the_fleet_through_a_deploy_handoff` fails on the
+    parent commit — the mainnet scope reads the manifest mid-handoff and prints
+    a `CRITICAL manifest` — and passes here. Local: Ruff, mypy and 1422 Python
+    tests green; the 16 failures in `tests/market_tape` and
+    `tests/scripts/test_observability_hygiene.py` need `zstd`, `rclone` or
+    `rsync`, which this container has not got, and fail identically on the
+    parent commit.
+  - Host-side, by hand: nothing. The funded engine and worker ran on `1193043`
+    throughout, untouched. `scripts/ops.sh curve mainnet 40` and
+    `scripts/ops.sh status` confirm the account and the heartbeats across the
+    window.
+
 - **2026-09-04 16:22 UTC — The demo realm was left stopped by a deploy: the
   state takeover refused the appended `probe` id the engine itself accepts.**
   - Run `33894054427`'s `vps` job, deploying `fc22e3b`, printed

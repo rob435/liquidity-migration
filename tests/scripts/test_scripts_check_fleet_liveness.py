@@ -362,6 +362,22 @@ def test_deploy_maintenance_preserves_unobserved_delivery_state() -> None:
     assert routine_state == prior
 
 
+def test_a_realm_scope_holds_the_fleet_through_a_deploy_handoff(tmp_path: Path, monkeypatch, capsys) -> None:
+    # worker-status, may-open and rolling-loss belong to the realm scopes: a
+    # deploy restarting the units it deploys must not page through them.
+    monkeypatch.setattr(liveness, "active_deploy_age", lambda path, *, now, **kwargs: 5.0)
+    monkeypatch.setattr(
+        liveness,
+        "load_fleet_manifest",
+        lambda path=None: (_ for _ in ()).throw(OSError("read during handoff")),
+    )
+    monkeypatch.setenv("LIVENESS_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(sys, "argv", ["check_fleet_liveness.py", "--account-scope", "mainnet"])
+
+    assert liveness.main() == 0
+    assert capsys.readouterr().out == "ok scope=mainnet sanctioned-deploy-in-progress\n"
+
+
 def test_backup_stamp_ages_into_a_warning(tmp_path: Path) -> None:
     stamp = tmp_path / "backup.stamp"
     now = time.time()

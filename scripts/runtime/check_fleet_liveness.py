@@ -985,13 +985,16 @@ def main() -> int:
             return 2
         return run_delivery_drill(scope, deadman_url)
     now = time.time()
-    deploy_maintenance = False
-    if scope == "host":
-        try:
-            deploy_age = active_deploy_age(_DEPLOY_LOCK, now=now)
-        except OSError:
-            deploy_age = None
-        deploy_maintenance = deploy_age is not None and deploy_age <= _MAX_DEPLOY_AGE_SEC
+    # Every scope consults the lock. The transitional keys held below —
+    # worker-status, worker-spool, may-open, rolling-loss, and the fleet's own
+    # unit and heartbeat keys — are produced by the realm scopes alone; host
+    # watches the independent units. A lock held past _MAX_DEPLOY_AGE_SEC still
+    # pages, through the host scope's deploy-lock check.
+    try:
+        deploy_age = active_deploy_age(_DEPLOY_LOCK, now=now)
+    except OSError:
+        deploy_age = None
+    deploy_maintenance = deploy_age is not None and deploy_age <= _MAX_DEPLOY_AGE_SEC
     state_file = args.state_file or (_REPO_ROOT / "data" / ".cache" / f"liveness-{scope}.json")
     counters_file = state_file.with_name(state_file.stem + ".counters.json")
 
