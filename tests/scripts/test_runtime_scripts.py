@@ -125,7 +125,7 @@ def test_deploy_starts_the_funded_realm_only_when_armed() -> None:
     remote = _remote_script()
     deploy_body = remote[remote.index("deploy_mode()") :]
     assert "if mainnet_armed; then" in deploy_body
-    assert "start_realm mainnet" in deploy_body
+    assert "handover_realm mainnet" in deploy_body
     assert "real-money off: funded units stay stopped" in deploy_body
 
 
@@ -231,9 +231,16 @@ def test_a_realm_that_does_not_come_up_rolls_back_to_the_last_finished_deploy() 
     remote = _remote_script()
     deploy_body = remote[remote.index("deploy_mode()") : remote.index("rollback_mode()")]
     assert "seed_generation_record" in deploy_body
-    assert "if ! (start_realm demo); then\n            rollback_after_failure demo" in deploy_body
-    assert "if ! (start_realm mainnet); then\n                rollback_after_failure mainnet" in deploy_body
+    assert "handover_realm demo" in deploy_body
+    assert "handover_realm mainnet" in deploy_body
     assert "record_generation" in deploy_body
+    handover = _function_body(remote, "handover_realm")
+    assert 'stop_realm_units "$realm"' in handover
+    assert 'import_native_strategy_state "$realm"' in handover
+    assert 'start_realm "$realm"' in handover
+    assert 'rollback_after_failure "$realm"' in handover
+    assert handover.index('rollback_after_failure "$realm"') < handover.index("return 1")
+    assert handover.index("return 1") < handover.index('record_realm_fingerprint "$realm"')
     rollback = remote[remote.index("rollback_after_failure()") : remote.index("# Every liquidity-migration unit")]
     # A rolled-back generation that also fails stops the fleet instead of looping.
     assert 'if [ "${AUTO_ROLLBACK:-0}" = 1 ]; then' in rollback
@@ -259,16 +266,15 @@ def test_a_realm_whose_inputs_did_not_change_is_left_running() -> None:
         assert f"if realm_unchanged {realm}; then" in deploy_body
         assert f'echo "{realm}-ok result=unchanged-left-running"' in deploy_body
         # The handover, when it runs, records what it started so the next deploy can compare.
-        handover = deploy_body[deploy_body.index(f"stop_realm_units {realm}") :]
-        assert handover.index(f"record_realm_fingerprint {realm}") > handover.index(f"start_realm {realm}")
+        assert f"handover_realm {realm}" in deploy_body
     # Nothing stops before the release is on disk; both realms stay up through install.
-    assert deploy_body.index("install_release") < deploy_body.index("stop_realm_units demo")
+    assert deploy_body.index("install_release") < deploy_body.index("handover_realm demo")
     # The first gated deploy seeds the record from the commit that started the realm,
     # before anything is rendered, so it compares against what actually runs.
     assert deploy_body.index("seed_realm_fingerprints") < deploy_body.index("install_release")
     seed = _function_body(remote, "seed_realm_fingerprints")
     assert 'realm_fingerprint "$realm" "$deployed"' in seed and "$DEPLOYED_COMMIT_FILE" in seed
-    assert "stop_realm_units demo" not in deploy_body[: deploy_body.index("prepare_demo_inputs")]
+    assert "handover_realm demo" not in deploy_body[: deploy_body.index("prepare_demo_inputs")]
 
 
 def test_ci_tests_the_debug_build_on_the_gate_and_the_release_build_off_it() -> None:
@@ -403,6 +409,80 @@ printf '%s\\n' "$*" >> "$SYSTEMCTL_TRACE"
     return trace.read_text(encoding="utf-8").splitlines()
 
 
+def _trace_stop_realm(realm: str, tmp_path: Path) -> list[str]:
+    bin_dir = tmp_path / f"stop-{realm}" / "bin"
+    bin_dir.mkdir(parents=True)
+    trace = tmp_path / f"stop-{realm}" / "systemctl.trace"
+    systemctl = bin_dir / "systemctl"
+    systemctl.write_text(
+        """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$SYSTEMCTL_TRACE"
+""",
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    harness = "\n".join(
+        [
+            "set -euo pipefail",
+            'source "$LM_REPOSITORY_ROOT/deploy/lib_sleeves.sh"',
+            'fail() { echo "$*" >&2; exit 1; }',
+            _function(deploy, "stop_realm_units"),
+            f'stop_realm_units "{realm}"',
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "SYSTEMCTL_TRACE": str(trace),
+            "LM_REPOSITORY_ROOT": str(ROOT),
+        },
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return trace.read_text(encoding="utf-8").splitlines()
+
+
+def _trace_handover_realm(tmp_path: Path, *, import_status: int, start_status: int) -> tuple[int, list[str]]:
+    trace = tmp_path / f"handover-{import_status}-{start_status}.trace"
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    harness = "\n".join(
+        [
+            "set -uo pipefail",
+            'trace() { printf \'%s\\n\' "$1" >> "$HANDOVER_TRACE"; }',
+            'stop_realm_units() { trace stop; }',
+            'import_native_strategy_state() { trace import; return "$IMPORT_STATUS"; }',
+            'start_realm() { trace start; return "$START_STATUS"; }',
+            'rollback_after_failure() { trace rollback; }',
+            'record_realm_fingerprint() { trace record; }',
+            _function(deploy, "handover_realm"),
+            'handover_realm demo; exit $?',
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "HANDOVER_TRACE": str(trace),
+            "IMPORT_STATUS": str(import_status),
+            "START_STATUS": str(start_status),
+        },
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    return result.returncode, trace.read_text(encoding="utf-8").splitlines()
+
+
 def _units(command: str) -> list[str]:
     return subprocess.run(
         ["bash", "-c", f"source deploy/lib_sleeves.sh; {command}"],
@@ -411,6 +491,32 @@ def _units(command: str) -> list[str]:
         capture_output=True,
         check=True,
     ).stdout.split()
+
+
+def test_a_deploy_handover_stops_units_without_disabling_the_watchdogs(tmp_path: Path) -> None:
+    for realm in ("demo", "mainnet"):
+        calls = _trace_stop_realm(realm, tmp_path)
+        units = _units(f"lm_realm_units {realm}")
+        assert units, realm
+        for unit in units:
+            assert f"stop {unit}" in calls, (realm, unit, calls)
+            assert f"reset-failed {unit}" in calls, (realm, unit, calls)
+        assert all(not call.startswith("disable ") for call in calls), (realm, calls)
+
+
+def test_every_handover_failure_rolls_back_before_recording_a_fingerprint(tmp_path: Path) -> None:
+    assert _trace_handover_realm(tmp_path, import_status=1, start_status=0) == (
+        1,
+        ["stop", "import", "rollback"],
+    )
+    assert _trace_handover_realm(tmp_path, import_status=0, start_status=1) == (
+        1,
+        ["stop", "import", "start", "rollback"],
+    )
+    assert _trace_handover_realm(tmp_path, import_status=0, start_status=0) == (
+        0,
+        ["stop", "import", "start", "record"],
+    )
 
 
 def test_a_realm_start_runs_its_liveness_watchdog_after_every_unit_it_watches(

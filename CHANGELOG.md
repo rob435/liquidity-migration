@@ -6,6 +6,27 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 16:50 UTC — A realm handover is transactional through state
+  takeover, and a deploy never disables its watchdogs.**
+  - The 16:21 incident below exposed two separate faults in
+    `scripts/deploy_vps_live.sh`: `stop_realm_units` used `disable --now`, and
+    only a failed `start_realm` entered `rollback_after_failure`. A state
+    import refusal exited earlier, leaving the realm, its liveness timer, and
+    its boot enablement off.
+  - A changed realm now runs stop, native-state import, and verified start as
+    one handover. Any failure enters the existing exact-generation rollback;
+    its fingerprint is recorded only after the whole handover succeeds.
+    Transient handover uses `systemctl stop`, preserving enablement. The
+    explicit funded stop/disarm path still uses `disable --now`.
+  - `test_a_deploy_handover_stops_units_without_disabling_the_watchdogs`
+    traces every manifest unit in both realms. The handover trace covers
+    import failure, start failure, and success, including rollback and the
+    fingerprint boundary. Both tests fail on `ba68e719`: the old trace contains
+    `disable --now`, and no `handover_realm` exists. They pass with the repair.
+    Full local gate: repository doctor ready, Ruff, ShellCheck and mypy clean,
+    1,451 Python tests pass, Rust format and Clippy clean, and every Rust
+    workspace test passes.
+
 - **2026-09-04 16:45 UTC — The order path has a measurement again, and the
   recorder stopped dropping frames. Both verified on the host.**
   - `2594e6b6` deployed at 16:41 UTC in 317 s with an atomic mainnet
@@ -32,6 +53,7 @@ edit STATE.md to match.
     `{carry: 2, exodus: 0, long: 3, probe: 0}` on demo: a flat sleeve is a
     line at zero instead of a missing series, which is what the dashboard's
     Exodus gap was.
+
 - **2026-09-04 16:21 UTC — Incident `host-bf5dcb6544d0dfdc`: the demo realm's
   own watchdog has been off since 16:17:16, and a hand restart cannot re-arm
   what the deploy disabled.**

@@ -95,10 +95,13 @@ EXPECTED_COMMIT=<40-hex-commit> scripts/ops.sh deploy
    and the rendered config and env files on the host — against
    `/opt/liquidity-migration-engine/<realm>.fingerprint`, and requires both
    long-running units active. Unchanged: `<realm>-ok result=unchanged-left-running`,
-   nothing stops. Changed: `stop_realm_units` $\to$ `import state` $\to$
-   `start_realm` $\to$ fresh heartbeat within 180s, then the fingerprint is recorded.
-   Mainnet's config is rendered first, while it is live.
-5. **Auto-Rollback**: If either realm fails to publish a fresh heartbeat within 180s, the script rolls back to `/opt/liquidity-migration-engine/deployed-commit`.
+   nothing stops. Changed: `stop_realm_units` preserves unit enablement, then
+   `import state` $\to$ `start_realm` $\to$ fresh heartbeat within 180s, then
+   the fingerprint is recorded. Mainnet's config is rendered first, while it
+   is live.
+5. **Auto-Rollback**: If stop, state takeover, start, or heartbeat readiness
+   fails for either realm, the script rolls back to
+   `/opt/liquidity-migration-engine/deployed-commit`.
 
 ### Native State Takeover Sources
 | Sleeve | Source Format | Named Source Roles |

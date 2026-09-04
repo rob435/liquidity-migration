@@ -450,7 +450,7 @@ stop_realm_units() {
     local realm="$1" unit
     while IFS= read -r unit; do
         [ -n "$unit" ] || continue
-        systemctl disable --now "$unit" 2>/dev/null || true
+        systemctl stop "$unit" || fail "cannot stop $unit for the $realm handover"
         systemctl reset-failed "$unit" 2>/dev/null || true
     done < <(lm_realm_units "$realm")
 }
@@ -1112,6 +1112,19 @@ start_realm() {
     done < <(lm_immediate_timer_jobs "$realm")
 }
 
+handover_realm() {
+    local realm="$1"
+    if ! (
+        stop_realm_units "$realm" \
+            && import_native_strategy_state "$realm" \
+            && start_realm "$realm"
+    ); then
+        rollback_after_failure "$realm"
+        return 1
+    fi
+    record_realm_fingerprint "$realm"
+}
+
 # ------------------------------------------------------------------ verify
 
 verify_mode() {
@@ -1227,12 +1240,7 @@ deploy_mode() {
     if realm_unchanged demo; then
         echo "demo-ok result=unchanged-left-running"
     else
-        stop_realm_units demo
-        import_native_strategy_state demo
-        if ! (start_realm demo); then
-            rollback_after_failure demo
-        fi
-        record_realm_fingerprint demo
+        handover_realm demo
     fi
     if mainnet_armed; then
         # provision_mainnet renders the funded config with the binary
@@ -1246,12 +1254,7 @@ deploy_mode() {
             echo "mainnet-ok result=unchanged-left-running"
         else
             echo "atomic mainnet handover: swapping binaries and state"
-            stop_realm_units mainnet
-            import_native_strategy_state mainnet
-            if ! (start_realm mainnet); then
-                rollback_after_failure mainnet
-            fi
-            record_realm_fingerprint mainnet
+            handover_realm mainnet
         fi
     else
         echo "real-money off: funded units stay stopped"
