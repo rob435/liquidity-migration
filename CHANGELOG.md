@@ -6,6 +6,49 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-04 18:17 UTC — Fleet observability is live; on-call delivery works,
+  but GitHub billing blocks autonomous host action.**
+  - The host writes six local JSONL samples before each remote push. Three
+    consecutive verification rows say `recorded and pushed 6 samples` to the
+    existing Grafana Cloud GB South zone 55 stack. The Johor host stays on that
+    stack: this once-per-minute payload has no latency-sensitive control role,
+    while changing regions would replace credentials, history, and stack
+    identity for no operational gain.
+  - Dashboard UID `liqmig-fleet` is reduced from 27 panels to 13: four current
+    status tiles, equity, open exposure, execution activity, p99 order-path
+    latency, freshness, pipeline pressure, and recorder faults. It is saved
+    against `grafanacloud-proudtortoise1017-prom`; live engine, worker, recorder,
+    account, and latency data populate. The demo and mainnet account series use
+    independent axes while retaining their exact USDT values. Explore resolves
+    the `lm_` family and returns both realms for `lm_engine_account_age_ms`.
+  - Commit `8352e564` carries the operator redesign, `cb416d46` carries the
+    funded-account scale repair, and `9ca9f795` removes plot-stealing tables in
+    favor of compact `D`, `M`, `BY`, and `BN` labels. The renderer matches the
+    generated JSON, all 26 dashboard tests pass, and the push gate passes Ruff,
+    ShellCheck, mypy, 1,452 Python tests, Rust formatting and Clippy, and every
+    Rust workspace test.
+  - Run `33900447763` passed CI, Rust, and the verified artifact for
+    `65ee75a7`, then GitHub refused to start the VPS job because recent account
+    payments failed. The VPS recovery recipe installed the same exact artifact
+    and commit at 17:34:41 UTC; rollback target is `16d52f88`. The funded engine
+    was not restarted and remains on process commit `218905d4` with five
+    positions, `may_open=true`, no loss trip, no strategy errors, and no pending
+    flatten.
+  - Fresh demo, mainnet, and host checks each return
+    `ok scope=<scope> units-and-heartbeats-healthy`; all four one-shot results
+    are `success` with exit 0, every always-on unit is active, and no systemd
+    unit is failed. Both workers are transport-healthy and fully covered during
+    bounded CARRY cold fill. Bybit is 16/16 connected and Binance 10/10, with
+    zero reconnects, frame drops, disk drops, or blocked disk.
+  - The live delivery drill already proved all three routes: Telegram accepted,
+    the no-change Claude Code routine accepted, and the independent dead-man
+    accepted in 2.9 s. Telegram remains the human pager, trade feed, and
+    constrained control surface. The routine intentionally has no host SSH or
+    venue credentials; its only diagnostic/deploy transport is
+    `vps-deploy.yml`. GitHub's billing refusal therefore prevents it from
+    completing autonomous host diagnosis or repair until the account is fixed,
+    even though detection and all three delivery routes work.
+
 - **2026-09-04 16:50 UTC — A realm handover is transactional through state
   takeover, and a deploy never disables its watchdogs.**
   - The 16:21 incident below exposed two separate faults in
