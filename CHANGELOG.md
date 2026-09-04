@@ -299,7 +299,21 @@ edit STATE.md to match.
     green on this commit — doctor `overall: ready`, Ruff and mypy clean, 1447
     pytest passed (`zstd` and `rsync` installed locally so the 16 tests
     `fc22e3b` had to skip ran), rustfmt and clippy clean, every cargo suite
-    passed. Rollout receipt below.
+    passed.
+  - Receipt. `b9fbcd7` reached the host inside `2594e6b`, read as
+    `deployed 2594e6b` at 16:44:21 UTC by diagnose run `33896781856`, and the
+    mainnet realm printed `ok scope=mainnet units-and-heartbeats-healthy` in
+    the same read: incident `mainnet-014ec4a90a2fde5f` is resolved on the host.
+    The sanctioned deploy this session dispatched, run `33896925320`, then held
+    the host 16:51:52-16:52:05 UTC and printed
+    `deploy-ok commit=1861e808`, `rollback-target 2594e6b`, `real-money armed`,
+    `mainnet-ok result=unchanged-left-running` — the funded engine's
+    fingerprints did not move, so it was left running — with both signal
+    workers at 4 s and 0 s heartbeats, the demo engine at 1 s and the funded
+    engine at `-1s` — the file's mtime a second ahead of the reader's
+    clock, which is a fresh heartbeat, not a stale one — the Bybit
+    recorder 11 s, the Binance recorder 1 s, every timer active including the
+    two demo timers the out-of-band handover had left disabled, and 31 GB free.
 
 - **2026-09-04 15:57 UTC — Incident `mainnet-014ec4a90a2fde5f`: the funded
   worker's repair gap could not close after the first pass, because an
