@@ -14,19 +14,18 @@ edit STATE.md to match.
     stack: this once-per-minute payload has no latency-sensitive control role,
     while changing regions would replace credentials, history, and stack
     identity for no operational gain.
-  - Dashboard UID `liqmig-fleet` is reduced from 27 panels to 13: four current
-    status tiles, equity, open exposure, execution activity, p99 order-path
-    latency, freshness, pipeline pressure, and recorder faults. It is saved
-    against `grafanacloud-proudtortoise1017-prom`; live engine, worker, recorder,
-    account, and latency data populate. The demo and mainnet account series use
-    independent axes while retaining their exact USDT values. Explore resolves
-    the `lm_` family and returns both realms for `lm_engine_account_age_ms`.
-  - Commit `8352e564` carries the operator redesign, `cb416d46` carries the
-    funded-account scale repair, `9ca9f795` removes plot-stealing tables, and
-    `99e12ab2` spells out the execution legend. The renderer matches the
-    generated JSON, all 27 dashboard tests pass, and the push gate passes Ruff,
-    ShellCheck, mypy, 1,454 Python tests, Rust formatting and Clippy, and every
-    Rust workspace test.
+  - Dashboard UID `liqmig-fleet` is reduced from 27 panels to 15: four current
+    status tiles; four independently scaled equity and open-exposure cards;
+    execution activity; p99 order-path latency; and compact freshness, capacity,
+    and fault state. It is saved against
+    `grafanacloud-proudtortoise1017-prom`; live engine, worker, recorder,
+    account, and latency data populate. Explore resolves the `lm_` family and
+    returns both realms for `lm_engine_account_age_ms`.
+  - Commit `bae45c83` carries final dashboard version 9 after the operator,
+    funded-scale, legend, and single-purpose-panel passes. The renderer matches
+    the generated JSON, all 27 dashboard tests pass, and the push gate passes
+    Ruff, ShellCheck, mypy, 1,454 Python tests, Rust formatting and Clippy, and
+    every Rust workspace test.
   - Run `33900447763` passed CI, Rust, and the verified artifact for
     `65ee75a7`, then GitHub refused to start the VPS job because recent account
     payments failed. The VPS recovery recipe installed the same exact artifact
