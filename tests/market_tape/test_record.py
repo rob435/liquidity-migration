@@ -810,6 +810,74 @@ def test_frames_are_metered_by_tier_and_feed_class(tmp_path: Path) -> None:
     assert status["by_feed_24h"] == {"deep:book:50": 800, "deep:trades": 120, "wide:control": 40}
 
 
+def test_a_frame_the_disk_gate_drops_still_counts_against_the_inbound_allowance(tmp_path: Path) -> None:
+    """`budget.monthly_gb` is an inbound allowance and `budget.shed` gives up
+    subscriptions to stay under it, so the meter must count what the venue
+    sent. Metering behind `disk_blocked` measures what the disk kept instead,
+    which collapses the projection precisely while a recorder is discarding
+    the most and can restore shed feeds — more inbound — during a storage
+    incident."""
+
+    recorder = build(tmp_path, Tier("wide", (Feed("ticker"),), Universe("listed", quote="USDT")))
+    frame = json.dumps(
+        {
+            "topic": "tickers.AGIUSDT",
+            "type": "delta",
+            "ts": 1_800_000_000_000,
+            "data": {"symbol": "AGIUSDT", "fundingRate": "-0.0015"},
+        }
+    )
+    # What a crossing leaves behind: the gate is shut and the venue keeps sending.
+    recorder.disk_blocked = True
+    recorder.frames.put(("frame", frame, BASE_NS, "wide"))
+    recorder.frames.put(None)
+
+    recorder._write_loop()
+
+    assert recorder.written_rows == 0
+    assert recorder.disk_dropped_frames == 1
+    assert recorder.meter.last_day("all", BASE_NS + 1) == len(frame)
+    assert recorder.meter.last_day("tier:wide", BASE_NS + 1) == len(frame)
+    # The per-feed split needs the normalized rows, which the gate never produced.
+    assert recorder.meter.keys("feed:") == []
+
+
+def test_a_blocked_recorder_projects_the_bytes_it_discards_not_the_bytes_it_keeps(tmp_path: Path) -> None:
+    """The number the budget acts on, end to end: one hour of frames the disk
+    refused must project the same allowance as one hour it wrote."""
+
+    settings = BudgetSettings(monthly_gb=400.0)
+    recorder = build(
+        tmp_path, Tier("wide", (Feed("ticker"),), Universe("listed", quote="USDT")), budget=settings
+    )
+    frame = json.dumps(
+        {
+            "topic": "tickers.AGIUSDT",
+            "type": "delta",
+            "ts": 1_800_000_000_000,
+            "data": {"symbol": "AGIUSDT", "fundingRate": "-0.0015"},
+        }
+    )
+    for at_ns in (BASE_NS, BASE_NS + HOUR_NS):
+        recorder.frames.put(("frame", frame, at_ns, "wide"))
+    recorder.frames.put(None)
+    recorder.disk_blocked = True
+
+    recorder._write_loop()
+
+    recorder.budget.step(BASE_NS + HOUR_NS)
+    blocked = recorder.budget.projected_gb
+    assert blocked is not None
+    # The same two frames, metered by the unblocked path over the same window.
+    reference = ByteMeter(recorder.meter.started_ns)
+    reference.add("all", len(frame), BASE_NS)
+    reference.add("all", len(frame), BASE_NS + HOUR_NS)
+    assert blocked == pytest.approx(
+        BudgetController(settings, reference).projection_gb(BASE_NS + HOUR_NS)
+    )
+    assert recorder.disk_dropped_frames == 2
+
+
 def _metered_hour(meter: ByteMeter, at_ns: int, wide_book: int, movers_book: int, rest: int) -> None:
     meter.add("all", wide_book + movers_book + rest, at_ns)
     meter.add("feed:wide:book:1", wide_book, at_ns)

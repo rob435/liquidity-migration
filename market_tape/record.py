@@ -1071,9 +1071,20 @@ class Recorder:
         return "other"
 
     def _meter(self, tier: str, rows: list[dict[str, Any]], count: int, now_ns: int) -> None:
+        self._meter_inbound(tier, count, now_ns)
+        self.meter.add(f"feed:{tier}:{self.feed_class(rows)}", count, now_ns)
+
+    def _meter_inbound(self, tier: str, count: int, now_ns: int) -> None:
+        """The allowance a frame spent on the wire, which the disk gate cannot refund.
+
+        `budget.monthly_gb` is an inbound allowance and `budget.shed` gives up
+        subscriptions to stay under it, so what the venue already sent counts
+        whether or not the disk took it. The per-feed split is not here: it
+        needs the normalized rows.
+        """
+
         self.meter.add("all", count, now_ns)
         self.meter.add(f"tier:{tier}", count, now_ns)
-        self.meter.add(f"feed:{tier}:{self.feed_class(rows)}", count, now_ns)
 
     def _write_loop(self) -> None:
         while True:
@@ -1086,6 +1097,13 @@ class Recorder:
                 return
             kind, payload, received_ns, tier = item
             if self.disk_blocked:
+                if kind == "frame":
+                    # Metering behind this gate makes the budget measure what
+                    # the disk kept, not what the venue sent, so a blocked
+                    # recorder reports itself under an allowance it is still
+                    # spending in full. Side-lane rows are not wire bytes and
+                    # stay out of it.
+                    self._meter_inbound(tier, len(payload), received_ns)
                 self.disk_dropped_frames += 1
                 continue
             try:

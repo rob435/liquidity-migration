@@ -340,6 +340,193 @@ edit STATE.md to match.
     `EXPECTED_COMMIT=7fe4fe0c1e115f8889eb73dc818726de82421d82 scripts/ops.sh deploy` needs no runner and
     installs all seven fixes.
 
+- **2026-09-05 03:39 UTC — The page between the 03:33 and 03:42 entries, off
+  the Binance ref, and it finds an **eighth defect, on the host and untouched
+  by the seven before it**: the byte meter that
+  drives `budget.monthly_gb` is fed behind the disk gate, so a blocked
+  recorder measures what the disk kept and reports itself comfortably under an
+  inbound allowance it is still spending in full. The payload proves it from
+  the journal alone — `projected_gb` falls by ~0.4 in every blocked status
+  interval and ticks *up* in exactly the three intervals where the unit wrote.
+  Fixed in this session. Two other firsts: the incident's first `RESOLVED`
+  line, which is aliasing and not recovery; and the deployed-code cost of the
+  sixth defect measured live, 101.2 s of a gated writer after 414 files were
+  unlinked.**
+  - Incident `host-16171e3c5e186136`, scope `host`, host `ip-208-84-103-4`,
+    `new_critical_refs=capture-disk:forward-market-binance`. Exact alert text:
+    `CRITICAL recorder forward-market-binance storage is blocked; frames are
+    counted but not written`, level-triggered on `disk_blocked is True`
+    (`scripts/runtime/check_fleet_liveness.py:431`, raised at `:433`). One
+    unit named, a `market_tape` recorder, research tape outside the order
+    path; pid 2263691 unchanged, host still `65ee75a7`. **The funded engine is
+    not implicated**, and the 25 GiB floor is the reservation held for
+    mainnet's WAL, which `writable()` blocks the recorder *above*
+    (`market_tape/storage.py:426-433`). Journal window 03:24:35.289 →
+    03:39:35.829, 900.54 s.
+  - **The first `RESOLVED` of the incident, and it means nothing about Bybit.**
+    The page carries `RESOLVED capture-disk` beside the Binance CRITICAL, so
+    the Bybit recorder's `status.json` read `disk_blocked=false` at that
+    watchdog run and only Binance's journal is attached — `_incident_units`
+    picks a unit per CRITICAL key (`:783-787`). Both configs set
+    `min_free_disk_gb = 25` (`deploy/capture/bybit-linear.toml:28`,
+    `deploy/capture/binance-usdm.toml:32`), so the two recorders cannot
+    durably disagree about the floor. What differs is sampling: `disk_blocked`
+    toggles on a 30 s `status_interval_seconds` and the host watchdog runs
+    every 3 min (`deploy/systemd/liquidity-migration-host-liveness.timer`), so
+    whether a recorder reads CRITICAL or RESOLVED on a given run is tick phase.
+    That is also the whole story of the id turnover: `select_incidents_to_fire`
+    keeps state only for keys currently critical (`:726`), so a key that
+    aliases to resolved is dropped and re-fires as "new" on the next sample
+    that catches it blocked. **A `RESOLVED` line in these payloads is not
+    evidence a recorder recovered.** The drop counters are; they are absent
+    here only because their Telegram cooldown is `--cooldown-min 60`
+    (`deploy/systemd/liquidity-migration-host-liveness.service:41`,
+    `:708-709`) and they fired at 03:21.
+  - **The duty cycle, measured on one unit over 15 minutes.** Frames received
+    are counted before the gate (`_on_frame`, `market_tape/record.py:791-793`)
+    and every one either becomes rows or a disk drop, which the payload
+    reconciles to ±101 in flight at every line.
+
+    | | 03:24:35.289 | 03:39:35.829 | Δ |
+    | :--- | ---: | ---: | ---: |
+    | `frames` | 27 030 158 | 28 147 175 | **1 117 017** |
+    | `rows` | 20 984 245 | 21 105 451 | **121 206** |
+    | `disk_dropped` | 6 045 813 | 7 041 623 | **995 810** |
+
+    **10.85% of what the venue sent reached the tape**: 8.22 frames discarded
+    for every row kept, 1 105.8 frames/s on the floor, against 1 240.4
+    frames/s inbound.
+  - **Four blocks, and the writer gets exactly one status interval per
+    unblock.** Each gate opens on a `_maintenance` tick (`:1190`, `:1199`),
+    the unit writes for one 30 s interval, and it re-crosses.
+
+    | Block | Crossed | Gate opens | Duration | Frames discarded |
+    | ---: | :--- | :--- | ---: | ---: |
+    | 1 | open at the first line | 03:26:05.340 | ≥90.05 s | ≥118 793 |
+    | 2 | 03:26:35.354 | 03:30:05.481 | 210.13 s | 281 882 |
+    | 3 | 03:30:35.496 | 03:36:35.743 | **360.25 s** | **429 111** |
+    | 4 | 03:37:05.753 | still shut at the last line | ≥150.08 s | ≥166 015 |
+
+    The three writing intervals are +49 500, +35 999 and +35 665 rows, one
+    30.0 s interval each. That is `d275885a` priced a second way, on a single
+    unit: a pass leaves the writer one status interval of room, because
+    `prune` stops on the number `writable()` unblocks on
+    (`market_tape/storage.py:404`, `:433` at `65ee75a7`). Block 3 is 0.05 s
+    longer than the 03:00 entry's Binance worst and carries 43 466 more
+    frames; Bybit's 390.3 s there is still the incident's maximum.
+  - **The pruner's deficit grows while its own tape shrinks.** Passes at
+    03:24:49.320, 03:29:51.810 and 03:34:54.533 — 302.49 s and 302.72 s apart,
+    the bare `RETENTION_INTERVAL_SECONDS` clock (`market_tape/record.py:99`)
+    with nothing woken by a crossing, so `1d8fad9a` is still undeployed.
+
+    | Pass | Files | Rows Binance wrote since the previous pass | Gate opens | Delay |
+    | :--- | ---: | ---: | :--- | ---: |
+    | 03:24:49.320 | 37 | — | 03:26:05.340 | 76.02 s |
+    | 03:29:51.810 | 68 | 49 517 | 03:30:05.481 | **13.67 s** |
+    | 03:34:54.533 | **414** | 36 014 | 03:36:35.743 | **101.21 s** |
+
+    Between the 68-file pass and the 414-file pass Binance wrote **27% fewer
+    rows** and its pruner had to unlink **6.1× more files** to get back to the
+    floor. Binance's own tape is not what took that room. That leaves Bybit's
+    tape — writing, per the `RESOLVED` line — or a non-tape writer, and `7fe4fe0`
+    now names one: the uploader's leaked staging archives, which
+    `Retention.prune` can neither see nor delete because it walks
+    `<tape root>/**/*.zst`. This is independent evidence for the same reading —
+    a pruner's deficit growing while its own tape shrinks is what a foreign
+    writer on the filesystem looks like from inside a recorder. Pass size and
+    recovery stay uncorrelated for a fifth independent measurement: the
+    68-file pass did best and the 414-file pass worst.
+  - **The sixth defect's cost, and the 03:34:54 pass closed out.** The 03:42
+    entry bounds that pass at "no row for at least 71.2 s"; its payload ends
+    inside the block. This one carries the other end: the gate opened at
+    03:36:35.743, so the pass bought **nothing for 101.21 s**. It unlinked its
+    414 files 259.0 s into block 3, and the three ticks after it —
+    03:35:05.679, 03:35:35.692, 03:36:05.719 — all still read
+    `disk_blocked=True`, with the pruner thread asleep and no further pass
+    logged through the last line (281.3 s and counting, next due ≈03:39:57).
+    That is the sixth defect priced on the deployed host: on `1702d14d`
+    `_maintenance` arms `prune_now` on every blocked tick (`:1201`), so those
+    three ticks are three walks instead of an idle thread, and block 3's
+    259.0 s from crossing to the unit's next scheduled pass becomes one
+    status interval.
+  - **The eighth defect, and like the uploader's it is on the host.**
+    `budget.monthly_gb` is documented as "this recorder's inbound allowance"
+    (`market_tape/config.py:98`) and `budget.shed` gives up subscriptions to
+    cut inbound bandwidth. But `_write_loop` counts a blocked frame and
+    `continue`s **before** it meters (`market_tape/record.py:1087-1089`, meter
+    at `:1093`), so the byte meter behind `projected_gb`
+    (`BudgetController.projection_gb`, `:512`) is fed only by frames the disk
+    accepted. A blocked recorder therefore reports itself under an allowance
+    it is spending in full, and `restore_below` (0.8, `:227`) can restore shed
+    feeds — *more* inbound — during a storage incident. The ordering dates to
+    the file's introduction; none of the seven merged fixes touches `_write_loop`,
+    so it is in `65ee75a7` and in every commit since.
+  - **The journal proves it without SSH.** The meter runs a 24 h window
+    (`ByteMeter.last_day`, `:144-149`), so a post-gate meter must bleed slowly
+    as blocked seconds displace written ones, and must recover only where rows
+    were written. That is exactly the trace: `projected_gb` steps **−0.4 to
+    −0.5 in every blocked status interval** and **up in precisely the three
+    intervals that wrote rows** — 415.5→416.0 (+49 500 rows), 413.0→413.3
+    (+35 999), 408.3→408.5 (+35 665), largest write to largest uptick. Over
+    the window it falls 416.8 → 406.5 while inbound frames run at a flat
+    1 240.4/s. A meter fed on the wire would be flat here.
+  - **The fix.** `_meter_inbound` counts `all` and `tier:` for a frame the
+    disk gate discards; the per-feed split stays behind the gate because it
+    needs the normalized rows, and side-lane rows are not wire bytes
+    (`market_tape/record.py`). Cost is two dict adds per dropped frame, no
+    `normalize`. The per-feed under-count while blocked makes
+    `projection_gb`'s subtraction of shed pairs too small, so the projection
+    errs high while feeds are shed — away from restoring them mid-incident.
+    Tests:
+    `tests/market_tape/test_record.py::test_a_frame_the_disk_gate_drops_still_counts_against_the_inbound_allowance`
+    drives `_write_loop` with the gate shut and asserts the frame's bytes land
+    in `all` and `tier:wide` with no `feed:` key, and
+    `::test_a_blocked_recorder_projects_the_bytes_it_discards_not_the_bytes_it_keeps`
+    asserts the end number — a blocked hour projects the same GB/month as the
+    unblocked path over the same window. Both fail on the unfixed tree
+    (`0.0` against `7.38e-06` GB/month) and pass with it. Full
+    `scripts/dev.sh check` green in this container with `zstd`, `rsync` and
+    `shellcheck` installed: **1469 passed**, ruff clean, mypy clean over 99
+    source files, `cargo` fmt/clippy and every engine suite ok, exit 0.
+  - **Correction to the 03:21 entry.** It priced the margin off "`projected_gb`
+    … is inbound wire bytes"; it is not, and this is the defect above. The
+    number is post-gate raw payload bytes, which for pricing how fast the tape
+    refills the disk is the better quantity and an upper bound, since what
+    lands is compressed. So that entry's ≤19.8 MB per 30 s and **`d275885a` ≥
+    34 minutes between crossings instead of 30 seconds** stand as a lower
+    bound on the improvement. What does *not* stand is reading any
+    `projected_gb` recorded during this incident as a venue rate: every such
+    figure in STATE.md and the entries below understates true inbound by the
+    share of the trailing day spent blocked.
+  - Loss, cumulative and never reset, on the one unit this page names.
+
+    | Unit | First line | Last line | Added since the 03:21 entry | Rows kept |
+    | :--- | ---: | ---: | ---: | ---: |
+    | Binance `forward-capture-binance` | 6 045 813 (03:24:35) | 7 041 623 (03:39:35) | 1 214 584 | 121 206 |
+
+    1 214 584 frames over the 1 080.29 s since the 03:21 entry's last Binance
+    line is **1 124.3 frames/s** on that unit alone. Bybit has no journal in
+    this payload, so the pair total is not this entry's to give; the 03:51
+    entry carries it.
+  - **Deploy refused a twenty-second time, same signature.** Recorded below.
+  - **The one action that ends this needs no runner**, from a workstation
+    holding the SSH key:
+
+    ```sh
+    EXPECTED_COMMIT=<this entry's commit> scripts/ops.sh deploy
+    scripts/ops.sh status
+    scripts/ops.sh curve mainnet 240
+    ```
+
+    This session's commit carries all eight recorder fixes. **Do not deploy
+    `06e17d4a`** (uncredited retry, deletes the tape roots in this host's
+    state) and **do not deploy `3c1ebd22` on its own** (the credited burst
+    ends with the gate shut and the block still runs 300 s). Either way the
+    deploy **hands over both realms and restarts the funded engine**, because
+    the fingerprint hashes the whole `engine` tree and the chain already
+    carries `697341e4` and `10ed1bd2`. That is the owner's call, which is why
+    the recipe is written for a human and not dispatched from here.
+
 - **2026-09-05 03:33 UTC — The eleventh page from the same free-space floor,
   and the first that is not episodic. No code change here: the sixth defect
   was found and fixed concurrently from the 03:18 payload (`1702d14d`, entry
