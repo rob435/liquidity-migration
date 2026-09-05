@@ -219,23 +219,57 @@ def build_archive(
     output = staging / f"{candidate.name}.tar"
     temporary = staging / f".{candidate.name}.tar.tmp"
     manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n"
-    with tarfile.open(temporary, "w", format=tarfile.PAX_FORMAT) as archive:
-        info = tarfile.TarInfo("MANIFEST.json")
-        info.size = len(manifest_bytes)
-        info.mtime = int(time.time())
-        info.mode = 0o644
-        archive.addfile(info, fileobj=_Bytes(manifest_bytes))
-        for path, arcname in members:
-            info = archive.gettarinfo(str(path), arcname=arcname)
-            info.uid = info.gid = 0
-            info.uname = info.gname = ""
+    try:
+        with tarfile.open(temporary, "w", format=tarfile.PAX_FORMAT) as archive:
+            info = tarfile.TarInfo("MANIFEST.json")
+            info.size = len(manifest_bytes)
+            info.mtime = int(time.time())
             info.mode = 0o644
-            with path.open("rb") as handle:
-                archive.addfile(info, fileobj=handle)
-    with temporary.open("rb") as handle:
-        os.fsync(handle.fileno())
+            archive.addfile(info, fileobj=_Bytes(manifest_bytes))
+            for path, arcname in members:
+                info = archive.gettarinfo(str(path), arcname=arcname)
+                info.uid = info.gid = 0
+                info.uname = info.gname = ""
+                info.mode = 0o644
+                with path.open("rb") as handle:
+                    archive.addfile(info, fileobj=handle)
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+    except BaseException:
+        # Staging is on the filesystem the recorders' `min_free_disk_gb` floor
+        # guards and outside both tape roots, so `Retention.prune` — which
+        # walks `<tape root>/**/*.zst` — can neither see a partial archive nor
+        # delete it. Left behind, it is disk the recorders pay for forever.
+        temporary.unlink(missing_ok=True)
+        raise
     os.replace(temporary, output)
     return output, manifest
+
+
+def sweep_staging(staging: Path) -> int:
+    """Delete archives an earlier run left behind; return the bytes reclaimed.
+
+    Staging holds one archive at a time and nothing reads it across runs, so
+    anything here when a run starts is the remains of a run that was killed
+    before its `finally` (`TimeoutStartSec`, `MemoryMax`, reboot). The caller
+    holds the exclusive upload lock, so no live run owns these bytes.
+    """
+
+    if not staging.is_dir():
+        return 0
+    reclaimed = 0
+    for path in sorted(staging.iterdir()):
+        if not path.is_file() or not (path.name.endswith(".tar") or path.name.endswith(".tar.tmp")):
+            continue
+        try:
+            size = path.stat().st_size
+            path.unlink()
+        except OSError as exc:
+            print(f"market tape: could not remove stale staging archive {path.name}: {exc}", file=sys.stderr)
+            continue
+        reclaimed += size
+        print(f"market tape: removed stale staging archive {path.name} bytes={size}")
+    return reclaimed
 
 
 class _Bytes:
@@ -441,6 +475,7 @@ def main(argv: list[str] | None = None) -> int:
         except OSError:
             print("market tape: another run owns the upload lock")
             return 0
+        sweep_staging(args.state_dir / "staging")
         if not shutil.which(args.rclone) and not os.access(args.rclone, os.X_OK):
             print(f"market tape: rclone is not executable: {args.rclone}", file=sys.stderr)
             return 2

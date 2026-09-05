@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -383,3 +384,53 @@ def test_the_stamp_sums_the_last_thirty_days_of_uploads() -> None:
     since = datetime(2026, 8, 3, tzinfo=timezone.utc).timestamp()
     assert pack.bytes_uploaded_since(ledger, since) == 105
     assert pack.bytes_uploaded_since({}, since) == 0
+
+
+def test_a_failed_archive_build_leaves_no_partial_archive_in_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial `.tar.tmp` is disk no retention pass can see: staging is outside
+    both tape roots, on the filesystem the recorders' free-space floor guards."""
+
+    root = tmp_path / "tape"
+    _segment(root, "2026-09-02", "10", "BTCUSDT", 0)
+    staging = tmp_path / "state" / "staging"
+    candidate = pack.Candidate("2026-09-02T10Z", "2026-09-02", "10", (root / "2026-09-02" / "10",))
+    added = 0
+    real_addfile = tarfile.TarFile.addfile
+
+    def full_disk(self, tarinfo, fileobj=None):  # noqa: ANN001, ANN202 - test double
+        nonlocal added
+        added += 1
+        if added > 1:  # the manifest lands, then the disk fills
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_addfile(self, tarinfo, fileobj)
+
+    monkeypatch.setattr(tarfile.TarFile, "addfile", full_disk)
+
+    with pytest.raises(OSError):
+        pack.build_archive(candidate, root, staging, {})
+
+    assert list(staging.iterdir()) == []
+
+
+def test_a_run_reclaims_the_staging_a_killed_run_left_behind(tmp_path: Path) -> None:
+    _segment(tmp_path / "tape", "2026-09-02", "10", "BTCUSDT", 0)
+    staging = tmp_path / "state" / "staging"
+    staging.mkdir(parents=True)
+    orphans = (staging / "2026-09-02T09Z.tar", staging / ".2026-09-02T08Z.tar.tmp")
+    for orphan in orphans:
+        orphan.write_bytes(b"x" * 1024)
+    keep = staging / "notes.txt"
+    keep.write_bytes(b"not an archive")
+
+    result = _run(tmp_path, *_single_tape(tmp_path), now="2026-09-02T11:20:00")
+
+    assert result.returncode == 0, result.stderr
+    assert "removed stale staging archive 2026-09-02T09Z.tar bytes=1024" in result.stdout
+    assert "removed stale staging archive .2026-09-02T08Z.tar.tmp bytes=1024" in result.stdout
+    for orphan in orphans:
+        assert not orphan.exists()
+    assert keep.exists()
+    # The run still ships its own hour.
+    assert [row["name"] for row in _ledger(tmp_path)] == ["2026-09-02T10Z"]
