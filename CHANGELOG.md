@@ -7,6 +7,23 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 05:11 UTC — The twenty-sixth refused deploy, identical
+  signature.** Run `33946543333`, `deploy` on `main@37971ca`, created
+  05:11:21 UTC and dead at 05:11:27. `rust` 05:11:22 → 05:11:25, `Deploy
+  artifact` 05:11:22 → 05:11:25, `ci` 05:11:22 → 05:11:26 — 3, 3 and 4
+  seconds, none of them long enough to check out the repository. `diagnose`,
+  `disarm`, the release-test job and `vps` all skipped; `vps` was never
+  scheduled against a runner. All three failed jobs' log downloads return the
+  same error verbatim: `failed to download logs: HTTP 404`. No job started and
+  nothing reached the host. **Twenty-six consecutive refusals since 19:17 UTC
+  on 2026-09-04**, every one with the account-payment signature. Deployed
+  commit stays `65ee75a7`; the eight recorder fixes and the uploader's leak fix
+  remain merged and undeployed, and the recorders have now thrown away
+  37 973 012 frames. The GitHub path is not going to open on its own — the SSH
+  path needs no runner:
+  `EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db scripts/ops.sh
+  deploy`.
+
 - **2026-09-05 05:05 UTC — The sixteenth page, and the mechanism behind the
   common pool. No code change and no ninth defect: every mechanism here is the
   deployed behaviour of the eight merged, undeployed recorder fixes plus the
