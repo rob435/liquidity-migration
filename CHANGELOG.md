@@ -9,9 +9,10 @@ edit STATE.md to match.
 - **2026-09-05 00:36 UTC — The third page of the night from the same free-space
   floor, and the first that contains a long clean stretch: both recorders wrote
   for 12 and 16 minutes with no disk drops at all, then crossed together at
-  00:35:59 and 00:36:00. No code changed and nothing new is broken — the fix
-  that ends this is `d275885a` on `main` and the deploy was refused a seventh
-  time. Tape discarded since 22:54 is now 3 899 048 frames.**
+  00:35:59 and 00:36:00. No code changed and nothing new is broken — what ends
+  this is `1d8fad9a` and `d275885a` on `main`, and the deploy was refused a
+  seventh and an eighth time. Tape discarded since 22:54 is now 3 899 048
+  frames.**
   - Incident `host-ecbac293ecc90d5e`, scope `host`, host `ip-208-84-103-4`,
     new critical refs `capture-disk` and `capture-disk:forward-market-binance`.
     Exact alert text: `CRITICAL recorder storage is blocked; frames are counted
