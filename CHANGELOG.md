@@ -6,6 +6,7 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+
 - **2026-09-05 03:51 UTC — The twelfth page from the same free-space floor. No
   code change here and no seventh defect: every mechanism in this payload is
   the deployed behaviour of the six merged, undeployed recorder fixes. One
@@ -152,6 +153,173 @@ edit STATE.md to match.
     full suite and `scripts/dev.sh check` were not run: this routine's
     container ships no `.venv`, no `zstd` and no `rsync`, and nothing in this
     entry touches code.
+
+- **2026-09-05 03:42 UTC — The page between the 03:33 and 03:51 entries either
+  side of it, and the first whose cause is outside the recorders. Both
+  neighbours say "no seventh defect" and both are right about the recorder;
+  this one is in `market_tape/pack.py`, which neither payload names and no
+  recorder fix touches. Binance's 414-file retention
+  pass at 03:34:54 bought zero seconds of writing: Binance wrote no row for at
+  least 71.2 s after it and Bybit for 260.5 s, with `writable()` False on both
+  throughout. About a gigabyte of tape went away and the filesystem did not
+  notice, while the only two writers that could have taken it were gated shut.
+  The repository holds exactly one other writer that puts hundreds of
+  megabytes onto `/var/lib` outside both tape roots — the hourly uploader's
+  staging directory — and `build_archive` leaks its partial archive there on
+  every failure, permanently, where no retention pass can see it or delete it.
+  That is the **seventh defect**. It is not in the recorder, none of the six
+  merged recorder fixes touch it, and deploying all six would not have fixed
+  it. Fixed here in `7fe4fe0c`.**
+  - Incident `host-681737fd16e1f806`, scope `host`, host `ip-208-84-103-4`,
+    `new_critical_refs=capture-disk` — the Bybit recorder, per the id table in
+    the 03:21 entry. Exact alert text: `CRITICAL recorder storage is blocked;
+    frames are counted but not written`, level-triggered on `disk_blocked is
+    True` (`scripts/runtime/check_fleet_liveness.py:431`, raised at `:433`).
+    Pids unchanged for the eleventh page — 2259813 (Bybit), 2263691 (Binance)
+    — so neither recorder has restarted and the host still runs `65ee75a7`.
+    No engine, worker or timer is named. The 25 GiB floor is mainnet's WAL
+    reservation and `writable()` blocks the recorder *above* it
+    (`market_tape/storage.py:426-433`), so it is intact by construction.
+  - **The window, and it is worse than every page before it.** The incident is
+    no longer episodic: each recorder now gets one 30-second writing interval
+    per three to six minutes.
+
+    | | Window | Frames | Rows kept | Discarded | Discarded per row | Intervals that wrote |
+    | :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+    | Bybit | 03:28:15 → 03:42:16, 840.7 s | +2 349 527 | +277 253 | +2 089 104 | 7.53 | 3 of 28 |
+    | Binance | 03:27:05 → 03:42:36, 930.6 s | +1 123 428 | +104 515 | +1 018 912 | 9.75 | 3 of 34 |
+    | Pair | | | 381 768 | 3 108 016 | **8.14** | |
+
+    The 03:21 page measured 4.14 discarded per row kept. This is 8.14 — the
+    ratio has doubled in twenty minutes. Cumulative tape discarded and never
+    reset, at the last line of each unit: **26 327 113** frames (19 101 236
+    Bybit, 7 225 877 Binance). Both units hold a **360.0 s** stretch with
+    `rows` frozen at one number: Bybit 61 901 784 from 03:33:15 to 03:39:15,
+    discarding 987 486 frames; Binance 21 069 776 from 03:30:35 to 03:36:35,
+    discarding 429 111.
+  - **A 414-file pass bought nothing, and that is what rules the tape out.**
+
+    | Pass | Files | Next row on that unit | Bought |
+    | :--- | ---: | :--- | :--- |
+    | Binance 03:29:51.810 | 68 | 03:30:05.481 (+15) | one interval, on both units |
+    | Bybit 03:32:47.012 | 71 | 03:33:15 (+94 607) | one interval — and the gate had already opened 2 s *before* the pass |
+    | Binance 03:34:54.533 | **414** | 03:36:35.743 (+10) | **nothing for ≥71.2 s** |
+    | Bybit 03:37:51.666 | 2 | 03:39:15.892 (+56) | nothing for 84.2 s |
+    | Binance 03:39:56.969 | 5 | 03:40:35.854 (+3) | 38.9 s later |
+
+    Take the 414-file pass. The deployed `pressured = total > self.max_bytes
+    or free < self.min_free_bytes` deletes until its own running free count
+    reaches the floor and stops there, so what that pass unlinked *is* the
+    deficit it measured — on the ≤2.5 MB per file the 03:21 entry priced, up
+    to ~1.0 GB. Eleven seconds later, at the 03:35:05.679 tick, `writable()`
+    still read False: the kernel's statvfs disagreed with the pass by a whole
+    deficit. And it kept disagreeing while **neither recorder wrote a byte** —
+    Binance's 03:36:05.719 tick still reads `rows=21069776`, and Bybit's next
+    row does not land until the interval ending 03:39:15.892. So a gigabyte of
+    free space was consumed, or never released, over a stretch in which the
+    tape provably consumed nothing. Pass size stopped predicting anything
+    several pages ago; this page says the passes are not the variable at all.
+  - **The defect: the uploader leaks a partial archive onto the guarded
+    filesystem, and no retention pass can ever see it.** `Retention.prune`
+    enumerates `self.root.rglob("*.zst")` (`market_tape/storage.py:386`) but
+    reads free space for the **whole filesystem**
+    (`:396`, and `writable()` at `:433`). Everything on `/var/lib` that is not
+    a `.zst` under a tape root therefore counts against the floor and is
+    invisible to every pass. The fleet has exactly one such writer of size:
+    `liquidity-migration-market-tape-upload.service`, staging at
+    `/var/lib/liquidity-migration/market-tape-upload/staging`
+    (`deploy/systemd/liquidity-migration-market-tape-upload.service`,
+    `--state-dir`), which builds one uncompressed `.tar` per finished hour —
+    roughly the size of that hour of tape.
+
+    `build_archive` wrote that tar to `.{name}.tar.tmp` and removed it only by
+    `os.replace` on success (`market_tape/pack.py:220-237` before this
+    change). Any failure between `tarfile.open` and `os.replace` left the
+    partial archive on disk, and **nothing in the repository ever swept
+    staging**: the sole unlink was `archive.unlink(missing_ok=True)` in
+    `ship`'s `finally` (`:396`), which names the finished `output`, never
+    `temporary`. A kill skips even that `finally` — `TimeoutStartSec=3000`,
+    `MemoryMax=1G`, a reboot — leaving a completed `.tar` behind too. The two
+    tests that assert staging is clean glob `*.tar`
+    (`tests/market_tape/test_pack.py:207`, `:248`), which matches neither a
+    dotfile nor a `.tar.tmp`, so the leak was untested and unlogged.
+  - **Why this incident is the condition that triggers it, every hour.** The
+    recorders' `min_free_disk_gb` is a floor for the *recorders*; the uploader
+    is not gated by it and writes its tar into the last free bytes, so on a
+    disk at the floor the build dies of `ENOSPC`. And the pruner is unlinking
+    `.zst` files out from under a build that enumerated them at
+    `market_tape/pack.py:183` — a 414-file pass against a walk of the same
+    tree — so `path.open("rb")` at `:234` raises `FileNotFoundError`
+    mid-archive. Either way the exception propagates out of `ship` and out of
+    `main`: the partial tar stays, the run ships none of the rest of its
+    backlog, no stamp is written, and next hour at `*:10` it happens again
+    with a new candidate name and a new orphan. That is a ratchet on the one
+    filesystem the recorders are fighting for, and the recorders answer it by
+    deleting tape that was never the problem.
+  - **The fix.** `build_archive` now removes its temporary on any failure
+    (`market_tape/pack.py:238-244`), and `sweep_staging` (`:249-275`) deletes
+    stray `*.tar` and `.*.tar.tmp` at the start of every run, under the
+    exclusive `upload.lock`, printing each name and its bytes so the next
+    payload can see the reclaim. It reclaims whatever a killed run already
+    left on the host at the next `*:10` tick.
+  - **Tests, and they fail without the fix.**
+    `test_a_failed_archive_build_leaves_no_partial_archive_in_staging` drives
+    a real `build_archive` with `TarFile.addfile` raising
+    `OSError(ENOSPC)` after the manifest member and asserts staging is empty;
+    without the fix it holds `.2026-09-02T10Z.tar.tmp`.
+    `test_a_run_reclaims_the_staging_a_killed_run_left_behind` plants a stale
+    `.tar` and `.tar.tmp`, runs the CLI end to end, and asserts both are gone,
+    a non-archive file is not, and the run still ships its own hour. Both
+    failed on the unfixed tree and pass on this one; `tests/market_tape/` is
+    202 passed, `ruff` clean, `mypy` clean on `market_tape/pack.py`. The full
+    suite is 1464 passed, 3 failed, all three pre-existing and environmental
+    in this routine's container: `rsync` is not installed, and `repo_doctor`
+    reports `dependency_lock` `drift` because the sandbox's fresh venv
+    resolved `ast_serialize`, `fonttools`, `ruff` and `websocket-client`
+    newer than `requirements.lock` pins. Git status is clean and all three
+    fail identically on the unmodified tree; `requirements.lock` is not
+    touched here.
+  - **What this does not establish, and the host readings that settle it.**
+    The leak is proven in code and unbounded; whether it accounts for the
+    whole 25 GiB is not. Nothing in a journal excerpt can say how large
+    staging is. The kernel-not-releasing-blocks reading is also still open,
+    though it cannot hold for 71.2 s unless a live fd pins the inodes. On the
+    host, in this order:
+
+    ```sh
+    scripts/ops.sh status
+    scripts/ops.sh curve mainnet 240
+    df -h /var/lib
+    du -sh /var/lib/liquidity-migration/market-tape-upload/staging
+    ls -la /var/lib/liquidity-migration/market-tape-upload/staging
+    du -sh /var/lib/liquidity-migration/forward-market \
+           /var/lib/liquidity-migration/forward-market-binance
+    cat /var/lib/liquidity-migration/receipts/market-tape-upload.last-success
+    journalctl -u liquidity-migration-market-tape-upload.service --since -24h
+    lsof +L1 /var/lib | head -40
+    ```
+
+    A staging directory holding gigabytes, or a stale
+    `market-tape-upload.last-success`, or a `FileNotFoundError`/`ENOSPC`
+    traceback in that unit's journal, confirms this reading outright. Tape
+    roots summing well under their 60 + 18 GB caps while `/var/lib` sits at
+    the floor says again that the caps are not the dial to turn.
+  - **The alert block in this payload is not the full alert set.** It carries
+    one CRITICAL line and **no WARNING lines at all**, while the drop counters
+    advanced by three million inside the window and every earlier page in this
+    incident quoted their WARNINGs. So the absence of a `tape-upload` WARNING
+    here proves nothing either way — that check is `WARNING` only, never
+    `CRITICAL` (`scripts/runtime/check_fleet_liveness.py:657-666`, default
+    `--max-upload-age-hours 3.0`), so a dead uploader can never page this
+    routine on its own. Reading the stamp by hand is the check.
+  - **Deploy.** This fix does not touch the `engine` tree, so it adds no
+    handover of its own; the six merged recorder fixes already differ from the
+    deployed `65ee75a7`, so a deploy still restarts the funded engine. Twenty
+    dispatches of `vps-deploy.yml` have now been refused since 19:17 UTC on
+    2026-09-04, every one dead within seconds with HTTP 404 log downloads and
+    `vps` skipped, because the account's payments failed. The SSH path
+    `EXPECTED_COMMIT=7fe4fe0c1e115f8889eb73dc818726de82421d82 scripts/ops.sh deploy` needs no runner and
+    installs all seven fixes.
 
 - **2026-09-05 03:33 UTC — The eleventh page from the same free-space floor,
   and the first that is not episodic. No code change here: the sixth defect
