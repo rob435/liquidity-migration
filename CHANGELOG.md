@@ -109,7 +109,7 @@ edit STATE.md to match.
     hashes every `market_tape/*.py`, so `start_independent_units` restarts both
     recorders on the new code and no hand restart is needed:
     ```bash
-    EXPECTED_COMMIT=<this entry's commit> scripts/ops.sh deploy
+    EXPECTED_COMMIT=fd604613cc222472670b65b74dc9abf5664e4be6 scripts/ops.sh deploy
     scripts/ops.sh status
     ```
     Then the reading still open since 22:54 — whether tape or non-tape files
