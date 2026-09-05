@@ -6,6 +6,117 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 00:36 UTC — The third page of the night from the same free-space
+  floor, and the first that contains a long clean stretch: both recorders wrote
+  for 12 and 16 minutes with no disk drops at all, then crossed together at
+  00:35:59 and 00:36:00. No code changed and nothing new is broken — the fix
+  that ends this is `d275885a` on `main` and the deploy was refused a seventh
+  time. Tape discarded since 22:54 is now 3 899 048 frames.**
+  - Incident `host-ecbac293ecc90d5e`, scope `host`, host `ip-208-84-103-4`,
+    new critical refs `capture-disk` and `capture-disk:forward-market-binance`.
+    Exact alert text: `CRITICAL recorder storage is blocked; frames are counted
+    but not written`, `CRITICAL recorder forward-market-binance storage is
+    blocked; frames are counted but not written`, `WARNING recorder dropped 24
+    frames since the last check (storage was blocked)`. The `capture-disk`
+    CRITICAL is level-triggered on `disk_blocked is True`
+    (`scripts/runtime/check_fleet_liveness.py:431-434`), so the id repeats
+    every crossing that clears the cooldown.
+  - **The funded engine is not implicated and the host has not moved.** No
+    engine, worker or timer is named; both refs are `market_tape` recorders,
+    research tape outside the order path. Both pids are unchanged from the
+    23:50 and 00:01 pages — 2259813 (Bybit), 2263691 (Binance) — so neither
+    recorder has restarted and the host still runs `65ee75a7`. The 25 GiB
+    floor is the reservation held for mainnet's WAL
+    (`deploy/engine.mainnet.toml.template:18`) and it held. What is lost is
+    tape.
+  - Timeline. Binance (`liquidity-migration-forward-capture-binance.service`)
+    holds `disk_dropped=1004572 disk_blocked=False` from 00:19:28.880 to
+    00:35:29.435 — 16 minutes, `rows` 14 374 239 → 15 270 938, not one frame
+    discarded — then reads `disk_dropped=1004577 disk_blocked=True` at
+    00:35:59.457. Bybit (`liquidity-migration-forward-capture.service`) does
+    the same: `disk_dropped=2894410` pinned 00:23:29.578 → 00:35:30.172,
+    `rows` 42 841 171 → 44 968 456, then `disk_dropped=2894471
+    disk_blocked=True` at 00:36:00.204. Both windows are cut by the 40-line
+    payload, so they are lower bounds. The two crossings are 0.75 s apart:
+    one shared filesystem, as at 22:54 and 23:50. Five and 61 frames lost at
+    the crossing tick, and the watchdog's 24 — the page fired at the start of
+    the block, not inside it, so what this payload shows is the beginning of
+    the loss, not its size.
+  - Cumulative, and the counters never reset: 2 894 471 (Bybit) + 1 004 577
+    (Binance) = 3 899 048 frames since 22:54. That is 480 931 more than the
+    00:01 entry's cut, of which every frame fell in crossings that went
+    unpaged or inside the cooldown.
+  - **What is new is the clean window, and the deployed pruner cannot explain
+    it on its own.** Neither journal carries a `retention removed N tape
+    files` line anywhere in the payload, so no pass deleted anything — for
+    room or for age — in 12 to 16 minutes, which is two to three passes each
+    at `RETENTION_INTERVAL_SECONDS` = 300 s. Free space was therefore at or
+    above 25 GiB and both totals under their caps that whole time, and the
+    room came from before the excerpts. Two readings fit and the payload
+    cannot separate them: the pass that unblocked the recorders before
+    00:19 overshot the floor by the size of its last unlinked segment, or
+    something else on `/var/lib` released and then reclaimed the room.
+    Bounding it: `projected_gb` 1444.6 + 468.5 = 1913.1 GB/month is *inbound
+    wire* bytes (`market_tape/record.py:508-515`), 738 KB/s for the pair, so
+    16 minutes consumed at most 708 MB of disk and, at any real zstd ratio,
+    nearer 100 MB — a single large hourly segment is in range. The host
+    settles it; this run cannot.
+  - Diagnosis, unchanged and still the *deployed* commit rather than a new
+    defect. At `65ee75a7`, `Retention.prune` re-evaluates `pressured = total >
+    self.max_bytes or free < self.min_free_bytes`
+    (`market_tape/storage.py:362`) and `Retention.writable()` returns `free >=
+    self.min_free_bytes` (`storage.py:390`), the same number, so a pass driven
+    by free space hands the writer no headroom; `_retention_loop` waits
+    `RETENTION_INTERVAL_SECONDS` on `stop` (`market_tape/record.py:1121`),
+    which nothing can wake, and `_maintenance` only reads the flag
+    (`record.py:1141`). A crossing therefore costs up to 300 s of tape and the
+    pass that ends it buys one status tick.
+  - **The two merged fixes are together sufficient, by arithmetic.**
+    `1d8fad9a` wakes the pruner on the crossing instead of the clock, and
+    `d275885a` frees to `min_free_bytes + FREE_HEADROOM_FRACTION *
+    min_free_bytes` (`storage.py:47`, `374`, `394`) while `writable()` still
+    unblocks on the floor (`storage.py:422`). On this host that headroom is
+    1.25 GiB against a worst case of 221 MB written per 300 s interval —
+    inbound wire bytes, which compression can only reduce — so the periodic
+    pass alone trims ahead of the floor with about 6× margin and the writer
+    stops reaching it; `prune_now` covers a burst that outruns the interval.
+    This also corrects what the 00:01 entry left standing: after these deploy,
+    the tape self-trims to the disk and `max_disk_gb` stops being the number
+    that decides whether this recurs. The 60 + 18 GB caps remain the owner's
+    call, but they now govern only how much history is *guaranteed*, not
+    whether the recorders block.
+  - No code changed in this entry. Nothing in the payload is a defect the
+    repository does not already fix.
+  - **Deploy receipt: refused a seventh time, same signature.** Run
+    `33933636343`, `deploy` on `main@c821585d`, dispatched 00:38:23 UTC and
+    failed at 00:38:28: `ci` and `Deploy artifact` dead in 3 s, `rust` in 4 s,
+    and `disarm`, the release-test job, `vps` and `diagnose` all skipped. Job
+    `101217183835`'s log download returns HTTP 404 — no job started. Identical
+    to `33932188757`, `33931474693`, `33928248402`, `33922197522`,
+    `33921858031` and `33911912004`; it is the account's failed payments, not
+    this commit. Deployed commit stays `65ee75a7` and the recorders keep
+    crossing the floor until the owner runs the SSH path.
+  - Host actions, in order, and only the owner can run them. Installing
+    `c821585d` carries both recorder fixes; `capture_fingerprint`
+    (`scripts/deploy_vps_live.sh:524-534`) hashes every `market_tape/*.py`, so
+    `start_independent_units` restarts both recorders on the new code and no
+    hand restart is needed:
+    ```bash
+    EXPECTED_COMMIT=c821585d7a8f86717f00ff918c95e877e53f0258 scripts/ops.sh deploy
+    scripts/ops.sh status
+    ```
+    Then the reading that separates the two explanations above, and the one
+    still open from 22:54 — whether the tape or non-tape files hold the room:
+    ```bash
+    df -h /var/lib
+    du -sh /var/lib/liquidity-migration/forward-market \
+           /var/lib/liquidity-migration/forward-market-binance
+    scripts/ops.sh curve mainnet
+    ```
+    `curve mainnet` is what shows the funded account through the incident and
+    which minutes had no heartbeat at all
+    ([docs/observability.md](docs/observability.md)).
+
 - **2026-09-05 00:01 UTC — The crossing stopped being an episode and became a
   30-second oscillation, and this time there is a second defect under it: the
   pruner stops deleting at exactly the free-space floor the writer unblocks
