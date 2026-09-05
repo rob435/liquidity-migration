@@ -9,7 +9,8 @@ Define the exact prompt and authority of the automated engineer fired once per a
 | Item | Contract |
 | :--- | :--- |
 | Repository | `rob435/liquidity-migration`, direct linear updates to `main` |
-| Outcome branch | `main`, set on the routine itself at claude.ai/code/routines (its Git outcome; `session_request.config.outcomes[].git_info.branches`). Any other value gets a per-session suffix appended and every run lands on its own `claude/…` branch; the prompt cannot override it. |
+| Branch | Every run is handed a platform-assigned `claude/…` branch (the routine's `outcomes[].git_info.branches`, not editable in the routines UI) and a system note telling it to develop there. The prompt overrides it: a push to `main` is accepted because `main` is not protected against the owner, carries only the owner's commits, and has no one else's open PR. Never push to the assigned `claude/…` branch; delete any that appear. |
+| Prompt updates | The routine was created through the API, so only the owner can change its prompt: claude.ai/code/routines → **On call engineer.** → pencil → **Instructions**; paste the fenced block in §4 below. An agent's `update_trigger` is refused. |
 | Trigger | API payload from `check_fleet_liveness.py`; `event_kind=incident` or `event_kind=drill` |
 | Fresh host evidence | `gh workflow run vps-deploy.yml --ref main -f mode=diagnose` |
 | Code deployment | `gh workflow run vps-deploy.yml --ref main -f mode=deploy` after local and GitHub checks pass |
