@@ -7,6 +7,147 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 05:48 UTC — The nineteenth page: a 630.356 s block in which
+  504 unlinked files bought nothing and 11 ended it, and the tick-phase
+  handicap inverts. No code change and no ninth defect in the write path;
+  one previously unrecorded consequence of a long block is measured and left
+  unbuilt below.** The Binance unit is gated **96.77 %** of 930.540 s at
+  **28.141 frames discarded per row kept** — both incident records, past
+  94.44 % and 11.028 — and it wrote **one 30-second interval in 15.5
+  minutes**. Its block runs 05:30:39.593 → 05:41:09.949, **630.356 s** with
+  **2 rows written**, the longest of the incident, past the 510.293 s of the
+  05:39 page.
+  - Incident `host-681737fd16e1f806`, scope `host`, host `ip-208-84-103-4`,
+    `new_critical_refs=capture-disk`. Id re-derived exactly:
+    `sha256("host\ncapture-disk")[:16]` = `681737fd16e1f806`
+    (`scripts/runtime/check_fleet_liveness.py:806-807`). Exact alert text,
+    raised at `scripts/runtime/check_fleet_liveness.py:431-433`: `CRITICAL
+    recorder storage is blocked; frames are counted but not written`. Per the
+    03:21 entry the id names whose cooldown cleared first, not a distinct
+    fault.
+  - **The funded engine is not implicated.** No engine, worker or timer is
+    named. Both units are `market_tape` recorders — research tape outside the
+    order path — and the 25 GiB floor is the reservation held for mainnet's
+    WAL, which `writable()` blocks the recorder *above*
+    (`market_tape/storage.py:433`). Pids unchanged across all nineteen pages —
+    2259813 (Bybit), 2263691 (Binance) — so neither recorder has restarted and
+    the host still runs `65ee75a7`.
+  - **The window, measured.** `liquidity-migration-forward-capture-binance.service`
+    05:32:39.647 → 05:48:10.187; the Bybit unit 05:33:56.740 → 05:47:57.448.
+    Both excerpts are contiguous — 32 and 29 status lines, 30 s apart, no gap —
+    so an absent line is an absent event, not a 40-line cut.
+
+    | Quantity | Binance | Bybit |
+    | :--- | ---: | ---: |
+    | Window | 930.540 s | 840.708 s |
+    | Frames | 967 901 (1 040.1/s) | 2 465 784 (2 933.0/s) |
+    | Rows kept | 33 214 (35.7/s) | 576 712 (686.0/s) |
+    | Frames discarded | 934 687 | 1 927 240 |
+    | Discarded per row kept | **28.141** | 3.342 |
+    | Window spent gated | **900.524 s (96.77 %)** | 660.540 s (78.57 %) |
+    | `retention removed` lines | 2 (290, 11 files) | 3 (7, 6, 6 files) |
+    | `projected_gb` | 386.0 → 377.0 | 1170.7 → 1153.8 |
+
+    Gated time is the 04:52 page's convention: the interval ending on a tick
+    that reads the gate shut. Cumulative **44 133 703** frames discarded, and
+    the rate since the 05:39 page is **3 317.4/s** as the sum of the exact
+    per-unit rates (Bybit 2 326.5/s over 540.482 s, Binance 990.9/s over
+    540.301 s) — below that page's 3 444.0/s and still under the 05:23 page's
+    ceiling of 4 113.8/s, which stands.
+  - **The 630.356 s block: 504 files bought nothing, 11 files ended it.**
+    Binance's `rows` is frozen at 24 650 896 from 05:30:39.593 (05:39 page)
+    through 05:41:09.949, where it reads 24 650 898 — **2 rows in 630.356 s**,
+    **657 213 frames discarded at 1 042.6/s**, every tick in between reading
+    below the floor. Three of its own retention passes lie in it, and pass size
+    orders them backwards:
+
+    | Pass | Files | Own next tick | Neighbour's next tick |
+    | :--- | ---: | :--- | :--- |
+    | Binance 05:30:47.843 | 214 | shut (+21.761 s), and for 630 s after | Bybit +38.780 s **open** → 84 674 rows |
+    | Binance 05:35:50.462 | 290 | 05:36:09.779 **shut** (+19.317 s) | Bybit 05:35:56.847 **open** (+6.385 s) → 96 927 rows |
+    | Binance 05:40:52.909 | **11** | 05:41:09.949 **open** (+17.040 s) → 33 212 rows | Bybit 05:41:27.106 **open** (+34.197 s) → 90 538 rows |
+
+    504 files unlinked by this recorder opened only the neighbour's gate; the
+    11-file pass 302.447 s later opened **both**, and the pair wrote 123 750
+    rows and was back under the floor inside one status interval. That is the
+    zero-margin common pool priced from the other end: what recovers a writer
+    is the margin left at the stopping point and who samples it first, never
+    the size of the walk. `d275885a` frees to `free_target` =
+    `min_free_bytes × 1.05` (`market_tape/storage.py:47,383`) instead of onto
+    the floor; `fd604613` lets the pass that freed the room open its own
+    runner's gate. Both merged, both undeployed.
+  - **The tick-phase handicap has inverted.** The 05:05 page measured Bybit
+    losing every one of its own passes to Binance on a 13.693 s tick-phase
+    handicap. This page measures the mirror image: all three Bybit passes open
+    **its own** gate first (+10.431 s, +5.625 s, +0.725 s) and Binance's next
+    tick reads shut every time (+23.370 s, +18.530 s, +13.534 s), a 18.478 s
+    mean handicap the other way. Neither unit is favoured by anything but the
+    phase of a 30 s clock that drifts, which is why `fd604613` — the pass opens
+    the runner's gate with no tick in between — is the fix and not a fairness
+    rule.
+  - **Retention still runs on the deployed 300-second clock.** Binance's two
+    passes are **302.447 s** apart, Bybit's three are **305.029 s** and
+    **305.170 s** apart, and not one pass falls on a crossing in either
+    excerpt — the deployed `_retention_loop` has no `prune_now` at all
+    (`1d8fad9a~1`), so nothing on the host shortens the gap between a crossing
+    and the next scheduled walk. Sixth independent window. `1d8fad9a` and
+    `1702d14d` remove it.
+  - **The eighth defect is confirmed 59 ticks out of 59.** All 7 `projected_gb`
+    upticks are writing intervals (33 212–100 766 rows) and all 52 downticks
+    are gated ones (≤110 rows); no flat ticks, no exceptions. Six pages now:
+    59/59, 63/63, 66/66, 62/62, 65/65 and 59/59. On Binance the deployed meter
+    saw 33 214 of 967 901 frames — **3.43 %**, a new low past 8.33 % (05:05)
+    and 9.64 % (05:39), so the unit reported itself at `projected_gb` 386.0 →
+    377.0 while spending an inbound allowance about twenty-nine times that.
+    `2c751c92` is what fixes the ordering.
+  - **New, measured, and deliberately not fixed: an hourly book re-anchor
+    issued while the gate is shut is lost for that hour.** Bybit logged
+    `re-anchored 1 book topics for 2026-09-05T05` at 05:40:27.024 and
+    05:45:27.296. Both lines are emitted inside a `_maintenance` call that had
+    just set `self.disk_blocked = True` nine and eleven milliseconds earlier
+    (`market_tape/record.py:1207,1222,1228`), and the status line of each of
+    those ticks, and of the tick after it, reads `disk_blocked=True`. The
+    snapshot frame the re-subscribe asks for therefore arrives at a shut gate
+    and is counted and thrown away (`market_tape/record.py:1098-1108`), while
+    `reanchor_books` has already advanced `reanchor_cursor` on send
+    (`:352-384`) and `reanchored()` reports the hour anchored
+    (`:386-387`) — nothing re-issues it. The hour's tar then replays without
+    an opening snapshot for those symbols, which is the one property
+    `reanchor_books_each_hour` exists to guarantee (`:1231-1240`). This is a
+    consequence of the block, not a new cause of it, and the fix is new
+    recorder behaviour — re-issue an anchor whose snapshot met a shut gate.
+    **Proposed to the owner and not built**, on three grounds: it is not the
+    fault that fired the page, a tenth merged-and-undeployed commit does not
+    help a fleet on its twenty-eighth refused deploy, and `AGENTS.md` reserves
+    machinery like this to the owner. The decisive reading is on the host and
+    is in the recipe below.
+  - **What the owner must do by hand.** Nothing in this repository will move
+    until a deploy lands. The SSH path needs no GitHub runner and installs all
+    eight recorder fixes plus the uploader's leak fix:
+
+    ```
+    EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db scripts/ops.sh deploy
+    ```
+
+    It restarts the funded engine (the fingerprint hashes the whole `engine`
+    tree). The readings that are still open, in order:
+
+    ```
+    scripts/ops.sh status
+    scripts/ops.sh curve mainnet 240
+    df -h /var/lib
+    ls -l /var/lib/liquidity-migration/market-tape-upload/staging
+    du -sh /var/lib/liquidity-migration/market-tape /var/lib/liquidity-migration/market-tape-binance
+    python -m market_tape book bybit --hour 2026-09-05T05 --symbol BTCUSDT --depth 50
+    ```
+
+    The `staging` listing is the decisive one for the seventh defect: a stray
+    `.tar` or `.*.tar.tmp` there is roughly an hour of tape sitting on the
+    filesystem the 25 GiB floor guards, outside both tape roots and invisible
+    to `Retention.prune`. The `book` rebuild is the decisive one for the
+    re-anchor loss above: an hour that cannot open a book is an hour of tape
+    the study harness cannot replay.
+
 - **2026-09-05 05:46 UTC — The twenty-eighth refused deploy, identical
   signature.** Run `33948078558`, `deploy` on `main@c5963221`, created
   05:46:31 UTC and dead at 05:46:37. `ci`, `rust` and `Deploy artifact` were
