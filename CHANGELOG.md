@@ -103,7 +103,19 @@ edit STATE.md to match.
     `rsync` binary — `backup_state.sh` exits 2 with `backup: rsync is not
     installed` before reaching either assertion — not this change, which
     touches no shell script. ShellCheck is not installed here; CI runs it.
-  - **Deploy receipt:** see the entry above this line's dispatch record.
+  - **Deploy receipt: refused an eleventh time, and this one strands rather
+    than fails.** Run `33937280978`, `deploy` on `main@1f627520`, dispatched
+    01:49:01 UTC. `ci` and `Deploy artifact` were dead 2 s in at 01:49:05,
+    `diagnose` and `disarm` skipped at 01:49:03, and `rust` has sat in
+    `queued` since 01:49:03 with no runner ever assigned, so the run itself
+    never leaves `queued` and the `vps` job is never scheduled. Both failed
+    jobs' log downloads return HTTP 404 — `failed to download logs: HTTP 404`
+    — the same no-job-ever-started signature as `33934970737`,
+    `33934851698`, `33933927629`, `33933636343`, `33932188757`, `33931474693`,
+    `33928248402`, `33922197522`, `33921858031` and `33911912004`. It is the
+    account's failed payments, not any commit. Deployed commit stays
+    `65ee75a7`; all three recorder fixes are merged and undeployed, and the
+    recorders keep crossing the floor until the owner runs the SSH path below.
   - Host action, and only the owner can run it. The tip carries all three
     recorder fixes; `capture_fingerprint` (`scripts/deploy_vps_live.sh:524-534`)
     hashes every `market_tape/*.py`, so `start_independent_units` restarts both
