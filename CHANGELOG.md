@@ -135,7 +135,33 @@ edit STATE.md to match.
     times its 1 048/s average. The tape now throws away **4.81 frames for
     every row it keeps** (Bybit 5.85, Binance 3.07). At the last line Bybit is
     150.1 s into an open block with 422 826 frames already gone.
-  - Deploy dispatched a fifteenth time; result recorded in the entry below.
+  - **Deploy refused a fifteenth time, same signature.** Run `33940468461`,
+    `deploy main@28dc27a6`, dispatched 02:56:17 UTC and failed 02:56:23 — 6 s.
+    `ci`, `rust` and `Deploy artifact` all dead 3 s in (02:56:19 → 02:56:22),
+    every one of their log downloads returning `failed to download logs: HTTP
+    404`; `diagnose`, `disarm`, the release-test job and `vps` skipped. No job
+    ever started, so nothing reached the host: deployed commit stays
+    `65ee75a7` and all four recorder fixes stay merged and undeployed. This is
+    the fifteenth consecutive refusal since 19:17 UTC on 2026-09-04 and the
+    cause is outside the repository — the account's payments failed, so GitHub
+    assigns no runner. **The one action that ends this incident tonight needs
+    no runner and only the owner can take it**, from a workstation holding the
+    SSH key:
+
+    ```sh
+    EXPECTED_COMMIT=06e17d4a82f9a5a19e00f1cd0928b4a0da96e315 scripts/ops.sh deploy
+    ```
+
+    `06e17d4a` is the commit carrying all four recorder fixes. Everything
+    between it and the current tip `28dc27a6` is `CHANGELOG.md` and `STATE.md`
+    only — the two trees' `engine` directories are identical — so either
+    commit installs the same thing, and either one **hands over both realms
+    and restarts the funded engine**, because the fingerprint hashes the whole
+    `engine` tree and `06e17d4a` already carries `697341e4` and `10ed1bd2`.
+    That handover is the known cost of this deploy, not a surprise: it is the
+    same one STATE.md records against `10ed1bd2`. It is the owner's call to
+    make, and it is why the recipe is written for a human and not dispatched
+    from here.
 
 - **2026-09-05 02:33 UTC — The seventh page from the same free-space floor.
   No new defect: the host still runs the un-fixed code and all four merged
