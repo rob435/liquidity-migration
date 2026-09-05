@@ -87,22 +87,25 @@ edit STATE.md to match.
     whether the recorders block.
   - No code changed in this entry. Nothing in the payload is a defect the
     repository does not already fix.
-  - **Deploy receipt: refused a seventh time, same signature.** Run
-    `33933636343`, `deploy` on `main@c821585d`, dispatched 00:38:23 UTC and
-    failed at 00:38:28: `ci` and `Deploy artifact` dead in 3 s, `rust` in 4 s,
-    and `disarm`, the release-test job, `vps` and `diagnose` all skipped. Job
-    `101217183835`'s log download returns HTTP 404 — no job started. Identical
-    to `33932188757`, `33931474693`, `33928248402`, `33922197522`,
+  - **Deploy receipt: refused twice more, seventh and eighth in a row, same
+    signature both times.** Run `33933636343`, `deploy` on `main@c821585d`,
+    dispatched 00:38:23 UTC and failed at 00:38:28: `ci` and `Deploy artifact`
+    dead in 3 s, `rust` in 4 s, and `disarm`, the release-test job, `vps` and
+    `diagnose` all skipped; job `101217183835`'s log download returns HTTP 404,
+    so no job started. Run `33933927629` on `main@fdc6bf7c` — this entry's own
+    commit — dispatched 00:43:47 and failed at 00:43:53 with `ci`, `rust` and
+    `Deploy artifact` each dead in 3 s and the same four jobs skipped.
+    Identical to `33932188757`, `33931474693`, `33928248402`, `33922197522`,
     `33921858031` and `33911912004`; it is the account's failed payments, not
-    this commit. Deployed commit stays `65ee75a7` and the recorders keep
+    any commit. Deployed commit stays `65ee75a7` and the recorders keep
     crossing the floor until the owner runs the SSH path.
   - Host actions, in order, and only the owner can run them. Installing
-    `c821585d` carries both recorder fixes; `capture_fingerprint`
+    `fdc6bf7c` carries both recorder fixes; `capture_fingerprint`
     (`scripts/deploy_vps_live.sh:524-534`) hashes every `market_tape/*.py`, so
     `start_independent_units` restarts both recorders on the new code and no
     hand restart is needed:
     ```bash
-    EXPECTED_COMMIT=c821585d7a8f86717f00ff918c95e877e53f0258 scripts/ops.sh deploy
+    EXPECTED_COMMIT=fdc6bf7c1f1855a91fdb99aa8f6607755f127fe0 scripts/ops.sh deploy
     scripts/ops.sh status
     ```
     Then the reading that separates the two explanations above, and the one
