@@ -6,6 +6,97 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 00:01 UTC — The crossing stopped being an episode and became a
+  30-second oscillation, and this time there is a second defect under it: the
+  pruner stops deleting at exactly the free-space floor the writer unblocks
+  on, so a pass hands the recorder no room and it re-blocks within one status
+  tick. Fixed in `market_tape/storage.py`; 1 956 903 more frames of tape were
+  discarded in the eleven minutes the payload covers.**
+  - Incident `host-681737fd16e1f806`, scope `host`, host `ip-208-84-103-4`,
+    new critical ref `capture-disk`. Exact alert text: `CRITICAL recorder
+    storage is blocked; frames are counted but not written`. No engine,
+    worker or timer is named. Both refs are `market_tape` recorders, which
+    are research tape outside the order path; the 25 GiB floor is the
+    reservation held for mainnet's WAL and it held. What is lost is tape.
+  - **What is new, and it is not the retention interval.** Earlier crossings
+    were episodes: blocked for minutes, then 14 minutes of clean ticks. In
+    this payload each recorder recovers for exactly one 30 s status interval
+    and blocks again. Bybit
+    (`liquidity-migration-forward-capture.service`, pid 2259813) reads
+    `disk_blocked=False` at 23:58:25 with `rows=38989246`, writes 73 904 rows,
+    and is blocked again at the 23:58:55 tick. Binance (`…-binance.service`,
+    pid 2263691) does the same one tick later: `disk_blocked=False` 23:59:27,
+    23 154 rows, blocked at 23:59:57. Every other tick in the window is
+    blocked. Counters over 23:50:55 → 00:01:28: Bybit `disk_dropped`
+    1 087 045 → 2 534 841 (1 447 796 frames), Binance 374 169 → 883 276
+    (509 107) — 1 956 903 frames for two 30 s windows of writing.
+  - Diagnosis, and it is a defect in this repository. `Retention.prune`
+    re-evaluated `pressured = total > self.max_bytes or free <
+    self.min_free_bytes` per file (`market_tape/storage.py:380` at
+    `65ee75a7`), and `Retention.writable()` — the O(1) check `_maintenance`
+    reads every tick to set `disk_blocked` (`market_tape/record.py:1152`,
+    `1161`) — returns `free >= self.min_free_bytes` (`storage.py:408`). The
+    stop condition and the unblock condition are the same number, so a pass
+    driven by free space returns the filesystem to the floor and not one byte
+    further. The writer is then unblocked onto zero headroom: the segments it
+    rolls in the next interval cross the floor again, and everything after
+    that is counted and dropped until the next pass. That is the oscillation
+    above, and it is why prune passes that are plainly working — `retention
+    removed 3 tape files` 23:53:19, `16` 23:54:25, `9` 23:58:22, `41` 23:59:29
+    — buy 30 seconds each.
+  - The pruner is still on the 300 s loop, so the host still runs `65ee75a7`:
+    those pass timestamps are 303 s and 304 s apart. `1d8fad9a` (prune on the
+    crossing rather than at the next interval) remains merged and undeployed.
+    On its own it would have made the chatter faster, not shorter — a prune
+    that frees to the floor is a prune the next interval undoes whenever it
+    runs. The two fixes are complementary and both are needed.
+  - Changed: `market_tape/storage.py`. A pass that deletes for room now frees
+    to `min_free_bytes + FREE_HEADROOM_FRACTION * min_free_bytes`
+    (`storage.py:47`, `374`, `394`); `writable()` still blocks and unblocks on
+    the floor itself (`storage.py:422`). The gap between the two thresholds is
+    what makes a crossing resolve instead of repeat. On this host that is
+    1.28 GiB of runway above a 25 GiB floor. Deleting for `max_bytes` or for
+    age is untouched, and the pass holds *less* tape than before, never more:
+    no cap moves, no disk is claimed, so this is not the size decision the
+    2026-09-04 23:50 entry left with the owner. That one still stands —
+    `max_disk_gb` 60 + 18 plus the floor is 105 GB of a 118 GB disk, and the
+    tape will keep growing back into the floor until the caps change.
+  - Test: `tests/market_tape/test_tape_storage.py::test_disk_pressure_leaves_
+    the_writer_room_above_the_floor` models free space as what the tape does
+    not hold, prunes from under the floor, then rolls one more segment and
+    asserts the recorder is still writable. Without the fix it fails on
+    exactly the incident's assertion — `assert retention.writable() is True`
+    → `assert False is True` — because the pass stopped on the floor. With
+    it, 195 `tests/market_tape` tests pass.
+  - Local gate: `ruff check market_tape scripts liquidity_migration tests`
+    clean, `mypy` clean over 92 files, `pytest -q` 1452 passed. Seven failures
+    are this sandbox, identical on a stashed tree: `rsync` and the two
+    `backup_state.sh` tests, the `doctor` tooling test, two `marketdata`
+    paging tests, two research-chart tests. `scripts/dev.sh check` reaches
+    the same point and stops at those; the `ruff format --check` diffs are
+    pre-existing lines under this box's ruff 0.16.6 against the pinned build,
+    none of them lines this change adds. The engine is Rust and untouched.
+  - Host actions, in order, and only the owner can run them. Installing this
+    commit carries `1d8fad9a` with it; `capture_fingerprint`
+    (`scripts/deploy_vps_live.sh:523-535`) hashes every `market_tape/*.py`, so
+    `start_independent_units` restarts both recorders on the new code and no
+    hand restart is needed:
+    ```bash
+    EXPECTED_COMMIT=<this commit> scripts/ops.sh deploy
+    scripts/ops.sh status
+    ```
+    Then the reading that is still open from 22:54 — whether the tape or
+    non-tape files hold the room:
+    ```bash
+    df -h /var/lib
+    du -sh /var/lib/liquidity-migration/forward-market \
+           /var/lib/liquidity-migration/forward-market-binance
+    scripts/ops.sh curve mainnet
+    ```
+    `curve mainnet` is what shows the funded account through the incident and
+    which minutes had no heartbeat at all
+    ([docs/observability.md](docs/observability.md)).
+
 - **2026-09-04 23:50 UTC — The same floor crossing, at least the third in an
   hour. `1d8fad9a` fixes it; the host does not run `1d8fad9a`; the two
   recorders have now discarded 1 752 989 frames of tape since 22:54. Nothing

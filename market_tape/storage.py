@@ -38,6 +38,14 @@ from market_tape.schema import SNAPSHOT_INSTRUMENTS, SNAPSHOT_TICKERS, snapshot_
 #: The per-hour directory holding the venue's instrument and ticker tables.
 META_DIRECTORY = "_meta"
 
+#: How far past `min_free_bytes` a pass driven by free space keeps deleting,
+#: as a fraction of that floor. `writable()` lets the writer run again the
+#: moment free space reaches the floor, so a pass that stops on the floor
+#: hands the writer no room at all: it re-crosses within one status interval
+#: and every frame in between is discarded. The gap between the two thresholds
+#: is what makes a crossing resolve instead of repeat.
+FREE_HEADROOM_FRACTION = 0.05
+
 
 def discard_file_cache(handle: Any) -> None:
     """Release clean tape pages after they are durable; replay reads archived files, not hot writes."""
@@ -355,9 +363,15 @@ class Retention:
         the sizes unlinked rather than re-read, which is also the truer
         number — a filesystem need not release a deleted file's blocks by the
         time the next statvfs returns.
+
+        A pass that deletes for room frees past the floor by
+        `FREE_HEADROOM_FRACTION`, so the writer it unblocks has somewhere to
+        write; deleting for `max_bytes` or for age stops where it always did.
         """
 
         now = time.time() if now is None else now
+        # The floor is what `writable()` blocks on; this is what a pass frees to.
+        free_target = self.min_free_bytes + int(self.min_free_bytes * FREE_HEADROOM_FRACTION)
         found: list[tuple[int, str, Path, int, float]] = []
         for path in self.root.rglob("*.zst"):
             if path.name.endswith(".tmp"):
@@ -377,7 +391,7 @@ class Retention:
             # hour after it and weighs kilobytes: it goes with age, never for room.
             snapshot = path.parent.name == META_DIRECTORY
             expired = mtime < cutoff
-            pressured = total > self.max_bytes or free < self.min_free_bytes
+            pressured = total > self.max_bytes or free < free_target
             if not expired and not (pressured and not snapshot):
                 continue
             relative = path.relative_to(self.root)

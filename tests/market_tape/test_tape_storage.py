@@ -336,6 +336,40 @@ def test_disk_pressure_stops_once_the_unlinked_bytes_clear_the_free_floor(tmp_pa
     assert (directory / "segment-000002.jsonl.zst").exists()
 
 
+def test_disk_pressure_leaves_the_writer_room_above_the_floor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pass that stops exactly on `min_free_bytes` unblocks the writer onto
+    no room at all: `writable()` returns True, the next segments cross the
+    floor again, and the recorder blocks for another interval with every frame
+    in between discarded. The pass must free past the floor."""
+
+    manifest = Manifest(tmp_path)
+    directory = tmp_path / "2027-01-15" / "10" / "AGIUSDT"
+    directory.mkdir(parents=True)
+    for index in range(20):
+        path = directory / f"segment-{index:06d}.jsonl.zst"
+        path.write_bytes(b"x" * 50)
+        os.utime(path, (1_000_000 + index, 1_000_000 + index))
+
+    # Free space is what the tape does not hold: deleting a file returns its
+    # bytes, writing one takes them, exactly as the filesystem behaves.
+    def usage(path: Any) -> Any:
+        held = sum(item.stat().st_size for item in tmp_path.rglob("*.zst"))
+        return SimpleNamespace(total=3_000, used=1_100 + held, free=1_900 - held)
+
+    monkeypatch.setattr("market_tape.storage.shutil.disk_usage", usage)
+
+    retention = Retention(tmp_path, manifest, retention_days=36_500, max_bytes=10**12, min_free_bytes=1_000)
+    assert retention.writable() is False
+
+    deleted = retention.prune(1_000_100.0)
+
+    assert retention.writable() is True
+    # One more rolled segment must not put the recorder back under the floor.
+    (directory / "segment-000099.jsonl.zst").write_bytes(b"x" * 50)
+    assert retention.writable() is True
+    assert len(deleted) == 3
+
+
 @needs_zstd
 def test_snapshots_write_the_venue_tables_with_their_own_payload(tmp_path: Path) -> None:
     manifest = Manifest(tmp_path)
