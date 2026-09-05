@@ -8,6 +8,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
     match command {
         "run" => run(args),
         "backtest" => backtest(args),
+        "sim" => sim(args),
         "bench" => bench(args),
         "wal-cost" => wal_cost(args),
         "venue-key" => venue_key(args),
@@ -43,6 +44,19 @@ fn backtest(args: &[String]) -> Result<(), Box<dyn Error>> {
     let options = parse_backtest_options(args)?;
     let report = runtime()?.block_on(backtest::run(options))?;
     print!("{}", report.table());
+    Ok(())
+}
+
+fn sim(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let (options, report_path) = parse_sim_options(args)?;
+    let report = runtime()?.block_on(engine_core::sim::run_sweep(options))?;
+    print!("{}", report.table());
+    if let Some(path) = report_path {
+        std::fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+    }
+    if !report.passed() {
+        return Err("simulation checks failed; each seed above reproduces its failure".into());
+    }
     Ok(())
 }
 
@@ -357,6 +371,37 @@ pub(super) fn parse_backtest_options(args: &[String]) -> Result<BacktestOptions,
     }
     options.durable_log = args.iter().any(|a| a == "--durable-log");
     Ok(options)
+}
+
+pub(super) fn parse_sim_options(
+    args: &[String],
+) -> Result<(engine_core::sim::SweepOptions, Option<PathBuf>), Box<dyn Error>> {
+    let dir = value(args, "--out")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("engine-sim-{}", std::process::id())));
+    let seed: u64 = value(args, "--seed").unwrap_or("1".into()).parse()?;
+    let mut base = engine_core::sim::SimOptions::new(seed, dir);
+    if let Some(v) = value(args, "--seconds") {
+        base.seconds = v.parse()?;
+    }
+    if let Some(v) = value(args, "--symbols") {
+        base.symbols = v.parse()?;
+    }
+    if let Some(v) = value(args, "--crashes") {
+        base.crashes = v.parse()?;
+    }
+    if let Some(v) = value(args, "--faults") {
+        base.faults = engine_core::sim::FaultRates::named(&v)
+            .ok_or_else(|| format!("--faults takes none, light or heavy, not {v:?}"))?;
+    }
+    base.keep = args.iter().any(|a| a == "--keep");
+    let seeds: u64 = value(args, "--seeds").unwrap_or("1".into()).parse()?;
+    let twice = args.iter().any(|a| a == "--twice");
+    let report = value(args, "--report").map(PathBuf::from);
+    Ok((
+        engine_core::sim::SweepOptions { base, seeds, twice },
+        report,
+    ))
 }
 
 pub(super) fn parse_bench_options(args: &[String]) -> Result<BenchOptions, Box<dyn Error>> {

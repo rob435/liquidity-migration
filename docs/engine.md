@@ -52,6 +52,7 @@ The engine workspace is under `engine/`:
 | `engine/engine-core/src/assembly.rs`, `engine/engine-core/src/runner.rs`, `engine/engine-core/src/config.rs` | Wiring feeds, venue, risk and strategies into one process |
 | `engine/engine-core/src/replay.rs`, `engine/engine-core/src/takeover.rs`, `engine/engine-core/src/clear.rs`, `engine/engine-core/src/canary.rs`, `engine/engine-core/src/controls.rs` | Operator commands over a WAL or a live engine |
 | `engine/engine-core/src/backtest/` | The live loop on a recorded tape against a simulated venue |
+| `engine/engine-core/src/sim/` | `engine sim`: the live loop on a seeded synthetic market with injected venue, private-stream and market-feed faults and process deaths; the end-of-run invariants |
 
 #### Worker ownership
 
@@ -340,7 +341,50 @@ cd engine && cargo run --release -- backtest --config CONFIG --tape TAPE \
 
 ---
 
+### 10. Deterministic Simulation (`engine sim`)
+
+The live loop on a seeded synthetic market against the backtest's simulated venue, with faults on every boundary the engine has with the world and process deaths at seeded instants. One seed is one run: two runs of one seed write byte-identical logs, so a failing seed reproduces on any machine.
+
+| Flag | Default | Meaning |
+| :--- | :--- | :--- |
+| `--seed N` | 1 | The seed; `--seeds K` runs `N..N+K` |
+| `--seconds S` | 600 | Tape length in virtual seconds; one ticker, one book delta and one print per symbol per second |
+| `--symbols M` | 2 | Symbols the quoter trades, from `BTCUSDT`, `ETHUSDT`, `SOLUSDT` |
+| `--crashes C` | 1 | Process deaths; the private socket dies with the process and the next boot recovers from the log and the venue's fill history |
+| `--faults none\|light\|heavy` | `light` | Per-call fault rates (`engine/engine-core/src/sim/faults.rs`); `light` is one command in fifty going wrong |
+| `--twice` | off | Run every seed twice and compare the logs byte for byte |
+| `--out DIR`, `--keep` | temp dir, off | Where the tape, config, log and trades go; kept only with `--keep` |
+| `--report PATH` | none | The sweep as JSON (`SweepReport`) |
+
+| Injected | Where | What the engine must do |
+| :--- | :--- | :--- |
+| venue refusal; request lost before the venue; reply lost after it; slow reply; account read failure | `FaultyGateway` | treat the ambiguous send as ambiguous; learn the order's fate before growing |
+| private update dropped, duplicated or delayed; socket hiccup | `FaultyOrderFeed` | dedupe by execution id; recover a gap from the venue's fill history |
+| market feed hiccup; feed reset | `FaultyMarketFeed` | re-arm; never open against a stale quote |
+| process death; engine exit with an error | `harness` | boot from the log; a supervisor restart is modelled by booting again, and more than 8 restarts in one run is a crash loop |
+
+| Check | Holds when |
+| :--- | :--- |
+| `engine_ran_clean` | no restart loop and no final error |
+| `stopped_by_feed_closed` | the loop stopped because the tape ended |
+| `positions_agree` | the log's signed exposure per symbol equals the venue's positions |
+| `every_fill_journaled` | the venue's execution ids and the log's are the same set |
+| `no_orphan_orders` | every order working at the venue is in the engine's in-flight ledger |
+| `cash_flow_agrees_when_flat` | with no position open, the log's fills as money equal the venue's realized P&L net of every fee |
+| `ledger_agrees_when_flat` | with no position open, the round trips the log closes (as `engine fills` reads them) net to the venue's realized P&L net of closed fees |
+| `numbers_finite` | no NaN or infinity in the venue's books or the engine's account view |
+
+The `cfg(test)` build shortens the engine's confirmation windows, so the simulator's own tests run as an integration test against the library as shipped (`engine/engine-core/tests/integration/sim.rs`).
+
+The engine keeps real-clock deadlines beside its virtual-clock waits (`MUTATION_DRAIN_TIMEOUT`, the one-second dispatch and callback deadlines in `engine/engine-core/src/engine/order_dispatch.rs` and `strategy_callbacks.rs`). On a heavily loaded machine one of those can fire inside a simulated run and the two logs of a seed diverge; `--twice` is judged on an idle machine.
+
+---
+
 ## Invariants
+
+* **Must**: the engine's own state be ordered maps only. Anything the engine iterates can reach the log, and two runs of one input write one log; a hash seed must never decide the order of two records. `engine sim --twice` is the gate.
+* **Must**: a simulator fault wrapper decide before it awaits and park anything it took from the inner feed, so a lost `select!` branch loses nothing.
+* **Must Never**: the simulator soften a failing check. A real engine defect is reported with its seed; a simulator gap is fixed in the simulator.
 
 - Must preserve one deterministic core as the account/order/risk/durability authority.
 - Must retain ordered strategy effects through overload, failure, rotation and restart.
@@ -355,6 +399,10 @@ audit_rust_bin="$(dirname "$(rustup which --toolchain 1.90.0 rustc)")"
 export PATH="$audit_rust_bin:$PATH"
 export RUSTC="$audit_rust_bin/rustc"
 export RUSTDOC="$audit_rust_bin/rustdoc"
+
+# One simulated seed, kept, with its report; then a sweep with the byte-identity check
+cargo run --manifest-path engine/Cargo.toml --release -- sim --seed 4 --seconds 300 --crashes 1 --faults light --keep --out /tmp/sim --report /tmp/sim/report.json
+cargo run --manifest-path engine/Cargo.toml --release -- sim --seed 100 --seeds 24 --faults light --twice
 
 # Style formatting check
 cargo fmt --manifest-path engine/Cargo.toml --all -- --check

@@ -28,6 +28,15 @@ engine — the execution loop
       on a simulated venue. The log must be new. Prints the report; --report
       writes it as JSON.
 
+  engine sim [--seed N] [--seeds K] [--seconds S] [--symbols M] [--crashes C]
+             [--faults none|light|heavy] [--twice] [--out DIR] [--keep] [--report PATH]
+      Run the loop on a seeded synthetic market against the simulated venue,
+      with venue replies lost, private updates dropped and duplicated, feed
+      hiccups, and C process deaths with a boot from the log after each. At
+      the end the venue's books, the log and the engine are checked against
+      each other. One seed is one run, byte for byte; --twice proves it.
+      Exit status is non-zero when any check fails; the seed reproduces it.
+
   engine bench [--events N] [--rate PER_SEC] [--every N] [--symbols A,B]
                [--wal PATH] [--fills] [--venue-delay-ms MS]
       Measure the real loop through a local submit response on this box.

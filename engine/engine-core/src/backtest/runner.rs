@@ -231,7 +231,7 @@ fn require_fresh_log(path: &Path) -> Result<(), EngineError> {
     }
 }
 
-fn read_engine_ledger(path: &Path) -> Result<EngineLedger, EngineError> {
+pub(crate) fn read_engine_ledger(path: &Path) -> Result<EngineLedger, EngineError> {
     let mut ledger = EngineLedger::default();
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,

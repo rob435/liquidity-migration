@@ -63,6 +63,52 @@ edit STATE.md to match.
   - Rust 1.90 verification passes 567 venue tests, strict workspace/all-target
     Clippy and venue formatting in an isolated `efb658b3` export plus this patch.
     Concurrent audit integration is excluded from this qualification.
+- **2026-09-05 13:17 UTC — `engine sim`: the live loop under seeded faults and deaths; the log is now independent of hash seeds (branch `claude/tier0`, three local commits).**
+  - `engine sim` (`engine/engine-core/src/sim/`, [docs/engine.md](docs/engine.md) §10)
+    runs `Engine::boot_as` and the quoter on a seeded synthetic market against
+    the backtest's simulated venue and virtual clock, with per-call faults on
+    every boundary — venue refusals, requests lost before the venue, replies
+    lost after it, slow replies, account reads failing, private updates
+    dropped, duplicated and delayed, private and market socket hiccups, feed
+    resets — and process deaths at seeded instants, each followed by a boot
+    from the log. An engine exit is modelled as the supervisor restart it
+    is; nine in one run is a crash loop. At the end the venue's books, the
+    log and the engine are judged: positions agree, every venue execution id
+    is in the log, no venue order is unknown to the engine, the log's fills
+    as cash equal the venue's realized P&L net of fees when flat, the closed
+    round trips net the same, every figure is finite. `--twice` proves one
+    seed writes one log. The simulated venue gained a fill history for the
+    recovery reads and an order-status lookup, which every live adapter has.
+  - Found and fixed on the first seeds: two runs of one input wrote
+    different logs. The risk envelope summed reservations and recent fills
+    in `HashMap` order (`engine-risk` `exposure.rs`), so `EnvelopeBreached`
+    verdicts differed in their last digit; the amend-confirmation sweep
+    pulled overdue amends in `HashMap` order, so two notes and two cancels
+    could swap. The exposure book's maps and the `Engine`'s seven remaining
+    `HashMap` fields are `BTreeMap`s. Neither showed with one symbol, which
+    is all the backtest's byte-identity test traded.
+  - Findings for the owner, not changed here. (1) An ambiguous send (request
+    lost before the venue) followed by the halt's cancel returning 110001
+    "not working" exits the process for reconciliation: 14 restarts across
+    24 light-fault seeds, each resolvable by the order lookup the engine
+    already uses at boot. (2) Under heavy faults (10% failing calls) that
+    policy loops: seeds 205 and 211 restarted nine times and never finished
+    the tape. (3) `trades.jsonl` omits round trips closed by fills the dead
+    process never saw, on 23 of 24 seeds with one death; `engine fills` reads
+    the log and is complete. (4) Real-clock deadlines (`MUTATION_DRAIN_TIMEOUT`,
+    the one-second dispatch and callback deadlines) make behaviour depend on
+    machine load: three heavy seeds diverged during a loaded sweep and replay
+    identical alone.
+  - Integration tests are one binary per crate (`engine-venue` 13 to 1 plus
+    `arming_env`; `engine-risk`'s contract suite was already one explicit
+    target and its seven part files now live under it; `engine-wal` 2 to 1;
+    `engine-core` 2 to 1): 40 test binaries become 21, where test targets
+    were 151 of 325 CPU-seconds of a debug build.
+  - Receipts: pinned Rust 1.90.0 rustfmt and `clippy --workspace
+    --all-targets --locked -D warnings` clean; workspace debug tests 2,002
+    passed, 0 failed, 5 ignored (the baseline's 1,996 plus six new tests); `engine sim` light sweep 24 seeds, 0 failed, 24 of 24
+    replays identical; heavy sweep 12 seeds, 3 symbols, 2 deaths each, 10 of
+    12 finished the tape. No push, deploy, or production access.
 
 - **2026-09-05 — Checkpoint local audit foundations; shared trading remains in integration.**
   - Every order records its dispatch authority atomically before a durable

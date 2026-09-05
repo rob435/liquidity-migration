@@ -28,6 +28,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use engine_types::numeric::ExactNumber;
+use engine_types::orders::{OrderLookup, OrderLookupClient, OrderLookupRow, TerminalOrderStatus};
 use engine_types::{
     AccountIdentity, AccountView, AmendSpec, Depth, FeedError, ForcedClose, InstrumentRule,
     OrderAck, OrderFeed, OrderKind, OrderRequest, OrderUpdate, PositionView, Side, Symbol,
@@ -131,6 +133,16 @@ pub struct Accounting {
     pub liquidated: bool,
 }
 
+/// What the venue accepted under a client order id, so a status lookup can
+/// answer the way the real venue's order query does.
+#[derive(Clone, Debug)]
+struct Accepted {
+    symbol: usize,
+    venue_order_id: String,
+    qty: f64,
+    filled: f64,
+}
+
 pub struct SimulatedVenue {
     params: VenueParams,
     scheduler: Scheduler,
@@ -145,6 +157,10 @@ pub struct SimulatedVenue {
     /// Keyed by client order id; a `BTreeMap` so iteration is one order.
     resting: BTreeMap<String, Resting>,
     private: VecDeque<(u64, OrderUpdate)>,
+    /// Every fill in venue order: what the history reads recover from.
+    executions: Vec<VenueExecution>,
+    /// Every order the venue accepted, by client order id, for lookups.
+    accepted: BTreeMap<String, Accepted>,
     cash: f64,
     accounting: Accounting,
     exec_counter: u64,
@@ -184,6 +200,8 @@ impl SimulatedVenue {
             positions: vec![None; n],
             resting: BTreeMap::new(),
             private: VecDeque::new(),
+            executions: Vec::new(),
+            accepted: BTreeMap::new(),
             accounting,
             exec_counter: 0,
             order_counter: 0,
@@ -308,6 +326,15 @@ impl SimulatedVenue {
                 request.qty = position.qty;
             }
         }
+        self.accepted.insert(
+            request.client_order_id.clone(),
+            Accepted {
+                symbol: i,
+                venue_order_id: venue_order_id.clone(),
+                qty: request.qty,
+                filled: 0.0,
+            },
+        );
         match request.kind {
             OrderKind::Market => {
                 let filled = self.walk_book(&request, None, false, None);
@@ -555,6 +582,9 @@ impl SimulatedVenue {
             _ => {}
         }
 
+        if let Some(accepted) = self.accepted.get_mut(&request.client_order_id) {
+            accepted.filled += qty;
+        }
         let stop = request.stop.map(|s| s.trigger_px);
         match self.positions[i].take() {
             None => {
@@ -615,6 +645,19 @@ impl SimulatedVenue {
             self.exec_counter += 1;
             format!("sim-exec-{}", self.exec_counter)
         };
+        self.executions.push(VenueExecution {
+            exec_id: exec_id.clone(),
+            client_order_id: request.client_order_id.clone(),
+            symbol: self.name(i).to_string(),
+            side: request.side,
+            qty,
+            px,
+            fee: Some(fee),
+            amounts: None,
+            is_maker,
+            forced_close: forced,
+            venue_ts_ms: clock::wall_ms(),
+        });
         self.queue_private(OrderUpdate::Fill {
             allocation: None,
             amounts: None,
@@ -925,7 +968,7 @@ impl SimulatedVenue {
         }
     }
 
-    fn working_orders(&self) -> Vec<VenueOrder> {
+    pub fn working_orders(&self) -> Vec<VenueOrder> {
         self.resting
             .values()
             .map(|r| VenueOrder {
@@ -1009,6 +1052,9 @@ impl SimulatedVenue {
             }
             (order.px, order.remaining)
         };
+        if let (Some(qty), Some(accepted)) = (spec.qty, self.accepted.get_mut(client_order_id)) {
+            accepted.qty = qty;
+        }
         // A repriced or enlarged order goes to the back of its new queue.
         let displayed = self.displayed_at(i, side, px);
         if let Some(order) = self.resting.get_mut(client_order_id) {
@@ -1078,6 +1124,61 @@ impl SimulatedVenue {
 
     fn next_private_at(&self) -> Option<u64> {
         self.private.front().map(|(at, _)| *at)
+    }
+    /// The venue's fill history between two wall instants, inclusive.
+    pub fn executions_between(&self, start_ms: i64, end_ms: i64) -> Vec<VenueExecution> {
+        self.executions
+            .iter()
+            .filter(|e| e.venue_ts_ms >= start_ms && e.venue_ts_ms <= end_ms)
+            .cloned()
+            .collect()
+    }
+    /// Every fill the venue has ever made, for a simulation's audit.
+    pub fn executions(&self) -> &[VenueExecution] {
+        &self.executions
+    }
+    /// Lose every update still on the private hop: a private socket that
+    /// died with the process delivers nothing to the next one. Returns how
+    /// many were lost.
+    pub fn drop_private_queue(&mut self) -> usize {
+        let lost = self.private.len();
+        self.private.clear();
+        lost
+    }
+    /// The venue's answer to "what became of this order": working, ended
+    /// with this much filled, or never seen at all.
+    pub fn lookup(&self, symbol: &str, client_order_id: &str) -> OrderLookup {
+        let Some(accepted) = self.accepted.get(client_order_id) else {
+            return OrderLookup::NeverAccepted;
+        };
+        let name = self.name(accepted.symbol);
+        if name != symbol {
+            return OrderLookup::Unknown {
+                reason: format!("{client_order_id} belongs to {name}, not {symbol}"),
+            };
+        }
+        let row = OrderLookupRow {
+            symbol: name.to_string(),
+            client_order_id: client_order_id.to_string(),
+            venue_order_id: accepted.venue_order_id.clone(),
+            filled_qty: ExactNumber::venue_decimal(&format!("{}", accepted.filled))
+                .or_else(|_| ExactNumber::venue_decimal("0"))
+                .map_err(|_| ())
+                .expect("zero is a decimal"),
+        };
+        if self.resting.contains_key(client_order_id) {
+            OrderLookup::Working(row)
+        } else if accepted.filled >= accepted.qty - 1e-12 {
+            OrderLookup::Terminal {
+                status: TerminalOrderStatus::Filled,
+                row,
+            }
+        } else {
+            OrderLookup::Terminal {
+                status: TerminalOrderStatus::Cancelled,
+                row,
+            }
+        }
     }
 
     pub fn private_pending(&self) -> usize {
@@ -1204,6 +1305,14 @@ impl VenueGateway for SimVenueGateway {
         Some(self.lock().add_symbol(symbol))
     }
 
+    fn order_lookup_client(&self) -> Option<Box<dyn OrderLookupClient>> {
+        Some(Box::new(SimLookupClient {
+            venue: self.venue.clone(),
+            scheduler: self.scheduler.clone(),
+            rtt_ns: self.rtt_ns,
+        }))
+    }
+
     async fn set_leverage(&mut self, symbol: SymbolId, leverage: f64) -> Result<(), VenueError> {
         if !leverage.is_finite() || leverage < 1.0 {
             return Err(VenueError::Rejected {
@@ -1243,13 +1352,45 @@ impl VenueGateway for SimVenueGateway {
         Ok(self.lock().working_orders())
     }
 
-    /// A fresh account: nothing traded before this run.
+    /// The venue's own fill history: what boot and a stream gap recover from.
     async fn executions(
         &mut self,
-        _start_ms: i64,
-        _end_ms: i64,
+        start_ms: i64,
+        end_ms: i64,
     ) -> Result<Vec<VenueExecution>, VenueError> {
-        Ok(Vec::new())
+        Ok(self.lock().executions_between(start_ms, end_ms))
+    }
+}
+
+/// The venue's order query, one round trip away, answered from the venue as
+/// it stands when the question arrives.
+pub struct SimLookupClient {
+    venue: Arc<Mutex<SimulatedVenue>>,
+    scheduler: Scheduler,
+    rtt_ns: u64,
+}
+
+#[engine_types::async_trait]
+impl OrderLookupClient for SimLookupClient {
+    async fn lookup(&self, symbol: &str, client_order_id: &str) -> Result<OrderLookup, VenueError> {
+        self.scheduler
+            .sleep(
+                std::time::Duration::from_nanos(self.rtt_ns / 2),
+                WaiterKind::Venue,
+            )
+            .await;
+        let answer = self
+            .venue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .lookup(symbol, client_order_id);
+        self.scheduler
+            .sleep(
+                std::time::Duration::from_nanos(self.rtt_ns / 2),
+                WaiterKind::Venue,
+            )
+            .await;
+        Ok(answer)
     }
 }
 
@@ -1264,13 +1405,18 @@ impl engine_types::orders::AccountRecoveryClient for SimVenueGateway {
         Ok(view)
     }
 
+    /// The venue's fill history, one round trip away: what a stream gap
+    /// recovers from, the same rows the gateway's `executions` serves.
     async fn executions(
         &self,
         _symbols: &[Symbol],
-        _start_ms: i64,
-        _end_ms: i64,
+        start_ms: i64,
+        end_ms: i64,
     ) -> Result<Vec<VenueExecution>, VenueError> {
-        Ok(Vec::new())
+        self.half_flight().await;
+        let rows = self.lock().executions_between(start_ms, end_ms);
+        self.half_flight().await;
+        Ok(rows)
     }
 }
 
