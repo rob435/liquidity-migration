@@ -153,6 +153,10 @@ PREVIOUS_COMMIT_FILE=$RELEASE_DIR/previous-commit
 # that recorder running.
 CONTROLS_SUDOERS=/etc/sudoers.d/liquidity-migration-controls
 QUALIFIED_RELEASE_DIR=""
+# How long a unit must hold one main process after publishing a fresh
+# heartbeat. Longer than the engine's and the signal worker's restart cycle
+# (RestartSec=5 plus the seconds each spends before it aborts).
+HEARTBEAT_SETTLE_SECONDS=12
 
 ENGINE_ENVIRONMENT=/etc/liquidity-migration/engine.env
 ENGINE_DEMO_CONFIG=/etc/liquidity-migration/engine.toml
@@ -239,18 +243,34 @@ mainnet_armed() {
 
 # Wait for a heartbeat this run's process wrote. `since` is read before the
 # unit starts, so a file left by the previous generation cannot satisfy it.
+# The engine and the signal worker both write the heartbeat before they read
+# the state that can abort them, so a crash loop publishes a fresh heartbeat
+# on every restart: freshness alone cannot tell a live unit from a restarting
+# one. The unit must also hold one main process across HEARTBEAT_SETTLE_SECONDS.
 wait_fresh_heartbeat() {
-    local unit="$1" heartbeat="$2" since="$3" attempt written
+    local unit="$1" heartbeat="$2" since="$3" attempt written pid restarts restarting=0
     for attempt in $(seq 1 90); do
-        if systemctl is-active --quiet "$unit" && [ -f "$heartbeat" ]; then
+        if [ "$(systemctl show --property=ActiveState --value "$unit")" = "active" ] \
+            && [ -f "$heartbeat" ]; then
             written="$(stat -c %Y "$heartbeat")"
-            if [ "$written" -ge "$since" ]; then
-                echo "heartbeat-ok unit=$unit age=$(( $(date +%s) - written ))s"
-                return 0
+            pid="$(systemctl show --property=MainPID --value "$unit")"
+            restarts="$(systemctl show --property=NRestarts --value "$unit")"
+            if [ "$written" -ge "$since" ] && [ "${pid:-0}" != "0" ]; then
+                sleep "$HEARTBEAT_SETTLE_SECONDS"
+                if [ "$(systemctl show --property=ActiveState --value "$unit")" = "active" ] \
+                    && [ "$(systemctl show --property=MainPID --value "$unit")" = "$pid" ] \
+                    && [ "$(systemctl show --property=NRestarts --value "$unit")" = "$restarts" ]; then
+                    echo "heartbeat-ok unit=$unit age=$(( $(date +%s) - written ))s pid=$pid"
+                    return 0
+                fi
+                restarting=1
+                continue
             fi
         fi
         sleep 2
     done
+    [ "$restarting" -eq 0 ] \
+        || fail "$unit restarts after each heartbeat at $heartbeat"
     fail "$unit did not publish a fresh heartbeat at $heartbeat"
 }
 

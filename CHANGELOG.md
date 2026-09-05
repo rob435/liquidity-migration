@@ -9,8 +9,8 @@ edit STATE.md to match.
 
 - **2026-09-05 22:48 UTC — The rollback printed `deploy-ok` over a crash-looping
   fleet, and the workers that replaced their quarantined state started their
-  sequences at 0. Two faults left by `mainnet-4117d27a32d02421` below, neither
-  yet addressed in code.**
+  sequences at 0. Two faults left by `mainnet-4117d27a32d02421` below. The gate
+  is fixed here; the sequence reset is not.**
   - `wait_fresh_heartbeat` (`scripts/deploy_vps_live.sh:242`) samples
     `systemctl is-active` and the heartbeat mtime once per attempt. A unit on
     `Restart=always` is `active` for the moments it lives and rewrites its
@@ -21,7 +21,13 @@ edit STATE.md to match.
     the same second printed `signal-worker-demo activating heartbeat 1s` and
     `signal-worker-mainnet activating heartbeat 2s`. The gate cannot tell a
     running unit from a restarting one, so a deploy or rollback reports success
-    over either.
+    over either. **Fixed**: the gate now reads `ActiveState`, `MainPID` and
+    `NRestarts`, and requires one main process to survive
+    `HEARTBEAT_SETTLE_SECONDS` = 12 after the heartbeat is fresh. Tests
+    `test_the_heartbeat_gate_refuses_a_unit_that_restarts_after_each_heartbeat`
+    and `…_accepts_a_unit_that_holds_one_process`; against the previous gate the
+    crash-looping stub returns 0 and prints `heartbeat-ok … age=0s`. A settled
+    deploy pays 12 s per waited unit and nothing else.
   - The workers that started clean at 22:54 started their sequences at 0.
     `WorkerState::new` sets `last_input_sequence`, `long_output_sequence` and
     `carry_output_sequence` to 0 (`engine/signal-worker/src/worker.rs:318`), and
@@ -35,8 +41,15 @@ edit STATE.md to match.
     worker's `long_output_sequence` and `carry_output_sequence` against the
     engine's frontier for that source, or simply whether a signal observation
     has reached the mainnet WAL since 22:54.
-  - Neither fix is written: one is a deploy gate and one is a boot-time
-    reconciliation, both guards, so both are the owner's call.
+  - Why the gate was fixed rather than proposed: `wait_fresh_heartbeat` is an
+    existing gate the deploy already acts on — it decides whether a handover
+    stands or rolls back — and it returned success over a fleet that was down.
+    That is a fault in code that runs, not a new guard, so the no-new-safety-
+    machinery rule does not hold it back. Reverting it is one commit if the
+    owner disagrees.
+  - The sequence reset is not fixed and is the owner's call: it is boot-time
+    reconciliation the worker does not do today, and it changes what a worker
+    may republish after its state is replaced.
 
 - **2026-09-05 22:50 UTC — Incident `mainnet-4117d27a32d02421`: the deploy of
   `80dc5c69` reached both
@@ -122,7 +135,6 @@ edit STATE.md to match.
     (`Engine::boot_as`, the path `engine sim` and the tests use), which writes
     none of these records. The takeover and WAL fixes of 22:20 stand and were
     exercised by this deploy.
-
 - **2026-09-05 22:20 UTC — Incident `demo-b161102514734dd5`: the deploy of
   `60bb0abb` took the demo realm down for 949 s. The takeover's verify replayed the whole 6.6 GB
   WAL chain into 8 GB of memory and was OOM-killed; the import then wrote an

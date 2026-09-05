@@ -570,3 +570,108 @@ def test_a_realm_start_runs_its_liveness_watchdog_after_every_unit_it_watches(
                     unit,
                     calls,
                 )
+
+
+def _run_heartbeat_gate(tmp_path: Path, name: str, crash_loop: bool) -> subprocess.CompletedProcess[str]:
+    """`wait_fresh_heartbeat` against a stubbed unit that always writes a
+    fresh heartbeat, restarting between reads only when crash_loop is set."""
+
+    bin_dir = tmp_path / name / "bin"
+    bin_dir.mkdir(parents=True)
+    counter = tmp_path / name / "restarts"
+    counter.write_text("0", encoding="utf-8")
+    systemctl = bin_dir / "systemctl"
+    systemctl.write_text(
+        """#!/usr/bin/env bash
+property=""
+for argument in "$@"; do
+    case "$argument" in --property=*) property="${argument#--property=}" ;; esac
+done
+case "$property" in
+    ActiveState) echo active ;;
+    MainPID)
+        if [ "$LM_TEST_CRASH_LOOP" = 1 ]; then
+            count=$(( $(cat "$LM_TEST_RESTARTS") + 1 ))
+            printf '%s' "$count" > "$LM_TEST_RESTARTS"
+            echo "$(( 1000 + count ))"
+        else
+            echo 4242
+        fi
+        ;;
+    NRestarts) [ "$LM_TEST_CRASH_LOOP" = 1 ] && cat "$LM_TEST_RESTARTS" || echo 0 ;;
+    *) echo "" ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+    # The gate's own waits; the loop under test does not need wall-clock time.
+    sleep = bin_dir / "sleep"
+    sleep.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    sleep.chmod(0o755)
+
+    heartbeat = tmp_path / name / "heartbeat.json"
+    heartbeat.write_text("{}", encoding="utf-8")
+    remote = _remote_script()
+    # Defaulted, not required, so the gate's behaviour is what fails this
+    # harness rather than the absence of the constant.
+    settle = next(
+        (line for line in remote.splitlines() if line.startswith("HEARTBEAT_SETTLE_SECONDS=")),
+        "HEARTBEAT_SETTLE_SECONDS=12",
+    )
+    harness = "\n".join(
+        [
+            "set -euo pipefail",
+            'fail() { echo "deploy failed: $*" >&2; exit 1; }',
+            settle,
+            _function(remote, "wait_fresh_heartbeat"),
+            f'wait_fresh_heartbeat unit.service "{heartbeat}" 1',
+        ]
+    )
+    return subprocess.run(
+        ["bash", "-c", harness],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "LM_TEST_CRASH_LOOP": "1" if crash_loop else "0",
+            "LM_TEST_RESTARTS": str(counter),
+        },
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def test_the_heartbeat_gate_refuses_a_unit_that_restarts_after_each_heartbeat(
+    tmp_path: Path,
+) -> None:
+    """The engine and the signal worker write the heartbeat before they read
+    the state that can abort them, so a crash loop republishes a fresh
+    heartbeat every RestartSec. The rollback of 2026-09-05 22:44 UTC read that
+    as `heartbeat-ok` and reported `deploy-ok` over two dead signal workers."""
+
+    result = _run_heartbeat_gate(tmp_path, "crash-loop", crash_loop=True)
+
+    assert result.returncode != 0, result.stdout
+    assert "heartbeat-ok" not in result.stdout
+    assert "restarts after each heartbeat" in result.stderr
+
+
+def test_the_heartbeat_gate_accepts_a_unit_that_holds_one_process(tmp_path: Path) -> None:
+    result = _run_heartbeat_gate(tmp_path, "settled", crash_loop=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "heartbeat-ok unit=unit.service" in result.stdout
+    assert "pid=4242" in result.stdout
+
+
+def test_the_heartbeat_gate_reads_unit_state_and_not_only_file_freshness() -> None:
+    gate = _function_body(_remote_script(), "wait_fresh_heartbeat")
+
+    assert 'systemctl show --property=NRestarts --value "$unit"' in gate
+    assert 'systemctl show --property=MainPID --value "$unit"' in gate
+    assert 'sleep "$HEARTBEAT_SETTLE_SECONDS"' in gate
+    # is-active is true for the instant a crash-looping process is running.
+    assert "systemctl is-active" not in gate
