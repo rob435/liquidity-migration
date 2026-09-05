@@ -25,6 +25,194 @@ edit STATE.md to match.
   `EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db scripts/ops.sh
   deploy`.
 
+- **2026-09-05 06:00 UTC — The twenty-first page: the discard ceiling is
+  broken, a gate opens with no deletion that could have opened it, and the
+  uploader's run window makes the sawtooth two-sided. No code change and no
+  ninth defect: every mechanism here is the deployed behaviour of the eight
+  merged, undeployed recorder fixes plus the uploader's leak fix.** The 05:23
+  page's ceiling of 4 113.8 frames/s — the pair's inbound rate while both
+  writers are gated, which it used to bound every window figure in this log —
+  is exceeded. The page ends with **both recorders gated and still gated**,
+  discarding **4 214.7 frames/s** with every single frame thrown away.
+  - Incident `host-ecbac293ecc90d5e`, scope `host`, host `ip-208-84-103-4`,
+    `new_critical_refs=capture-disk,capture-disk:forward-market-binance`. Id
+    re-derived exactly:
+    `sha256("host\ncapture-disk\ncapture-disk:forward-market-binance")[:16]`
+    = `ecbac293ecc90d5e` (`scripts/runtime/check_fleet_liveness.py:806-807`).
+    Exact alert text, both refs, raised at
+    `scripts/runtime/check_fleet_liveness.py:431-433`: `CRITICAL recorder
+    storage is blocked; frames are counted but not written` and `CRITICAL
+    recorder forward-market-binance storage is blocked; frames are counted but
+    not written`. Per the 03:21 entry the id names whose cooldown cleared
+    first, not a distinct fault; both refs came due in this check.
+  - **The funded engine is not implicated.** No engine, worker or timer is
+    named. Both units are `market_tape` recorders — research tape outside the
+    order path — and the 25 GiB floor is the reservation held for mainnet's
+    WAL, which `writable()` blocks the recorder *above*
+    (`market_tape/storage.py:433`). Pids unchanged across all twenty-one
+    pages — 2259813 (Bybit), 2263691 (Binance) — so neither recorder has
+    restarted and the host still runs `65ee75a7`.
+  - **The window, measured.**
+    `liquidity-migration-forward-capture-binance.service` 05:46:10.118 →
+    06:00:10.578; the Bybit unit 05:45:27.307 → 05:59:58.018 (its last line is
+    a retention pass at 06:00:15.306). **Both excerpts are exactly 40 lines**
+    — the `journalctl -n 40` cap — so each has its head cut and nothing before
+    its first line is visible; inside those two windows the excerpts are
+    contiguous and hold every line the unit logged.
+
+    | Quantity | Binance | Bybit |
+    | :--- | ---: | ---: |
+    | Window | 840.460 s | 870.711 s |
+    | Frames | 921 689 (1 096.6/s) | 2 654 568 (3 048.7/s) |
+    | Rows kept | 191 601 (228.0/s) | 616 473 (708.0/s) |
+    | Frames discarded | 730 086 | 2 082 955 |
+    | Discarded per row kept | 3.810 | 3.379 |
+    | Window spent gated | 660.358 s (78.57 %) | 690.550 s (79.31 %) |
+    | `retention removed` lines | 2 (6, 83 files) | 3 (5, 4, 5 files) |
+    | `projected_gb` | 378.2 → 372.7 | 1156.8 → 1140.2 |
+
+    Gated time is the 04:52 page's convention: the interval ending on a tick
+    that reads the gate shut. The pair kept 808 074 rows and discarded
+    2 813 041 — **3.481 per row kept**. Cumulative **46 454 544**, and the rate
+    since the 05:54 page is **3 290.1/s** as the sum of the exact per-unit
+    rates (Bybit 2 516.1/s over 360.277 s, Binance 774.0/s over 360.190 s) —
+    above that page's 3 152.0/s and below the incident record of 3 474.0/s.
+    On the 360 s tail that page does not cover, the pair discards **3.690 per
+    row kept** against the **2.935** it measured, so the recovery it caught did
+    not hold.
+  - **The ceiling is broken, and it was never a constant.** The page ends with
+    both units gated and neither writing: Binance 05:57:40.506 → 06:00:10.578,
+    **150.072 s, zero rows, 179 836 frames received and 179 836 discarded**;
+    Bybit 05:57:27.910 → 05:59:58.018, **150.108 s, zero rows, 452 779
+    received and 452 779 discarded**. Received equals discarded to the frame on
+    both units, which is what a shut gate does (`market_tape/record.py:1099-1108`).
+    The stretches overlap by 137.512 s, and the sum of the exact per-unit rates
+    is **4 214.7 frames/s** against the 05:23 page's 4 113.8/s. That page called
+    its number a ceiling because a gated pair can discard no faster than the
+    venues send; the number is therefore the pair's **inbound rate**, which
+    drifts with the venues, and it has drifted up 2.5 % in 37 minutes. Read
+    every "under the ceiling" in this log as "under the inbound rate measured
+    that hour", not as a bound.
+  - **A gate opened with no deletion that could have opened it.** Binance's
+    tick at 05:55:10.435 reads the gate open after 05:54:40.414 read it shut.
+    The nearest unlink on either unit is Bybit's 4-file pass **1.815 s**
+    earlier, and Binance's own last pass was **252.574 s** earlier. Every
+    own-tick lag this incident has measured is longer than 1.815 s — the
+    smallest is 10.075 s, on this page — and the kernel-release bracket the
+    05:39 page took is (21.761 s, 38.780 s]. So free space rose above the
+    25 GiB floor inside one 30 s tick with nothing the tape did to explain it.
+    One unit took all of it: Binance wrote **31 952 rows** in the next interval
+    and read shut again at 05:55:40.448, while Bybit read shut on both
+    surrounding ticks (05:55:27.819, 05:55:57.844). This is the **fifth**
+    independent pointer at a non-tape writer on the filesystem the floor
+    guards, after the 03:39, 03:42, 04:37 and 05:39 pages, and the first in
+    which the rise is bracketed inside a single status interval.
+  - **The uploader's run window, and why the sawtooth has two sides.**
+    `liquidity-migration-market-tape-upload.timer` fires `*:10:00` and its
+    service carries `TimeoutStartSec=3000` — **50 minutes** — and one run ships
+    **both** tapes (`deploy/systemd/liquidity-migration-market-tape-upload.service`).
+    `ship` loops over candidate hours, and for each one `build_archive` writes
+    `<staging>/<name>.tar`, a full second copy of that hour, uploads it, and
+    unlinks it only in the `finally` (`market_tape/pack.py:179,219,371,396`).
+    So a single 05:10 run can still be building and removing GB-scale tars at
+    05:55, and **each candidate hour is one rise and one fall** of free space on
+    the filesystem the 25 GiB floor guards — outside both tape roots, and
+    invisible to `Retention.prune`, which enumerates `self.root.rglob("*.zst")`
+    (`market_tape/storage.py:386`). Earlier pages measured only the rise
+    (deficits of 214–414 files while the tape wrote nothing). This page
+    measures a fall. The correlation is not proof and the payload carries no
+    uploader journal; the host reading that settles it is below and it is
+    sharper than `ls staging` alone.
+  - **Pass size fails to order recovery for a third window running.** Ordered
+    by files unlinked, this window's five passes buy: Bybit **4** →
+    nobody for 79.246 s; Binance **6** → its own gate at +12.435 s; Bybit
+    **5** → its own at +54.835 s (already recorded by the 05:54 page);
+    Binance **83** → **both**, its own at +10.075 s and Bybit's at +27.478 s;
+    Bybit **5** at 06:00:15.306 → outcome past the end of the payload. The
+    83-file pass produced the Binance unit's longest continuous writing stretch
+    of any blocked phase in this incident — **three consecutive open ticks,
+    90.043 s, 95 874 rows** — and Bybit wrote **193 327 rows** in two intervals
+    off the same pass, **289 201 rows for the pair**. The 05:54 page's 5-file
+    pass bought 386 840. Sixteen times the files, two thirds of the rows: what
+    recovers a writer is the margin left at the stopping point and who samples
+    it first, which is `d275885a` (free to `free_target` = `min_free_bytes ×
+    1.05`, `market_tape/storage.py:47,383`) and `fd604613` (the pass opens its
+    own runner's gate with no tick in between). Both merged, both undeployed.
+  - **A narrowing of the 05:54 page's methodological warning.** That page found
+    a 15-file pass at 05:45:55.281 inside the 05:48 page's window and absent
+    from its entry, and concluded that contiguous status lines do not imply an
+    excerpt holds every `retention removed` line. `journalctl -u UNIT -n 40`
+    returns the last 40 lines of that unit with no gaps, so a line whose
+    timestamp falls **between an excerpt's first and last line is necessarily
+    in the excerpt**; what the cap removes is the head. Whether that pass was
+    absent from the 05:48 payload or present and missed in the reading cannot
+    be settled from here — that payload is not in this session. The warning
+    should therefore be read as: an excerpt at the 40-line cap says nothing
+    about events before its first line, and "not one pass in N seconds" is
+    sound only for N inside the excerpt's own span. Both of this page's
+    excerpts sit exactly on the cap, so its window figures start where the
+    excerpts start and no earlier.
+  - **Retention still runs the deployed 300-second clock.** Binance's two
+    passes are **302.527 s** apart; Bybit's three are **305.864 s** and
+    **306.686 s** apart. Not one falls on a crossing — the deployed
+    `_retention_loop` has no `prune_now` at all (`1d8fad9a~1`), so nothing on
+    the host shortens the gap between a crossing and the next scheduled walk.
+    Eighth independent window, subject to the narrowing above. `1d8fad9a` and
+    `1702d14d` remove it.
+  - **The eighth defect is confirmed 57 ticks out of 57.** All 12
+    `projected_gb` upticks are writing intervals (29 648–128 962 rows) and all
+    45 downticks are gated or near-idle ones (≤48 rows); no flat ticks, no
+    exceptions. Eight pages now: 59/59, 63/63, 66/66, 62/62, 65/65, 59/59,
+    57/57 and 57/57. The deployed meter saw 20.79 % of Binance's frames and
+    23.22 % of Bybit's, so both units again report `projected_gb` against an
+    inbound allowance they are spending four to five times over, and
+    `budget.restore_below` = 0.8 can restore shed feeds mid-incident.
+    `2c751c92` fixes the ordering.
+  - **No ninth defect, and no code change.** No test is added because no code
+    changed: every mechanism above is `65ee75a7`'s behaviour and the fixes for
+    all of it are merged and undeployed. This container has no project venv, so
+    `scripts/dev.sh check` could not run here; no Python, Rust, config or test
+    file is touched. Bybit logged two re-anchors for hour `2026-09-05T05`
+    (05:51:27.613 and 05:52:27.680), both immediately after tier changes that
+    added book topics — `reanchored()` compares `reanchor_cursor` against the
+    shard's **current** `book_count()` (`market_tape/record.py:386-387`), so a
+    topic entering a tier re-opens the hour's anchor pass, which is the
+    behaviour and not a re-issue. The first landed on a writing tick; the
+    second was issued 8 ms before a tick that read the gate shut and the gate
+    stayed shut for 270.203 s, so that snapshot met the gate and was thrown
+    away. That is a second instance of the loss the 05:48 page proposed to the
+    owner and did not build, and it stands as recorded, awaiting the `book`
+    rebuild below.
+  - **What the owner must do by hand.** Nothing in this repository will move
+    until a deploy lands, and GitHub has now refused thirty consecutive times
+    for failed account payments. The SSH path needs no GitHub runner and
+    installs all eight recorder fixes plus the uploader's leak fix:
+
+    ```
+    EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db scripts/ops.sh deploy
+    ```
+
+    It restarts the funded engine (the fingerprint hashes the whole `engine`
+    tree). The readings this page leaves open, the first two of them new:
+
+    ```
+    systemctl status liquidity-migration-market-tape-upload.service
+    journalctl -u liquidity-migration-market-tape-upload.service -S 05:00 -U 06:15
+    scripts/ops.sh status
+    scripts/ops.sh curve mainnet 240
+    df -h /var/lib
+    ls -l /var/lib/liquidity-migration/market-tape-upload/staging
+    du -sh /var/lib/liquidity-migration/market-tape /var/lib/liquidity-migration/market-tape-binance
+    python -m market_tape book bybit --hour 2026-09-05T05 --symbol BTCUSDT --depth 50
+    ```
+
+    The uploader journal is the decisive one for the two-sided sawtooth: if the
+    05:10 run was still shipping at 05:55, each hour it packed is one GB-scale
+    rise and fall on the filesystem the floor guards, and the deficits and the
+    unexplained recoveries are the same event seen from both ends. `curve
+    mainnet 240` covers the whole incident at one sample a minute and shows
+    which minutes had no heartbeat at all.
+
 - **2026-09-05 05:54 UTC — The twentieth page: a 5-file pass buys 3.1× what
   an 11-file pass bought four minutes earlier, and the 05:48 page's window
   held a third Binance pass. No code change and no ninth defect: every
