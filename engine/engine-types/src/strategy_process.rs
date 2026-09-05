@@ -13,6 +13,8 @@ pub const STRATEGY_PROCESS_SCHEMA: u16 = 1;
 pub const MAX_PROCESS_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_PROCESS_STATE_BYTES: usize = crate::strategy::MAX_STRATEGY_STATE_BYTES;
 pub const MAX_PROCESS_PROPOSAL_BYTES: usize = 64 * 1024 * 1024;
+// Registered plugs use at most three timer IDs; ownership includes unrearmed deadlines.
+pub const MAX_PROCESS_TIMERS: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -299,6 +301,8 @@ pub struct OwnedOrderSnapshot {
     pub kind: OrderKind,
     pub qty: f64,
     pub filled_qty: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_qty: Option<f64>,
     pub reduce_only: bool,
     pub acked: bool,
     pub resting: bool,
@@ -311,6 +315,7 @@ impl OwnedOrderSnapshot {
             side: self.side,
             qty: self.qty,
             filled_qty: self.filled_qty,
+            remaining_qty: self.remaining_qty,
             reduce_only: self.reduce_only,
         }
     }
@@ -348,6 +353,8 @@ pub enum CallbackPreparation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StrategyCallbackInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_origin: Option<CallbackOrderOrigin>,
     pub callback_id: u64,
     pub strategy: StrategyId,
     pub event: CallbackEvent,
@@ -409,6 +416,13 @@ pub struct SnapshotCtx<'a, F> {
 
 impl<'a, F: FnMut(CallbackReply)> SnapshotCtx<'a, F> {
     pub fn new(snapshot: &'a CallbackSnapshot, emit: F) -> Result<Self, String> {
+        if snapshot.orders.iter().any(|row| {
+            row.remaining_qty.is_some_and(|qty| {
+                !qty.is_finite() || qty < 0.0 || !row.qty.is_finite() || qty > row.qty
+            })
+        }) {
+            return Err("strategy order snapshot has an invalid canonical remainder".into());
+        }
         let depths = snapshot
             .symbols
             .iter()
@@ -538,6 +552,7 @@ impl<F: FnMut(CallbackReply)> StrategyCtx for SnapshotCtx<'_, F> {
                     kind: row.kind,
                     qty: row.qty,
                     filled_qty: row.filled_qty,
+                    remaining_qty: row.remaining_qty,
                     reduce_only: row.reduce_only,
                     acked: row.acked,
                 }),
@@ -567,4 +582,72 @@ impl<F: FnMut(CallbackReply)> StrategyCtx for SnapshotCtx<'_, F> {
     fn strategy_events(&self, out: &mut Vec<StrategyEvent>) {
         out.extend(self.snapshot.strategy_events.iter().cloned());
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackOrderOrigin {
+    pub segment: u64,
+    pub sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackWalCursor {
+    pub segment: u64,
+    pub sequence: u64,
+    pub offset: u64,
+}
+
+pub struct CallbackWalRecord {
+    pub cursor: CallbackWalCursor,
+    pub next: CallbackWalCursor,
+    pub source: Option<(Vec<StrategyId>, CallbackEvent)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackQueueSlot {
+    pub callback_id: u64,
+    pub strategy: StrategyId,
+    pub queued: CallbackWalCursor,
+    pub prepared: Option<CallbackWalCursor>,
+    pub event_sha256: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackSourceFrontier {
+    pub strategy: StrategyId,
+    pub cursor: CallbackWalCursor,
+    pub accepted: Option<CallbackOrderOrigin>,
+    pub latest: CallbackOrderOrigin,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignalCallbackDelivery {
+    pub strategy: StrategyId,
+    pub source: String,
+    pub sequence: u64,
+    pub observation_id: String,
+}
+
+pub trait CallbackWalReader: Send {
+    fn start(&self) -> CallbackWalCursor;
+    fn read_callback(
+        &mut self,
+        cursor: CallbackWalCursor,
+        callback_id: u64,
+    ) -> Result<StrategyCallbackInput, crate::WalError> {
+        let _ = callback_id;
+        Err(crate::WalError::Corrupt {
+            offset: cursor.offset,
+            detail: "WAL does not support callback paging".into(),
+        })
+    }
+    fn next(
+        &mut self,
+        cursor: CallbackWalCursor,
+    ) -> Result<Option<CallbackWalRecord>, crate::WalError>;
 }

@@ -2,13 +2,14 @@
 use serde::{Deserialize, Serialize};
 
 use crate::numeric::{Exact, ExactError, ExactInstrumentSpec, PricePrecision};
-use crate::orders::{OrderKind, OrderRequest, Side, SleeveOrderEffect, StopSpec};
+use crate::orders::{AmendSpec, OrderKind, OrderRequest, Side, SleeveOrderEffect, StopSpec};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderInputPolicy {
     /// Strategy binary64 inputs use their shortest round-trip decimal spelling.
     /// This preserves 0.29 as 29 decimal cents without relabeling execution data.
     StrategyShortestDecimal,
+    CanonicalPortfolio,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +19,41 @@ pub struct ExactOrderTerms {
     pub stop_trigger_price: Option<Exact>,
     pub physical_stop_trigger_price: Option<Exact>,
     pub input_policy: OrderInputPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExactAmendTerms {
+    pub quantity: Option<Exact>,
+    pub limit_price: Option<Exact>,
+    pub input_policy: OrderInputPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExactAmendedTerms {
+    pub price: crate::numeric::ExactNumber,
+    pub quantity: crate::numeric::ExactNumber,
+}
+impl ExactAmendedTerms {
+    pub fn validate_projection(&self, px: f64, qty: f64) -> Result<(), OrderLegalityError> {
+        self.price.value.validate_storage()?;
+        self.quantity.value.validate_storage()?;
+        self.price.validate_provenance()?;
+        self.quantity.validate_provenance()?;
+        if !self.price.value.is_positive() || self.quantity.value.is_negative() {
+            return Err(OrderLegalityError::Constraint("amended order amounts"));
+        }
+        if self.price.value.to_f64()? != px || self.quantity.value.to_f64()? != qty {
+            return Err(OrderLegalityError::Projection);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExactStopTerms {
+    pub trigger_price: Exact,
+    pub position_side: Side,
+    pub reference_price: Exact,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,7 +187,49 @@ pub fn quantize_order(
     reference_px: Option<f64>,
     policy: QuantityPolicy,
 ) -> Result<ExactOrderTerms, OrderLegalityError> {
-    let input_qty = strategy_decimal(qty)?;
+    quantize_with_quantity(
+        spec,
+        side,
+        (
+            strategy_decimal(qty)?,
+            OrderInputPolicy::StrategyShortestDecimal,
+        ),
+        kind,
+        stop,
+        reference_px,
+        policy,
+    )
+}
+
+pub fn quantize_portfolio_close(
+    spec: &ExactInstrumentSpec,
+    side: Side,
+    quantity: &Exact,
+    reference_px: Option<f64>,
+    policy: QuantityPolicy,
+) -> Result<ExactOrderTerms, OrderLegalityError> {
+    quantize_with_quantity(
+        spec,
+        side,
+        (quantity.clone(), OrderInputPolicy::CanonicalPortfolio),
+        OrderKind::Market,
+        None,
+        reference_px,
+        policy,
+    )
+}
+
+fn quantize_with_quantity(
+    spec: &ExactInstrumentSpec,
+    side: Side,
+    input: (Exact, OrderInputPolicy),
+    kind: OrderKind,
+    stop: Option<StopSpec>,
+    reference_px: Option<f64>,
+    policy: QuantityPolicy,
+) -> Result<ExactOrderTerms, OrderLegalityError> {
+    let (input_qty, input_policy) = input;
+    input_qty.validate_storage()?;
     let market = matches!(kind, OrderKind::Market);
     let quantity = if policy == QuantityPolicy::CloseEntirePosition {
         if !market {
@@ -226,7 +304,7 @@ pub fn quantize_order(
         limit_price,
         physical_stop_trigger_price: stop_trigger_price.clone(),
         stop_trigger_price,
-        input_policy: OrderInputPolicy::StrategyShortestDecimal,
+        input_policy,
     };
     terms.validate_storage()?;
     Ok(terms)
@@ -345,6 +423,181 @@ impl ExactOrderTerms {
     }
 }
 
+impl ExactAmendTerms {
+    pub fn validate_wire_grid(&self, spec: &ExactInstrumentSpec) -> Result<(), OrderLegalityError> {
+        if let Some(qty) = &self.quantity {
+            decimal_wire(qty)?;
+            if !qty.is_multiple_of(required_positive(&spec.qty_step, "quantity step")?)? {
+                return Err(OrderLegalityError::Constraint("amend quantity grid"));
+            }
+            check_bounds(qty, &spec.min_qty, &spec.max_qty, "amend quantity bounds")?;
+        }
+        if let Some(px) = &self.limit_price {
+            if quantize_price(px, Side::Buy, spec)? != *px {
+                return Err(OrderLegalityError::Constraint("amend price grid"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_projection(&self, amendment: &AmendSpec) -> Result<(), OrderLegalityError> {
+        if self.quantity.is_none() && self.limit_price.is_none() {
+            return Err(OrderLegalityError::Constraint("empty amendment"));
+        }
+        for value in self.quantity.iter().chain(self.limit_price.iter()) {
+            decimal_wire(value)?;
+            value.to_f64()?;
+        }
+        if self.quantity.as_ref().map(Exact::to_f64).transpose()? != amendment.qty
+            || self.limit_price.as_ref().map(Exact::to_f64).transpose()? != amendment.px
+        {
+            return Err(OrderLegalityError::Projection);
+        }
+        Ok(())
+    }
+
+    pub fn apply_projection(&self, amendment: &mut AmendSpec) -> Result<(), OrderLegalityError> {
+        amendment.qty = self.quantity.as_ref().map(Exact::to_f64).transpose()?;
+        amendment.px = self.limit_price.as_ref().map(Exact::to_f64).transpose()?;
+        self.validate_projection(amendment)?;
+        amendment.exact_terms = Some(Box::new(self.clone()));
+        Ok(())
+    }
+}
+
+pub fn quantize_amend(
+    spec: &ExactInstrumentSpec,
+    current: &OrderRequest,
+    amendment: &AmendSpec,
+    reference_px: Option<f64>,
+) -> Result<ExactAmendTerms, OrderLegalityError> {
+    if amendment.px.is_none() && amendment.qty.is_none() {
+        return Err(OrderLegalityError::Constraint("empty amendment"));
+    }
+    let OrderKind::Limit { px: current_px, .. } = current.kind else {
+        return Err(OrderLegalityError::Constraint(
+            "only limit orders can be amended",
+        ));
+    };
+    if let Some(terms) = current.exact_terms.as_deref() {
+        terms.validate_projection(current)?;
+    }
+    let quantity = amendment
+        .qty
+        .map(|qty| {
+            strategy_decimal(qty)?
+                .floor_to(required_positive(&spec.qty_step, "quantity step")?)
+                .map_err(OrderLegalityError::from)
+        })
+        .transpose()?;
+    let limit_price = amendment
+        .px
+        .map(|px| quantize_price(&strategy_decimal(px)?, current.side, spec))
+        .transpose()?;
+    let full_quantity = match &quantity {
+        Some(qty) => qty.clone(),
+        None => match &current.exact_terms {
+            Some(terms) => terms.quantity.clone(),
+            None => strategy_decimal(current.qty)?,
+        },
+    };
+    let full_price = match &limit_price {
+        Some(px) => px.clone(),
+        None => match &current.exact_terms {
+            Some(terms) => terms
+                .limit_price
+                .clone()
+                .ok_or(OrderLegalityError::Projection)?,
+            None => strategy_decimal(current_px)?,
+        },
+    };
+    let projected = ExactOrderTerms {
+        quantity: full_quantity,
+        limit_price: Some(full_price.clone()),
+        stop_trigger_price: None,
+        physical_stop_trigger_price: None,
+        input_policy: OrderInputPolicy::StrategyShortestDecimal,
+    };
+    projected.validate_wire_grid(spec, current.kind, QuantityPolicy::Normal)?;
+    if let Some(min) = &spec.min_notional {
+        min.validate_storage()?;
+        if min.is_negative() {
+            return Err(OrderLegalityError::Constraint("negative minimum notional"));
+        }
+        if &projected.quantity * &full_price < *min {
+            return Err(OrderLegalityError::Constraint("minimum notional"));
+        }
+    }
+    if let Some(stop) = current.sleeve_stop() {
+        let trigger = match current
+            .exact_terms
+            .as_deref()
+            .and_then(|terms| terms.stop_trigger_price.as_ref())
+        {
+            Some(trigger) => trigger.clone(),
+            None => strategy_decimal(stop.trigger_px)?,
+        };
+        let reference = reference_px
+            .map(strategy_decimal)
+            .transpose()?
+            .ok_or(OrderLegalityError::Unavailable("stop reference price"))?;
+        if match current.side {
+            Side::Buy => trigger >= full_price || trigger >= reference,
+            Side::Sell => trigger <= full_price || trigger <= reference,
+        } {
+            return Err(OrderLegalityError::Constraint(
+                "amend crosses protective stop",
+            ));
+        }
+    }
+    Ok(ExactAmendTerms {
+        quantity,
+        limit_price,
+        input_policy: OrderInputPolicy::StrategyShortestDecimal,
+    })
+}
+
+impl ExactStopTerms {
+    pub fn quantize(
+        spec: &ExactInstrumentSpec,
+        position_side: Side,
+        trigger: &Exact,
+        reference: &Exact,
+    ) -> Result<Self, OrderLegalityError> {
+        let terms = Self {
+            trigger_price: quantize_price(trigger, position_side.flipped(), spec)?,
+            position_side,
+            reference_price: reference.clone(),
+        };
+        terms.validate_storage()?;
+        Ok(terms)
+    }
+
+    pub fn validate_storage(&self) -> Result<(), OrderLegalityError> {
+        decimal_wire(&self.trigger_price)?;
+        decimal_wire(&self.reference_price)?;
+        self.trigger_price.to_f64()?;
+        self.reference_price.to_f64()?;
+        if match self.position_side {
+            Side::Buy => self.trigger_price >= self.reference_price,
+            Side::Sell => self.trigger_price <= self.reference_price,
+        } {
+            return Err(OrderLegalityError::Constraint(
+                "stop crosses current reference",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_wire_grid(&self, spec: &ExactInstrumentSpec) -> Result<(), OrderLegalityError> {
+        self.validate_storage()?;
+        if quantize_price(&self.trigger_price, Side::Buy, spec)? != self.trigger_price {
+            return Err(OrderLegalityError::Constraint("stop price grid"));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +634,75 @@ mod tests {
             tif: TimeInForce::Gtc,
         }
     }
+    #[test]
+    fn standalone_stops_round_earlier_without_crossing_the_current_reference() {
+        let long = ExactStopTerms::quantize(&spec(), Side::Buy, &d("1.001"), &d("1.1")).unwrap();
+        assert_eq!(long.trigger_price, d("1.01"));
+        let short = ExactStopTerms::quantize(&spec(), Side::Sell, &d("1.099"), &d("1.0")).unwrap();
+        assert_eq!(short.trigger_price, d("1.09"));
+        assert!(ExactStopTerms::quantize(&spec(), Side::Buy, &d("1.001"), &d("1.01")).is_err());
+        assert!(ExactStopTerms::quantize(&spec(), Side::Sell, &d("1.009"), &d("1.0")).is_err());
+        long.validate_wire_grid(&spec()).unwrap();
+    }
+
+    #[test]
+    fn amendment_fields_are_optional_but_the_assembled_order_remains_legal() {
+        let mut current = OrderRequest {
+            client_order_id: "amend".into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 1.0,
+            kind: limit(1.0),
+            stop: None,
+            reduce_only: false,
+            close_position: false,
+            sleeve_effect: None,
+            exact_terms: None,
+        };
+        let amendment = AmendSpec {
+            px: Some(1.009),
+            qty: None,
+            exact_terms: None,
+        };
+        let terms = quantize_amend(&spec(), &current, &amendment, None).unwrap();
+        assert_eq!(terms.limit_price, Some(d("1")));
+        assert_eq!(terms.quantity, None);
+        let mut projected = amendment.clone();
+        terms.apply_projection(&mut projected).unwrap();
+        assert_eq!(projected.px, Some(1.0));
+        let mut s = spec();
+        s.qty_step = Some(d("1e-21"));
+        s.min_qty = s.qty_step.clone();
+        s.min_notional = Some(d("0.123456789012345679"));
+        ExactOrderTerms {
+            quantity: d("0.123456789012345678901"),
+            limit_price: Some(d("1")),
+            stop_trigger_price: None,
+            physical_stop_trigger_price: None,
+            input_policy: OrderInputPolicy::StrategyShortestDecimal,
+        }
+        .apply_projection(&mut current)
+        .unwrap();
+        assert!(
+            quantize_amend(&s, &current, &amendment, None).is_err(),
+            "unchanged exact quantity was relabeled through a float"
+        );
+        let too_small = AmendSpec {
+            qty: Some(0.0001),
+            px: None,
+            exact_terms: None,
+        };
+        assert!(quantize_amend(&spec(), &current, &too_small, None).is_err());
+        projected.px = Some(2.0);
+        assert!(terms.validate_projection(&projected).is_err());
+        let legacy: AmendSpec = serde_json::from_str(r#"{"px":1.0,"qty":null}"#).unwrap();
+        assert_eq!(
+            serde_json::to_string(&legacy).unwrap(),
+            r#"{"px":1.0,"qty":null}"#
+        );
+    }
+
     #[test]
     fn strategy_conversion_preserves_decimal_ticks_without_erasing_a_real_ulp() {
         for qty in [0.29, 0.3, 8.2] {

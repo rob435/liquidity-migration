@@ -70,6 +70,7 @@ pub(crate) struct SignalState {
     subscriptions: BTreeMap<(String, u16), SignalSubscriptionState>,
     gaps: BTreeMap<String, SignalGap>,
     required_readiness: BTreeSet<StrategyId>,
+    named_producers: BTreeMap<String, [Option<StrategyId>; 2]>,
     producer_frontiers: BTreeMap<String, engine_types::SignalSourceFrontier>,
     readiness_request_cursors: BTreeMap<String, u64>,
     producers: BTreeMap<String, engine_types::SignalProducerLifecycle>,
@@ -122,6 +123,28 @@ impl SignalState {
                     state.consumable(*strategy, source, *sequence, observation_id)?;
                     state.consume(source, *sequence);
                 }
+                WalRecord::StrategyCallbackQueued { input } => {
+                    if let engine_types::strategy_process::CallbackEvent::Signal { observation } =
+                        &input.event
+                    {
+                        if state
+                            .observations
+                            .get(&(observation.source.clone(), observation.sequence))
+                            != Some(observation)
+                        {
+                            return Err(
+                                "queued callback changes its accepted signal observation".into()
+                            );
+                        }
+                        let delivery = engine_types::strategy_process::SignalCallbackDelivery {
+                            strategy: input.strategy,
+                            source: observation.source.clone(),
+                            sequence: observation.sequence,
+                            observation_id: observation.observation_id.clone(),
+                        };
+                        state.restore_callback_delivery(&delivery)?;
+                    }
+                }
                 WalRecord::SignalGapRecorded { gap, .. } => {
                     state.validate_gap(gap, strategies)?;
                     state.record_gap(gap.clone());
@@ -138,6 +161,7 @@ impl SignalState {
                     signal_gaps,
                     signal_producers,
                     signal_suspensions,
+                    signal_callback_deliveries,
                     ..
                 } => {
                     state = Self::default();
@@ -268,6 +292,15 @@ impl SignalState {
                             );
                         }
                     }
+                    for delivery in signal_callback_deliveries {
+                        if state
+                            .delivered
+                            .contains(&(delivery.source.clone(), delivery.sequence))
+                        {
+                            return Err("rotation repeats a signal callback delivery marker".into());
+                        }
+                        state.restore_callback_delivery(delivery)?;
+                    }
                 }
                 _ => {}
             }
@@ -318,6 +351,41 @@ impl SignalState {
     pub fn require_readiness(&mut self, strategies: impl IntoIterator<Item = StrategyId>) {
         self.required_readiness = strategies.into_iter().collect();
         self.begin_readiness_request();
+    }
+
+    pub fn named_source_required(&self, destination: StrategyId) -> bool {
+        self.required_readiness.contains(&destination)
+    }
+
+    pub fn set_named_producer(&mut self, report: &engine_types::SignalProducerReport) {
+        let mut routes = [None; 2];
+        for source in &report.sources {
+            let lane = engine_types::ManagedSignalSource::parse(&source.source)
+                .map(|source| source.lane)
+                .or_else(|| engine_types::legacy_signal_lane(&report.producer, &source.source));
+            if let Some(lane) = lane {
+                routes[match lane {
+                    engine_types::SignalLane::Long => 0,
+                    engine_types::SignalLane::Carry => 1,
+                }] = Some(source.destination);
+            }
+        }
+        self.named_producers.insert(report.producer.clone(), routes);
+    }
+
+    pub fn named_source_verified(&self, source: &str, destination: StrategyId) -> bool {
+        self.named_producers.iter().any(|(producer, routes)| {
+            let lane = engine_types::ManagedSignalSource::parse(source)
+                .filter(|source| source.producer == producer)
+                .map(|source| source.lane)
+                .or_else(|| engine_types::legacy_signal_lane(producer, source));
+            lane.is_some_and(|lane| {
+                routes[match lane {
+                    engine_types::SignalLane::Long => 0,
+                    engine_types::SignalLane::Carry => 1,
+                }] == Some(destination)
+            })
+        })
     }
 
     pub fn readiness_required(&self) -> bool {
@@ -633,6 +701,41 @@ impl SignalState {
         if self.observations.contains_key(&key) {
             self.delivered.insert(key);
         }
+    }
+
+    fn restore_callback_delivery(
+        &mut self,
+        delivery: &engine_types::strategy_process::SignalCallbackDelivery,
+    ) -> Result<(), String> {
+        let key = (delivery.source.clone(), delivery.sequence);
+        let observation = self
+            .observations
+            .get(&key)
+            .ok_or("callback delivery has no retained signal observation")?;
+        if observation.destination != delivery.strategy
+            || observation.observation_id != delivery.observation_id
+        {
+            return Err("callback delivery changes its accepted signal identity".into());
+        }
+        self.delivered.insert(key);
+        Ok(())
+    }
+
+    pub fn callback_deliveries(
+        &self,
+    ) -> Vec<engine_types::strategy_process::SignalCallbackDelivery> {
+        self.delivered
+            .iter()
+            .filter_map(|key| self.observations.get(key))
+            .map(
+                |observation| engine_types::strategy_process::SignalCallbackDelivery {
+                    strategy: observation.destination,
+                    source: observation.source.clone(),
+                    sequence: observation.sequence,
+                    observation_id: observation.observation_id.clone(),
+                },
+            )
+            .collect()
     }
 
     pub fn observations(&self) -> impl Iterator<Item = &SignalObservation> {

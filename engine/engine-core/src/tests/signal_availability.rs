@@ -155,7 +155,7 @@ async fn future_availability_is_rechecked_after_symbol_admission() {
             "signal-availability",
             delivered.clone(),
         ))],
-        &["BTCUSDT"],
+        &["BTCUSDT", "ETHUSDT"],
         &[],
     )
     .await;

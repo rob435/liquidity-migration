@@ -68,6 +68,10 @@ impl Book {
         self.pending.remove(client_order_id)
     }
 
+    pub(crate) fn contains(&self, id: &str) -> bool {
+        self.pending.contains_key(id)
+    }
+
     pub(crate) fn forget(&mut self, client_order_id: &str) {
         self.pending.remove(client_order_id);
     }
@@ -78,6 +82,17 @@ impl Book {
         symbol: SymbolId,
         signed_qty: f64,
         recv_ns: u64,
+    ) {
+        self.on_fill_with_remaining(client_order_id, symbol, signed_qty, recv_ns, None);
+    }
+
+    pub(crate) fn on_fill_with_remaining(
+        &mut self,
+        client_order_id: &str,
+        symbol: SymbolId,
+        signed_qty: f64,
+        recv_ns: u64,
+        remaining: Option<f64>,
     ) {
         let stop_fraction = self
             .pending
@@ -91,7 +106,7 @@ impl Book {
             return;
         };
         // The reservation shrinks toward zero by what actually filled.
-        let left = pending.signed_qty.abs() - signed_qty.abs();
+        let left = remaining.unwrap_or_else(|| pending.signed_qty.abs() - signed_qty.abs());
         pending.signed_qty = if left > 0.0 {
             left * pending.signed_qty.signum()
         } else {

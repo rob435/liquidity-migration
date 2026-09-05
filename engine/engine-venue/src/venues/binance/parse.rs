@@ -18,24 +18,18 @@
 //!
 //! **Account-wide trade recovery is not available.** `userTrades` requires a
 //! symbol, while the order sources that could discover symbols forget orders
-//! based on creation time. The gateway refuses that trait call. Tests still
-//! parse the documented REST row beside the private-stream row so their
-//! execution ids, fee units, and strict numeric checks stay identical.
+//! based on creation time. The gateway refuses that trait call.
 
 use std::collections::HashMap;
 
 use crate::wire::{self, Field, Id};
 use engine_types::ids::SymbolId;
-#[cfg(test)]
-use engine_types::orders::VenueExecution;
 use engine_types::orders::{InstrumentRule, Side, VenueOrder};
 use engine_types::risk::PositionView;
 use engine_types::VenueError;
 use serde::Deserialize;
 use serde_json::Value;
 
-#[cfg(test)]
-use crate::json::int_field;
 use crate::json::{num_field, opt_num_field, str_field};
 
 /// The client-order-id prefix this adapter's own position stops carry.
@@ -373,6 +367,7 @@ impl Stops {
 /// `closePosition` is true tracks the whole position however it grows. A
 /// fixed-quantity or contract-price stop does not satisfy the protection the
 /// gateway promises and remains visible to reconciliation by client id.
+#[cfg(test)]
 pub(crate) fn parse_position_stops(rows: &Value) -> HashMap<String, Stops> {
     let mut out: HashMap<String, Stops> = HashMap::new();
     let Some(rows) = rows.as_array() else {
@@ -426,6 +421,7 @@ fn is_stop_for_position(row: &Value, position_side: Side) -> bool {
     )
 }
 
+#[cfg(test)]
 fn text_or_number(value: &Value) -> Option<f64> {
     match value {
         Value::String(s) => s.trim().parse().ok(),
@@ -496,6 +492,7 @@ pub(crate) fn parse_account(
             .and_then(|held| held.nearest(side))
             .unwrap_or(0.0);
         out.push(PositionView {
+            exact_stop_px: None,
             symbol: id,
             side,
             qty: amount.abs(),
@@ -615,79 +612,6 @@ pub(crate) fn parse_working_algo_orders(
                 .unwrap_or(false)
                 || close_position,
         });
-    }
-    Ok(out)
-}
-
-/// One page of `GET /fapi/v1/userTrades`: each fill, and the venue order id
-/// the caller still has to resolve into a client id — the row itself never
-/// carries one.
-#[cfg(test)]
-pub(crate) fn parse_trades(rows: &Value) -> Result<Vec<(i64, VenueExecution)>, VenueError> {
-    let rows = rows
-        .as_array()
-        .ok_or_else(|| VenueError::BadReply("userTrades was not a list".into()))?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let symbol = str_field(row, "symbol")?;
-        let native_exec_id = id_text(row, "id")
-            .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| {
-                VenueError::BadReply(format!("execution in {symbol} has no readable id"))
-            })?;
-        let exec_id = scoped_execution_id(&symbol, &native_exec_id);
-        let order_id = int_field(row, "orderId")?;
-        let side_raw = str_field(row, "side")?;
-        let side = side_of(&side_raw).ok_or_else(|| {
-            VenueError::BadReply(format!("execution {exec_id} has side {side_raw:?}"))
-        })?;
-        let qty = num_field(row, "qty")?;
-        let px = num_field(row, "price")?;
-        let mut fee = opt_num_field(row, "commission")?;
-        if fee.is_some() {
-            let fee_asset = str_field(row, "commissionAsset")?;
-            if fee_asset != "USDT" {
-                tracing::warn!(
-                    execution = %exec_id,
-                    asset = %fee_asset,
-                    "a Binance fee is not USDT; preserving the fill with an unknown fee"
-                );
-                fee = None;
-            }
-        }
-        let is_maker = row.get("maker").and_then(Value::as_bool).ok_or_else(|| {
-            VenueError::BadReply(format!("execution {exec_id} has no boolean maker flag"))
-        })?;
-        let venue_ts_ms = int_field(row, "time")?;
-        if qty <= 0.0 || px <= 0.0 || venue_ts_ms <= 0 {
-            return Err(VenueError::BadReply(format!(
-                "execution {exec_id} in {symbol} has non-positive quantity, price, or timestamp"
-            )));
-        }
-        out.push((
-            order_id,
-            VenueExecution {
-                exec_id,
-                // Resolved by the caller through the order the venue names;
-                // this row cannot say.
-                client_order_id: String::new(),
-                symbol,
-                side,
-                qty,
-                px,
-                fee,
-                amounts: Some(crate::wire::execution_amounts(
-                    row,
-                    "qty",
-                    "price",
-                    Some("commission"),
-                    row.get("commissionAsset").and_then(Value::as_str),
-                )?),
-                is_maker,
-                forced_close: None,
-                venue_ts_ms,
-            },
-        ));
     }
     Ok(out)
 }
@@ -1182,97 +1106,6 @@ mod tests {
             "type": "LIMIT", "origQty": "0", "executedQty": "0", "closePosition": false
         }]);
         assert!(parse_working_orders(&rows).is_err());
-    }
-
-    #[test]
-    fn a_fill_carries_everything_but_the_client_id_which_the_row_cannot_say() {
-        // The documented userTrades row: commission signed as charged, the
-        // maker flag stated, and no client order id anywhere on it.
-        let rows = json!([{
-            "buyer": false, "commission": "0.07819010", "commissionAsset": "USDT",
-            "id": 698759, "maker": false, "orderId": 25851813, "price": "7819.01",
-            "qty": "0.002", "quoteQty": "15.63802", "realizedPnl": "-0.91539999",
-            "side": "SELL", "positionSide": "BOTH", "symbol": "BTCUSDT",
-            "time": 1569514978020i64
-        }]);
-        let out = parse_trades(&rows).unwrap();
-        assert_eq!(out.len(), 1);
-        let (order_id, fill) = &out[0];
-        assert_eq!(*order_id, 25851813);
-        assert_eq!(fill.exec_id, "BTCUSDT:698759");
-        assert_eq!(fill.client_order_id, "");
-        assert_eq!(fill.side, Side::Sell);
-        assert_eq!(fill.qty, 0.002);
-        assert_eq!(fill.px, 7819.01);
-        assert_eq!(fill.fee, Some(0.07819010));
-        assert!(!fill.is_maker);
-        assert_eq!(fill.venue_ts_ms, 1569514978020);
-    }
-
-    #[test]
-    fn one_malformed_trade_invalidates_the_whole_page() {
-        let valid = json!({
-            "id": 1, "orderId": 2, "symbol": "BTCUSDT", "side": "BUY", "price": "1.0",
-            "qty": "1", "commission": "0.01", "commissionAsset": "USDT",
-            "maker": true, "time": 1
-        });
-        let mut bad_rows = Vec::new();
-        for field in [
-            "id", "orderId", "symbol", "side", "price", "qty", "maker", "time",
-        ] {
-            let mut row = valid.clone();
-            row.as_object_mut().unwrap().remove(field);
-            bad_rows.push(row);
-        }
-        for (field, value) in [
-            ("side", json!("LONG")),
-            ("qty", json!("0")),
-            ("price", json!("0")),
-            ("time", json!(0)),
-            ("maker", json!("yes")),
-        ] {
-            let mut row = valid.clone();
-            row[field] = value;
-            bad_rows.push(row);
-        }
-        for bad in bad_rows {
-            assert!(
-                parse_trades(&json!([valid.clone(), bad])).is_err(),
-                "a malformed row was silently skipped"
-            );
-        }
-    }
-
-    #[test]
-    fn a_missing_commission_stays_unknown_and_an_explicit_zero_stays_zero() {
-        let base = json!({
-            "id": 1, "orderId": 2, "symbol": "BTCUSDT", "side": "BUY", "price": "1.0",
-            "qty": "1", "maker": true, "time": 1
-        });
-        let (_, without) = &parse_trades(&json!([base.clone()])).unwrap()[0];
-        assert_eq!(without.fee, None);
-        let mut zero = base;
-        zero["commission"] = json!("0");
-        zero["commissionAsset"] = json!("USDT");
-        let (_, with_zero) = &parse_trades(&json!([zero])).unwrap()[0];
-        assert_eq!(with_zero.fee, Some(0.0));
-    }
-
-    #[test]
-    fn trade_ids_are_symbol_scoped_and_non_usdt_fees_stay_unknown() {
-        let trade = |symbol: &str, asset: &str| {
-            json!({
-                "id": 7, "orderId": 2, "symbol": symbol, "side": "BUY", "price": "1",
-                "qty": "1", "commission": "0.01", "commissionAsset": asset,
-                "maker": true, "time": 1
-            })
-        };
-        let parsed =
-            parse_trades(&json!([trade("BTCUSDT", "USDT"), trade("ETHUSDT", "USDT")])).unwrap();
-        assert_eq!(parsed[0].1.exec_id, "BTCUSDT:7");
-        assert_eq!(parsed[1].1.exec_id, "ETHUSDT:7");
-        let bnb = parse_trades(&json!([trade("BTCUSDT", "BNB")])).unwrap();
-        assert_eq!(bnb[0].1.fee, None);
     }
 
     #[test]

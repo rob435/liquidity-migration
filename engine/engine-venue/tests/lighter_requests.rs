@@ -514,6 +514,7 @@ async fn an_amend_is_refused_rather_than_turned_into_a_different_trade() {
             SymbolId(0),
             "eng-1",
             AmendSpec {
+                exact_terms: None,
                 px: Some(1.0),
                 qty: None,
             },
@@ -638,4 +639,110 @@ async fn exact_order_size_does_not_lose_a_lot_during_integer_wire_scaling() {
         tx["BaseAmount"], 123_456_789,
         "a legal decimal lot was lost after exact preparation"
     );
+}
+
+#[tokio::test]
+async fn independent_catalog_installs_market_indices_before_a_mutation_without_another_read() {
+    let server = TestServer::start(|request, _| answer(request)).await;
+    let mut gw = gateway(&server);
+    let catalog = gw
+        .instrument_catalog_client()
+        .unwrap()
+        .fetch()
+        .await
+        .unwrap();
+    assert_eq!(catalog.rules.len(), 2);
+    assert_eq!(catalog.specs.len(), 2);
+    gw.install_instrument_catalog(&catalog).unwrap();
+    gw.send_order(&entry(
+        OrderKind::Limit {
+            px: 95_000.0,
+            tif: TimeInForce::Gtc,
+        },
+        None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(server.to_path("/api/v1/orderBookDetails").len(), 1);
+    let other = TestServer::start(|request, _| answer(request)).await;
+    assert!(gateway(&other)
+        .install_instrument_catalog(&catalog)
+        .is_err());
+    assert!(other.requests().is_empty());
+}
+
+#[tokio::test]
+async fn independent_account_recovery_uses_requested_ids_and_preserves_protection() {
+    // Two reads because this venue keeps no stop on the position row; issued
+    // together so the picture is of one moment.
+    let server = TestServer::start(|request, _| answer(request)).await;
+    let mut gw = gateway(&server);
+    let catalog = gw
+        .instrument_catalog_client()
+        .unwrap()
+        .fetch()
+        .await
+        .unwrap();
+    gw.install_instrument_catalog(&catalog).unwrap();
+    let view = gw
+        .account_recovery_client()
+        .expect("independent account recovery client")
+        .account_view(&["ETHUSDT".into(), "BTCUSDT".into()])
+        .await
+        .unwrap();
+    assert_eq!(view.positions[0].symbol, SymbolId(1));
+    assert_eq!(view.equity_usdt, 1500.25);
+    assert_eq!(view.available_usdt, 1200.5);
+    assert_eq!(view.positions.len(), 1);
+    assert!(
+        !view.positions[0].stop_attached,
+        "a position with no stop order read as protected"
+    );
+    assert_eq!(view.positions[0].leverage, Some(20.0));
+    assert_eq!(server.to_path("/api/v1/account").len(), 1);
+    assert_eq!(server.to_path("/api/v1/accountActiveOrders").len(), 1);
+}
+
+#[tokio::test]
+async fn recovery_catalog_install_refreshes_native_units_without_metadata_reads() {
+    let server = TestServer::start(|request, prior| {
+        match request.path.as_str() {
+            "/api/v1/orderBookDetails" if prior > 0 => (503, "metadata unavailable".into()),
+            "/api/v1/trades" => (200, r#"{"code":200,"trades":[{"market_id":0,"ask_account_id":7,"bid_account_id":42,"is_maker_ask":true,"bid_client_order_index":0,"trade_id":9,"size":0.0003,"price":95000,"fee":0.01,"timestamp":150}]}"#.into()),
+            _ => answer(request),
+        }
+    }).await;
+    let gw = gateway(&server);
+    let client = gw.account_recovery_client().unwrap();
+    let catalog = gw
+        .instrument_catalog_client()
+        .unwrap()
+        .fetch()
+        .await
+        .unwrap();
+    client.install_instrument_catalog(&catalog).unwrap();
+    let names = vec!["ETHUSDT".into(), "BTCUSDT".into()];
+    let view = client.account_view(&names).await.unwrap();
+    assert_eq!(
+        (view.positions[0].symbol, view.positions[0].qty),
+        (SymbolId(1), 0.01)
+    );
+    let fills = client.executions(&names, 100, 200).await.unwrap();
+    assert_eq!(fills.len(), 1);
+    assert_eq!(
+        (fills[0].symbol.as_str(), fills[0].qty),
+        ("BTCUSDT", 0.0003)
+    );
+    assert_eq!(
+        fills[0].amounts.as_ref().unwrap().quantity.value,
+        engine_types::numeric::Exact::parse_decimal("0.0003").unwrap()
+    );
+    assert_eq!(server.to_path("/api/v1/orderBookDetails").len(), 1);
+    assert!(server.to_path("/api/v1/nextNonce").is_empty());
+    assert!(server.to_path("/api/v1/sendTx").is_empty());
+    let other = TestServer::start(|_, _| panic!("catalog installation must not issue HTTP")).await;
+    assert!(
+        matches!(gateway(&other).account_recovery_client().unwrap().install_instrument_catalog(&catalog), Err(VenueError::BadRequest(reason)) if reason == "recovery catalog belongs to another endpoint")
+    );
+    assert!(other.requests().is_empty());
 }

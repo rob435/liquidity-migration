@@ -41,6 +41,8 @@ pub struct UnvaluedExecutionTotals {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortfolioState {
+    #[serde(default)]
+    pub internal_settlements: Vec<crate::portfolio_control::InternalSettlementTotals>,
     pub schema_version: u16,
     pub positions: Vec<PortfolioPosition>,
     #[serde(default)]
@@ -55,6 +57,7 @@ pub struct PortfolioState {
 impl Default for PortfolioState {
     fn default() -> Self {
         Self {
+            internal_settlements: Vec::new(),
             schema_version: 2,
             positions: Vec::new(),
             accounting: Vec::new(),

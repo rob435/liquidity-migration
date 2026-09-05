@@ -6,6 +6,64 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 — Pause local Tier-1 integration at the owner's request.**
+  - Shared and opposing same-ticker sleeves retain separate inventory and
+    logical stops. Engine-owned emergency parents combine sub-minimum sleeve
+    fragments, preserve canonical decimal quantities, chunk at market maxima,
+    and allocate actual partial executions and fees once. Durable internal
+    settlement preserves a reconciled manual account baseline through restart.
+  - Independent account/history clients keep private events and reductions
+    serviceable. History applies 32 rows per turn; causal account frontiers,
+    retry ownership and asynchronous durability preserve restart behavior.
+    Recovered fill callback owners persist atomically with actual WAL origins;
+    distinct execution IDs are not hidden by the legacy tuple fallback.
+  - Inactive/net-zero inventory retains market routes; durable identities and
+    native catalog snapshots preserve ownership through reorder and outage.
+    Paged callback sources and input-delivery markers survive rotation.
+  - Five native account readers retain lexical stop prices. Analytic exact lot
+    quantities preserve tiny holdings and late partial exits. Unallocated
+    emergency parents have no fabricated analytic sleeve owner. Simulated and
+    benchmark venues implement the independent recovery capability; the
+    unchanged funding/determinism backtest passes after the missing factory fix.
+  - Frozen-source formatting and strict workspace/all-target Clippy pass.
+    Final venue checks pass 602 tests in debug and release at that boundary;
+    targeted regression and mutation logs remain explicitly scoped. Full final
+    integrated debug/release/developer and resource qualification is unfinished.
+  - `docs/tier1-round-handoff.md` records the restart order and remaining
+    architecture limits; `docs/tier1-round-evidence.json` indexes durable
+    source/log archives, including failed diagnostics. Audit completion is not
+    claimed. No push, funded deployment or live-state mutation occurs.
+
+- **2026-09-05 — Integrate shared sleeve ownership and durable portfolio exits (local, incomplete).**
+  - Typed instruments admit independent sleeves on the same ticker, including
+    opposing positions. Logical stops remain with each sleeve; physical growth
+    carries the earliest applicable native stop. Dispatch rechecks risk,
+    direction and stop ownership after durability without counting its own
+    reservation twice.
+  - A valid reduction retains its exact remaining target before admission, so
+    temporary refusal cannot discard it or turn a partial reduction into a full
+    sleeve exit. Busy emergency symbols no longer starve another sleeve.
+  - Native net closure can settle balanced opposing allocations at one retained
+    observed price. Internal cash/realized amounts remain separate from real
+    venue fills and fees. Six durable crash cuts resume once; stale flat state
+    during a private gap cannot authorize settlement.
+  - Individual failure/after logs are retained in
+    `docs/tier1-portfolio-progress.json`. Independent account/history recovery,
+    exact physical reconciliation, fragmented emergency closures and complete
+    debug/release/developer qualification remain active work. No push, funded
+    deployment, capital, credentials or live-state mutation occurs.
+
+- **2026-09-05 — Delete unused venue parsing and forwarding files (local).**
+  - Eleven forwarding files become direct `engine-public` module re-exports;
+    existing import paths remain available. The realm test reads their actual
+    definitions in `engine-public`.
+  - Binance's unused, test-only REST trade parser, its helper and four self-tests
+    are removed. WebSocket tests assert symbol-scoped IDs and fees directly.
+    The venue changes remove 230 net lines.
+  - Rust 1.90 verification passes 567 venue tests, strict workspace/all-target
+    Clippy and venue formatting in an isolated `efb658b3` export plus this patch.
+    Concurrent audit integration is excluded from this qualification.
+
 - **2026-09-05 — Checkpoint local audit foundations; shared trading remains in integration.**
   - Every order records its dispatch authority atomically before a durable
     attempted marker permits network submission. Independent read-only lookups
@@ -3921,3 +3979,10 @@ edit STATE.md to match.
   the ledger service's first run under v7 completed green on a quiet hour
   (0 movers, 0 triggers, so 0 rows — the first journaled
   `driver-judgment-v7-crime-pump` row is the runtime receipt to watch).
+
+## 2026-09-05 — Aggregate sleeve emergency integration
+
+- Add explicit engine-owned emergency net reductions so sleeve fragments of 0.4 and 0.6 can close a legal venue quantity of 1.0. Individual sleeves cannot own, amend or cancel that parent; real partial fills retain exact allocation slices and actual asset-denominated fees through duplicate delivery and rotated replay.
+- Retain unavailable-price exits with monotonic retry pacing; a 1,000-turn regression fails before the change instead of accepting repeated journal refusals. Restart preserves the durable obligation and permits one immediate retry; attempt IDs and unresolved dispatch rules still prevent duplicate sends.
+- Keep the exact emergency settlement mark fixed and permit balanced virtual offset closure beside a causally confirmed manual holding. Both changed-mark cases and the manual-baseline restart case fail before the fixes.
+- Extend local evidence in `docs/tier1-portfolio-progress.json`; the combined tree still requires final integrated qualification. No push, funded deployment or live-state mutation.

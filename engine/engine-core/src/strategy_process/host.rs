@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 use engine_types::strategy_process::{
@@ -7,6 +7,8 @@ use engine_types::strategy_process::{
 use engine_types::{EngineEvent, Strategy, StrategyId, WalRecord};
 
 use super::{state::CallbackState, CallbackProposal, StrategyProcess, CALLBACK_TIMEOUT};
+
+pub const MAX_STRATEGY_PROCESSES: usize = 4;
 
 pub enum CallbackExecution {
     Embedded,
@@ -20,8 +22,18 @@ pub struct CallbackCompletion {
 }
 
 pub enum CallbackWrite {
-    Accept(Vec<StrategyCallbackInput>),
-    Prepare(StrategyCallbackInput),
+    Accept(
+        Vec<(
+            StrategyCallbackInput,
+            engine_types::strategy_process::CallbackWalCursor,
+        )>,
+    ),
+    Prepare(
+        (
+            StrategyCallbackInput,
+            engine_types::strategy_process::CallbackWalCursor,
+        ),
+    ),
     Commit {
         input_id: u64,
         transition: Option<engine_types::StrategyTransitionState>,
@@ -32,6 +44,11 @@ pub enum CallbackWrite {
 
 pub struct CallbackHost {
     pub state: CallbackState,
+    pub pages: super::paging::CallbackPages,
+    pub order_news: super::order_news::OrderNews,
+    pub pending_boot: BTreeSet<StrategyId>,
+    pub retry_inputs: super::retry::RetryInputs,
+    pub refused_orders: BTreeSet<String>,
     pub unwritten: VecDeque<StrategyCallbackInput>,
     pub completions: tokio::sync::mpsc::Receiver<CallbackCompletion>,
     pub faults: BTreeMap<StrategyId, String>,
@@ -39,7 +56,10 @@ pub struct CallbackHost {
     pub durable: tokio::sync::mpsc::Receiver<Result<(), engine_types::WalError>>,
     durability_result: tokio::sync::mpsc::Sender<Result<(), engine_types::WalError>>,
     initial: BTreeMap<StrategyId, StrategyRuntimeState>,
+    initial_bytes: BTreeMap<StrategyId, usize>,
+    active: BTreeSet<StrategyId>,
     closing: bool,
+    pub last_launched: Option<StrategyId>,
     executable: Option<PathBuf>,
     processes: BTreeMap<StrategyId, StrategyProcess>,
     running: BTreeMap<StrategyId, u64>,
@@ -55,16 +75,54 @@ impl CallbackHost {
         strategies: &[Box<dyn Strategy>],
         records: &[WalRecord],
     ) -> Result<Self, String> {
+        let state = CallbackState::replay(records, strategies.len())?;
+        Self::build(execution, strategies, records, state, Default::default())
+    }
+
+    pub fn new_paged(
+        execution: CallbackExecution,
+        strategies: &[Box<dyn Strategy>],
+        records: &[WalRecord],
+        reader: Box<dyn engine_types::strategy_process::CallbackWalReader>,
+    ) -> Result<Self, String> {
+        let (state, mut pages) = super::paging::CallbackPages::replay(
+            records,
+            strategies.len(),
+            reader.start().segment,
+        )?;
+        pages.attach(reader);
+        Self::build(execution, strategies, records, state, pages)
+    }
+
+    fn build(
+        execution: CallbackExecution,
+        strategies: &[Box<dyn Strategy>],
+        records: &[WalRecord],
+        state: CallbackState,
+        pages: super::paging::CallbackPages,
+    ) -> Result<Self, String> {
         let executable = match execution {
             CallbackExecution::Embedded => None,
             CallbackExecution::Isolated { executable } => Some(executable),
         };
-        let state = CallbackState::replay(records, strategies.len())?;
         let mut initial = BTreeMap::new();
+        let mut initial_bytes = BTreeMap::new();
+        let mut retained = state.retained_process_bytes(None);
+        let mut active = BTreeSet::new();
+        for (index, strategy) in strategies.iter().enumerate() {
+            if strategy.callback_enabled() {
+                active.insert(StrategyId(
+                    u16::try_from(index).map_err(|_| "too many strategy processes")?,
+                ));
+            }
+        }
         if executable.is_some() {
             for (index, strategy) in strategies.iter().enumerate() {
                 let id =
                     StrategyId(u16::try_from(index).map_err(|_| "too many strategy processes")?);
+                if !active.contains(&id) {
+                    continue;
+                }
                 let runtime = strategy.runtime_state()?.ok_or_else(|| {
                     format!(
                         "strategy {} cannot run in an isolated process",
@@ -81,21 +139,65 @@ impl CallbackHost {
                         ));
                     }
                 }
-                initial.insert(id, runtime);
+                if !state.committed.contains_key(&id) {
+                    let size = CallbackState::encoded_size(&runtime)?;
+                    retained = retained.saturating_add(size);
+                    if retained > engine_types::strategy_process::MAX_PROCESS_PROPOSAL_BYTES {
+                        return Err("strategy initial and committed process budget is full".into());
+                    }
+                    initial_bytes.insert(id, size);
+                    initial.insert(id, runtime);
+                }
+            }
+        }
+        let effects = crate::effects::Effects::replay(records, strategies.len())?;
+        let mut refused_orders = BTreeSet::new();
+        for record in records {
+            let WalRecord::StrategyCallbackSource {
+                placement: Some(id),
+                strategy,
+                event,
+            } = record
+            else {
+                continue;
+            };
+            let pending = effects.transitions.values().find_map(|transition| {
+                transition
+                    .order_ids
+                    .iter()
+                    .position(|known| known.as_ref() == Some(id))
+                    .map(|index| (&transition.effects[index], transition.strategy))
+            });
+            let Some((engine_types::Action::Place(intent), owner)) = pending else {
+                continue;
+            };
+            if !matches!(event, CallbackEvent::IntentRefused { symbol, reduce_only, .. } if *symbol == intent.symbol && *reduce_only == intent.reduce_only)
+                || *strategy != owner
+                || !refused_orders.insert(id.clone())
+            {
+                return Err("durable refusal changes or repeats its placement authority".into());
             }
         }
         let (completed, completions) = tokio::sync::mpsc::channel(strategies.len().max(1));
         let (durability_result, durable) = tokio::sync::mpsc::channel(1);
         Ok(Self {
+            last_launched: None,
             closing: false,
             write: None,
             durable,
             durability_result,
             state,
+            pages,
+            order_news: super::order_news::OrderNews::default(),
+            pending_boot: BTreeSet::new(),
+            retry_inputs: Default::default(),
+            refused_orders,
             unwritten: VecDeque::new(),
             completions,
             faults: BTreeMap::new(),
             initial,
+            initial_bytes,
+            active,
             executable,
             processes: BTreeMap::new(),
             running: BTreeMap::new(),
@@ -126,6 +228,32 @@ impl CallbackHost {
         }
     }
 
+    pub fn is_active(&self, strategy: StrategyId) -> bool {
+        self.active.contains(&strategy)
+    }
+
+    pub fn start_page_load(&mut self) {
+        if self.write.is_none() {
+            self.pages.start_load(&self.state, &self.active);
+        }
+    }
+    pub fn unwritten_size(&self) -> usize {
+        self.unwritten_bytes.values().sum()
+    }
+    pub fn pending_for(&self, strategy: StrategyId) -> bool {
+        self.pages.owner_pending(strategy)
+            || self
+                .state
+                .inputs
+                .values()
+                .any(|input| input.strategy == strategy)
+            || self
+                .unwritten
+                .iter()
+                .any(|input| input.strategy == strategy)
+            || matches!(&self.write, Some(CallbackWrite::Accept(inputs)) if inputs.iter().any(|(input, _)| input.strategy == strategy))
+    }
+
     pub fn isolated(&self) -> bool {
         self.executable.is_some()
     }
@@ -142,35 +270,104 @@ impl CallbackHost {
     }
 
     pub fn enqueue(&mut self, strategy: StrategyId, event: &EngineEvent) -> Result<(), String> {
+        let boot = matches!(event, EngineEvent::Boot);
+        if boot {
+            self.pending_boot.insert(strategy);
+        }
+        let result =
+            if self.order_news.unread_for(strategy) || self.retry_inputs.blocks(strategy, event) {
+                Err("prior durable callback sources await delivery".into())
+            } else {
+                self.enqueue_inner(strategy, event, None)
+            };
+        if result.is_ok() {
+            self.retry_inputs.forget(strategy, event);
+        } else {
+            self.retry_inputs.remember(strategy, event);
+        }
+        if boot && result.is_ok() {
+            self.pending_boot.remove(&strategy);
+        }
+        result
+    }
+
+    pub fn enqueue_order(
+        &mut self,
+        strategy: StrategyId,
+        update: engine_types::OrderUpdate,
+        origin: engine_types::strategy_process::CallbackOrderOrigin,
+    ) -> Result<(), String> {
+        self.enqueue_source(strategy, CallbackEvent::Order { update }, origin)
+    }
+
+    pub fn enqueue_source(
+        &mut self,
+        strategy: StrategyId,
+        event: CallbackEvent,
+        origin: engine_types::strategy_process::CallbackOrderOrigin,
+    ) -> Result<(), String> {
+        self.enqueue_inner(strategy, &EngineEvent::try_from(&event)?, Some(origin))?;
+        self.order_news.accepted(strategy, origin);
+        Ok(())
+    }
+
+    fn enqueue_inner(
+        &mut self,
+        strategy: StrategyId,
+        event: &EngineEvent,
+        order_origin: Option<engine_types::strategy_process::CallbackOrderOrigin>,
+    ) -> Result<(), String> {
         let event: CallbackEvent = event.into();
         let durable = matches!(
             event,
-            CallbackEvent::Signal { .. }
+            CallbackEvent::Boot
+                | CallbackEvent::Signal { .. }
                 | CallbackEvent::StrategyEvent { .. }
                 | CallbackEvent::EntryPermission { .. }
                 | CallbackEvent::FlattenDirectional { .. }
         );
-        if durable
+        if (durable || order_origin.is_some())
             && self
                 .state
                 .inputs
                 .values()
                 .chain(self.unwritten.iter())
-                .any(|input| input.strategy == strategy && input.event == event)
+                .any(|input| {
+                    input.strategy == strategy
+                        && input.event == event
+                        && input.order_origin == order_origin
+                })
+        {
+            return Ok(());
+        }
+        if (durable || order_origin.is_some())
+            && matches!(&self.write, Some(CallbackWrite::Accept(inputs)) if inputs.iter().any(|(input, _)| input.strategy == strategy && input.event == event && input.order_origin == order_origin))
         {
             return Ok(());
         }
         let input = StrategyCallbackInput {
+            order_origin,
             callback_id: self.state.next_id,
             strategy,
             event,
             preparation: CallbackPreparation::Queued,
         };
-        let used = self
-            .unwritten_bytes
-            .get(&strategy)
-            .copied()
-            .unwrap_or_default();
+        if self.pages.enabled() {
+            let hash = super::paging::CallbackPages::hash(&input)?;
+            if (durable || order_origin.is_some())
+                && self
+                    .pages
+                    .slots
+                    .values()
+                    .any(|slot| slot.strategy == strategy && slot.event_sha256 == hash)
+            {
+                return Ok(());
+            }
+            if !self.is_active(strategy) || self.pending_for(strategy) {
+                return Err("strategy callback has a prior durable input".into());
+            }
+        }
+        let used = self.unwritten_bytes.values().sum();
         self.state.capacity_for(&input, used)?;
         self.state.next_id = self
             .state
@@ -182,7 +379,11 @@ impl CallbackHost {
         Ok(())
     }
 
-    pub fn accepted(&mut self, input: StrategyCallbackInput) -> Result<(), String> {
+    pub fn accepted(
+        &mut self,
+        input: StrategyCallbackInput,
+        cursor: engine_types::strategy_process::CallbackWalCursor,
+    ) -> Result<(), String> {
         let bytes = CallbackState::size(&input)?;
         let used = self
             .unwritten_bytes
@@ -191,11 +392,19 @@ impl CallbackHost {
         *used = used
             .checked_sub(bytes)
             .ok_or("unwritten callback byte ownership underflow")?;
+        if self.pages.enabled() {
+            self.pages.queued(&input, cursor)?;
+        }
         self.state.accept(input)
     }
 
     pub fn launch(&mut self, strategy: StrategyId) -> Result<(), String> {
-        if self.closing || self.running.contains_key(&strategy) || !self.retry_ready(strategy) {
+        if self.closing
+            || !self.is_active(strategy)
+            || self.running.contains_key(&strategy)
+            || !self.retry_ready(strategy)
+            || self.running.len() >= MAX_STRATEGY_PROCESSES
+        {
             return Ok(());
         }
         let Some(input) = self
@@ -216,6 +425,11 @@ impl CallbackHost {
             .clone();
         let request = input.request(runtime)?;
         let input_id = input.callback_id;
+        if !self.processes.contains_key(&strategy)
+            && self.processes.len() + self.running.len() >= MAX_STRATEGY_PROCESSES
+        {
+            self.processes.pop_first();
+        }
         let process = match self.processes.remove(&strategy) {
             Some(process) => process,
             None => StrategyProcess::spawn(
@@ -225,6 +439,7 @@ impl CallbackHost {
             )?,
         };
         self.running.insert(strategy, input_id);
+        self.last_launched = Some(strategy);
         let completed = self.completed.clone();
         let task = tokio::spawn(async move {
             let result = process.call(request, CALLBACK_TIMEOUT).await;
@@ -248,7 +463,31 @@ impl CallbackHost {
         Ok(())
     }
 
+    pub fn can_commit(
+        &self,
+        input_id: u64,
+        process: &engine_types::strategy_process::StrategyProcessState,
+    ) -> Result<(), String> {
+        let proposed = self.state.can_commit(input_id, process)?;
+        let initial: usize = self
+            .initial_bytes
+            .iter()
+            .filter(|(strategy, _)| **strategy != process.strategy)
+            .map(|(_, bytes)| bytes)
+            .sum();
+        if initial
+            .saturating_add(self.state.retained_process_bytes(Some(process.strategy)))
+            .saturating_add(proposed)
+            > engine_types::strategy_process::MAX_PROCESS_PROPOSAL_BYTES
+        {
+            return Err("strategy initial and committed process budget is full".into());
+        }
+        Ok(())
+    }
+
     pub fn succeeded(&mut self, strategy: StrategyId, process: StrategyProcess) {
+        self.initial.remove(&strategy);
+        self.initial_bytes.remove(&strategy);
         self.faults.remove(&strategy);
         self.retry_at.remove(&strategy);
         self.processes.insert(strategy, process);
@@ -288,5 +527,176 @@ impl Drop for CallbackHost {
 impl CallbackHost {
     pub(crate) fn expect_test_completion(&mut self, strategy: StrategyId, input_id: u64) {
         assert!(self.running.insert(strategy, input_id).is_none());
+    }
+}
+
+#[cfg(test)]
+mod process_capacity_tests {
+    use super::*;
+    use engine_types::strategy_process::CallbackSnapshot;
+
+    #[tokio::test]
+    async fn simultaneous_callbacks_share_a_fixed_process_pool() {
+        let params = toml::from_str("symbol = 'BTCUSDT'\nevery_s = 60\nenabled = false").unwrap();
+        let strategies: Vec<_> = (0..5)
+            .map(|id| engine_strategies::build_strategy("probe", StrategyId(id), &params).unwrap())
+            .collect();
+        let mut host = CallbackHost::new(
+            CallbackExecution::Isolated {
+                executable: "/bin/sleep".into(),
+            },
+            &strategies,
+            &[],
+        )
+        .unwrap();
+        for id in 0..5 {
+            let strategy = StrategyId(id);
+            host.state
+                .accept(StrategyCallbackInput {
+                    order_origin: None,
+                    callback_id: id.into(),
+                    strategy,
+                    event: CallbackEvent::Boot,
+                    preparation: CallbackPreparation::Prepared {
+                        snapshot: CallbackSnapshot {
+                            strategy,
+                            now_ns: 1,
+                            wall_ms: 1,
+                            entries_enabled: true,
+                            account: engine_types::StrategyAccountSummary {
+                                equity_usdt: 1.0,
+                                available_margin_usdt: 1.0,
+                                observed_ns: 1,
+                            },
+                            symbols: Vec::new(),
+                            orders: Vec::new(),
+                            global_checkpoint: None,
+                            strategy_names: Vec::new(),
+                            strategy_events: Vec::new(),
+                        },
+                    },
+                })
+                .unwrap();
+            host.launch(strategy).unwrap();
+        }
+        assert_eq!(
+            host.running.len(),
+            4,
+            "configured sleeve count multiplied the worker resource budget"
+        );
+        assert_eq!(
+            host.state.inputs.len(),
+            5,
+            "waiting for a process slot discarded a callback"
+        );
+        assert!(!host.running.contains_key(&StrategyId(4)));
+        host.stop().await;
+    }
+}
+
+#[cfg(test)]
+mod initial_runtime_budget_tests {
+    use super::*;
+    struct LargeRuntime;
+    impl Strategy for LargeRuntime {
+        fn name(&self) -> &str {
+            "large-runtime"
+        }
+        fn subscriptions(&self) -> Vec<engine_types::Subscription> {
+            Vec::new()
+        }
+        fn on_event(&mut self, _: &EngineEvent, _: &mut dyn engine_types::StrategyCtx) {}
+        fn runtime_state(&self) -> Result<Option<StrategyRuntimeState>, String> {
+            Ok(Some(StrategyRuntimeState {
+                schema_version: 1,
+                kind: "large-runtime".into(),
+                configuration_sha256: "0".repeat(64),
+                payload: vec![0; engine_types::strategy_process::MAX_PROCESS_PROPOSAL_BYTES / 4],
+            }))
+        }
+    }
+    #[test]
+    fn configured_initial_runtimes_share_the_committed_process_budget() {
+        let strategies: Vec<Box<dyn Strategy>> = (0..3)
+            .map(|_| Box::new(LargeRuntime) as Box<dyn Strategy>)
+            .collect();
+        assert!(
+            CallbackHost::new(
+                CallbackExecution::Isolated {
+                    executable: "/bin/false".into()
+                },
+                &strategies,
+                &[]
+            )
+            .is_err(),
+            "initial runtime copies escaped the aggregate retained-state budget"
+        );
+    }
+}
+
+#[cfg(test)]
+mod admission_ownership_tests {
+    use super::*;
+    use engine_types::strategy_process::{CallbackWalCursor, CallbackWalReader, CallbackWalRecord};
+    struct EmptyReader;
+    impl CallbackWalReader for EmptyReader {
+        fn start(&self) -> CallbackWalCursor {
+            CallbackWalCursor {
+                segment: 1,
+                sequence: 1,
+                offset: 0,
+            }
+        }
+        fn next(
+            &mut self,
+            _: CallbackWalCursor,
+        ) -> Result<Option<CallbackWalRecord>, engine_types::WalError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_acceptance_barrier_owns_the_head_and_deduplicates_redelivery() {
+        let params = toml::from_str("symbol='BTCUSDT'\nevery_s=60\nenabled=false").unwrap();
+        let strategies =
+            vec![engine_strategies::build_strategy("probe", StrategyId(0), &params).unwrap()];
+        let mut host = CallbackHost::new_paged(
+            CallbackExecution::Isolated {
+                executable: "/bin/false".into(),
+            },
+            &strategies,
+            &[],
+            Box::new(EmptyReader),
+        )
+        .unwrap();
+        host.enqueue(StrategyId(0), &EngineEvent::Boot).unwrap();
+        let input = host.unwritten.pop_front().unwrap();
+        let cursor = CallbackWalCursor {
+            segment: 1,
+            sequence: 1,
+            offset: 0,
+        };
+        host.begin_write(
+            CallbackWrite::Accept(vec![(input, cursor)]),
+            engine_types::wal::PendingBarrier::settled(),
+        );
+        assert!(
+            host.pending_for(StrategyId(0)),
+            "the barrier lost ownership of its not-yet-published callback"
+        );
+        host.enqueue(StrategyId(0), &EngineEvent::Boot).unwrap();
+        assert!(
+            host.unwritten.is_empty(),
+            "redelivery during fsync duplicated the callback input"
+        );
+        let later = EngineEvent::Timer {
+            id: engine_types::TimerId(99),
+            now_ns: 1,
+        };
+        assert!(
+            host.enqueue(StrategyId(0), &later).is_err(),
+            "a later callback overtook the durable acceptance barrier"
+        );
+        assert!(host.unwritten.is_empty());
     }
 }

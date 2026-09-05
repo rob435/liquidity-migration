@@ -96,7 +96,7 @@ async fn changing_an_existing_wal_strategy_id_still_refuses_boot() {
         panic!("reordering an existing strategy table must refuse boot")
     };
     assert!(
-        message.contains("does not preserve the WAL prefix"),
+        message.contains("must be constructed in durable identity order"),
         "{message}"
     );
 }

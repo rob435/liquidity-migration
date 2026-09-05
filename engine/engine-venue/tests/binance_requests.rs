@@ -616,3 +616,118 @@ async fn private_stream_retries_key_failure_resets_before_news_and_deduplicates_
     server.await.unwrap();
     assert_eq!(rest.to_path("/fapi/v1/listenKey").len(), 3);
 }
+
+#[tokio::test]
+async fn independent_catalog_installs_market_rules_before_a_mutation_without_another_read() {
+    let server = TestServer::start(|request, _| match request.path.as_str() {
+        "/fapi/v1/exchangeInfo" => (200, BTC_EXCHANGE_INFO.into()),
+        "/fapi/v1/order" => (
+            200,
+            r#"{"clientOrderId":"eng-1700000000000-1","orderId":41}"#.into(),
+        ),
+        other => panic!("unexpected {other}"),
+    })
+    .await;
+    let mut gw = gateway(&server);
+    let catalog = gw
+        .instrument_catalog_client()
+        .unwrap()
+        .fetch()
+        .await
+        .unwrap();
+    assert_eq!(catalog.rules.len(), 1);
+    assert_eq!(catalog.specs.len(), 1);
+    gw.install_instrument_catalog(&catalog).unwrap();
+    gw.send_order(&entry(None)).await.unwrap();
+    assert_eq!(server.to_path("/fapi/v1/exchangeInfo").len(), 1);
+    let other = TestServer::start(|_, _| (503, "unavailable".into())).await;
+    assert!(gateway(&other)
+        .install_instrument_catalog(&catalog)
+        .is_err());
+    assert!(gateway(&other)
+        .instrument_catalog_client()
+        .unwrap()
+        .fetch()
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn exact_amend_preserves_unmodified_native_quantity_and_checks_identity() {
+    use engine_types::numeric::Exact;
+    use engine_types::order_terms::{ExactAmendTerms, OrderInputPolicy};
+    for foreign in [false, true] {
+        let server=TestServer::start(move|request,_| match (request.method.as_str(),request.path.as_str()) {
+            ("GET","/fapi/v1/exchangeInfo")=>(200,BTC_EXCHANGE_INFO.replace("\"0.1\"","\"0.000000000000000000001\"").replace("\"0.001\"","\"0.000000000000000000001\"")),
+            ("GET","/fapi/v1/order")=>(200,format!(r#"{{"symbol":"{}","clientOrderId":"eng-1","type":"LIMIT","side":"BUY","price":"99.1","origQty":0.123456789012345678901}}"#,if foreign{"ETHUSDT"}else{"BTCUSDT"})),
+            ("PUT","/fapi/v1/order")=>(200,"{}".into()),
+            _=>panic!("unexpected request"),
+        }).await;
+        let mut gw = gateway(&server);
+        let catalog = gw
+            .instrument_catalog_client()
+            .unwrap()
+            .fetch()
+            .await
+            .unwrap();
+        gw.install_instrument_catalog(&catalog).unwrap();
+        let mut spec = engine_types::AmendSpec {
+            px: None,
+            qty: None,
+            exact_terms: None,
+        };
+        ExactAmendTerms {
+            quantity: None,
+            limit_price: Some(Exact::parse_decimal("100.123456789012345678901").unwrap()),
+            input_policy: OrderInputPolicy::StrategyShortestDecimal,
+        }
+        .apply_projection(&mut spec)
+        .unwrap();
+        let result = gw.amend_order(SymbolId(0), "eng-1", spec).await;
+        let requests = server.to_path("/fapi/v1/order");
+        let sent = requests.iter().find(|request| request.method == "PUT");
+        if foreign {
+            assert!(result.is_err());
+            assert!(sent.is_none());
+        } else {
+            result.unwrap();
+            let sent = sent.unwrap();
+            assert_eq!(
+                query_value(sent, "price"),
+                Some("100.123456789012345678901")
+            );
+            assert_eq!(
+                query_value(sent, "quantity"),
+                Some("0.123456789012345678901")
+            );
+            assert!(query_value(sent, "signature").is_some());
+        }
+    }
+}
+
+#[tokio::test]
+async fn independent_account_recovery_uses_requested_ids_and_preserves_history_unavailability() {
+    let server = TestServer::start(|request, _| match request.path.as_str() {
+        "/fapi/v2/account" => (200, r#"{"totalMarginBalance":"1500.25","availableBalance":"1200.5","positions":[{"symbol":"BTCUSDT","positionAmt":"0.004","entryPrice":"78000.5","leverage":"6","positionSide":"BOTH"}]}"#.into()),
+        "/fapi/v1/openAlgoOrders" => (200, r#"[{"symbol":"BTCUSDT","algoType":"CONDITIONAL","orderType":"STOP_MARKET","closePosition":true,"workingType":"MARK_PRICE","side":"SELL","triggerPrice":"75000"}]"#.into()),
+        other => panic!("unexpected read path {other}"),
+    }).await;
+    let gw = gateway(&server);
+    let client = gw
+        .account_recovery_client()
+        .expect("independent account recovery client");
+    let names = vec!["ETHUSDT".into(), "BTCUSDT".into()];
+    let scan_started_after = engine_types::clock::mono_ns();
+    let view = client.account_view(&names).await.unwrap();
+    let scan_completed_before = engine_types::clock::mono_ns();
+    assert_eq!((view.equity_usdt, view.available_usdt), (1500.25, 1200.5));
+    assert_eq!(view.positions[0].symbol, SymbolId(1));
+    assert_eq!(view.positions[0].qty, 0.004);
+    assert_eq!(view.positions[0].stop_px, 75000.0);
+    assert!(view.positions[0].stop_attached);
+    assert!((scan_started_after..=scan_completed_before).contains(&view.observed_ns));
+    assert!(
+        matches!(client.executions(&names, 1, 2).await, Err(VenueError::BadRequest(reason)) if reason.starts_with("Binance execution recovery is unavailable:"))
+    );
+    assert_eq!(server.only("/fapi/v1/openAlgoOrders").method, "GET");
+}

@@ -24,15 +24,14 @@
 
 use std::collections::BTreeMap;
 
+use engine_types::numeric::Exact;
 use engine_types::Side;
 use serde::Serialize;
 
 use super::{arrival_shortfall_bps, Fill, Weighted};
 
-/// Smaller than this is flat — the same value and the same reasoning as
-/// `attribution`'s: a venue position is a whole number of quantity steps, so
-/// anything under it is this sum's own rounding.
-const FLAT: f64 = 1e-9;
+/// Compatibility for logs without retained execution quantities.
+const LEGACY_FLAT: f64 = 1e-9;
 
 /// A position a sleeve is now out of, and what it came to.
 ///
@@ -41,6 +40,8 @@ const FLAT: f64 = 1e-9;
 /// JSON line and puts them on the owner's phone.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ClosedTrade {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub internal_settlement: Option<u64>,
     pub sleeve: String,
     pub symbol: String,
     /// The side it was held on, spelled the way the heartbeat's position rows
@@ -89,7 +90,8 @@ pub struct RoundTrip {
 /// One sleeve's open position in one symbol.
 #[derive(Clone, Debug)]
 struct Lot {
-    signed_qty: f64,
+    signed_qty: Exact,
+    exact_quantity: bool,
     /// +1 while held long, −1 short. `signed_qty` is zero by the time the
     /// trip closes, so the side it was held on has to be remembered.
     held: f64,
@@ -117,7 +119,8 @@ struct Lot {
 impl Default for Lot {
     fn default() -> Self {
         Lot {
-            signed_qty: 0.0,
+            signed_qty: Exact::zero(),
+            exact_quantity: false,
             held: 0.0,
             cash: 0.0,
             in_qty: 0.0,
@@ -138,33 +141,42 @@ impl Default for Lot {
 impl Lot {
     /// Fold in `qty` of a fill — all of it, or the part of it that belongs to
     /// this lot when one fill takes a position through zero.
-    fn fold(&mut self, fill: &Fill, qty: f64) {
+    fn fold(&mut self, fill: &Fill, quantity: &Exact, exact: bool) -> Result<(), String> {
+        let qty = quantity.to_f64().map_err(|e| e.to_string())?;
         let signed = match fill.side {
-            Side::Buy => qty,
-            Side::Sell => -qty,
+            Side::Buy => quantity.clone(),
+            Side::Sell => -quantity,
         };
         let value = fill.px * qty;
-        if self.signed_qty == 0.0 {
-            self.held = signed.signum();
+        if self.signed_qty.is_zero() {
+            self.held = if signed.is_negative() { -1.0 } else { 1.0 };
             self.opened_ms = fill.venue_ts_ms;
             self.priced = true;
         }
-        if signed.signum() == self.held {
+        if signed.is_negative() == (self.held < 0.0) {
             self.in_qty += qty;
             self.in_value += value;
         } else {
             self.out_qty += qty;
             self.out_value += value;
         }
-        self.signed_qty += signed;
-        self.cash -= signed * fill.px;
+        self.exact_quantity |= exact;
+        self.signed_qty = if self.exact_quantity {
+            &self.signed_qty + &signed
+        } else {
+            Exact::from_legacy_f64(
+                self.signed_qty.to_f64().map_err(|e| e.to_string())?
+                    + signed.to_f64().map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?
+        };
+        self.signed_qty.to_f64().map_err(|e| e.to_string())?;
+        self.cash -= signed.to_f64().map_err(|e| e.to_string())? * fill.px;
         self.fills += 1;
         self.notional += value;
         if fill.is_maker {
             self.maker_notional += value;
         }
-        // Charged pro rata, because a fill split across two lots was one
-        // charge at the venue.
         self.fees = match (self.fees, fill.fee.filter(|fee| fee.is_finite())) {
             (Some(total), Some(fee)) if fill.qty > 0.0 => Some(total + fee * (qty / fill.qty)),
             _ => None,
@@ -172,15 +184,17 @@ impl Lot {
         if let Some(bps) = arrival_shortfall_bps(fill.side, fill.px, fill.arrival_mid) {
             self.shortfall.add(bps, value);
         }
+        Ok(())
     }
 
     fn flat(&self) -> bool {
-        self.signed_qty.abs() < FLAT
+        self.signed_qty.is_zero()
     }
 
     fn closed(&self, sleeve: &str, symbol: &str, closed_ms: i64) -> ClosedTrade {
         let priced = self.priced && self.in_qty > 0.0 && self.in_value > 0.0;
         ClosedTrade {
+            internal_settlement: None,
             sleeve: sleeve.to_string(),
             symbol: symbol.to_string(),
             side: if self.held < 0.0 { "short" } else { "long" },
@@ -221,39 +235,144 @@ pub struct Lots {
 }
 
 impl Lots {
-    /// Fold one fill into the sleeve's position in this symbol, closing the
-    /// trip if it takes the position to flat.
-    pub fn on_fill(&mut self, sleeve: &str, symbol: &str, fill: &Fill) {
-        if !fill.qty.is_finite() || fill.qty <= 0.0 || !fill.px.is_finite() || fill.px <= 0.0 {
-            return;
+    pub(super) fn validate_internal(
+        &self,
+        sleeve: &str,
+        symbol: &str,
+        signed_delta: &Exact,
+        px: f64,
+    ) -> Result<(), String> {
+        if signed_delta.is_zero() || !px.is_finite() || px <= 0.0 {
+            return Err("invalid internal settlement projection".into());
         }
-        let key = (sleeve.to_string(), symbol.to_string());
-        let held = self.open.get(&key).map_or(0.0, |lot| lot.signed_qty);
-        let signed = match fill.side {
-            Side::Buy => fill.qty,
-            Side::Sell => -fill.qty,
-        };
-        // A fill that takes the position through zero is two fills: it closes
-        // what was open and opens the rest the other way. Splitting it is what
-        // keeps the two trips' entry prices apart.
-        let closing = if held != 0.0 && signed.signum() != held.signum() {
-            fill.qty.min(held.abs())
-        } else {
-            0.0
-        };
-        if closing > 0.0 {
-            let lot = self.open.entry(key.clone()).or_default();
-            lot.fold(fill, closing);
-            if lot.flat() {
-                let trade = lot.closed(&key.0, &key.1, fill.venue_ts_ms);
-                self.open.remove(&key);
-                self.closed.push(trade);
+        let delta = signed_delta.to_f64().map_err(|e| e.to_string())?;
+        if let Some(lot) = self.open.get(&(sleeve.to_string(), symbol.to_string())) {
+            let remaining = &lot.signed_qty + signed_delta;
+            let agrees = if lot.exact_quantity {
+                remaining.is_zero()
+            } else {
+                remaining
+                    .to_f64()
+                    .is_ok_and(|qty| qty.abs() <= 1e-12_f64.max(delta.abs() * 1e-12))
+            };
+            if lot.signed_qty.is_negative() == signed_delta.is_negative() || !agrees {
+                return Err(
+                    "internal settlement projection disagrees with the analytic lot".into(),
+                );
             }
         }
-        let opening = fill.qty - closing;
-        if opening > 0.0 {
-            self.open.entry(key).or_default().fold(fill, opening);
+        Ok(())
+    }
+    pub(super) fn settle_internal(
+        &mut self,
+        sleeve: &str,
+        symbol: &str,
+        signed_delta: &Exact,
+        px: f64,
+        closed_ms: i64,
+        id: u64,
+    ) -> Result<(), String> {
+        self.validate_internal(sleeve, symbol, signed_delta, px)?;
+        let delta = signed_delta.to_f64().map_err(|e| e.to_string())?;
+        let key = (sleeve.to_string(), symbol.to_string());
+        let mut lot = self.open.get(&key).cloned().unwrap_or_else(|| Lot {
+            signed_qty: -signed_delta,
+            exact_quantity: true,
+            held: -delta.signum(),
+            ..Lot::default()
+        });
+        lot.out_qty += delta.abs();
+        lot.out_value += delta.abs() * px;
+        lot.cash -= delta * px;
+        lot.signed_qty = Exact::zero();
+        let mut closed = lot.closed(sleeve, symbol, closed_ms);
+        closed.internal_settlement = Some(id);
+        self.open.remove(&key);
+        self.closed.push(closed);
+        Ok(())
+    }
+    pub fn on_fill(&mut self, sleeve: &str, symbol: &str, fill: &Fill) {
+        self.on_fill_with_quantity(sleeve, symbol, fill, None)
+            .expect("validated scalar analytic fill");
+    }
+
+    pub fn on_fill_with_quantity(
+        &mut self,
+        sleeve: &str,
+        symbol: &str,
+        fill: &Fill,
+        exact_qty: Option<&Exact>,
+    ) -> Result<(), String> {
+        if let Some(exact) = exact_qty {
+            if !exact.is_positive() || exact.to_f64().map_err(|e| e.to_string())? != fill.qty {
+                return Err("analytic exact quantity disagrees with fill projection".into());
+            }
         }
+        if !fill.qty.is_finite() || fill.qty <= 0.0 || !fill.px.is_finite() || fill.px <= 0.0 {
+            return Ok(());
+        }
+        let quantity = exact_qty
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| Exact::from_legacy_f64(fill.qty))
+            .map_err(|e| e.to_string())?;
+        if !quantity.is_positive() || quantity.to_f64().map_err(|e| e.to_string())? != fill.qty {
+            return Err("analytic exact quantity disagrees with fill projection".into());
+        }
+        let key = (sleeve.to_string(), symbol.to_string());
+        let mut lot = self.open.get(&key).cloned().unwrap_or_default();
+        let exact = exact_qty.is_some() || lot.exact_quantity;
+        let signed_fill = if fill.side == Side::Buy {
+            quantity.clone()
+        } else {
+            -&quantity
+        };
+        let legacy_flat_after = exact_qty.is_none()
+            && (&lot.signed_qty + &signed_fill)
+                .to_f64()
+                .is_ok_and(|qty| qty.abs() < LEGACY_FLAT);
+        let opposite =
+            !lot.signed_qty.is_zero() && lot.signed_qty.is_negative() != (fill.side == Side::Sell);
+        let (closing, opening) = if exact {
+            let closing = if opposite {
+                quantity.clone().min(lot.signed_qty.abs())
+            } else {
+                Exact::zero()
+            };
+            let opening = &quantity - &closing;
+            (closing, opening)
+        } else {
+            let closing = if opposite {
+                fill.qty
+                    .min(lot.signed_qty.to_f64().map_err(|e| e.to_string())?.abs())
+            } else {
+                0.0
+            };
+            (
+                Exact::from_legacy_f64(closing).map_err(|e| e.to_string())?,
+                Exact::from_legacy_f64(fill.qty - closing).map_err(|e| e.to_string())?,
+            )
+        };
+        let mut closed = None;
+        if closing.is_positive() {
+            lot.fold(fill, &closing, exact)?;
+            if lot.flat() || legacy_flat_after {
+                closed = Some(lot.closed(&key.0, &key.1, fill.venue_ts_ms));
+                lot = Lot::default();
+            }
+        }
+        if opening.is_positive() && !legacy_flat_after {
+            lot.fold(fill, &opening, exact)?;
+        }
+        if lot.signed_qty.is_zero() {
+            self.open.remove(&key);
+        } else {
+            self.open.insert(key, lot);
+        }
+        if let Some(closed) = closed {
+            self.closed.push(closed);
+        }
+        Ok(())
     }
 
     /// Restate every position from a rotation's own account of them.
@@ -272,18 +391,45 @@ impl Lots {
     pub fn restate(&mut self, held: &[(String, String, f64)]) {
         self.open.clear();
         for (sleeve, symbol, signed_qty) in held {
-            if !signed_qty.is_finite() || signed_qty.abs() < FLAT {
+            if !signed_qty.is_finite() || *signed_qty == 0.0 {
                 continue;
             }
             self.open.insert(
                 (sleeve.clone(), symbol.clone()),
                 Lot {
-                    signed_qty: *signed_qty,
+                    signed_qty: Exact::from_legacy_f64(*signed_qty)
+                        .expect("finite legacy quantity"),
                     held: signed_qty.signum(),
                     ..Lot::default()
                 },
             );
         }
+    }
+
+    pub fn restate_exact(&mut self, held: &[(String, String, Exact)]) -> Result<(), String> {
+        let mut open = BTreeMap::new();
+        for (sleeve, symbol, quantity) in held {
+            if quantity.is_zero() {
+                continue;
+            }
+            let projected = quantity.to_f64().map_err(|e| e.to_string())?;
+            if open
+                .insert(
+                    (sleeve.clone(), symbol.clone()),
+                    Lot {
+                        signed_qty: quantity.clone(),
+                        exact_quantity: true,
+                        held: projected.signum(),
+                        ..Lot::default()
+                    },
+                )
+                .is_some()
+            {
+                return Err("duplicate analytic position in portfolio snapshot".into());
+            }
+        }
+        self.open = open;
+        Ok(())
     }
 
     /// Forget a sleeve's position without reporting a trip, for the symbols
@@ -305,11 +451,14 @@ impl Lots {
         let mut held = self
             .open
             .iter()
-            .filter(|((_, coin), lot)| coin == symbol && lot.signed_qty.abs() >= FLAT);
+            .filter(|((_, coin), lot)| coin == symbol && !lot.flat());
         let ((sleeve, _), lot) = held.next()?;
-        held.next()
-            .is_none()
-            .then_some((sleeve.as_str(), lot.signed_qty))
+        held.next().is_none().then_some((
+            sleeve.as_str(),
+            lot.signed_qty
+                .to_f64()
+                .expect("validated analytic quantity"),
+        ))
     }
 
     /// Every trip that has closed and not yet been taken.
@@ -600,5 +749,54 @@ mod tests {
         lots.drop_symbols(|sleeve, symbol| sleeve == "carry" && symbol == "ACEUSDT");
         assert_eq!(lots.open(), 0);
         assert!(lots.take_closed().is_empty(), "a drop is not a trip");
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use engine_types::{StrategyId, SymbolId};
+
+    #[test]
+    fn legacy_restated_tiny_quantity_remains_a_real_holder() {
+        let mut lots = Lots::default();
+        lots.restate(&[("owner".into(), "BTCUSDT".into(), 1e-10)]);
+        assert_eq!(lots.sole_holder("BTCUSDT"), Some(("owner", 1e-10)));
+    }
+
+    #[test]
+    fn legacy_close_of_canonical_snapshot_does_not_leave_analytic_residue() {
+        let mut lots = Lots::default();
+        lots.restate_exact(&[(
+            "owner".into(),
+            "BTCUSDT".into(),
+            Exact::parse_decimal("0.3").unwrap(),
+        )])
+        .unwrap();
+        for qty in [0.1, 0.2] {
+            lots.on_fill(
+                "owner",
+                "BTCUSDT",
+                &Fill {
+                    client_order_id: "legacy".into(),
+                    strategy: StrategyId(0),
+                    symbol: SymbolId(0),
+                    side: Side::Sell,
+                    qty,
+                    px: 100.0,
+                    fee: Some(0.0),
+                    is_maker: false,
+                    arrival_mid: 0.0,
+                    venue_ts_ms: 1,
+                },
+            );
+        }
+        assert_eq!(
+            lots.open(),
+            0,
+            "the canonical owner already settled legacy rounding residue"
+        );
+        assert_eq!(lots.closed().len(), 1);
+        assert!(lots.closed()[0].round_trip.is_none());
     }
 }

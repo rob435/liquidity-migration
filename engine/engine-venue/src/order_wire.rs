@@ -59,3 +59,35 @@ pub(crate) fn scaled(value: &Exact, decimals: u32, max: u64) -> Result<u64, Venu
     }
     Ok(integer)
 }
+
+pub(crate) fn amend_terms(
+    spec: &engine_types::AmendSpec,
+) -> Result<Option<&engine_types::order_terms::ExactAmendTerms>, VenueError> {
+    spec.exact_terms
+        .as_deref()
+        .map(|terms| {
+            terms.validate_projection(spec).map_err(error)?;
+            Ok(terms)
+        })
+        .transpose()
+}
+pub(crate) fn amend_price(spec: &engine_types::AmendSpec) -> Result<Option<String>, VenueError> {
+    match amend_terms(spec)? {
+        Some(terms) => terms
+            .limit_price
+            .as_ref()
+            .map(|value| decimal_wire(value).map_err(error))
+            .transpose(),
+        None => spec.px.map(crate::fmt::venue_num).transpose(),
+    }
+}
+pub(crate) fn amend_quantity(spec: &engine_types::AmendSpec) -> Result<Option<String>, VenueError> {
+    match amend_terms(spec)? {
+        Some(terms) => terms
+            .quantity
+            .as_ref()
+            .map(|value| decimal_wire(value).map_err(error))
+            .transpose(),
+        None => spec.qty.map(crate::fmt::venue_num).transpose(),
+    }
+}

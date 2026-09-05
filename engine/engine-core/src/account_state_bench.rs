@@ -349,7 +349,7 @@ async fn recovery_once(history_rows: usize) -> Result<u64, Error> {
         sequence: 0,
     };
     let venue = HistoryVenue {
-        executions,
+        executions: std::sync::Arc::new(std::sync::Mutex::new(executions)),
         account,
     };
     let settings = EngineSection {
@@ -423,6 +423,7 @@ fn prior_state(history_rows: usize, now_ms: i64) -> (Vec<WalRecord>, AccountView
             arrival_mid: 100.0,
         });
         vec![PositionView {
+            exact_stop_px: None,
             symbol: SymbolId(0),
             side: Side::Buy,
             qty: history_rows as f64,
@@ -533,12 +534,44 @@ impl RiskKernel for PermitAll {
 }
 
 struct HistoryVenue {
-    executions: Vec<VenueExecution>,
+    executions: std::sync::Arc<std::sync::Mutex<Vec<VenueExecution>>>,
+    account: AccountView,
+}
+
+struct HistoryRecovery {
+    executions: std::sync::Arc<std::sync::Mutex<Vec<VenueExecution>>>,
     account: AccountView,
 }
 
 #[engine_types::async_trait]
+impl engine_types::orders::AccountRecoveryClient for HistoryRecovery {
+    async fn account_view(&self, _symbols: &[String]) -> Result<AccountView, VenueError> {
+        Ok(self.account.clone())
+    }
+    async fn executions(
+        &self,
+        _symbols: &[String],
+        _start_ms: i64,
+        _end_ms: i64,
+    ) -> Result<Vec<VenueExecution>, VenueError> {
+        let mut rows = self
+            .executions
+            .lock()
+            .map_err(|_| VenueError::BadReply("benchmark history lock poisoned".into()))?;
+        Ok(std::mem::take(&mut *rows))
+    }
+}
+
+#[engine_types::async_trait]
 impl VenueGateway for HistoryVenue {
+    fn account_recovery_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::AccountRecoveryClient>> {
+        Some(Box::new(HistoryRecovery {
+            executions: self.executions.clone(),
+            account: self.account.clone(),
+        }))
+    }
     fn caps(&self) -> VenueCaps {
         VenueCaps {
             native_position_stop: true,
@@ -614,7 +647,11 @@ impl VenueGateway for HistoryVenue {
         _start_ms: i64,
         _end_ms: i64,
     ) -> Result<Vec<VenueExecution>, VenueError> {
-        Ok(std::mem::take(&mut self.executions))
+        let mut rows = self
+            .executions
+            .lock()
+            .map_err(|_| VenueError::BadReply("benchmark history lock poisoned".into()))?;
+        Ok(std::mem::take(&mut *rows))
     }
 }
 
@@ -686,5 +723,37 @@ mod tests {
                 .sum::<usize>(),
             100
         );
+    }
+}
+
+#[cfg(test)]
+mod recovery_client_tests {
+    use super::*;
+    #[tokio::test]
+    async fn independent_history_bench_recovery_preserves_bootstrap_once() {
+        let mut venue = HistoryVenue {
+            executions: std::sync::Arc::new(std::sync::Mutex::new(history(2, clock::wall_ms()))),
+            account: AccountView {
+                equity_usdt: 100.0,
+                available_usdt: 80.0,
+                positions: vec![],
+                observed_ns: clock::now_ns(),
+            },
+        };
+        let client = venue
+            .account_recovery_client()
+            .expect("independent bootstrap history recovery");
+        assert_eq!(venue.executions(0, i64::MAX).await.unwrap().len(), 2);
+        assert!(
+            client
+                .executions(&[SYMBOL.into()], 0, i64::MAX)
+                .await
+                .unwrap()
+                .is_empty(),
+            "read client duplicated bootstrap history"
+        );
+        let view = client.account_view(&[SYMBOL.into()]).await.unwrap();
+        assert_eq!((view.equity_usdt, view.available_usdt), (100.0, 80.0));
+        assert!(view.positions.is_empty());
     }
 }

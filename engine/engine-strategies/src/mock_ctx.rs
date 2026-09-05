@@ -177,6 +177,7 @@ impl MockCtx {
         self.positions.insert(
             id,
             PositionView {
+                exact_stop_px: None,
                 symbol: id,
                 side,
                 qty,
@@ -330,7 +331,16 @@ impl StrategyCtx for MockCtx {
     fn my_position_facts(&self, symbol: SymbolId) -> Option<engine_types::StrategyPositionFacts> {
         let attributed_signed_qty = self.my_position(symbol);
         let in_flight_signed_qty = self.in_flight(symbol);
-        if attributed_signed_qty == 0.0 && in_flight_signed_qty == 0.0 {
+        let open_order_count = self
+            .resting
+            .iter()
+            .filter(|order| order.symbol == symbol && order.qty > order.filled_qty)
+            .count()
+            .max(usize::from(in_flight_signed_qty != 0.0));
+        if attributed_signed_qty == 0.0
+            && open_order_count == 0
+            && !self.allocated.contains_key(&symbol)
+        {
             return None;
         }
         Some(engine_types::StrategyPositionFacts {
@@ -338,12 +348,7 @@ impl StrategyCtx for MockCtx {
             attributed_signed_qty,
             venue: self.position(symbol),
             in_flight_signed_qty,
-            open_order_count: self
-                .resting
-                .iter()
-                .filter(|order| order.symbol == symbol && order.qty > order.filled_qty)
-                .count()
-                .max(usize::from(in_flight_signed_qty != 0.0)),
+            open_order_count,
             allocated: self.allocated.get(&symbol).cloned(),
         })
     }
@@ -407,6 +412,7 @@ impl StrategyCtx for MockCtx {
                 kind: seed.kind,
                 qty: seed.qty,
                 filled_qty: seed.filled_qty,
+                remaining_qty: None,
                 reduce_only: seed.reduce_only,
                 acked: seed.acked,
             });
@@ -423,6 +429,7 @@ impl StrategyCtx for MockCtx {
             side: order.side,
             qty: order.qty,
             filled_qty: order.filled_qty,
+            remaining_qty: None,
             reduce_only: order.reduce_only,
         })
     }

@@ -8,10 +8,15 @@ use super::*;
 pub(crate) enum OpeningRefusal {
     /// Another strategy owns exposure or a live opening order on the symbol.
     ForeignStrategyOwner,
+    PortfolioExitPending,
+    StopRepairPending,
     /// A durable signal source this strategy depends on has a recorded gap.
     SignalSequenceGap,
     SignalProducerUnready,
     StrategyCallbackUnavailable,
+    StrategyInactive,
+    InstrumentCatalogUnready,
+    InstrumentUnlisted,
     OrderDispatchUnresolved,
     /// The operator switched this strategy's entries off.
     RuntimeEntriesDisabled,
@@ -25,9 +30,14 @@ impl OpeningRefusal {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::ForeignStrategyOwner => "foreign_strategy_owner",
+            Self::PortfolioExitPending => "portfolio_exit_pending",
+            Self::StopRepairPending => "stop_repair_pending",
             Self::SignalSequenceGap => "signal_sequence_gap",
             Self::SignalProducerUnready => "signal_producer_unready",
             Self::StrategyCallbackUnavailable => "strategy_callback_unavailable",
+            Self::StrategyInactive => "strategy_inactive",
+            Self::InstrumentCatalogUnready => "instrument_catalog_unready",
+            Self::InstrumentUnlisted => "instrument_unlisted",
             Self::OrderDispatchUnresolved => "order_dispatch_unresolved",
             Self::RuntimeEntriesDisabled => "runtime_entries_disabled",
             Self::PrivateStreamUnready => "private_stream_unready",
@@ -37,6 +47,8 @@ impl OpeningRefusal {
 
     fn detail(self) -> &'static str {
         match self {
+            Self::PortfolioExitPending => "portfolio_exit_pending: this sleeve or symbol has an unfinished engine-owned exit",
+            Self::StopRepairPending => "stop_repair_pending: this instrument is waiting for confirmed native protection",
             Self::ForeignStrategyOwner => {
                 "foreign_strategy_owner: another strategy owns exposure or a live opening order on this symbol"
             }
@@ -45,6 +57,9 @@ impl OpeningRefusal {
             }
             Self::SignalProducerUnready => "signal_producer_unready: a required producer has not established its startup frontier",
             Self::StrategyCallbackUnavailable => "strategy_callback_unavailable: a strategy callback has no committed outcome",
+            Self::StrategyInactive => "strategy_inactive: this durable sleeve has no active configured owner",
+            Self::InstrumentCatalogUnready => "instrument_catalog_unready: retained metadata supports recovery while an authoritative refresh is pending",
+            Self::InstrumentUnlisted => "instrument_unlisted: retained native metadata permits reductions and stops only",
             Self::OrderDispatchUnresolved => "order_dispatch_unresolved: an attempted order has no authoritative venue outcome",
             Self::RuntimeEntriesDisabled => {
                 "this strategy's runtime entry permission is disabled"
@@ -89,7 +104,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// operator switch. Per strategy, not per symbol, and not the engine's
     /// own state.
     pub(super) fn opening_permission_reason(&self, strategy: StrategyId) -> Option<OpeningRefusal> {
-        if self.host.callbacks.faults.contains_key(&strategy) {
+        if !self.host.callbacks.is_active(strategy) {
+            Some(OpeningRefusal::StrategyInactive)
+        } else if self.symbol_admission.refresh_required() {
+            Some(OpeningRefusal::InstrumentCatalogUnready)
+        } else if self.host.callbacks.faults.contains_key(&strategy) {
             Some(OpeningRefusal::StrategyCallbackUnavailable)
         } else if self.signal_inputs_blocked(strategy) {
             Some(OpeningRefusal::SignalSequenceGap)
@@ -128,7 +147,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     /// Judge and reserve one sibling, appending its send record to the WAL.
     /// The caller owns the accepted group's durability barrier and dispatch.
-    async fn prepare_intent(
+    pub(super) async fn prepare_intent(
         &mut self,
         intent: Intent,
         client_order_id: Option<String>,
@@ -143,7 +162,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.ledger
             .record(Segment::Decide, decided_ns.saturating_sub(origin_ns));
 
-        if !self.journal_and_admit_intent(&intent, decided_ns)? {
+        if !self.journal_and_admit_intent(&intent, decided_ns, client_order_id.as_deref())? {
+            return Ok(None);
+        }
+        self.retain_portfolio_reduction(&intent)?;
+        if self
+            .portfolio_controls
+            .emergencies
+            .contains_key(&intent.symbol)
+        {
             return Ok(None);
         }
         let Some(approval) = self.assess_intent(intent, client_order_id)? else {
@@ -162,10 +189,242 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .map(Some)
     }
 
+    pub(super) fn emergency_order_refusal(
+        &mut self,
+        request: &OrderRequest,
+        excluding: Option<&str>,
+    ) -> Option<String> {
+        use engine_types::orders::SleeveOrderEffect;
+        use engine_types::portfolio_control::PortfolioEmergencyPhase;
+        let Some(SleeveOrderEffect::EmergencyNetReduction { emergency_id }) = request.sleeve_effect
+        else {
+            return Some("order has no engine emergency owner".into());
+        };
+        let valid_control = self
+            .portfolio_controls
+            .emergencies
+            .get(&request.symbol)
+            .is_some_and(|state| {
+                state.id == emergency_id
+                    && state.phase == PortfolioEmergencyPhase::CloseNet
+                    && state.order_id.as_deref() == Some(request.client_order_id.as_str())
+            });
+        if !valid_control {
+            return Some("emergency order no longer belongs to the active control".into());
+        }
+        let Some(terms) = request.exact_terms.as_ref() else {
+            return Some("emergency order has no exact terms".into());
+        };
+        let net = self
+            .books
+            .attribution
+            .snapshot()
+            .positions
+            .into_iter()
+            .filter(|row| row.symbol == request.symbol)
+            .fold(engine_types::numeric::Exact::zero(), |sum, row| {
+                sum + row.signed_qty
+            });
+        if !request.reduce_only
+            || request.stop.is_some()
+            || net.is_zero()
+            || net.is_positive() == (request.side == Side::Buy)
+            || terms.quantity > net.abs()
+        {
+            return Some("emergency order exceeds the owned physical net".into());
+        }
+        let interval = match excluding {
+            Some(id) => self.risk.physical_exposure_interval_excluding(
+                id,
+                request.symbol,
+                &self.books.account,
+            ),
+            None => self
+                .risk
+                .physical_exposure_interval(request.symbol, &self.books.account),
+        };
+        if !interval.is_ok_and(|interval| {
+            interval.certainly_reduces(request.side, request.qty)
+                && (!request.close_position
+                    || (interval.low() == interval.high() && interval.low().abs() == request.qty))
+        }) {
+            return Some(
+                "emergency order no longer certainly reduces the physical position".into(),
+            );
+        }
+        let Some(spec) = self.instrument_specs.get(&request.symbol) else {
+            return Some("emergency instrument metadata is unavailable".into());
+        };
+        let policy = if request.close_position {
+            engine_types::order_terms::QuantityPolicy::CloseEntirePosition
+        } else {
+            engine_types::order_terms::QuantityPolicy::Normal
+        };
+        if terms
+            .validate_projection(request)
+            .and_then(|()| terms.validate_wire_grid(spec, request.kind, policy))
+            .is_err()
+        {
+            return Some("emergency order no longer matches the instrument grid".into());
+        }
+        None
+    }
+
+    pub(super) fn prepare_emergency_net_order(
+        &mut self,
+        state: &engine_types::portfolio_control::PortfolioEmergency,
+    ) -> Result<Option<PreparedOrder>, EngineError> {
+        use engine_types::numeric::Exact;
+        use engine_types::order_terms::{quantize_portfolio_close, QuantityPolicy};
+        use engine_types::orders::SleeveOrderEffect;
+        let Some(client_order_id) = state.order_id.clone() else {
+            return Ok(None);
+        };
+        let rows = self.books.attribution.snapshot().positions;
+        let net = rows
+            .iter()
+            .filter(|row| row.symbol == state.symbol)
+            .fold(Exact::zero(), |sum, row| sum + &row.signed_qty);
+        if net.is_zero() {
+            return Ok(None);
+        }
+        let Some(owner) = rows
+            .iter()
+            .filter(|row| {
+                row.symbol == state.symbol && row.signed_qty.is_positive() == net.is_positive()
+            })
+            .min_by_key(|row| row.strategy)
+            .map(|row| row.strategy)
+        else {
+            return Ok(None);
+        };
+        let interval = match self
+            .risk
+            .physical_exposure_interval(state.symbol, &self.books.account)
+        {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        let side = if net.is_positive() {
+            Side::Sell
+        } else {
+            Side::Buy
+        };
+        let physical = if side == Side::Sell {
+            interval.low().max(0.0)
+        } else {
+            (-interval.high()).max(0.0)
+        };
+        let journal_net = self.logged_exposure.get(&state.symbol);
+        let physical_qty = if let Some(journal_net) = journal_net.filter(|value| {
+            value.is_positive() == (side == Side::Sell)
+                && value.abs().to_f64().ok() == Some(physical)
+        }) {
+            journal_net.abs()
+        } else {
+            Exact::from_legacy_f64(physical).map_err(|e| EngineError::State(e.to_string()))?
+        };
+        let mut quantity = net.abs().min(physical_qty.clone());
+        if !quantity.is_positive() {
+            return Ok(None);
+        }
+        let Some(spec) = self.instrument_specs.get(&state.symbol) else {
+            return Ok(None);
+        };
+        if let Some(max) = spec.max_market_qty.as_ref() {
+            quantity = quantity.min(max.clone());
+        }
+        let reference = self.reference_px(state.symbol, &OrderKind::Market);
+        let mut policy = QuantityPolicy::Normal;
+        let mut terms = quantize_portfolio_close(spec, side, &quantity, reference, policy);
+        let below_minimum = spec
+            .market_min_qty
+            .as_ref()
+            .is_some_and(|min| &quantity < min)
+            || reference
+                .and_then(|px| engine_types::order_terms::strategy_decimal(px).ok())
+                .is_some_and(|px| {
+                    spec.min_notional
+                        .as_ref()
+                        .is_some_and(|min| &quantity * &px < *min)
+                });
+        if terms.is_err()
+            && below_minimum
+            && self.venue.caps().close_position_below_minimum
+            && interval.low() == interval.high()
+            && quantity == physical_qty
+        {
+            policy = QuantityPolicy::CloseEntirePosition;
+            terms = quantize_portfolio_close(spec, side, &quantity, reference, policy);
+        }
+        let Ok(terms) = terms else {
+            return Ok(None);
+        };
+        let qty = terms
+            .quantity
+            .to_f64()
+            .map_err(|e| EngineError::State(e.to_string()))?;
+        let mut request = OrderRequest {
+            client_order_id: client_order_id.clone(),
+            strategy: owner,
+            symbol: state.symbol,
+            side,
+            qty,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: true,
+            close_position: policy == QuantityPolicy::CloseEntirePosition,
+            exact_terms: None,
+            sleeve_effect: Some(SleeveOrderEffect::EmergencyNetReduction {
+                emergency_id: state.id,
+            }),
+        };
+        terms
+            .apply_projection(&mut request)
+            .map_err(|e| EngineError::State(e.to_string()))?;
+        if self.emergency_order_refusal(&request, None).is_some() {
+            return Ok(None);
+        }
+        let decided_ns = clock::now_ns();
+        let intent = Intent {
+            strategy: owner,
+            symbol: state.symbol,
+            side,
+            qty: request.qty,
+            kind: request.kind,
+            stop: None,
+            reduce_only: true,
+            tag: format!("portfolio-emergency:{}", state.id),
+            decided_ns,
+            work: None,
+            leverage: None,
+        };
+        self.wal.append(&WalRecord::Intent {
+            intent: intent.clone(),
+        })?;
+        self.wal.append(&WalRecord::Verdict {
+            client_order_id: Some(client_order_id.clone()),
+            verdict: RiskVerdict::Allow { qty: request.qty },
+        })?;
+        let approval = RiskApprovedIntent {
+            allowed_qty: request.qty,
+            intent,
+            client_order_id,
+            work: None,
+        };
+        self.commit_prepared_order(
+            ProtectedOrder(LegalOrder { request, approval }),
+            decided_ns,
+            decided_ns,
+        )
+        .map(Some)
+    }
+
     fn journal_and_admit_intent(
         &mut self,
         intent: &Intent,
         decided_ns: u64,
+        client_order_id: Option<&str>,
     ) -> Result<bool, EngineError> {
         // A non-finite number would be written to the log as null and stop
         // the next boot's replay dead, so it is refused before any append.
@@ -178,7 +437,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 ),
             })?;
             tracing::error!(tag = %intent.tag, what, "intent carries an unreal number");
-            self.tell_refused(intent, "unreal_number");
+            self.tell_refused(intent, "unreal_number", client_order_id)?;
             return Ok(false);
         }
 
@@ -192,13 +451,28 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // kernel sees it. Whoever owns the symbol comes first: a symbol held
         // by another sleeve is refused however healthy this one is.
         if !intent.reduce_only {
-            let refusal = if self.symbol_owned_by_another(intent.strategy, intent.symbol) {
+            let refusal = if self.stop_repairs_pending.contains(&intent.symbol) {
+                Some(OpeningRefusal::StopRepairPending)
+            } else if self
+                .portfolio_controls
+                .blocked(intent.strategy, intent.symbol)
+            {
+                Some(OpeningRefusal::PortfolioExitPending)
+            } else if !self.instrument_specs.contains_key(&intent.symbol)
+                && self.symbol_owned_by_another(intent.strategy, intent.symbol)
+            {
                 Some(OpeningRefusal::ForeignStrategyOwner)
+            } else if intent.symbol.idx() < self.books.market.table.len()
+                && !self
+                    .symbol_admission
+                    .listed(self.books.market.table.name(intent.symbol))
+            {
+                Some(OpeningRefusal::InstrumentUnlisted)
             } else {
                 self.opening_refusal(intent.strategy)
             };
             if let Some(refusal) = refusal {
-                self.deny_opening(intent, refusal)?;
+                self.deny_opening(intent, refusal, client_order_id)?;
                 return Ok(false);
             }
         }
@@ -243,7 +517,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     never_quoted = quote_ns == 0,
                     "refused: the quote this entry was decided against is too old to open on"
                 );
-                self.tell_refused(intent, "stale_quote");
+                self.tell_refused(intent, "stale_quote", client_order_id)?;
                 return Ok(false);
             }
         }
@@ -264,7 +538,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut intent = intent;
         let work = self.plan_resting_entry(&mut intent);
 
-        let verdict = { self.risk.assess(&intent, &self.books.account) };
+        let verdict = if self.instrument_specs.contains_key(&intent.symbol) {
+            match self.risk.assess_portfolio(
+                &intent,
+                &self.books.account,
+                &self.books.attribution.snapshot(),
+            ) {
+                engine_types::risk::PortfolioRiskVerdict::Allow { qty, .. } => {
+                    RiskVerdict::Allow { qty }
+                }
+                engine_types::risk::PortfolioRiskVerdict::Deny { reason } => {
+                    RiskVerdict::Deny { reason }
+                }
+            }
+        } else {
+            self.risk.assess(&intent, &self.books.account)
+        };
         let verdict = durable_risk_verdict(verdict, intent.qty, false);
         let allowed_qty = match &verdict {
             RiskVerdict::Allow { qty } => *qty,
@@ -275,7 +564,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     verdict,
                 })?;
                 tracing::info!(tag = %intent.tag, reason, "risk refused the order");
-                self.tell_refused(&intent, &reason);
+                self.tell_refused(&intent, &reason, client_order_id.as_deref())?;
                 return Ok(None);
             }
         };
@@ -554,7 +843,140 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 "exact quantity projection enlarged the risk approval".into(),
             ));
         }
+        let Some(request) = self.translate_physical_order(request, &approval, spec)? else {
+            return Ok(None);
+        };
         Ok(Some(LegalOrder { request, approval }))
+    }
+
+    fn translate_physical_order(
+        &mut self,
+        mut request: OrderRequest,
+        approval: &RiskApprovedIntent,
+        spec: &engine_types::numeric::ExactInstrumentSpec,
+    ) -> Result<Option<OrderRequest>, EngineError> {
+        let planned = self.physical_order_plan(&request, spec, None);
+        let plan = match planned {
+            Ok(plan) => plan,
+            Err(reason) => {
+                self.refuse(
+                    &approval.client_order_id,
+                    &approval.intent,
+                    &format!("physical protection: {reason}"),
+                )?;
+                return Ok(None);
+            }
+        };
+        request.reduce_only = plan.reduce_only;
+        if request.close_position && !request.reduce_only {
+            self.refuse(
+                &approval.client_order_id,
+                &approval.intent,
+                "whole-position close does not certainly reduce the physical position",
+            )?;
+            return Ok(None);
+        }
+        let terms = request.exact_terms.take().ok_or_else(|| {
+            EngineError::State("physical translation requires exact order terms".into())
+        })?;
+        terms
+            .with_physical_stop(plan.native_stop.map(|stop| stop.trigger_price))
+            .and_then(|terms| terms.apply_projection(&mut request))
+            .map_err(|e| EngineError::State(e.to_string()))?;
+        Ok(Some(request))
+    }
+
+    pub(super) fn physical_order_plan(
+        &mut self,
+        request: &OrderRequest,
+        spec: &engine_types::numeric::ExactInstrumentSpec,
+        excluding: Option<&str>,
+    ) -> Result<crate::portfolio_protection::ProtectionPlan, String> {
+        let interval = match excluding {
+            Some(id) => self.risk.physical_exposure_interval_excluding(
+                id,
+                request.symbol,
+                &self.books.account,
+            ),
+            None => self
+                .risk
+                .physical_exposure_interval(request.symbol, &self.books.account),
+        }
+        .map_err(|reason| format!("{reason:?}"))?;
+        let reference = self
+            .reference_px(request.symbol, &OrderKind::Market)
+            .or_else(|| self.reference_px(request.symbol, &request.kind))
+            .ok_or("no reference price for physical protection")?;
+        let reference =
+            engine_types::order_terms::strategy_decimal(reference).map_err(|e| e.to_string())?;
+        let mut stops = Vec::new();
+        for order in self.books.orders.in_flight().into_iter().filter(|order| {
+            order.request.symbol == request.symbol
+                && excluding != Some(order.request.client_order_id.as_str())
+                && !order.request.is_sleeve_reduction()
+        }) {
+            if let Some(stop) = order
+                .request
+                .exact_terms
+                .as_ref()
+                .and_then(|terms| terms.stop_trigger_price.clone())
+            {
+                stops.push((order.request.side, stop));
+            } else if let Some(stop) = order.request.sleeve_stop() {
+                stops.push((
+                    order.request.side,
+                    engine_types::numeric::Exact::from_legacy_f64(stop.trigger_px)
+                        .map_err(|e| e.to_string())?,
+                ));
+            }
+        }
+        for position in self
+            .books
+            .account
+            .positions
+            .iter()
+            .filter(|position| position.symbol == request.symbol && position.stop_attached)
+        {
+            stops.push((
+                position.side,
+                engine_types::numeric::Exact::from_legacy_f64(position.stop_px)
+                    .map_err(|e| e.to_string())?,
+            ));
+        }
+        let plan = crate::portfolio_protection::plan(
+            &self.books.attribution.snapshot(),
+            request,
+            interval,
+            spec,
+            &reference,
+            stops,
+        )?;
+        if !plan.reduce_only {
+            if self.stop_repairs_pending.contains(&request.symbol) {
+                return Err("physical growth is waiting for native stop repair".into());
+            }
+            if !self.private_stream_ready
+                || !self.may_open
+                || !self.dispatches.unresolved.is_empty()
+            {
+                return Err(
+                    "physical growth requires reconciled private state and resolved order outcomes"
+                        .into(),
+                );
+            }
+            if self.symbol_admission.refresh_required()
+                || !self
+                    .symbol_admission
+                    .listed(self.books.market.table.name(request.symbol))
+            {
+                return Err("physical growth requires a current listed instrument".into());
+            }
+            let quote_ns = self.books.market.quote(request.symbol).recv_ns;
+            if quote_ns == 0 || clock::now_ns().saturating_sub(quote_ns) > self.max_quote_age_ns {
+                return Err("physical growth requires a fresh quote".into());
+            }
+        }
+        Ok(plan)
     }
 
     async fn confirm_order_protection(
@@ -649,6 +1071,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // number for this order missing rather than flattering.
             arrival_mid: self.decision_mid(request.symbol),
         };
+        self.portfolio_controls
+            .validate_engine_order(&request)
+            .map_err(EngineError::State)?;
         self.wal.append(&sent_record)?;
         self.dispatches.orders.insert(
             client_order_id.clone(),
@@ -659,12 +1084,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 phase: engine_types::order_dispatch::OrderDispatchPhase::Queued,
             },
         );
-        self.books.orders.apply(&sent_record);
-        self.books.registry.own(&client_order_id, intent.strategy);
+        self.books
+            .orders
+            .try_apply(&sent_record)
+            .map_err(EngineError::State)?;
+        if let Some(owner) = request.sleeve_owner() {
+            self.books.registry.own(&client_order_id, owner);
+        }
         // The engine's own note of what just went out, at the size that
         // actually went — strategies read it back as `ctx.in_flight`, so the
         // window between a fill and the next account reading cannot look flat.
-        if request.is_sleeve_reduction() {
+        if request.is_portfolio_reduction() {
+            // Its real fills are allocated across the contributing sleeves.
+        } else if request.is_sleeve_reduction() {
             self.books.covers.register_reduce(
                 intent.strategy,
                 request.symbol,
@@ -681,7 +1113,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 &self.books.account,
             );
         }
-        self.risk.register_order(&client_order_id, &intent, qty);
+        self.risk
+            .register_order_with_account(&client_order_id, &intent, qty, &self.books.account);
         self.orders_sent += 1;
 
         // Start working it from the price that is actually resting — the
@@ -782,7 +1215,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     tag = %intent.tag,
                     "refused leverage-conflicting sibling batch"
                 );
-                self.tell_refused(&intent, "batch_leverage_conflict");
+                self.tell_refused(
+                    &intent,
+                    "batch_leverage_conflict",
+                    client_order_id.as_deref(),
+                )?;
                 continue;
             }
             if let Some(order) = self
@@ -806,6 +1243,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         &mut self,
         intent: &Intent,
         refusal: OpeningRefusal,
+        client_order_id: Option<&str>,
     ) -> Result<(), EngineError> {
         self.wal.append(&WalRecord::Verdict {
             client_order_id: None,
@@ -821,7 +1259,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             reason = refusal.as_str(),
             "refused: this strategy cannot open exposure"
         );
-        self.tell_refused(intent, refusal.as_str());
+        self.tell_refused(intent, refusal.as_str(), client_order_id)?;
         Ok(())
     }
 
@@ -840,7 +1278,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             if let Some(last) = self.refusals.get_mut(&key) {
                 last.suppressed += 1;
             }
-            self.tell_refused(intent, why);
+            self.tell_refused(intent, why, Some(client_order_id))?;
             return Ok(());
         }
         let suppressed = self
@@ -865,7 +1303,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             source: "engine".into(),
             text: format!("{client_order_id} not sent ({}): {why}{also}", intent.tag),
         })?;
-        self.tell_refused(intent, why);
+        self.tell_refused(intent, why, Some(client_order_id))?;
         Ok(())
     }
 
@@ -873,7 +1311,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// engine, then tell the strategy. A refused exit means the covers
     /// describe exposure the account reading says is not there, and left
     /// standing they would re-plan the same doomed exit on every quote.
-    pub(super) fn tell_refused(&mut self, intent: &Intent, reason: &str) {
+    pub(super) fn tell_refused(
+        &mut self,
+        intent: &Intent,
+        reason: &str,
+        client_order_id: Option<&str>,
+    ) -> Result<(), EngineError> {
         // Bookkeeping first, so the strategy woken below already reads the
         // truthful in-flight number. A refused exit drops every cover on the
         // symbol; a refused entry has none to drop, because covers are booked
@@ -886,8 +1329,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             reduce_only: intent.reduce_only,
             reason: reason.to_string(),
         };
-        let now = clock::now_ns();
-        self.host.feed(&self.books, intent.strategy, &event, now);
+        self.deliver_callback_source(intent.strategy, event, client_order_id.map(str::to_owned))
     }
 
     /// Turn an entry the strategy asked to have worked into the resting limit
@@ -938,7 +1380,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
     }
 
-    fn reference_px(&self, symbol: SymbolId, kind: &OrderKind) -> Option<f64> {
+    pub(super) fn reference_px(&self, symbol: SymbolId, kind: &OrderKind) -> Option<f64> {
         if let OrderKind::Limit { px, .. } = kind {
             return Some(*px);
         }

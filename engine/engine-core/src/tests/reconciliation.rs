@@ -253,6 +253,7 @@ async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
             arrival_mid: 0.0,
         },
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -342,6 +343,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
             arrival_mid: 0.0,
         },
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -398,6 +400,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
         arrival_mid: 0.0,
     });
     log.push(WalRecord::OrderUpdate {
+        callbacks: None,
         update: OrderUpdate::Fill {
             allocation: None,
             amounts: None,
@@ -431,6 +434,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
         &log,
         Vec::new(),
         vec![engine_types::PositionView {
+            exact_stop_px: None,
             symbol: SymbolId(0),
             side: Side::Buy,
             qty: 0.5,

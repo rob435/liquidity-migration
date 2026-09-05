@@ -9,6 +9,7 @@ use super::*;
 pub struct SpoolSignalFeed {
     directory: PathBuf,
     readiness: Option<super::readiness::ReadinessExchange>,
+    sleeve_keys: Vec<engine_types::identity::SleeveKey>,
     pub(super) returned: Option<(PathBuf, DeliveryIdentity)>,
     acknowledged: Option<PathBuf>,
     pub(super) retirement: Option<tokio::task::JoinHandle<Result<(), SignalError>>>,
@@ -179,6 +180,7 @@ impl SpoolSignalFeed {
         Self {
             directory: directory.into(),
             readiness: None,
+            sleeve_keys: Vec::new(),
             returned: None,
             acknowledged: None,
             retirement: None,
@@ -318,6 +320,13 @@ impl SpoolSignalFeed {
 }
 
 impl SignalFeed for SpoolSignalFeed {
+    fn set_sleeve_keys(
+        &mut self,
+        keys: Vec<engine_types::identity::SleeveKey>,
+    ) -> Result<(), SignalError> {
+        self.sleeve_keys = keys;
+        Ok(())
+    }
     fn request_readiness(&mut self) -> Result<(), SignalError> {
         self.readiness = Some(super::readiness::ReadinessExchange::start(
             self.directory.clone(),
@@ -335,7 +344,7 @@ impl SignalFeed for SpoolSignalFeed {
         self.readiness = Some(super::readiness::ReadinessExchange::start(
             self.directory.clone(),
             self.poll,
-            Some((producers, legacy_sources)),
+            Some((producers, legacy_sources, self.sleeve_keys.clone())),
         ));
         Ok(())
     }

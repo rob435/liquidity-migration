@@ -73,6 +73,7 @@ impl ExecutionIds {
                             venue_ts_ms,
                             ..
                         },
+                    ..
                 } if !exec_id.is_empty() => entries.push((*venue_ts_ms, exec_id.clone())),
                 _ => {}
             }
@@ -227,11 +228,17 @@ mod tests {
     #[test]
     fn a_rotation_base_restores_duplicate_memory() {
         let record = WalRecord::SegmentBase {
+            portfolio_control: Default::default(),
             pending_order_dispatches: Vec::new(),
             signal_producers: Vec::new(),
+            identities: None,
+            instrument_catalog: None,
             signal_suspensions: Vec::new(),
             portfolio: Some(Default::default()),
             strategy_processes: Vec::new(),
+            strategy_callback_queues: Vec::new(),
+            strategy_callback_sources: Vec::new(),
+            signal_callback_deliveries: Vec::new(),
             strategy_callbacks: Vec::new(),
             wall_ts_ms: 20,
             strategies: Vec::new(),

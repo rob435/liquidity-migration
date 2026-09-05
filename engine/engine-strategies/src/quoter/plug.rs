@@ -352,7 +352,9 @@ impl Quoter {
     /// Ask the venue to pull an order, unless we have just asked.
     fn pull(&mut self, symbol: SymbolId, id: &str, now_ns: u64, ctx: &mut dyn StrategyCtx) {
         if let Some(asked) = self.asked.get(id) {
-            if now_ns.saturating_sub(asked.at_ns) < CANCEL_AGAIN_AFTER_NS {
+            if asked.moved_to.is_none()
+                && now_ns.saturating_sub(asked.at_ns) < CANCEL_AGAIN_AFTER_NS
+            {
                 return;
             }
         }
@@ -402,6 +404,7 @@ impl Quoter {
             symbol,
             id,
             engine_types::AmendSpec {
+                exact_terms: None,
                 px: Some(px),
                 qty: None,
             },
@@ -830,7 +833,7 @@ impl Strategy for Quoter {
                 self.settle_fast_fill(exec_id);
                 if ctx
                     .order_facts(client_order_id)
-                    .is_some_and(|order| order.reduce_only && order.filled_qty + 1e-12 >= order.qty)
+                    .is_some_and(|order| order.reduce_only && order.remaining_qty() == 0.0)
                 {
                     self.flatten_pending.remove(symbol);
                     self.flatten_retry.remove(symbol);

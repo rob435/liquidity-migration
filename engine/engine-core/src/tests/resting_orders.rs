@@ -105,6 +105,7 @@ impl Strategy for Amender {
                     *symbol,
                     &self.order,
                     AmendSpec {
+                        exact_terms: None,
                         px: Some(quote.bid_px),
                         qty: None,
                     },
@@ -275,8 +276,6 @@ async fn an_amend_is_refused_where_the_venue_cannot_move_a_resting_order() {
     let (mut venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
     venue.caps.amend_in_place = false;
     venue.working = vec![still_working("eng-old-1", "BTCUSDT", 0.01)];
-    let replayed =
-        replay_with_history_boundary(&owned_resting_replay("amender", &["eng-old-1".into()]));
     let amends = venue.amends.clone();
     let cancels = venue.cancels.clone();
     let (risk, _seen) = MockRisk::with(allow_all());
@@ -286,17 +285,12 @@ async fn an_amend_is_refused_where_the_venue_cannot_move_a_resting_order() {
         fired: false,
         keeps_asking: false,
     };
-    let mut engine = Engine::boot(
-        &settings(),
-        "0",
-        wal,
-        risk,
-        venue,
-        vec![Box::new(amender)],
-        &replayed,
-    )
-    .await
-    .unwrap();
+    let strategies: Vec<Box<dyn Strategy>> = vec![Box::new(amender)];
+    let replayed =
+        replay_with_history_boundary(&owned_resting_replay("amender", &["eng-old-1".into()]));
+    let mut engine = Engine::boot(&settings(), "0", wal, risk, venue, strategies, &replayed)
+        .await
+        .unwrap();
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -343,7 +337,7 @@ async fn until_amend_settled(records: Rc<RefCell<Vec<WalRecord>>>) {
 
 /// The bench for the three amend endings: a resting order the log already
 /// knows, a strategy that moves it once, and the venue taking the move.
-async fn amended_once() -> (Engine<MockWal, MockRisk, MockVenue>, Harness, SymbolId) {
+async fn amend_fixture() -> (Engine<MockWal, MockRisk, MockVenue>, Harness, SymbolId) {
     let amender = Amender {
         symbol: "BTCUSDT".into(),
         order: "eng-old-1".into(),
@@ -374,7 +368,7 @@ async fn amended_once() -> (Engine<MockWal, MockRisk, MockVenue>, Harness, Symbo
         wire_ns: 1,
         arrival_mid: 29_500.0,
     }];
-    let (mut engine, h) = build_with_venue_orders(
+    let (engine, h) = build_with_venue_orders(
         allow_all(),
         vec![Box::new(amender)],
         &["BTCUSDT"],
@@ -383,6 +377,11 @@ async fn amended_once() -> (Engine<MockWal, MockRisk, MockVenue>, Harness, Symbo
     )
     .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    (engine, h, symbol)
+}
+
+async fn amended_once() -> (Engine<MockWal, MockRisk, MockVenue>, Harness, SymbolId) {
+    let (mut engine, h, symbol) = amend_fixture().await;
     engine
         .run(
             &mut ScriptFeed::quotes(symbol, 1, true),
@@ -455,6 +454,7 @@ async fn the_venue_stating_the_price_settles_the_amend_and_keeps_the_order() {
         .run(
             &mut ScriptFeed::quotes(symbol, 0, false),
             &mut ScriptOrderFeed::playing(vec![OrderUpdate::Amended {
+                exact_terms: None,
                 client_order_id: "eng-old-1".into(),
                 px: 30_000.0,
                 qty: 0.01,
@@ -579,6 +579,7 @@ async fn an_unrelated_stated_price_leaves_an_open_amend_alone() {
         .run(
             &mut ScriptFeed::quotes(symbol, 1, true),
             &mut ScriptOrderFeed::playing(vec![OrderUpdate::Amended {
+                exact_terms: None,
                 client_order_id: "eng-somebody-else".into(),
                 px: 12.0,
                 qty: 1.0,
@@ -679,6 +680,7 @@ impl Strategy for Grower {
                     *symbol,
                     &self.order,
                     AmendSpec {
+                        exact_terms: None,
                         px: None,
                         qty: Some(self.qty),
                     },
@@ -895,6 +897,7 @@ async fn each_strategy_reads_only_its_own_working_orders() {
             arrival_mid: 0.0,
         },
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -1036,4 +1039,135 @@ async fn an_order_the_log_has_ended_leaves_the_strategys_book() {
         "the rejection ended the order"
     );
     assert!(seen.len() >= 3, "it was woken after the rejection");
+}
+
+struct NewsAfterAmend {
+    records: Arc<Mutex<Vec<WalRecord>>>,
+    update: Option<OrderUpdate>,
+}
+impl OrderFeed for NewsAfterAmend {
+    fn learn(&mut self, _: &str, _: SymbolId) {}
+    async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
+        loop {
+            if self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|record| matches!(record, WalRecord::AmendSent { .. }))
+            {
+                return match self.update.take() {
+                    Some(update) => Ok(update),
+                    None => std::future::pending().await,
+                };
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn slow_amend_durability_keeps_private_news_live_and_the_wire_waiting() {
+    let (mut engine, h, symbol) = amend_fixture().await;
+    engine.wal.defer_barriers();
+    engine.wal.barrier_takes = Duration::from_millis(250);
+    engine.wal.sync_barrier_takes = Duration::from_millis(250);
+    let started = std::time::Instant::now();
+    let mut feed = NewsAfterAmend {
+        records: h.records.clone(),
+        update: Some(OrderUpdate::Ack(engine_types::OrderAck {
+            client_order_id: "eng-old-1".into(),
+            venue_order_id: "during-fsync".into(),
+            sent_ns: 1,
+            ack_ns: clock::now_ns(),
+        })),
+    };
+    let records = h.records.clone();
+    let amends = h.amends.clone();
+    let shutdown = async move {
+        tokio::time::timeout(Duration::from_millis(100),async {
+            loop {
+                if records.lock().unwrap().iter().any(|record| matches!(record,WalRecord::OrderUpdate { update:OrderUpdate::Ack(ack),.. } if ack.venue_order_id == "during-fsync")) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("slow amend fsync blocked private news");
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "synchronous amend fsync blocked the private news loop"
+        );
+        assert!(
+            amends.lock().unwrap().is_empty(),
+            "amend reached the venue before its durability confirmation"
+        );
+    };
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut feed,
+            shutdown,
+        )
+        .await
+        .unwrap();
+    assert_eq!(h.amends.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn cancellation_during_amend_fsync_prevents_the_late_mutation() {
+    let (mut engine, h, symbol) = amend_fixture().await;
+    engine.wal.defer_barriers();
+    engine.wal.barrier_takes = Duration::from_millis(80);
+    let mut feed = NewsAfterAmend {
+        records: h.records.clone(),
+        update: Some(OrderUpdate::Cancelled {
+            client_order_id: "eng-old-1".into(),
+            recv_ns: clock::now_ns(),
+        }),
+    };
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut feed,
+            tokio::time::sleep(Duration::from_millis(120)),
+        )
+        .await
+        .unwrap();
+    assert!(
+        h.amends.lock().unwrap().is_empty(),
+        "terminal order received an amendment after delayed fsync"
+    );
+}
+
+#[tokio::test]
+async fn contradictory_private_amend_never_enters_the_wal_or_settles_the_price() {
+    let (mut engine, h, symbol) = amended_once().await;
+    let number = engine_types::numeric::ExactNumber::venue_decimal("30001").unwrap();
+    let mut feed = ScriptOrderFeed::playing(vec![OrderUpdate::Amended {
+        client_order_id: "eng-old-1".into(),
+        px: 30000.0,
+        qty: 0.01,
+        recv_ns: clock::now_ns(),
+        exact_terms: Some(Box::new(engine_types::order_terms::ExactAmendedTerms {
+            price: number,
+            quantity: engine_types::numeric::ExactNumber::venue_decimal("0.01").unwrap(),
+        })),
+    }]);
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 0, false),
+            &mut feed,
+            tokio::time::sleep(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+    assert!(resolved_price(&h).is_none());
+    assert!(
+        !h.records.lock().unwrap().iter().any(|record| matches!(
+            record,
+            WalRecord::OrderUpdate {
+                update: OrderUpdate::Amended { .. },
+                ..
+            }
+        )),
+        "invalid exact amendment poisoned the WAL"
+    );
 }

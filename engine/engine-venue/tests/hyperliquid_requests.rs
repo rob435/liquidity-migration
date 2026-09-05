@@ -410,6 +410,7 @@ async fn an_amend_keeps_the_half_it_was_not_asked_to_change() {
         SymbolId(0),
         "eng-1700000000000-1",
         AmendSpec {
+            exact_terms: None,
             px: Some(93_500.0),
             qty: None,
         },
@@ -457,6 +458,7 @@ async fn an_amend_refuses_rather_than_guess_a_time_in_force() {
             SymbolId(0),
             "eng-1700000000000-1",
             AmendSpec {
+                exact_terms: None,
                 px: Some(93_500.0),
                 qty: None,
             },
@@ -479,6 +481,7 @@ async fn an_amend_that_changes_nothing_is_refused_before_a_round_trip() {
             SymbolId(0),
             "eng-1",
             AmendSpec {
+                exact_terms: None,
                 px: None,
                 qty: None,
             },
@@ -758,4 +761,169 @@ async fn exact_terms_reach_signed_action_and_illegal_grid_is_refused_before_send
     illegal.apply_projection(&mut request).unwrap();
     assert!(gw.send_order(&request).await.is_err());
     assert_eq!(server.to_path("/exchange").len(), 1);
+}
+
+#[tokio::test]
+async fn independent_catalog_installs_asset_ids_before_a_mutation_without_another_read() {
+    let server = TestServer::start(|request, _| answer(request)).await;
+    let mut gw = gateway(&server);
+    let catalog = gw
+        .instrument_catalog_client()
+        .unwrap()
+        .fetch()
+        .await
+        .unwrap();
+    assert_eq!(catalog.rules.len(), 2);
+    assert_eq!(catalog.specs.len(), 2);
+    gw.install_instrument_catalog(&catalog).unwrap();
+    gw.send_order(&entry(
+        OrderKind::Limit {
+            px: 95_000.0,
+            tif: TimeInForce::Gtc,
+        },
+        None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|r| r.path == "/info" && r.json()["type"] == "meta")
+            .count(),
+        1
+    );
+    let other = TestServer::start(|request, _| answer(request)).await;
+    assert!(gateway(&other)
+        .install_instrument_catalog(&catalog)
+        .is_err());
+    assert!(other.requests().is_empty());
+}
+
+#[tokio::test]
+async fn exact_market_slippage_uses_the_venue_mid_lexeme_before_rounding() {
+    use engine_types::numeric::Exact;
+    use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
+    let server = TestServer::start(|request, _| {
+        if request.path == "/info" {
+            match request.json()["type"].as_str().unwrap() {
+                "meta" => {
+                    return (
+                        200,
+                        r#"{"universe":[{"name":"BTC","szDecimals":0,"maxLeverage":40}]}"#.into(),
+                    )
+                }
+                "allMids" => return (200, r#"{"BTC":"1.0000000000000000000001"}"#.into()),
+                _ => {}
+            }
+        }
+        answer(request)
+    })
+    .await;
+    let mut gw = gateway(&server);
+    let mut request = entry(OrderKind::Market, None);
+    ExactOrderTerms {
+        quantity: Exact::one(),
+        limit_price: None,
+        stop_trigger_price: None,
+        physical_stop_trigger_price: None,
+        input_policy: OrderInputPolicy::StrategyShortestDecimal,
+    }
+    .apply_projection(&mut request)
+    .unwrap();
+    gw.send_order(&request).await.unwrap();
+    assert_eq!(
+        action(&server.only("/exchange"))["orders"][0]["p"],
+        "1.0501",
+        "market bound lost the native mid precision before crossing-side rounding"
+    );
+}
+
+#[tokio::test]
+async fn exact_amend_requires_the_current_reduce_only_flag_and_keeps_remaining_quantity() {
+    use engine_types::numeric::Exact;
+    use engine_types::order_terms::{ExactAmendTerms, OrderInputPolicy};
+    for present in [false, true] {
+        let server=TestServer::start(move|request,_|{
+            if request.path=="/exchange"{return(200,resting(88));}
+            if request.json()["type"]=="frontendOpenOrders" {
+                return(200,format!(r#"[{{"coin":"BTC","side":"B","sz":"0.00401","origSz":"0.01","oid":77,"limitPx":"94000","isTrigger":false,"orderType":"Limit","tif":"Alo","cloid":"{}"{}}}]"#,cloid_of("eng-1700000000000-1"),if present{",\"reduceOnly\":true"}else{""}));
+            }
+            answer(request)
+        }).await;
+        let mut gw = gateway(&server);
+        let mut spec = AmendSpec {
+            px: None,
+            qty: None,
+            exact_terms: None,
+        };
+        ExactAmendTerms {
+            quantity: None,
+            limit_price: Some(Exact::from_i64(93500)),
+            input_policy: OrderInputPolicy::StrategyShortestDecimal,
+        }
+        .apply_projection(&mut spec)
+        .unwrap();
+        let result = gw
+            .amend_order(SymbolId(0), "eng-1700000000000-1", spec)
+            .await;
+        if present {
+            result.unwrap();
+            let sent = action(&server.only("/exchange"));
+            let order = &sent["modifies"][0]["order"];
+            assert_eq!(order["r"], true);
+            assert_eq!(order["s"], "0.00401");
+            assert_eq!(order["p"], "93500");
+            assert_eq!(order["t"]["limit"]["tif"], "Alo");
+        } else {
+            assert!(
+                result.is_err(),
+                "unknown reduce-only state became an unrestricted replacement"
+            );
+            assert!(server.to_path("/exchange").is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn independent_account_recovery_uses_requested_ids_and_preserves_protection() {
+    // This venue keeps no stop on the position row, so the account read has to
+    // look at the open orders — and a position with no stop must come back
+    // unprotected, which is what holds new risk back.
+    let server = TestServer::start(|request, _| answer(request)).await;
+    let gw = gateway(&server);
+    let view = gw
+        .account_recovery_client()
+        .expect("independent account recovery client")
+        .account_view(&["ETHUSDT".into(), "BTCUSDT".into()])
+        .await
+        .unwrap();
+    assert_eq!(view.positions[0].symbol, SymbolId(1));
+    assert_eq!(view.equity_usdt, 1500.25);
+    assert_eq!(view.available_usdt, 1200.5);
+    assert_eq!(view.positions.len(), 1);
+    assert!(view.positions[0].stop_attached);
+    assert_eq!(view.positions[0].stop_px, 93_000.0);
+    assert_eq!(view.positions[0].leverage, Some(20.0));
+
+    let bare = TestServer::start(|request, _| {
+        let body: Value = request.json();
+        if request.path == "/info" && body["type"] == "frontendOpenOrders" {
+            return (200, "[]".to_string());
+        }
+        answer(request)
+    })
+    .await;
+    let gw = gateway(&bare);
+    let view = gw
+        .account_recovery_client()
+        .expect("independent account recovery client")
+        .account_view(&["ETHUSDT".into(), "BTCUSDT".into()])
+        .await
+        .unwrap();
+    assert_eq!(view.positions[0].symbol, SymbolId(1));
+    assert!(
+        !view.positions[0].stop_attached,
+        "a position with no stop order read as protected"
+    );
 }

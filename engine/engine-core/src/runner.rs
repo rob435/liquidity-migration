@@ -11,7 +11,7 @@
 use std::error::Error;
 use std::path::Path;
 
-use engine_types::{AccountIdentity, Strategy, VenueGateway};
+use engine_types::{AccountIdentity, MarketFeed, VenueGateway};
 use engine_venue::lease::{self, AccountLease, LeaseError};
 use engine_venue::Venue;
 
@@ -42,9 +42,23 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     let chosen = assembly::venue_name(&settings.venue)?;
     chosen.require_engine_run_ready()?;
 
-    // Building a strategy is reading its config block: no clock, no socket,
-    // no decision. Nothing below has happened yet when the lease is taken.
-    let strategies: Vec<Box<dyn Strategy>> = assembly::strategies(&loaded.config.strategies)?;
+    let _log_claim = engine_wal::lock(&settings.wal_path)?;
+    let (wal, replayed) = assembly::wal(&settings.wal_path)?;
+    let configured_keys: Vec<_> = loaded
+        .config
+        .strategies
+        .iter()
+        .map(|strategy| strategy.sleeve_name().to_string())
+        .collect();
+    let plan = crate::identities::plan_identities(
+        &replayed,
+        &configured_keys,
+        None,
+        &Default::default(),
+        &[],
+    )?;
+    let strategies =
+        assembly::strategies_for_registry(&loaded.config.strategies, &plan, &replayed)?;
     if strategies
         .iter()
         .any(|strategy| strategy.requires_signal_feed())
@@ -52,33 +66,31 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     {
         return Err("a configured strategy requires engine.signal_spool_path".into());
     }
-    // Each block's sleeve name, so the WAL and heartbeat keep the fixed native
-    // strategy order distinct even when plugs share implementation helpers.
-    let sleeves: Vec<String> = loaded
-        .config
-        .strategies
+    let sleeves: Vec<_> = plan
+        .state
+        .sleeves
         .iter()
-        .map(|s| s.sleeve_name().to_string())
+        .map(|key| key.as_str().to_string())
         .collect();
     let mut wanted: Vec<_> = strategies
         .iter()
-        .flat_map(|s| s.subscriptions())
-        .collect::<Vec<_>>();
+        .flat_map(|strategy| strategy.subscriptions())
+        .collect();
     let risk = assembly::risk(&loaded.config.risk)?;
-    // The log is claimed and replayed before anything is given a symbol
-    // table, because the table STARTS from the log: the previous run's own
-    // id order, then this config's subscriptions on top. Claim before open,
-    // because opening truncates a torn tail — doing that to a log another
-    // engine is appending to is the damage the claim prevents. Shadow runs
-    // take it too: they write the same log.
-    let _log_claim = engine_wal::lock(&settings.wal_path)?;
-    let (wal, replayed) = assembly::wal(&settings.wal_path)?;
     for subscription in crate::signals::active_subscriptions(&replayed) {
         if !wanted.contains(&subscription) {
             wanted.push(subscription);
         }
     }
-    let symbols = assembly::symbol_order(&replayed, &wanted);
+    for subscription in crate::portfolio_routes::replayed(&replayed)? {
+        if !wanted.contains(&subscription) {
+            wanted.push(subscription);
+        }
+    }
+    let symbols = assembly::symbol_order(&replayed, &wanted)?;
+    if symbols.len() > engine_types::identity::DENSE_ID_CAPACITY {
+        return Err(engine_types::identity::IdentityError::SymbolIdsExhausted.into());
+    }
 
     // The switch, turned once. All three of the venue's parts are built from
     // this one value, so a config cannot half-switch — send orders to one
@@ -89,8 +101,7 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     // kernel if the process dies first.
     let claimed = single_writer(&mut venue).await?;
 
-    let mut market_feed =
-        assembly::market_feed(chosen, &assembly::boot_subscriptions(&symbols, &wanted));
+    let mut market_feed = assembly::market_feed_for_registry(chosen, &symbols, &wanted);
     let mut order_feed = assembly::order_feed(chosen, symbols)?;
 
     // Subscribe before any account/history snapshot. Once this readiness
@@ -112,6 +123,21 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         std::env::current_exe()?,
     )
     .await?;
+
+    for subscription in engine.subscriptions() {
+        let expected = engine
+            .market()
+            .table
+            .get(&subscription.symbol)
+            .ok_or("boot route has no durable symbol")?;
+        if market_feed.admit(&subscription.symbol, subscription.feed) != Some(expected) {
+            return Err(format!(
+                "public feed refused retained portfolio route for {}",
+                subscription.symbol
+            )
+            .into());
+        }
+    }
 
     if let Some(trades) = assembly::trades(&settings) {
         engine.write_trades(trades);

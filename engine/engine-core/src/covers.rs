@@ -248,6 +248,7 @@ mod tests {
             positions: rows
                 .iter()
                 .map(|(symbol, signed)| PositionView {
+                    exact_stop_px: None,
                     symbol: *symbol,
                     side: if *signed >= 0.0 {
                         Side::Buy

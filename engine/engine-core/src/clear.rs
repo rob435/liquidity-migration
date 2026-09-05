@@ -73,7 +73,7 @@ pub async fn run(config_path: &Path, note: &str, execute: bool) -> Result<(), Bo
         Err(e) => println!("no instrument rules ({e}); judging with the smallest tolerance"),
     }
 
-    let orders = LedgerOfOrders::from_records(&replayed);
+    let orders = LedgerOfOrders::try_from_records(&replayed)?;
     let symbols = names.symbols.clone();
     let found = reconcile::reconcile(
         &orders,
@@ -88,7 +88,7 @@ pub async fn run(config_path: &Path, note: &str, execute: bool) -> Result<(), Bo
         },
         |id| quantity_steps.get(id.0 as usize).copied().flatten(),
         |id| price_ticks.get(id.0 as usize).copied().flatten(),
-    );
+    )?;
 
     if found.findings.is_empty() {
         println!("standing findings: none — the log and the venue agree");
@@ -104,21 +104,27 @@ pub async fn run(config_path: &Path, note: &str, execute: bool) -> Result<(), Bo
     let restated: Vec<SymbolTotal> = account
         .positions
         .iter()
-        .map(|position| SymbolTotal {
-            symbol: position.symbol,
-            signed_qty: match position.side {
+        .map(|position| {
+            let signed_qty = match position.side {
                 Side::Buy => position.qty,
                 Side::Sell => -position.qty,
-            },
+            };
+            Ok(SymbolTotal {
+                symbol: position.symbol,
+                signed_qty,
+                exact_signed_qty: Some(engine_types::numeric::ExactNumber::legacy_binary64(
+                    signed_qty,
+                )?),
+            })
         })
-        .collect();
+        .collect::<Result<_, engine_types::numeric::ExactError>>()?;
     println!("restating exposure over {} symbol(s):", restated.len());
     for row in &restated {
         println!(
             "  {}: {} (the log accounted {})",
             names.symbol(row.symbol),
             row.signed_qty,
-            reconcile::logged_exposure(&replayed)
+            reconcile::logged_exposure(&replayed)?
                 .get(&row.symbol)
                 .copied()
                 .unwrap_or(0.0)

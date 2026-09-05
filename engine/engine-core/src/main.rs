@@ -284,11 +284,25 @@ async fn submit_runtime_control(
         .control_spool_path
         .as_deref()
         .ok_or("engine.control_spool_path is required for live runtime controls")?;
+    let (records, torn) = engine_wal::replay_chain(&loaded.config.engine.wal_path)?;
+    if torn {
+        return Err("runtime control waits for a complete WAL identity frame".into());
+    }
+    let replayed = records
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect::<Vec<_>>();
+    let keys = loaded
+        .config
+        .strategies
+        .iter()
+        .map(|strategy| strategy.sleeve_name().to_string())
+        .collect::<Vec<_>>();
+    let plan =
+        engine_core::identities::plan_identities(&replayed, &keys, None, &Default::default(), &[])?;
     let mut request = engine_types::RuntimeControlRequest {
         schema_version: engine_types::STRATEGY_ENTRY_PERMISSION_SCHEMA_VERSION,
-        strategy: engine_types::StrategyId(
-            u16::try_from(*at).map_err(|_| "more than 65535 configured strategies")?,
-        ),
+        strategy: plan.configured_ids[*at],
         strategy_name: strategy_name.to_string(),
         request_id: request_id.to_string(),
         command,

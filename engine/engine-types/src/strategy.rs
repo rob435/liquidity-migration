@@ -278,6 +278,12 @@ pub enum SignalFeedEvent {
 /// work and never waits synchronously for the signal worker.
 #[allow(async_fn_in_trait)]
 pub trait SignalFeed {
+    fn set_sleeve_keys(
+        &mut self,
+        _keys: Vec<crate::identity::SleeveKey>,
+    ) -> Result<(), SignalError> {
+        Ok(())
+    }
     /// Begin a fresh producer participation handshake for this engine run.
     fn request_readiness(&mut self) -> Result<(), SignalError> {
         Ok(())
@@ -665,6 +671,9 @@ pub trait StrategyCtx {
 /// edit.
 pub trait Strategy {
     fn name(&self) -> &str;
+    fn callback_enabled(&self) -> bool {
+        true
+    }
     /// Complete private state for an isolated callback process. Registered
     /// plugs include configuration and transient decision state; reducer
     /// checkpoints alone do not capture pending requests and retry state.

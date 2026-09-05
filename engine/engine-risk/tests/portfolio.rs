@@ -120,3 +120,252 @@ fn a_new_opposing_sleeve_may_cross_physical_flat_within_existing_gross_caps() {
         }
     );
 }
+
+fn exact_held(qty: &str) -> PortfolioPosition {
+    let quantity = Exact::parse_decimal(qty).unwrap();
+    PortfolioPosition {
+        strategy: CARRY,
+        symbol: BUSDT,
+        entry_value: Some(quantity.abs() * Exact::from_i64(10)),
+        signed_qty: quantity,
+        stop_px: Some(Exact::from_i64(9)),
+        settlement_asset: AssetId::Named("USDT".into()),
+    }
+}
+
+#[test]
+fn a_legal_exact_position_below_legacy_dust_tolerance_can_reduce() {
+    let mut kernel = Kernel::new(demo_config()).unwrap();
+    let state = portfolio(vec![exact_held("0.0000000000001")]);
+    let account = view(
+        250_000.0,
+        vec![position(BUSDT, Side::Buy, 1e-13, 10.0, false)],
+        SEC,
+    );
+    assert_eq!(
+        kernel.assess_portfolio(
+            &exit(CARRY, BUSDT, Side::Sell, 1e-13, 10.0, SEC),
+            &account,
+            &state
+        ),
+        PortfolioRiskVerdict::Allow {
+            qty: 1e-13,
+            venue_reduce_only: true
+        }
+    );
+}
+
+#[test]
+fn reduction_direction_does_not_multiply_tiny_quantities_to_zero() {
+    let mut config = demo_config();
+    config.qty_tolerance = 0.0;
+    let mut kernel = Kernel::new(config).unwrap();
+    let state = portfolio(vec![exact_held("1e-200")]);
+    let account = view(
+        250_000.0,
+        vec![position(BUSDT, Side::Buy, 1e-200, 10.0, false)],
+        SEC,
+    );
+    assert_eq!(
+        kernel.assess_portfolio(
+            &exit(CARRY, BUSDT, Side::Sell, 1e-200, 10.0, SEC),
+            &account,
+            &state
+        ),
+        PortfolioRiskVerdict::Allow {
+            qty: 1e-200,
+            venue_reduce_only: true
+        }
+    );
+}
+
+#[test]
+fn virtual_exit_accepts_a_profit_locking_stop_on_the_surviving_short() {
+    let mut short = held(LONG, BUSDT, -2);
+    short.stop_px = Some(Exact::from_i64(9));
+    let state = portfolio(vec![held(CARRY, BUSDT, 3), short]);
+    let mut kernel = Kernel::new(demo_config()).unwrap();
+    kernel.observe_price(BUSDT, 8.0);
+    let mut physical = position(BUSDT, Side::Buy, 1.0, 10.0, true);
+    physical.stop_px = 7.0;
+    let account = view(250_000.0, vec![physical], SEC);
+    assert_eq!(
+        kernel.assess_portfolio(
+            &exit(CARRY, BUSDT, Side::Sell, 3.0, 8.0, SEC),
+            &account,
+            &state
+        ),
+        PortfolioRiskVerdict::Allow {
+            qty: 3.0,
+            venue_reduce_only: false
+        }
+    );
+}
+
+#[test]
+fn a_stop_already_crossed_by_current_price_cannot_authorize_more_portfolio_risk() {
+    let state = portfolio(vec![held(CARRY, BUSDT, 2), held(LONG, BUSDT, -2)]);
+    for current in [8.0, 12.0] {
+        let mut kernel = Kernel::new(demo_config()).unwrap();
+        kernel.observe_price(BUSDT, current);
+        let verdict = kernel.assess_portfolio(
+            &entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC),
+            &flat(250_000.0, SEC),
+            &state,
+        );
+        assert!(
+            matches!(verdict, PortfolioRiskVerdict::Deny { .. }),
+            "crossed stop allowed at{current}: {verdict:?}"
+        );
+    }
+}
+
+#[test]
+fn pending_opposite_order_does_not_hide_margin_when_a_virtual_exit_fills_first() {
+    let state = portfolio(vec![held(CARRY, BUSDT, 2), held(LONG, BUSDT, -2)]);
+    let mut kernel = Kernel::new(demo_config()).unwrap();
+    kernel.observe_price(BUSDT, 10.0);
+    kernel.register_order(
+        "pending-buy",
+        &entry(CARRY, BUSDT, Side::Buy, 2.0, 10.0, 9.0, SEC),
+        2.0,
+    );
+    kernel.mark_order_accepted("pending-buy", SEC);
+    let mut account = flat(250_000.0, SEC);
+    account.available_usdt = 4.99;
+    let verdict = kernel.assess_portfolio(
+        &exit(CARRY, BUSDT, Side::Sell, 1.0, 10.0, SEC),
+        &account,
+        &state,
+    );
+    assert!(
+        matches!(
+            verdict,
+            PortfolioRiskVerdict::Deny {
+                reason: DenyReason::AvailableMarginExhausted {
+                    additional_margin_usdt: 5.0,
+                    ..
+                }
+            }
+        ),
+        "pending buy hid required margin: {verdict:?}"
+    );
+    account.available_usdt = 5.0;
+    assert_eq!(
+        kernel.assess_portfolio(
+            &exit(CARRY, BUSDT, Side::Sell, 1.0, 10.0, SEC),
+            &account,
+            &state
+        ),
+        PortfolioRiskVerdict::Allow {
+            qty: 1.0,
+            venue_reduce_only: false
+        }
+    );
+}
+
+#[test]
+fn a_tiny_unallocated_quantity_with_material_notional_counts_against_portfolio_caps() {
+    let mut config = demo_config();
+    config.envelope.max_component_gross_notional_usdt = 50.0;
+    config.envelope.max_initial_margin_usdt = 25.0;
+    let mut kernel = Kernel::new(config).unwrap();
+    kernel.observe_price(BUSDT, 1e15);
+    let account = view(
+        250_000.0,
+        vec![position(BUSDT, Side::Buy, 1e-13, 1e15, true)],
+        SEC,
+    );
+    let verdict = kernel.assess_portfolio(
+        &entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC),
+        &account,
+        &portfolio(vec![]),
+    );
+    assert!(
+        matches!(
+            verdict,
+            PortfolioRiskVerdict::Deny {
+                reason: DenyReason::ComponentGrossBreached { .. }
+            }
+        ),
+        "material residual disappeared as dust: {verdict:?}"
+    );
+}
+
+#[test]
+fn native_position_stop_must_still_be_executable_at_current_price() {
+    use engine_types::risk::RiskVerdict;
+    for (side, current) in [(Side::Buy, 8.0), (Side::Sell, 12.0)] {
+        let mut kernel = Kernel::new(demo_config()).unwrap();
+        kernel.observe_price(BUSDT, current);
+        let account = view(250_000.0, vec![position(BUSDT, side, 2.0, 10.0, true)], SEC);
+        let verdict = kernel.assess(
+            &entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC),
+            &account,
+        );
+        assert!(
+            matches!(verdict, RiskVerdict::Deny { .. }),
+            "crossed native stop allowed more risk: {verdict:?}"
+        );
+    }
+}
+
+#[test]
+fn tiny_opposing_native_rows_do_not_hide_the_one_way_account_violation() {
+    let mut config = demo_config();
+    config.qty_tolerance = 0.0;
+    let mut kernel = Kernel::new(config).unwrap();
+    let account = view(
+        250_000.0,
+        vec![
+            position(BUSDT, Side::Buy, 1e-200, 10.0, true),
+            position(BUSDT, Side::Sell, 1e-200, 10.0, true),
+        ],
+        SEC,
+    );
+    let verdict = kernel.assess_portfolio(
+        &entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC),
+        &account,
+        &portfolio(vec![]),
+    );
+    assert!(
+        matches!(verdict, PortfolioRiskVerdict::Deny { .. }),
+        "tiny hedge rows appeared one-way: {verdict:?}"
+    );
+}
+
+#[test]
+fn overflowing_native_rows_cannot_make_every_exit_appear_physically_reducing() {
+    let mut kernel = Kernel::new(demo_config()).unwrap();
+    let account = view(
+        250_000.0,
+        vec![
+            position(BUSDT, Side::Buy, 1e308, 10.0, true),
+            position(BUSDT, Side::Buy, 1e308, 10.0, true),
+        ],
+        SEC,
+    );
+    let verdict = kernel.assess_portfolio(
+        &exit(CARRY, BUSDT, Side::Sell, 1.0, 10.0, SEC),
+        &account,
+        &portfolio(vec![held(CARRY, BUSDT, 1)]),
+    );
+    assert!(
+        matches!(verdict, PortfolioRiskVerdict::Deny { .. }),
+        "overflow made physical reduction certain: {verdict:?}"
+    );
+}
+
+#[test]
+fn contradictory_exact_account_stop_cannot_authorize_a_physical_interval() {
+    for raw in ["11", "-1", "1e-400"] {
+        let mut row = position(BUSDT, Side::Buy, 1.0, 10.0, true);
+        row.exact_stop_px = Some(Box::new(Exact::parse_decimal(raw).unwrap()));
+        let account = view(250_000.0, vec![row], SEC);
+        let mut kernel = Kernel::new(demo_config()).unwrap();
+        assert!(
+            kernel.physical_exposure_interval(BUSDT, &account).is_err(),
+            "inconsistent native stop {raw} retained account authority"
+        );
+    }
+}

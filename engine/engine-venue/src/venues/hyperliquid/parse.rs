@@ -236,6 +236,7 @@ pub(crate) fn parse_positions(
         let side = if signed > 0.0 { Side::Buy } else { Side::Sell };
         let stop_px = stops.get(&coin).map(|held| held.nearest(side));
         out.push(PositionView {
+            exact_stop_px: None,
             symbol,
             side,
             qty: signed.abs(),

@@ -10,6 +10,13 @@ use crate::strategy::{
     StrategyEvent,
 };
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveredCallbacks {
+    pub owners: Vec<StrategyId>,
+    pub recv_ns: u64,
+}
+
 /// One record in the append-only log. Serialized as tagged JSON inside a
 /// checksummed binary frame (framing is the WAL crate's concern). Kept
 /// human-readable on purpose: the log is the engine's audit trail.
@@ -17,6 +24,32 @@ use crate::strategy::{
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 pub enum WalRecord {
+    PortfolioExitChanged {
+        state: crate::portfolio_control::PortfolioExit,
+    },
+    PortfolioExitCompleted {
+        id: u64,
+        strategy: StrategyId,
+        symbol: SymbolId,
+    },
+    PortfolioEmergencyChanged {
+        state: crate::portfolio_control::PortfolioEmergency,
+    },
+    PortfolioEmergencyCompleted {
+        id: u64,
+        symbol: SymbolId,
+    },
+    PortfolioOffsetSettled {
+        settlement: crate::portfolio_control::PortfolioOffsetSettlement,
+    },
+    SleeveStopSet {
+        strategy: StrategyId,
+        symbol: SymbolId,
+        side: Side,
+        trigger_price: crate::numeric::Exact,
+        wall_ts_ms: i64,
+    },
+
     /// Engine start: code identity and config identity, so every later
     /// record is attributable. `commit` is the git commit the binary was built
     /// from; logs written before builds were stamped read back with it empty.
@@ -38,6 +71,12 @@ pub enum WalRecord {
     },
     StrategyTransitionQueued {
         transition: StrategyTransitionState,
+    },
+    StrategyCallbackSource {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placement: Option<String>,
+        strategy: StrategyId,
+        event: crate::strategy_process::CallbackEvent,
     },
     StrategyCallbackQueued {
         input: crate::strategy_process::StrategyCallbackInput,
@@ -84,7 +123,10 @@ pub enum WalRecord {
         #[serde(default)]
         arrival_mid: f64,
     },
+    #[serde(rename = "order_update_v2", alias = "order_update")]
     OrderUpdate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callbacks: Option<Vec<StrategyId>>,
         update: OrderUpdate,
     },
     /// A cancel on its way out. Not barriered before the wire: a cancel adds
@@ -105,6 +147,7 @@ pub enum WalRecord {
         wall_ts_ms: i64,
     },
     /// An in-place reprice or resize on its way out.
+    #[serde(rename = "amend_sent_v2", alias = "amend_sent")]
     AmendSent {
         symbol: SymbolId,
         client_order_id: String,
@@ -115,9 +158,12 @@ pub enum WalRecord {
     /// keeps the full old/requested price range reserved: its high end prices
     /// notional and both ends price stop loss. An accepted/rejected answer
     /// narrows that conservative ambiguity to the price actually working.
+    #[serde(rename = "amend_resolved_v2", alias = "amend_resolved")]
     AmendResolved {
         client_order_id: String,
         effective_px: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exact_effective_px: Option<crate::numeric::ExactNumber>,
     },
     /// What the ids in this log mean.
     ///
@@ -299,7 +345,10 @@ pub enum WalRecord {
     /// inside a private-stream gap. Counted into the per-symbol exposure sum
     /// exactly like a delivered fill, so the log stays an account of what the
     /// position actually is rather than only of what this process witnessed.
+    #[serde(rename = "recovered_fill_v2", alias = "recovered_fill")]
     RecoveredFill {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callbacks: Option<RecoveredCallbacks>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allocation: Option<Box<crate::execution_allocation::ExecutionAllocation>>,
         /// The venue's own execution id — the dedup key against fetching the
@@ -434,6 +483,14 @@ pub enum WalRecord {
         destination: StrategyId,
         suspension: Option<crate::SignalAdmissionSuspensionReason>,
     },
+    InstrumentCatalogCheckpoint {
+        wall_ts_ms: i64,
+        checkpoint: Box<crate::orders::InstrumentCatalogCheckpoint>,
+    },
+    IdentityState {
+        wall_ts_ms: i64,
+        state: crate::identity::IdentityState,
+    },
     SignalProducerLifecycle {
         wall_ts_ms: i64,
         state: crate::SignalProducerLifecycle,
@@ -474,18 +531,31 @@ pub enum WalRecord {
     /// already produced, which is what makes chain reads and single-segment
     /// reads agree.
     #[serde(
-        rename = "segment_base_v4",
+        rename = "segment_base_v5",
+        alias = "segment_base_v4",
         alias = "segment_base_v3",
         alias = "segment_base_v2",
         alias = "segment_base"
     )]
     SegmentBase {
         #[serde(default)]
+        portfolio_control: crate::portfolio_control::PortfolioControlState,
+        #[serde(default)]
+        identities: Option<crate::identity::IdentityState>,
+        #[serde(default)]
+        instrument_catalog: Option<Box<crate::orders::InstrumentCatalogCheckpoint>>,
+        #[serde(default)]
         pending_order_dispatches: Vec<crate::order_dispatch::OrderDispatchState>,
         #[serde(default)]
         strategy_processes: Vec<crate::strategy_process::StrategyProcessState>,
         #[serde(default)]
         strategy_callbacks: Vec<crate::strategy_process::StrategyCallbackInput>,
+        #[serde(default)]
+        strategy_callback_queues: Vec<crate::strategy_process::CallbackQueueSlot>,
+        #[serde(default)]
+        strategy_callback_sources: Vec<crate::strategy_process::CallbackSourceFrontier>,
+        #[serde(default)]
+        signal_callback_deliveries: Vec<crate::strategy_process::SignalCallbackDelivery>,
         #[serde(default)]
         portfolio: Option<crate::portfolio::PortfolioState>,
         wall_ts_ms: i64,
@@ -612,10 +682,47 @@ pub struct FilledTotal {
 }
 
 /// One per-symbol fill total inside [`WalRecord::SegmentBase`].
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SymbolTotal {
     pub symbol: SymbolId,
     pub signed_qty: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_signed_qty: Option<crate::numeric::ExactNumber>,
+}
+
+impl SymbolTotal {
+    pub fn exact_quantity(&self) -> Result<crate::numeric::Exact, crate::numeric::ExactError> {
+        match &self.exact_signed_qty {
+            Some(quantity) => {
+                quantity.validate_provenance()?;
+                if quantity.value.to_f64()? != self.signed_qty {
+                    return Err(crate::numeric::ExactError::InvalidProjection);
+                }
+                Ok(quantity.value.clone())
+            }
+            None => crate::numeric::Exact::from_legacy_f64(self.signed_qty),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SymbolTotal {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Row {
+            symbol: SymbolId,
+            signed_qty: f64,
+            #[serde(default)]
+            exact_signed_qty: Option<crate::numeric::ExactNumber>,
+        }
+        let row = Row::deserialize(deserializer)?;
+        let total = Self {
+            symbol: row.symbol,
+            signed_qty: row.signed_qty,
+            exact_signed_qty: row.exact_signed_qty,
+        };
+        total.exact_quantity().map_err(serde::de::Error::custom)?;
+        Ok(total)
+    }
 }
 
 /// One strategy/symbol state key inside [`WalRecord::SegmentBase`].
@@ -689,6 +796,13 @@ pub struct RecentExecutionId {
 /// One still-open order inside [`WalRecord::SegmentBase`]: what its own
 /// `OrderSent` record and the updates so far said about it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OrderFillQuantity {
+    Exact { quantity: crate::numeric::Exact },
+    LegacyBinary64 { quantity: f64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OpenOrderState {
     pub request: OrderRequest,
     pub wire_ns: u64,
@@ -696,6 +810,8 @@ pub struct OpenOrderState {
     pub arrival_mid: f64,
     pub acked: bool,
     pub filled_qty: f64,
+    #[serde(default)]
+    pub fill_quantity: Option<OrderFillQuantity>,
     /// Plausible working-price bounds after an amend whose answer was lost.
     /// Zero in older segments means "derive the exact price from request".
     #[serde(default)]
@@ -788,6 +904,12 @@ pub trait Wal {
     }
     /// Push buffered bytes to the OS without forcing disk durability.
     fn flush(&mut self) -> Result<(), WalError>;
+    /// A bounded cursor reader of parent order updates in the current segment.
+    fn callback_reader(
+        &mut self,
+    ) -> Result<Option<Box<dyn crate::strategy_process::CallbackWalReader>>, WalError> {
+        Ok(None)
+    }
     /// Bytes in the current segment, buffered ones included. Zero for a log
     /// that does not live in a file, which also means it is never rotated.
     fn segment_size(&self) -> u64 {
@@ -918,6 +1040,7 @@ mod tests {
     #[test]
     fn old_numeric_fees_stay_known_and_absent_fees_stay_unknown() {
         let recovered = WalRecord::RecoveredFill {
+            callbacks: None,
             allocation: None,
             amounts: None,
             exec_id: "exec-1".into(),
@@ -951,6 +1074,7 @@ mod tests {
         ));
 
         let delivered = WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -976,7 +1100,8 @@ mod tests {
         assert!(matches!(
             serde_json::from_value::<WalRecord>(encoded).expect("legacy stream fill reads"),
             WalRecord::OrderUpdate {
-                update: OrderUpdate::Fill { fee: None, .. }
+                update: OrderUpdate::Fill { fee: None, .. },
+                ..
             }
         ));
     }
@@ -984,6 +1109,7 @@ mod tests {
     #[test]
     fn a_recovered_fill_written_before_the_venue_reason_still_replays() {
         let recovered = WalRecord::RecoveredFill {
+            callbacks: None,
             allocation: None,
             amounts: None,
             exec_id: "exec-1".into(),
@@ -1016,11 +1142,17 @@ mod tests {
     #[test]
     fn old_segment_base_without_new_defaulted_fields_still_reads() {
         let base = WalRecord::SegmentBase {
+            portfolio_control: Default::default(),
             pending_order_dispatches: Vec::new(),
             signal_producers: Vec::new(),
+            identities: None,
+            instrument_catalog: None,
             signal_suspensions: Vec::new(),
             portfolio: Some(Default::default()),
             strategy_processes: Vec::new(),
+            strategy_callback_queues: Vec::new(),
+            strategy_callback_sources: Vec::new(),
+            signal_callback_deliveries: Vec::new(),
             strategy_callbacks: Vec::new(),
             wall_ts_ms: 1,
             strategies: Vec::new(),
@@ -1050,7 +1182,7 @@ mod tests {
             }],
         };
         let mut encoded = serde_json::to_value(&base).expect("serialize segment base");
-        assert_eq!(encoded["kind"], "segment_base_v4");
+        assert_eq!(encoded["kind"], "segment_base_v5");
         encoded["kind"] = serde_json::Value::String("segment_base".into());
         encoded
             .as_object_mut()
@@ -1120,5 +1252,47 @@ mod boot_shape_tests {
         })
         .unwrap();
         assert!(stamped.contains(r#""commit":"0123abcd""#));
+    }
+}
+
+impl WalRecord {
+    pub fn recovered_callback(&self) -> Option<(Vec<StrategyId>, OrderUpdate)> {
+        let Self::RecoveredFill {
+            callbacks: Some(callbacks),
+            allocation,
+            amounts,
+            exec_id,
+            client_order_id,
+            symbol,
+            side,
+            qty,
+            px,
+            fee,
+            is_maker,
+            forced_close,
+            venue_ts_ms,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some((
+            callbacks.owners.clone(),
+            OrderUpdate::Fill {
+                allocation: allocation.clone(),
+                amounts: amounts.clone().map(Box::new),
+                exec_id: exec_id.clone(),
+                client_order_id: client_order_id.clone(),
+                symbol: *symbol,
+                side: *side,
+                qty: *qty,
+                px: *px,
+                fee: *fee,
+                is_maker: *is_maker,
+                forced_close: *forced_close,
+                venue_ts_ms: *venue_ts_ms,
+                recv_ns: callbacks.recv_ns,
+            },
+        ))
     }
 }

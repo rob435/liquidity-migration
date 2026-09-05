@@ -172,10 +172,12 @@ pub struct Intent {
 
 /// A new price and/or size for an order already resting at the venue.
 /// `None` leaves that field as it is.
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AmendSpec {
     pub px: Option<f64>,
     pub qty: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_terms: Option<Box<crate::order_terms::ExactAmendTerms>>,
 }
 
 /// What a strategy asks the engine to do. Placing is one of three verbs: a
@@ -401,6 +403,8 @@ pub struct RestingOrder<'a> {
     pub kind: OrderKind,
     pub qty: f64,
     pub filled_qty: f64,
+    /// Canonical ledger remainder projected once; None is legacy compatibility input.
+    pub remaining_qty: Option<f64>,
     pub reduce_only: bool,
     /// The venue has acknowledged it. An unacked order is still out there —
     /// it may rest, or the reply may simply not have arrived yet.
@@ -417,7 +421,8 @@ impl RestingOrder<'_> {
     }
 
     pub fn remaining_qty(&self) -> f64 {
-        (self.qty - self.filled_qty).max(0.0)
+        self.remaining_qty
+            .unwrap_or_else(|| (self.qty - self.filled_qty).max(0.0))
     }
 }
 
@@ -426,6 +431,7 @@ impl RestingOrder<'_> {
 pub enum SleeveOrderEffect {
     Increase { stop: StopSpec },
     Reduce,
+    EmergencyNetReduction { emergency_id: u64 },
 }
 
 /// A risk-approved order on its way to the venue. Quantities and prices are
@@ -438,6 +444,7 @@ pub struct OrderRequest {
     pub sleeve_effect: Option<SleeveOrderEffect>,
     /// Engine-minted, unique per boot, recorded in the log before send.
     pub client_order_id: String,
+    /// Durable compatibility slot; `sleeve_owner()` is None for engine-owned net closes.
     pub strategy: StrategyId,
     pub symbol: SymbolId,
     pub side: Side,
@@ -453,9 +460,22 @@ pub struct OrderRequest {
 }
 
 impl OrderRequest {
+    pub fn is_portfolio_reduction(&self) -> bool {
+        matches!(
+            self.sleeve_effect,
+            Some(SleeveOrderEffect::EmergencyNetReduction { .. })
+        )
+    }
+
+    pub fn sleeve_owner(&self) -> Option<StrategyId> {
+        (!self.is_portfolio_reduction()).then_some(self.strategy)
+    }
+
     pub fn is_sleeve_reduction(&self) -> bool {
         match self.sleeve_effect {
-            Some(SleeveOrderEffect::Reduce) => true,
+            Some(SleeveOrderEffect::Reduce | SleeveOrderEffect::EmergencyNetReduction { .. }) => {
+                true
+            }
             Some(SleeveOrderEffect::Increase { .. }) => false,
             None => self.reduce_only,
         }
@@ -463,7 +483,9 @@ impl OrderRequest {
 
     pub fn sleeve_stop(&self) -> Option<StopSpec> {
         match self.sleeve_effect {
-            Some(SleeveOrderEffect::Reduce) => None,
+            Some(SleeveOrderEffect::Reduce | SleeveOrderEffect::EmergencyNetReduction { .. }) => {
+                None
+            }
             Some(SleeveOrderEffect::Increase { stop }) => Some(stop),
             None => self.stop,
         }
@@ -490,7 +512,16 @@ pub struct OrderFacts {
     pub side: Side,
     pub qty: f64,
     pub filled_qty: f64,
+    /// Canonical ledger remainder projected once; None is legacy compatibility input.
+    pub remaining_qty: Option<f64>,
     pub reduce_only: bool,
+}
+
+impl OrderFacts {
+    pub fn remaining_qty(&self) -> f64 {
+        self.remaining_qty
+            .unwrap_or_else(|| (self.qty - self.filled_qty).max(0.0))
+    }
 }
 
 /// The market state surrounding one quoter fill.
@@ -595,6 +626,8 @@ pub enum OrderUpdate {
     /// states it, and the only thing that can end an amend's ambiguity
     /// without pulling the order.
     Amended {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exact_terms: Option<Box<crate::order_terms::ExactAmendedTerms>>,
         client_order_id: String,
         px: f64,
         /// What is still working. A fill that landed while the amend was in
@@ -672,6 +705,8 @@ mod tests {
 
 #[derive(Debug, thiserror::Error)]
 pub enum VenueError {
+    #[error("venue capability unavailable: {0}")]
+    Unsupported(String),
     /// The request could not be built at all (unknown symbol, non-finite
     /// number). Nothing was sent; retrying the same input cannot succeed.
     #[error("cannot build request: {0}")]
@@ -717,6 +752,27 @@ pub enum OrderLookup {
     Unavailable,
 }
 
+/// Account and execution reads have no ownership of the venue mutation path.
+#[crate::async_trait]
+pub trait AccountRecoveryClient: Send + Sync + 'static {
+    fn install_instrument_catalog(
+        &self,
+        _catalog: &InstrumentCatalog,
+    ) -> Result<(), crate::VenueError> {
+        Ok(())
+    }
+    async fn account_view(
+        &self,
+        symbols: &[crate::Symbol],
+    ) -> Result<crate::AccountView, crate::VenueError>;
+    async fn executions(
+        &self,
+        symbols: &[crate::Symbol],
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<crate::VenueExecution>, crate::VenueError>;
+}
+
 /// Read-only client with no ownership of the serialized venue mutation path.
 #[crate::async_trait]
 pub trait OrderLookupClient: Send + Sync + 'static {
@@ -725,4 +781,104 @@ pub trait OrderLookupClient: Send + Sync + 'static {
         symbol: &str,
         client_order_id: &str,
     ) -> Result<OrderLookup, crate::VenueError>;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InstrumentCatalog {
+    pub cache: Option<std::sync::Arc<dyn InstrumentCatalogCache>>,
+    pub rules: Vec<(crate::Symbol, crate::InstrumentRule)>,
+    pub specs: Vec<(crate::Symbol, crate::numeric::ExactInstrumentSpec)>,
+}
+#[crate::async_trait]
+pub trait InstrumentCatalogClient: Send + Sync + 'static {
+    async fn fetch(&self) -> Result<InstrumentCatalog, VenueError>;
+}
+
+pub trait InstrumentCatalogCache: std::any::Any + Send + Sync + std::fmt::Debug {
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn checkpoint(&self) -> Result<InstrumentCatalogCacheSnapshot, VenueError>;
+    fn retain_previous(
+        &self,
+        checkpoint: &InstrumentCatalogCheckpoint,
+    ) -> Result<InstrumentCatalog, VenueError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InstrumentCatalogCheckpoint {
+    pub schema_version: u32,
+    pub rules: Vec<(crate::Symbol, crate::InstrumentRule)>,
+    pub specs: Vec<(crate::Symbol, crate::numeric::ExactInstrumentSpec)>,
+    pub cache: InstrumentCatalogCacheSnapshot,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstrumentCatalogCacheSnapshot {
+    pub kind: String,
+    pub payload: Vec<u8>,
+}
+impl InstrumentCatalogCheckpoint {
+    pub fn validate_bounds(&self) -> Result<(), VenueError> {
+        if self.schema_version != 1
+            || self.cache.payload.len() > 64 * 1024 * 1024
+            || self.rules.len() > 100_000
+            || self.specs.len() > 100_000
+        {
+            return Err(VenueError::BadReply(
+                "unsupported or oversized instrument catalog checkpoint".into(),
+            ));
+        }
+        if self.cache.kind.len() > 64
+            || self.rules.iter().any(|(name, _)| name.len() > 256)
+            || self.specs.iter().any(|(name, _)| name.len() > 256)
+        {
+            return Err(VenueError::BadReply(
+                "oversized instrument catalog identifiers".into(),
+            ));
+        }
+        struct LimitedBytes(usize);
+        impl std::io::Write for LimitedBytes {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self
+                    .0
+                    .checked_add(bytes.len())
+                    .ok_or_else(|| std::io::Error::other("catalog size overflow"))?;
+                if self.0 > 64 * 1024 * 1024 {
+                    return Err(std::io::Error::other(
+                        "catalog checkpoint exceeds serialized size limit",
+                    ));
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        serde_json::to_writer(LimitedBytes(0), self)
+            .map_err(|e| VenueError::BadReply(e.to_string()))?;
+        Ok(())
+    }
+}
+impl InstrumentCatalog {
+    pub fn retain_previous(
+        &self,
+        checkpoint: &InstrumentCatalogCheckpoint,
+    ) -> Result<Self, VenueError> {
+        self.cache
+            .as_ref()
+            .ok_or_else(|| VenueError::Unsupported("catalog has no native cache".into()))?
+            .retain_previous(checkpoint)
+    }
+    pub fn checkpoint(&self) -> Result<InstrumentCatalogCheckpoint, VenueError> {
+        let checkpoint = InstrumentCatalogCheckpoint {
+            schema_version: 1,
+            rules: self.rules.clone(),
+            specs: self.specs.clone(),
+            cache: self
+                .cache
+                .as_ref()
+                .ok_or_else(|| VenueError::Unsupported("catalog has no native cache".into()))?
+                .checkpoint()?,
+        };
+        checkpoint.validate_bounds()?;
+        Ok(checkpoint)
+    }
 }

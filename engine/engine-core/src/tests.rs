@@ -59,13 +59,22 @@ fn recent_replay_ms() -> i64 {
 
 fn kind_of(record: &WalRecord) -> String {
     match record {
+        WalRecord::PortfolioExitChanged { .. } => "portfolio_exit_changed",
+        WalRecord::PortfolioExitCompleted { .. } => "portfolio_exit_completed",
+        WalRecord::PortfolioEmergencyChanged { .. } => "portfolio_emergency_changed",
+        WalRecord::PortfolioEmergencyCompleted { .. } => "portfolio_emergency_completed",
+        WalRecord::PortfolioOffsetSettled { .. } => "portfolio_offset_settled",
+        WalRecord::SleeveStopSet { .. } => "sleeve_stop_set",
         WalRecord::SignalAdmissionChanged { .. } => "signal_admission_changed",
+        WalRecord::StrategyCallbackSource { .. } => "strategy_callback_source",
         WalRecord::StrategyCallbackQueued { .. } => "strategy_callback_queued",
         WalRecord::OrderDispatchQueued { .. } => "order_dispatch_queued",
         WalRecord::OrderDispatchAttempted { .. } => "order_dispatch_attempted",
         WalRecord::OrderDispatchCompleted { .. } => "order_dispatch_completed",
         WalRecord::StrategyCallbackPrepared { .. } => "strategy_callback_prepared",
         WalRecord::StrategyProcessTransitionQueued { .. } => "strategy_process_transition_queued",
+        WalRecord::InstrumentCatalogCheckpoint { .. } => "instrument_catalog_checkpoint",
+        WalRecord::IdentityState { .. } => "identity_state",
         WalRecord::SignalProducerLifecycle { .. } => "signal_producer_lifecycle",
         WalRecord::Boot { .. } => "boot",
         WalRecord::Intent { .. } => "intent",
@@ -207,9 +216,14 @@ pub(crate) struct MockWal {
     /// How long the deferred barrier takes. Long enough that a caller which
     /// does not wait for it visibly does not.
     barrier_takes: Duration,
+    sync_barrier_takes: Duration,
 }
 
 impl MockWal {
+    pub(crate) fn snapshot_records(&self) -> Vec<WalRecord> {
+        self.records.lock().unwrap().clone()
+    }
+
     fn new(tape: Tape) -> (Self, Rc<RefCell<Vec<WalRecord>>>) {
         let records = Rc::new(RefCell::new(Vec::new()));
         (
@@ -221,6 +235,7 @@ impl MockWal {
                 fail_barrier_after: None,
                 crossing_tape: None,
                 barrier_takes: Duration::from_millis(30),
+                sync_barrier_takes: Duration::ZERO,
             },
             records,
         )
@@ -246,7 +261,89 @@ impl MockWal {
     }
 }
 
+struct MockCallbackReader(Arc<Mutex<Vec<WalRecord>>>);
+
+impl engine_types::strategy_process::CallbackWalReader for MockCallbackReader {
+    fn start(&self) -> engine_types::strategy_process::CallbackWalCursor {
+        engine_types::strategy_process::CallbackWalCursor {
+            segment: 1,
+            sequence: 1,
+            offset: 0,
+        }
+    }
+    fn read_callback(
+        &mut self,
+        cursor: engine_types::strategy_process::CallbackWalCursor,
+        callback_id: u64,
+    ) -> Result<engine_types::strategy_process::StrategyCallbackInput, WalError> {
+        let records = self.0.lock().unwrap();
+        let input = match records.get(cursor.sequence as usize - 1) {
+            Some(
+                WalRecord::StrategyCallbackQueued { input }
+                | WalRecord::StrategyCallbackPrepared { input },
+            ) if input.callback_id == callback_id => Some(input),
+            Some(WalRecord::SegmentBase {
+                strategy_callbacks, ..
+            }) => strategy_callbacks
+                .iter()
+                .find(|input| input.callback_id == callback_id),
+            _ => None,
+        };
+        input.cloned().ok_or_else(|| WalError::Corrupt {
+            offset: cursor.offset,
+            detail: "mock callback slot has no durable input".into(),
+        })
+    }
+    fn next(
+        &mut self,
+        cursor: engine_types::strategy_process::CallbackWalCursor,
+    ) -> Result<Option<engine_types::strategy_process::CallbackWalRecord>, WalError> {
+        let records = self.0.lock().unwrap();
+        let Some(record) = records.get(cursor.sequence as usize - 1) else {
+            return Ok(None);
+        };
+        let source = match record {
+            WalRecord::OrderUpdate {
+                callbacks: Some(owners),
+                update,
+            } => Some((
+                owners.clone(),
+                engine_types::strategy_process::CallbackEvent::Order {
+                    update: update.clone(),
+                },
+            )),
+            record @ WalRecord::RecoveredFill {
+                callbacks: Some(_), ..
+            } => record.recovered_callback().map(|(owners, update)| {
+                (
+                    owners,
+                    engine_types::strategy_process::CallbackEvent::Order { update },
+                )
+            }),
+            WalRecord::StrategyCallbackSource {
+                strategy, event, ..
+            } => Some((vec![*strategy], event.clone())),
+            _ => None,
+        };
+        Ok(Some(engine_types::strategy_process::CallbackWalRecord {
+            cursor,
+            next: engine_types::strategy_process::CallbackWalCursor {
+                segment: cursor.segment,
+                sequence: cursor.sequence + 1,
+                offset: cursor.offset + 1,
+            },
+            source,
+        }))
+    }
+}
+
 impl Wal for MockWal {
+    fn callback_reader(
+        &mut self,
+    ) -> Result<Option<Box<dyn engine_types::strategy_process::CallbackWalReader>>, WalError> {
+        Ok(Some(Box::new(MockCallbackReader(self.records.clone()))))
+    }
+
     fn append(&mut self, record: &WalRecord) -> Result<u64, WalError> {
         let kind = kind_of(record);
         if self.fail_on.as_deref() == Some(kind.as_str()) {
@@ -264,6 +361,7 @@ impl Wal for MockWal {
     }
 
     fn barrier(&mut self) -> Result<(), WalError> {
+        std::thread::sleep(self.sync_barrier_takes);
         self.tape.lock().unwrap().push(Step::Barrier);
         if self.fail_barrier_after.is_some_and(|kind| {
             self.records
@@ -310,7 +408,81 @@ fn bybit_like_caps() -> VenueCaps {
     }
 }
 
+#[derive(Default)]
+struct MockRecoveryControl {
+    account_delay_ms: std::sync::atomic::AtomicU64,
+    history_delay_ms: std::sync::atomic::AtomicU64,
+    account_started: tokio::sync::Notify,
+    history_started: tokio::sync::Notify,
+}
+
+#[derive(Clone)]
+struct MockRecoveryClient {
+    tape: Tape,
+    account_readings: Rc<RefCell<VecDeque<Vec<engine_types::PositionView>>>>,
+    account_view_fails: Rc<RefCell<bool>>,
+    executions: Rc<RefCell<Option<Vec<VenueExecution>>>>,
+    control: Arc<MockRecoveryControl>,
+}
+
+#[engine_types::async_trait]
+impl engine_types::orders::AccountRecoveryClient for MockRecoveryClient {
+    async fn account_view(&self, _: &[Symbol]) -> Result<AccountView, VenueError> {
+        self.tape.lock().unwrap().push(Step::ReadAccount);
+        let observed_ns = clock::now_ns();
+        let failed = *self.account_view_fails.lock().unwrap();
+        let positions = if failed {
+            Vec::new()
+        } else {
+            self.account_readings
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default()
+        };
+        let delay = self
+            .control
+            .account_delay_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if delay > 0 {
+            self.control.account_started.notify_one();
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        if failed {
+            return Err(VenueError::Transport(
+                "scripted account-view failure".into(),
+            ));
+        }
+        Ok(AccountView {
+            equity_usdt: 10_000.0,
+            available_usdt: 9_000.0,
+            positions,
+            observed_ns,
+        })
+    }
+    async fn executions(
+        &self,
+        _: &[Symbol],
+        _: i64,
+        _: i64,
+    ) -> Result<Vec<VenueExecution>, VenueError> {
+        let rows = self.executions.lock().unwrap().clone();
+        let delay = self
+            .control
+            .history_delay_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if delay > 0 {
+            self.control.history_started.notify_one();
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        rows.ok_or_else(|| {
+            VenueError::BadRequest("this venue cannot list its execution history".into())
+        })
+    }
+}
+
 pub(crate) struct MockVenue {
+    recovery_reads: Arc<MockRecoveryControl>,
     tape: Tape,
     /// Shared with the log's deferred barrier, so one ordered list holds the
     /// send, the disk's answer, and the news that follows. Set by
@@ -318,11 +490,14 @@ pub(crate) struct MockVenue {
     crossing_tape: Option<Arc<Mutex<Vec<&'static str>>>>,
     rules: Vec<(Symbol, InstrumentRule)>,
     exact_specs: Option<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>>,
+    catalog_client: Option<Arc<dyn engine_types::orders::InstrumentCatalogClient>>,
     sends: Rc<RefCell<Vec<OrderRequest>>>,
     cancels: Rc<RefCell<Vec<(SymbolId, String)>>>,
     amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>,
     stops: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     stop_failures_remaining: Rc<RefCell<usize>>,
+    stop_delay: Duration,
+    exact_stops: Arc<Mutex<Vec<(SymbolId, engine_types::order_terms::ExactStopTerms)>>>,
     caps: VenueCaps,
     reply: Option<VenueError>,
     lookup_started: Option<Arc<tokio::sync::Notify>>,
@@ -344,6 +519,15 @@ pub(crate) struct MockVenue {
 }
 
 impl MockVenue {
+    fn recovery_client(&self) -> MockRecoveryClient {
+        MockRecoveryClient {
+            tape: self.tape.clone(),
+            account_readings: self.account_readings.clone(),
+            account_view_fails: self.account_view_fails.clone(),
+            executions: self.executions.clone(),
+            control: self.recovery_reads.clone(),
+        }
+    }
     fn new(tape: Tape, symbols: &[&str]) -> (Self, Rc<RefCell<Vec<OrderRequest>>>) {
         let sends = Rc::new(RefCell::new(Vec::new()));
         let rules = symbols
@@ -362,15 +546,19 @@ impl MockVenue {
             .collect();
         (
             MockVenue {
+                recovery_reads: Arc::new(MockRecoveryControl::default()),
                 tape,
                 crossing_tape: None,
                 rules,
                 exact_specs: None,
+                catalog_client: None,
                 sends: sends.clone(),
                 cancels: Rc::new(RefCell::new(Vec::new())),
                 amends: Rc::new(RefCell::new(Vec::new())),
                 stops: Rc::new(RefCell::new(Vec::new())),
                 stop_failures_remaining: Rc::new(RefCell::new(0)),
+                stop_delay: Duration::ZERO,
+                exact_stops: Arc::new(Mutex::new(Vec::new())),
                 caps: bybit_like_caps(),
                 reply: None,
                 lookup_started: None,
@@ -388,6 +576,71 @@ impl MockVenue {
 
 #[engine_types::async_trait]
 impl VenueGateway for MockVenue {
+    fn account_recovery_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::AccountRecoveryClient>> {
+        Some(Box::new(self.recovery_client()))
+    }
+
+    fn instrument_catalog_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::InstrumentCatalogClient>> {
+        self.catalog_client.as_ref().map(|client| {
+            Box::new(SharedCatalogClient(client.clone()))
+                as Box<dyn engine_types::orders::InstrumentCatalogClient>
+        })
+    }
+    fn restore_instrument_catalog(
+        &self,
+        checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        checkpoint.validate_bounds()?;
+        if checkpoint.cache.kind != "mock-native-map" {
+            return Err(VenueError::BadReply("wrong mock catalog owner".into()));
+        }
+        let names: Vec<String> = serde_json::from_slice(&checkpoint.cache.payload)
+            .map_err(|error| VenueError::BadReply(error.to_string()))?;
+        Ok(engine_types::orders::InstrumentCatalog {
+            cache: Some(Arc::new(TestCatalogCache(names))),
+            rules: checkpoint.rules.clone(),
+            specs: checkpoint.specs.clone(),
+        })
+    }
+    fn install_instrument_catalog(
+        &mut self,
+        catalog: &engine_types::orders::InstrumentCatalog,
+    ) -> Result<(), VenueError> {
+        let cache = catalog
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.as_any().downcast_ref::<TestCatalogCache>())
+            .ok_or_else(|| VenueError::BadReply("wrong mock catalog owner".into()))?;
+        if self
+            .rules
+            .iter()
+            .enumerate()
+            .any(|(index, (name, _))| cache.0.get(index) != Some(name))
+        {
+            return Err(VenueError::BadReply(
+                "mock native symbol ids changed".into(),
+            ));
+        }
+        self.rules = cache
+            .0
+            .iter()
+            .map(|name| {
+                catalog
+                    .rules
+                    .iter()
+                    .find(|(symbol, _)| symbol == name)
+                    .cloned()
+                    .ok_or_else(|| VenueError::BadReply("mock catalog lacks a native rule".into()))
+            })
+            .collect::<Result<_, _>>()?;
+        self.exact_specs = Some(catalog.specs.clone());
+        Ok(())
+    }
+
     fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
         self.lookup_started.as_ref().map(|started| {
             Box::new(StalledLookup(started.clone()))
@@ -450,15 +703,16 @@ impl VenueGateway for MockVenue {
 
     async fn executions(
         &mut self,
-        _start_ms: i64,
-        _end_ms: i64,
+        start_ms: i64,
+        end_ms: i64,
     ) -> Result<Vec<VenueExecution>, VenueError> {
-        match self.executions.lock().unwrap().as_ref() {
-            Some(execs) => Ok(execs.clone()),
-            None => Err(VenueError::BadRequest(
-                "this venue cannot list its execution history".to_string(),
-            )),
-        }
+        engine_types::orders::AccountRecoveryClient::executions(
+            &self.recovery_client(),
+            &[],
+            start_ms,
+            end_ms,
+        )
+        .await
     }
 
     async fn cancel_order(&mut self, symbol: SymbolId, id: &str) -> Result<(), VenueError> {
@@ -483,12 +737,26 @@ impl VenueGateway for MockVenue {
 
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
         self.stops.lock().unwrap().push((symbol, trigger_px));
+        tokio::time::sleep(self.stop_delay).await;
         let mut failures_remaining = self.stop_failures_remaining.lock().unwrap();
         if *failures_remaining > 0 {
             *failures_remaining -= 1;
             return Err(VenueError::Transport("scripted stop failure".into()));
         }
         Ok(())
+    }
+
+    async fn set_stop_exact(
+        &mut self,
+        symbol: SymbolId,
+        terms: &engine_types::order_terms::ExactStopTerms,
+    ) -> Result<(), VenueError> {
+        self.exact_stops
+            .lock()
+            .unwrap()
+            .push((symbol, terms.clone()));
+        self.set_stop(symbol, terms.trigger_price.to_f64().unwrap())
+            .await
     }
 
     fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {
@@ -514,24 +782,8 @@ impl VenueGateway for MockVenue {
     }
 
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
-        self.tape.lock().unwrap().push(Step::ReadAccount);
-        if *self.account_view_fails.lock().unwrap() {
-            return Err(VenueError::Transport(
-                "scripted account-view failure".to_string(),
-            ));
-        }
-        let positions = self
-            .account_readings
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_default();
-        Ok(AccountView {
-            equity_usdt: 10_000.0,
-            available_usdt: 9_000.0,
-            positions,
-            observed_ns: clock::now_ns(),
-        })
+        engine_types::orders::AccountRecoveryClient::account_view(&self.recovery_client(), &[])
+            .await
     }
 
     async fn instrument_specs(
@@ -614,6 +866,59 @@ impl MockRisk {
 }
 
 impl RiskKernel for MockRisk {
+    fn assess_portfolio(
+        &mut self,
+        intent: &Intent,
+        account: &AccountView,
+        _portfolio: &engine_types::portfolio::PortfolioState,
+    ) -> engine_types::risk::PortfolioRiskVerdict {
+        match self.assess(intent, account) {
+            RiskVerdict::Allow { qty } => engine_types::risk::PortfolioRiskVerdict::Allow {
+                qty,
+                venue_reduce_only: intent.reduce_only,
+            },
+            RiskVerdict::Deny { reason } => {
+                engine_types::risk::PortfolioRiskVerdict::Deny { reason }
+            }
+        }
+    }
+    fn reassess_portfolio_order(
+        &mut self,
+        _id: &str,
+        intent: &Intent,
+        account: &AccountView,
+        portfolio: &engine_types::portfolio::PortfolioState,
+    ) -> engine_types::risk::PortfolioRiskVerdict {
+        self.assess_portfolio(intent, account, portfolio)
+    }
+    fn physical_exposure_interval_excluding(
+        &mut self,
+        _id: &str,
+        symbol: SymbolId,
+        account: &AccountView,
+    ) -> Result<engine_types::risk::PhysicalExposureInterval, DenyReason> {
+        self.physical_exposure_interval(symbol, account)
+    }
+    fn physical_exposure_interval(
+        &mut self,
+        symbol: SymbolId,
+        account: &AccountView,
+    ) -> Result<engine_types::risk::PhysicalExposureInterval, DenyReason> {
+        let net = account
+            .positions
+            .iter()
+            .filter(|row| row.symbol == symbol)
+            .map(|row| {
+                if row.side == Side::Buy {
+                    row.qty
+                } else {
+                    -row.qty
+                }
+            })
+            .sum();
+        engine_types::risk::PhysicalExposureInterval::try_new(net, net)
+    }
+
     fn assess(&mut self, intent: &Intent, _account: &AccountView) -> RiskVerdict {
         match &self.verdict {
             RiskVerdict::Allow { qty } if qty.is_nan() => RiskVerdict::Allow { qty: intent.qty },
@@ -684,9 +989,7 @@ struct ScriptFeed {
     close_at_end: bool,
     /// Symbols admitted after boot, in order, with the ids handed back.
     admitted: Rc<RefCell<Vec<(String, SymbolId)>>>,
-    /// How many symbols this feed already knows, so an admission gets the
-    /// next id — the same rule the real feed's table follows.
-    known: u16,
+    symbols: Vec<String>,
     /// Hand back the wrong id, to prove the engine notices.
     admits_wrongly: bool,
 }
@@ -711,7 +1014,7 @@ impl ScriptFeed {
             events,
             close_at_end,
             admitted: Rc::new(RefCell::new(Vec::new())),
-            known: 1,
+            symbols: vec!["BTCUSDT".into()],
             admits_wrongly: false,
         }
     }
@@ -739,7 +1042,7 @@ impl ScriptFeed {
             events,
             close_at_end,
             admitted: Rc::new(RefCell::new(Vec::new())),
-            known: 1,
+            symbols: vec!["BTCUSDT".into()],
             admits_wrongly: false,
         }
     }
@@ -747,21 +1050,13 @@ impl ScriptFeed {
 
 impl MarketFeed for ScriptFeed {
     fn admit(&mut self, symbol: &str, _feed: engine_types::Feed) -> Option<SymbolId> {
-        if let Some((_, id)) = self
-            .admitted
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(known, _)| known == symbol)
-        {
-            return Some(*id);
+        if let Some(index) = self.symbols.iter().position(|name| name == symbol) {
+            return Some(SymbolId(u16::try_from(index).unwrap()));
         }
-        let id = if self.admits_wrongly {
-            SymbolId(self.known + 7)
-        } else {
-            SymbolId(self.known)
-        };
-        self.known += 1;
+        let id = SymbolId(
+            u16::try_from(self.symbols.len()).unwrap() + if self.admits_wrongly { 7 } else { 0 },
+        );
+        self.symbols.push(symbol.to_string());
         self.admitted.lock().unwrap().push((symbol.to_string(), id));
         Some(id)
     }
@@ -987,6 +1282,7 @@ fn owned_exit_fixture(
             arrival_mid: 30_000.0,
         },
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 client_order_id: id,
                 exec_id: "owned-exit-fixture-fill".into(),
@@ -1005,6 +1301,7 @@ fn owned_exit_fixture(
         },
     ];
     let held = vec![engine_types::PositionView {
+        exact_stop_px: None,
         symbol: SymbolId(0),
         side,
         qty,
@@ -1042,6 +1339,7 @@ fn settings() -> EngineSection {
 }
 
 struct Harness {
+    recovery_reads: Arc<MockRecoveryControl>,
     tape: Tape,
     records: Rc<RefCell<Vec<WalRecord>>>,
     sends: Rc<RefCell<Vec<OrderRequest>>>,
@@ -1185,19 +1483,21 @@ async fn build_holding(
     let stops = venue.stops.clone();
     let stop_failures_remaining = venue.stop_failures_remaining.clone();
     let leverages = venue.leverages.clone();
+    let recovery_reads = venue.recovery_reads.clone();
     let account_readings = venue.account_readings.clone();
     let account_view_fails = venue.account_view_fails.clone();
     let executions = venue.executions.clone();
     let (risk, risk_saw) = MockRisk::with(verdict);
     let risk_rolling = risk.rolling.clone();
-    let replayed = replay_with_history_boundary(replayed);
-    let engine = Engine::boot(
+    let (strategies, sleeves, replayed) = assemble_fixture_names(strategies, symbols, replayed);
+    let engine = Engine::boot_as(
         settings,
         "0000000000000000",
         wal,
         risk,
         venue,
         strategies,
+        &sleeves,
         &replayed,
     )
     .await
@@ -1205,6 +1505,7 @@ async fn build_holding(
     (
         engine,
         Harness {
+            recovery_reads,
             tape,
             records,
             sends,
@@ -1245,20 +1546,22 @@ async fn build_inner(
     let stops = venue.stops.clone();
     let stop_failures_remaining = venue.stop_failures_remaining.clone();
     let leverages = venue.leverages.clone();
+    let recovery_reads = venue.recovery_reads.clone();
     let account_readings = venue.account_readings.clone();
     let account_view_fails = venue.account_view_fails.clone();
     let executions = venue.executions.clone();
     let (mut risk, risk_saw) = MockRisk::with(verdict);
     risk.amend_verdict = options.amend_verdict;
     let risk_rolling = risk.rolling.clone();
-    let replayed = replay_with_history_boundary(replayed);
-    let engine = Engine::boot(
+    let (strategies, sleeves, replayed) = assemble_fixture_names(strategies, symbols, replayed);
+    let engine = Engine::boot_as(
         settings,
         "0000000000000000",
         wal,
         risk,
         venue,
         strategies,
+        &sleeves,
         &replayed,
     )
     .await
@@ -1266,6 +1569,7 @@ async fn build_inner(
     (
         engine,
         Harness {
+            recovery_reads,
             tape,
             records,
             sends,
@@ -1287,6 +1591,57 @@ async fn build_inner(
 /// A real pre-checkpoint WAL still starts with Boot, which is the compatible
 /// recovery boundary. Supply that omitted framing without weakening boot's
 /// refusal of an actually unbounded existing log.
+fn assemble_fixture_names(
+    mut strategies: Vec<Box<dyn Strategy>>,
+    symbols: &[&str],
+    replayed: &[WalRecord],
+) -> (Vec<Box<dyn Strategy>>, Vec<String>, Vec<WalRecord>) {
+    let mut names = replayed
+        .iter()
+        .rev()
+        .find_map(|record| match record {
+            WalRecord::Names { strategies, .. } | WalRecord::SegmentBase { strategies, .. } => {
+                Some(strategies.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_default();
+    for (index, strategy) in strategies.iter().enumerate().skip(names.len()) {
+        let candidate = strategy.name().to_string();
+        names.push(if names.contains(&candidate) {
+            format!("{candidate}-{index}")
+        } else {
+            candidate
+        });
+    }
+    while strategies.len() < names.len() {
+        strategies.push(Box::new(crate::identities::InactiveStrategy::new(
+            engine_types::identity::SleeveKey::new(names[strategies.len()].clone()).unwrap(),
+            None,
+        )));
+    }
+    let mut framed = replayed.to_vec();
+    if !framed.is_empty()
+        && !framed.iter().any(|record| {
+            matches!(
+                record,
+                WalRecord::Names { .. }
+                    | WalRecord::SegmentBase { .. }
+                    | WalRecord::IdentityState { .. }
+            )
+        })
+    {
+        framed.insert(
+            0,
+            WalRecord::Names {
+                strategies: names.clone(),
+                symbols: symbols.iter().map(|symbol| (*symbol).to_string()).collect(),
+            },
+        );
+    }
+    (strategies, names, replay_with_history_boundary(&framed))
+}
+
 fn replay_with_history_boundary(replayed: &[WalRecord]) -> Vec<WalRecord> {
     if replayed.is_empty()
         || replayed.iter().any(|record| {
@@ -1366,12 +1721,15 @@ mod order_path;
 mod ownership;
 mod quote_staleness;
 mod reconciliation;
+mod recovery_liveness;
 mod resting_orders;
 mod rolling_loss;
 mod rotation;
 mod runtime_controls;
 mod scheduler_fairness;
+pub(crate) mod shared_sleeves;
 mod signal_availability;
+mod standalone_stops;
 mod strategy_checkpoints;
 mod strategy_events;
 mod update_contract;
@@ -1398,6 +1756,11 @@ pub(crate) async fn callback_test_fixture(
 }
 
 impl MockWal {
+    pub(crate) fn delay_metadata_barriers(&mut self, duration: Duration) {
+        self.sync_barrier_takes = duration;
+        self.delay_callback_barriers(duration);
+    }
+
     pub(crate) fn delay_callback_barriers(&mut self, duration: Duration) {
         self.defer_barriers();
         self.barrier_takes = duration;
@@ -1463,4 +1826,238 @@ impl engine_types::orders::OrderLookupClient for StalledLookup {
         self.0.notify_one();
         std::future::pending().await
     }
+}
+
+pub(crate) async fn symbol_admission_test_fixture(
+    strategy: Box<dyn Strategy>,
+) -> (
+    Engine<MockWal, MockRisk, MockVenue>,
+    Arc<Mutex<Vec<WalRecord>>>,
+    Arc<Mutex<Vec<OrderRequest>>>,
+) {
+    let (prior, held) = owned_exit_fixture(strategy.name(), Side::Buy, 0.01);
+    let (engine, harness) = build_with_venue_state(
+        allow_all(),
+        vec![strategy],
+        &["BTCUSDT"],
+        &prior,
+        Vec::new(),
+        held,
+    )
+    .await;
+    (engine, harness.records, harness.sends)
+}
+
+#[derive(Debug)]
+struct TestCatalogCache(Vec<String>);
+impl engine_types::orders::InstrumentCatalogCache for TestCatalogCache {
+    fn retain_previous(
+        &self,
+        checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        if checkpoint.cache.kind != "mock-native-map" {
+            return Err(VenueError::BadReply("wrong retained mock map".into()));
+        }
+        let mut names: Vec<String> = serde_json::from_slice(&checkpoint.cache.payload)
+            .map_err(|error| VenueError::BadReply(error.to_string()))?;
+        for name in &self.0 {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        Ok(test_instrument_catalog(
+            &names.iter().map(String::as_str).collect::<Vec<_>>(),
+        ))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn checkpoint(
+        &self,
+    ) -> Result<engine_types::orders::InstrumentCatalogCacheSnapshot, VenueError> {
+        Ok(engine_types::orders::InstrumentCatalogCacheSnapshot {
+            kind: "mock-native-map".into(),
+            payload: serde_json::to_vec(&self.0).unwrap(),
+        })
+    }
+}
+struct SharedCatalogClient(Arc<dyn engine_types::orders::InstrumentCatalogClient>);
+#[engine_types::async_trait]
+impl engine_types::orders::InstrumentCatalogClient for SharedCatalogClient {
+    async fn fetch(&self) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        self.0.fetch().await
+    }
+}
+
+pub(crate) fn test_instrument_catalog(names: &[&str]) -> engine_types::orders::InstrumentCatalog {
+    use engine_types::numeric::{AssetId, Exact, ExactInstrumentSpec, PricePrecision};
+    let rule = InstrumentRule {
+        tick_size: 0.5,
+        qty_step: 0.001,
+        min_qty: 0.001,
+        min_notional: 5.0,
+    };
+    let decimal = |value| Some(Exact::parse_decimal(value).unwrap());
+    let specs = names
+        .iter()
+        .map(|name| {
+            (
+                (*name).into(),
+                ExactInstrumentSpec {
+                    native_symbol: (*name).into(),
+                    base_asset: AssetId::Named(name.trim_end_matches("USDT").into()),
+                    quote_asset: AssetId::Named("USDT".into()),
+                    settlement_asset: AssetId::Named("USDT".into()),
+                    tick_size: decimal("0.5"),
+                    min_price: None,
+                    max_price: None,
+                    price_precision: PricePrecision::Tick,
+                    qty_step: decimal("0.001"),
+                    min_qty: decimal("0.001"),
+                    market_qty_step: decimal("0.001"),
+                    market_min_qty: decimal("0.001"),
+                    max_qty: None,
+                    max_market_qty: None,
+                    min_notional: decimal("5"),
+                    contract_multiplier: decimal("1"),
+                    fee_assets: None,
+                    fee_step: None,
+                },
+            )
+        })
+        .collect();
+    engine_types::orders::InstrumentCatalog {
+        cache: Some(Arc::new(TestCatalogCache(
+            names.iter().map(|name| (*name).into()).collect(),
+        ))),
+        rules: names.iter().map(|name| ((*name).into(), rule)).collect(),
+        specs,
+    }
+}
+
+pub(crate) async fn catalog_restart_test_fixture(
+    strategy: Box<dyn Strategy>,
+    prior: Option<Vec<WalRecord>>,
+    client: Arc<dyn engine_types::orders::InstrumentCatalogClient>,
+) -> (
+    Engine<MockWal, MockRisk, MockVenue>,
+    Arc<Mutex<Vec<WalRecord>>>,
+    Arc<Mutex<Vec<OrderRequest>>>,
+) {
+    let (history, held) = owned_exit_fixture(strategy.name(), Side::Buy, 0.01);
+    let mut prior = prior.unwrap_or(history);
+    if !prior.iter().any(|record| {
+        matches!(
+            record,
+            WalRecord::InstrumentCatalogCheckpoint { .. }
+                | WalRecord::SegmentBase {
+                    instrument_catalog: Some(_),
+                    ..
+                }
+        )
+    }) {
+        prior.push(WalRecord::InstrumentCatalogCheckpoint {
+            wall_ts_ms: clock::wall_ms(),
+            checkpoint: Box::new(test_instrument_catalog(&["BTCUSDT"]).checkpoint().unwrap()),
+        });
+    }
+    let tape = tape();
+    let (wal, records) = MockWal::new(tape.clone());
+    let (mut venue, sends) = MockVenue::new(tape, &["BTCUSDT"]);
+    venue.catalog_client = Some(client);
+    venue.account_readings.lock().unwrap().push_back(held);
+    let (risk, _) = MockRisk::with(allow_all());
+    let (strategies, sleeves, prior) = assemble_fixture_names(vec![strategy], &["BTCUSDT"], &prior);
+    let engine = Engine::boot_as(
+        &settings(),
+        "catalog-restart",
+        wal,
+        risk,
+        venue,
+        strategies,
+        &sleeves,
+        &prior,
+    )
+    .await
+    .unwrap();
+    (engine, records, sends)
+}
+
+pub(crate) async fn physical_recovery_test_fixture(
+    strategy: Box<dyn Strategy>,
+    prior: &[WalRecord],
+    qty: f64,
+) -> (
+    Engine<MockWal, MockRisk, MockVenue>,
+    Arc<Mutex<Vec<WalRecord>>>,
+) {
+    let held = engine_types::PositionView {
+        exact_stop_px: None,
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty,
+        entry_px: 100.0,
+        stop_px: 90.0,
+        stop_attached: true,
+        leverage: None,
+    };
+    let (engine, harness) = build_with_venue_state(
+        allow_all(),
+        vec![strategy],
+        &["BTCUSDT"],
+        prior,
+        vec![],
+        vec![held],
+    )
+    .await;
+    (engine, harness.records)
+}
+
+pub(crate) async fn portfolio_route_test_fixture(
+    prior: Option<Vec<WalRecord>>,
+) -> (
+    Engine<MockWal, MockRisk, MockVenue>,
+    Arc<Mutex<Vec<WalRecord>>>,
+) {
+    let prior = prior.unwrap_or_else(|| shared_sleeves::owned_records("1", "1"));
+    let strategies: Vec<Box<dyn Strategy>> = ["left", "right"]
+        .into_iter()
+        .map(|name| {
+            Box::new(crate::identities::InactiveStrategy::new(
+                engine_types::identity::SleeveKey::new(name).unwrap(),
+                None,
+            )) as Box<dyn Strategy>
+        })
+        .collect();
+    let (engine, harness) = build_with_venue_state(
+        allow_all(),
+        strategies,
+        &["BTCUSDT"],
+        &prior,
+        vec![],
+        vec![],
+    )
+    .await;
+    (engine, harness.records)
+}
+
+pub(crate) fn recovery_venue_fixture(rows: Vec<VenueExecution>) -> MockVenue {
+    let (venue, _) = MockVenue::new(tape(), &["BTCUSDT"]);
+    *venue.executions.lock().unwrap() = Some(rows);
+    venue
+}
+
+pub(crate) async fn recovery_inventory_fixture() -> (
+    Engine<MockWal, MockRisk, MockVenue>,
+    Arc<Mutex<Vec<WalRecord>>>,
+) {
+    let (buyer, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let (engine, harness) = order_path::build_exit_inventory(
+        vec![Box::new(buyer)],
+        &[(StrategyId(0), Side::Buy, 0.01)],
+        None,
+    )
+    .await;
+    (engine, harness.records)
 }

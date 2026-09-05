@@ -674,8 +674,42 @@ impl LiveRunner {
         }
     }
 
+    async fn resolve_named_destinations(&mut self) -> Result<(), WorkerError> {
+        self.durable.require_named_destinations();
+        let mut last_error = None;
+        loop {
+            match self.durable.respond_to_readiness_request() {
+                Ok(()) => last_error = None,
+                Err(error) => {
+                    let text = error.to_string();
+                    if last_error.as_ref() != Some(&text) {
+                        eprintln!("signal-worker: waiting for engine destination registry: {text}");
+                    }
+                    last_error = Some(text);
+                }
+            }
+            if self.durable.destinations_verified()
+                && !self
+                    .durable
+                    .worker()
+                    .state()
+                    .signal_lifecycle
+                    .as_ref()
+                    .is_some_and(|state| state.sealed)
+            {
+                return Ok(());
+            }
+            self.write_heartbeat("starting", None)?;
+            tokio::time::sleep(Duration::from_millis(
+                self.config.live.retry_base_ms.clamp(500, 1_000),
+            ))
+            .await;
+        }
+    }
+
     pub async fn run(mut self) -> Result<(), WorkerError> {
         self.write_heartbeat("starting", None)?;
+        self.resolve_named_destinations().await?;
         self.resolve_universe().await?;
         self.durable.respond_to_readiness_request()?;
         let run_started_at_ms = wall_ms()?;

@@ -24,9 +24,6 @@ libc = { workspace = true }
 # toolchain and one build.
 k256 = { workspace = true, features = ["ecdsa", "std"] }
 sha3 = { workspace = true }
-# Direct only so the crypto provider can be named rather than inferred; see
-# src/tls.rs. Already in the lock through hyper-rustls, so nothing new is
-# pulled in.
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "macros", "sync"] }

@@ -8,12 +8,10 @@
 //! variable is written down.
 
 pub mod gateway;
-pub mod public;
-pub mod realm;
+pub use engine_public::venues::lighter::{markets, public, realm};
 
 pub(crate) mod crypto;
 pub(crate) mod execution;
-pub mod markets;
 pub(crate) mod order_index;
 mod parse;
 pub(crate) mod tx;

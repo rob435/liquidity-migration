@@ -210,7 +210,7 @@ async fn replayed_event_is_visible_to_source_and_destination_but_not_a_third_sle
                 events,
                 close_at_end: true,
                 admitted: Rc::new(RefCell::new(Vec::new())),
-                known: 3,
+                symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
                 admits_wrongly: false,
             },
             &mut ScriptOrderFeed::empty(),

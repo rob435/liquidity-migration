@@ -7,6 +7,7 @@ fn recovered(id: &str, side: Side, qty: &str, price: &str, asset: &str, fee: &st
     let px = ExactNumber::venue_decimal(price).unwrap();
     let fee = ExactNumber::venue_decimal(fee).unwrap();
     WalRecord::RecoveredFill {
+        callbacks: None,
         exec_id: id.into(),
         client_order_id: id.into(),
         symbol: SymbolId(0),

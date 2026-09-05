@@ -13,6 +13,13 @@ const COMPLETION_CAPACITY: usize = 4096;
 
 #[derive(Debug)]
 pub enum MutationCompletion {
+    SetStop {
+        command_id: u64,
+        started_ns: u64,
+        completed_ns: u64,
+        rate_wait_ns: Option<u64>,
+        reply: Result<(), VenueError>,
+    },
     Orders {
         command_id: u64,
         started_ns: u64,
@@ -39,6 +46,17 @@ pub enum MutationCompletion {
 }
 
 enum Command {
+    DispatchStop {
+        command_id: u64,
+        symbol: SymbolId,
+        trigger_px: f64,
+        exact: Option<engine_types::order_terms::ExactStopTerms>,
+    },
+    AdmitSymbols {
+        catalog: Option<engine_types::orders::InstrumentCatalog>,
+        names: Vec<String>,
+        reply: oneshot::Sender<Result<Vec<Option<SymbolId>>, VenueError>>,
+    },
     SendOrders {
         command_id: u64,
         requests: Vec<OrderRequest>,
@@ -73,22 +91,13 @@ enum Command {
         trigger_px: f64,
         reply: oneshot::Sender<Result<(), VenueError>>,
     },
-    AddSymbol {
-        symbol: String,
-        reply: oneshot::Sender<Option<SymbolId>>,
-    },
+
     SetLeverage {
         symbol: SymbolId,
         leverage: f64,
         reply: oneshot::Sender<Result<(), VenueError>>,
     },
     AccountView(oneshot::Sender<Result<AccountView, VenueError>>),
-    InstrumentRules(oneshot::Sender<Result<Vec<(Symbol, InstrumentRule)>, VenueError>>),
-    InstrumentSpecs(
-        oneshot::Sender<
-            Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError>,
-        >,
-    ),
     WorkingOrders(oneshot::Sender<Result<Vec<VenueOrder>, VenueError>>),
     AccountInventory(oneshot::Sender<Result<AccountInventory, VenueError>>),
     Executions {
@@ -103,6 +112,9 @@ struct LookupRequest {
     client_order_id: String,
     reply: oneshot::Sender<Result<engine_types::orders::OrderLookup, VenueError>>,
 }
+
+pub(crate) type SymbolAdmissionReceiver =
+    oneshot::Receiver<Result<Vec<Option<SymbolId>>, VenueError>>;
 
 pub struct VenueClient {
     caps: VenueCaps,
@@ -170,6 +182,22 @@ impl VenueClient {
         Ok(command_id)
     }
 
+    pub fn dispatch_stop(
+        &mut self,
+        symbol: SymbolId,
+        trigger_px: f64,
+        exact: Option<engine_types::order_terms::ExactStopTerms>,
+    ) -> Result<u64, VenueError> {
+        let command_id = self.mint_command_id();
+        self.send(Command::DispatchStop {
+            command_id,
+            symbol,
+            trigger_px,
+            exact,
+        })?;
+        Ok(command_id)
+    }
+
     pub fn dispatch_order_status(
         &self,
         symbol: &str,
@@ -203,13 +231,18 @@ impl VenueClient {
             .map_err(worker_gone)?
     }
 
-    pub async fn add_symbol_async(&mut self, symbol: &str) -> Result<Option<SymbolId>, VenueError> {
+    pub fn dispatch_symbol_admission(
+        &self,
+        catalog: Option<engine_types::orders::InstrumentCatalog>,
+        names: Vec<String>,
+    ) -> Result<SymbolAdmissionReceiver, VenueError> {
         let (reply, receive) = oneshot::channel();
-        self.send(Command::AddSymbol {
-            symbol: symbol.to_string(),
+        self.send(Command::AdmitSymbols {
+            catalog,
+            names,
             reply,
         })?;
-        receive.await.map_err(worker_gone)
+        Ok(receive)
     }
 
     fn mint_command_id(&mut self) -> u64 {
@@ -349,17 +382,9 @@ impl VenueGateway for VenueClient {
     }
 
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {
-        let (reply, receive) = oneshot::channel();
-        self.send(Command::InstrumentRules(reply))?;
-        receive.await.map_err(worker_gone)?
-    }
-
-    async fn instrument_specs(
-        &mut self,
-    ) -> Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError> {
-        let (reply, receive) = oneshot::channel();
-        self.send(Command::InstrumentSpecs(reply))?;
-        receive.await.map_err(worker_gone)?
+        Err(VenueError::Unsupported(
+            "live metadata requires the independent instrument catalog client".into(),
+        ))
     }
 
     async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError> {
@@ -474,6 +499,29 @@ async fn run<V: VenueGateway>(
                     })
                     .await;
             }
+            Command::DispatchStop {
+                command_id,
+                symbol,
+                trigger_px,
+                exact,
+            } => {
+                let started_ns = engine_types::clock::mono_ns();
+                let reply = match exact {
+                    Some(terms) => venue.set_stop_exact(symbol, &terms).await,
+                    None => venue.set_stop(symbol, trigger_px).await,
+                };
+                let rate_wait_ns = venue.take_rate_wait_ns();
+                let completed_ns = engine_types::clock::mono_ns();
+                let _ = completions
+                    .send(MutationCompletion::SetStop {
+                        command_id,
+                        started_ns,
+                        completed_ns,
+                        rate_wait_ns,
+                        reply,
+                    })
+                    .await;
+            }
             Command::SendOrdersWait { requests, reply } => {
                 let _ = reply.send(venue.send_orders(&requests).await);
             }
@@ -498,9 +546,19 @@ async fn run<V: VenueGateway>(
             } => {
                 let _ = reply.send(venue.set_stop(symbol, trigger_px).await);
             }
-            Command::AddSymbol { symbol, reply } => {
-                let _ = reply.send(venue.add_symbol(&symbol));
+            Command::AdmitSymbols {
+                catalog,
+                names,
+                reply,
+            } => {
+                let result = match catalog {
+                    Some(catalog) => venue.install_instrument_catalog(&catalog),
+                    None => Ok(()),
+                }
+                .map(|()| names.iter().map(|name| venue.add_symbol(name)).collect());
+                let _ = reply.send(result);
             }
+
             Command::SetLeverage {
                 symbol,
                 leverage,
@@ -510,12 +568,6 @@ async fn run<V: VenueGateway>(
             }
             Command::AccountView(reply) => {
                 let _ = reply.send(venue.account_view().await);
-            }
-            Command::InstrumentRules(reply) => {
-                let _ = reply.send(venue.instrument_rules().await);
-            }
-            Command::InstrumentSpecs(reply) => {
-                let _ = reply.send(venue.instrument_specs().await);
             }
             Command::WorkingOrders(reply) => {
                 let _ = reply.send(venue.working_orders().await);
@@ -540,6 +592,7 @@ fn worker_gone(_: oneshot::error::RecvError) -> VenueError {
 
 fn copy_error(error: &VenueError) -> VenueError {
     match error {
+        VenueError::Unsupported(detail) => VenueError::Unsupported(detail.clone()),
         VenueError::BadRequest(detail) => VenueError::BadRequest(detail.clone()),
         VenueError::Transport(detail) => VenueError::Transport(detail.clone()),
         VenueError::Rejected { code, message } => VenueError::Rejected {

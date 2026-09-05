@@ -10,6 +10,7 @@ use crate::config::{ConfigError, KernelConfig};
 use crate::envelope::Envelope;
 use crate::exposure::{Book, Pending};
 use crate::loss_window::LossWindow;
+use crate::margin::MarginBook;
 use crate::ROLLING_LOSS_WINDOW_MS;
 
 mod portfolio;
@@ -20,6 +21,7 @@ pub struct Kernel {
     envelope: Envelope,
     book: Book,
     loss_window: LossWindow,
+    margin: MarginBook,
 }
 
 fn unknown(detail: impl Into<String>) -> DenyReason {
@@ -44,6 +46,7 @@ impl Kernel {
             envelope,
             book: Book::default(),
             loss_window: LossWindow::default(),
+            margin: MarginBook::default(),
         })
     }
 
@@ -100,6 +103,8 @@ impl Kernel {
         } else {
             None
         };
+        self.margin
+            .register(client_order_id, intent.symbol, Some(approved_qty), px);
         self.book.register(
             client_order_id,
             Pending {
@@ -111,6 +116,60 @@ impl Kernel {
                 stop_fraction,
             },
         );
+    }
+
+    pub fn register_order_with_account(
+        &mut self,
+        id: &str,
+        intent: &Intent,
+        qty: f64,
+        account: &AccountView,
+    ) {
+        let quoted = match intent.kind {
+            OrderKind::Limit { px, .. } if px.is_finite() && px > 0.0 => px,
+            _ => 0.0,
+        };
+        self.register_order_price_range_with_account(id, intent, qty, (quoted, quoted), account);
+    }
+
+    pub fn register_order_price_range_with_account(
+        &mut self,
+        id: &str,
+        intent: &Intent,
+        qty: f64,
+        price_range: (f64, f64),
+        account: &AccountView,
+    ) {
+        self.book.forget(id);
+        let quantity = if intent.reduce_only {
+            ViewFacts::read(account, 0.0).ok().and_then(|view| {
+                let physical = view.net_qty(intent.symbol)
+                    + self
+                        .book
+                        .fills_after(account.observed_ns)
+                        .get(&intent.symbol.0)
+                        .map_or(0.0, |row| row.signed_qty);
+                self.incremental_physical_quantity(intent, qty, physical)
+                    .ok()
+            })
+        } else {
+            Some(qty)
+        };
+        self.register_order_price_range(id, intent, qty, price_range.0, price_range.1);
+        self.margin.set_quantity(id, quantity);
+    }
+
+    pub fn complete_order(&mut self, id: &str, confirmed_ns: u64) {
+        self.book.forget(id);
+        self.margin.retire(id, confirmed_ns);
+    }
+
+    pub fn mark_order_attempted(&mut self, id: &str) {
+        self.margin.attempted(id);
+    }
+
+    pub fn mark_order_accepted(&mut self, id: &str, confirmed_ns: u64) {
+        self.margin.accepted(id, confirmed_ns);
     }
 
     pub fn capital_reference_usdt(&self) -> f64 {
@@ -181,8 +240,8 @@ impl Kernel {
             let low = current.min(*entry_px);
             let high = current.max(*entry_px);
             let fraction = match side {
-                Side::Buy if *stop_px < high => (high - *stop_px) / high,
-                Side::Sell if *stop_px > low => (*stop_px - low) / high,
+                Side::Buy if *stop_px < current => (high - *stop_px) / high,
+                Side::Sell if *stop_px > current => (*stop_px - low) / high,
                 _ => {
                     return Err(unknown(
                         "held position stop is not on the protective side of plausible prices",
@@ -219,7 +278,12 @@ impl Kernel {
 
         // 2. Can the view and the intent be read at all? Exits need this
         //    too: the clamp below sizes against the position rows.
-        let view = ViewFacts::read(account, self.cfg.qty_tolerance)?;
+        let quantity_tolerance = if portfolio.is_some() {
+            0.0
+        } else {
+            self.cfg.qty_tolerance
+        };
+        let view = ViewFacts::read(account, quantity_tolerance)?;
         let ask_qty = read_intent_qty(intent)?;
 
         // 3. A genuine exit passes the staleness refusal below: risk-reducing
@@ -235,8 +299,8 @@ impl Kernel {
             portfolio.owned(intent.strategy, intent.symbol)
         });
         let delta = signed(intent.side, ask_qty);
-        let reduces_settled =
-            settled_qty.abs() > self.cfg.qty_tolerance && delta * settled_qty < 0.0;
+        let reduces_settled = settled_qty.abs() > quantity_tolerance
+            && ((delta < 0.0 && settled_qty > 0.0) || (delta > 0.0 && settled_qty < 0.0));
         if intent.reduce_only {
             if !reduces_settled {
                 return Err(unknown(
@@ -256,7 +320,7 @@ impl Kernel {
                 self.book.pending_reduce_qty(intent.symbol)
             };
             let open = settled_qty.abs() - covered;
-            if open <= self.cfg.qty_tolerance {
+            if open <= quantity_tolerance {
                 return Err(unknown(
                     "the position is already fully covered by resting exits",
                 ));
@@ -302,7 +366,7 @@ impl Kernel {
             } else {
                 self.book.pending_open_qty(intent.symbol, intent.side)
             };
-            if already_opposite + ask_qty > settled_qty.abs() + self.cfg.qty_tolerance {
+            if already_opposite + ask_qty > settled_qty.abs() + quantity_tolerance {
                 return Err(unknown("intent crosses through flat to the other side"));
             }
         }
@@ -456,11 +520,10 @@ impl Kernel {
             });
         }
 
-        // Available margin is what is left AFTER the standing book's margin is
-        // deducted, so only the increase is new money — charging the whole book
-        // against it would count the standing book twice. This order is the
-        // whole increase, because nothing above nets it against the book.
-        let additional_margin_usdt = notional / leverage;
+        let additional_margin_usdt = notional / leverage + self.unreflected_margin(view)?;
+        if !additional_margin_usdt.is_finite() {
+            return Err(unknown("required margin is unreadable"));
+        }
         if additional_margin_usdt > view.available_usdt {
             return Err(DenyReason::AvailableMarginExhausted {
                 additional_margin_usdt,
@@ -468,6 +531,14 @@ impl Kernel {
             });
         }
         Ok(())
+    }
+
+    fn unreflected_margin(&self, view: &ViewFacts) -> Result<f64, DenyReason> {
+        self.margin
+            .required(view.observed_ns, self.cfg.leverage, |symbol| {
+                self.price_for(symbol, view)
+            })
+            .map_err(unknown)
     }
 
     /// The lowest and highest price this order could reasonably fill at, from
@@ -551,6 +622,53 @@ impl RiskKernel for Kernel {
         }
     }
 
+    fn reassess_portfolio_order(
+        &mut self,
+        id: &str,
+        intent: &Intent,
+        account: &AccountView,
+        portfolio: &engine_types::portfolio::PortfolioState,
+    ) -> engine_types::risk::PortfolioRiskVerdict {
+        let Some(previous) = self.book.take(id) else {
+            return engine_types::risk::PortfolioRiskVerdict::Deny {
+                reason: unknown("portfolio reassessment has no matching reservation"),
+            };
+        };
+        let margin = self.margin.take(id);
+        let verdict = if previous.symbol == intent.symbol
+            && previous.strategy == intent.strategy
+            && previous.signed_qty.is_sign_positive() == (intent.side == Side::Buy)
+        {
+            self.assess_portfolio(intent, account, portfolio)
+        } else {
+            engine_types::risk::PortfolioRiskVerdict::Deny {
+                reason: unknown("portfolio reassessment names another order owner or direction"),
+            }
+        };
+        self.book.register(id, previous);
+        self.margin.restore(id, margin);
+        verdict
+    }
+
+    fn physical_exposure_interval_excluding(
+        &mut self,
+        id: &str,
+        symbol: SymbolId,
+        account: &AccountView,
+    ) -> Result<engine_types::risk::PhysicalExposureInterval, DenyReason> {
+        let previous = self
+            .book
+            .take(id)
+            .ok_or_else(|| unknown("physical interval exclusion has no matching reservation"))?;
+        let interval = if previous.symbol == symbol {
+            self.physical_interval_for(symbol, account)
+        } else {
+            Err(unknown("physical interval exclusion names another symbol"))
+        };
+        self.book.register(id, previous);
+        interval
+    }
+
     fn assess_price_amend(
         &mut self,
         client_order_id: &str,
@@ -562,6 +680,7 @@ impl RiskKernel for Kernel {
                 reason: unknown("opening amend has no matching risk reservation"),
             };
         };
+        let previous_margin = self.margin.take(client_order_id);
         // Judge the replacement, not old+replacement. Restore the old state
         // before returning; the engine commits the conservative replacement
         // only after its AmendSent record is durable.
@@ -570,7 +689,48 @@ impl RiskKernel for Kernel {
             Err(reason) => RiskVerdict::Deny { reason },
         };
         self.book.register(client_order_id, previous);
+        self.margin.restore(client_order_id, previous_margin);
         verdict
+    }
+
+    fn on_update_with_remaining(
+        &mut self,
+        update: &OrderUpdate,
+        remaining_qty: f64,
+    ) -> Result<(), DenyReason> {
+        if !remaining_qty.is_finite() || remaining_qty < 0.0 {
+            return Err(unknown("canonical remaining quantity is invalid"));
+        }
+        let OrderUpdate::Fill {
+            client_order_id,
+            symbol,
+            side,
+            qty,
+            px,
+            recv_ns,
+            ..
+        } = update
+        else {
+            self.on_update(update);
+            return Ok(());
+        };
+        if remaining_qty > 0.0 && !self.book.contains(client_order_id) {
+            return Err(unknown("canonical partial fill has no pending reservation"));
+        }
+        self.book.observe_px(*symbol, *px);
+        self.book.on_fill_with_remaining(
+            client_order_id,
+            *symbol,
+            signed(*side, qty.abs()),
+            *recv_ns,
+            Some(remaining_qty),
+        );
+        if self.book.contains(client_order_id) {
+            self.margin.accepted(client_order_id, *recv_ns);
+        } else {
+            self.margin.retire(client_order_id, *recv_ns);
+        }
+        Ok(())
     }
 
     fn on_update(&mut self, update: &OrderUpdate) {
@@ -587,16 +747,28 @@ impl RiskKernel for Kernel {
                 self.book.observe_px(*symbol, *px);
                 self.book
                     .on_fill(client_order_id, *symbol, signed(*side, qty.abs()), *recv_ns);
+                if self.book.contains(client_order_id) {
+                    self.margin.accepted(client_order_id, *recv_ns);
+                } else {
+                    self.margin.retire(client_order_id, *recv_ns);
+                }
             }
             OrderUpdate::Cancelled {
-                client_order_id, ..
-            } => self.book.forget(client_order_id),
+                client_order_id,
+                recv_ns,
+            } => {
+                self.book.forget(client_order_id);
+                self.margin.retire(client_order_id, *recv_ns);
+            }
             OrderUpdate::Reject {
                 client_order_id, ..
-            } => self.book.forget(client_order_id),
-            OrderUpdate::Ack(_)
-            | OrderUpdate::FastFill { .. }
-            | OrderUpdate::StopAttached { .. } => {}
+            } => {
+                self.book.forget(client_order_id);
+                self.margin
+                    .retire(client_order_id, engine_types::clock::mono_ns());
+            }
+            OrderUpdate::Ack(ack) => self.margin.accepted(&ack.client_order_id, ack.ack_ns),
+            OrderUpdate::FastFill { .. } | OrderUpdate::StopAttached { .. } => {}
             // The reservation an amend widened is narrowed by the engine, in
             // one call that names the price this news carried. Acting on the
             // news here as well would register the order twice.
@@ -619,6 +791,9 @@ impl RiskKernel for Kernel {
         // Refreshes happen independently of new intents. Prune fills the
         // venue snapshot has caught up with here so a fill-heavy, entry-idle
         // process does not retain its entire session until the next assess.
+        if ViewFacts::read(account, 0.0).is_ok() {
+            self.margin.observe(account.observed_ns);
+        }
         self.book.prune_through(account.observed_ns);
         if account.equity_usdt.is_finite() && account.equity_usdt > 0.0 {
             self.envelope.observe_equity(account.equity_usdt);
@@ -647,6 +822,49 @@ impl RiskKernel for Kernel {
 
     fn register_order(&mut self, client_order_id: &str, intent: &Intent, approved_qty: f64) {
         Kernel::register_order(self, client_order_id, intent, approved_qty);
+    }
+
+    fn physical_exposure_interval(
+        &mut self,
+        symbol: SymbolId,
+        account: &AccountView,
+    ) -> Result<engine_types::risk::PhysicalExposureInterval, DenyReason> {
+        self.physical_interval_for(symbol, account)
+    }
+    fn register_order_with_account(
+        &mut self,
+        id: &str,
+        intent: &Intent,
+        qty: f64,
+        account: &AccountView,
+    ) {
+        Kernel::register_order_with_account(self, id, intent, qty, account);
+    }
+    fn register_order_price_range_with_account(
+        &mut self,
+        id: &str,
+        intent: &Intent,
+        qty: f64,
+        price_range: (f64, f64),
+        account: &AccountView,
+    ) {
+        Kernel::register_order_price_range_with_account(
+            self,
+            id,
+            intent,
+            qty,
+            price_range,
+            account,
+        );
+    }
+    fn complete_order(&mut self, id: &str, confirmed_ns: u64) {
+        Kernel::complete_order(self, id, confirmed_ns);
+    }
+    fn mark_order_attempted(&mut self, id: &str) {
+        Kernel::mark_order_attempted(self, id);
+    }
+    fn mark_order_accepted(&mut self, id: &str, ns: u64) {
+        Kernel::mark_order_accepted(self, id, ns);
     }
 
     fn register_order_price_range(
@@ -717,6 +935,7 @@ impl Projected {
 
 /// What the kernel could read out of one account view.
 struct ViewFacts {
+    observed_ns: u64,
     equity_usdt: f64,
     /// Spare margin the venue reports. Legitimately negative when the owner
     /// hand-trades the account, which is a reading, not a fault.
@@ -746,6 +965,7 @@ impl ViewFacts {
             return Err(unknown("available margin is not a number"));
         }
         let mut facts = ViewFacts {
+            observed_ns: account.observed_ns,
             equity_usdt,
             available_usdt: account.available_usdt,
             net: Vec::new(),
@@ -754,6 +974,11 @@ impl ViewFacts {
             unprotected: false,
         };
         for position in &account.positions {
+            if position.validate_stop_projection().is_err() {
+                return Err(unknown(
+                    "native stop disagrees with its compatibility projection",
+                ));
+            }
             if !position.qty.is_finite() || position.qty < 0.0 {
                 return Err(unknown("position quantity is not a readable size"));
             }
@@ -770,10 +995,14 @@ impl ViewFacts {
                 .find(|(symbol, _)| *symbol == position.symbol.0)
             {
                 Some((_, running)) => {
-                    if *running * signed_qty < 0.0 {
+                    if (*running > 0.0 && signed_qty < 0.0) || (*running < 0.0 && signed_qty > 0.0)
+                    {
                         return Err(unknown("account view holds both sides of one symbol"));
                     }
                     *running += signed_qty;
+                    if !running.is_finite() {
+                        return Err(unknown("account position total is unreadable"));
+                    }
                 }
                 None => facts.net.push((position.symbol.0, signed_qty)),
             }

@@ -84,6 +84,7 @@ async fn every_method_reaches_the_adapter_behind_the_name() {
             SymbolId(0),
             "eng-1",
             AmendSpec {
+                exact_terms: None,
                 px: Some(94_000.5),
                 qty: None,
             },

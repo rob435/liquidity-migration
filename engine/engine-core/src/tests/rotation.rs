@@ -54,6 +54,7 @@ async fn a_live_stop_move_is_validated_and_survives_rotation() {
         stops: VecDeque::from(vec![70.0, f64::NAN, 90.0]),
     };
     let held = vec![PositionView {
+        exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
         qty: 1.0,
@@ -94,6 +95,7 @@ async fn an_equal_remembered_stop_is_not_sent_again_before_the_account_view_catc
         stops: VecDeque::from(vec![90.0, 90.0]),
     };
     let held = vec![PositionView {
+        exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
         qty: 1.0,
@@ -141,6 +143,7 @@ async fn an_equal_stop_is_retried_after_the_first_venue_call_fails() {
         stops: VecDeque::from(vec![90.0, 90.0, 90.0]),
     };
     let held = vec![PositionView {
+        exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
         qty: 1.0,
@@ -208,6 +211,7 @@ fn sent(id: &str, symbol: u16, qty: f64, stop: f64) -> WalRecord {
 
 fn fill(id: &str, symbol: u16, qty: f64) -> WalRecord {
     WalRecord::OrderUpdate {
+        callbacks: None,
         update: OrderUpdate::Fill {
             allocation: None,
             amounts: None,
@@ -266,6 +270,7 @@ fn previous_log() -> Vec<WalRecord> {
 fn venue_holdings() -> Vec<PositionView> {
     vec![
         PositionView {
+            exact_stop_px: None,
             symbol: SymbolId(0),
             side: Side::Buy,
             qty: 7.0,
@@ -275,6 +280,7 @@ fn venue_holdings() -> Vec<PositionView> {
             leverage: None,
         },
         PositionView {
+            exact_stop_px: None,
             symbol: SymbolId(1),
             side: Side::Buy,
             qty: 0.4,
@@ -415,6 +421,7 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
 #[tokio::test]
 async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
     let held = vec![PositionView {
+        exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
         qty: 2.0,

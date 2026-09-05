@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 
 use engine_types::{OrderRequest, OrderUpdate, Side, StrategyId, SymbolId, WalRecord};
 
+mod quantities;
+
 const QTY_EPS: f64 = 1e-9;
 
 /// How a never-sent order's note starts. Read from the log, never written:
@@ -36,6 +38,7 @@ pub struct OrderRec {
     pub wire_ns: u64,
     pub acked: bool,
     pub filled_qty: f64,
+    pub fill_quantity: engine_types::wal::OrderFillQuantity,
     pub ending: Option<Ending>,
     /// The midpoint when this order left, carried so a fill arriving a minute
     /// later can still be priced against it. Zero when the book could not be
@@ -98,14 +101,28 @@ pub struct LedgerOfOrders {
 
 impl LedgerOfOrders {
     pub fn from_records(records: &[WalRecord]) -> Self {
+        Self::try_from_records(records).expect("validated order ledger")
+    }
+
+    pub fn try_from_records(records: &[WalRecord]) -> Result<Self, String> {
         let mut me = Self::default();
         for record in records {
-            me.apply(record);
+            me.try_apply(record)?;
         }
-        me
+        Ok(me)
+    }
+
+    pub fn try_apply(&mut self, record: &WalRecord) -> Result<(), String> {
+        self.validate_record_quantities(record)?;
+        self.apply_validated(record);
+        Ok(())
     }
 
     pub fn apply(&mut self, record: &WalRecord) {
+        self.try_apply(record).expect("validated order record");
+    }
+
+    fn apply_validated(&mut self, record: &WalRecord) {
         match record {
             WalRecord::Boot { .. } => self.boots += 1,
             WalRecord::OrderSent {
@@ -122,6 +139,7 @@ impl LedgerOfOrders {
                         wire_ns: *wire_ns,
                         acked: false,
                         filled_qty: 0.0,
+                        fill_quantity: quantities::initial(request),
                         ending: None,
                         arrival_mid: *arrival_mid,
                         reservation_low_px: exact_px,
@@ -129,7 +147,7 @@ impl LedgerOfOrders {
                     },
                 );
             }
-            WalRecord::OrderUpdate { update } => self.apply_update(update),
+            WalRecord::OrderUpdate { update, .. } => self.apply_update_validated(update),
             // A fill the private stream never delivered, read back from the
             // venue's own history. It ends its order exactly like a delivered
             // one: without this the working-order pass never retires a filled
@@ -138,6 +156,7 @@ impl LedgerOfOrders {
             WalRecord::RecoveredFill {
                 client_order_id,
                 qty,
+                amounts,
                 ..
             } => {
                 let ended_indexes = if let Some(rec) = self.orders.get_mut(client_order_id.as_str())
@@ -146,10 +165,7 @@ impl LedgerOfOrders {
                     let stop = was_live.then(|| opening_stop(&rec.request)).flatten();
                     let opening = was_live.then(|| opening_key(&rec.request)).flatten();
                     rec.acked = true;
-                    rec.filled_qty += qty;
-                    if rec.filled_qty + QTY_EPS >= rec.request.qty {
-                        rec.ending = Some(Ending::Filled);
-                    }
+                    rec.commit_fill(*qty, amounts.as_ref());
                     (was_live && !rec.in_flight()).then_some((stop, opening))
                 } else {
                     None
@@ -172,7 +188,7 @@ impl LedgerOfOrders {
                     (self.orders.get_mut(client_order_id), spec.px)
                 {
                     if rec.in_flight() {
-                        if let engine_types::OrderKind::Limit { px, tif } = rec.request.kind {
+                        if let engine_types::OrderKind::Limit { px, .. } = rec.request.kind {
                             // The request may have reached the venue even if
                             // the process died before its answer. Preserve the
                             // full plausible range: high prices dominate
@@ -181,10 +197,6 @@ impl LedgerOfOrders {
                             let prior_high = positive_or(rec.reservation_high_px, px);
                             rec.reservation_low_px = prior_low.min(requested_px);
                             rec.reservation_high_px = prior_high.max(requested_px);
-                            rec.request.kind = engine_types::OrderKind::Limit {
-                                px: rec.reservation_high_px,
-                                tif,
-                            };
                         }
                     }
                 }
@@ -192,6 +204,7 @@ impl LedgerOfOrders {
             WalRecord::AmendResolved {
                 client_order_id,
                 effective_px,
+                exact_effective_px,
             } => {
                 if let Some(rec) = self.orders.get_mut(client_order_id) {
                     if rec.in_flight() {
@@ -200,6 +213,19 @@ impl LedgerOfOrders {
                                 px: *effective_px,
                                 tif,
                             };
+                            if let Some(terms) = &mut rec.request.exact_terms {
+                                terms.limit_price = Some(
+                                    exact_effective_px
+                                        .as_ref()
+                                        .map(|number| number.value.clone())
+                                        .unwrap_or_else(|| {
+                                            engine_types::numeric::Exact::from_legacy_f64(
+                                                *effective_px,
+                                            )
+                                            .expect("validated effective price")
+                                        }),
+                                );
+                            }
                             rec.reservation_low_px = *effective_px;
                             rec.reservation_high_px = *effective_px;
                         }
@@ -244,6 +270,7 @@ impl LedgerOfOrders {
                             wire_ns: open.wire_ns,
                             acked: open.acked,
                             filled_qty: open.filled_qty,
+                            fill_quantity: quantities::restore(open),
                             ending: None,
                             arrival_mid: open.arrival_mid,
                             reservation_low_px: positive_or(open.reservation_low_px, exact_px),
@@ -256,7 +283,14 @@ impl LedgerOfOrders {
         }
     }
 
-    pub fn apply_update(&mut self, update: &OrderUpdate) {
+    pub fn try_apply_update(&mut self, update: &OrderUpdate) -> Result<(), String> {
+        self.try_apply(&WalRecord::OrderUpdate {
+            callbacks: None,
+            update: update.clone(),
+        })
+    }
+
+    fn apply_update_validated(&mut self, update: &OrderUpdate) {
         let id = client_order_id(update);
         let Some(id) = id else { return };
         let ended_indexes = {
@@ -275,11 +309,8 @@ impl LedgerOfOrders {
                     })
                 }
                 OrderUpdate::Cancelled { .. } => rec.ending = Some(Ending::Cancelled),
-                OrderUpdate::Fill { qty, .. } => {
-                    rec.filled_qty += qty;
-                    if rec.filled_qty + QTY_EPS >= rec.request.qty {
-                        rec.ending = Some(Ending::Filled);
-                    }
+                OrderUpdate::Fill { qty, amounts, .. } => {
+                    rec.commit_fill(*qty, amounts.as_deref());
                 }
                 OrderUpdate::FastFill { .. }
                 | OrderUpdate::StopAttached { .. }
@@ -382,7 +413,7 @@ impl LedgerOfOrders {
     pub fn owner_of(&self, client_order_id: &str) -> Option<StrategyId> {
         self.orders
             .get(client_order_id)
-            .map(|order| order.request.strategy)
+            .and_then(|order| order.request.sleeve_owner())
     }
 
     /// Check an authoritative fill before it can change any order, risk, or
@@ -427,7 +458,7 @@ impl LedgerOfOrders {
         {
             return Err("the sent order carries invalid quantity state".to_string());
         }
-        let remaining = (order.request.qty - order.filled_qty).max(0.0);
+        let remaining = order.remaining_qty()?;
         if qty > remaining + QTY_EPS {
             return Err(format!(
                 "reported quantity {qty} exceeds the order's remaining quantity {remaining}"
@@ -642,6 +673,7 @@ mod tests {
 
     fn fill(id: &str, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -660,11 +692,128 @@ mod tests {
         }
     }
 
+    fn exact_order_and_fill(qty: &str, part: &str, recovery: bool) -> (WalRecord, WalRecord) {
+        use engine_types::numeric::{AssetId, Exact, ExactNumber, ExecutionAmounts};
+        use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
+        let mut order = sent("exact", qty.parse().unwrap());
+        if let WalRecord::OrderSent { request, .. } = &mut order {
+            let terms = ExactOrderTerms {
+                quantity: Exact::parse_decimal(qty).unwrap(),
+                limit_price: None,
+                stop_trigger_price: None,
+                physical_stop_trigger_price: None,
+                input_policy: OrderInputPolicy::StrategyShortestDecimal,
+            };
+            terms.apply_projection(request).unwrap();
+        }
+        let amounts = ExecutionAmounts {
+            quantity: ExactNumber::venue_decimal(part).unwrap(),
+            price: ExactNumber::venue_decimal("100").unwrap(),
+            fee: None,
+            settlement_asset: AssetId::Unknown,
+        };
+        let mut execution = if recovery {
+            recovered("exact", part.parse().unwrap())
+        } else {
+            fill("exact", part.parse().unwrap())
+        };
+        match &mut execution {
+            WalRecord::OrderUpdate {
+                update:
+                    OrderUpdate::Fill {
+                        amounts: row, fee, ..
+                    },
+                ..
+            } => {
+                *row = Some(Box::new(amounts));
+                *fee = None;
+            }
+            WalRecord::RecoveredFill {
+                amounts: row, fee, ..
+            } => {
+                *row = Some(amounts);
+                *fee = None;
+            }
+            _ => unreachable!(),
+        }
+        (order, execution)
+    }
+
+    #[test]
+    fn exact_partial_fills_do_not_finish_a_small_order_at_the_legacy_epsilon() {
+        for recovery in [false, true] {
+            let (order, part) = exact_order_and_fill("0.0000000001", "0.00000000004", recovery);
+            let mut ledger = LedgerOfOrders::from_records(&[order, part]);
+            assert_eq!(
+                ledger.in_flight_ids(),
+                ["exact"],
+                "a real unfilled remainder disappeared after recovery={recovery}"
+            );
+            assert!(
+                ledger.opening_owned_by_another(StrategyId(1), SymbolId(0)),
+                "remaining ownership must survive a partial fill"
+            );
+            let (_, rest) = exact_order_and_fill("0.0000000001", "0.00000000006", !recovery);
+            ledger.apply(&rest);
+            assert!(ledger.in_flight_ids().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_partial_fill_rotation_retains_frontier_and_refuses_corruption() {
+        let (engine, _) = crate::tests::lifecycle_test_fixture(vec![]).await;
+        let (sent, fill) = exact_order_and_fill("0.0000000001", "0.00000000004", false);
+        let ledger = LedgerOfOrders::try_from_records(&[sent, fill]).unwrap();
+        let order = &ledger.orders["exact"];
+        let mut base = engine.rotation_base(engine_types::clock::wall_ms());
+        if let WalRecord::SegmentBase { open_orders, .. } = &mut base {
+            open_orders.push(engine_types::OpenOrderState {
+                request: order.request.clone(),
+                wire_ns: order.wire_ns,
+                acked: order.acked,
+                filled_qty: order.filled_qty,
+                fill_quantity: Some(order.fill_quantity.clone()),
+                arrival_mid: order.arrival_mid,
+                reservation_low_px: order.reservation_low_px,
+                reservation_high_px: order.reservation_high_px,
+            });
+        }
+        let base: WalRecord = serde_json::from_slice(&serde_json::to_vec(&base).unwrap()).unwrap();
+        let mut restored = LedgerOfOrders::try_from_records(std::slice::from_ref(&base)).unwrap();
+        assert_eq!(
+            restored.orders["exact"].remaining_qty().unwrap(),
+            0.00000000006
+        );
+        let (_, too_large) = exact_order_and_fill("0.0000000001", "0.000000000061", true);
+        assert!(restored.try_apply(&too_large).is_err());
+        assert_eq!(
+            restored.orders["exact"].remaining_qty().unwrap(),
+            0.00000000006
+        );
+        let (_, rest) = exact_order_and_fill("0.0000000001", "0.00000000006", true);
+        restored.try_apply(&rest).unwrap();
+        assert!(restored.in_flight_ids().is_empty());
+        let mut corrupt = base.clone();
+        if let WalRecord::SegmentBase { open_orders, .. } = &mut corrupt {
+            open_orders[0].filled_qty = 0.0;
+        }
+        assert!(LedgerOfOrders::try_from_records(&[corrupt]).is_err());
+        let mut legacy = base;
+        if let WalRecord::SegmentBase { open_orders, .. } = &mut legacy {
+            open_orders[0].fill_quantity = None;
+        }
+        let legacy = LedgerOfOrders::try_from_records(&[legacy]).unwrap();
+        assert!(
+            matches!(legacy.orders["exact"].fill_quantity, engine_types::wal::OrderFillQuantity::LegacyBinary64 { quantity } if quantity == 0.00000000004)
+        );
+    }
+
     #[test]
     fn an_ack_alone_leaves_the_order_in_flight() {
         let log = vec![
             sent("a", 1.0),
             WalRecord::OrderUpdate {
+                callbacks: None,
                 update: OrderUpdate::Ack(OrderAck {
                     client_order_id: "a".into(),
                     venue_order_id: "v".into(),
@@ -680,6 +829,7 @@ mod tests {
 
     fn recovered(id: &str, qty: f64) -> WalRecord {
         WalRecord::RecoveredFill {
+            callbacks: None,
             allocation: None,
             amounts: None,
             exec_id: format!("e-{id}-{qty}"),
@@ -757,6 +907,7 @@ mod tests {
         let ledger = LedgerOfOrders::from_records(&[
             sent("a", 1.0),
             WalRecord::OrderUpdate {
+                callbacks: None,
                 update: OrderUpdate::Reject {
                     client_order_id: "a".into(),
                     code: 7,
@@ -765,6 +916,7 @@ mod tests {
             },
             sent("b", 1.0),
             WalRecord::OrderUpdate {
+                callbacks: None,
                 update: OrderUpdate::Cancelled {
                     client_order_id: "b".into(),
                     recv_ns: 3,
@@ -802,6 +954,7 @@ mod tests {
         );
         ledger.apply(&fill("long-tight-b", 1.0));
         ledger.apply(&WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Cancelled {
                 client_order_id: "short-tight".into(),
                 recv_ns: 3,
@@ -816,6 +969,7 @@ mod tests {
         );
 
         ledger.apply(&WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Reject {
                 client_order_id: "long-loose".into(),
                 code: 7,
@@ -856,6 +1010,7 @@ mod tests {
             "ending one sibling must not hide the other"
         );
         ledger.apply(&WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Cancelled {
                 client_order_id: "second".into(),
                 recv_ns: 3,
@@ -865,6 +1020,7 @@ mod tests {
 
         ledger.apply(&opening_sent("rejected", 7, Side::Sell, 105.0));
         ledger.apply(&WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Reject {
                 client_order_id: "rejected".into(),
                 code: 7,
@@ -896,6 +1052,7 @@ mod tests {
             symbol: SymbolId(0),
             client_order_id: "a".into(),
             spec: AmendSpec {
+                exact_terms: None,
                 px: Some(1_000.0),
                 qty: None,
             },
@@ -904,7 +1061,7 @@ mod tests {
         let unresolved = LedgerOfOrders::from_records(&[sent.clone(), amend.clone()]);
         assert!(matches!(
             unresolved.orders["a"].request.kind,
-            OrderKind::Limit { px: 1_000.0, .. }
+            OrderKind::Limit { px: 100.0, .. }
         ));
         assert_eq!(unresolved.orders["a"].reservation_low_px, 100.0);
         assert_eq!(unresolved.orders["a"].reservation_high_px, 1_000.0);
@@ -915,6 +1072,7 @@ mod tests {
             WalRecord::AmendResolved {
                 client_order_id: "a".into(),
                 effective_px: 100.0,
+                exact_effective_px: None,
             },
         ]);
         assert!(matches!(
@@ -930,6 +1088,7 @@ mod tests {
             WalRecord::AmendResolved {
                 client_order_id: "a".into(),
                 effective_px: 1_000.0,
+                exact_effective_px: None,
             },
         ]);
         assert!(matches!(

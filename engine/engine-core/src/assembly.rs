@@ -46,14 +46,25 @@ pub fn wal(path: &Path) -> Result<(WalWriter, Vec<WalRecord>), WalError> {
 /// names the OLD run's numbers. A symbol a book admitted at runtime last
 /// run would otherwise come back at a different position (or not at all,
 /// leaving its position invisible to reconcile and the stop discipline).
-pub fn symbol_order(replayed: &[WalRecord], wanted: &[Subscription]) -> Vec<Symbol> {
-    let mut names: Vec<Symbol> = crate::replay::LogNames::of_log(replayed).symbols;
+pub fn symbol_order(
+    replayed: &[WalRecord],
+    wanted: &[Subscription],
+) -> Result<Vec<Symbol>, engine_types::identity::IdentityError> {
+    let mut names = crate::identities::replay_identities(replayed)?
+        .unwrap_or_default()
+        .instruments
+        .into_iter()
+        .map(|binding| binding.symbol)
+        .collect::<Vec<_>>();
     for sub in wanted {
         if !names.iter().any(|n| n == &sub.symbol) {
             names.push(sub.symbol.clone());
         }
     }
-    names
+    if names.len() > engine_types::identity::DENSE_ID_CAPACITY {
+        return Err(engine_types::identity::IdentityError::SymbolIdsExhausted);
+    }
+    Ok(names)
 }
 
 /// What the market feed opens with: every strategy subscription, plus a
@@ -117,6 +128,21 @@ pub fn venue_name(name: &str) -> Result<VenueName, VenueError> {
 /// asked.
 pub fn market_feed(name: VenueName, wanted: &[Subscription]) -> MarketFeeds {
     MarketFeeds::build(name, wanted)
+}
+
+pub fn market_feed_for_registry(
+    name: VenueName,
+    symbols: &[Symbol],
+    wanted: &[Subscription],
+) -> MarketFeeds {
+    let seeded = boot_subscriptions(symbols, wanted);
+    let mut feed = market_feed(name, &seeded);
+    for subscription in seeded {
+        if !wanted.contains(&subscription) {
+            engine_types::MarketFeed::retire(&mut feed, &subscription.symbol, subscription.feed);
+        }
+    }
+    feed
 }
 
 /// The chosen venue's private order stream, on the same account the gateway
@@ -284,57 +310,48 @@ fn risk_from_profile(section: &toml::Table) -> Result<Kernel, Box<dyn Error>> {
     Ok(Kernel::new(cfg).map_err(|e| format!("the risk kernel refuses this config: {e}"))?)
 }
 
-/// Name plus config block to a live strategy, ids in block order.
 pub fn strategies(configured: &[StrategyConfig]) -> Result<Vec<Box<dyn Strategy>>, Box<dyn Error>> {
-    one_name_per_sleeve(configured)?;
-    let mut out: Vec<Box<dyn Strategy>> = Vec::with_capacity(configured.len());
-    for (index, cfg) in configured.iter().enumerate() {
-        let id = StrategyId(u16::try_from(index).map_err(|_| "more than 65535 strategies")?);
-        let params = toml::Value::Table(cfg.params.clone());
-        out.push(build_strategy(&cfg.name, id, &params).map_err(|e| e.to_string())?);
-    }
-    one_owner_per_symbol(&out)?;
-    Ok(out)
+    let keys: Vec<_> = configured
+        .iter()
+        .map(|config| config.sleeve_name().to_string())
+        .collect();
+    let plan = crate::identities::plan_identities(&[], &keys, None, &Default::default(), &[])?;
+    strategies_for_registry(configured, &plan, &[])
 }
 
-/// Refuse a config where two strategies want the same symbol.
-///
-/// The venue holds one position per symbol and keeps no note of who asked for
-/// it, so `StrategyCtx::position` reports the account's holding, not the
-/// caller's. Two strategies claiming one symbol is a config saying two things
-/// at once, and it is refused here rather than resolved at run time.
-///
-/// This is not the only line of defence, and not the load-bearing one.
-/// Signal-driven reducers may admit symbols after boot, where this check
-/// cannot see overlap. `StrategyCtx::foreign_position` answers that runtime
-/// case. This check still refuses overlap already present in config.
-///
-/// Two behaviours on one symbol is one strategy with two branches.
-fn one_owner_per_symbol(built: &[Box<dyn Strategy>]) -> Result<(), Box<dyn Error>> {
-    let mut claimed: Vec<(String, &str)> = Vec::new();
-    for strategy in built {
-        let mut mine: Vec<String> = Vec::new();
-        for sub in strategy.subscriptions() {
-            // A strategy may want two feeds on one symbol; that is one claim.
-            if mine.iter().any(|s| s == &sub.symbol) {
-                continue;
-            }
-            mine.push(sub.symbol.clone());
+pub fn strategies_for_registry(
+    configured: &[StrategyConfig],
+    plan: &crate::identities::IdentityPlan,
+    replayed: &[WalRecord],
+) -> Result<Vec<Box<dyn Strategy>>, Box<dyn Error>> {
+    one_name_per_sleeve(configured)?;
+    let restored =
+        crate::strategy_process::state::CallbackState::replay(replayed, plan.state.sleeves.len())?;
+    let mut strategies: Vec<Box<dyn Strategy>> = Vec::with_capacity(plan.slot_configs.len());
+    for (slot, config) in plan.slot_configs.iter().enumerate() {
+        let id = StrategyId(u16::try_from(slot)?);
+        let Some(index) = config else {
+            strategies.push(Box::new(crate::identities::InactiveStrategy::new(
+                plan.state.sleeves[slot].clone(),
+                restored.committed.get(&id),
+            )));
+            continue;
+        };
+        let config = configured
+            .get(*index)
+            .ok_or("identity plan names an absent config block")?;
+        if plan.configured_ids.get(*index) != Some(&id)
+            || config.sleeve_name() != plan.state.sleeves[slot].as_str()
+        {
+            return Err("strategy config differs from its durable identity plan".into());
         }
-        for symbol in mine {
-            if let Some((_, first)) = claimed.iter().find(|(name, _)| name == &symbol) {
-                return Err(format!(
-                    "{symbol} is claimed by both \"{first}\" and \"{}\": the venue holds one \
-                     position per symbol and cannot say which strategy it belongs to, so each \
-                     would read the other's fills as its own",
-                    strategy.name()
-                )
-                .into());
-            }
-            claimed.push((symbol, strategy.name()));
-        }
+        strategies.push(build_strategy(
+            &config.name,
+            id,
+            &toml::Value::Table(config.params.clone()),
+        )?);
     }
-    Ok(())
+    Ok(strategies)
 }
 
 /// A sleeve name belongs to one block.
@@ -450,17 +467,74 @@ max_initial_margin_usdt = 100.0
     }
 
     #[test]
-    fn two_strategies_on_one_symbol_are_refused() {
-        let mut first = quoter("BTCUSDT");
-        first.sleeve = Some("first".into());
-        let mut second = quoter("BTCUSDT");
-        second.sleeve = Some("second".into());
-        let Err(err) = strategies(&[first, second]) else {
-            panic!("the venue cannot say whose position BTCUSDT is; this must not boot");
-        };
-        let text = err.to_string();
-        assert!(text.contains("BTCUSDT"), "{text}");
-        assert!(text.contains("quoter"), "{text}");
+    fn same_symbol_sleeves_keep_separate_constructor_ownership() {
+        let first = sleeve_strategy("first", "BTCUSDT");
+        let second = sleeve_strategy("second", "BTCUSDT");
+        let built =
+            strategies(&[first, second]).expect("distinct sleeve keys may share one instrument");
+        assert_eq!(built.len(), 2);
+        for (id, strategy) in built.iter().enumerate() {
+            let runtime = strategy.runtime_state().unwrap().unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&runtime.payload).unwrap();
+            assert_eq!(payload["id"], id as u64);
+            assert!(strategy
+                .subscriptions()
+                .iter()
+                .all(|row| row.symbol == "BTCUSDT"));
+        }
+    }
+
+    #[test]
+    fn registry_order_reaches_constructors_and_preserves_missing_sleeve_slots() {
+        let records = [WalRecord::Names {
+            strategies: vec!["first".into(), "second".into()],
+            symbols: vec!["BTCUSDT".into()],
+        }];
+        let mut second = sleeve_strategy("second", "BTCUSDT");
+        second
+            .params
+            .insert("half_spread_bps".into(), toml::Value::Float(25.0));
+        let configured = [second, sleeve_strategy("third", "BTCUSDT")];
+        let keys = configured
+            .iter()
+            .map(|config| config.sleeve_name().to_string())
+            .collect::<Vec<_>>();
+        let plan =
+            crate::identities::plan_identities(&records, &keys, None, &Default::default(), &[])
+                .unwrap();
+        let built = strategies_for_registry(&configured, &plan, &records).unwrap();
+        assert_eq!(built.len(), 3);
+        assert!(!built[0].callback_enabled());
+        assert_eq!(built[0].name(), "first");
+        for id in [1, 2] {
+            assert!(built[id].callback_enabled());
+            let runtime = built[id].runtime_state().unwrap().unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&runtime.payload).unwrap();
+            assert_eq!(payload["id"], id as u64);
+        }
+        let configured = [
+            sleeve_strategy("third", "BTCUSDT"),
+            sleeve_strategy("first", "BTCUSDT"),
+            sleeve_strategy("second", "BTCUSDT"),
+        ];
+        let records = [WalRecord::IdentityState {
+            wall_ts_ms: 1,
+            state: plan.state,
+        }];
+        let keys = configured
+            .iter()
+            .map(|config| config.sleeve_name().to_string())
+            .collect::<Vec<_>>();
+        let plan =
+            crate::identities::plan_identities(&records, &keys, None, &Default::default(), &[])
+                .unwrap();
+        let built = strategies_for_registry(&configured, &plan, &records).unwrap();
+        assert!(built.iter().all(|strategy| strategy.callback_enabled()));
+        for (id, strategy) in built.iter().enumerate() {
+            let runtime = strategy.runtime_state().unwrap().unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&runtime.payload).unwrap();
+            assert_eq!(payload["id"], id as u64);
+        }
     }
 
     #[test]
@@ -581,7 +655,7 @@ disaster_stop_fraction = 0.35
             quote("XRPUSDT"),
             quote("DOGEUSDT"), // the new seed the log already knows
         ];
-        let symbols = symbol_order(&replayed, &wanted);
+        let symbols = symbol_order(&replayed, &wanted).unwrap();
         let feed = market_feed(VenueName::BybitDemo, &boot_subscriptions(&symbols, &wanted));
         for (position, name) in symbols.iter().enumerate() {
             assert_eq!(
@@ -691,5 +765,39 @@ mod deployed_templates {
             [true, true, false, false],
             "CARRY and LONG consume external observations; Exodus consumes CARRY events; the probe consumes a clock"
         );
+    }
+}
+
+#[cfg(test)]
+mod retired_registry_tests {
+    use super::*;
+    use engine_types::{Feed, MarketFeed};
+    #[test]
+    fn market_registry_boot_keeps_ids_without_reopening_retired_history() {
+        let names = vec!["OLDUSDT".into(), "BTCUSDT".into()];
+        let wanted = vec![
+            Subscription {
+                symbol: "BTCUSDT".into(),
+                feed: Feed::Quote,
+            },
+            Subscription {
+                symbol: "BTCUSDT".into(),
+                feed: Feed::Depth,
+            },
+        ];
+        let mut feed = market_feed_for_registry(VenueName::BybitDemo, &names, &wanted);
+        assert_eq!(feed.id_of("OLDUSDT"), Some(engine_types::SymbolId(0)));
+        assert_eq!(feed.id_of("BTCUSDT"), Some(engine_types::SymbolId(1)));
+        assert!(
+            !feed.retire("OLDUSDT", Feed::Quote),
+            "historical identity alone reopened transport demand"
+        );
+        assert!(feed.retire("BTCUSDT", Feed::Quote));
+        assert!(feed.retire("BTCUSDT", Feed::Depth));
+        assert_eq!(
+            feed.admit("OLDUSDT", Feed::Depth),
+            Some(engine_types::SymbolId(0))
+        );
+        assert_eq!(feed.id_of("BTCUSDT"), Some(engine_types::SymbolId(1)));
     }
 }

@@ -108,6 +108,7 @@ pub struct Books {
     /// The venue's instrument rules, indexed by symbol, exactly as the
     /// engine quantizes against.
     pub rules: Vec<Option<InstrumentRule>>,
+    pub portfolio_symbols: BTreeSet<SymbolId>,
     /// What the log says is still out there. Filtered by the registry below
     /// before a strategy is shown any of it.
     pub orders: LedgerOfOrders,
@@ -411,6 +412,9 @@ impl StrategyCtx for Ctx<'_> {
     }
 
     fn foreign_position(&self, symbol: SymbolId) -> bool {
+        if self.books.portfolio_symbols.contains(&symbol) {
+            return false;
+        }
         self.books
             .attribution
             .held_by_another(self.strategy, symbol)
@@ -444,11 +448,11 @@ impl StrategyCtx for Ctx<'_> {
         let mut in_flight_signed_qty = 0.0;
         let mut open_order_count = 0;
         for order in self.books.orders.orders.values().filter(|order| {
-            order.request.strategy == self.strategy
+            order.request.sleeve_owner() == Some(self.strategy)
                 && order.request.symbol == symbol
                 && order.in_flight()
         }) {
-            let qty = (order.request.qty - order.filled_qty).max(0.0);
+            let qty = order.remaining_qty().expect("validated order quantity");
             in_flight_signed_qty += if order.request.side == engine_types::Side::Buy {
                 qty
             } else {
@@ -485,7 +489,7 @@ impl StrategyCtx for Ctx<'_> {
             .map(|symbol| symbol.0)
             .collect();
         symbols.extend(self.books.orders.orders.values().filter_map(|order| {
-            (order.request.strategy == self.strategy && order.in_flight())
+            (order.request.sleeve_owner() == Some(self.strategy) && order.in_flight())
                 .then_some(order.request.symbol.0)
         }));
         out.extend(
@@ -530,6 +534,11 @@ impl StrategyCtx for Ctx<'_> {
                 kind: request.kind,
                 qty: request.qty,
                 filled_qty: order.filled_qty,
+                remaining_qty: Some(
+                    order
+                        .remaining_qty()
+                        .expect("validated canonical order remainder"),
+                ),
                 reduce_only: request.is_sleeve_reduction(),
                 acked: order.acked,
             });
@@ -542,7 +551,7 @@ impl StrategyCtx for Ctx<'_> {
         // earlier boot sent. Another strategy's order stays none of this
         // one's business.
         let order = self.books.orders.orders.get(client_order_id)?;
-        if order.request.strategy != self.strategy {
+        if order.request.sleeve_owner() != Some(self.strategy) {
             return None;
         }
         Some(engine_types::OrderFacts {
@@ -550,6 +559,11 @@ impl StrategyCtx for Ctx<'_> {
             side: order.request.side,
             qty: order.request.qty,
             filled_qty: order.filled_qty,
+            remaining_qty: Some(
+                order
+                    .remaining_qty()
+                    .expect("validated canonical order remainder"),
+            ),
             reduce_only: order.request.is_sleeve_reduction(),
         })
     }
@@ -633,6 +647,7 @@ mod tests {
             market,
             account: flat_account(),
             rules: Vec::new(),
+            portfolio_symbols: BTreeSet::new(),
             orders,
             registry,
             attribution: Attribution::default(),
@@ -677,6 +692,7 @@ mod tests {
         let records = vec![
             sent("entry", owner),
             engine_types::WalRecord::OrderUpdate {
+                callbacks: None,
                 update: engine_types::OrderUpdate::Fill {
                     allocation: None,
                     amounts: None,
@@ -928,6 +944,134 @@ mod tests {
         );
     }
 
+    fn exact_partial_books(total: &str, part: &str) -> Books {
+        use engine_types::numeric::{AssetId, Exact, ExactNumber, ExecutionAmounts};
+        use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
+        let mut sent = sent("canonical", StrategyId(1));
+        let WalRecord::OrderSent { request, .. } = &mut sent else {
+            unreachable!()
+        };
+        ExactOrderTerms {
+            quantity: Exact::parse_decimal(total).unwrap(),
+            limit_price: Some(Exact::from_i64(100)),
+            stop_trigger_price: None,
+            physical_stop_trigger_price: None,
+            input_policy: OrderInputPolicy::StrategyShortestDecimal,
+        }
+        .apply_projection(request)
+        .unwrap();
+        let fill = WalRecord::OrderUpdate {
+            callbacks: None,
+            update: OrderUpdate::Fill {
+                client_order_id: "canonical".into(),
+                exec_id: "canonical-part".into(),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: part.parse().unwrap(),
+                px: 100.0,
+                fee: None,
+                is_maker: true,
+                forced_close: None,
+                venue_ts_ms: 1,
+                recv_ns: 2,
+                allocation: None,
+                amounts: Some(Box::new(ExecutionAmounts {
+                    quantity: ExactNumber::venue_decimal(part).unwrap(),
+                    price: ExactNumber::venue_decimal("100").unwrap(),
+                    fee: None,
+                    settlement_asset: AssetId::Unknown,
+                })),
+            },
+        };
+        let orders = LedgerOfOrders::try_from_records(&[sent, fill]).unwrap();
+        let mut registry = OrderRegistry::default();
+        registry.own("canonical", StrategyId(1));
+        books_over(MarketState::default(), orders, registry)
+    }
+
+    #[tokio::test]
+    async fn canonical_partial_remainder_survives_live_context_rotation_and_callback_json() {
+        use engine_types::strategy_process::{CallbackSnapshot, SnapshotCtx};
+        let (engine, _) = crate::tests::lifecycle_test_fixture(vec![]).await;
+        for (total, part, expected) in [
+            ("0.3", "0.1", 0.2),
+            ("0.1", "0.09999999999999999999", 1e-20),
+        ] {
+            let mut books = exact_partial_books(total, part);
+            let mut base = engine.rotation_base(7);
+            let row = &books.orders.orders["canonical"];
+            if let WalRecord::SegmentBase { open_orders, .. } = &mut base {
+                open_orders.push(engine_types::OpenOrderState {
+                    request: row.request.clone(),
+                    wire_ns: row.wire_ns,
+                    arrival_mid: row.arrival_mid,
+                    acked: row.acked,
+                    filled_qty: row.filled_qty,
+                    fill_quantity: Some(row.fill_quantity.clone()),
+                    reservation_low_px: row.reservation_low_px,
+                    reservation_high_px: row.reservation_high_px,
+                });
+            }
+            let base: WalRecord =
+                serde_json::from_slice(&serde_json::to_vec(&base).unwrap()).unwrap();
+            books.orders = LedgerOfOrders::try_from_records(&[base]).unwrap();
+            let mut out = VecDeque::new();
+            let mut timers = Timers::default();
+            let ctx = ctx_over(&books, &mut out, &mut timers, StrategyId(1));
+            let mut resting = Vec::new();
+            ctx.resting(&mut resting);
+            assert_eq!(resting.len(), 1);
+            assert_eq!(
+                resting[0].remaining_qty(),
+                expected,
+                "live context re-subtracted compatibility scalars after exact rotation"
+            );
+            if expected == 0.2 {
+                let terms = engine_types::order_terms::quantize_order(
+                    &crate::tests::shared_sleeves::spec(),
+                    Side::Buy,
+                    resting[0].remaining_qty(),
+                    OrderKind::Market,
+                    None,
+                    Some(100.0),
+                    engine_types::order_terms::QuantityPolicy::Normal,
+                )
+                .unwrap();
+                assert_eq!(terms.quantity, engine_types::numeric::Exact::parse_decimal("0.2").unwrap(), "the strategy must not lose one legal lot by re-quantizing its canonical remaining quantity");
+            }
+            let snapshot: CallbackSnapshot = serde_json::from_slice(
+                &serde_json::to_vec(&ctx.callback_snapshot().unwrap()).unwrap(),
+            )
+            .unwrap();
+            let callback = SnapshotCtx::new(&snapshot, |_| {}).unwrap();
+            let mut resting = Vec::new();
+            callback.resting(&mut resting);
+            assert_eq!(
+                resting[0].remaining_qty(),
+                expected,
+                "serialized worker callback changed the canonical remainder"
+            );
+        }
+    }
+
+    #[test]
+    fn callback_order_facts_preserve_the_sleeve_role_when_physical_role_differs() {
+        let mut books = exact_partial_books("0.3", "0.1");
+        let request = &mut books.orders.orders.get_mut("canonical").unwrap().request;
+        request.sleeve_effect = Some(engine_types::orders::SleeveOrderEffect::Reduce);
+        request.reduce_only = false;
+        let mut out = VecDeque::new();
+        let mut timers = Timers::default();
+        let ctx = ctx_over(&books, &mut out, &mut timers, StrategyId(1));
+        assert!(ctx.order_facts("canonical").unwrap().reduce_only);
+        let snapshot = ctx.callback_snapshot().unwrap();
+        let callback = engine_types::strategy_process::SnapshotCtx::new(&snapshot, |_| {}).unwrap();
+        assert!(
+            callback.order_facts("canonical").unwrap().reduce_only,
+            "the worker was shown the venue role instead of its own sleeve's reduction"
+        );
+    }
+
     #[test]
     fn resting_shows_a_strategy_its_own_working_orders_and_nobody_elses() {
         // A strategy that could read another's book could cancel it too.
@@ -938,6 +1082,7 @@ mod tests {
             sent("theirs", StrategyId(2)),
             sent("mine-filled", StrategyId(1)),
             WalRecord::OrderUpdate {
+                callbacks: None,
                 update: OrderUpdate::Fill {
                     allocation: None,
                     amounts: None,
@@ -994,6 +1139,7 @@ mod tests {
 
     fn holding(symbol: SymbolId, side: Side, qty: f64) -> PositionView {
         PositionView {
+            exact_stop_px: None,
             symbol,
             side,
             qty,
@@ -1026,6 +1172,7 @@ mod tests {
             market,
             account,
             rules: rules.to_vec(),
+            portfolio_symbols: BTreeSet::new(),
             orders,
             registry,
             attribution,
@@ -1085,6 +1232,33 @@ mod tests {
     }
 
     #[test]
+    fn typed_portfolio_context_distinguishes_another_sleeve_from_foreign_inventory() {
+        let mut books = books_over(
+            MarketState::default(),
+            LedgerOfOrders::default(),
+            OrderRegistry::default(),
+        );
+        books.portfolio_symbols.insert(SymbolId(0));
+        books
+            .attribution
+            .note(StrategyId(1), SymbolId(0), Side::Buy, 1.0);
+        let mut actions = VecDeque::new();
+        let mut timers = Timers::default();
+        let ctx = ctx_over(&books, &mut actions, &mut timers, StrategyId(0));
+        assert!(
+            !ctx.foreign_position(SymbolId(0)),
+            "a known sleeve must not suppress another sleeve's decisions"
+        );
+        assert_eq!(ctx.my_position(SymbolId(0)), 0.0);
+        books.portfolio_symbols.clear();
+        let ctx = ctx_over(&books, &mut actions, &mut timers, StrategyId(0));
+        assert!(
+            ctx.foreign_position(SymbolId(0)),
+            "legacy exclusive instruments retain their ownership contract"
+        );
+    }
+
+    #[test]
     fn a_flat_row_in_the_account_reading_is_not_a_position() {
         // A venue that reports a symbol it once held with size zero must not
         // read as something to exit: the exit would be an order for nothing.
@@ -1107,6 +1281,7 @@ mod tests {
             market,
             account,
             rules: Vec::new(),
+            portfolio_symbols: BTreeSet::new(),
             orders,
             registry,
             attribution,

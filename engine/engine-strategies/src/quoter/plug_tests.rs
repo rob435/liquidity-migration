@@ -365,6 +365,51 @@ fn an_opening_quote_on_the_new_exit_side_is_cancelled_before_replacement() {
 }
 
 #[test]
+fn a_recent_amend_never_delays_cancelling_a_quote_that_inventory_made_unsafe() {
+    let mut h = quoter_over(&["BTCUSDT"], 0.0);
+    let symbol = h.ctx.id_of("BTCUSDT");
+    h.ctx.resting.push(RestingSeed {
+        client_order_id: "recently-amended-ask".into(),
+        symbol,
+        side: Side::Sell,
+        kind: OrderKind::Limit {
+            px: 110.0,
+            tif: engine_types::TimeInForce::PostOnly,
+        },
+        qty: 0.1,
+        filled_qty: 0.0,
+        reduce_only: false,
+        acked: true,
+    });
+    h.quote("BTCUSDT", 99.0, 101.0);
+    assert_eq!(amend_count(&mut h), 1);
+    h.ctx
+        .set_now(engine_types::StrategyCtx::now_ns(&h.ctx) + 60_000_000);
+    h.maker_fill("filled-bid", "BTCUSDT", Side::Buy, 0.1, 99.9);
+    assert_eq!(
+        cancel_count(&mut h),
+        1,
+        "the first cancel must supersede the recent amend on the fill wake"
+    );
+    for _ in 0..1000 {
+        h.quote("BTCUSDT", 99.0, 101.0);
+    }
+    assert_eq!(
+        cancel_count(&mut h),
+        0,
+        "repeated cancels retain their pacing during overload"
+    );
+    h.ctx
+        .set_now(engine_types::StrategyCtx::now_ns(&h.ctx) + 1_000_000_000);
+    h.quote("BTCUSDT", 99.0, 101.0);
+    assert_eq!(
+        cancel_count(&mut h),
+        1,
+        "an unconfirmed cancel is retried after its own deadline"
+    );
+}
+
+#[test]
 fn a_fill_is_a_wake_and_the_quotes_are_rebuilt_on_it() {
     // A maker that waited for the next price to notice its own fill would sit
     // one-sided through exactly the quiet market it can least afford it in.
@@ -1531,5 +1576,41 @@ fn the_touchs_own_topic_moves_the_quotes_without_a_new_deep_book() {
     assert!(
         new_bid > first_bid + 0.5,
         "repriced to {new_bid} from {first_bid}: the fresher touch did not reach the plan"
+    );
+}
+
+#[test]
+fn a_tiny_partial_reduction_keeps_its_runtime_exit_obligation() {
+    let mut h = micro_bench("quote_enabled = false");
+    h.ctx.set_my_position("BTCUSDT", 0.1);
+    h.quote("BTCUSDT", 99.9, 100.1);
+    assert!(placed(&mut h).iter().any(|intent| intent.reduce_only));
+    let symbol = active_reduce_only_order(&mut h, "partial-drain");
+    h.ctx.resting.last_mut().unwrap().filled_qty = 0.1 - 1e-13;
+    h.ctx.set_my_position("BTCUSDT", 1e-13);
+    h.strategy.on_event(
+        &EngineEvent::Order(OrderUpdate::Fill {
+            client_order_id: "partial-drain".into(),
+            exec_id: "partial-drain-fill".into(),
+            symbol,
+            side: Side::Sell,
+            qty: 0.1 - 1e-13,
+            px: 100.0,
+            fee: Some(0.0),
+            is_maker: false,
+            forced_close: None,
+            venue_ts_ms: 1,
+            recv_ns: 2,
+            amounts: None,
+            allocation: None,
+        }),
+        &mut h.ctx,
+    );
+    let state = h.strategy.runtime_state().unwrap().unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&state.payload).unwrap();
+    assert_eq!(
+        payload["flatten_pending"],
+        serde_json::json!([symbol.0]),
+        "a real partial remainder must survive the strategy's durable process checkpoint"
     );
 }

@@ -27,6 +27,7 @@ impl ReadinessExchange {
         lifecycle: Option<(
             Vec<engine_types::SignalProducerLifecycle>,
             Vec<SignalSourceFrontier>,
+            Vec<engine_types::identity::SleeveKey>,
         )>,
     ) -> Self {
         let nonce = format!(
@@ -98,6 +99,7 @@ async fn exchange(
     lifecycle: Option<(
         Vec<engine_types::SignalProducerLifecycle>,
         Vec<SignalSourceFrontier>,
+        Vec<engine_types::identity::SleeveKey>,
     )>,
     poll: Duration,
     sender: &tokio::sync::watch::Sender<Option<ReadinessResult>>,
@@ -105,8 +107,9 @@ async fn exchange(
     let path = directory.join(SIGNAL_READINESS_REQUEST_FILE);
     let lifecycle_requested = lifecycle.is_some();
     let encoded = match lifecycle {
-        Some((producers, legacy_sources)) => {
+        Some((producers, legacy_sources, sleeve_keys)) => {
             serde_json::to_vec(&engine_types::SignalLifecycleRequest {
+                sleeve_keys,
                 schema_version: engine_types::SIGNAL_LIFECYCLE_SCHEMA_VERSION,
                 boot_nonce: request.boot_nonce.clone(),
                 producers,

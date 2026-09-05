@@ -18,7 +18,7 @@
 //!   inconsistent reply rather than naming the single-writer lease locally.
 
 pub mod gateway;
-pub mod realm;
+pub use engine_public::venues::binance::realm;
 
 mod execution;
 mod parse;

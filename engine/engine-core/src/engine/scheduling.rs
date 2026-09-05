@@ -497,6 +497,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) async fn on_market(&mut self, event: MarketEvent) -> Result<(), EngineError> {
         let now = clock::now_ns();
         self.books.market.apply(&event);
+        self.observe_virtual_stops(&event)?;
+        self.enforce_position_stop_intent().await?;
         match event {
             MarketEvent::Quote { symbol, quote } if quote.bid_px > 0.0 && quote.ask_px > 0.0 => {
                 self.risk
@@ -612,7 +614,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             matches!(
                 state,
                 HaltCancelState::AwaitingPrivate { deadline_ns }
-                    if now_ns >= *deadline_ns && self.is_live_opening(id)
+                    if now_ns >= *deadline_ns && self.is_live_halt_order(id)
             )
         }) {
             return Err(EngineError::State(format!(
@@ -638,7 +640,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             let Some((symbol, client_order_id)) = self.halt_cancel_queue.pop_front() else {
                 break;
             };
-            let live = self.is_live_opening(&client_order_id);
+            let live = self.is_live_halt_order(&client_order_id);
             if live
                 && matches!(
                     self.halt_cancels.get(&client_order_id),
@@ -660,7 +662,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if self.rotate_after_bytes > 0
             && self.wal.segment_size() >= self.rotate_after_bytes
             && self.host.callbacks.write.is_none()
+            && self.host.callbacks.unwritten.is_empty()
+            && !self.host.callbacks.order_news.pending()
+            && !self.host.callbacks.pages.loading()
             && self.dispatches.write.is_none()
+            && !self.portfolio_dirty
+            && !self.symbol_admission.persisting()
+            && !self.recovery.uncommitted()
         {
             let pending: Vec<_> = self.host.effects.transitions.keys().copied().collect();
             for id in pending {
@@ -668,6 +676,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
             let base = self.rotation_base(clock::wall_ms());
             if self.wal.rotate(&base)? {
+                if self.host.callbacks.isolated() {
+                    let reader = self.wal.callback_reader()?.ok_or_else(|| {
+                        EngineError::State("rotated WAL lost its callback reader".into())
+                    })?;
+                    self.host
+                        .callbacks
+                        .order_news
+                        .rotated(reader)
+                        .map_err(EngineError::State)?;
+                }
                 tracing::info!(
                     "log rotated: a fresh segment restates the engine's state; the old \
                      segment stays in place as an archive"
@@ -696,9 +714,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.refresh_account_if_due(now).await?;
         self.queue_halted_entry_cancels()?;
 
-        // Every resting entry gets one look. Read the clock again: the
-        // account refresh above is a venue round trip, and the stamp from
-        // before it is old by the time we get here.
+        // The maintenance pass uses the latest committed account snapshot.
         let now = clock::now_ns();
         if self.may_open && self.private_stream_ready {
             let mut maintenance = VecDeque::new();
@@ -717,28 +733,28 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.drain(now).await
     }
 
-    fn account_refresh_due(&self, now_ns: u64) -> bool {
-        now_ns.saturating_sub(self.books.account.observed_ns) >= self.refresh_after_ns
+    pub(super) fn request_account_refresh_after(&mut self, frontier_ns: u64) {
+        if self.account_refresh_started_ns <= frontier_ns {
+            self.account_refresh_requested_after = Some(
+                self.account_refresh_requested_after
+                    .map_or(frontier_ns, |previous| previous.max(frontier_ns)),
+            );
+        }
+    }
+
+    pub(super) fn account_refresh_due(&self, now_ns: u64) -> bool {
+        self.account_refresh_requested_after.is_some()
+            || now_ns.saturating_sub(self.books.account.observed_ns) >= self.refresh_after_ns
     }
 
     pub(super) async fn refresh_account_if_due(&mut self, now_ns: u64) -> Result<(), EngineError> {
-        if !self.account_refresh_due(now_ns) {
-            return Ok(());
-        }
-        match self.venue.account_view().await {
-            Ok(view) => {
-                self.adopt_view(view);
-                self.enforce_position_stop_intent().await?;
-            }
-            // Keeping the old reading is not the same as trusting it: it
-            // ages, and the risk kernel refuses on an old reading.
-            Err(e) => tracing::warn!(error = %e, "could not refresh the account reading"),
-        }
-        Ok(())
+        self.launch_account_recovery(self.account_refresh_due(now_ns));
+        self.service_account_recovery().await
     }
 
     pub(super) async fn drain(&mut self, origin_ns: u64) -> Result<(), EngineError> {
         self.service_order_dispatches().await?;
+        self.service_portfolio_controls().await?;
         self.service_strategy_callbacks()?;
         self.pull_unconfirmed_amends()?;
         let mut progress = self.drain_progress.take().unwrap_or(DrainProgress {
@@ -754,7 +770,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.load_ready_wake(&mut progress);
             }
             while let Some(pending) = self.host.pending.pop_front() {
-                if self.dispatches.write.is_some() && matches!(pending.action, Action::Place(_)) {
+                if self.dispatches.write.is_some()
+                    && matches!(
+                        pending.action,
+                        Action::Place(_) | Action::Amend { .. } | Action::SetStop { .. }
+                    )
+                {
                     let owner = pending.caller.zip(pending.callback_id);
                     self.dispatches
                         .waiting
@@ -867,7 +888,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         self.wal.append(&WalRecord::Intent {
                             intent: intent.clone(),
                         })?;
-                        self.tell_refused(intent, "wake_action_limit");
+                        let order_id = effect.and_then(|key| {
+                            self.host
+                                .effects
+                                .transitions
+                                .get(&key.transition_id)
+                                .and_then(|transition| transition.order_ids.get(key.index))
+                                .cloned()
+                                .flatten()
+                        });
+                        self.tell_refused(intent, "wake_action_limit", order_id.as_deref())?;
                     }
                     self.complete_effect(effect)?;
                     continue;
@@ -924,7 +954,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         spec,
                     } => {
                         let taken = self
-                            .process_amend(symbol, &client_order_id, spec, progress.origin_ns)
+                            .process_amend(
+                                symbol,
+                                &client_order_id,
+                                spec.clone(),
+                                progress.origin_ns,
+                            )
                             .await?;
                         self.working
                             .amended(&client_order_id, spec.px, taken, clock::now_ns());
@@ -934,7 +969,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         }
                     }
                     Action::SetStop { symbol, trigger_px } => {
-                        self.process_set_stop(symbol, trigger_px).await?;
+                        self.process_set_stop(caller, symbol, trigger_px).await?;
                         self.complete_effect(effect)?;
                         if !self.host.pending.is_empty() {
                             return self.pause_drain(progress).await;
@@ -1015,7 +1050,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     order.request.strategy == caller && order.request.symbol == *symbol
                 }),
             Action::SetStop { symbol, .. } => {
-                self.books.attribution.sole_owner(*symbol) == Some(caller)
+                if self.instrument_specs.contains_key(symbol) {
+                    self.books.attribution.signed(caller, *symbol) != 0.0
+                } else {
+                    self.books.attribution.sole_owner(*symbol) == Some(caller)
+                }
             }
             _ => true,
         };
@@ -1090,8 +1129,42 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     !matches!(&queued.action, Action::Amend { client_order_id: queued_id, .. } if queued_id == client_order_id)
                 });
             }
-            Action::SetStop { .. } => {
-                queue.retain(|(queued, _)| !matches!(&queued.action, Action::SetStop { .. }));
+            Action::SetStop { trigger_px, .. } => {
+                let owned = pending
+                    .caller
+                    .map(|caller| self.books.attribution.signed(caller, symbol));
+                if trigger_px.is_finite() && *trigger_px > 0.0 {
+                    let same_owner_stop = |queued: &PendingAction| {
+                        if queued.caller != pending.caller {
+                            return None;
+                        }
+                        match queued.action {
+                            Action::SetStop {
+                                trigger_px: old, ..
+                            } if old.is_finite() && old > 0.0 => Some(old),
+                            _ => None,
+                        }
+                    };
+                    if queue.iter().any(|(queued, _)| {
+                        same_owner_stop(queued).is_some_and(|old| {
+                            old == *trigger_px
+                                || owned.is_some_and(|qty| {
+                                    if qty > 0.0 {
+                                        old >= *trigger_px
+                                    } else if qty < 0.0 {
+                                        old <= *trigger_px
+                                    } else {
+                                        false
+                                    }
+                                })
+                        })
+                    }) {
+                        return;
+                    }
+                    if owned.is_some_and(|qty| qty != 0.0) {
+                        queue.retain(|(queued, _)| same_owner_stop(queued).is_none());
+                    }
+                }
             }
             Action::Place(intent)
                 if !intent.reduce_only
@@ -1202,6 +1275,59 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 #[cfg(test)]
 mod dispatch_budget_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn deferred_stops_keep_each_owner_and_never_replace_a_tighter_target() {
+        let (mut engine, _) = crate::tests::callback_test_fixture(Vec::new()).await;
+        let symbol = SymbolId(0);
+        engine
+            .books
+            .attribution
+            .note(StrategyId(0), symbol, Side::Buy, 1.0);
+        engine
+            .books
+            .attribution
+            .note(StrategyId(1), symbol, Side::Sell, 1.0);
+        let mut enqueue = |owner, trigger_px| {
+            engine.defer_action(
+                PendingAction {
+                    caller: Some(StrategyId(owner)),
+                    action: Action::SetStop { symbol, trigger_px },
+                    effect: None,
+                    callback_id: None,
+                },
+                1,
+            );
+        };
+        enqueue(0, 95.0);
+        enqueue(1, 105.0);
+        enqueue(0, 94.0);
+        for _ in 0..1000 {
+            enqueue(0, 95.0);
+        }
+        let queued = &engine.deferred_actions[&symbol];
+        assert_eq!(
+            queued.len(),
+            2,
+            "different sleeves must retain separate stop obligations during overload"
+        );
+        assert!(queued.iter().any(|(p, _)| p.caller == Some(StrategyId(0))
+            && matches!(
+                p.action,
+                Action::SetStop {
+                    trigger_px: 95.0,
+                    ..
+                }
+            )));
+        assert!(queued.iter().any(|(p, _)| p.caller == Some(StrategyId(1))
+            && matches!(
+                p.action,
+                Action::SetStop {
+                    trigger_px: 105.0,
+                    ..
+                }
+            )));
+    }
 
     #[tokio::test]
     async fn a_durable_dispatch_wait_preserves_the_original_wake_budget() {

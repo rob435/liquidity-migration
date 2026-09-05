@@ -7,6 +7,7 @@ use engine_types::{
 };
 
 mod allocated;
+mod internal;
 pub(crate) use allocated::PreparedPortfolioFill;
 
 /// Smaller than this is flat. A venue position is a whole number of quantity
@@ -49,6 +50,7 @@ pub fn forced_close_owner(
 #[derive(Debug, Default)]
 pub struct Attribution {
     inventory: crate::inventory::Inventory,
+    internal: internal::InternalAccounting,
     accounting: crate::execution_accounting::ExecutionAccounting,
 }
 
@@ -77,6 +79,19 @@ impl Attribution {
         let mut strategy_names = Vec::new();
         for record in records {
             match record {
+                WalRecord::PortfolioOffsetSettled { settlement } => {
+                    let prepared = me.prepare_internal_settlement(settlement)?;
+                    me.commit_internal_settlement(prepared)?;
+                }
+                WalRecord::SleeveStopSet {
+                    strategy,
+                    symbol,
+                    side,
+                    trigger_price,
+                    ..
+                } => {
+                    me.set_sleeve_stop_exact(*strategy, *symbol, *side, trigger_price.clone())?;
+                }
                 WalRecord::Names { strategies, .. } => strategy_names = strategies.clone(),
                 WalRecord::OrderSent { request, .. } => {
                     sender.insert(request.client_order_id.as_str(), request);
@@ -87,7 +102,7 @@ impl Attribution {
                 // charged to nobody on purpose: the engine does not guess
                 // whose it is, and `reconcile` is what notices the account
                 // holds more than the log accounts for.
-                WalRecord::OrderUpdate { update } => {
+                WalRecord::OrderUpdate { update, .. } => {
                     let OrderUpdate::Fill {
                         client_order_id,
                         symbol,
@@ -107,11 +122,7 @@ impl Attribution {
                         }
                     ) {
                         let prepared = me
-                            .prepare_portfolio_update(
-                                request.map(|request| request.strategy),
-                                &strategy_names,
-                                update,
-                            )?
+                            .prepare_portfolio_update_for_order(request, &strategy_names, update)?
                             .ok_or("recorded fill has no valid allocation")?;
                         me.commit_portfolio_fill(prepared)?;
                         if let Some(request) = request {
@@ -119,9 +130,21 @@ impl Attribution {
                         }
                         continue;
                     }
-                    let strategy = request.map(|request| request.strategy).or_else(|| {
-                        forced_close_owner(&me, client_order_id, *symbol, *side, *forced_close)
-                    });
+                    if request.is_some_and(|request| request.is_portfolio_reduction()) {
+                        return Err("engine net execution is missing its durable allocation".into());
+                    }
+                    let strategy =
+                        request
+                            .and_then(|request| request.sleeve_owner())
+                            .or_else(|| {
+                                forced_close_owner(
+                                    &me,
+                                    client_order_id,
+                                    *symbol,
+                                    *side,
+                                    *forced_close,
+                                )
+                            });
                     let Some(strategy) = strategy else {
                         continue;
                     };
@@ -149,8 +172,8 @@ impl Attribution {
                         }
                     ) {
                         let prepared = me
-                            .prepare_portfolio_recovered(
-                                request.map(|request| request.strategy),
+                            .prepare_portfolio_recovered_for_order(
+                                request,
                                 &strategy_names,
                                 record,
                             )?
@@ -161,9 +184,21 @@ impl Attribution {
                         }
                         continue;
                     }
-                    let strategy = request.map(|request| request.strategy).or_else(|| {
-                        forced_close_owner(&me, client_order_id, *symbol, *side, *forced_close)
-                    });
+                    if request.is_some_and(|request| request.is_portfolio_reduction()) {
+                        return Err("engine net execution is missing its durable allocation".into());
+                    }
+                    let strategy =
+                        request
+                            .and_then(|request| request.sleeve_owner())
+                            .or_else(|| {
+                                forced_close_owner(
+                                    &me,
+                                    client_order_id,
+                                    *symbol,
+                                    *side,
+                                    *forced_close,
+                                )
+                            });
                     let Some(strategy) = strategy else {
                         continue;
                     };
@@ -175,7 +210,7 @@ impl Attribution {
                 WalRecord::ClaimsDropped { rows, .. } => me.forget(rows),
                 WalRecord::LatchCleared {
                     restated_exposure, ..
-                } => me.keep_held(restated_exposure),
+                } => me.keep_held(restated_exposure)?,
                 // Still-open orders arrive through the same record, so
                 // `sender` keeps resolving their later fills.
                 WalRecord::SegmentBase {
@@ -278,12 +313,21 @@ impl Attribution {
     }
 
     /// Restating physical flatness cannot remove balanced virtual holdings.
-    pub fn keep_held(&mut self, restated: &[SymbolTotal]) {
+    pub fn keep_held(&mut self, restated: &[SymbolTotal]) -> Result<(), String> {
+        let held = restated
+            .iter()
+            .map(|row| {
+                row.exact_quantity()
+                    .map(|quantity| (row.symbol, quantity))
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         self.drop_where_flat(|symbol| {
-            !restated
+            !held
                 .iter()
-                .any(|row| row.symbol == symbol && row.signed_qty.abs() >= FLAT)
+                .any(|(known, quantity)| *known == symbol && !quantity.is_zero())
         });
+        Ok(())
     }
 
     /// Every non-flat row, sorted, for a rotation to restate.
@@ -543,17 +587,33 @@ impl Attribution {
     pub fn snapshot(&self) -> engine_types::portfolio::PortfolioState {
         let mut state = self.inventory.snapshot();
         self.accounting.write_snapshot(&mut state);
+        state.internal_settlements = self.internal.snapshot();
         state
     }
 
     pub fn restore(state: &engine_types::portfolio::PortfolioState) -> Result<Self, String> {
         Ok(Self {
             inventory: crate::inventory::Inventory::restore(state)?,
+            internal: internal::InternalAccounting::restore(&state.internal_settlements)?,
             accounting: crate::execution_accounting::ExecutionAccounting::restore(state)?,
         })
     }
 
     pub fn remember_order_stop(&mut self, request: &engine_types::OrderRequest) {
+        if request.is_sleeve_reduction() {
+            return;
+        }
+        if let Some(terms) = &request.exact_terms {
+            if let Some(stop) = &terms.stop_trigger_price {
+                self.inventory.tighten_stop(
+                    request.strategy,
+                    request.symbol,
+                    request.side,
+                    stop.clone(),
+                );
+            }
+            return;
+        }
         if let Some(stop) = request.sleeve_stop() {
             self.remember_stop(
                 request.strategy,
@@ -598,6 +658,10 @@ impl Attribution {
                     .to_f64()
                     .expect("validated inventory projection")
             })
+    }
+
+    pub(crate) fn all_symbols(&self) -> impl Iterator<Item = SymbolId> + '_ {
+        self.inventory.rows().map(|row| row.symbol)
     }
 
     /// Symbols this strategy still has a non-flat fill claim on.
@@ -667,7 +731,7 @@ mod tests {
         ];
         let mut attribution = Attribution::from_records(&records);
         assert!(attribution.drop_where_flat(|_| true).is_empty());
-        attribution.keep_held(&[]);
+        attribution.keep_held(&[]).unwrap();
         assert_eq!(attribution.signed(CARRY, BTC), 2.0);
         assert_eq!(attribution.signed(LONG, BTC), -1.0);
         let state =
@@ -704,7 +768,7 @@ mod tests {
             sent("c", CARRY, ETH),
             fill("c", ETH, Side::Buy, 3.0),
         ]);
-        attribution.keep_held(&[]);
+        attribution.keep_held(&[]).unwrap();
         assert_eq!(attribution.signed(CARRY, BTC), 2.0);
         assert_eq!(attribution.signed(LONG, BTC), -2.0);
         assert_eq!(attribution.signed(CARRY, ETH), 0.0);
@@ -733,6 +797,7 @@ mod tests {
 
     fn fill(id: &str, symbol: SymbolId, side: Side, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -754,6 +819,7 @@ mod tests {
     /// A close the venue itself started: no `orderLinkId`, and a reason.
     fn stop_fill(symbol: SymbolId, side: Side, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -779,6 +845,7 @@ mod tests {
         qty: f64,
     ) -> WalRecord {
         WalRecord::RecoveredFill {
+            callbacks: None,
             allocation: None,
             amounts: None,
             exec_id: "native-or-manual".into(),
@@ -1042,6 +1109,7 @@ mod tests {
                 wall_ts_ms: 2,
                 note: "operator looked".to_string(),
                 restated_exposure: vec![engine_types::SymbolTotal {
+                    exact_signed_qty: None,
                     symbol: ETH,
                     signed_qty: 3.0,
                 }],
@@ -1057,5 +1125,60 @@ mod tests {
         assert!(!a.held_by_another(LONG, BTC));
         assert_eq!(a.signed(LONG, ETH), 3.0, "held in the restatement keeps it");
         assert!(a.held_by_another(CARRY, ETH));
+    }
+}
+
+#[cfg(test)]
+mod exact_stop_tests {
+    use super::*;
+    use engine_types::numeric::{AssetId, Exact};
+    use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
+    use engine_types::portfolio::{PortfolioPosition, PortfolioState};
+    #[test]
+    fn exact_order_stop_retains_its_decimal_value_in_owned_rotation_state() {
+        let exact = |s: &str| Exact::parse_decimal(s).unwrap();
+        let mut inventory = Attribution::restore(&PortfolioState {
+            positions: vec![PortfolioPosition {
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                signed_qty: exact("1"),
+                entry_value: Some(exact("100")),
+                stop_px: None,
+                settlement_asset: AssetId::Unknown,
+            }],
+            ..PortfolioState::default()
+        })
+        .unwrap();
+        let terms = ExactOrderTerms {
+            quantity: exact("1"),
+            limit_price: None,
+            stop_trigger_price: Some(exact("90.1")),
+            physical_stop_trigger_price: Some(exact("90.1")),
+            input_policy: OrderInputPolicy::StrategyShortestDecimal,
+        };
+        let mut order = engine_types::OrderRequest {
+            client_order_id: "exact-stop".into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 1.0,
+            kind: engine_types::OrderKind::Market,
+            stop: Some(engine_types::StopSpec { trigger_px: 90.1 }),
+            reduce_only: false,
+            close_position: false,
+            exact_terms: None,
+            sleeve_effect: None,
+        };
+        terms.apply_projection(&mut order).unwrap();
+        inventory.remember_order_stop(&order);
+        let state = inventory.snapshot();
+        assert_eq!(
+            state.positions[0].stop_px,
+            Some(exact("90.1")),
+            "durable protection must not regain a binary rounding error"
+        );
+        let bytes = serde_json::to_vec(&state).unwrap();
+        let restored = Attribution::restore(&serde_json::from_slice(&bytes).unwrap()).unwrap();
+        assert_eq!(restored.snapshot(), state);
     }
 }

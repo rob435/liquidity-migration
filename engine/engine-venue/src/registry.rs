@@ -278,6 +278,21 @@ impl VenueGateway for Venue {
         }
     }
 
+    async fn set_stop_exact(
+        &mut self,
+        symbol: SymbolId,
+        terms: &engine_types::order_terms::ExactStopTerms,
+    ) -> Result<(), VenueError> {
+        match self {
+            Venue::Bybit(gw) => gw.set_stop_exact(symbol, terms).await,
+            Venue::Hyperliquid(gw) => gw.set_stop_exact(symbol, terms).await,
+            Venue::Lighter(gw) => gw.set_stop_exact(symbol, terms).await,
+            Venue::Mexc(gw) => gw.set_stop_exact(symbol, terms).await,
+            Venue::Binance(gw) => gw.set_stop_exact(symbol, terms).await,
+            Venue::Variational(gw) => gw.set_stop_exact(symbol, terms).await,
+        }
+    }
+
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
         match self {
             Venue::Bybit(gw) => gw.set_stop(symbol, trigger_px).await,
@@ -344,6 +359,19 @@ impl VenueGateway for Venue {
         }
     }
 
+    fn account_recovery_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::AccountRecoveryClient>> {
+        match self {
+            Venue::Bybit(gateway) => gateway.account_recovery_client(),
+            Venue::Hyperliquid(gateway) => gateway.account_recovery_client(),
+            Venue::Lighter(gateway) => gateway.account_recovery_client(),
+            Venue::Mexc(gateway) => gateway.account_recovery_client(),
+            Venue::Binance(gateway) => gateway.account_recovery_client(),
+            Venue::Variational(gateway) => gateway.account_recovery_client(),
+        }
+    }
+
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
         match self {
             Venue::Bybit(gw) => gw.account_view().await,
@@ -363,6 +391,46 @@ impl VenueGateway for Venue {
             Venue::Mexc(gw) => gw.instrument_rules().await,
             Venue::Binance(gw) => gw.instrument_rules().await,
             Venue::Variational(gw) => gw.instrument_rules().await,
+        }
+    }
+
+    fn restore_instrument_catalog(
+        &self,
+        checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        match self {
+            Venue::Bybit(gw) => gw.restore_instrument_catalog(checkpoint),
+            Venue::Hyperliquid(gw) => gw.restore_instrument_catalog(checkpoint),
+            Venue::Lighter(gw) => gw.restore_instrument_catalog(checkpoint),
+            Venue::Mexc(gw) => gw.restore_instrument_catalog(checkpoint),
+            Venue::Binance(gw) => gw.restore_instrument_catalog(checkpoint),
+            Venue::Variational(gw) => gw.restore_instrument_catalog(checkpoint),
+        }
+    }
+    fn install_instrument_catalog(
+        &mut self,
+        catalog: &engine_types::orders::InstrumentCatalog,
+    ) -> Result<(), VenueError> {
+        match self {
+            Venue::Bybit(gw) => gw.install_instrument_catalog(catalog),
+            Venue::Hyperliquid(gw) => gw.install_instrument_catalog(catalog),
+            Venue::Lighter(gw) => gw.install_instrument_catalog(catalog),
+            Venue::Mexc(gw) => gw.install_instrument_catalog(catalog),
+            Venue::Binance(gw) => gw.install_instrument_catalog(catalog),
+            Venue::Variational(gw) => gw.install_instrument_catalog(catalog),
+        }
+    }
+
+    fn instrument_catalog_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::InstrumentCatalogClient>> {
+        match self {
+            Venue::Bybit(gw) => gw.instrument_catalog_client(),
+            Venue::Hyperliquid(gw) => gw.instrument_catalog_client(),
+            Venue::Lighter(gw) => gw.instrument_catalog_client(),
+            Venue::Mexc(gw) => gw.instrument_catalog_client(),
+            Venue::Binance(gw) => gw.instrument_catalog_client(),
+            Venue::Variational(gw) => gw.instrument_catalog_client(),
         }
     }
 

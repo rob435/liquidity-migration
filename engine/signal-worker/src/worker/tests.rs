@@ -3402,6 +3402,7 @@ fn lifecycle_request(
             .join(engine_types::SIGNAL_READINESS_REQUEST_FILE),
     )
     .save(&engine_types::SignalLifecycleRequest {
+        sleeve_keys: Vec::new(),
         schema_version: 2,
         boot_nonce: nonce.into(),
         producers,
@@ -3704,4 +3705,203 @@ fn producer_lifecycle_failed_seal_write_preserves_old_checkpoint_and_restarts() 
     assert_eq!(durable.worker.state.long_output_sequence, 0);
     assert_eq!(durable.worker.state.carry_output_sequence, 0);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+fn named_lifecycle_request(durable: &DurableSignalWorker, keys: &[&str], nonce: &str) {
+    use engine_types::identity::SleeveKey;
+    AtomicJsonStore::new(
+        durable
+            .spool
+            .directory()
+            .join(engine_types::SIGNAL_READINESS_REQUEST_FILE),
+    )
+    .save(&engine_types::SignalLifecycleRequest {
+        sleeve_keys: keys
+            .iter()
+            .map(|key| SleeveKey::new(*key).unwrap())
+            .collect(),
+        schema_version: engine_types::SIGNAL_LIFECYCLE_SCHEMA_VERSION,
+        boot_nonce: nonce.into(),
+        producers: Vec::new(),
+        legacy_sources: Vec::new(),
+    })
+    .unwrap();
+}
+
+#[test]
+fn named_destinations_hold_fresh_publication_and_bind_before_first_output() {
+    let root = temporary_root("named-fresh-publication");
+    let mut durable = DurableSignalWorker::open_with_universe(
+        test_config(),
+        test_universe(),
+        root.join("state"),
+        root.join("spool"),
+    )
+    .unwrap();
+    durable.require_named_destinations();
+    let before = serde_json::to_vec(durable.worker.state()).unwrap();
+    let receipt = durable
+        .apply_many_and_commit([lifecycle_ticker(1)])
+        .unwrap();
+    assert_eq!(receipt.committed_events, 0);
+    assert!(receipt.observations.is_empty());
+    assert_eq!(serde_json::to_vec(durable.worker.state()).unwrap(), before);
+    assert_eq!(durable.spool.inventory().unwrap().files, 0);
+    named_lifecycle_request(&durable, &["carry", "exodus", "long"], "bind");
+    durable.respond_to_readiness_request().unwrap();
+    assert!(durable.destinations_verified());
+    let report = lifecycle_response(&durable);
+    assert_eq!(report.source_sleeves.len(), 2);
+    for source in &report.producer.sources {
+        let named = report
+            .source_sleeves
+            .iter()
+            .find(|binding| binding.source == source.source)
+            .unwrap();
+        assert_eq!(
+            source.destination,
+            StrategyId(if named.sleeve.as_str() == "long" {
+                2
+            } else {
+                0
+            })
+        );
+        assert_eq!(source.published_through, 0);
+    }
+    lifecycle_request(&durable, vec![successor_grant(&report.producer)], "grant");
+    let request_store = AtomicJsonStore::new(
+        durable
+            .spool
+            .directory()
+            .join(engine_types::SIGNAL_READINESS_REQUEST_FILE),
+    );
+    let mut request = request_store
+        .load::<engine_types::SignalLifecycleRequest>()
+        .unwrap()
+        .unwrap();
+    request.sleeve_keys = ["carry", "exodus", "long"]
+        .into_iter()
+        .map(|key| engine_types::identity::SleeveKey::new(key).unwrap())
+        .collect();
+    request_store.save(&request).unwrap();
+    durable.respond_to_readiness_request().unwrap();
+    let output = durable.apply_and_commit(lifecycle_ticker(1)).unwrap();
+    assert!(!output.is_empty());
+    assert!(output.iter().all(
+        |row| row.destination == StrategyId(if row.source.ends_with(".long") { 2 } else { 0 })
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn named_destinations_restore_reordered_legacy_tail_without_relabeling_or_consuming_input() {
+    let root = temporary_root("named-legacy-reorder");
+    let mut durable = DurableSignalWorker::open_with_universe(
+        test_config(),
+        test_universe(),
+        root.join("state"),
+        root.join("spool"),
+    )
+    .unwrap();
+    let published = durable.apply_and_commit(lifecycle_ticker(1)).unwrap();
+    let published_json = serde_json::to_vec(&published).unwrap();
+    let previous = durable.worker.state().clone();
+    drop(durable);
+    let mut reordered = test_config();
+    std::mem::swap(
+        &mut reordered.long_destination,
+        &mut reordered.carry_destination,
+    );
+    let mut restored = DurableSignalWorker::open_with_universe(
+        reordered.clone(),
+        test_universe(),
+        root.join("state"),
+        root.join("spool"),
+    )
+    .unwrap();
+    assert!(!restored.destinations_verified());
+    let receipt = restored
+        .apply_many_and_commit([lifecycle_ticker(2)])
+        .unwrap();
+    assert_eq!(receipt.committed_events, 0);
+    assert!(receipt.observations.is_empty());
+    assert_eq!(
+        restored.worker.state().last_input_sequence,
+        previous.last_input_sequence
+    );
+    named_lifecycle_request(&restored, &["carry", "long", "exodus"], "bind-old");
+    restored.respond_to_readiness_request().unwrap();
+    let response = lifecycle_response(&restored);
+    assert_eq!(response.source_sleeves.len(), 2);
+    assert!(response.producer.sources.iter().all(
+        |row| row.destination == StrategyId(if row.source.ends_with(".long") { 1 } else { 0 })
+    ));
+    assert_eq!(
+        response
+            .producer
+            .sources
+            .iter()
+            .map(|row| row.published_through)
+            .sum::<u64>(),
+        published.len() as u64
+    );
+    let stored = restored.worker.state().clone();
+    let reopened = SignalWorker::restore(reordered, stored).unwrap();
+    assert_eq!(reopened.config.long_destination, 1);
+    assert_eq!(reopened.config.carry_destination, 0);
+    assert_eq!(serde_json::to_vec(&published).unwrap(), published_json);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn named_destinations_refuse_registry_reassignment_and_changed_sleeve_keys() {
+    let root = temporary_root("named-refuse-reassignment");
+    let mut durable = DurableSignalWorker::open_with_universe(
+        test_config(),
+        test_universe(),
+        root.join("state"),
+        root.join("spool"),
+    )
+    .unwrap();
+    durable.apply_and_commit(lifecycle_ticker(1)).unwrap();
+    durable.require_named_destinations();
+    let before = serde_json::to_vec(durable.worker.state()).unwrap();
+    named_lifecycle_request(&durable, &["exodus", "carry", "long"], "wrong");
+    let error = durable
+        .respond_to_readiness_request()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("reinterpret already published source history"),
+        "{error}"
+    );
+    assert_eq!(serde_json::to_vec(durable.worker.state()).unwrap(), before);
+    assert!(!durable.destinations_verified());
+    named_lifecycle_request(&durable, &["carry", "long", "exodus"], "right");
+    durable.respond_to_readiness_request().unwrap();
+    let mut renamed = test_config();
+    renamed.routing.long_sleeve = "new-long-owner".into();
+    let error = SignalWorker::restore(renamed, durable.worker.state().clone())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("directional sleeve keys changed"), "{error}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn named_destinations_refuse_a_checkpoint_that_aliases_both_directional_owners() {
+    let config = test_config();
+    let mut state = SignalWorker::with_universe(config.clone(), test_universe())
+        .unwrap()
+        .state
+        .clone();
+    state.long_destination = state.carry_destination;
+    let error = SignalWorker::restore(config, state)
+        .err()
+        .expect("two sleeves cannot restore to one durable owner");
+    assert_eq!(
+        error.to_string(),
+        "state: checkpoint directional destinations share one durable id"
+    );
 }

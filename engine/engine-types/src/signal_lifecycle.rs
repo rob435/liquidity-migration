@@ -42,6 +42,8 @@ pub struct SignalProducerRoute {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignalLifecycleRequest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sleeve_keys: Vec<crate::identity::SleeveKey>,
     pub schema_version: u16,
     pub boot_nonce: String,
     pub producers: Vec<SignalProducerLifecycle>,
@@ -61,6 +63,8 @@ pub struct SignalProducerReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignalLifecycleResponse {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_sleeves: Vec<crate::identity::SignalSourceSleeve>,
     pub schema_version: u16,
     pub boot_nonce: String,
     pub producer: SignalProducerReport,

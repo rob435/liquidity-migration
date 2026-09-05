@@ -468,6 +468,68 @@ pub struct HttpVenue {
     last_sent_ns: u64,
 }
 
+struct HttpAccountRecovery {
+    addr: SocketAddr,
+    key: Vec<u8>,
+}
+
+#[engine_types::async_trait]
+impl engine_types::orders::AccountRecoveryClient for HttpAccountRecovery {
+    async fn account_view(&self, _symbols: &[Symbol]) -> Result<AccountView, VenueError> {
+        let observed_ns = clock::now_ns();
+        let mut stream = tokio::net::TcpStream::connect(self.addr)
+            .await
+            .map_err(|error| VenueError::Transport(error.to_string()))?;
+        stream
+            .set_nodelay(true)
+            .map_err(|error| VenueError::Transport(error.to_string()))?;
+        let request = signed_http_request(&self.key, "/v5/account/wallet-balance", "{}");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|error| VenueError::Transport(error.to_string()))?;
+        let mut buf = Vec::with_capacity(8 * 1024);
+        let body = read_http_body(&mut stream, &mut buf).await?;
+        let reply = serde_json::from_slice(&body)
+            .map_err(|error| VenueError::BadReply(error.to_string()))?;
+        Ok(bench_account_view(&reply, observed_ns))
+    }
+    async fn executions(
+        &self,
+        _symbols: &[Symbol],
+        _start_ms: i64,
+        _end_ms: i64,
+    ) -> Result<Vec<VenueExecution>, VenueError> {
+        Ok(Vec::new())
+    }
+}
+
+fn signed_http_request(key: &[u8], path: &str, body: &str) -> String {
+    let timestamp = clock::wall_ms();
+    let signature = sign(key, &format!("{timestamp}bench5000{body}"));
+    format!(
+        "POST {path} HTTP/1.1\r\nHost: bench\r\nContent-Type: application/json\r\n\
+         X-BAPI-API-KEY: bench\r\nX-BAPI-TIMESTAMP: {timestamp}\r\nX-BAPI-SIGN: {signature}\r\n\
+         Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn bench_account_view(reply: &serde_json::Value, observed_ns: u64) -> AccountView {
+    AccountView {
+        equity_usdt: reply
+            .pointer("/result/equity")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(10_000.0),
+        available_usdt: reply
+            .pointer("/result/available")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(10_000.0),
+        positions: Vec::new(),
+        observed_ns,
+    }
+}
+
 impl HttpVenue {
     pub fn new(addr: SocketAddr, symbols: Vec<Symbol>) -> Self {
         HttpVenue {
@@ -519,14 +581,7 @@ impl HttpVenue {
     }
 
     async fn try_call(&mut self, path: &str, body: &str) -> Result<serde_json::Value, VenueError> {
-        let timestamp = clock::wall_ms();
-        let signature = sign(&self.key, &format!("{timestamp}bench5000{body}"));
-        let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: bench\r\nContent-Type: application/json\r\n\
-             X-BAPI-API-KEY: bench\r\nX-BAPI-TIMESTAMP: {timestamp}\r\nX-BAPI-SIGN: {signature}\r\n\
-             Content-Length: {}\r\n\r\n{body}",
-            body.len()
-        );
+        let request = signed_http_request(&self.key, path, body);
         let stream = self
             .stream
             .as_mut()
@@ -650,18 +705,16 @@ impl VenueGateway for HttpVenue {
 
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
         let reply = self.call("/v5/account/wallet-balance", "{}").await?;
-        Ok(AccountView {
-            equity_usdt: reply
-                .pointer("/result/equity")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(10_000.0),
-            available_usdt: reply
-                .pointer("/result/available")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(10_000.0),
-            positions: Vec::new(),
-            observed_ns: clock::now_ns(),
-        })
+        Ok(bench_account_view(&reply, clock::now_ns()))
+    }
+
+    fn account_recovery_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::AccountRecoveryClient>> {
+        Some(Box::new(HttpAccountRecovery {
+            addr: self.addr,
+            key: self.key.clone(),
+        }))
     }
 
     /// The benchmark measures the order path, and this read happens once at
@@ -913,5 +966,63 @@ mod tests {
         let head = b"HTTP/1.1 200 OK\r\nContent-Length: 17\r\n\r\n";
         assert_eq!(find_head_end(head), Some(head.len()));
         assert_eq!(content_length(head), 17);
+    }
+}
+
+#[cfg(test)]
+mod recovery_client_tests {
+    use super::*;
+    #[tokio::test]
+    async fn independent_bench_recovery_uses_another_http_socket() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let seen = connections.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                seen.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(serve(socket, Duration::ZERO));
+            }
+        });
+        let mut venue = HttpVenue::new(address, vec!["BTCUSDT".into()]);
+        venue.connect().await.unwrap();
+        let mutation_socket = venue.stream.as_ref().unwrap().local_addr().unwrap();
+        let client = venue
+            .account_recovery_client()
+            .expect("independent benchmark account recovery");
+        let began = clock::now_ns();
+        let view = client.account_view(&["BTCUSDT".into()]).await.unwrap();
+        assert_eq!((view.equity_usdt, view.available_usdt), (10_000.0, 9_000.0));
+        assert!(view.positions.is_empty());
+        assert!((began..=clock::now_ns()).contains(&view.observed_ns));
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            2,
+            "account read reused the mutation socket"
+        );
+        assert_eq!(
+            venue.last_sent_ns, 0,
+            "account read changed mutation timing"
+        );
+        assert_eq!(
+            venue.stream.as_ref().unwrap().local_addr().unwrap(),
+            mutation_socket
+        );
+        assert!(client
+            .executions(&["BTCUSDT".into()], 0, 1)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            venue.account_view().await.unwrap().available_usdt,
+            view.available_usdt
+        );
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        server.abort();
     }
 }

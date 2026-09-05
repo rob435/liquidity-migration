@@ -103,7 +103,7 @@ fn feed_with_stamp(recv_ns: u64) -> ScriptFeed {
         .into(),
         close_at_end: true,
         admitted: Rc::new(RefCell::new(Vec::new())),
-        known: 1,
+        symbols: vec!["BTCUSDT".into()],
         admits_wrongly: false,
     }
 }

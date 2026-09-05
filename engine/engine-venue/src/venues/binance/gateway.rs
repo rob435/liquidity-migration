@@ -31,6 +31,9 @@
 //! signed account proves a supported dust-close path, both realms remain
 //! production-blocked.
 
+#[path = "recovery.rs"]
+mod recovery;
+
 use crate::RealmCredentials;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -47,8 +50,8 @@ use sha2::{Digest, Sha256};
 
 use super::parse::{
     native_stop_algo_ids, parse_account, parse_account_alias, parse_algo_ack, parse_exchange_info,
-    parse_multi_assets_mode, parse_order_ack, parse_position_sides, parse_position_stops,
-    parse_working_algo_orders, parse_working_orders, MarketQtyRule, STOP_ID_PREFIX,
+    parse_multi_assets_mode, parse_order_ack, parse_position_sides, parse_working_algo_orders,
+    parse_working_orders, MarketQtyRule, STOP_ID_PREFIX,
 };
 use super::realm::BinanceRealm;
 use super::rest::RestClient;
@@ -185,6 +188,7 @@ pub struct BinanceGateway {
     realm: BinanceRealm,
     rest: RestClient,
     symbols: engine_public::symbols::SymbolCatalog,
+    exact_specs: HashMap<Symbol, engine_types::numeric::ExactInstrumentSpec>,
     market_qty_rules: HashMap<Symbol, MarketQtyRule>,
     weight_budget: crate::shared_budget::SharedBudget,
     weight_reservation: Option<crate::shared_budget::Reservation>,
@@ -198,6 +202,83 @@ pub struct BinanceGateway {
 }
 
 impl BinanceGateway {
+    async fn set_stop_terms(
+        &mut self,
+        symbol: SymbolId,
+        trigger_px: f64,
+        exact: Option<&engine_types::order_terms::ExactStopTerms>,
+    ) -> Result<(), VenueError> {
+        let name = self.name_of(symbol)?.clone();
+        // What the stop has to cover, from the venue rather than from memory.
+        let position_side = if let Some(terms) = exact {
+            self.spend_weight(WEIGHT_ACCOUNT).await;
+            let raw: Result<Box<serde_json::value::RawValue>, VenueError> =
+                self.rest.get_signed_as(PATH_ACCOUNT, &[]).await;
+            self.settle_weight(WEIGHT_ACCOUNT);
+            let (side, _) = crate::stop_state::binance(raw?.get(), &name)?;
+            if side != terms.position_side {
+                return Err(VenueError::BadRequest(
+                    "native position changed side before stop".into(),
+                ));
+            }
+            side
+        } else {
+            self.held_position_side(&name).await?
+        };
+
+        // Which stops are standing now, read before anything is sent, so the
+        // list is exactly the old ones and the replacement cannot be in it.
+        let standing = self.open_algo_orders_raw(&name).await?;
+        let old = native_stop_algo_ids(&standing, position_side)?;
+
+        // The replacement first, the old ones after. The other order leaves
+        // the position bare for the width of a round trip, and bare for good
+        // if the placement then fails. Two stops for a moment is harmless:
+        // both close the position, and the second can only close what is
+        // already gone.
+        let stop_id = self.mint_stop_id();
+        let params = match exact {
+            Some(terms) => Self::stop_params_text(
+                &name,
+                position_side,
+                engine_types::order_terms::decimal_wire(&terms.trigger_price)
+                    .map_err(crate::order_wire::error)?,
+                stop_id.clone(),
+            )?,
+            None => Self::stop_params(&name, position_side, trigger_px, stop_id.clone())?,
+        };
+        let waited = self.spend_orders(1).await;
+        self.last_rate_wait_ns = Some(waited);
+        let placed = self.rest.post_signed(PATH_ALGO_ORDER, &params).await;
+        self.settle_orders(1);
+        let (accepted_id, _) = parse_algo_ack(&placed?)?;
+        if accepted_id != stop_id {
+            return Err(VenueError::BadReply(format!(
+                "the replacement stop reply acknowledged {accepted_id}, not {stop_id}"
+            )));
+        }
+
+        for order_id in old {
+            self.spend_weight(WEIGHT_CANCEL).await;
+            let cancelled = self
+                .rest
+                .delete_signed(PATH_ALGO_ORDER, &[("algoId", order_id.clone())])
+                .await;
+            self.settle_weight(WEIGHT_CANCEL);
+            // A stop that fired or was pulled between the read and here is
+            // gone, which is the state this was asking for.
+            match cancelled {
+                Err(error) if algo_order_is_already_gone(&error) => {
+                    tracing::debug!(%order_id, symbol = %name, "a standing stop was already gone");
+                }
+                result => {
+                    result?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The live gateway: the realm's host and the realm's credentials from
     /// the environment. For `BinanceRealm::Mainnet` this fails unless the
     /// owner has armed `REAL_MONEY` on the host, and it fails at the
@@ -241,6 +322,7 @@ impl BinanceGateway {
             realm,
             rest: RestClient::new(base_url, creds),
             symbols: engine_public::symbols::SymbolCatalog::from_names(symbols),
+            exact_specs: HashMap::new(),
             market_qty_rules: HashMap::new(),
             weight_budget: crate::shared_budget::SharedBudget::new(
                 WEIGHT_WINDOW + RATE_LIMIT_GUARD,
@@ -708,6 +790,15 @@ impl VenueGateway for BinanceGateway {
         client_order_id: &str,
         spec: AmendSpec,
     ) -> Result<(), VenueError> {
+        if let Some(terms) = crate::order_wire::amend_terms(&spec)? {
+            let rules = self.exact_specs.get(self.name_of(symbol)?).ok_or_else(|| {
+                VenueError::Unsupported("exact amendment metadata is not installed".into())
+            })?;
+            terms
+                .validate_wire_grid(rules)
+                .map_err(crate::order_wire::error)?;
+        }
+        crate::order_wire::amend_terms(&spec)?;
         if spec.px.is_none() && spec.qty.is_none() {
             return Err(VenueError::BadRequest(
                 "an amend that changes neither price nor size".to_string(),
@@ -719,7 +810,7 @@ impl VenueGateway for BinanceGateway {
         self.spend_weight(WEIGHT_QUERY_ORDER).await;
         let reply = self
             .rest
-            .get_signed(
+            .get_signed_as::<Box<serde_json::value::RawValue>>(
                 PATH_ORDER,
                 &[
                     ("symbol", name.clone()),
@@ -728,20 +819,39 @@ impl VenueGateway for BinanceGateway {
             )
             .await;
         self.settle_weight(WEIGHT_QUERY_ORDER);
-        let current = reply?;
+        let raw = reply?;
+        let current: Value =
+            serde_json::from_str(raw.get()).map_err(|e| VenueError::BadReply(e.to_string()))?;
         if current.get("type").and_then(Value::as_str) != Some("LIMIT") {
             return Err(VenueError::BadRequest(format!(
                 "{client_order_id} is not a LIMIT order, and this venue modifies no other kind"
             )));
         }
         let side = crate::json::str_field(&current, "side")?;
-        let px = match spec.px {
-            Some(px) => venue_num(px)?,
-            None => crate::json::num_field(&current, "price").and_then(venue_num)?,
-        };
-        let qty = match spec.qty {
-            Some(qty) => venue_num(qty)?,
-            None => crate::json::num_field(&current, "origQty").and_then(venue_num)?,
+        let (px, qty) = if let Some(terms) = crate::order_wire::amend_terms(&spec)? {
+            let (old_px, old_qty) =
+                crate::amend_state::resting_binance(raw.get(), &name, client_order_id)?;
+            (
+                engine_types::order_terms::decimal_wire(
+                    terms.limit_price.as_ref().unwrap_or(&old_px),
+                )
+                .map_err(crate::order_wire::error)?,
+                engine_types::order_terms::decimal_wire(
+                    terms.quantity.as_ref().unwrap_or(&old_qty),
+                )
+                .map_err(crate::order_wire::error)?,
+            )
+        } else {
+            (
+                match spec.px {
+                    Some(px) => venue_num(px)?,
+                    None => crate::json::num_field(&current, "price").and_then(venue_num)?,
+                },
+                match spec.qty {
+                    Some(qty) => venue_num(qty)?,
+                    None => crate::json::num_field(&current, "origQty").and_then(venue_num)?,
+                },
+            )
         };
 
         let waited = self.spend_orders(1).await;
@@ -765,52 +875,28 @@ impl VenueGateway for BinanceGateway {
     }
 
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
-        let name = self.name_of(symbol)?.clone();
-        // What the stop has to cover, from the venue rather than from memory.
-        let position_side = self.held_position_side(&name).await?;
+        self.set_stop_terms(symbol, trigger_px, None).await
+    }
 
-        // Which stops are standing now, read before anything is sent, so the
-        // list is exactly the old ones and the replacement cannot be in it.
-        let standing = self.open_algo_orders_raw(&name).await?;
-        let old = native_stop_algo_ids(&standing, position_side)?;
-
-        // The replacement first, the old ones after. The other order leaves
-        // the position bare for the width of a round trip, and bare for good
-        // if the placement then fails. Two stops for a moment is harmless:
-        // both close the position, and the second can only close what is
-        // already gone.
-        let stop_id = self.mint_stop_id();
-        let params = Self::stop_params(&name, position_side, trigger_px, stop_id.clone())?;
-        let waited = self.spend_orders(1).await;
-        self.last_rate_wait_ns = Some(waited);
-        let placed = self.rest.post_signed(PATH_ALGO_ORDER, &params).await;
-        self.settle_orders(1);
-        let (accepted_id, _) = parse_algo_ack(&placed?)?;
-        if accepted_id != stop_id {
-            return Err(VenueError::BadReply(format!(
-                "the replacement stop reply acknowledged {accepted_id}, not {stop_id}"
-            )));
-        }
-
-        for order_id in old {
-            self.spend_weight(WEIGHT_CANCEL).await;
-            let cancelled = self
-                .rest
-                .delete_signed(PATH_ALGO_ORDER, &[("algoId", order_id.clone())])
-                .await;
-            self.settle_weight(WEIGHT_CANCEL);
-            // A stop that fired or was pulled between the read and here is
-            // gone, which is the state this was asking for.
-            match cancelled {
-                Err(error) if algo_order_is_already_gone(&error) => {
-                    tracing::debug!(%order_id, symbol = %name, "a standing stop was already gone");
-                }
-                result => {
-                    result?;
-                }
-            }
-        }
-        Ok(())
+    async fn set_stop_exact(
+        &mut self,
+        symbol: SymbolId,
+        terms: &engine_types::order_terms::ExactStopTerms,
+    ) -> Result<(), VenueError> {
+        terms
+            .validate_wire_grid(self.exact_specs.get(self.name_of(symbol)?).ok_or_else(|| {
+                VenueError::Unsupported("exact stop metadata is not installed".into())
+            })?)
+            .map_err(crate::order_wire::error)?;
+        self.set_stop_terms(
+            symbol,
+            terms
+                .trigger_price
+                .to_f64()
+                .map_err(crate::order_wire::error)?,
+            Some(terms),
+        )
+        .await
     }
 
     async fn set_leverage(&mut self, symbol: SymbolId, leverage: f64) -> Result<(), VenueError> {
@@ -843,36 +929,53 @@ impl VenueGateway for BinanceGateway {
     }
 
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
-        let (observed_ns, reply) = account_scan(async {
-            self.spend_weight(WEIGHT_ACCOUNT).await;
-            let account = self.rest.get_signed(PATH_ACCOUNT, &[]).await;
-            self.settle_weight(WEIGHT_ACCOUNT);
-            let account = account?;
-            // The position rows say nothing about stops, so the stop book is
-            // read beside them and joined in — one open-algo read per held
-            // symbol, because "which symbols" is only known from the account.
-            // Without the join every position would report itself
-            // unprotected, and the engine would act on that.
-            let (equity, available, mut positions) =
-                parse_account(&account, self.symbols.ids(), &HashMap::new())?;
-            for position in &mut positions {
-                let name = self.name_of(position.symbol)?.clone();
-                let stops = parse_position_stops(&self.open_algo_orders_raw(&name).await?);
-                if let Some(held) = stops.get(name.as_str()) {
-                    position.stop_px = held.nearest(position.side).unwrap_or(0.0);
-                    position.stop_attached = position.stop_px > 0.0;
-                }
-            }
-            Ok::<_, VenueError>((equity, available, positions))
-        })
-        .await;
-        let (equity_usdt, available_usdt, positions) = reply?;
-        Ok(AccountView {
-            equity_usdt,
-            available_usdt,
-            positions,
-            observed_ns,
-        })
+        engine_types::orders::AccountRecoveryClient::account_view(
+            &recovery::RecoveryClient::new(self),
+            self.symbols.names(),
+        )
+        .await
+    }
+
+    fn restore_instrument_catalog(
+        &self,
+        checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let pages = crate::catalog_checkpoint::decode(checkpoint, "binance", self.rest.base())?;
+        let catalog = catalog_from_pages(self.rest.base(), pages)?;
+        crate::catalog_checkpoint::check(checkpoint, catalog)
+    }
+    fn install_instrument_catalog(
+        &mut self,
+        catalog: &engine_types::orders::InstrumentCatalog,
+    ) -> Result<(), VenueError> {
+        let snapshot = catalog
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.as_ref().as_any().downcast_ref::<CatalogSnapshot>())
+            .ok_or_else(|| VenueError::BadRequest("catalog belongs to another adapter".into()))?;
+        if snapshot.base != self.rest.base() {
+            return Err(VenueError::BadRequest(
+                "catalog belongs to another venue endpoint".into(),
+            ));
+        }
+        self.market_qty_rules = snapshot.data.clone();
+        self.exact_specs = catalog.specs.iter().cloned().collect();
+        Ok(())
+    }
+
+    fn account_recovery_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::AccountRecoveryClient>> {
+        Some(Box::new(recovery::RecoveryClient::new(self)))
+    }
+
+    fn instrument_catalog_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::InstrumentCatalogClient>> {
+        Some(Box::new(LookupClient {
+            rest: self.rest.clone(),
+            budget: self.weight_budget.clone(),
+        }))
     }
 
     fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
@@ -949,20 +1052,63 @@ impl VenueGateway for BinanceGateway {
 
     async fn executions(
         &mut self,
-        _start_ms: i64,
-        _end_ms: i64,
+        start_ms: i64,
+        end_ms: i64,
     ) -> Result<Vec<VenueExecution>, VenueError> {
-        Err(VenueError::BadRequest(
-            "Binance execution recovery is unavailable: account trades require a symbol, while \
-             account-wide order discovery and order lookup can omit a fill from an ordinary GTC \
-             order created more than 90 days ago; a complete account-wide interval cannot be \
-             proved"
-                .to_string(),
-        ))
+        engine_types::orders::AccountRecoveryClient::executions(
+            &recovery::RecoveryClient::new(self),
+            self.symbols.names(),
+            start_ms,
+            end_ms,
+        )
+        .await
     }
 
     fn take_rate_wait_ns(&mut self) -> Option<u64> {
         self.last_rate_wait_ns.take()
+    }
+}
+
+#[derive(Debug)]
+struct CatalogSnapshot {
+    base: String,
+    pages: Vec<String>,
+    data: HashMap<String, MarketQtyRule>,
+}
+
+impl engine_types::orders::InstrumentCatalogCache for CatalogSnapshot {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn checkpoint(
+        &self,
+    ) -> Result<engine_types::orders::InstrumentCatalogCacheSnapshot, VenueError> {
+        crate::catalog_checkpoint::encode("binance", &self.base, &self.pages)
+    }
+    fn retain_previous(
+        &self,
+        checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let previous = crate::catalog_checkpoint::decode(checkpoint, "binance", &self.base)?;
+        crate::catalog_checkpoint::check(
+            checkpoint,
+            catalog_from_pages(&self.base, previous.clone())?,
+        )?;
+        let pages =
+            crate::catalog_checkpoint::merge_pages("binance", previous, self.pages.clone())?;
+        let catalog = catalog_from_pages(&self.base, pages)?;
+        catalog.checkpoint()?.validate_bounds()?;
+        Ok(catalog)
+    }
+}
+
+#[engine_types::async_trait]
+impl engine_types::orders::InstrumentCatalogClient for LookupClient {
+    async fn fetch(&self) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let _reservation = self.budget.reserve(WEIGHT_EXCHANGE_INFO).await;
+        let raw: Box<serde_json::value::RawValue> =
+            self.rest.get_public_as(PATH_EXCHANGE_INFO, "").await?;
+        catalog_from_pages(self.rest.base(), vec![raw.get().to_owned()])
     }
 }
 
@@ -994,6 +1140,31 @@ impl engine_types::orders::OrderLookupClient for LookupClient {
             Err(error) => Err(error),
         }
     }
+}
+
+fn catalog_from_pages(
+    base: &str,
+    pages: Vec<String>,
+) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+    if pages.len() != 1 {
+        return Err(VenueError::BadReply(
+            "catalog requires one metadata page".into(),
+        ));
+    }
+    let raw = pages[0].as_str();
+    let specs = engine_public::venues::binance::spec::parse(raw)?;
+    let value: Value =
+        serde_json::from_str(raw).map_err(|e| VenueError::BadReply(e.to_string()))?;
+    let parsed = parse_exchange_info(&value)?;
+    Ok(engine_types::orders::InstrumentCatalog {
+        rules: parsed.instruments,
+        specs,
+        cache: Some(std::sync::Arc::new(CatalogSnapshot {
+            pages,
+            base: base.to_owned(),
+            data: parsed.market_qty,
+        })),
+    })
 }
 
 #[cfg(test)]
@@ -1162,6 +1333,7 @@ mod tests {
                 SymbolId(0),
                 "eng-1",
                 AmendSpec {
+                    exact_terms: None,
                     px: None,
                     qty: None,
                 },

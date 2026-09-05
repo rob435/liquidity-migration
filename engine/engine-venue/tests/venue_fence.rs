@@ -422,14 +422,11 @@ fn the_one_file_rule_would_notice_a_host_in_another_file() {
 }
 
 #[test]
-fn every_venue_the_crate_declares_has_a_realm_table_the_fence_reads() {
-    // The scan is only a fence if it reads every venue. A new adapter arrives
-    // as a directory under src/venues/ with a realm.rs in it; if one appears
-    // that `venue_hosts` above does not list, its hosts would be unfenced.
+fn every_public_venue_has_a_realm_table_the_fence_reads() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let venues = root.join("src/venues");
+    let venues = root.parent().unwrap().join("engine-public/src/venues");
     let declared: Vec<String> = std::fs::read_dir(&venues)
-        .expect("src/venues must exist")
+        .expect("engine-public/src/venues must exist")
         .flatten()
         .filter(|entry| entry.path().is_dir())
         .filter(|entry| entry.path().join("realm.rs").exists())
@@ -440,7 +437,7 @@ fn every_venue_the_crate_declares_has_a_realm_table_the_fence_reads() {
     for venue in &declared {
         assert!(
             fenced.contains(&venue.as_str()),
-            "src/venues/{venue}/realm.rs exists but the fence does not know about {venue}, \
+            "engine-public/src/venues/{venue}/realm.rs exists but the fence does not know about {venue}, \
              so whatever hosts it names are unfenced"
         );
     }

@@ -257,6 +257,7 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
 
     let kinds = appends(&h.tape);
     let want = [
+        "identity_state",
         "boot",
         "note",  // boot says which mode it is in
         "names", // and what its sleeve and symbol ids mean
@@ -378,6 +379,7 @@ async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
     assert_eq!(
         kinds,
         [
+            "identity_state",
             "boot",
             "note",
             "names",
@@ -439,7 +441,7 @@ async fn retired_control_anchors_are_ignored_and_cannot_halt_entries() {
             state: "{malformed-retired-state".into(),
         },
     ];
-    let replayed = replay_with_history_boundary(&replayed);
+    let replayed = named_buyer_history(&replayed);
     let tape = tape();
     let (wal, _records) = MockWal::new(tape.clone());
     let (venue, sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
@@ -489,7 +491,7 @@ async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
         wire_ns: 3,
         arrival_mid: 0.0,
     }];
-    let replayed = replay_with_history_boundary(&replayed);
+    let replayed = named_buyer_history(&replayed);
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
     let tape = tape();
     let (wal, _records) = MockWal::new(tape.clone());
@@ -540,6 +542,7 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
             arrival_mid: 100.0,
         },
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -557,7 +560,7 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
             },
         },
     ];
-    let replayed = replay_with_history_boundary(&replayed);
+    let replayed = named_buyer_history(&replayed);
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
     let tape = tape();
     let (wal, _records) = MockWal::new(tape.clone());
@@ -568,6 +571,7 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
         .lock()
         .unwrap()
         .push_back(vec![engine_types::PositionView {
+            exact_stop_px: None,
             symbol: SymbolId(0),
             side: Side::Buy,
             qty: 9.0,
@@ -647,7 +651,7 @@ async fn an_order_the_venue_is_not_working_is_reaped_at_boot() {
         wire_ns: 3,
         arrival_mid: 0.0,
     }];
-    let replayed = replay_with_history_boundary(&replayed);
+    let replayed = named_buyer_history(&replayed);
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
@@ -677,7 +681,7 @@ async fn an_order_the_venue_is_not_working_is_reaped_at_boot() {
     let reaped = records.lock().unwrap().iter().any(|record| {
         matches!(
             record,
-            WalRecord::OrderUpdate {
+            WalRecord::OrderUpdate { callbacks: _,
                 update: OrderUpdate::Cancelled { client_order_id, .. }
             } if client_order_id == "eng-1700000000000-4"
         )
@@ -1097,6 +1101,7 @@ async fn a_fresh_account_view_repairs_a_loosened_whole_position_stop() {
             arrival_mid: 100.0,
         },
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -1115,6 +1120,7 @@ async fn a_fresh_account_view_repairs_a_loosened_whole_position_stop() {
         },
     ];
     let protected = engine_types::PositionView {
+        exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
         qty: 1.0,
@@ -1643,7 +1649,7 @@ async fn an_exit_sheds_its_stop_before_the_log_and_the_wire() {
     }
 }
 
-async fn build_exit_inventory(
+pub(super) async fn build_exit_inventory(
     strategies: Vec<Box<dyn Strategy>>,
     holdings: &[(StrategyId, Side, f64)],
     rule: Option<InstrumentRule>,
@@ -1680,6 +1686,7 @@ async fn build_exit_inventory(
             arrival_mid: 30_000.0,
         });
         replay.push(WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 client_order_id: id,
                 exec_id: format!("owned-fill-{}", strategy.0),
@@ -1719,6 +1726,7 @@ async fn build_exit_inventory(
 
 fn held_long(qty: f64) -> engine_types::PositionView {
     engine_types::PositionView {
+        exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
         qty,
@@ -1909,6 +1917,7 @@ async fn a_refused_retired_maker_exit_retries_on_a_later_wake_without_hitting_th
             arrival_mid: 100.0,
         },
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -1927,6 +1936,7 @@ async fn a_refused_retired_maker_exit_retries_on_a_later_wake_without_hitting_th
         },
     ];
     let held = vec![engine_types::PositionView {
+        exact_stop_px: None,
         symbol: SymbolId(1),
         side: Side::Sell,
         qty: 0.04,
@@ -2126,6 +2136,7 @@ async fn a_venue_rejected_native_long_exit_retries_only_after_its_timer() {
             arrival_mid: 100.0,
         },
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -2155,6 +2166,7 @@ async fn a_venue_rejected_native_long_exit_retries_only_after_its_timer() {
         },
     ];
     let held = vec![engine_types::PositionView {
+        exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
         qty: 0.1,
@@ -2172,7 +2184,7 @@ async fn a_venue_rejected_native_long_exit_retries_only_after_its_timer() {
     });
     venue.account_readings.lock().unwrap().push_back(held);
     let (risk, _) = MockRisk::with(allow_all());
-    let replayed = replay_with_history_boundary(&replayed);
+    let replayed = named_buyer_history(&replayed);
     let mut engine = Engine::boot(
         &settings(),
         "0000000000000000",
@@ -2475,6 +2487,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
             arrival_mid: 0.0,
         },
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -2593,7 +2606,7 @@ async fn timers_fire_for_the_strategy_that_armed_them() {
         ]),
         close_at_end: false,
         admitted: Rc::new(RefCell::new(Vec::new())),
-        known: 1,
+        symbols: vec!["BTCUSDT".into()],
         admits_wrongly: false,
     };
     engine
@@ -2723,15 +2736,21 @@ async fn boot_reads_the_rules_and_the_account_before_anything_else() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (_engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let steps = h.tape.lock().unwrap().clone();
-    assert_eq!(steps[0], Step::Append("boot".into()));
-    assert_eq!(steps[1], Step::Append("note".into()), "which mode it is in");
+    assert_eq!(steps[0], Step::Append("identity_state".into()));
     assert_eq!(
-        steps[2],
-        Step::Append("names".into()),
-        "what the ids mean, before any record uses one"
+        steps[1],
+        Step::Barrier,
+        "identity reservation is durable before use"
     );
-    assert_eq!(steps[3], Step::ReadRules);
-    assert_eq!(steps[4], Step::ReadAccount);
+    assert_eq!(steps[2], Step::Append("boot".into()));
+    assert_eq!(steps[3], Step::Append("note".into()), "which mode it is in");
+    assert_eq!(
+        steps[4],
+        Step::Append("names".into()),
+        "dense ids are named before use"
+    );
+    assert_eq!(steps[5], Step::ReadRules);
+    assert_eq!(steps[6], Step::ReadAccount);
 }
 
 #[tokio::test]
@@ -2877,4 +2896,23 @@ async fn exact_catalog_applies_market_lot_instead_of_limit_lot() {
         sends[0].exact_terms.as_ref().unwrap().quantity,
         Exact::parse_decimal("0.2").unwrap()
     );
+}
+
+fn named_buyer_history(records: &[WalRecord]) -> Vec<WalRecord> {
+    let mut records = records.to_vec();
+    if !records.iter().any(|record| {
+        matches!(
+            record,
+            WalRecord::Names { .. } | WalRecord::SegmentBase { .. }
+        )
+    }) {
+        records.insert(
+            0,
+            WalRecord::Names {
+                strategies: vec!["buyer".into()],
+                symbols: vec!["BTCUSDT".into()],
+            },
+        );
+    }
+    replay_with_history_boundary(&records)
 }

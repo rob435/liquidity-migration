@@ -308,12 +308,12 @@ impl Decoder {
         };
         match channel {
             "orderUpdates" => self.order_updates(
-                &frame
+                frame
                     .data
                     .0
                     .as_ref()
-                    .and_then(|raw| serde_json::from_str::<Value>(raw.get()).ok())
-                    .unwrap_or(Value::Null),
+                    .ok_or_else(|| FeedError::BadMessage("orderUpdates carries no data".into()))?
+                    .get(),
             ),
             "userFills" => self.user_fills(
                 frame
@@ -340,14 +340,25 @@ impl Decoder {
         }
     }
 
-    fn order_updates(&mut self, data: &Value) -> Result<(), FeedError> {
-        let rows = data
-            .as_array()
-            .ok_or_else(|| FeedError::BadMessage("orderUpdates carries no list".to_string()))?;
-        for row in rows {
-            let Some(order) = row.get("order") else {
+    fn order_updates(&mut self, raw: &str) -> Result<(), FeedError> {
+        #[derive(Default, serde::Deserialize)]
+        struct RawOrderEvent {
+            #[serde(default)]
+            order: Option<Box<serde_json::value::RawValue>>,
+        }
+        let rows: Vec<Box<serde_json::value::RawValue>> =
+            serde_json::from_str(raw).map_err(|e| FeedError::BadMessage(e.to_string()))?;
+        for raw in rows {
+            let event: RawOrderEvent =
+                wire::raw_object(raw.get()).map_err(|e| FeedError::BadMessage(e.to_string()))?;
+            let Some(raw_order) = event.order else {
                 continue;
             };
+            let row: Value = serde_json::from_str(raw.get())
+                .map_err(|e| FeedError::BadMessage(e.to_string()))?;
+            let order: Value = serde_json::from_str(raw_order.get())
+                .map_err(|e| FeedError::BadMessage(e.to_string()))?;
+            let order = &order;
             // Orders this engine did not name are not ours to route.
             let Some(client_order_id) = order
                 .get("cloid")
@@ -369,8 +380,11 @@ impl Decoder {
                     // size the order is working at — and that is the answer a
                     // modify never gets in its own reply.
                     if !self.remember_ack(&client_order_id) {
-                        if let Some(amended) = amended_from_order(order, &client_order_id, recv_ns)
-                        {
+                        if let Ok(amended) = crate::amend_state::hyperliquid(
+                            raw_order.get(),
+                            &client_order_id,
+                            recv_ns,
+                        ) {
                             self.pending.push_back(amended);
                         }
                         continue;
@@ -489,25 +503,6 @@ fn first_chars(text: &str) -> String {
 /// The venue ends every refusal in `Rejected` and every kill in `Canceled` —
 /// except `scheduledCancel`, the dead-man's switch, which ends in `Cancel`.
 /// Both endings are matched for that reason.
-/// A republished open order, read as what it is working at.
-///
-/// `None` for anything unreadable: this row is a repeat the engine would
-/// otherwise have dropped, so silence costs nothing, while a wrong price
-/// would settle a reservation at a number the venue never stated.
-fn amended_from_order(order: &Value, client_order_id: &str, recv_ns: u64) -> Option<OrderUpdate> {
-    let px: f64 = order.get("limitPx").and_then(Value::as_str)?.parse().ok()?;
-    let qty: f64 = order.get("sz").and_then(Value::as_str)?.parse().ok()?;
-    if !px.is_finite() || px <= 0.0 || !qty.is_finite() || qty <= 0.0 {
-        return None;
-    }
-    Some(OrderUpdate::Amended {
-        client_order_id: client_order_id.to_string(),
-        px,
-        qty,
-        recv_ns,
-    })
-}
-
 fn is_rejection(status: &str) -> bool {
     status == "rejected" || status.ends_with("Rejected")
 }

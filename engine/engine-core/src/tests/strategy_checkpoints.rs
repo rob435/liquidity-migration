@@ -577,7 +577,7 @@ async fn global_checkpoint_is_visible_only_to_its_owner_after_restart() {
                 events: feed.into(),
                 close_at_end: true,
                 admitted: Rc::new(RefCell::new(Vec::new())),
-                known: 2,
+                symbols: vec!["BTCUSDT".into(), "ETHUSDT".into()],
                 admits_wrongly: false,
             },
             &mut ScriptOrderFeed::empty(),

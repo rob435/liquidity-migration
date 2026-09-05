@@ -205,11 +205,17 @@ fn consumed_universe_changes_keep_earlier_subscriptions_through_rotation() {
     assert_eq!(active_subscriptions(&records), expected);
 
     let rotated = WalRecord::SegmentBase {
+        portfolio_control: Default::default(),
         pending_order_dispatches: Vec::new(),
         signal_producers: Vec::new(),
+        identities: None,
+        instrument_catalog: None,
         signal_suspensions: Vec::new(),
         portfolio: Some(Default::default()),
         strategy_processes: Vec::new(),
+        strategy_callback_queues: Vec::new(),
+        strategy_callback_sources: Vec::new(),
+        signal_callback_deliveries: Vec::new(),
         strategy_callbacks: Vec::new(),
         wall_ts_ms: 5,
         strategies: vec!["long".into(), "carry".into()],

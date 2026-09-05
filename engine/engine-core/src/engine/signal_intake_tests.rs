@@ -153,6 +153,7 @@ async fn lifecycle_close_barrier_failure_retains_epoch_and_never_grants_a_succes
     engine
         .accept_signal_lifecycle(
             SignalLifecycleResponse {
+                source_sleeves: Vec::new(),
                 schema_version: 2,
                 boot_nonce: "discover".into(),
                 producer: discovery,
@@ -186,6 +187,7 @@ async fn lifecycle_close_barrier_failure_retains_epoch_and_never_grants_a_succes
     engine
         .accept_signal_lifecycle(
             SignalLifecycleResponse {
+                source_sleeves: Vec::new(),
                 schema_version: 2,
                 boot_nonce: "seal".into(),
                 producer: sealed,
@@ -463,6 +465,7 @@ async fn lifecycle_seal_cannot_omit_an_observation_waiting_for_symbol_admission(
     engine
         .accept_signal_lifecycle(
             SignalLifecycleResponse {
+                source_sleeves: Vec::new(),
                 schema_version: 2,
                 boot_nonce: "discover".into(),
                 producer: discovery,
@@ -485,6 +488,7 @@ async fn lifecycle_seal_cannot_omit_an_observation_waiting_for_symbol_admission(
     engine
         .accept_signal_lifecycle(
             SignalLifecycleResponse {
+                source_sleeves: Vec::new(),
                 schema_version: 2,
                 boot_nonce: "seal".into(),
                 producer: SignalProducerReport {
@@ -656,6 +660,7 @@ async fn signal_route_release_waits_for_consumption_and_keeps_candidates_positio
     engine
         .accept_signal_lifecycle(
             SignalLifecycleResponse {
+                source_sleeves: Vec::new(),
                 schema_version: 2,
                 boot_nonce: "test".into(),
                 producer: report,
@@ -736,6 +741,30 @@ async fn signal_route_release_waits_for_consumption_and_keeps_candidates_positio
         )
         .unwrap();
     engine.signals.consume(&source, 1);
+    let reader = engine.wal.callback_reader().unwrap().unwrap();
+    engine
+        .host
+        .callbacks
+        .order_news
+        .attach(reader, &[], 2)
+        .unwrap();
+    engine
+        .host
+        .callbacks
+        .order_news
+        .record(1, &[StrategyId(0)])
+        .unwrap();
+    engine.maintain_signal_routes(&mut market).unwrap();
+    assert!(
+        market.retired.is_empty(),
+        "unread order callback source still owns its route"
+    );
+    let origin = engine.host.callbacks.order_news.origin(1).unwrap();
+    engine
+        .host
+        .callbacks
+        .order_news
+        .accepted(StrategyId(0), origin);
     engine.wal.fail_barrier_after = Some("signal_producer_lifecycle");
     assert!(engine.maintain_signal_routes(&mut market).is_err());
     assert!(
@@ -830,6 +859,7 @@ async fn consumed_route_churn_crosses_the_old_lifetime_cap_without_releasing_liv
     engine
         .accept_signal_lifecycle(
             SignalLifecycleResponse {
+                source_sleeves: Vec::new(),
                 schema_version: 2,
                 boot_nonce: "test".into(),
                 producer: report,
@@ -949,6 +979,7 @@ async fn signal_route_budget_releases_obsolete_routes_while_a_replacement_row_wa
     engine
         .accept_signal_lifecycle(
             SignalLifecycleResponse {
+                source_sleeves: Vec::new(),
                 schema_version: 2,
                 boot_nonce: "test".into(),
                 producer: report,
@@ -1113,6 +1144,7 @@ async fn signal_route_budget_waits_for_the_entire_blocked_row_across_restart_wit
     engine
         .accept_signal_lifecycle(
             SignalLifecycleResponse {
+                source_sleeves: Vec::new(),
                 schema_version: 2,
                 boot_nonce: "test".into(),
                 producer: report,
@@ -1232,5 +1264,311 @@ async fn signal_route_budget_waits_for_the_entire_blocked_row_across_restart_wit
             .route_subscriptions(&source, StrategyId(0))
             .len(),
         4094
+    );
+}
+
+#[tokio::test]
+async fn named_source_bindings_precede_fresh_input_and_refuse_numeric_reassignment() {
+    use engine_types::identity::{InstrumentScope, SignalSourceSleeve, SleeveKey};
+    use engine_types::{SignalLifecycleResponse, SignalProducerReport, SignalSourceFrontier};
+    let (mut engine, records) = crate::tests::lifecycle_test_fixture(vec![
+        Box::new(Consumer("long", false)),
+        Box::new(Consumer("carry", false)),
+    ])
+    .await;
+    engine.identities.scope = Some(InstrumentScope {
+        venue: "mock".into(),
+        environment: "demo".into(),
+    });
+    engine
+        .signals
+        .require_readiness([StrategyId(0), StrategyId(1)]);
+    let generation = "a".repeat(32);
+    let mut feed = LifecycleSignals {
+        inner: FinishedSignals {
+            rows: VecDeque::new(),
+            done: None,
+            gaps: Vec::new(),
+            blocked_destinations: Vec::new(),
+        },
+        requests: Vec::new(),
+    };
+    let wrong = source_row(&format!("native.g{generation}.long"), 1, 1);
+    engine
+        .queue_signal_observation(wrong.clone(), &mut feed)
+        .unwrap();
+    engine.accept_pending_signals(&mut feed).unwrap();
+    assert_eq!(feed.inner.rows.iter().collect::<Vec<_>>(), vec![&wrong]);
+    assert!(engine.signals.observations().next().is_none());
+    assert!(!records
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|record| matches!(record, WalRecord::SignalObservation { .. })));
+    let report = SignalProducerReport {
+        producer: "native".into(),
+        epoch: None,
+        generation,
+        sealed: true,
+        sources: vec![
+            SignalSourceFrontier {
+                source: wrong.source.clone(),
+                destination: StrategyId(1),
+                published_through: 1,
+            },
+            SignalSourceFrontier {
+                source: wrong.source.replace(".long", ".carry"),
+                destination: StrategyId(0),
+                published_through: 0,
+            },
+        ],
+    };
+    let bindings = vec![
+        SignalSourceSleeve {
+            source: report.sources[0].source.clone(),
+            sleeve: SleeveKey::new("long").unwrap(),
+        },
+        SignalSourceSleeve {
+            source: report.sources[1].source.clone(),
+            sleeve: SleeveKey::new("carry").unwrap(),
+        },
+    ];
+    engine
+        .accept_signal_lifecycle(
+            SignalLifecycleResponse {
+                schema_version: 2,
+                boot_nonce: "fresh".into(),
+                producer: report.clone(),
+                source_sleeves: bindings.clone(),
+            },
+            &mut feed,
+        )
+        .unwrap();
+    assert!(engine.signals.producers().next().is_none());
+    assert!(!engine
+        .signals
+        .named_source_verified(&wrong.source, StrategyId(1)));
+    assert!(records.lock().unwrap().iter().any(|record| matches!(record, WalRecord::Note { text, .. } if text.contains("do not match the durable sleeve registry"))));
+    let mut correct = report;
+    correct.sources[0].destination = StrategyId(0);
+    correct.sources[1].destination = StrategyId(1);
+    engine
+        .accept_signal_lifecycle(
+            SignalLifecycleResponse {
+                schema_version: 2,
+                boot_nonce: "correct".into(),
+                producer: correct.clone(),
+                source_sleeves: bindings,
+            },
+            &mut feed,
+        )
+        .unwrap();
+    assert!(engine
+        .signals
+        .named_source_verified(&wrong.source, StrategyId(0)));
+    assert!(!engine
+        .signals
+        .named_source_verified(&wrong.source, StrategyId(1)));
+    let mut tail = source_row(&wrong.source, 1, 0);
+    tail.payload = vec![2];
+    tail.content_sha256 = crate::signals::content_sha256(&tail);
+    engine
+        .queue_signal_observation(tail.clone(), &mut feed)
+        .unwrap();
+    engine.accept_pending_signals(&mut feed).unwrap();
+    assert_eq!(
+        engine.signals.observations().cloned().collect::<Vec<_>>(),
+        [tail.clone()]
+    );
+    let mut restored =
+        crate::signal_state::SignalState::replay(&[engine.rotation_base(clock::wall_ms())], 2)
+            .unwrap();
+    restored.require_readiness([StrategyId(0), StrategyId(1)]);
+    assert!(
+        !restored.named_source_verified(&tail.source, StrategyId(0)),
+        "each engine boot needs a fresh named response"
+    );
+    assert_eq!(restored.observations().cloned().collect::<Vec<_>>(), [tail]);
+    assert_eq!(
+        restored.classify(&wrong).unwrap(),
+        crate::signal_state::Admission::Unregistered
+    );
+}
+
+struct CountSignalCallbacks(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl Strategy for CountSignalCallbacks {
+    fn name(&self) -> &str {
+        "retained-noop"
+    }
+    fn subscriptions(&self) -> Vec<Subscription> {
+        Vec::new()
+    }
+    fn on_signal(&mut self, _: &SignalObservation, _: &mut dyn StrategyCtx) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn noop_signal_delivery_survives_rotation_restart_without_consumption_or_redelivery() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let (mut engine, records) =
+        crate::tests::lifecycle_test_fixture(vec![Box::new(CountSignalCallbacks(calls.clone()))])
+            .await;
+    let row = source_row("noop-durable", 1, 0);
+    let mut feed = FinishedSignals {
+        rows: VecDeque::new(),
+        done: None,
+        gaps: Vec::new(),
+        blocked_destinations: Vec::new(),
+    };
+    engine
+        .queue_signal_observation(row.clone(), &mut feed)
+        .unwrap();
+    engine.accept_pending_signals(&mut feed).unwrap();
+    engine.drain(clock::now_ns()).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        engine.signals.observations().collect::<Vec<_>>(),
+        vec![&row]
+    );
+    assert_eq!(engine.signals.undelivered().count(), 0);
+    assert!(!records.lock().unwrap().iter().any(|record| matches!(
+        record,
+        WalRecord::SignalObservationConsumed { .. } | WalRecord::SignalObservationRejected { .. }
+    )));
+    let base = engine.rotation_base(clock::wall_ms());
+    let encoded = serde_json::to_vec(&base).unwrap();
+    let decoded = serde_json::from_slice::<WalRecord>(&encoded).unwrap();
+    engine.signals = crate::signal_state::SignalState::replay(&[decoded], 1).unwrap();
+    assert_eq!(
+        engine.signals.callback_deliveries(),
+        [engine_types::strategy_process::SignalCallbackDelivery {
+            strategy: row.destination,
+            source: row.source.clone(),
+            sequence: row.sequence,
+            observation_id: row.observation_id.clone(),
+        }]
+    );
+    engine.deliver_pending_signal_callbacks();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a retained no-op input was launched again after rotation"
+    );
+    assert_eq!(
+        engine.signals.observations().collect::<Vec<_>>(),
+        vec![&row]
+    );
+    assert_eq!(
+        engine.signals.classify(&row).unwrap(),
+        crate::signal_state::Admission::Duplicate
+    );
+    let twice =
+        crate::signal_state::SignalState::replay(&[engine.rotation_base(clock::wall_ms())], 1)
+            .unwrap();
+    assert_eq!(twice.undelivered().count(), 0);
+    assert_eq!(twice.observations().collect::<Vec<_>>(), vec![&row]);
+}
+
+#[tokio::test]
+async fn signal_callback_markers_refuse_wrong_identity_duplicate_markers_and_changed_input() {
+    use engine_types::strategy_process::{
+        CallbackEvent, CallbackPreparation, SignalCallbackDelivery, StrategyCallbackInput,
+    };
+    let (engine, _) =
+        crate::tests::lifecycle_test_fixture(vec![Box::new(Consumer("marker-owner", false))]).await;
+    let row = source_row("marker-source", 1, 0);
+    let accepted = WalRecord::SignalObservation {
+        wall_ts_ms: 2,
+        observation: row.clone(),
+    };
+    let queued = |observation: SignalObservation| WalRecord::StrategyCallbackQueued {
+        input: StrategyCallbackInput {
+            order_origin: None,
+            callback_id: 1,
+            strategy: row.destination,
+            event: CallbackEvent::Signal { observation },
+            preparation: CallbackPreparation::Queued,
+        },
+    };
+    let replay =
+        crate::signal_state::SignalState::replay(&[accepted.clone(), queued(row.clone())], 1)
+            .unwrap();
+    assert_eq!(replay.observations().collect::<Vec<_>>(), vec![&row]);
+    assert_eq!(replay.undelivered().count(), 0);
+    let mut altered = row.clone();
+    altered.payload = vec![9];
+    altered.content_sha256 = crate::signals::content_sha256(&altered);
+    assert_eq!(
+        crate::signal_state::SignalState::replay(&[accepted, queued(altered)], 1).unwrap_err(),
+        "queued callback changes its accepted signal observation"
+    );
+    let exact = SignalCallbackDelivery {
+        strategy: row.destination,
+        source: row.source.clone(),
+        sequence: row.sequence,
+        observation_id: row.observation_id.clone(),
+    };
+    for malformed in [
+        SignalCallbackDelivery {
+            strategy: StrategyId(1),
+            ..exact.clone()
+        },
+        SignalCallbackDelivery {
+            source: "other-source".into(),
+            ..exact.clone()
+        },
+        SignalCallbackDelivery {
+            sequence: 2,
+            ..exact.clone()
+        },
+        SignalCallbackDelivery {
+            observation_id: "other-id".into(),
+            ..exact.clone()
+        },
+    ] {
+        let mut base = engine.rotation_base(clock::wall_ms());
+        if let WalRecord::SegmentBase {
+            signal_observations,
+            signal_cursors,
+            signal_subscriptions,
+            signal_callback_deliveries,
+            ..
+        } = &mut base
+        {
+            signal_observations.push(row.clone());
+            signal_cursors.extend(replay.cursors().cloned());
+            signal_subscriptions.extend(replay.subscriptions().cloned());
+            signal_callback_deliveries.push(malformed.clone());
+        }
+        let error = crate::signal_state::SignalState::replay(&[base], 2).unwrap_err();
+        assert_eq!(
+            error,
+            if malformed.source != row.source || malformed.sequence != row.sequence {
+                "callback delivery has no retained signal observation"
+            } else {
+                "callback delivery changes its accepted signal identity"
+            },
+            "malformed marker failed for an unrelated reason: {malformed:?}"
+        );
+    }
+    let mut repeated = engine.rotation_base(clock::wall_ms());
+    if let WalRecord::SegmentBase {
+        signal_observations,
+        signal_cursors,
+        signal_subscriptions,
+        signal_callback_deliveries,
+        ..
+    } = &mut repeated
+    {
+        signal_observations.push(row);
+        signal_cursors.extend(replay.cursors().cloned());
+        signal_subscriptions.extend(replay.subscriptions().cloned());
+        signal_callback_deliveries.extend([exact.clone(), exact]);
+    }
+    assert_eq!(
+        crate::signal_state::SignalState::replay(&[repeated], 1).unwrap_err(),
+        "rotation repeats a signal callback delivery marker"
     );
 }

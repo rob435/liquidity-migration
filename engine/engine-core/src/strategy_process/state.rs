@@ -13,6 +13,8 @@ pub struct CallbackState {
     pub inputs: BTreeMap<u64, StrategyCallbackInput>,
     pub next_id: u64,
     bytes: BTreeMap<StrategyId, usize>,
+    prepared_bytes: BTreeMap<StrategyId, usize>,
+    committed_bytes: BTreeMap<StrategyId, usize>,
 }
 
 struct BoundedCount(usize);
@@ -48,12 +50,15 @@ impl CallbackState {
         #[derive(serde::Serialize)]
         struct Queued<'a> {
             callback_id: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            order_origin: Option<engine_types::strategy_process::CallbackOrderOrigin>,
             strategy: StrategyId,
             event: &'a CallbackEvent,
             preparation: CallbackPreparation,
         }
         Self::encoded_size(&Queued {
             callback_id: input.callback_id,
+            order_origin: input.order_origin,
             strategy: input.strategy,
             event: &input.event,
             preparation: CallbackPreparation::Queued,
@@ -66,7 +71,7 @@ impl CallbackState {
         unwritten_bytes: usize,
     ) -> Result<(), String> {
         let bytes = Self::size(input)?;
-        let used = self.bytes.get(&input.strategy).copied().unwrap_or_default();
+        let used: usize = self.bytes.values().sum();
         if used.saturating_add(unwritten_bytes).saturating_add(bytes) > MAX_PROCESS_PROPOSAL_BYTES {
             return Err("strategy callback inbox is full".into());
         }
@@ -74,7 +79,36 @@ impl CallbackState {
     }
 
     pub fn accept(&mut self, input: StrategyCallbackInput) -> Result<(), String> {
+        self.accept_resident(input, true)
+    }
+
+    pub(super) fn load(&mut self, input: StrategyCallbackInput) -> Result<(), String> {
+        self.accept_resident(input, false)
+    }
+
+    pub(super) fn load_capacity(
+        &self,
+        input: &StrategyCallbackInput,
+        unwritten_bytes: usize,
+    ) -> Result<(), String> {
+        self.capacity_for(input, unwritten_bytes)?;
+        let size = Self::preparation_size(input)?;
+        if size > 0 {
+            self.preparation_capacity(input.strategy, size)?;
+        }
+        Ok(())
+    }
+
+    fn accept_resident(
+        &mut self,
+        input: StrategyCallbackInput,
+        retire_timer: bool,
+    ) -> Result<(), String> {
         self.capacity_for(&input, 0)?;
+        let prepared = Self::preparation_size(&input)?;
+        if prepared > 0 {
+            self.preparation_capacity(input.strategy, prepared)?;
+        }
         let next_id = input
             .callback_id
             .checked_add(1)
@@ -83,12 +117,13 @@ impl CallbackState {
             return Err("strategy callback id is repeated".into());
         }
         self.next_id = self.next_id.max(next_id);
-        if let CallbackEvent::Timer { id, .. } = input.event {
-            if let Some(state) = self.committed.get_mut(&input.strategy) {
-                state.timers.retain(|timer| timer.id != id);
-            }
+        if retire_timer {
+            self.retire_timer(&input)?;
         }
         *self.bytes.entry(input.strategy).or_default() += Self::size(&input)?;
+        if prepared > 0 {
+            self.prepared_bytes.insert(input.strategy, prepared);
+        }
         self.inputs.insert(input.callback_id, input);
         Ok(())
     }
@@ -98,7 +133,8 @@ impl CallbackState {
             .inputs
             .get(&input.callback_id)
             .ok_or("prepared invocation has no queued input")?;
-        if previous.strategy != input.strategy
+        if previous.order_origin != input.order_origin
+            || previous.strategy != input.strategy
             || previous.event != input.event
             || previous.snapshot().is_some()
             || input.snapshot().is_none()
@@ -114,22 +150,77 @@ impl CallbackState {
         {
             return Err("strategy invocation overtakes an earlier input".into());
         }
-        Self::encoded_size(input)?;
-        self.bytes
-            .get(&input.strategy)
-            .copied()
-            .ok_or_else(|| "callback byte owner absent".into())
+        if input
+            .snapshot()
+            .is_some_and(|snapshot| snapshot.strategy != input.strategy)
+        {
+            return Err("prepared invocation escapes its owner".into());
+        }
+        let size = Self::preparation_size(input)?;
+        self.preparation_capacity(input.strategy, size)?;
+        Ok(size)
     }
 
     pub fn prepared(&mut self, input: StrategyCallbackInput) -> Result<(), String> {
         let next = self.can_prepare(&input)?;
-        self.bytes.insert(input.strategy, next);
+        self.prepared_bytes.insert(input.strategy, next);
         self.inputs.insert(input.callback_id, input);
         Ok(())
     }
 
-    pub fn commit(&mut self, input_id: u64, state: StrategyProcessState) -> Result<(), String> {
+    fn preparation_size(input: &StrategyCallbackInput) -> Result<usize, String> {
+        if input.snapshot().is_none() {
+            return Ok(0);
+        }
+        Self::encoded_size(&input.preparation)
+    }
+
+    fn preparation_capacity(&self, strategy: StrategyId, size: usize) -> Result<(), String> {
+        if self.prepared_bytes.contains_key(&strategy) {
+            return Err("strategy has more than one prepared invocation".into());
+        }
+        let used: usize = self.prepared_bytes.values().sum();
+        if used.saturating_add(size) > MAX_PROCESS_PROPOSAL_BYTES {
+            return Err("strategy prepared invocation budget is full".into());
+        }
+        Ok(())
+    }
+
+    fn process_size(state: &StrategyProcessState) -> Result<usize, String> {
         state.runtime.validate()?;
+        if state.timers.len() > engine_types::strategy_process::MAX_PROCESS_TIMERS {
+            return Err("strategy committed timer budget is full".into());
+        }
+        let mut timers = std::collections::BTreeSet::new();
+        if state.timers.iter().any(|timer| !timers.insert(timer.id)) {
+            return Err("strategy committed timer identity is repeated".into());
+        }
+        Self::encoded_size(state)
+    }
+
+    pub fn retained_process_bytes(&self, except: Option<StrategyId>) -> usize {
+        self.committed_bytes
+            .iter()
+            .filter(|(strategy, _)| Some(**strategy) != except)
+            .map(|(_, bytes)| bytes)
+            .sum()
+    }
+
+    fn process_capacity(&self, state: &StrategyProcessState) -> Result<usize, String> {
+        let size = Self::process_size(state)?;
+        let used: usize = self
+            .committed_bytes
+            .iter()
+            .filter(|(strategy, _)| **strategy != state.strategy)
+            .map(|(_, bytes)| bytes)
+            .sum();
+        if used.saturating_add(size) > MAX_PROCESS_PROPOSAL_BYTES {
+            return Err("strategy committed process budget is full".into());
+        }
+        Ok(size)
+    }
+
+    pub fn can_commit(&self, input_id: u64, state: &StrategyProcessState) -> Result<usize, String> {
         let input = self
             .inputs
             .get(&input_id)
@@ -148,6 +239,15 @@ impl CallbackState {
         {
             return Err("strategy commit overtakes an earlier callback".into());
         }
+        self.process_capacity(state)
+    }
+
+    pub fn commit(&mut self, input_id: u64, state: StrategyProcessState) -> Result<(), String> {
+        let committed_size = self.can_commit(input_id, &state)?;
+        let input = self
+            .inputs
+            .get(&input_id)
+            .ok_or("strategy commit has no accepted callback")?;
         let size = Self::size(input)?;
         let used = self
             .bytes
@@ -156,8 +256,41 @@ impl CallbackState {
         *used = used
             .checked_sub(size)
             .ok_or("strategy callback byte ownership underflow")?;
+        self.prepared_bytes.remove(&state.strategy);
+        self.committed_bytes.insert(state.strategy, committed_size);
         self.inputs.remove(&input_id);
         self.committed.insert(state.strategy, state);
+        Ok(())
+    }
+
+    pub(super) fn retire_timer(&mut self, input: &StrategyCallbackInput) -> Result<(), String> {
+        if let CallbackEvent::Timer { id, .. } = input.event {
+            if let Some(state) = self.committed.get_mut(&input.strategy) {
+                state.timers.retain(|timer| timer.id != id);
+                self.committed_bytes
+                    .insert(input.strategy, Self::encoded_size(state)?);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn restore_process(
+        &mut self,
+        process: StrategyProcessState,
+        count: usize,
+    ) -> Result<(), String> {
+        if process.strategy.idx() >= count {
+            return Err("process restatement escapes its owner".into());
+        }
+        let size = self.process_capacity(&process)?;
+        self.next_id = self.next_id.max(
+            process
+                .last_callback_id
+                .checked_add(1)
+                .ok_or("callback identity exhausted")?,
+        );
+        self.committed_bytes.insert(process.strategy, size);
+        self.committed.insert(process.strategy, process);
         Ok(())
     }
 
@@ -168,11 +301,15 @@ impl CallbackState {
                 WalRecord::SegmentBase {
                     strategy_processes,
                     strategy_callbacks,
+                    strategy_callback_queues,
                     ..
                 } => {
+                    if !strategy_callback_queues.is_empty() {
+                        return Err("callback cursor restatement requires paged replay".into());
+                    }
                     state = Self::default();
                     for process in strategy_processes {
-                        process.runtime.validate()?;
+                        let size = state.process_capacity(process)?;
                         if process.strategy.idx() >= strategy_count
                             || state
                                 .committed
@@ -181,6 +318,7 @@ impl CallbackState {
                         {
                             return Err("invalid strategy process restatement".into());
                         }
+                        state.committed_bytes.insert(process.strategy, size);
                         state.next_id = state.next_id.max(
                             process
                                 .last_callback_id
@@ -190,6 +328,14 @@ impl CallbackState {
                     }
                     for input in strategy_callbacks {
                         state.validate_input(input, strategy_count)?;
+                        if input.snapshot().is_some()
+                            && state
+                                .inputs
+                                .values()
+                                .any(|known| known.strategy == input.strategy)
+                        {
+                            return Err("prepared restatement overtakes an earlier input".into());
+                        }
                         state.accept(input.clone())?;
                     }
                 }
@@ -217,7 +363,7 @@ impl CallbackState {
         Ok(state)
     }
 
-    fn validate_input(
+    pub(super) fn validate_input(
         &self,
         input: &StrategyCallbackInput,
         strategy_count: usize,
@@ -230,5 +376,115 @@ impl CallbackState {
             return Err("strategy callback escapes its owner".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod retained_budget_tests {
+    use super::*;
+
+    #[test]
+    fn callback_inbox_capacity_is_shared_across_sleeves() {
+        let mut state = CallbackState::default();
+        let input = |id, strategy| StrategyCallbackInput {
+            order_origin: None,
+            callback_id: id,
+            strategy: StrategyId(strategy),
+            event: CallbackEvent::IntentRefused {
+                symbol: engine_types::SymbolId(0),
+                reduce_only: false,
+                reason: "x".repeat(MAX_PROCESS_PROPOSAL_BYTES / 2),
+            },
+            preparation: CallbackPreparation::Queued,
+        };
+        state.accept(input(0, 0)).unwrap();
+        assert!(
+            state.accept(input(1, 1)).is_err(),
+            "each sleeve obtained another full callback inbox budget"
+        );
+        assert_eq!(state.inputs.len(), 1);
+        assert_eq!(state.inputs[&0].strategy, StrategyId(0));
+    }
+}
+
+#[cfg(test)]
+mod complete_process_budget_tests {
+    use super::*;
+    use engine_types::strategy_process::{CallbackSnapshot, StrategyRuntimeState};
+
+    fn input(id: u64, strategy: u16) -> StrategyCallbackInput {
+        let strategy = StrategyId(strategy);
+        StrategyCallbackInput {
+            order_origin: None,
+            callback_id: id,
+            strategy,
+            event: CallbackEvent::Boot,
+            preparation: CallbackPreparation::Prepared {
+                snapshot: CallbackSnapshot {
+                    strategy,
+                    now_ns: 1,
+                    wall_ms: 1,
+                    entries_enabled: true,
+                    account: engine_types::StrategyAccountSummary {
+                        equity_usdt: 1.0,
+                        available_margin_usdt: 1.0,
+                        observed_ns: 1,
+                    },
+                    symbols: Vec::new(),
+                    orders: Vec::new(),
+                    global_checkpoint: None,
+                    strategy_names: Vec::new(),
+                    strategy_events: Vec::new(),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn retained_route_manifests_share_the_complete_process_budget() {
+        let mut state = CallbackState::default();
+        let process = |id, strategy| StrategyProcessState {
+            strategy: StrategyId(strategy),
+            last_callback_id: id,
+            runtime: StrategyRuntimeState {
+                schema_version: 1,
+                kind: "test".into(),
+                configuration_sha256: "0".repeat(64),
+                payload: Vec::new(),
+            },
+            timers: Vec::new(),
+            retained_signal_subscriptions: Some(vec![engine_types::Subscription {
+                symbol: "x".repeat(MAX_PROCESS_PROPOSAL_BYTES / 2),
+                feed: engine_types::Feed::Quote,
+            }]),
+        };
+        state.accept(input(0, 0)).unwrap();
+        state.commit(0, process(0, 0)).unwrap();
+        state.accept(input(1, 1)).unwrap();
+        assert!(
+            state.commit(1, process(1, 1)).is_err(),
+            "route manifests escaped the aggregate committed-state budget"
+        );
+        assert_eq!(state.committed.len(), 1);
+        assert!(state.inputs.contains_key(&1));
+    }
+
+    #[test]
+    fn prepared_snapshots_share_a_budget_separate_from_the_inbox() {
+        let mut state = CallbackState::default();
+        let mut first = input(0, 0);
+        let mut second = input(1, 1);
+        for input in [&mut first, &mut second] {
+            let CallbackPreparation::Prepared { snapshot } = &mut input.preparation else {
+                unreachable!()
+            };
+            snapshot.strategy_names = vec!["x".repeat(MAX_PROCESS_PROPOSAL_BYTES / 2)];
+        }
+        state.accept(first).unwrap();
+        assert!(
+            state.accept(second).is_err(),
+            "prepared snapshots each obtained a new aggregate budget"
+        );
+        assert_eq!(state.inputs.len(), 1);
     }
 }

@@ -5,7 +5,7 @@
 //! hostname or a credential variable name.
 
 pub mod gateway;
-pub mod realm;
+pub use engine_public::venues::bybit::realm;
 
 mod execution;
 mod parse;

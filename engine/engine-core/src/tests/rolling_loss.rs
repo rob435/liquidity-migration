@@ -45,6 +45,7 @@ fn sent(id: &str, side: Side, qty: f64) -> WalRecord {
 
 fn filled(id: &str, side: Side, qty: f64, px: f64, venue_ts_ms: i64) -> WalRecord {
     WalRecord::OrderUpdate {
+        callbacks: None,
         update: OrderUpdate::Fill {
             allocation: None,
             amounts: None,
@@ -74,6 +75,7 @@ fn bought_ten() -> Vec<WalRecord> {
 
 fn still_held() -> Vec<engine_types::PositionView> {
     vec![engine_types::PositionView {
+        exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
         qty: 10.0,
@@ -115,8 +117,11 @@ fn segment_base(
     rolling_loss_rows: Vec<ClosedTradeRow>,
 ) -> WalRecord {
     WalRecord::SegmentBase {
+        portfolio_control: Default::default(),
         pending_order_dispatches: Vec::new(),
         signal_producers: Vec::new(),
+        identities: None,
+        instrument_catalog: None,
         signal_suspensions: Vec::new(),
         portfolio: Some(engine_types::portfolio::PortfolioState {
             positions: attribution
@@ -135,6 +140,9 @@ fn segment_base(
             ..Default::default()
         }),
         strategy_processes: Vec::new(),
+        strategy_callback_queues: Vec::new(),
+        strategy_callback_sources: Vec::new(),
+        signal_callback_deliveries: Vec::new(),
         strategy_callbacks: Vec::new(),
         wall_ts_ms: recent_replay_ms(),
         strategies: vec!["buyer".to_string()],
@@ -234,6 +242,7 @@ async fn a_close_the_log_cannot_price_is_not_counted() {
                 signed_qty: 10.0,
             }],
             vec![engine_types::SymbolTotal {
+                exact_signed_qty: None,
                 symbol: SymbolId(0),
                 signed_qty: 10.0,
             }],
@@ -489,6 +498,7 @@ async fn the_shipped_kernel_refuses_the_next_entry_and_still_lets_the_exit_out()
         .lock()
         .unwrap()
         .push_back(vec![engine_types::PositionView {
+            exact_stop_px: None,
             symbol: SymbolId(0),
             side: Side::Buy,
             qty: 1.0,
@@ -571,5 +581,206 @@ async fn the_shipped_kernel_refuses_the_next_entry_and_still_lets_the_exit_out()
     assert!(
         !sent_reduce_only.iter().any(|only| !*only),
         "and nothing opening does: {sent_reduce_only:?}"
+    );
+}
+
+fn exact_tiny_record(id: &str, side: Side, qty: &str, px: &str, timestamp: i64) -> Vec<WalRecord> {
+    use engine_types::numeric::{AssetAmount, AssetId, Exact, ExactNumber, ExecutionAmounts};
+    use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
+    let quantity = Exact::parse_decimal(qty).unwrap();
+    let price = Exact::parse_decimal(px).unwrap();
+    let mut order = sent(id, side, quantity.to_f64().unwrap());
+    if let WalRecord::OrderSent { request, .. } = &mut order {
+        if side == Side::Sell {
+            request.stop = None;
+        }
+        ExactOrderTerms {
+            quantity,
+            limit_price: None,
+            stop_trigger_price: request
+                .sleeve_stop()
+                .map(|s| Exact::from_legacy_f64(s.trigger_px).unwrap()),
+            physical_stop_trigger_price: request
+                .stop
+                .map(|s| Exact::from_legacy_f64(s.trigger_px).unwrap()),
+            input_policy: OrderInputPolicy::StrategyShortestDecimal,
+        }
+        .apply_projection(request)
+        .unwrap();
+    }
+    let mut execution = filled(
+        id,
+        side,
+        qty.parse().unwrap(),
+        price.to_f64().unwrap(),
+        timestamp,
+    );
+    if let WalRecord::OrderUpdate {
+        update: OrderUpdate::Fill { amounts, .. },
+        ..
+    } = &mut execution
+    {
+        *amounts = Some(Box::new(ExecutionAmounts {
+            quantity: ExactNumber::venue_decimal(qty).unwrap(),
+            price: ExactNumber::venue_decimal(px).unwrap(),
+            fee: Some(AssetAmount {
+                asset: AssetId::Named("USDT".into()),
+                amount: ExactNumber::venue_decimal("0.1").unwrap(),
+            }),
+            settlement_asset: AssetId::Named("USDT".into()),
+        }));
+    }
+    vec![order, execution]
+}
+fn exact_tiny_log(closes: usize) -> Vec<WalRecord> {
+    let mut records = vec![names()];
+    records.extend(exact_tiny_record(
+        "eng-tiny-open",
+        Side::Buy,
+        "0.0000000002",
+        "1000000000000",
+        recent_replay_ms(),
+    ));
+    for index in 0..closes {
+        records.extend(exact_tiny_record(
+            &format!("eng-tiny-close-{index}"),
+            Side::Sell,
+            "0.0000000001",
+            "500000000000",
+            recent_replay_ms() + index as i64 + 1,
+        ));
+    }
+    records
+}
+#[test]
+fn exact_tiny_partial_reduction_does_not_report_a_closed_trip() {
+    let mut fills = crate::execution::Fills::from_records(&exact_tiny_log(1));
+    assert!(
+        fills.closed().is_empty(),
+        "a partial fill below the old epsilon reported a false close: {:?}",
+        fills.closed()
+    );
+    assert_eq!(fills.lots().sole_holder("BTCUSDT"), Some(("buyer", 1e-10)));
+}
+#[tokio::test]
+async fn exact_tiny_round_trip_restores_the_actual_rolling_loss_at_boot() {
+    let log = exact_tiny_log(2);
+    let (idle, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let (_, h) = build(allow_all(), vec![Box::new(idle)], &["BTCUSDT"], &log).await;
+    let closes = h.risk_rolling.closes();
+    assert_eq!(closes.len(), 1);
+    assert!(
+        close(&closes[0], recent_replay_ms() + 2, -100.3),
+        "the actual exact full trip must determine rolling loss: {:?}",
+        closes[0]
+    );
+}
+#[test]
+fn exact_tiny_position_survives_rotation_without_fabricating_an_entry_value() {
+    let tiny = engine_types::numeric::Exact::parse_decimal("0.0000000001").unwrap();
+    let mut base = segment_base(
+        vec![engine_types::FilledTotal {
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            signed_qty: 1e-10,
+        }],
+        vec![],
+        vec![],
+    );
+    if let WalRecord::SegmentBase {
+        portfolio: Some(portfolio),
+        ..
+    } = &mut base
+    {
+        portfolio.positions[0].signed_qty = tiny;
+    }
+    let mut log = vec![base];
+    log.extend(exact_tiny_record(
+        "eng-after-rotation",
+        Side::Sell,
+        "0.0000000001",
+        "1000000000000",
+        recent_replay_ms() + 1,
+    ));
+    let encoded = serde_json::to_vec(&log).unwrap();
+    let restored = serde_json::from_slice::<Vec<WalRecord>>(&encoded).unwrap();
+    let mut fills = crate::execution::Fills::from_records(&restored);
+    assert_eq!(
+        fills.closed().len(),
+        1,
+        "rotation lost the tiny holding and treated its close as a new short"
+    );
+    assert_eq!(fills.closed()[0].qty, 1e-10);
+    assert!(
+        fills.closed()[0].round_trip.is_none(),
+        "rotation does not invent archived entry value"
+    );
+    assert_eq!(fills.lots().open(), 0);
+}
+
+#[tokio::test]
+async fn exact_sub_ulp_remainder_reaches_live_rolling_loss_only_after_the_last_fill() {
+    let mut prior = vec![names()];
+    prior.extend(exact_tiny_record(
+        "eng-sub-ulp-open",
+        Side::Buy,
+        "0.1",
+        "100",
+        recent_replay_ms(),
+    ));
+    let mut held = still_held();
+    held[0].qty = 0.1;
+    let (idle, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let (mut engine, h) = build_holding(
+        &quick_tick(),
+        allow_all(),
+        vec![Box::new(idle)],
+        &["BTCUSDT"],
+        &prior,
+        vec![],
+        held,
+        None,
+    )
+    .await;
+    let mut updates = Vec::new();
+    for (index, qty) in ["0.09999999999999999999", "0.00000000000000000001"]
+        .into_iter()
+        .enumerate()
+    {
+        let records = exact_tiny_record(
+            &format!("eng-sub-ulp-close-{index}"),
+            Side::Sell,
+            qty,
+            "99",
+            recent_replay_ms() + index as i64 + 1,
+        );
+        let WalRecord::OrderUpdate { mut update, .. } = records[1].clone() else {
+            unreachable!()
+        };
+        if let OrderUpdate::Fill {
+            client_order_id,
+            forced_close,
+            ..
+        } = &mut update
+        {
+            client_order_id.clear();
+            *forced_close = Some(ForcedClose::StopLoss);
+        }
+        updates.push(update);
+    }
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 1, false),
+            &mut ScriptOrderFeed::playing(updates),
+            tokio::time::sleep(Duration::from_millis(60)),
+        )
+        .await
+        .unwrap();
+    let closes = h.risk_rolling.closes();
+    assert_eq!(closes.len(), 1);
+    assert!(
+        close(&closes[0], recent_replay_ms() + 2, -0.4),
+        "a real sub-ULP remainder must defer live loss until the final execution: {:?}",
+        closes[0]
     );
 }

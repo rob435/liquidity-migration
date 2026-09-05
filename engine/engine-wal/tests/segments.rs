@@ -23,11 +23,17 @@ fn note(text: &str) -> WalRecord {
 /// replayed base from a replayed record.
 fn base(mark: &str) -> WalRecord {
     WalRecord::SegmentBase {
+        portfolio_control: Default::default(),
         pending_order_dispatches: Vec::new(),
         signal_producers: Vec::new(),
+        identities: None,
+        instrument_catalog: None,
         signal_suspensions: Vec::new(),
         portfolio: Some(Default::default()),
         strategy_processes: Vec::new(),
+        strategy_callback_queues: Vec::new(),
+        strategy_callback_sources: Vec::new(),
+        signal_callback_deliveries: Vec::new(),
         strategy_callbacks: Vec::new(),
         wall_ts_ms: 7,
         strategies: vec!["carry".to_string()],
@@ -234,7 +240,7 @@ fn gap_record_and_rotation_keep_the_exact_missing_prefix() {
     assert_eq!(records[0].1, rotated);
     let bytes = fs::read(dir.path().join("engine.wal.000002")).unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&bytes[16..]).unwrap();
-    assert_eq!(payload["kind"], "segment_base_v4");
+    assert_eq!(payload["kind"], "segment_base_v5");
 }
 
 /// The crash test: a rotation cut off at ANY byte leaves boot replaying the
@@ -408,11 +414,17 @@ fn effect_rotation_requires_all_mandatory_state_without_truncating() {
         "signal_producers",
         "strategy_processes",
         "strategy_callbacks",
+        "identities",
+        "portfolio_control",
+        "instrument_catalog",
+        "strategy_callback_queues",
+        "strategy_callback_sources",
+        "signal_callback_deliveries",
     ] {
         let dir = TempDir::new().unwrap();
         let path = log_path(&dir);
         let mut value = serde_json::to_value(base("required-effects")).unwrap();
-        assert_eq!(value["kind"], "segment_base_v4");
+        assert_eq!(value["kind"], "segment_base_v5");
         value.as_object_mut().unwrap().remove(missing);
         let bytes = write_raw_record(&path, &value);
         assert!(
@@ -503,4 +515,161 @@ fn durable_effect_identity_and_suffix_survive_rotation() {
     let (chain, damaged) = replay_chain(&path).unwrap();
     assert!(!damaged);
     assert!(chain.iter().any(|(_, record)| record == &queued));
+}
+
+#[test]
+fn v5_open_orders_require_typed_fill_progress_without_truncating() {
+    use engine_types::{OrderKind, OrderRequest, Side, StrategyId, SymbolId};
+    let order = engine_types::wal::OpenOrderState {
+        request: OrderRequest {
+            client_order_id: "fill-frontier".into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 0.01,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: true,
+            close_position: false,
+            sleeve_effect: None,
+            exact_terms: None,
+        },
+        wire_ns: 1,
+        arrival_mid: 100.0,
+        acked: true,
+        filled_qty: 0.003,
+        fill_quantity: Some(engine_types::wal::OrderFillQuantity::LegacyBinary64 {
+            quantity: 0.003,
+        }),
+        reservation_low_px: 100.0,
+        reservation_high_px: 100.0,
+    };
+    let mut snapshot = base("fill-progress");
+    let WalRecord::SegmentBase { open_orders, .. } = &mut snapshot else {
+        unreachable!()
+    };
+    open_orders.push(order);
+    let complete = serde_json::to_value(snapshot).unwrap();
+    assert_eq!(complete["kind"], "segment_base_v5");
+    for null in [false, true] {
+        let mut value = complete.clone();
+        if null {
+            value["open_orders"][0]["fill_quantity"] = serde_json::Value::Null;
+        } else {
+            value["open_orders"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("fill_quantity");
+        }
+        let dir = TempDir::new().unwrap();
+        let path = log_path(&dir);
+        let bytes = write_raw_record(&path, &value);
+        assert!(
+            matches!(
+                WalWriter::open(&path),
+                Err(engine_wal::WalError::Corrupt { .. })
+            ),
+            "current snapshot silently lost its typed fill frontier"
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        value["kind"] = "segment_base_v4".into();
+        let bytes = write_raw_record(&path, &value);
+        let (_, rows) = WalWriter::open(&path).unwrap();
+        let WalRecord::SegmentBase { open_orders, .. } = &rows[0].1 else {
+            unreachable!()
+        };
+        assert!(open_orders[0].fill_quantity.is_none());
+        assert_eq!(open_orders[0].filled_qty.to_bits(), 0.003_f64.to_bits());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn v4_snapshots_keep_their_original_identity_migration_shape() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let mut value = serde_json::to_value(base("original-v4-shape")).unwrap();
+    value["kind"] = "segment_base_v4".into();
+    value.as_object_mut().unwrap().remove("identities");
+    value.as_object_mut().unwrap().remove("portfolio_control");
+    for field in [
+        "instrument_catalog",
+        "strategy_callback_queues",
+        "strategy_callback_sources",
+        "signal_callback_deliveries",
+    ] {
+        value.as_object_mut().unwrap().remove(field);
+    }
+    let bytes = write_raw_record(&path, &value);
+    let (_, rows) = WalWriter::open(&path)
+        .expect("a v4 snapshot cannot be required to contain a v5 identity field");
+    assert!(matches!(
+        &rows[0].1,
+        WalRecord::SegmentBase {
+            identities: None,
+            ..
+        }
+    ));
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn callback_pages_read_legacy_arrays_and_refuse_damaged_archives_without_repair() {
+    use engine_types::strategy_process::{
+        CallbackEvent, CallbackPreparation, CallbackWalCursor, StrategyCallbackInput,
+    };
+    use engine_types::StrategyId;
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let (mut wal, _) = WalWriter::open(&path).unwrap();
+    let input = |id| StrategyCallbackInput {
+        callback_id: id,
+        strategy: StrategyId(0),
+        order_origin: None,
+        event: CallbackEvent::IntentRefused {
+            symbol: engine_types::SymbolId(0),
+            reduce_only: true,
+            reason: format!("owned-{id}"),
+        },
+        preparation: CallbackPreparation::Queued,
+    };
+    let mut legacy = base("legacy-queue-array");
+    let WalRecord::SegmentBase {
+        strategy_callbacks, ..
+    } = &mut legacy
+    else {
+        unreachable!()
+    };
+    *strategy_callbacks = vec![input(1), input(2)];
+    wal.append(&legacy).unwrap();
+    wal.barrier().unwrap();
+    wal.rotate(&base("cursor-only")).unwrap();
+    let mut reader = wal.callback_reader().unwrap().unwrap();
+    let cursor = CallbackWalCursor {
+        segment: 1,
+        sequence: 1,
+        offset: 0,
+    };
+    assert_eq!(reader.read_callback(cursor, 2).unwrap(), input(2));
+    assert!(reader.read_callback(cursor, 3).is_err());
+    let bytes = fs::read(&path).unwrap();
+    let torn = &bytes[..bytes.len() - 2];
+    fs::write(&path, torn).unwrap();
+    assert!(
+        reader.read_callback(cursor, 2).is_err(),
+        "an incomplete archived callback was delivered"
+    );
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        torn,
+        "read-only callback paging repaired an archive"
+    );
+    let mut corrupt = bytes;
+    corrupt[12] ^= 1;
+    fs::write(&path, &corrupt).unwrap();
+    assert!(
+        reader.read_callback(cursor, 2).is_err(),
+        "a checksum-corrupt callback was delivered"
+    );
+    assert_eq!(fs::read(&path).unwrap(), corrupt);
 }

@@ -32,7 +32,9 @@ use crate::store::{
 use crate::universe::{same_membership, universe_is_resolved, unresolved_universe};
 use crate::{DAY_MS, HOUR_MS, SCHEMA_VERSION};
 
+mod identities;
 mod lifecycle;
+pub use identities::WorkerDestinationSleeves;
 pub use lifecycle::WorkerSignalLifecycle;
 
 pub(crate) fn required_carry_history_hours(
@@ -176,6 +178,8 @@ impl std::error::Error for WorkerError {}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_sleeves: Option<WorkerDestinationSleeves>,
     pub schema_version: u32,
     pub config: ConfigIdentity,
     #[serde(default)]
@@ -303,6 +307,7 @@ impl WorkerState {
             config: config.identity.clone(),
             source_generation,
             signal_lifecycle: None,
+            destination_sleeves: None,
             source_contract_sha256: source_history_hash(config),
             long_feature_sha256: state_part_hash(&config.long),
             carry_feature_sha256: state_part_hash(&config.carry),
@@ -358,6 +363,7 @@ pub struct SignalWorker {
     config: SignalWorkerConfig,
     state: WorkerState,
     suppressed_output_kinds: BTreeSet<&'static str>,
+    routing_verification_required: bool,
 }
 
 /// The venue host whose instrument list bounds what this realm's account may
@@ -409,10 +415,14 @@ impl SignalWorker {
             state: WorkerState::new(&config, universe, source_generation),
             config,
             suppressed_output_kinds: BTreeSet::new(),
+            routing_verification_required: false,
         })
     }
 
-    pub fn restore(config: SignalWorkerConfig, state: WorkerState) -> Result<Self, WorkerError> {
+    pub fn restore(
+        mut config: SignalWorkerConfig,
+        state: WorkerState,
+    ) -> Result<Self, WorkerError> {
         if state.schema_version != SCHEMA_VERSION {
             return Err(WorkerError::state("checkpoint schema has drifted"));
         }
@@ -427,13 +437,7 @@ impl SignalWorker {
                 "checkpoint public source contract has drifted; a new cold start is required",
             ));
         }
-        if state.long_destination != config.long_destination
-            || state.carry_destination != config.carry_destination
-        {
-            return Err(WorkerError::state(
-                "engine strategy slot order changed for a directional sleeve",
-            ));
-        }
+        let routing_verification_required = identities::restore_destinations(&mut config, &state)?;
         if state.last_input_sequence == u64::MAX
             || state.long_output_sequence == u64::MAX
             || state.carry_output_sequence == u64::MAX
@@ -523,6 +527,7 @@ impl SignalWorker {
             config,
             state,
             suppressed_output_kinds: BTreeSet::new(),
+            routing_verification_required,
         };
         worker.retain_owned_tickers();
         if worker.state.last_observed_ts_ms > 0 {
@@ -547,6 +552,11 @@ impl SignalWorker {
     }
 
     pub fn apply(&mut self, event: WireEvent) -> Result<Vec<NormalizedObservation>, WorkerError> {
+        if self.routing_verification_required {
+            return Err(WorkerError::state(
+                "signal routing awaits the engine identity registry",
+            ));
+        }
         if event.schema_version() != SCHEMA_VERSION {
             return Err(WorkerError::input(format!(
                 "wire schema {} is unsupported",
@@ -2810,6 +2820,9 @@ impl DurableSignalWorker {
         &mut self,
         events: Vec<WireEvent>,
     ) -> Result<Vec<NormalizedObservation>, WorkerError> {
+        if self.worker.routing_verification_required {
+            return Ok(Vec::new());
+        }
         if self.publication_pending {
             return Err(WorkerError::state(
                 "publication recovery requires reopening the worker",

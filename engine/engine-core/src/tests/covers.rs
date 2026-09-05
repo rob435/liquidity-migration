@@ -187,6 +187,7 @@ async fn the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder() {
         .lock()
         .unwrap()
         .push_back(vec![PositionView {
+            exact_stop_px: None,
             symbol,
             side: Side::Buy,
             qty: 0.004,

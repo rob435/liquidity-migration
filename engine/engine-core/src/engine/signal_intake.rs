@@ -39,6 +39,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         frontiers: Vec<engine_types::SignalSourceFrontier>,
         feed: &mut F,
     ) -> Result<(), EngineError> {
+        if self.identities.scope.is_some() && self.signals.readiness_required() {
+            return self.refuse_signal_readiness(
+                "named source destinations require lifecycle readiness".into(),
+                feed,
+            );
+        }
         if self.signals.producers().next().is_some() {
             return self.refuse_signal_readiness(
                 "managed producer cannot downgrade to readiness schema one".into(),
@@ -113,6 +119,25 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return self
                 .refuse_signal_readiness("unsupported producer lifecycle schema".into(), feed);
         }
+        if self.identities.scope.is_some() {
+            let valid = response.source_sleeves.len() == response.producer.sources.len()
+                && response.producer.sources.iter().all(|source| {
+                    let bindings: Vec<_> = response
+                        .source_sleeves
+                        .iter()
+                        .filter(|binding| binding.source == source.source)
+                        .collect();
+                    bindings.len() == 1
+                        && self.identities.sleeves.get(source.destination.idx())
+                            == Some(&bindings[0].sleeve)
+                });
+            if !valid {
+                return self.refuse_signal_readiness(
+                    "producer source destinations do not match the durable sleeve registry".into(),
+                    feed,
+                );
+            }
+        }
         if response.producer.sealed
             && self.pending_signal_deliveries.iter().any(|pending| {
                 response.producer.sources.iter().any(|source| {
@@ -153,6 +178,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.wal.barrier()?;
                 self.signals.record_gap(gap);
             }
+        }
+        if self.identities.scope.is_some() {
+            self.signals.set_named_producer(&response.producer);
         }
         if state.legacy.is_empty()
             && !state.unresolved_tail
@@ -232,6 +260,24 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .signals
             .classify(&observation)
             .map_err(EngineError::State)?;
+        if admission != crate::signal_state::Admission::Duplicate
+            && !self.host.callbacks.is_active(observation.destination)
+        {
+            return feed
+                .defer_last(observation)
+                .map_err(|error| EngineError::State(error.to_string()));
+        }
+        if admission != crate::signal_state::Admission::Duplicate
+            && self.identities.scope.is_some()
+            && self.signals.named_source_required(observation.destination)
+            && !self
+                .signals
+                .named_source_verified(&observation.source, observation.destination)
+        {
+            return feed
+                .defer_last(observation)
+                .map_err(|error| EngineError::State(error.to_string()));
+        }
         if admission == crate::signal_state::Admission::Unregistered {
             let producer = self
                 .signals
@@ -355,6 +401,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     ) -> Result<(), EngineError> {
         let observations = std::mem::take(&mut self.pending_signal_deliveries);
         for observation in observations {
+            if observation.subscriptions.iter().any(|subscription| {
+                self.wanted_symbols
+                    .iter()
+                    .any(|wanted| wanted.name == subscription.symbol)
+                    || self.symbol_admission.contains(&subscription.symbol)
+            }) {
+                self.pending_signal_deliveries.push_back(observation);
+                continue;
+            }
             if self
                 .signals
                 .classify(&observation)
@@ -464,138 +519,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.signals.mark_delivered(&row.source, row.sequence);
             }
         }
-    }
-
-    /// Start following symbols a durable observation names that the engine
-    /// did not know.
-    ///
-    /// Every table that maps a name to a `SymbolId` has to gain the symbol in
-    /// the same order, because the id is an index assigned by position. Four
-    /// of them exist — the engine's own, the public feed's, the venue
-    /// gateway's, and the private stream's — and if any two disagreed, an
-    /// order meant for one symbol would be sent for another. So this is the
-    /// only place that admits, it admits one name at a time, and it checks
-    /// that all four agree before the symbol is usable. A disagreement drops
-    /// the symbol rather than trading it: the engine carries on with the names
-    /// it already had, and says loudly which one it refused.
-    pub(super) async fn admit_wanted<M, O>(
-        &mut self,
-        market_feed: &mut M,
-        order_feed: &mut O,
-    ) -> Result<(), EngineError>
-    where
-        M: engine_types::MarketFeed,
-        O: engine_types::OrderFeed,
-    {
-        let wanted = std::mem::take(&mut self.wanted_symbols);
-        let mut admitted = 0usize;
-        for wanted in wanted {
-            let name = wanted.name;
-            let core_id = self.books.market.add_symbol(&name);
-            let venue_id = self.venue.add_symbol_async(&name).await?;
-            let mut feeds = Vec::new();
-            for (_, feed) in &wanted.listeners {
-                if !feeds.contains(feed) {
-                    feeds.push(*feed);
-                }
-            }
-            let feed_ids: Vec<_> = feeds
-                .iter()
-                .map(|feed| (*feed, market_feed.admit(&name, *feed)))
-                .collect();
-            if feed_ids.iter().any(|(_, id)| *id != Some(core_id)) || venue_id != Some(core_id) {
-                tracing::error!(
-                    symbol = %name,
-                    ?core_id,
-                    ?feed_ids,
-                    ?venue_id,
-                    "the parts of the engine disagree about this symbol's id; it will not be \
-                     traded. Nothing else is affected — the ids already handed out do not move."
-                );
-                return Err(EngineError::State(format!(
-                    "signal-required symbol {name} has inconsistent ids: core {:?}, feed {:?}, venue {:?}",
-                    core_id, feed_ids, venue_id
-                )));
-            }
-            order_feed.learn(&name, core_id);
-            self.routing.size_to(self.books.market.table.len());
-            for (strategy, feed) in wanted.listeners {
-                self.routing.add(core_id, feed, strategy);
-            }
-            for feed in feeds {
-                let subscription = Subscription {
-                    symbol: name.clone(),
-                    feed,
-                };
-                if !self.subscriptions.contains(&subscription) {
-                    self.subscriptions.push(subscription);
-                }
-            }
-            admitted += 1;
-            tracing::info!(symbol = %name, id = core_id.0, "following a symbol a signal named");
-        }
-        if admitted == 0 {
-            return Ok(());
-        }
-        // The table grew, so say what it is now. Ids are only appended, so
-        // this is the earlier one plus the new names.
-        let names = names_record(&self.host.names, &self.books.market);
-        self.wal.append(&names)?;
-        self.fills.learn(&names);
-        // One venue read covers everything admitted this pass. Without a rule
-        // there is no way to quantize, so the symbol is followed but nothing
-        // can be sent for it — which is the same state as a symbol whose rule
-        // was missing at boot.
-        self.books.rules.resize(self.books.market.table.len(), None);
-        match self.venue.instrument_rules().await {
-            Ok(fetched) => {
-                for (name, rule) in fetched {
-                    if let Some(id) = self.books.market.table.get(&name) {
-                        self.books.rules[id.0 as usize] = Some(rule);
-                    }
-                }
-            }
-            Err(e) => tracing::warn!(
-                error = %e,
-                "no instrument rules for the symbols just taken on; they cannot trade until \
-                 the next attempt"
-            ),
-        }
-        match self.venue.instrument_specs().await {
-            Ok(specs) => {
-                for (name, spec) in specs {
-                    if let Some(symbol) = self.books.market.table.get(&name) {
-                        order_feed.learn_instrument(symbol, &spec);
-                        self.instrument_specs.insert(symbol, spec);
-                    }
-                }
-            }
-            Err(error) if self.require_exact_instruments => {
-                tracing::warn!(%error, "exact instrument catalog unavailable; new symbols cannot open")
-            }
-            Err(_) => {}
-        }
-        for observation in &self.pending_signal_deliveries {
-            for subscription in &observation.subscriptions {
-                let Some(symbol) = self.books.market.table.get(&subscription.symbol) else {
-                    continue;
-                };
-                if self
-                    .books
-                    .rules
-                    .get(symbol.0 as usize)
-                    .copied()
-                    .flatten()
-                    .is_none()
-                {
-                    return Err(EngineError::State(format!(
-                        "signal-required symbol {} has no venue instrument rule",
-                        subscription.symbol
-                    )));
-                }
-            }
-        }
-        Ok(())
     }
 }
 

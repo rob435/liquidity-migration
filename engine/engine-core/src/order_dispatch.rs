@@ -4,8 +4,22 @@ use engine_types::order_dispatch::{OrderDispatchPhase, OrderDispatchState};
 use engine_types::{WalError, WalRecord};
 
 pub(crate) enum DispatchWrite {
+    Stop(Vec<crate::engine::stop_runtime::DurableStop>),
+    Portfolio,
     Queue(Vec<String>),
     Attempt(Vec<String>),
+    Amend(Box<DurableAmend>),
+}
+
+pub(crate) struct DurableAmend {
+    pub symbol: engine_types::SymbolId,
+    pub client_order_id: String,
+    pub spec: engine_types::AmendSpec,
+    pub existing: crate::inflight::OrderRec,
+    pub amended_intent: engine_types::Intent,
+    pub remaining_qty: f64,
+    pub old_px: f64,
+    pub tif: engine_types::TimeInForce,
 }
 
 pub(crate) struct OrderDispatches {

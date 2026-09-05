@@ -82,6 +82,7 @@ fn order(id: String) -> OwnedOrderSnapshot {
         },
         qty: 0.01,
         filled_qty: 0.0,
+        remaining_qty: None,
         reduce_only: false,
         acked: true,
         resting: true,
@@ -337,6 +338,11 @@ struct ExactBenchVenue(engine_core::bench::HttpVenue);
 
 #[engine_types::async_trait]
 impl engine_types::VenueGateway for ExactBenchVenue {
+    fn account_recovery_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::AccountRecoveryClient>> {
+        self.0.account_recovery_client()
+    }
     fn caps(&self) -> engine_types::VenueCaps {
         self.0.caps()
     }
@@ -554,4 +560,21 @@ async fn registered_engine_callback_restarts_from_prepared_and_committed_cuts() 
         }
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn independent_exact_bench_recovery_forwards_the_read_capability() {
+    use engine_types::VenueGateway;
+    let address = engine_core::bench::start_mock_venue().unwrap();
+    let venue = ExactBenchVenue(engine_core::bench::HttpVenue::new(
+        address,
+        vec!["BTCUSDT".into()],
+    ));
+    let client = venue
+        .account_recovery_client()
+        .expect("exact benchmark must forward independent recovery");
+    let view = client.account_view(&["BTCUSDT".into()]).await.unwrap();
+    assert_eq!((view.equity_usdt, view.available_usdt), (10_000.0, 9_000.0));
+    assert!(view.positions.is_empty());
+    assert!(client.executions(&[], 0, 1).await.unwrap().is_empty());
 }

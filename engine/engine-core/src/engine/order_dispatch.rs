@@ -140,6 +140,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .take()
             .ok_or_else(|| EngineError::State("dispatch barrier result has no owner".into()))?;
         match write {
+            DispatchWrite::Portfolio => self.service_portfolio_controls().await?,
+            DispatchWrite::Stop(stops) => self.dispatch_durable_stops(stops)?,
+            DispatchWrite::Amend(amend) => self.dispatch_durable_amend(*amend)?,
             DispatchWrite::Queue(ids) => {
                 let mut authorized = Vec::new();
                 for id in ids {
@@ -170,6 +173,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         .get_mut(&id)
                         .expect("authorized dispatch");
                     order.phase = OrderDispatchPhase::Attempted;
+                    self.risk.mark_order_attempted(&id);
                     self.ledger.record(
                         Segment::Durable,
                         clock::now_ns().saturating_sub(order.intent.decided_ns),
@@ -212,7 +216,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.complete_order_dispatch(id)?;
             return Ok(true);
         }
-        let refusal = if !order.intent.reduce_only {
+        let mut refusal = if order.request.is_portfolio_reduction() {
+            self.emergency_order_refusal(&order.request, Some(id))
+        } else if !order.intent.reduce_only {
             if self.dispatches.recovered.contains(id) {
                 Some("opening decision belongs to the previous engine epoch".into())
             } else {
@@ -231,6 +237,47 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             (!reduces || order.request.qty > owned.abs() + 1e-12)
                 .then(|| "allocated position changed before dispatch".into())
         };
+        if refusal.is_none()
+            && order.request.exact_terms.is_some()
+            && !order.request.is_portfolio_reduction()
+        {
+            let mut intent = order.intent.clone();
+            intent.qty = order.request.qty;
+            refusal = match self.risk.reassess_portfolio_order(
+                id,
+                &intent,
+                &self.books.account,
+                &self.books.attribution.snapshot(),
+            ) {
+                engine_types::risk::PortfolioRiskVerdict::Allow { qty, .. }
+                    if qty == order.request.qty =>
+                {
+                    None
+                }
+                other => Some(format!("portfolio risk changed before dispatch: {other:?}")),
+            };
+            if refusal.is_none() {
+                refusal = match self.instrument_specs.get(&intent.symbol).cloned() {
+                    Some(spec) => match self.physical_order_plan(&order.request, &spec, Some(id)) {
+                        Ok(plan)
+                            if plan.reduce_only == order.request.reduce_only
+                                && plan.native_stop.as_ref().map(|stop| &stop.trigger_price)
+                                    == order.request.exact_terms.as_ref().and_then(|terms| {
+                                        terms.physical_stop_trigger_price.as_ref()
+                                    }) =>
+                        {
+                            None
+                        }
+                        Ok(_) => Some(
+                            "physical direction or aggregate protection changed before dispatch"
+                                .into(),
+                        ),
+                        Err(reason) => Some(reason),
+                    },
+                    None => Some("exact instrument metadata disappeared before dispatch".into()),
+                };
+            }
+        }
         if let Some(reason) = refusal {
             self.take_update(OrderUpdate::Reject {
                 client_order_id: id.into(),
@@ -560,11 +607,11 @@ mod tests {
                     .unwrap();
             engine.take_venue_completion(completion).await.unwrap();
             assert!(engine.dispatches.orders.is_empty());
-            assert!(records.lock().unwrap().iter().any(|record| matches!(record, WalRecord::OrderUpdate { update: OrderUpdate::Ack(ack) } if ack.client_order_id == "independent-exit")));
+            assert!(records.lock().unwrap().iter().any(|record| matches!(record, WalRecord::OrderUpdate { update: OrderUpdate::Ack(ack), .. } if ack.client_order_id == "independent-exit")));
         };
         let (callback, ()) = tokio::join!(callback, independent);
         assert!(callback.is_err(), "the callback escaped its memory owner");
-        assert!(records.lock().unwrap().iter().any(|record| matches!(record, WalRecord::OrderUpdate { update: OrderUpdate::Ack(ack) } if ack.client_order_id == "independent-private")));
+        assert!(records.lock().unwrap().iter().any(|record| matches!(record, WalRecord::OrderUpdate { update: OrderUpdate::Ack(ack), .. } if ack.client_order_id == "independent-private")));
     }
 
     #[tokio::test]
@@ -751,5 +798,105 @@ mod tests {
         assert!(restart.dispatches.orders.is_empty());
         assert!(restart.dispatches.unresolved.is_empty());
         assert!(restart.pending_mutations.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod portfolio_tests {
+    use super::*;
+    use engine_types::Quote;
+
+    async fn fixture() -> Engine<crate::tests::MockWal, engine_risk::Kernel, crate::tests::MockVenue>
+    {
+        let mut engine = crate::tests::shared_sleeves::balanced_engine().await;
+        engine.books.market.apply(&MarketEvent::Quote {
+            symbol: SymbolId(0),
+            quote: Quote {
+                bid_px: 99.9,
+                ask_px: 100.1,
+                bid_qty: 10.0,
+                ask_qty: 10.0,
+                recv_ns: clock::now_ns(),
+                ..Default::default()
+            },
+        });
+        engine.risk.observe_price(SymbolId(0), 100.0);
+        engine
+    }
+
+    async fn exit(
+        engine: &mut Engine<crate::tests::MockWal, engine_risk::Kernel, crate::tests::MockVenue>,
+    ) -> PreparedOrder {
+        engine
+            .prepare_intent(
+                Intent {
+                    strategy: StrategyId(0),
+                    symbol: SymbolId(0),
+                    side: Side::Sell,
+                    qty: 1.0,
+                    kind: OrderKind::Market,
+                    stop: None,
+                    reduce_only: true,
+                    tag: "owned-exit".into(),
+                    decided_ns: clock::now_ns(),
+                    work: None,
+                    leverage: None,
+                },
+                Some("eng-exit-recheck".into()),
+                clock::now_ns(),
+                &mut HashMap::new(),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn queued_shared_exit_rechecks_surviving_stop_and_excludes_its_own_reservation() {
+        let mut engine = fixture().await;
+        let order = exit(&mut engine).await;
+        assert!(
+            !order.request.reduce_only,
+            "closing the long sleeve exposes the short sleeve"
+        );
+        assert_eq!(order.request.stop.unwrap().trigger_px, 110.0);
+        assert!(
+            !engine
+                .refuse_changed_dispatch(&order.request.client_order_id)
+                .await
+                .unwrap(),
+            "the unchanged order must not double count itself"
+        );
+        engine
+            .books
+            .attribution
+            .set_sleeve_stop_exact(
+                StrategyId(1),
+                SymbolId(0),
+                Side::Sell,
+                engine_types::numeric::Exact::parse_decimal("105").unwrap(),
+            )
+            .unwrap();
+        assert!(
+            engine
+                .refuse_changed_dispatch(&order.request.client_order_id)
+                .await
+                .unwrap(),
+            "durability wait retained a weaker physical stop than the surviving sleeve owns"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_virtual_exit_cannot_create_physical_growth_after_private_gap() {
+        let mut engine = fixture().await;
+        let order = exit(&mut engine).await;
+        engine.private_stream_ready = false;
+        assert!(
+            engine
+                .refuse_changed_dispatch(&order.request.client_order_id)
+                .await
+                .unwrap(),
+            "virtual reduction became unprotected physical growth during private recovery"
+        );
     }
 }

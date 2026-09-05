@@ -74,11 +74,26 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let Some(key) = effect else {
             return Ok(());
         };
+        let order_id = self
+            .host
+            .effects
+            .transitions
+            .get(&key.transition_id)
+            .and_then(|transition| transition.order_ids.get(key.index))
+            .cloned()
+            .flatten();
         self.wal.append(&WalRecord::StrategyEffectCompleted {
             transition_id: key.transition_id,
             effect_index: key.index,
         })?;
-        self.host.effects.complete(key).map_err(EngineError::State)
+        self.host
+            .effects
+            .complete(key)
+            .map_err(EngineError::State)?;
+        if let Some(id) = order_id {
+            self.host.callbacks.refused_orders.remove(&id);
+        }
+        Ok(())
     }
 
     pub(super) async fn flush_placements(
@@ -101,10 +116,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .cloned()
                     .flatten()
             });
-            if order_id
-                .as_ref()
-                .is_some_and(|id| self.books.orders.contains(id))
-            {
+            if order_id.as_ref().is_some_and(|id| {
+                self.books.orders.contains(id) || self.host.callbacks.refused_orders.contains(id)
+            }) {
                 self.complete_effect(effect)?;
                 continue;
             }

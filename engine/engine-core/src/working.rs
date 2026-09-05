@@ -181,6 +181,7 @@ fn apply(
         // durable before the wire, and that fsync would land on every single
         // reprice.
         spec: AmendSpec {
+            exact_terms: None,
             px: Some(px),
             qty: None,
         },

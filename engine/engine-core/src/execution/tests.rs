@@ -210,6 +210,7 @@ fn a_stream_gap_is_remembered_because_the_fills_in_it_are_not() {
         sent("eng-1", CARRY, 100.0),
         filled("eng-1", 101.0, false),
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::StreamReset { recv_ns: 1 },
         },
     ];
@@ -548,6 +549,7 @@ fn sent(id: &str, strategy: StrategyId, arrival_mid: f64) -> WalRecord {
 
 fn filled(id: &str, px: f64, is_maker: bool) -> WalRecord {
     WalRecord::OrderUpdate {
+        callbacks: None,
         update: OrderUpdate::Fill {
             allocation: None,
             amounts: None,
@@ -746,6 +748,7 @@ fn sent_for(id: &str, strategy: StrategyId, symbol: SymbolId) -> WalRecord {
 
 fn filled_for(id: &str, symbol: SymbolId, px: f64) -> WalRecord {
     WalRecord::OrderUpdate {
+        callbacks: None,
         update: OrderUpdate::Fill {
             allocation: None,
             amounts: None,
@@ -832,6 +835,7 @@ fn an_id_no_table_ever_named_still_reads_as_a_number() {
 
 fn recovered(id: &str, symbol: SymbolId, px: f64, venue_ts_ms: i64) -> WalRecord {
     WalRecord::RecoveredFill {
+        callbacks: None,
         allocation: None,
         amounts: None,
         exec_id: format!("venue-{id}"),
@@ -857,6 +861,7 @@ fn a_fill_the_stream_missed_costs_the_same_as_one_it_delivered() {
         names(),
         sent("eng-1", CARRY, 100.0),
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::StreamReset { recv_ns: 1 },
         },
         recovered("eng-1", BTC, 101.0, 1_700_000_000_000),
@@ -995,6 +1000,7 @@ fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
     }
     fn traded(id: &str, symbol: SymbolId, side: Side, px: f64, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -1070,11 +1076,17 @@ fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
 #[test]
 fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
     let held = WalRecord::SegmentBase {
+        portfolio_control: Default::default(),
         pending_order_dispatches: Vec::new(),
         signal_producers: Vec::new(),
+        identities: None,
+        instrument_catalog: None,
         signal_suspensions: Vec::new(),
-        portfolio: Some(Default::default()),
+        portfolio: None,
         strategy_processes: Vec::new(),
+        strategy_callback_queues: Vec::new(),
+        strategy_callback_sources: Vec::new(),
+        signal_callback_deliveries: Vec::new(),
         strategy_callbacks: Vec::new(),
         wall_ts_ms: 1,
         strategies: vec!["carry".into()],
@@ -1126,6 +1138,7 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
     }
     fn traded(id: &str, side: Side, px: f64, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -1185,6 +1198,7 @@ fn entry(log: &mut Vec<WalRecord>, id: &str, strategy: StrategyId, side: Side, p
         arrival_mid: px,
     });
     log.push(WalRecord::OrderUpdate {
+        callbacks: None,
         update: OrderUpdate::Fill {
             allocation: None,
             amounts: None,
@@ -1206,6 +1220,7 @@ fn entry(log: &mut Vec<WalRecord>, id: &str, strategy: StrategyId, side: Side, p
 /// A close the venue itself started: no order id of ours, and a reason.
 fn venue_stop(side: Side, px: f64, qty: f64) -> WalRecord {
     WalRecord::OrderUpdate {
+        callbacks: None,
         update: OrderUpdate::Fill {
             allocation: None,
             amounts: None,
@@ -1255,6 +1270,7 @@ fn a_recovered_venue_stop_closes_and_prices_the_same_trip() {
     let mut log = vec![names()];
     entry(&mut log, "eng-1", CARRY, Side::Buy, 100.0, 10.0);
     log.push(WalRecord::RecoveredFill {
+        callbacks: None,
         allocation: None,
         amounts: None,
         exec_id: "venue-stop".into(),
@@ -1305,4 +1321,55 @@ fn a_close_the_venue_named_in_a_coin_two_sleeves_hold_is_priced_for_nobody() {
     let fills = Fills::from_records(&log);
     assert_eq!(fills.total().fills, 2, "only the two entries were ours");
     assert!(fills.closed().is_empty());
+}
+
+#[test]
+fn an_emergency_net_order_without_allocation_cannot_charge_its_diagnostic_strategy_slot() {
+    let records = vec![
+        names(),
+        WalRecord::OrderSent {
+            dispatch: None,
+            request: OrderRequest {
+                client_order_id: "eng-net-parent".into(),
+                strategy: CARRY,
+                symbol: BTC,
+                side: Side::Sell,
+                qty: 1.0,
+                kind: OrderKind::Market,
+                stop: None,
+                reduce_only: true,
+                close_position: false,
+                sleeve_effect: Some(
+                    engine_types::orders::SleeveOrderEffect::EmergencyNetReduction {
+                        emergency_id: 7,
+                    },
+                ),
+                exact_terms: None,
+            },
+            wire_ns: 1,
+            arrival_mid: 100.0,
+        },
+        WalRecord::OrderUpdate {
+            callbacks: None,
+            update: OrderUpdate::Fill {
+                client_order_id: "eng-net-parent".into(),
+                exec_id: "net-exec".into(),
+                symbol: BTC,
+                side: Side::Sell,
+                qty: 1.0,
+                px: 99.0,
+                fee: Some(0.1),
+                is_maker: false,
+                forced_close: None,
+                venue_ts_ms: 1,
+                recv_ns: 1,
+                amounts: None,
+                allocation: None,
+            },
+        },
+    ];
+    assert!(
+        Fills::try_from_records(&records).is_err(),
+        "an engine-owned net order has no sleeve owner without durable allocation slices"
+    );
 }

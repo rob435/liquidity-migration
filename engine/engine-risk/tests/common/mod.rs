@@ -82,6 +82,7 @@ pub fn position(
     stop_attached: bool,
 ) -> PositionView {
     PositionView {
+        exact_stop_px: None,
         symbol,
         side,
         qty,

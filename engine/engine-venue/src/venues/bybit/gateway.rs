@@ -5,6 +5,9 @@
 //! the host is derived from that realm rather than passed alongside it, so the
 //! two cannot disagree.
 
+#[path = "recovery.rs"]
+mod recovery;
+
 use crate::realm_credentials::InventoryCredentials;
 use crate::RealmCredentials;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -88,6 +91,7 @@ pub struct BybitGateway {
     rest: RestClient,
     trade: Option<TradeClient>,
     symbols: engine_public::symbols::SymbolCatalog,
+    exact_specs: HashMap<Symbol, engine_types::numeric::ExactInstrumentSpec>,
     one_way_verified: Vec<bool>,
     clock_checked: bool,
     create_limiter: RollingRateLimiter,
@@ -213,6 +217,7 @@ async fn reserve_rate_capacity(
 
 fn copy_venue_error(error: &VenueError) -> VenueError {
     match error {
+        VenueError::Unsupported(detail) => VenueError::Unsupported(detail.clone()),
         VenueError::BadRequest(detail) => VenueError::BadRequest(detail.clone()),
         VenueError::Transport(detail) => VenueError::Transport(detail.clone()),
         VenueError::Rejected { code, message } => VenueError::Rejected {
@@ -278,6 +283,65 @@ impl BybitInventoryProbe {
 }
 
 impl BybitGateway {
+    async fn set_stop_terms(
+        &mut self,
+        symbol: SymbolId,
+        trigger_px: f64,
+        exact: Option<&engine_types::order_terms::ExactStopTerms>,
+    ) -> Result<(), VenueError> {
+        self.require_one_way(symbol).await?;
+        if let Some(terms) = exact {
+            let name = self.name_of(symbol)?;
+            let query = format!(
+                "category={CATEGORY}&symbol={}&limit=200",
+                percent_encode(name)
+            );
+            let raw: Box<serde_json::value::RawValue> =
+                self.rest.get_signed_as(PATH_POSITIONS, &query).await?;
+            let (side, _) = crate::stop_state::bybit(raw.get(), name)?;
+            if side != terms.position_side {
+                return Err(VenueError::BadRequest(
+                    "native position changed side before stop".into(),
+                ));
+            }
+        }
+        let mut body = Map::new();
+        body.insert("category".into(), CATEGORY.into());
+        body.insert("symbol".into(), self.name_of(symbol)?.into());
+        body.insert(
+            "stopLoss".into(),
+            match exact {
+                Some(terms) => engine_types::order_terms::decimal_wire(&terms.trigger_price)
+                    .map_err(crate::order_wire::error)?,
+                None => venue_num(trigger_px)?,
+            }
+            .into(),
+        );
+        // Full: the stop closes the whole position. positionIdx 0 is one-way
+        // mode, which is how the demo account is configured.
+        body.insert("tpslMode".into(), "Full".into());
+        body.insert("positionIdx".into(), 0.into());
+        body.insert("slTriggerBy".into(), "MarkPrice".into());
+        body.insert("slOrderType".into(), "Market".into());
+
+        let stop_limit = match self.realm {
+            VenueRealm::Demo => TRADING_STOPS_DEMO_PER_SECOND,
+            VenueRealm::Mainnet => TRADING_STOPS_MAINNET_PER_SECOND,
+        };
+        reserve_rate_capacity(&mut self.stop_limiter, 1, stop_limit).await;
+        let envelope = self
+            .rest
+            .post_signed(PATH_TRADING_STOP, &Value::Object(body))
+            .await;
+        self.stop_limiter.anchor_completion(Instant::now(), 1);
+        let envelope = envelope?;
+        match venue_result(envelope) {
+            Ok(_) => Ok(()),
+            Err(VenueError::Rejected { code: 34040, .. }) => Ok(()),
+            Err(other) => Err(other),
+        }
+    }
+
     /// The live gateway: the realm's host, and the realm's credentials from
     /// the environment. There is no argument for the host on purpose — it is
     /// derived from the realm, so the account being addressed and the account
@@ -367,6 +431,7 @@ impl BybitGateway {
             rest: RestClient::new(base_url, creds.clone()),
             trade: trade_url.map(|url| TradeClient::new(url, creds)),
             symbols: engine_public::symbols::SymbolCatalog::from_names(symbols),
+            exact_specs: HashMap::new(),
             one_way_verified,
             clock_checked: false,
             create_limiter: RollingRateLimiter::default(),
@@ -1152,6 +1217,14 @@ impl VenueGateway for BybitGateway {
         client_order_id: &str,
         spec: AmendSpec,
     ) -> Result<(), VenueError> {
+        if let Some(terms) = crate::order_wire::amend_terms(&spec)? {
+            let rules = self.exact_specs.get(self.name_of(symbol)?).ok_or_else(|| {
+                VenueError::Unsupported("exact amendment metadata is not installed".into())
+            })?;
+            terms
+                .validate_wire_grid(rules)
+                .map_err(crate::order_wire::error)?;
+        }
         self.last_mutation_timing = None;
         self.last_rate_wait_ns = None;
         if spec.px.is_none() && spec.qty.is_none() {
@@ -1166,11 +1239,11 @@ impl VenueGateway for BybitGateway {
         // Only what is changing. Bybit reads an absent field as "leave it",
         // and a price echoed back unchanged still costs the order its place
         // in the queue.
-        if let Some(px) = spec.px {
-            body.insert("price".into(), venue_num(px)?.into());
+        if let Some(px) = crate::order_wire::amend_price(&spec)? {
+            body.insert("price".into(), px.into());
         }
-        if let Some(qty) = spec.qty {
-            body.insert("qty".into(), venue_num(qty)?.into());
+        if let Some(qty) = crate::order_wire::amend_quantity(&spec)? {
+            body.insert("qty".into(), qty.into());
         }
 
         self.last_rate_wait_ns =
@@ -1212,34 +1285,28 @@ impl VenueGateway for BybitGateway {
     }
 
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
-        self.require_one_way(symbol).await?;
-        let mut body = Map::new();
-        body.insert("category".into(), CATEGORY.into());
-        body.insert("symbol".into(), self.name_of(symbol)?.into());
-        body.insert("stopLoss".into(), venue_num(trigger_px)?.into());
-        // Full: the stop closes the whole position. positionIdx 0 is one-way
-        // mode, which is how the demo account is configured.
-        body.insert("tpslMode".into(), "Full".into());
-        body.insert("positionIdx".into(), 0.into());
-        body.insert("slTriggerBy".into(), "MarkPrice".into());
-        body.insert("slOrderType".into(), "Market".into());
+        self.set_stop_terms(symbol, trigger_px, None).await
+    }
 
-        let stop_limit = match self.realm {
-            VenueRealm::Demo => TRADING_STOPS_DEMO_PER_SECOND,
-            VenueRealm::Mainnet => TRADING_STOPS_MAINNET_PER_SECOND,
-        };
-        reserve_rate_capacity(&mut self.stop_limiter, 1, stop_limit).await;
-        let envelope = self
-            .rest
-            .post_signed(PATH_TRADING_STOP, &Value::Object(body))
-            .await;
-        self.stop_limiter.anchor_completion(Instant::now(), 1);
-        let envelope = envelope?;
-        match venue_result(envelope) {
-            Ok(_) => Ok(()),
-            Err(VenueError::Rejected { code: 34040, .. }) => Ok(()),
-            Err(other) => Err(other),
-        }
+    async fn set_stop_exact(
+        &mut self,
+        symbol: SymbolId,
+        terms: &engine_types::order_terms::ExactStopTerms,
+    ) -> Result<(), VenueError> {
+        terms
+            .validate_wire_grid(self.exact_specs.get(self.name_of(symbol)?).ok_or_else(|| {
+                VenueError::Unsupported("exact stop metadata is not installed".into())
+            })?)
+            .map_err(crate::order_wire::error)?;
+        self.set_stop_terms(
+            symbol,
+            terms
+                .trigger_price
+                .to_f64()
+                .map_err(crate::order_wire::error)?,
+            Some(terms),
+        )
+        .await
     }
 
     fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {
@@ -1367,48 +1434,11 @@ impl VenueGateway for BybitGateway {
     }
 
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
-        // Stamp the beginning of the scan. A private fill received while the
-        // REST requests are in flight is not proven present in their snapshot
-        // and must remain in the risk kernel's recent-fill overlay.
-        let observed_ns = mono_ns();
-        // Wallet and positions are separate endpoints, so this is two round
-        // trips however it is written — they at least go out together.
-        let wallet = self.rest.get_signed(PATH_WALLET, "accountType=UNIFIED");
-        let positions = self
-            .rest
-            .get_signed(PATH_POSITIONS, "category=linear&settleCoin=USDT&limit=200");
-        let (wallet, positions) = futures_util::future::try_join(wallet, positions).await?;
-        let (equity_usdt, available_usdt) = parse_wallet(&venue_result(wallet)?)?;
-
-        let ids = self.symbols.ids();
-        let resolve = |name: &str| ids.get(name).copied();
-        let (mut open, mut cursor) = parse_positions(&venue_result(positions)?, &resolve)?;
-        let mut pages = 1;
-        while !cursor.is_empty() && pages < MAX_PAGES {
-            let query = format!(
-                "category=linear&settleCoin=USDT&limit=200&cursor={}",
-                percent_encode(&cursor)
-            );
-            let more = self.rest.get_signed(PATH_POSITIONS, &query).await?;
-            let (rows, next) = parse_positions(&venue_result(more)?, &resolve)?;
-            open.extend(rows);
-            cursor = next;
-            pages += 1;
-        }
-        // A truncated position list under-counts exposure and can hide an
-        // unprotected position — this read fails closed, like instruments.
-        if !cursor.is_empty() {
-            return Err(VenueError::BadReply(format!(
-                "position listing still had pages after {MAX_PAGES}"
-            )));
-        }
-
-        Ok(AccountView {
-            equity_usdt,
-            available_usdt,
-            positions: open,
-            observed_ns,
-        })
+        engine_types::orders::AccountRecoveryClient::account_view(
+            &recovery::RecoveryClient::new(self),
+            self.symbols.names(),
+        )
+        .await
     }
 
     async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError> {
@@ -1590,50 +1620,54 @@ impl VenueGateway for BybitGateway {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<VenueExecution>, VenueError> {
-        // The venue caps one query's window at 7 days, so a longer ask walks
-        // in slices. `settleCoin` rather than a symbol, for the same reason
-        // as working_orders: this read exists to find what the log missed,
-        // and asking only about known symbols would hide exactly that.
-        const SLICE_MS: i64 = 6 * 86_400_000;
-        let mut out = Vec::new();
-        let mut from = start_ms;
-        while from < end_ms {
-            let to = (from + SLICE_MS).min(end_ms);
-            let mut cursor = String::new();
-            let mut pages = 0;
-            loop {
-                if pages >= MAX_PAGES {
-                    // A truncated history would quietly leave fills missing,
-                    // which is the one answer this read must never give.
-                    return Err(VenueError::BadReply(format!(
-                        "execution listing still had pages after {MAX_PAGES}"
-                    )));
-                }
-                let query = if cursor.is_empty() {
-                    format!(
-                        "category={CATEGORY}&settleCoin=USDT&startTime={from}&endTime={to}&limit=100"
-                    )
-                } else {
-                    format!(
-                        "category={CATEGORY}&settleCoin=USDT&startTime={from}&endTime={to}\
-                         &limit=100&cursor={}",
-                        percent_encode(&cursor)
-                    )
-                };
-                let envelope: engine_public::numeric_wire::RawObject<
-                    super::execution::HistoryReply,
-                > = self.rest.get_signed_as(PATH_EXECUTIONS, &query).await?;
-                let (rows, next) = envelope.0.executions()?;
-                out.extend(rows);
-                if next.is_empty() {
-                    break;
-                }
-                cursor = next;
-                pages += 1;
-            }
-            from = to;
+        engine_types::orders::AccountRecoveryClient::executions(
+            &recovery::RecoveryClient::new(self),
+            self.symbols.names(),
+            start_ms,
+            end_ms,
+        )
+        .await
+    }
+
+    fn restore_instrument_catalog(
+        &self,
+        checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let pages = crate::catalog_checkpoint::decode(checkpoint, "bybit", self.rest.base())?;
+        let catalog = catalog_from_pages(self.rest.base(), pages)?;
+        crate::catalog_checkpoint::check(checkpoint, catalog)
+    }
+    fn install_instrument_catalog(
+        &mut self,
+        catalog: &engine_types::orders::InstrumentCatalog,
+    ) -> Result<(), VenueError> {
+        let snapshot = catalog
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.as_ref().as_any().downcast_ref::<CatalogSnapshot>())
+            .ok_or_else(|| VenueError::BadRequest("catalog belongs to another adapter".into()))?;
+        if snapshot.base != self.rest.base() {
+            return Err(VenueError::BadRequest(
+                "catalog belongs to another venue endpoint".into(),
+            ));
         }
-        Ok(out)
+
+        self.exact_specs = catalog.specs.iter().cloned().collect();
+        Ok(())
+    }
+
+    fn account_recovery_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::AccountRecoveryClient>> {
+        Some(Box::new(recovery::RecoveryClient::new(self)))
+    }
+
+    fn instrument_catalog_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::InstrumentCatalogClient>> {
+        Some(Box::new(LookupClient {
+            rest: self.rest.clone(),
+        }))
     }
 
     fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
@@ -1881,6 +1915,66 @@ fn realm_name(realm: VenueRealm) -> &'static str {
     }
 }
 
+#[derive(Debug)]
+struct CatalogSnapshot {
+    base: String,
+    pages: Vec<String>,
+}
+
+impl engine_types::orders::InstrumentCatalogCache for CatalogSnapshot {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn checkpoint(
+        &self,
+    ) -> Result<engine_types::orders::InstrumentCatalogCacheSnapshot, VenueError> {
+        crate::catalog_checkpoint::encode("bybit", &self.base, &self.pages)
+    }
+    fn retain_previous(
+        &self,
+        checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let previous = crate::catalog_checkpoint::decode(checkpoint, "bybit", &self.base)?;
+        crate::catalog_checkpoint::check(
+            checkpoint,
+            catalog_from_pages(&self.base, previous.clone())?,
+        )?;
+        let pages = crate::catalog_checkpoint::merge_pages("bybit", previous, self.pages.clone())?;
+        let catalog = catalog_from_pages(&self.base, pages)?;
+        catalog.checkpoint()?.validate_bounds()?;
+        Ok(catalog)
+    }
+}
+
+#[engine_types::async_trait]
+impl engine_types::orders::InstrumentCatalogClient for LookupClient {
+    async fn fetch(&self) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let mut pages = Vec::new();
+        let mut cursor = String::new();
+        for _ in 0..MAX_PAGES {
+            let query = if cursor.is_empty() {
+                format!("category={CATEGORY}&limit=1000")
+            } else {
+                format!(
+                    "category={CATEGORY}&limit=1000&cursor={}",
+                    percent_encode(&cursor)
+                )
+            };
+            let raw: Box<serde_json::value::RawValue> =
+                self.rest.get_public_as(PATH_INSTRUMENTS, &query).await?;
+            let (_, next) = engine_public::venues::bybit::spec::parse_page(raw.get())?;
+            pages.push(raw.get().to_owned());
+            if next.is_empty() {
+                return catalog_from_pages(self.rest.base(), pages);
+            }
+            cursor = next;
+        }
+        Err(VenueError::BadReply(format!(
+            "instrument listing still had pages after {MAX_PAGES}"
+        )))
+    }
+}
+
 struct LookupClient {
     rest: RestClient,
 }
@@ -1907,6 +2001,34 @@ impl engine_types::orders::OrderLookupClient for LookupClient {
             "Bybit realtime and retained history contain no matching order",
         ))
     }
+}
+
+fn catalog_from_pages(
+    base: &str,
+    pages: Vec<String>,
+) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+    if pages.is_empty() || pages.len() > MAX_PAGES {
+        return Err(VenueError::BadReply("invalid instrument page count".into()));
+    }
+    let mut out = engine_types::orders::InstrumentCatalog::default();
+    for (index, raw) in pages.iter().enumerate() {
+        let (specs, next) = engine_public::venues::bybit::spec::parse_page(raw)?;
+        let value: Value =
+            serde_json::from_str(raw).map_err(|e| VenueError::BadReply(e.to_string()))?;
+        let (rules, legacy_next) = parse_instruments(&venue_result(value)?)?;
+        if next != legacy_next || next.is_empty() != (index + 1 == pages.len()) {
+            return Err(VenueError::BadReply(
+                "incomplete instrument page chain".into(),
+            ));
+        }
+        out.rules.extend(rules);
+        out.specs.extend(specs);
+    }
+    out.cache = Some(std::sync::Arc::new(CatalogSnapshot {
+        base: base.to_owned(),
+        pages,
+    }));
+    Ok(out)
 }
 
 #[cfg(test)]

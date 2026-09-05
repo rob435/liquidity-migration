@@ -207,6 +207,13 @@ impl SignalFeed for HybridSignalFeed {
         self.spool.request_readiness()
     }
 
+    fn set_sleeve_keys(
+        &mut self,
+        keys: Vec<engine_types::identity::SleeveKey>,
+    ) -> Result<(), SignalError> {
+        self.spool.set_sleeve_keys(keys)
+    }
+
     fn request_lifecycle(
         &mut self,
         producers: Vec<engine_types::SignalProducerLifecycle>,

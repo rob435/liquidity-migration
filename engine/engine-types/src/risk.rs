@@ -16,12 +16,26 @@ pub struct PositionView {
     /// what it asked for says nothing about what the venue kept.
     #[serde(default)]
     pub stop_px: f64,
+    /// Native stop decimal retained before its compatibility projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_stop_px: Option<Box<crate::numeric::Exact>>,
     /// The leverage the venue itself reports on this position, when the row
     /// carries one. This is the venue's own answer, not our cache — it is
     /// what lets an engine with sole leverage authority VERIFY instead of
     /// re-asking before every entry.
     #[serde(default)]
     pub leverage: Option<f64>,
+}
+
+impl PositionView {
+    pub fn validate_stop_projection(&self) -> Result<(), crate::numeric::ExactError> {
+        if let Some(exact) = &self.exact_stop_px {
+            if !self.stop_attached || !exact.is_positive() || exact.to_f64()? != self.stop_px {
+                return Err(crate::numeric::ExactError::InvalidProjection);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Account state the risk kernel judges against. `observed_ns` is the engine
@@ -32,7 +46,52 @@ pub struct AccountView {
     pub equity_usdt: f64,
     pub available_usdt: f64,
     pub positions: Vec<PositionView>,
+    /// Monotonic start of the earliest request composing this view; zero is stale.
     pub observed_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhysicalExposureInterval {
+    low: f64,
+    high: f64,
+}
+
+impl PhysicalExposureInterval {
+    pub fn try_new(low: f64, high: f64) -> Result<Self, DenyReason> {
+        if !low.is_finite() || !high.is_finite() || low > high {
+            return Err(DenyReason::UnknownState {
+                detail: "physical exposure interval is unreadable".into(),
+            });
+        }
+        Ok(Self { low, high })
+    }
+    pub fn low(self) -> f64 {
+        self.low
+    }
+    pub fn high(self) -> f64 {
+        self.high
+    }
+    pub fn after(self, side: crate::orders::Side, qty: f64) -> Result<Self, DenyReason> {
+        if !qty.is_finite() || qty <= 0.0 {
+            return Err(DenyReason::UnknownState {
+                detail: "physical interval delta is unreadable".into(),
+            });
+        }
+        let delta = if side == crate::orders::Side::Buy {
+            qty
+        } else {
+            -qty
+        };
+        Self::try_new(self.low + delta, self.high + delta)
+    }
+    pub fn certainly_reduces(self, side: crate::orders::Side, qty: f64) -> bool {
+        qty.is_finite()
+            && qty > 0.0
+            && match side {
+                crate::orders::Side::Sell => self.low >= qty,
+                crate::orders::Side::Buy => self.high <= -qty,
+            }
+    }
 }
 
 /// Why an intent was refused. Closed enum so every denial is nameable in the
@@ -146,6 +205,29 @@ pub trait RiskKernel {
         }
     }
 
+    fn reassess_portfolio_order(
+        &mut self,
+        _id: &str,
+        _intent: &Intent,
+        _account: &AccountView,
+        _portfolio: &crate::portfolio::PortfolioState,
+    ) -> PortfolioRiskVerdict {
+        PortfolioRiskVerdict::Deny {
+            reason: DenyReason::UnknownState {
+                detail: "kernel cannot re-evaluate an owned portfolio order".into(),
+            },
+        }
+    }
+    fn physical_exposure_interval_excluding(
+        &mut self,
+        _id: &str,
+        _symbol: SymbolId,
+        _account: &AccountView,
+    ) -> Result<PhysicalExposureInterval, DenyReason> {
+        Err(DenyReason::UnknownState {
+            detail: "kernel cannot exclude an owned pending order".into(),
+        })
+    }
     /// Reassess the remaining quantity of an existing opening order at a new
     /// price. Implementations that track reservations override this to
     /// temporarily exclude the order's old reservation; the conservative
@@ -161,6 +243,15 @@ pub trait RiskKernel {
     }
     /// Keep internal exposure/fill accounting current.
     fn on_update(&mut self, update: &OrderUpdate);
+    fn on_update_with_remaining(
+        &mut self,
+        update: &OrderUpdate,
+        _remaining_qty: f64,
+    ) -> Result<(), DenyReason> {
+        self.on_update(update);
+        Ok(())
+    }
+
     /// Latest price for a symbol, for valuing exposure. Default: ignore.
     fn observe_price(&mut self, _symbol: SymbolId, _px: f64) {}
     /// Fold every fresh account reading into account-level capital state.
@@ -185,6 +276,40 @@ pub trait RiskKernel {
     /// Bind an engine-minted client order id to the intent it approved, so an
     /// order in flight is exposure the caps can see. Default: ignore.
     fn register_order(&mut self, _client_order_id: &str, _intent: &Intent, _approved_qty: f64) {}
+    fn physical_exposure_interval(
+        &mut self,
+        _symbol: SymbolId,
+        _account: &AccountView,
+    ) -> Result<PhysicalExposureInterval, DenyReason> {
+        Err(DenyReason::UnknownState {
+            detail: "kernel cannot establish physical exposure interval".into(),
+        })
+    }
+    /// Reserve cash margin against the causal account query used for admission.
+    fn register_order_with_account(
+        &mut self,
+        client_order_id: &str,
+        intent: &Intent,
+        approved_qty: f64,
+        _account: &AccountView,
+    ) {
+        self.register_order(client_order_id, intent, approved_qty);
+    }
+    fn register_order_price_range_with_account(
+        &mut self,
+        id: &str,
+        intent: &Intent,
+        qty: f64,
+        price_range: (f64, f64),
+        _account: &AccountView,
+    ) {
+        self.register_order_price_range(id, intent, qty, price_range.0, price_range.1);
+    }
+    /// Canonical order ledger completion; does not synthesize or erase executions.
+    fn complete_order(&mut self, _client_order_id: &str, _confirmed_ns: u64) {}
+    fn mark_order_attempted(&mut self, _client_order_id: &str) {}
+    /// Confirmation is a receipt in this process's monotonic epoch, never a replayed stamp.
+    fn mark_order_accepted(&mut self, _client_order_id: &str, _confirmed_ns: u64) {}
     /// Register an order whose exact working price is temporarily ambiguous.
     /// The range is durable replay evidence: notional uses its high end while
     /// stop loss is evaluated across both ends. Kernels without range-aware

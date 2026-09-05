@@ -13,12 +13,14 @@
 
 pub mod clock;
 pub mod execution_allocation;
+pub mod identity;
 pub mod ids;
 pub mod market;
 pub mod numeric;
 pub mod order_terms;
 pub mod orders;
 pub mod portfolio;
+pub mod portfolio_control;
 pub mod quantize;
 pub mod risk;
 pub mod signal_lifecycle;
@@ -198,6 +200,16 @@ pub trait VenueGateway: Send + 'static {
     /// says a position was opened behind, and a venue whose caps under-declare
     /// must not be the reason a held position stays naked.
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError>;
+    async fn set_stop_exact(
+        &mut self,
+        _symbol: SymbolId,
+        _terms: &crate::order_terms::ExactStopTerms,
+    ) -> Result<(), VenueError> {
+        Err(VenueError::Unsupported(
+            "exact standalone stops are unavailable".into(),
+        ))
+    }
+
     /// Start trading a symbol this gateway was not built with, and return the
     /// id it will use. `None` if it cannot grow.
     ///
@@ -230,6 +242,28 @@ pub trait VenueGateway: Send + 'static {
     async fn account_view(&mut self) -> Result<AccountView, VenueError>;
     /// Tick size, quantity step, and minimums for every tradable symbol.
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError>;
+    fn restore_instrument_catalog(
+        &self,
+        _checkpoint: &crate::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<crate::orders::InstrumentCatalog, VenueError> {
+        Err(VenueError::Unsupported(
+            "durable instrument catalog restore".into(),
+        ))
+    }
+    fn install_instrument_catalog(
+        &mut self,
+        _catalog: &crate::orders::InstrumentCatalog,
+    ) -> Result<(), VenueError> {
+        Err(VenueError::Unsupported(
+            "instrument catalog installation is unavailable".into(),
+        ))
+    }
+    fn instrument_catalog_client(&self) -> Option<Box<dyn crate::orders::InstrumentCatalogClient>> {
+        None
+    }
+    fn account_recovery_client(&self) -> Option<Box<dyn orders::AccountRecoveryClient>> {
+        None
+    }
     fn order_lookup_client(&self) -> Option<Box<dyn orders::OrderLookupClient>> {
         None
     }

@@ -778,6 +778,7 @@ async fn lifecycle_readiness_observes_a_later_seal_without_restarting_or_duplica
     .await
     .unwrap();
     let mut response = SignalLifecycleResponse {
+        source_sleeves: Vec::new(),
         schema_version: 2,
         boot_nonce: request.boot_nonce,
         producer: SignalProducerReport {

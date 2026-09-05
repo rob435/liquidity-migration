@@ -409,28 +409,40 @@ impl Fills {
     /// `None` is a fill older than the engine's clock, whose origin is this
     /// process: it cost what it cost, and it is owed no mark at all.
     pub fn on_recovered_fill(&mut self, fill: &Fill, filled_ns: Option<u64>) {
-        self.recovered += 1;
-        match filled_ns {
-            Some(filled_ns) => self.on_fill(fill, filled_ns),
-            None => {
-                self.price(fill);
-            }
-        }
+        self.on_recovered_fill_with_quantity(fill, filled_ns, None)
+            .expect("validated scalar recovered fill");
     }
 
-    /// Price one fill and start its markout clock. `filled_ns` is when the
-    /// fill happened on the engine's own clock.
-    pub fn on_fill(&mut self, fill: &Fill, filled_ns: u64) {
-        let notional = self.price(fill);
+    pub fn on_recovered_fill_with_quantity(
+        &mut self,
+        fill: &Fill,
+        filled_ns: Option<u64>,
+        quantity: Option<&engine_types::numeric::Exact>,
+    ) -> Result<(), String> {
+        match filled_ns {
+            Some(filled_ns) => self.on_fill_with_quantity(fill, filled_ns, quantity)?,
+            None => {
+                self.price(fill, quantity)?;
+            }
+        }
+        self.recovered += 1;
+        Ok(())
+    }
 
-        // `usable`, not `is_finite`: a zero-notional fill would otherwise be
-        // owed marks that are measured, written to the log, and then dropped
-        // by a weight of zero -- counted neither in the average nor in the
-        // tally of what could not be measured.
+    pub fn on_fill(&mut self, fill: &Fill, filled_ns: u64) {
+        self.on_fill_with_quantity(fill, filled_ns, None)
+            .expect("validated scalar analytic fill");
+    }
+
+    pub fn on_fill_with_quantity(
+        &mut self,
+        fill: &Fill,
+        filled_ns: u64,
+        quantity: Option<&engine_types::numeric::Exact>,
+    ) -> Result<(), String> {
+        let notional = self.price(fill, quantity)?;
         if !usable(fill.px) || !usable(notional) {
-            // Nothing later could be measured against this, so do not hold a
-            // slot open for it.
-            return;
+            return Ok(());
         }
         if self.pending.len() >= MAX_PENDING {
             self.pending.pop_front();
@@ -447,14 +459,20 @@ impl Fills {
             filled_ns,
             owed: (1u8 << HORIZONS_MS.len()) - 1,
         });
+        Ok(())
     }
 
     /// What one fill cost, folded into its row. Returns the notional, which is
     /// the weight every mark it is later owed carries.
-    fn price(&mut self, fill: &Fill) -> f64 {
+    fn price(
+        &mut self,
+        fill: &Fill,
+        quantity: Option<&engine_types::numeric::Exact>,
+    ) -> Result<f64, String> {
         let notional = (fill.px * fill.qty).abs();
         let key = self.key(fill.strategy, fill.symbol);
-        self.lots.on_fill(&key.0, &key.1, fill);
+        self.lots
+            .on_fill_with_quantity(&key.0, &key.1, fill, quantity)?;
         let costs = self.by_key.entry(key).or_default();
         costs.fills += 1;
         if fill.is_maker {
@@ -482,7 +500,7 @@ impl Fills {
         if let (Some(shortfall), Some(fee)) = (shortfall, fee) {
             costs.all_in.add(shortfall + fee, notional);
         }
-        notional
+        Ok(notional)
     }
 
     /// Read every markout that has come due, and fold it in. Called from the
@@ -647,6 +665,40 @@ impl Fills {
             .expect("validated execution accounting WAL")
     }
 
+    pub(crate) fn validate_internal_settlement(
+        &self,
+        settlement: &engine_types::portfolio_control::PortfolioOffsetSettlement,
+    ) -> Result<(), String> {
+        crate::portfolio_control::validate_settlement(settlement)?;
+        for slice in &settlement.slices {
+            self.lots.validate_internal(
+                &self.names.strategy(slice.strategy),
+                &self.names.symbol(settlement.symbol),
+                &slice.signed_quantity,
+                settlement.price.to_f64().map_err(|e| e.to_string())?,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn on_internal_settlement(
+        &mut self,
+        settlement: &engine_types::portfolio_control::PortfolioOffsetSettlement,
+    ) -> Result<(), String> {
+        self.validate_internal_settlement(settlement)?;
+        for slice in &settlement.slices {
+            self.lots.settle_internal(
+                &self.names.strategy(slice.strategy),
+                &self.names.symbol(settlement.symbol),
+                &slice.signed_quantity,
+                settlement.price.to_f64().map_err(|e| e.to_string())?,
+                settlement.settled_ms,
+                settlement.emergency_id,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn try_seed_lots(
         &mut self,
         records: &[WalRecord],
@@ -671,12 +723,16 @@ impl Fills {
     }
 
     pub fn try_from_records(records: &[WalRecord]) -> Result<Self, String> {
-        let mut sent: HashMap<&str, (StrategyId, f64)> = HashMap::new();
+        let mut sent: HashMap<&str, (&engine_types::OrderRequest, f64)> = HashMap::new();
         let mut me = Fills::default();
         for record in records {
             // Before the record is folded, never after: a row is keyed by what
             // its ids meant at its own place in the log, not at the end of it.
             me.learn(record);
+            if let WalRecord::PortfolioOffsetSettled { settlement } = record {
+                me.on_internal_settlement(settlement)?;
+                continue;
+            }
             let allocated = match record {
                 WalRecord::OrderUpdate {
                     update:
@@ -684,6 +740,7 @@ impl Fills {
                             allocation: Some(_),
                             ..
                         },
+                    ..
                 } => Some((update.clone(), false)),
                 WalRecord::RecoveredFill {
                     allocation: Some(_),
@@ -712,6 +769,7 @@ impl Fills {
                     .ok_or("expected execution slices")?
                 {
                     let OrderUpdate::Fill {
+                        amounts,
                         client_order_id,
                         symbol,
                         side,
@@ -741,9 +799,17 @@ impl Fills {
                         arrival_mid,
                     };
                     if recovered {
-                        me.on_recovered_fill(&fill, Some(0));
+                        me.on_recovered_fill_with_quantity(
+                            &fill,
+                            Some(0),
+                            amounts.as_deref().map(|a| &a.quantity.value),
+                        )?;
                     } else {
-                        me.on_fill(&fill, 0);
+                        me.on_fill_with_quantity(
+                            &fill,
+                            0,
+                            amounts.as_deref().map(|a| &a.quantity.value),
+                        )?;
                     }
                 }
                 continue;
@@ -754,14 +820,12 @@ impl Fills {
                     arrival_mid,
                     ..
                 } => {
-                    sent.insert(
-                        request.client_order_id.as_str(),
-                        (request.strategy, *arrival_mid),
-                    );
+                    sent.insert(request.client_order_id.as_str(), (request, *arrival_mid));
                 }
                 WalRecord::OrderUpdate {
                     update:
                         OrderUpdate::Fill {
+                            amounts,
                             client_order_id,
                             symbol,
                             side,
@@ -773,6 +837,7 @@ impl Fills {
                             venue_ts_ms,
                             ..
                         },
+                    ..
                 } => {
                     // A fill for an order this log never sent belongs to
                     // somebody else on the account, exactly as `attribution`
@@ -781,15 +846,22 @@ impl Fills {
                     // be pricing a stranger's trade. A close nobody ordered
                     // has no order to anchor it, so its arrival midpoint is
                     // zero and yields no shortfall.
-                    let Some((strategy, arrival_mid)) =
-                        sent.get(client_order_id.as_str()).copied().or_else(|| {
-                            me.forced_close_owner(client_order_id, *symbol, *side, *forced_close)
-                                .map(|strategy| (strategy, 0.0))
+                    let sent_owner = sent
+                        .get(client_order_id.as_str())
+                        .map(|(request, mid)| {
+                            request
+                                .sleeve_owner()
+                                .map(|strategy| (strategy, *mid))
+                                .ok_or("engine net execution is missing its durable allocation")
                         })
-                    else {
+                        .transpose()?;
+                    let Some((strategy, arrival_mid)) = sent_owner.or_else(|| {
+                        me.forced_close_owner(client_order_id, *symbol, *side, *forced_close)
+                            .map(|strategy| (strategy, 0.0))
+                    }) else {
                         continue;
                     };
-                    me.on_fill(
+                    me.on_fill_with_quantity(
                         &Fill {
                             client_order_id: client_order_id.clone(),
                             strategy,
@@ -803,7 +875,8 @@ impl Fills {
                             venue_ts_ms: *venue_ts_ms,
                         },
                         0,
-                    );
+                        amounts.as_deref().map(|a| &a.quantity.value),
+                    )?;
                 }
                 WalRecord::Markout {
                     client_order_id,
@@ -828,6 +901,7 @@ impl Fills {
                 }),
                 WalRecord::OrderUpdate {
                     update: OrderUpdate::StreamReset { .. },
+                    ..
                 } => me.stream_gap(),
                 // A claim boot found the venue does not back. There is no
                 // exit price for it, so it is forgotten rather than reported.
@@ -845,6 +919,7 @@ impl Fills {
                 // produced it, or through the position a venue-named close
                 // reduced -- so anything else is priced for nobody.
                 WalRecord::RecoveredFill {
+                    amounts,
                     client_order_id,
                     symbol,
                     side,
@@ -856,15 +931,22 @@ impl Fills {
                     venue_ts_ms,
                     ..
                 } => {
-                    let Some((strategy, arrival_mid)) =
-                        sent.get(client_order_id.as_str()).copied().or_else(|| {
-                            me.forced_close_owner(client_order_id, *symbol, *side, *forced_close)
-                                .map(|strategy| (strategy, 0.0))
+                    let sent_owner = sent
+                        .get(client_order_id.as_str())
+                        .map(|(request, mid)| {
+                            request
+                                .sleeve_owner()
+                                .map(|strategy| (strategy, *mid))
+                                .ok_or("engine net execution is missing its durable allocation")
                         })
-                    else {
+                        .transpose()?;
+                    let Some((strategy, arrival_mid)) = sent_owner.or_else(|| {
+                        me.forced_close_owner(client_order_id, *symbol, *side, *forced_close)
+                            .map(|strategy| (strategy, 0.0))
+                    }) else {
                         continue;
                     };
-                    me.on_recovered_fill(
+                    me.on_recovered_fill_with_quantity(
                         &Fill {
                             client_order_id: client_order_id.clone(),
                             strategy,
@@ -878,7 +960,8 @@ impl Fills {
                             venue_ts_ms: *venue_ts_ms,
                         },
                         Some(0),
-                    );
+                        amounts.as_ref().map(|a| &a.quantity.value),
+                    )?;
                 }
                 // A rotation restated every still-open order, so a fill that
                 // lands after the rotation can still be priced against the
@@ -889,12 +972,13 @@ impl Fills {
                 WalRecord::SegmentBase {
                     open_orders,
                     attribution,
+                    portfolio,
                     ..
                 } => {
                     for open in open_orders {
                         sent.insert(
                             open.request.client_order_id.as_str(),
-                            (open.request.strategy, open.arrival_mid),
+                            (&open.request, open.arrival_mid),
                         );
                     }
                     // What each sleeve was HOLDING, which the cost totals
@@ -912,7 +996,22 @@ impl Fills {
                             )
                         })
                         .collect();
-                    me.lots.restate(&held);
+                    if let Some(portfolio) = portfolio {
+                        let exact_held: Vec<_> = portfolio
+                            .positions
+                            .iter()
+                            .map(|row| {
+                                (
+                                    me.names.strategy(row.strategy),
+                                    me.names.symbol(row.symbol),
+                                    row.signed_qty.clone(),
+                                )
+                            })
+                            .collect();
+                        me.lots.restate_exact(&exact_held)?;
+                    } else {
+                        me.lots.restate(&held);
+                    }
                 }
                 _ => {}
             }

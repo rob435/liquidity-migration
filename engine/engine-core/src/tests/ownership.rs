@@ -125,6 +125,7 @@ fn prior_order(owner: u16, side: Side) -> Vec<WalRecord> {
 
 fn fill(side: Side) -> WalRecord {
     WalRecord::OrderUpdate {
+        callbacks: None,
         update: OrderUpdate::Fill {
             allocation: None,
             amounts: None,
@@ -145,6 +146,7 @@ fn fill(side: Side) -> WalRecord {
 
 fn held(side: Side) -> Vec<engine_types::PositionView> {
     vec![engine_types::PositionView {
+        exact_stop_px: None,
         symbol: SymbolId(0),
         side,
         qty: 0.01,
@@ -263,6 +265,7 @@ async fn a_cancel_releases_ownership_but_a_late_fill_restores_it_on_replay() {
     for late_fill in [false, true] {
         let mut prior = prior_order(0, Side::Buy);
         prior.push(WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Cancelled {
                 client_order_id: "eng-prior-1".into(),
                 recv_ns: 2,
@@ -315,6 +318,7 @@ impl Strategy for Editor {
                 *symbol,
                 "eng-edit-1",
                 AmendSpec {
+                    exact_terms: None,
                     px: Some(30_000.0),
                     qty: None,
                 },
@@ -450,6 +454,7 @@ impl Strategy for ForeignOrderEditor {
                 *symbol,
                 "eng-prior-1",
                 AmendSpec {
+                    exact_terms: None,
                     px: Some(30_000.0),
                     qty: None,
                 },

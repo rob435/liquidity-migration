@@ -16,6 +16,9 @@
 //! `takeProfitReverse` explicitly: MEXC documents none of their defaults, and
 //! a reverse stop would open an opposite position instead of flattening one.
 
+#[path = "recovery.rs"]
+mod recovery;
+
 use crate::RealmCredentials;
 use std::collections::HashMap;
 
@@ -111,6 +114,86 @@ pub struct MexcGateway {
 }
 
 impl MexcGateway {
+    async fn set_stop_terms(
+        &mut self,
+        symbol: SymbolId,
+        trigger_px: f64,
+        exact: Option<&engine_types::order_terms::ExactStopTerms>,
+    ) -> Result<(), VenueError> {
+        let name = self.name_of(symbol)?.clone();
+        // Proves the symbol is one this venue will take API orders on before
+        // anything is sent about it.
+        self.contracts().await?.tradable(&name)?;
+        let position_id = if let Some(terms) = exact {
+            let venue_symbol = self.contracts.tradable(&name)?.venue_symbol.clone();
+            let raw: Box<serde_json::value::RawValue> =
+                self.rest.get_signed_as(PATH_POSITIONS, &[]).await?;
+            let (id, side) = crate::stop_state::mexc(raw.get(), &venue_symbol)?;
+            if side != terms.position_side {
+                return Err(VenueError::BadRequest(
+                    "native position changed side before stop".into(),
+                ));
+            }
+            id
+        } else {
+            self.position_ids()
+                .await?
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| {
+                    VenueError::BadRequest(format!(
+                        "MEXC holds no position on {name}, and a stop here is attached to one"
+                    ))
+                })?
+        };
+
+        // A stop already on this position is moved rather than added to. MEXC
+        // lets several records coexist on one position, so placing a second
+        // would leave two live stops with no way to tell which fires.
+        let records = self.stop_records().await?;
+        let existing = records
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|row| {
+                id_text(row, "positionId").as_deref() == Some(position_id.as_str())
+                    && id_text(row, "orderId").as_deref().unwrap_or("0") == "0"
+            })
+            .and_then(|row| id_text(row, "id"));
+
+        let price = match exact {
+            Some(terms) => engine_types::order_terms::decimal_wire(&terms.trigger_price)
+                .map_err(crate::order_wire::error)?,
+            None => venue_num(trigger_px)?,
+        };
+        let reply = match existing {
+            Some(record_id) => {
+                let body = json!({
+                    "stopPlanOrderId": record_id,
+                    "stopLossPrice": price,
+                    "lossTrend": TREND_LAST_PRICE,
+                });
+                self.rest.post_signed(PATH_STOP_CHANGE, &body).await?
+            }
+            None => {
+                let body = json!({
+                    "positionId": position_id,
+                    "stopLossPrice": price,
+                    "lossTrend": TREND_LAST_PRICE,
+                    // Stated, never defaulted. MEXC documents no default for
+                    // either, and the wrong one on `stopLossReverse` turns a
+                    // stop-out into an opposite position that carries no stop.
+                    "volType": VOL_TYPE_POSITION,
+                    "stopLossReverse": REVERSE_NO,
+                    "takeProfitReverse": REVERSE_NO,
+                });
+                self.rest.post_signed(PATH_STOP_PLACE, &body).await?
+            }
+        };
+        venue_result(&reply)?;
+        Ok(())
+    }
+
     /// The live gateway: the realm's host and the realm's credentials from the
     /// environment.
     ///
@@ -396,62 +479,26 @@ impl VenueGateway for MexcGateway {
     }
 
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
-        let name = self.name_of(symbol)?.clone();
-        // Proves the symbol is one this venue will take API orders on before
-        // anything is sent about it.
-        self.contracts().await?.tradable(&name)?;
-        let position_id = self
-            .position_ids()
-            .await?
-            .get(&name)
-            .cloned()
-            .ok_or_else(|| {
-                VenueError::BadRequest(format!(
-                    "MEXC holds no position on {name}, and a stop here is attached to one"
-                ))
-            })?;
+        self.set_stop_terms(symbol, trigger_px, None).await
+    }
 
-        // A stop already on this position is moved rather than added to. MEXC
-        // lets several records coexist on one position, so placing a second
-        // would leave two live stops with no way to tell which fires.
-        let records = self.stop_records().await?;
-        let existing = records
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|row| {
-                id_text(row, "positionId").as_deref() == Some(position_id.as_str())
-                    && id_text(row, "orderId").as_deref().unwrap_or("0") == "0"
-            })
-            .and_then(|row| id_text(row, "id"));
-
-        let price = venue_num(trigger_px)?;
-        let reply = match existing {
-            Some(record_id) => {
-                let body = json!({
-                    "stopPlanOrderId": record_id,
-                    "stopLossPrice": price,
-                    "lossTrend": TREND_LAST_PRICE,
-                });
-                self.rest.post_signed(PATH_STOP_CHANGE, &body).await?
-            }
-            None => {
-                let body = json!({
-                    "positionId": position_id,
-                    "stopLossPrice": price,
-                    "lossTrend": TREND_LAST_PRICE,
-                    // Stated, never defaulted. MEXC documents no default for
-                    // either, and the wrong one on `stopLossReverse` turns a
-                    // stop-out into an opposite position that carries no stop.
-                    "volType": VOL_TYPE_POSITION,
-                    "stopLossReverse": REVERSE_NO,
-                    "takeProfitReverse": REVERSE_NO,
-                });
-                self.rest.post_signed(PATH_STOP_PLACE, &body).await?
-            }
-        };
-        venue_result(&reply)?;
-        Ok(())
+    async fn set_stop_exact(
+        &mut self,
+        symbol: SymbolId,
+        terms: &engine_types::order_terms::ExactStopTerms,
+    ) -> Result<(), VenueError> {
+        terms
+            .validate_wire_grid(&self.contracts.tradable(self.name_of(symbol)?)?.exact_spec)
+            .map_err(crate::order_wire::error)?;
+        self.set_stop_terms(
+            symbol,
+            terms
+                .trigger_price
+                .to_f64()
+                .map_err(crate::order_wire::error)?,
+            Some(terms),
+        )
+        .await
     }
 
     async fn set_leverage(&mut self, symbol: SymbolId, leverage: f64) -> Result<(), VenueError> {
@@ -504,28 +551,52 @@ impl VenueGateway for MexcGateway {
     }
 
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
-        let (observed_ns, reply) = account_scan(async {
-            let assets = self.rest.get_signed(PATH_ASSETS, &[]).await?;
-            let (equity_usdt, available_usdt) = parse_assets(venue_result(&assets)?)?;
-            let positions_body = self.rest.get_signed(PATH_POSITIONS, &[]).await?;
-            let positions_data = venue_result(&positions_body)?.clone();
-            // The position rows say nothing about stops, so the stop book is read
-            // alongside and joined in. Without it every position would report
-            // itself unprotected, and the engine would act on that.
-            let stops = parse_position_stops(&self.stop_records().await?);
-            let ids = self.symbols.ids().clone();
-            let contracts = self.contracts().await?;
-            let positions = parse_positions(&positions_data, contracts, &ids, &stops)?;
-            Ok::<_, VenueError>((equity_usdt, available_usdt, positions))
-        })
-        .await;
-        let (equity_usdt, available_usdt, positions) = reply?;
-        Ok(AccountView {
-            equity_usdt,
-            available_usdt,
-            positions,
-            observed_ns,
-        })
+        self.contracts().await?;
+        engine_types::orders::AccountRecoveryClient::account_view(
+            &recovery::RecoveryClient::new(self),
+            self.symbols.names(),
+        )
+        .await
+    }
+
+    fn restore_instrument_catalog(
+        &self,
+        checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let pages = crate::catalog_checkpoint::decode(checkpoint, "mexc", self.rest.base())?;
+        let catalog = catalog_from_pages(self.rest.base(), pages)?;
+        crate::catalog_checkpoint::check(checkpoint, catalog)
+    }
+    fn install_instrument_catalog(
+        &mut self,
+        catalog: &engine_types::orders::InstrumentCatalog,
+    ) -> Result<(), VenueError> {
+        let snapshot = catalog
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.as_ref().as_any().downcast_ref::<CatalogSnapshot>())
+            .ok_or_else(|| VenueError::BadRequest("catalog belongs to another adapter".into()))?;
+        if snapshot.base != self.rest.base() {
+            return Err(VenueError::BadRequest(
+                "catalog belongs to another venue endpoint".into(),
+            ));
+        }
+        self.contracts = snapshot.data.clone();
+        Ok(())
+    }
+
+    fn account_recovery_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::AccountRecoveryClient>> {
+        Some(Box::new(recovery::RecoveryClient::new(self)))
+    }
+
+    fn instrument_catalog_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::InstrumentCatalogClient>> {
+        Some(Box::new(LookupClient {
+            rest: self.rest.clone(),
+        }))
     }
 
     fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
@@ -608,52 +679,55 @@ impl VenueGateway for MexcGateway {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<VenueExecution>, VenueError> {
-        // `symbol` is required here, so the sweep is per symbol rather than
-        // account-wide. The engine asks about the symbols it follows.
-        let names = self.symbols.names().clone();
-        let mut out = Vec::new();
-        for name in names {
-            let venue_symbol = self
-                .contracts()
-                .await?
-                .any(&name)
-                .ok_or_else(|| {
-                    VenueError::BadReply(format!(
-                        "configured symbol {name} is absent from the MEXC contract table"
-                    ))
-                })?
-                .venue_symbol
-                .clone();
-            let mut complete = false;
-            for page in 1..=MAX_PAGES {
-                let body: engine_public::numeric_wire::RawObject<super::execution::HistoryReply> =
-                    self.rest
-                        .get_signed_as(
-                            PATH_DEALS,
-                            &[
-                                ("symbol", venue_symbol.clone()),
-                                ("start_time", start_ms.to_string()),
-                                ("end_time", end_ms.to_string()),
-                                ("page_num", page.to_string()),
-                                ("page_size", PAGE_SIZE.to_string()),
-                            ],
-                        )
-                        .await?;
-                let contracts = self.contracts().await?;
-                let (rows, raw_count) = body.0.executions(contracts)?;
-                out.extend(rows);
-                if execution_page_complete(&name, page, raw_count)? {
-                    complete = true;
-                    break;
-                }
-            }
-            if !complete {
-                return Err(VenueError::BadReply(format!(
-                    "execution history for {name} still had pages after {MAX_PAGES} full pages"
-                )));
-            }
-        }
-        Ok(out)
+        self.contracts().await?;
+        engine_types::orders::AccountRecoveryClient::executions(
+            &recovery::RecoveryClient::new(self),
+            self.symbols.names(),
+            start_ms,
+            end_ms,
+        )
+        .await
+    }
+}
+
+#[derive(Debug)]
+struct CatalogSnapshot {
+    base: String,
+    pages: Vec<String>,
+    data: Contracts,
+}
+
+impl engine_types::orders::InstrumentCatalogCache for CatalogSnapshot {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn checkpoint(
+        &self,
+    ) -> Result<engine_types::orders::InstrumentCatalogCacheSnapshot, VenueError> {
+        crate::catalog_checkpoint::encode("mexc", &self.base, &self.pages)
+    }
+    fn retain_previous(
+        &self,
+        checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let previous = crate::catalog_checkpoint::decode(checkpoint, "mexc", &self.base)?;
+        crate::catalog_checkpoint::check(
+            checkpoint,
+            catalog_from_pages(&self.base, previous.clone())?,
+        )?;
+        let pages = crate::catalog_checkpoint::merge_pages("mexc", previous, self.pages.clone())?;
+        let catalog = catalog_from_pages(&self.base, pages)?;
+        catalog.checkpoint()?.validate_bounds()?;
+        Ok(catalog)
+    }
+}
+
+#[engine_types::async_trait]
+impl engine_types::orders::InstrumentCatalogClient for LookupClient {
+    async fn fetch(&self) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let raw: Box<serde_json::value::RawValue> =
+            self.rest.get_public_as(PATH_CONTRACT_DETAIL, "").await?;
+        catalog_from_pages(self.rest.base(), vec![raw.get().to_owned()])
     }
 }
 
@@ -681,6 +755,28 @@ impl engine_types::orders::OrderLookupClient for LookupClient {
         let raw: Box<serde_json::value::RawValue> = self.rest.get_signed_as(&path, &[]).await?;
         super::lookup::parse(raw.get(), name, client_order_id, contract)
     }
+}
+
+fn catalog_from_pages(
+    base: &str,
+    pages: Vec<String>,
+) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+    if pages.len() != 1 {
+        return Err(VenueError::BadReply(
+            "catalog requires one metadata page".into(),
+        ));
+    }
+    let raw = pages[0].as_str();
+    let catalog = Contracts::parse_raw(raw)?;
+    Ok(engine_types::orders::InstrumentCatalog {
+        rules: catalog.rules(),
+        specs: catalog.instrument_specs(),
+        cache: Some(std::sync::Arc::new(CatalogSnapshot {
+            pages,
+            base: base.to_owned(),
+            data: catalog,
+        })),
+    })
 }
 
 #[cfg(test)]
@@ -774,6 +870,7 @@ mod tests {
                 SymbolId(0),
                 "eng-1",
                 AmendSpec {
+                    exact_terms: None,
                     px: Some(1.0),
                     qty: None,
                 },

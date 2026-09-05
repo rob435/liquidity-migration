@@ -78,31 +78,3 @@ impl Id {
         }
     }
 }
-
-/// Exact quantities and prices share the fill identity with compatibility floats.
-#[cfg(test)]
-pub(crate) fn execution_amounts(
-    row: &serde_json::Value,
-    quantity: &str,
-    price: &str,
-    fee: Option<&str>,
-    asset: Option<&str>,
-) -> Result<engine_types::numeric::ExecutionAmounts, engine_types::VenueError> {
-    use engine_types::numeric::{AssetAmount, AssetId, ExecutionAmounts};
-    let fee = match fee {
-        Some(name) => engine_public::json::opt_exact_field(row, name)?.map(|amount| AssetAmount {
-            asset: asset
-                .filter(|asset| !asset.is_empty())
-                .map(|asset| AssetId::Named(asset.to_owned()))
-                .unwrap_or(AssetId::Unknown),
-            amount,
-        }),
-        None => None,
-    };
-    Ok(ExecutionAmounts {
-        settlement_asset: AssetId::Unknown,
-        quantity: engine_public::json::exact_field(row, quantity)?,
-        price: engine_public::json::exact_field(row, price)?,
-        fee,
-    })
-}

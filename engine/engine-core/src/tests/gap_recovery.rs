@@ -238,7 +238,7 @@ async fn a_repeated_live_exec_id_mutates_the_engine_once() {
         .iter()
         .filter(|record| {
             matches!(
-                record, WalRecord::OrderUpdate { update: OrderUpdate::Fill { exec_id, .. } }
+                record, WalRecord::OrderUpdate { callbacks: _,  update: OrderUpdate::Fill { exec_id, .. } }
                     if exec_id == "exec-once"
             )
         })
@@ -315,7 +315,7 @@ async fn a_known_live_fill_with_the_wrong_side_is_durable_but_mutates_nothing() 
     )));
     assert!(!records.iter().any(|record| matches!(
         record,
-        WalRecord::OrderUpdate {
+        WalRecord::OrderUpdate { callbacks: _,
             update: OrderUpdate::Fill { exec_id, .. }
         } if exec_id == "wrong-side-live"
     )));
@@ -408,21 +408,46 @@ async fn a_known_recovered_fill_with_the_wrong_symbol_preserves_the_order() {
 }
 
 #[tokio::test]
-async fn execution_history_failure_after_a_gap_stops_the_run_and_latches_entries() {
+async fn execution_history_failure_after_a_gap_retains_private_progress_and_latches_entries() {
     let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     *h.executions.lock().unwrap() = None;
 
+    let checkpoints_before = h
+        .records
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|row| matches!(row, WalRecord::ExecutionHistoryCheckpoint { .. }))
+        .count();
     let result = engine
         .run(
             &mut ScriptFeed::quotes(symbol, 0, false),
-            &mut ScriptOrderFeed::playing(vec![OrderUpdate::StreamReset { recv_ns: 1 }]),
-            std::future::pending::<()>(),
+            &mut ScriptOrderFeed::playing(vec![
+                OrderUpdate::StreamReset { recv_ns: 1 },
+                OrderUpdate::Ack(OrderAck {
+                    client_order_id: "news-after-history-failure".into(),
+                    venue_order_id: "private".into(),
+                    sent_ns: 1,
+                    ack_ns: clock::now_ns(),
+                }),
+            ]),
+            tokio::time::sleep(Duration::from_millis(60)),
         )
         .await;
 
-    assert!(matches!(result, Err(EngineError::Venue(_))));
+    assert!(result.is_ok());
+    assert!(h.records.lock().unwrap().iter().any(|row| matches!(row, WalRecord::OrderUpdate { update: OrderUpdate::Ack(ack), .. } if ack.client_order_id == "news-after-history-failure")));
+    assert_eq!(
+        h.records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| matches!(row, WalRecord::ExecutionHistoryCheckpoint { .. }))
+            .count(),
+        checkpoints_before
+    );
     assert!(h.records.lock().unwrap().iter().any(|record| matches!(
         record,
         WalRecord::Reconciled { may_open: false, findings, .. }
@@ -663,6 +688,10 @@ async fn a_later_reconciliation_stamp_does_not_replace_a_history_checkpoint() {
     let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
     let now_ms = clock::wall_ms();
     let replayed = vec![
+        WalRecord::Names {
+            strategies: vec!["buyer".into()],
+            symbols: vec!["BTCUSDT".into()],
+        },
         WalRecord::Boot {
             version: ENGINE_VERSION.into(),
             config_sha256: "old".into(),
@@ -801,6 +830,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
         vec![Box::new(buyer)],
         &["BTCUSDT"],
         &[WalRecord::OrderUpdate {
+            callbacks: None,
             update: already.clone(),
         }],
     )

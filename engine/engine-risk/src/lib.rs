@@ -12,6 +12,7 @@ mod envelope;
 mod exposure;
 mod kernel;
 mod loss_window;
+mod margin;
 mod profile;
 
 pub use config::{ConfigError, EnvelopeConfig, KernelConfig};

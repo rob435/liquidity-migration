@@ -144,11 +144,20 @@ fn initial_state_record(
     }
     let wall_ts_ms = clock::wall_ms();
     Ok(WalRecord::SegmentBase {
+        portfolio_control: Default::default(),
         portfolio: Some(Default::default()),
         pending_order_dispatches: Vec::new(),
         signal_producers: Vec::new(),
+        identities: Some(
+            crate::identities::plan_identities(&[], configured, None, &Default::default(), &[])?
+                .state,
+        ),
+        instrument_catalog: None,
         signal_suspensions: Vec::new(),
         strategy_processes: Vec::new(),
+        strategy_callback_queues: Vec::new(),
+        strategy_callback_sources: Vec::new(),
+        signal_callback_deliveries: Vec::new(),
         strategy_callbacks: Vec::new(),
         wall_ts_ms,
         strategies: configured.to_vec(),
@@ -226,6 +235,9 @@ fn verify_records(
     }
     for (index, strategy) in strategies.iter().enumerate() {
         let owner = StrategyId(u16::try_from(index)?);
+        if !strategy.callback_enabled() {
+            continue;
+        }
         let state = current.get(&owner.0);
         match (strategy.checkpoint_identity(), state) {
             (Some(identity), Some(state)) => {
@@ -398,7 +410,12 @@ fn append_import<W: Wal>(
 // same rule (`configured.starts_with(prior)`), so this must too, or a deploy
 // that appends a sleeve cannot import the state of the sleeves that existed.
 fn verify_names(configured: &[String], replayed: &[WalRecord]) -> Result<(), Box<dyn Error>> {
-    let logged = crate::replay::LogNames::of_log(replayed).strategies;
+    let logged = crate::identities::replay_identities(replayed)?
+        .unwrap_or_default()
+        .sleeves
+        .iter()
+        .map(|key| key.as_str().to_string())
+        .collect::<Vec<_>>();
     if logged.is_empty() {
         return Err("the nonempty WAL has no Names strategy table".into());
     }
@@ -420,11 +437,26 @@ fn initialize_or_verify_names<W: Wal>(
     if replayed.is_empty() {
         let wall_ts_ms = clock::wall_ms();
         let names = WalRecord::SegmentBase {
+            portfolio_control: Default::default(),
             portfolio: Some(Default::default()),
             pending_order_dispatches: Vec::new(),
             signal_producers: Vec::new(),
+            identities: Some(
+                crate::identities::plan_identities(
+                    &[],
+                    configured,
+                    None,
+                    &Default::default(),
+                    &[],
+                )?
+                .state,
+            ),
+            instrument_catalog: None,
             signal_suspensions: Vec::new(),
             strategy_processes: Vec::new(),
+            strategy_callback_queues: Vec::new(),
+            strategy_callback_sources: Vec::new(),
+            signal_callback_deliveries: Vec::new(),
             strategy_callbacks: Vec::new(),
             wall_ts_ms,
             strategies: configured.to_vec(),
@@ -711,7 +743,7 @@ pub async fn initialize_native_strategy_state(config_path: &Path) -> Result<(), 
     let settings = &loaded.config.engine;
     let configured = configured_names(&loaded.config.strategies);
     let strategies = assembly::strategies(&loaded.config.strategies)?;
-    let initial = initial_state_record(&configured, &strategies)?;
+    let mut initial = initial_state_record(&configured, &strategies)?;
 
     let _log_claim = engine_wal::lock(&settings.wal_path)?;
     let chosen = assembly::venue_name(&settings.venue)?;
@@ -733,6 +765,17 @@ pub async fn initialize_native_strategy_state(config_path: &Path) -> Result<(), 
     if !replayed.is_empty() {
         return Err("initialize-native-strategy-state requires a truly empty WAL".into());
     }
+    if let WalRecord::SegmentBase {
+        identities: Some(state),
+        ..
+    } = &mut initial
+    {
+        state.scope = Some(engine_types::identity::InstrumentScope {
+            venue: who.venue.clone(),
+            environment: who.realm.clone(),
+        });
+        state.validate()?;
+    }
     wal.append(&initial)?;
     wal.barrier()?;
     println!("log       {}", settings.wal_path.display());
@@ -746,8 +789,6 @@ pub async fn initialize_native_strategy_state(config_path: &Path) -> Result<(), 
 pub fn verify_native_strategy_state(config_path: &Path) -> Result<(), Box<dyn Error>> {
     let loaded = config::load(config_path)?;
     let settings = &loaded.config.engine;
-    let configured = configured_names(&loaded.config.strategies);
-    let strategies = assembly::strategies(&loaded.config.strategies)?;
     let _log_claim = engine_wal::lock(&settings.wal_path)?;
     let (records, torn) = engine_wal::replay_chain(&settings.wal_path)?;
     if torn {
@@ -757,6 +798,17 @@ pub fn verify_native_strategy_state(config_path: &Path) -> Result<(), Box<dyn Er
     if replayed.is_empty() {
         return Err("WAL is empty; native strategy state is not initialized".into());
     }
+    let keys = configured_names(&loaded.config.strategies);
+    let plan =
+        crate::identities::plan_identities(&replayed, &keys, None, &Default::default(), &[])?;
+    let configured = plan
+        .state
+        .sleeves
+        .iter()
+        .map(|key| key.as_str().to_string())
+        .collect::<Vec<_>>();
+    let strategies =
+        assembly::strategies_for_registry(&loaded.config.strategies, &plan, &replayed)?;
     verify_records(&configured, &strategies, &replayed)?;
     println!("log       {}", settings.wal_path.display());
     println!("result    native strategy state verified");
@@ -786,11 +838,6 @@ pub async fn run(
         .iter()
         .position(|name| name == strategy_name)
         .ok_or_else(|| format!("strategy {strategy_name:?} is not in this config"))?;
-    let strategy_id = StrategyId(u16::try_from(at).map_err(|_| "more than 65535 strategies")?);
-    let strategies = assembly::strategies(&loaded.config.strategies)?;
-    let identity = strategies[at].checkpoint_identity().ok_or_else(|| {
-        format!("strategy {strategy_name:?} does not declare a whole-sleeve checkpoint contract")
-    })?;
     let settings = &loaded.config.engine;
     let _log_claim = engine_wal::lock(&settings.wal_path)?;
     let chosen = assembly::venue_name(&settings.venue)?;
@@ -809,7 +856,44 @@ pub async fn run(
     let _account_claim =
         engine_venue::lease::acquire(&who.venue, &who.realm, &who.user_id, LEASE_ROLE)?;
     let (mut wal, mut replayed) = assembly::wal(&settings.wal_path)?;
+    let scope = engine_types::identity::InstrumentScope {
+        venue: who.venue.clone(),
+        environment: who.realm.clone(),
+    };
+    let plan = crate::identities::plan_identities(
+        &replayed,
+        &configured,
+        Some(&scope),
+        &Default::default(),
+        &[],
+    )?;
+    let strategy_id = plan.configured_ids[at];
+    let strategies =
+        assembly::strategies_for_registry(&loaded.config.strategies, &plan, &replayed)?;
+    let configured = plan
+        .state
+        .sleeves
+        .iter()
+        .map(|key| key.as_str().to_string())
+        .collect::<Vec<_>>();
+    let identity = strategies[strategy_id.idx()]
+        .checkpoint_identity()
+        .ok_or_else(|| {
+            format!(
+                "strategy {strategy_name:?} does not declare a whole-sleeve checkpoint contract"
+            )
+        })?;
     initialize_or_verify_names(&mut wal, &configured, &mut replayed)?;
+    if plan.changed {
+        let record = WalRecord::IdentityState {
+            wall_ts_ms: clock::wall_ms(),
+            state: plan.state,
+        };
+        wal.append(&record)?;
+        wal.barrier()?;
+        replayed.push(record);
+    }
+
     let sources = read_sources(source_paths)?;
     let context = StrategyImportContext {
         venue: who.venue.clone(),
@@ -817,7 +901,7 @@ pub async fn run(
         account_user_id: who.user_id.clone(),
     };
     let (checkpoint, translated_events) = checkpoint_from_source(
-        strategies[at].as_ref(),
+        strategies[strategy_id.idx()].as_ref(),
         identity,
         &context,
         source_format,

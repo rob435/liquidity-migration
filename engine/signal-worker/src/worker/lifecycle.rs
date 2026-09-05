@@ -89,6 +89,7 @@ impl DurableSignalWorker {
                 "input lifecycle waits for pending publication recovery",
             ));
         }
+        self.bind_destination_sleeves(&request.sleeve_keys)?;
         if self.worker.state.signal_lifecycle.is_none() {
             self.seal_signal_generation()?;
         }
@@ -187,6 +188,7 @@ impl DurableSignalWorker {
             ));
         }
         let response = SignalLifecycleResponse {
+            source_sleeves: self.source_sleeves()?,
             schema_version: engine_types::SIGNAL_LIFECYCLE_SCHEMA_VERSION,
             boot_nonce: request.boot_nonce,
             producer: SignalProducerReport {
@@ -205,7 +207,7 @@ impl DurableSignalWorker {
         .save(&response)
     }
 
-    fn publication_frontiers(&self) -> Result<Vec<SignalSourceFrontier>, WorkerError> {
+    pub(super) fn publication_frontiers(&self) -> Result<Vec<SignalSourceFrontier>, WorkerError> {
         let state = &self.worker.state;
         let epoch = state
             .signal_lifecycle

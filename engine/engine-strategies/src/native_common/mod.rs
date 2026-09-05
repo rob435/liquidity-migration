@@ -741,7 +741,7 @@ pub fn attributed_exposure_is_flat(ctx: &dyn StrategyCtx, symbols: &BTreeSet<Str
             .my_position_facts(symbol)
             .filter(|position| position.allocated.is_some())
         {
-            position.attributed_signed_qty.abs() <= f64::EPSILON && position.open_order_count == 0
+            position.attributed_signed_qty == 0.0 && position.open_order_count == 0
         } else {
             ctx.my_position(symbol).abs() <= f64::EPSILON
                 && ctx.in_flight(symbol).abs() <= f64::EPSILON
@@ -773,6 +773,40 @@ mod tests {
     use crate::mock_ctx::MockCtx;
 
     const PEPE: &str = "1000PEPEUSDT";
+
+    #[test]
+    fn exact_allocated_quantity_below_binary64_epsilon_remains_nonflat() {
+        for quantity in [1e-200, -1e-200] {
+            let (mut ctx, symbols) = pepe_ctx();
+            ctx.set_allocated_position(PEPE, quantity, Some(0.004), Some(0.003));
+            assert!(
+                !attributed_exposure_is_flat(&ctx, &symbols),
+                "nonzero owned quantity was treated as flat: {quantity}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_flat_position_with_offsetting_open_orders_remains_nonflat() {
+        let (mut ctx, symbols) = pepe_ctx();
+        ctx.set_allocated_position(PEPE, 0.0, None, None);
+        let symbol = ctx.symbol_id(PEPE).unwrap();
+        for side in [Side::Buy, Side::Sell] {
+            ctx.resting.push(crate::mock_ctx::RestingSeed {
+                client_order_id: format!("{side:?}"),
+                symbol,
+                side,
+                kind: engine_types::OrderKind::Market,
+                qty: 1e-200,
+                filled_qty: 0.0,
+                reduce_only: false,
+                acked: true,
+            });
+        }
+        assert!(!attributed_exposure_is_flat(&ctx, &symbols));
+        ctx.resting.clear();
+        assert!(attributed_exposure_is_flat(&ctx, &symbols));
+    }
 
     #[test]
     fn sleeve_flatness_does_not_inherit_another_sleeves_holding() {

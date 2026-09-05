@@ -8,7 +8,23 @@ Record the audit baseline and each finding’s local resolution, verified eviden
 
 ### Decision index
 
-**Implementation continues.** The verified `584844fa` checkpoint resolves the
+**Paused for the owner's restart.** The [current handoff](tier1-round-handoff.md)
+and [archived round evidence](tier1-round-evidence.json) define the latest local
+implementation and its remaining work. Final formatting and strict workspace /
+all-target Clippy pass. Final integrated debug/release/developer suites and the
+complete per-finding reconciliation remain open; the audit is not complete.
+
+| Current implementation | Verified local behavior | Open integration |
+| --- | --- | --- |
+| Shared typed instruments | Independent sleeve quantities and logical stops; aggregate native stop; opposing entry can reduce physical net. [Regression artifacts](tier1-portfolio-progress.json) | Complete recovery failure/replay verification and final integrated qualification |
+| Durable sleeve reductions | Exact remaining target persists through refusal; other busy symbols do not monopolize exit service; dispatch rechecks physical direction and protection after durability | Full failure/replay matrix under final asynchronous recovery owner |
+| Internal offset closure | Real native fill remains one execution; balanced internal closure carries separate cash and realized accounting; every durable emergency crash cut resumes once; a trusted manual baseline remains intact | Final asynchronous recovery qualification |
+| Aggregate emergency close | One engine-owned parent closes a legal net across sleeve fragments below individual venue minimums; canonical units and market maximums survive sizing; actual partial fills and fees allocate once; reference prices remain frozen | Complete rejection/restart failure matrix and integrated suite verification |
+| Stable identities and metadata | Append-only sleeve/instrument identities and retained native catalog support reorder and outage recovery | Final integrated verification and durable evidence consolidation |
+| Callback lifecycle | Registered process isolation, paged inactive callback payloads and exact input delivery frontiers are implemented | Final resource, source traversal and replay qualification |
+
+
+**Implementation is paused, not complete.** The verified `584844fa` checkpoint resolves the
 first defect pass; its retained architecture policies are open work under the
 owner's shared-ticker mandate. The checkpoint's passing suites do not qualify
 the current worktree or establish completion of the architecture below.
@@ -21,7 +37,7 @@ the current worktree or establish completion of the architecture below.
 | Exact execution and accounting | CL-01; LM-T1-203–205/207 | Exact lexical wire values and asset units reach owned execution accounting; legacy precision and unknown values remain explicit |
 | Stable durable identities | CL-05; LM-T1-005 | Namespaced keys survive registration reorder with validated legacy dense-ID mapping |
 
-| Current local verification | Evidence | Limit |
+| Earlier integration boundaries | Evidence | Limit at that boundary |
 | --- | --- | --- |
 | Owned inventory and shared fills | Prepared inventory/accounting commits; shared emergency fill regression fails before allocation and passes after; core debug suite 664 passes at that integration boundary | Internal settlement and physical order translation remain incomplete |
 | Portfolio risk ownership | `engine-risk`: 101 contract tests pass; four new portfolio regressions fail on the original physical-only path | The portfolio API is not enabled in order admission yet |
@@ -30,7 +46,9 @@ the current worktree or establish completion of the architecture below.
 | Callback processes and dispatch | Eleven actual Linux process tests pass; disabled OS limits fail allocation/fork regressions; atomic order/outbox acceptance, authority validation and independent lookup regressions fail before/pass after | Global retained-state bounds and durable retry of full order-news inboxes remain in integration |
 | Foundation checkpoint | macOS 1,997 / Linux 2,000 workspace debug tests pass; five existing ignores each; Python 1,499 passes; strict Clippy passes. [Durable evidence](tier1-foundation-evidence.json) | Final shared-admission/resource/identity integration and complete debug/release/developer qualification remain required |
 
-The table below records the first checkpoint’s behavior; its remaining boundaries are active implementation work above.
+The table below records the first checkpoint’s behavior. Its exclusive-ownership,
+trusted-callback and numeric policies are superseded by the current handoff;
+these historical rows do not describe the current source or close the architecture.
 
 | Order | Finding | Resolution | Remaining boundary |
 | --- | --- | --- | --- |
@@ -60,7 +78,7 @@ The table below records the first checkpoint’s behavior; its remaining boundar
 | Authority | Code/tests establish implemented behavior; [AGENTS.md](../AGENTS.md) and the owner's current request govern work. The owner authorizes local implementation and architecture decisions; funded deployment, capital, credentials and live-state changes remain unauthorized |
 | Path notation | Rust crate paths below are relative to `engine/`; function names identify the source more reliably than old line numbers |
 
-### Local verification
+### First-checkpoint verification
 
 | Check | Verified result | Scope |
 | --- | --- | --- |

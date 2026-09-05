@@ -1,0 +1,638 @@
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+use engine_types::strategy_process::{
+    CallbackOrderOrigin, CallbackWalCursor, CallbackWalReader, CallbackWalRecord,
+};
+use engine_types::{OrderUpdate, StrategyId, WalError, WalRecord};
+
+pub struct ReadCompletion {
+    reader: Box<dyn CallbackWalReader>,
+    pub strategy: StrategyId,
+    pub cursor: CallbackWalCursor,
+    pub result: Result<Option<CallbackWalRecord>, WalError>,
+}
+
+pub struct OrderNews {
+    reader: Option<Box<dyn CallbackWalReader>>,
+    start: Option<CallbackWalCursor>,
+    cursors: BTreeMap<StrategyId, CallbackWalCursor>,
+    latest: BTreeMap<StrategyId, CallbackOrderOrigin>,
+    through: BTreeMap<StrategyId, CallbackOrderOrigin>,
+    retry_after: BTreeMap<StrategyId, Instant>,
+    last_read: Option<StrategyId>,
+    pending: bool,
+    pub completed: tokio::sync::mpsc::Receiver<ReadCompletion>,
+    completion: tokio::sync::mpsc::Sender<ReadCompletion>,
+}
+
+impl Default for OrderNews {
+    fn default() -> Self {
+        let (completion, completed) = tokio::sync::mpsc::channel(1);
+        Self {
+            reader: None,
+            start: None,
+            cursors: BTreeMap::new(),
+            latest: BTreeMap::new(),
+            through: BTreeMap::new(),
+            retry_after: BTreeMap::new(),
+            last_read: None,
+            pending: false,
+            completed,
+            completion,
+        }
+    }
+}
+
+impl OrderNews {
+    pub fn attach(
+        &mut self,
+        reader: Box<dyn CallbackWalReader>,
+        records: &[WalRecord],
+        strategy_count: usize,
+    ) -> Result<(), String> {
+        if self.pending {
+            return Err("cannot replace an owned callback WAL read".into());
+        }
+        *self = Self::default();
+        self.start = Some(reader.start());
+        self.reader = Some(reader);
+        for record in records {
+            if let WalRecord::SegmentBase {
+                strategy_callback_sources,
+                ..
+            } = record
+            {
+                for source in strategy_callback_sources {
+                    if source.strategy.idx() >= strategy_count
+                        || source.cursor.segment == 0
+                        || source.cursor.sequence == 0
+                        || source.latest.segment == 0
+                        || source.latest.sequence == 0
+                        || source
+                            .accepted
+                            .is_some_and(|accepted| accepted > source.latest)
+                    {
+                        return Err("invalid callback source frontier".into());
+                    }
+                    self.cursors.insert(source.strategy, source.cursor);
+                    self.latest.insert(source.strategy, source.latest);
+                    if let Some(accepted) = source.accepted {
+                        self.through.insert(source.strategy, accepted);
+                    }
+                }
+            }
+        }
+        for (index, record) in records.iter().enumerate() {
+            let owners = match record {
+                WalRecord::OrderUpdate {
+                    callbacks: Some(owners),
+                    ..
+                } => owners.clone(),
+                WalRecord::RecoveredFill {
+                    callbacks: Some(callbacks),
+                    ..
+                } => callbacks.owners.clone(),
+                WalRecord::StrategyCallbackSource { strategy, .. } => vec![*strategy],
+                _ => continue,
+            };
+            {
+                if owners.iter().any(|owner| owner.idx() >= strategy_count) {
+                    return Err("order callback source escapes configured owners".into());
+                }
+                self.record(index as u64 + 1, &owners)?;
+            }
+        }
+        for record in records {
+            if let WalRecord::StrategyCallbackQueued { input } = record {
+                if let Some(origin) = input.order_origin {
+                    if origin.segment == 0
+                        || origin.sequence == 0
+                        || Some(origin.segment) > self.start.map(|start| start.segment)
+                    {
+                        return Err(
+                            "callback source origin names a future or invalid segment".into()
+                        );
+                    }
+                    if Some(origin.segment) == self.start.map(|start| start.segment) {
+                        let source = origin
+                            .sequence
+                            .checked_sub(1)
+                            .and_then(|index| records.get(index as usize))
+                            .ok_or("callback order origin has no parent frame")?;
+                        let expected = match source {
+                            WalRecord::OrderUpdate {
+                                update,
+                                callbacks: Some(owners),
+                            } if owners.contains(&input.strategy) => {
+                                engine_types::strategy_process::CallbackEvent::Order {
+                                    update: Self::slice(update, input.strategy)?,
+                                }
+                            }
+                            WalRecord::RecoveredFill {
+                                callbacks: Some(callbacks),
+                                ..
+                            } if callbacks.owners.contains(&input.strategy) => {
+                                let (_, update) = source
+                                    .recovered_callback()
+                                    .expect("recorded callback source");
+                                engine_types::strategy_process::CallbackEvent::Order {
+                                    update: Self::slice(&update, input.strategy)?,
+                                }
+                            }
+                            WalRecord::StrategyCallbackSource {
+                                strategy, event, ..
+                            } if *strategy == input.strategy => event.clone(),
+                            _ => {
+                                return Err(
+                                    "callback source origin has no matching durable owner".into()
+                                )
+                            }
+                        };
+                        if input.event != expected {
+                            return Err("callback view differs from its durable parent".into());
+                        }
+                    }
+                    self.accepted(input.strategy, origin);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn slice(update: &OrderUpdate, strategy: StrategyId) -> Result<OrderUpdate, String> {
+        match crate::portfolio_allocation::slice_updates(update)? {
+            Some(slices) => slices
+                .into_iter()
+                .find_map(|(owner, update)| (owner == strategy).then_some(update))
+                .ok_or_else(|| {
+                    "allocated execution has no callback slice for its recorded owner".into()
+                }),
+            None => Ok(update.clone()),
+        }
+    }
+
+    pub fn origin(&self, sequence: u64) -> Result<CallbackOrderOrigin, String> {
+        Ok(CallbackOrderOrigin {
+            segment: self
+                .start
+                .ok_or("isolated callbacks have no WAL source reader")?
+                .segment,
+            sequence,
+        })
+    }
+
+    pub fn record(&mut self, sequence: u64, owners: &[StrategyId]) -> Result<(), String> {
+        if sequence == 0 {
+            return Err("order callback source has zero sequence".into());
+        }
+        let origin = self.origin(sequence)?;
+        for owner in owners {
+            self.latest
+                .entry(*owner)
+                .and_modify(|known| *known = (*known).max(origin))
+                .or_insert(origin);
+        }
+        Ok(())
+    }
+
+    pub fn unread_for(&self, strategy: StrategyId) -> bool {
+        self.latest.get(&strategy) > self.through.get(&strategy)
+    }
+
+    pub fn has_reader(&self) -> bool {
+        self.start.is_some()
+    }
+    pub fn source_due(&self, strategy: StrategyId, origin: CallbackOrderOrigin) -> bool {
+        Some(&origin) > self.through.get(&strategy)
+    }
+    pub fn pending(&self) -> bool {
+        self.pending
+    }
+    pub fn unread(&self) -> bool {
+        self.pending || self.latest.keys().any(|owner| self.unread_for(*owner))
+    }
+
+    pub fn accepted(&mut self, strategy: StrategyId, origin: CallbackOrderOrigin) {
+        self.through
+            .entry(strategy)
+            .and_modify(|through| *through = (*through).max(origin))
+            .or_insert(origin);
+        self.retry_after.remove(&strategy);
+    }
+
+    pub fn snapshot(&self) -> Vec<engine_types::strategy_process::CallbackSourceFrontier> {
+        self.latest
+            .iter()
+            .filter_map(|(strategy, latest)| {
+                self.start.map(
+                    |start| engine_types::strategy_process::CallbackSourceFrontier {
+                        strategy: *strategy,
+                        cursor: self.cursors.get(strategy).copied().unwrap_or(start),
+                        accepted: self.through.get(strategy).copied(),
+                        latest: *latest,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub fn rotated(&mut self, reader: Box<dyn CallbackWalReader>) -> Result<(), String> {
+        if self.pending {
+            return Err("cannot rotate an owned callback source read".into());
+        }
+        if let Some(start) = self.start {
+            for owner in self.latest.keys() {
+                self.cursors.entry(*owner).or_insert(start);
+            }
+        }
+        self.start = Some(reader.start());
+        self.reader = Some(reader);
+        Ok(())
+    }
+
+    pub fn start_read(&mut self) {
+        self.start_read_for(|_| true);
+    }
+
+    pub fn start_read_for(&mut self, allowed: impl Fn(StrategyId) -> bool) {
+        if self.pending || self.reader.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        let mut owners: Vec<_> = self
+            .latest
+            .keys()
+            .copied()
+            .filter(|owner| {
+                allowed(*owner)
+                    && self.unread_for(*owner)
+                    && self
+                        .retry_after
+                        .get(owner)
+                        .is_none_or(|after| *after <= now)
+            })
+            .collect();
+        if let Some(previous) = self.last_read {
+            let next = owners.partition_point(|owner| *owner <= previous);
+            owners.rotate_left(next);
+        }
+        let Some(strategy) = owners.first().copied() else {
+            return;
+        };
+        let cursor = self
+            .cursors
+            .get(&strategy)
+            .copied()
+            .or(self.start)
+            .expect("configured callback reader");
+        let mut reader = self.reader.take().expect("available callback reader");
+        self.pending = true;
+        self.last_read = Some(strategy);
+        let completed = self.completion.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = reader.next(cursor);
+            let _ = completed.blocking_send(ReadCompletion {
+                reader,
+                strategy,
+                cursor,
+                result,
+            });
+        });
+    }
+
+    pub fn returned(
+        &mut self,
+        completion: ReadCompletion,
+    ) -> Result<(StrategyId, CallbackWalCursor, CallbackWalRecord), String> {
+        if !self.pending || self.reader.is_some() {
+            return Err("callback WAL read completion has no owner".into());
+        }
+        self.pending = false;
+        self.reader = Some(completion.reader);
+        let record = completion
+            .result
+            .map_err(|error| error.to_string())?
+            .ok_or("callback source disappeared before its recorded frontier")?;
+        Ok((completion.strategy, record.cursor, record))
+    }
+
+    pub fn advance(&mut self, strategy: StrategyId, cursor: CallbackWalCursor) {
+        self.cursors.insert(strategy, cursor);
+    }
+    pub fn refused(&mut self, strategy: StrategyId) {
+        self.retry_after
+            .insert(strategy, Instant::now() + Duration::from_secs(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_types::strategy_process::{
+        CallbackEvent, CallbackPreparation, StrategyCallbackInput,
+    };
+    use engine_types::{Side, SymbolId, Wal};
+
+    #[tokio::test]
+    async fn a_restart_between_slice_admissions_replays_only_the_other_durable_owner() {
+        slice_restart(false).await;
+    }
+
+    #[tokio::test]
+    async fn recovered_parent_restarts_before_either_slice_and_between_slice_admissions() {
+        slice_restart(true).await;
+    }
+
+    async fn slice_restart(recovered: bool) {
+        let path = crate::testpath::temp_path("callback-source-restart");
+        let parent = OrderUpdate::Fill {
+            allocation: Some(Box::new(
+                engine_types::execution_allocation::ExecutionAllocation {
+                    policy: engine_types::execution_allocation::AllocationPolicy::EmergencyNetFifo,
+                    slices: [(0, "a", "0.25"), (1, "b", "0.75")]
+                        .into_iter()
+                        .map(|(strategy, key, qty)| {
+                            engine_types::execution_allocation::ExecutionSlice {
+                                strategy: StrategyId(strategy),
+                                strategy_key: key.into(),
+                                quantity: qty.parse().unwrap(),
+                                fee: None,
+                            }
+                        })
+                        .collect(),
+                },
+            )),
+            amounts: None,
+            exec_id: "shared-private-parent".into(),
+            client_order_id: String::new(),
+            symbol: SymbolId(0),
+            side: Side::Sell,
+            qty: 1.0,
+            px: 100.0,
+            fee: None,
+            is_maker: false,
+            forced_close: Some(engine_types::ForcedClose::StopLoss),
+            venue_ts_ms: 1,
+            recv_ns: 1,
+        };
+        let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+        let source = if recovered {
+            let OrderUpdate::Fill {
+                allocation,
+                amounts,
+                exec_id,
+                client_order_id,
+                symbol,
+                side,
+                qty,
+                px,
+                fee,
+                is_maker,
+                forced_close,
+                venue_ts_ms,
+                recv_ns,
+            } = &parent
+            else {
+                unreachable!()
+            };
+            WalRecord::RecoveredFill {
+                callbacks: Some(engine_types::wal::RecoveredCallbacks {
+                    owners: vec![StrategyId(0), StrategyId(1)],
+                    recv_ns: *recv_ns,
+                }),
+                allocation: allocation.clone(),
+                amounts: amounts.as_deref().cloned(),
+                exec_id: exec_id.clone(),
+                client_order_id: client_order_id.clone(),
+                symbol: *symbol,
+                side: *side,
+                qty: *qty,
+                px: *px,
+                fee: *fee,
+                is_maker: *is_maker,
+                forced_close: *forced_close,
+                venue_ts_ms: *venue_ts_ms,
+                recovered_wall_ts_ms: 2,
+            }
+        } else {
+            WalRecord::OrderUpdate {
+                callbacks: Some(vec![StrategyId(0), StrategyId(1)]),
+                update: parent.clone(),
+            }
+        };
+        wal.append(&source).unwrap();
+        wal.barrier().unwrap();
+        drop(wal);
+        let (mut wal, rows) = engine_wal::WalWriter::open(&path).unwrap();
+        let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
+        let mut news = OrderNews::default();
+        news.attach(wal.callback_reader().unwrap().unwrap(), &rows, 2)
+            .unwrap();
+        assert!(news.unread_for(StrategyId(0)) && news.unread_for(StrategyId(1)));
+        news.start_read();
+        let completion = news.completed.recv().await.unwrap();
+        let (owner, cursor, record) = news.returned(completion).unwrap();
+        assert_eq!(owner, StrategyId(0));
+        let (owners, event) = record.source.unwrap();
+        assert_eq!(owners, [StrategyId(0), StrategyId(1)]);
+        let CallbackEvent::Order { update } = event else {
+            unreachable!()
+        };
+        let view = OrderNews::slice(&update, owner).unwrap();
+        assert!(matches!(view, OrderUpdate::Fill { qty, .. } if qty == 0.25));
+        let origin = news.origin(cursor.sequence).unwrap();
+        let input = StrategyCallbackInput {
+            callback_id: 1,
+            strategy: owner,
+            order_origin: Some(origin),
+            event: CallbackEvent::Order { update: view },
+            preparation: CallbackPreparation::Queued,
+        };
+        wal.append(&WalRecord::StrategyCallbackQueued { input })
+            .unwrap();
+        wal.barrier().unwrap();
+        drop(news);
+        drop(wal);
+        let (mut wal, rows) = engine_wal::WalWriter::open(&path).unwrap();
+        let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
+        let mut restored = OrderNews::default();
+        restored
+            .attach(wal.callback_reader().unwrap().unwrap(), &rows, 2)
+            .unwrap();
+        assert!(
+            !restored.unread_for(StrategyId(0)),
+            "committed callback admission was duplicated after restart"
+        );
+        assert!(
+            restored.unread_for(StrategyId(1)),
+            "one slice admission erased the other owner's input"
+        );
+        restored.start_read();
+        let completion = restored.completed.recv().await.unwrap();
+        let (owner, _, record) = restored.returned(completion).unwrap();
+        assert_eq!(owner, StrategyId(1));
+        let CallbackEvent::Order { update } = record.source.unwrap().1 else {
+            unreachable!()
+        };
+        let view = OrderNews::slice(&update, owner).unwrap();
+        assert!(
+            matches!(view, OrderUpdate::Fill { qty, fee: None, allocation: None, .. } if qty == 0.75)
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(
+                    row,
+                    WalRecord::OrderUpdate { .. } | WalRecord::RecoveredFill { .. }
+                ))
+                .count(),
+            1
+        );
+        let mut wrong = rows.clone();
+        let WalRecord::StrategyCallbackQueued { input } = &mut wrong[1] else {
+            unreachable!()
+        };
+        input.event = CallbackEvent::Order { update: parent };
+        let mut refused = OrderNews::default();
+        assert!(
+            refused
+                .attach(wal.callback_reader().unwrap().unwrap(), &wrong, 2)
+                .is_err(),
+            "whole-parent substitution silently changed a durable sleeve view"
+        );
+    }
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::*;
+    use engine_types::strategy_process::{
+        CallbackEvent, CallbackPreparation, StrategyCallbackInput,
+    };
+    use engine_types::Wal;
+
+    #[tokio::test]
+    async fn unread_inactive_sources_survive_rotation_without_stalling_active_order_news() {
+        let path = crate::testpath::temp_path("inactive-callback-source-rotation");
+        let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+        let event = |reason: &str| CallbackEvent::IntentRefused {
+            symbol: engine_types::SymbolId(0),
+            reduce_only: true,
+            reason: reason.into(),
+        };
+        let rows = vec![
+            WalRecord::StrategyCallbackSource {
+                strategy: StrategyId(0),
+                placement: None,
+                event: event("paused-owner"),
+            },
+            WalRecord::StrategyCallbackSource {
+                strategy: StrategyId(1),
+                placement: None,
+                event: event("active-owner"),
+            },
+        ];
+        for row in &rows {
+            wal.append(row).unwrap();
+        }
+        let mut news = OrderNews::default();
+        news.attach(wal.callback_reader().unwrap().unwrap(), &rows, 2)
+            .unwrap();
+        loop {
+            news.start_read_for(|strategy| strategy == StrategyId(1));
+            let completion = news.completed.recv().await.unwrap();
+            let (owner, cursor, record) = news.returned(completion).unwrap();
+            assert_eq!(owner, StrategyId(1));
+            if let Some((owners, source)) = record.source {
+                if owners.contains(&owner) {
+                    assert_eq!(source, event("active-owner"));
+                    let origin = CallbackOrderOrigin {
+                        segment: cursor.segment,
+                        sequence: cursor.sequence,
+                    };
+                    wal.append(&WalRecord::StrategyCallbackQueued {
+                        input: StrategyCallbackInput {
+                            callback_id: 0,
+                            strategy: owner,
+                            order_origin: Some(origin),
+                            event: source,
+                            preparation: CallbackPreparation::Queued,
+                        },
+                    })
+                    .unwrap();
+                    news.accepted(owner, origin);
+                }
+            }
+            news.advance(owner, record.next);
+            if !news.unread_for(owner) {
+                break;
+            }
+        }
+        assert!(news.unread_for(StrategyId(0)));
+        assert!(!news.unread_for(StrategyId(1)));
+        let params = toml::from_str("symbol='BTCUSDT'\nevery_s=60\nenabled=false").unwrap();
+        let strategies = (0..2)
+            .map(|id| engine_strategies::build_strategy("probe", StrategyId(id), &params).unwrap())
+            .collect();
+        let (engine, _) = crate::tests::callback_test_fixture(strategies).await;
+        let mut base = engine.rotation_base(1);
+        let WalRecord::SegmentBase {
+            strategy_callback_sources,
+            ..
+        } = &mut base
+        else {
+            unreachable!()
+        };
+        *strategy_callback_sources = news.snapshot();
+        wal.rotate(&base).unwrap();
+        news.rotated(wal.callback_reader().unwrap().unwrap())
+            .unwrap();
+        assert!(
+            news.unread_for(StrategyId(0)),
+            "rotation dropped a paused owner's durable source"
+        );
+        drop(news);
+        drop(wal);
+        let (mut wal, rows) = engine_wal::open_current(&path).unwrap();
+        let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
+        let mut news = OrderNews::default();
+        news.attach(wal.callback_reader().unwrap().unwrap(), &rows, 2)
+            .unwrap();
+        assert!(news.unread_for(StrategyId(0)));
+        assert!(
+            !news.unread_for(StrategyId(1)),
+            "restart duplicated the admitted active owner's source"
+        );
+        news.start_read_for(|strategy| strategy == StrategyId(0));
+        let completion = news.completed.recv().await.unwrap();
+        let (owner, cursor, record) = news.returned(completion).unwrap();
+        assert_eq!(owner, StrategyId(0));
+        assert_eq!(cursor.segment, 1);
+        assert_eq!(record.source.unwrap(), (vec![owner], event("paused-owner")));
+        let origin = CallbackOrderOrigin {
+            segment: cursor.segment,
+            sequence: cursor.sequence,
+        };
+        wal.append(&WalRecord::StrategyCallbackQueued {
+            input: StrategyCallbackInput {
+                callback_id: 1,
+                strategy: owner,
+                order_origin: Some(origin),
+                event: event("paused-owner"),
+                preparation: CallbackPreparation::Queued,
+            },
+        })
+        .unwrap();
+        wal.barrier().unwrap();
+        drop(wal);
+        let (mut wal, rows) = engine_wal::open_current(&path).unwrap();
+        let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
+        let mut news = OrderNews::default();
+        news.attach(wal.callback_reader().unwrap().unwrap(), &rows, 2)
+            .unwrap();
+        assert!(
+            !news.unread(),
+            "restarting after admission repeated a paused owner's old-segment source"
+        );
+    }
+}

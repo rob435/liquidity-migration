@@ -24,8 +24,10 @@
 //! local server. Neither of those is the venue accepting an order; only
 //! sending one proves that, and the funded realm is the owner's to arm.
 
+#[path = "recovery.rs"]
+mod recovery;
+
 use crate::RealmCredentials;
-use std::collections::HashMap;
 
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
@@ -90,6 +92,122 @@ pub struct LighterGateway {
 }
 
 impl LighterGateway {
+    async fn set_stop_terms(
+        &mut self,
+        symbol: SymbolId,
+        trigger_px: f64,
+        exact: Option<&engine_types::order_terms::ExactStopTerms>,
+    ) -> Result<(), VenueError> {
+        let name = self.name_of(symbol)?.to_string();
+        let market = self.market_for(&name).await?;
+
+        // What the stop has to cover, and which way it points, from the venue
+        // rather than from memory.
+        let raw: Box<serde_json::value::RawValue> = self
+            .http
+            .get_as(
+                PATH_ACCOUNT,
+                &format!("by=index&value={}", self.account.account_index),
+                &[],
+            )
+            .await?;
+        let (position_side, exact_qty) = crate::stop_state::lighter(
+            raw.get(),
+            market.index,
+            &market.symbol,
+            self.account.account_index,
+        )?;
+        if exact.is_some_and(|terms| terms.position_side != position_side) {
+            return Err(VenueError::BadRequest(
+                "native position changed side before stop".into(),
+            ));
+        }
+
+        // Which stops are standing now, read before anything is sent, so the
+        // list is exactly the old ones and the replacement cannot be in it.
+        let open = self.active_orders().await?;
+        let old: Vec<i64> = open
+            .get("orders")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter(|row| {
+                        // Read the same way every other field in this adapter
+                        // is: a stringed number read with `as_i64` alone comes
+                        // back as no match, and the old stop is left standing
+                        // beside the new one.
+                        int_field(row, "market_index").ok() == Some(i64::from(market.index))
+                            && row
+                                .get("reduce_only")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                            && row
+                                .get("type")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_ascii_lowercase()
+                                .contains("stop")
+                    })
+                    .filter_map(|row| int_field(row, "client_order_index").ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // The replacement first, the old ones after. The other order leaves
+        // the position bare for the width of a round trip, and bare for good
+        // if the placement then fails — which is the one state this call
+        // exists to prevent. Two reduce-only stops for a moment is harmless:
+        // whichever fires first flattens the position, and the other can only
+        // reduce a position that is already gone.
+        let exit_side = position_side.flipped();
+        let stop_id = format!("stop-{}-{}", market.index, wall_ms());
+        if let Some(terms) = exact {
+            let qty_units =
+                crate::order_wire::scaled(&exact_qty, market.size_decimals, (1u64 << 48) - 1)?;
+            let price_units = crate::order_wire::scaled(
+                &terms.trigger_price,
+                market.price_decimals,
+                u64::from(u32::MAX),
+            )?;
+            self.send_stop_units(
+                &market,
+                exit_side,
+                qty_units as i64,
+                price_units as u32,
+                &stop_id,
+            )
+            .await?;
+        } else {
+            self.send_stop(
+                &market,
+                exit_side,
+                exact_qty.to_f64().map_err(crate::order_wire::error)?,
+                trigger_px,
+                &stop_id,
+            )
+            .await?;
+        }
+
+        for index in old {
+            let cancel = CancelOrder {
+                account_index: self.account.account_index,
+                api_key_index: self.account.api_key_index,
+                market_index: market.index,
+                index,
+                expired_at: wall_ms() + TX_LIFETIME_MS,
+                nonce: self.take_nonce().await?,
+            };
+            let hashed = cancel.hash(self.realm.chain_id());
+            if let Err(gone) = self
+                .send_tx(TX_TYPE_CANCEL_ORDER, &hashed, cancel.to_json(&[0u8; 80]))
+                .await
+            {
+                tracing::debug!(index, error = %gone, "a standing stop was already gone");
+            }
+        }
+        Ok(())
+    }
+
     /// The live gateway: the realm's host, chain id and credentials.
     pub fn new(realm: LighterRealm, symbols: Vec<Symbol>) -> Result<Self, VenueError> {
         let creds = realm.credentials()?;
@@ -585,91 +703,34 @@ impl VenueGateway for LighterGateway {
     }
 
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
-        let name = self.name_of(symbol)?.to_string();
-        let market = self.market_for(&name).await?;
+        self.set_stop_terms(symbol, trigger_px, None).await
+    }
 
-        // What the stop has to cover, and which way it points, from the venue
-        // rather than from memory.
-        let account = self
-            .get(
-                PATH_ACCOUNT,
-                &format!("by=index&value={}", self.account.account_index),
+    async fn set_stop_exact(
+        &mut self,
+        symbol: SymbolId,
+        terms: &engine_types::order_terms::ExactStopTerms,
+    ) -> Result<(), VenueError> {
+        terms
+            .validate_wire_grid(
+                self.markets
+                    .for_symbol(self.name_of(symbol)?)?
+                    .exact_spec
+                    .as_ref()
+                    .ok_or_else(|| {
+                        VenueError::Unsupported("exact stop metadata is not installed".into())
+                    })?,
             )
-            .await?;
-        let ids = self.symbols.ids();
-        let resolve = |name: &str| ids.get(name).copied();
-        let held = parse_positions(&account, &self.markets, &HashMap::new(), &resolve)?;
-        let position = held.iter().find(|p| p.symbol == symbol).ok_or_else(|| {
-            VenueError::BadRequest(format!(
-                "there is no open position in {name} for a stop to protect"
-            ))
-        })?;
-
-        // Which stops are standing now, read before anything is sent, so the
-        // list is exactly the old ones and the replacement cannot be in it.
-        let open = self.active_orders().await?;
-        let old: Vec<i64> = open
-            .get("orders")
-            .and_then(Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter(|row| {
-                        // Read the same way every other field in this adapter
-                        // is: a stringed number read with `as_i64` alone comes
-                        // back as no match, and the old stop is left standing
-                        // beside the new one.
-                        int_field(row, "market_index").ok() == Some(i64::from(market.index))
-                            && row
-                                .get("reduce_only")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false)
-                            && row
-                                .get("type")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .to_ascii_lowercase()
-                                .contains("stop")
-                    })
-                    .filter_map(|row| int_field(row, "client_order_index").ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // The replacement first, the old ones after. The other order leaves
-        // the position bare for the width of a round trip, and bare for good
-        // if the placement then fails — which is the one state this call
-        // exists to prevent. Two reduce-only stops for a moment is harmless:
-        // whichever fires first flattens the position, and the other can only
-        // reduce a position that is already gone.
-        let exit_side = position.side.flipped();
-        let qty = position.qty;
-        self.send_stop(
-            &market,
-            exit_side,
-            qty,
-            trigger_px,
-            &format!("stop-{}-{}", market.index, wall_ms()),
+            .map_err(crate::order_wire::error)?;
+        self.set_stop_terms(
+            symbol,
+            terms
+                .trigger_price
+                .to_f64()
+                .map_err(crate::order_wire::error)?,
+            Some(terms),
         )
-        .await?;
-
-        for index in old {
-            let cancel = CancelOrder {
-                account_index: self.account.account_index,
-                api_key_index: self.account.api_key_index,
-                market_index: market.index,
-                index,
-                expired_at: wall_ms() + TX_LIFETIME_MS,
-                nonce: self.take_nonce().await?,
-            };
-            let hashed = cancel.hash(self.realm.chain_id());
-            if let Err(gone) = self
-                .send_tx(TX_TYPE_CANCEL_ORDER, &hashed, cancel.to_json(&[0u8; 80]))
-                .await
-            {
-                tracing::debug!(index, error = %gone, "a standing stop was already gone");
-            }
-        }
-        Ok(())
+        .await
     }
 
     fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {
@@ -709,27 +770,54 @@ impl VenueGateway for LighterGateway {
         if self.markets.is_empty() {
             self.load_markets().await?;
         }
-        // Two reads, issued together: the account, and the open orders that
-        // say which positions carry a stop.
-        let account_query = format!("by=index&value={}", self.account.account_index);
-        let account = self.get(PATH_ACCOUNT, &account_query);
-        let orders = self.active_orders();
-        let (observed_ns, reply) =
-            account_scan(futures_util::future::try_join(account, orders)).await;
-        let (account, orders) = reply?;
+        engine_types::orders::AccountRecoveryClient::account_view(
+            &recovery::RecoveryClient::new(self),
+            self.symbols.names(),
+        )
+        .await
+    }
 
-        let (equity_usdt, available_usdt) = parse_margin(&account)?;
-        let stops = stops_by_market(&orders)?;
-        let ids = self.symbols.ids();
-        let resolve = |name: &str| ids.get(name).copied();
-        let positions = parse_positions(&account, &self.markets, &stops, &resolve)?;
+    fn restore_instrument_catalog(
+        &self,
+        checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let pages = crate::catalog_checkpoint::decode(checkpoint, "lighter", self.http.base())?;
+        let catalog = catalog_from_pages(self.http.base(), pages)?;
+        crate::catalog_checkpoint::check(checkpoint, catalog)
+    }
+    fn install_instrument_catalog(
+        &mut self,
+        catalog: &engine_types::orders::InstrumentCatalog,
+    ) -> Result<(), VenueError> {
+        let snapshot = catalog
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.as_ref().as_any().downcast_ref::<CatalogSnapshot>())
+            .ok_or_else(|| VenueError::BadRequest("catalog belongs to another adapter".into()))?;
+        if snapshot.base != self.http.base() {
+            return Err(VenueError::BadRequest(
+                "catalog belongs to another venue endpoint".into(),
+            ));
+        }
+        self.markets = snapshot.data.clone();
+        Ok(())
+    }
 
-        Ok(AccountView {
-            equity_usdt,
-            available_usdt,
-            positions,
-            observed_ns,
-        })
+    fn account_recovery_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::AccountRecoveryClient>> {
+        Some(Box::new(recovery::RecoveryClient::new(self)))
+    }
+
+    fn instrument_catalog_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::InstrumentCatalogClient>> {
+        Some(Box::new(LookupClient {
+            http: self.http.clone(),
+            account_index: self.account.account_index,
+            api_key_index: self.account.api_key_index,
+            secret: self.secret,
+        }))
     }
 
     fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
@@ -792,61 +880,13 @@ impl VenueGateway for LighterGateway {
         if self.markets.is_empty() {
             self.load_markets().await?;
         }
-        // The venue answers at most this many per query, oldest first, so a
-        // busy window walks forward from the last fill seen. On this venue
-        // this read is the ONLY way a fill is ever learned — the private feed
-        // paces resyncs and carries no fills of its own — so one truncated
-        // page is a fill the log never gets.
-        const PAGE_LIMIT: usize = 100;
-        const MAX_PAGES: usize = 20;
-        let mut out: Vec<VenueExecution> = Vec::new();
-        let mut from = start_ms;
-        for _ in 0..MAX_PAGES {
-            if from > end_ms {
-                return Ok(out);
-            }
-            let query = format!(
-                "account_index={}&sort_by=timestamp&sort_dir=asc&from={from}&to={end_ms}\
-                 &limit={PAGE_LIMIT}",
-                self.account.account_index
-            );
-            let reply: engine_public::numeric_wire::RawObject<super::execution::HistoryReply> =
-                self.get_signed_as(PATH_TRADES, &query).await?;
-            let (rows, count) = reply
-                .0
-                .executions(self.account.account_index, &self.markets)?;
-            let newest = rows.iter().map(|r| r.venue_ts_ms).max();
-            // Fills already held are dropped by their own id, so a page that
-            // overlaps the last one does not double-count.
-            for row in rows {
-                if row.venue_ts_ms < start_ms || row.venue_ts_ms > end_ms {
-                    continue;
-                }
-                if !out.iter().any(|held| held.exec_id == row.exec_id) {
-                    out.push(row);
-                }
-            }
-            if count < PAGE_LIMIT {
-                return Ok(out);
-            }
-            match newest {
-                // Every fill in a full page shares one millisecond: stepping
-                // past it would drop fills, and not stepping loops forever.
-                Some(newest) if newest > from => from = newest,
-                _ => {
-                    return Err(VenueError::BadReply(
-                        "a full page of fills shares one timestamp, so the history cannot be \
-                         walked without losing some"
-                            .to_string(),
-                    ))
-                }
-            }
-        }
-        // A truncated history would quietly leave fills missing, which is the
-        // one answer this read must never give.
-        Err(VenueError::BadReply(format!(
-            "fill history still had pages after {MAX_PAGES}"
-        )))
+        engine_types::orders::AccountRecoveryClient::executions(
+            &recovery::RecoveryClient::new(self),
+            self.symbols.names(),
+            start_ms,
+            end_ms,
+        )
+        .await
     }
 }
 
@@ -891,6 +931,47 @@ fn base64_signature(bytes: &[u8; 80]) -> String {
         .to_string()
 }
 
+#[derive(Debug)]
+struct CatalogSnapshot {
+    base: String,
+    pages: Vec<String>,
+    data: Markets,
+}
+
+impl engine_types::orders::InstrumentCatalogCache for CatalogSnapshot {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn checkpoint(
+        &self,
+    ) -> Result<engine_types::orders::InstrumentCatalogCacheSnapshot, VenueError> {
+        crate::catalog_checkpoint::encode("lighter", &self.base, &self.pages)
+    }
+    fn retain_previous(
+        &self,
+        checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let previous = crate::catalog_checkpoint::decode(checkpoint, "lighter", &self.base)?;
+        crate::catalog_checkpoint::check(
+            checkpoint,
+            catalog_from_pages(&self.base, previous.clone())?,
+        )?;
+        let pages =
+            crate::catalog_checkpoint::merge_pages("lighter", previous, self.pages.clone())?;
+        let catalog = catalog_from_pages(&self.base, pages)?;
+        catalog.checkpoint()?.validate_bounds()?;
+        Ok(catalog)
+    }
+}
+
+#[engine_types::async_trait]
+impl engine_types::orders::InstrumentCatalogClient for LookupClient {
+    async fn fetch(&self) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let raw: Box<serde_json::value::RawValue> = self.http.get_as(PATH_MARKETS, "", &[]).await?;
+        catalog_from_pages(self.http.base(), vec![raw.get().to_owned()])
+    }
+}
+
 struct LookupClient {
     http: HttpClient,
     account_index: i64,
@@ -933,6 +1014,30 @@ impl engine_types::orders::OrderLookupClient for LookupClient {
             self.account_index,
         )
     }
+}
+
+fn catalog_from_pages(
+    base: &str,
+    pages: Vec<String>,
+) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+    if pages.len() != 1 {
+        return Err(VenueError::BadReply(
+            "catalog requires one metadata page".into(),
+        ));
+    }
+    let raw = pages[0].as_str();
+    let catalog = Markets::from_rows(engine_public::venues::lighter::parse::parse_markets_raw(
+        raw,
+    )?);
+    Ok(engine_types::orders::InstrumentCatalog {
+        rules: catalog.instrument_rules(),
+        specs: catalog.instrument_specs()?,
+        cache: Some(std::sync::Arc::new(CatalogSnapshot {
+            pages,
+            base: base.to_owned(),
+            data: catalog,
+        })),
+    })
 }
 
 #[cfg(test)]

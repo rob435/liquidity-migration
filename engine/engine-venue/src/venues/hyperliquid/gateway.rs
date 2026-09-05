@@ -20,6 +20,9 @@
 //! - **Assets are numbered by position** in the venue's own list, so the list
 //!   is read before the first order and re-read when a symbol is not in it.
 
+#[path = "recovery.rs"]
+mod recovery;
+
 use crate::RealmCredentials;
 
 use engine_types::ids::{Symbol, SymbolId};
@@ -77,6 +80,97 @@ pub struct HyperliquidGateway {
 }
 
 impl HyperliquidGateway {
+    async fn set_stop_terms(
+        &mut self,
+        symbol: SymbolId,
+        trigger_px: f64,
+        exact: Option<&engine_types::order_terms::ExactStopTerms>,
+    ) -> Result<(), VenueError> {
+        let name = self.name_of(symbol)?.to_string();
+        let asset = self.asset_for(&name).await?;
+        // The venue's own spelling. Both reads below compare it against what
+        // the venue wrote, and a coin folded up from the engine's symbol never
+        // matches for the assets this venue names with a lower-case prefix —
+        // leaving a position that cannot be protected and cannot be exited.
+        let coin = asset.coin.clone();
+
+        // What the stop has to cover, from the venue rather than from memory.
+        let raw: Box<serde_json::value::RawValue> = self
+            .info_as(json!({"type": "clearinghouseState", "user": self.address_text()}))
+            .await?;
+        let (position_side, exact_qty) = crate::stop_state::hyperliquid(raw.get(), &coin)?;
+        if exact.is_some_and(|terms| terms.position_side != position_side) {
+            return Err(VenueError::BadRequest(
+                "native position changed side before stop".into(),
+            ));
+        }
+
+        // Which stops are standing now, read before anything is sent, so the
+        // list is exactly the old ones and the replacement cannot be in it.
+        let open = self.open_orders().await?;
+        let old = stop_oids(&open, &coin)?;
+
+        // The replacement first, the old ones after. The other order leaves
+        // the position bare for the width of a round trip, and bare for good
+        // if the placement then fails — which is the one state this call
+        // exists to prevent. Two stops for a moment is harmless: whichever
+        // fires first flattens the position, and the other can only reduce a
+        // position that is already gone.
+        let stop = match exact {
+            Some(terms) => {
+                let step = engine_types::numeric::Exact::parse_decimal(&format!(
+                    "1e-{}",
+                    asset.sz_decimals
+                ))
+                .map_err(crate::order_wire::error)?;
+                if !exact_qty
+                    .is_multiple_of(&step)
+                    .map_err(crate::order_wire::error)?
+                {
+                    return Err(VenueError::BadReply(
+                        "native stop quantity violates asset precision".into(),
+                    ));
+                }
+                let text = engine_types::order_terms::decimal_wire(&terms.trigger_price)
+                    .map_err(crate::order_wire::error)?;
+                OrderWire {
+                    asset: asset.index,
+                    is_buy: position_side.flipped() == Side::Buy,
+                    px: text.clone(),
+                    sz: engine_types::order_terms::decimal_wire(&exact_qty)
+                        .map_err(crate::order_wire::error)?,
+                    reduce_only: true,
+                    kind: OrderKindWire::Trigger {
+                        is_market: true,
+                        trigger_px: text,
+                        tpsl: TPSL_STOP,
+                    },
+                    cloid: None,
+                }
+            }
+            None => self.stop_wire(
+                &asset,
+                position_side,
+                exact_qty.to_f64().map_err(crate::order_wire::error)?,
+                trigger_px,
+            )?,
+        };
+        let data = self
+            .exchange(order_action(vec![stop], GROUPING_POSITION_TPSL))
+            .await?;
+        first_status(&data)?;
+
+        for oid in old {
+            let data = self.exchange(cancel_action(asset.index, oid)).await?;
+            // A stop that fired or was pulled between the read and here is
+            // gone, which is the state this was asking for.
+            if let Err(VenueError::Rejected { .. }) = first_status(&data) {
+                tracing::debug!(oid, coin = %coin, "a standing stop was already gone");
+            }
+        }
+        Ok(())
+    }
+
     /// The live gateway: the realm's host, and the realm's credentials from
     /// the environment. There is no argument for the host on purpose — it is
     /// derived from the realm, so the account being addressed and the network
@@ -243,11 +337,21 @@ impl HyperliquidGateway {
     /// Build the entry as the venue takes it. A market intent becomes an
     /// immediate-or-cancel limit priced through the book, because this venue
     /// has no market order.
+    #[cfg(test)]
     fn entry_wire(
         &self,
         req: &OrderRequest,
         asset: &Asset,
         reference_px: f64,
+    ) -> Result<OrderWire, VenueError> {
+        self.entry_wire_with_reference(req, asset, reference_px, None)
+    }
+    fn entry_wire_with_reference(
+        &self,
+        req: &OrderRequest,
+        asset: &Asset,
+        reference_px: f64,
+        exact_reference: Option<&engine_types::numeric::Exact>,
     ) -> Result<OrderWire, VenueError> {
         if let Some(terms) = crate::order_wire::terms(req)? {
             use engine_types::numeric::Exact;
@@ -262,8 +366,10 @@ impl HyperliquidGateway {
                 .map_err(crate::order_wire::error)?;
             let (price, kind) = match req.kind {
                 OrderKind::Market => {
-                    let reference =
-                        strategy_decimal(reference_px).map_err(crate::order_wire::error)?;
+                    let reference = match exact_reference {
+                        Some(reference) => reference.clone(),
+                        None => strategy_decimal(reference_px).map_err(crate::order_wire::error)?,
+                    };
                     let slippage = Exact::parse_decimal(&MARKET_SLIPPAGE.to_string())
                         .map_err(crate::order_wire::error)?;
                     let multiplier = if req.side == Side::Buy {
@@ -405,19 +511,28 @@ impl HyperliquidGateway {
     }
 
     /// The venue's mid prices, for pricing a market order through the book.
-    async fn mid_price(&self, coin: &str) -> Result<f64, VenueError> {
-        let mids = self.info(json!({"type": "allMids"})).await?;
-        let text = mids
+    async fn mid_price(
+        &self,
+        coin: &str,
+    ) -> Result<engine_types::numeric::ExactNumber, VenueError> {
+        let mids: std::collections::BTreeMap<String, engine_public::numeric_wire::DecimalField> =
+            self.http
+                .post_as(
+                    PATH_INFO,
+                    r#"{"type":"allMids"}"#.to_owned(),
+                    "application/json",
+                    &[],
+                )
+                .await?;
+        let number = mids
             .get(coin)
-            .and_then(Value::as_str)
-            .ok_or_else(|| VenueError::BadReply(format!("the venue quotes no mid for {coin}")))?;
-        let px: f64 = text.parse().map_err(|_| {
-            VenueError::BadReply(format!("the mid for {coin} is not a number: {text:?}"))
-        })?;
-        if !px.is_finite() || px <= 0.0 {
-            return Err(VenueError::BadReply(format!("the mid for {coin} is {px}")));
+            .ok_or_else(|| VenueError::BadReply(format!("the venue quotes no mid for {coin}")))?
+            .required("mid")?;
+        if !number.value.is_positive() {
+            return Err(VenueError::BadReply("mid price is not positive".into()));
         }
-        Ok(px)
+        number.value.to_f64().map_err(crate::order_wire::error)?;
+        Ok(number)
     }
 
     async fn open_orders(&self) -> Result<Value, VenueError> {
@@ -455,14 +570,25 @@ impl VenueGateway for HyperliquidGateway {
 
         // Only a market order needs a reference price, and only then is the
         // round trip for one paid.
-        let reference_px = match req.kind {
-            // The asset row's own spelling, not one folded from the engine's
-            // symbol: `allMids` is keyed the way the venue writes the coin,
-            // and `kPEPE` is not `KPEPE`.
-            OrderKind::Market => self.mid_price(&asset.coin.clone()).await?,
-            OrderKind::Limit { px, .. } => px,
+        let reference = match req.kind {
+            OrderKind::Market => Some(self.mid_price(&asset.coin).await?),
+            OrderKind::Limit { .. } => None,
         };
-        let entry = self.entry_wire(req, &asset, reference_px)?;
+        let reference_px = match req.kind {
+            OrderKind::Limit { px, .. } => px,
+            OrderKind::Market => reference
+                .as_ref()
+                .expect("market reference")
+                .value
+                .to_f64()
+                .map_err(crate::order_wire::error)?,
+        };
+        let entry = self.entry_wire_with_reference(
+            req,
+            &asset,
+            reference_px,
+            reference.as_ref().map(|number| &number.value),
+        )?;
 
         // The stop rides with the entry, so one signed action leaves the
         // position protected rather than two. Never on an exit: a reduce-only
@@ -509,6 +635,7 @@ impl VenueGateway for HyperliquidGateway {
         client_order_id: &str,
         spec: AmendSpec,
     ) -> Result<(), VenueError> {
+        crate::order_wire::amend_terms(&spec)?;
         if spec.px.is_none() && spec.qty.is_none() {
             return Err(VenueError::BadRequest(
                 "an amend that changes neither price nor size".to_string(),
@@ -519,7 +646,13 @@ impl VenueGateway for HyperliquidGateway {
         // is read back for the half that is not changing rather than assumed.
         let asset = self.asset_of_id(symbol).await?;
         let wanted = cloid::to_cloid(client_order_id);
-        let open = self.open_orders().await?;
+        let raw_rows: Vec<Box<serde_json::value::RawValue>> = self
+            .info_as(json!({"type":"frontendOpenOrders","user":self.address_text()}))
+            .await?;
+        let open: Value = serde_json::from_str(
+            &serde_json::to_string(&raw_rows).map_err(crate::order_wire::error)?,
+        )
+        .map_err(|e| VenueError::BadReply(e.to_string()))?;
         let rows = open.as_array().ok_or_else(|| {
             VenueError::BadReply("the open-order reply is not a list".to_string())
         })?;
@@ -542,13 +675,53 @@ impl VenueGateway for HyperliquidGateway {
             }
         };
         let side = if is_buy { Side::Buy } else { Side::Sell };
-        let px = match spec.px {
-            Some(px) => venue_px(px, side, asset.sz_decimals)?,
-            None => crate::json::num_field(current, "limitPx")?.to_string(),
-        };
-        let sz = match spec.qty {
-            Some(qty) => venue_sz(qty, asset.sz_decimals)?,
-            None => crate::json::num_field(current, "sz")?.to_string(),
+        let (px, sz) = if let Some(terms) = crate::order_wire::amend_terms(&spec)? {
+            let raw = raw_rows
+                .iter()
+                .find(|raw| {
+                    #[derive(serde::Deserialize)]
+                    struct Identity {
+                        cloid: String,
+                    }
+                    serde_json::from_str::<Identity>(raw.get()).is_ok_and(|row| row.cloid == wanted)
+                })
+                .ok_or_else(|| VenueError::BadReply("amend lookup lost its raw row".into()))?;
+            let (old_px, old_qty) =
+                crate::amend_state::resting_hyperliquid(raw.get(), &asset.coin, &wanted)?;
+            let px = terms.limit_price.as_ref().unwrap_or(&old_px);
+            let qty = terms.quantity.as_ref().unwrap_or(&old_qty);
+            let effective = engine_types::order_terms::ExactOrderTerms {
+                quantity: qty.clone(),
+                limit_price: Some(px.clone()),
+                stop_trigger_price: None,
+                physical_stop_trigger_price: None,
+                input_policy: engine_types::order_terms::OrderInputPolicy::StrategyShortestDecimal,
+            };
+            effective
+                .validate_wire_grid(
+                    &asset.exact_spec()?,
+                    OrderKind::Limit {
+                        px: px.to_f64().map_err(crate::order_wire::error)?,
+                        tif: TimeInForce::Gtc,
+                    },
+                    engine_types::order_terms::QuantityPolicy::Normal,
+                )
+                .map_err(crate::order_wire::error)?;
+            (
+                engine_types::order_terms::decimal_wire(px).map_err(crate::order_wire::error)?,
+                engine_types::order_terms::decimal_wire(qty).map_err(crate::order_wire::error)?,
+            )
+        } else {
+            (
+                match spec.px {
+                    Some(px) => venue_px(px, side, asset.sz_decimals)?,
+                    None => crate::json::num_field(current, "limitPx")?.to_string(),
+                },
+                match spec.qty {
+                    Some(qty) => venue_sz(qty, asset.sz_decimals)?,
+                    None => crate::json::num_field(current, "sz")?.to_string(),
+                },
+            )
         };
 
         // The venue's modify replaces the order outright, so the
@@ -563,15 +736,21 @@ impl VenueGateway for HyperliquidGateway {
             )));
         };
 
+        let reduce_only = match current.get("reduceOnly").and_then(Value::as_bool) {
+            Some(value) => value,
+            None if spec.exact_terms.is_some() => {
+                return Err(VenueError::BadReply(
+                    "amend lookup has no readable reduce-only flag".into(),
+                ))
+            }
+            None => false,
+        };
         let order = OrderWire {
             asset: asset.index,
             is_buy,
             px,
             sz,
-            reduce_only: current
-                .get("reduceOnly")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            reduce_only,
             kind: OrderKindWire::Limit { tif },
             cloid: Some(wanted.clone()),
         };
@@ -581,50 +760,31 @@ impl VenueGateway for HyperliquidGateway {
     }
 
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
-        let name = self.name_of(symbol)?.to_string();
-        let asset = self.asset_for(&name).await?;
-        // The venue's own spelling. Both reads below compare it against what
-        // the venue wrote, and a coin folded up from the engine's symbol never
-        // matches for the assets this venue names with a lower-case prefix —
-        // leaving a position that cannot be protected and cannot be exited.
-        let coin = asset.coin.clone();
+        self.set_stop_terms(symbol, trigger_px, None).await
+    }
 
-        // What the stop has to cover, from the venue rather than from memory.
-        let state = self
-            .info(json!({"type": "clearinghouseState", "user": self.address_text()}))
-            .await?;
-        let (position_side, qty) = position_of(&state, &coin)?.ok_or_else(|| {
-            VenueError::BadRequest(format!(
-                "there is no open position in {name} for a stop to protect"
-            ))
-        })?;
-
-        // Which stops are standing now, read before anything is sent, so the
-        // list is exactly the old ones and the replacement cannot be in it.
-        let open = self.open_orders().await?;
-        let old = stop_oids(&open, &coin)?;
-
-        // The replacement first, the old ones after. The other order leaves
-        // the position bare for the width of a round trip, and bare for good
-        // if the placement then fails — which is the one state this call
-        // exists to prevent. Two stops for a moment is harmless: whichever
-        // fires first flattens the position, and the other can only reduce a
-        // position that is already gone.
-        let stop = self.stop_wire(&asset, position_side, qty, trigger_px)?;
-        let data = self
-            .exchange(order_action(vec![stop], GROUPING_POSITION_TPSL))
-            .await?;
-        first_status(&data)?;
-
-        for oid in old {
-            let data = self.exchange(cancel_action(asset.index, oid)).await?;
-            // A stop that fired or was pulled between the read and here is
-            // gone, which is the state this was asking for.
-            if let Err(VenueError::Rejected { .. }) = first_status(&data) {
-                tracing::debug!(oid, coin = %coin, "a standing stop was already gone");
-            }
-        }
-        Ok(())
+    async fn set_stop_exact(
+        &mut self,
+        symbol: SymbolId,
+        terms: &engine_types::order_terms::ExactStopTerms,
+    ) -> Result<(), VenueError> {
+        terms
+            .validate_wire_grid(
+                &self
+                    .assets
+                    .for_symbol(self.name_of(symbol)?)?
+                    .exact_spec()?,
+            )
+            .map_err(crate::order_wire::error)?;
+        self.set_stop_terms(
+            symbol,
+            terms
+                .trigger_price
+                .to_f64()
+                .map_err(crate::order_wire::error)?,
+            Some(terms),
+        )
+        .await
     }
 
     fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {
@@ -690,30 +850,52 @@ impl VenueGateway for HyperliquidGateway {
     }
 
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
-        // Two reads, issued together: the account, and the open orders that
-        // say which positions carry a stop. This venue keeps no stop on the
-        // position row, so one read cannot answer both.
-        let state = self.info(json!({
-            "type": "clearinghouseState",
-            "user": self.address_text(),
-        }));
-        let orders = self.open_orders();
-        let (observed_ns, reply) =
-            account_scan(futures_util::future::try_join(state, orders)).await;
-        let (state, orders) = reply?;
+        engine_types::orders::AccountRecoveryClient::account_view(
+            &recovery::RecoveryClient::new(self),
+            self.symbols.names(),
+        )
+        .await
+    }
 
-        let (equity_usdt, available_usdt) = parse_margin(&state)?;
-        let stops = stops_by_coin(&orders)?;
-        let ids = self.symbols.ids();
-        let resolve = |name: &str| ids.get(name).copied();
-        let positions = parse_positions(&state, &stops, &resolve)?;
+    fn restore_instrument_catalog(
+        &self,
+        checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let pages = crate::catalog_checkpoint::decode(checkpoint, "hyperliquid", self.http.base())?;
+        let catalog = catalog_from_pages(self.http.base(), pages)?;
+        crate::catalog_checkpoint::check(checkpoint, catalog)
+    }
+    fn install_instrument_catalog(
+        &mut self,
+        catalog: &engine_types::orders::InstrumentCatalog,
+    ) -> Result<(), VenueError> {
+        let snapshot = catalog
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.as_ref().as_any().downcast_ref::<CatalogSnapshot>())
+            .ok_or_else(|| VenueError::BadRequest("catalog belongs to another adapter".into()))?;
+        if snapshot.base != self.http.base() {
+            return Err(VenueError::BadRequest(
+                "catalog belongs to another venue endpoint".into(),
+            ));
+        }
+        self.assets = snapshot.data.clone();
+        Ok(())
+    }
 
-        Ok(AccountView {
-            equity_usdt,
-            available_usdt,
-            positions,
-            observed_ns,
-        })
+    fn account_recovery_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::AccountRecoveryClient>> {
+        Some(Box::new(recovery::RecoveryClient::new(self)))
+    }
+
+    fn instrument_catalog_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::InstrumentCatalogClient>> {
+        Some(Box::new(LookupClient {
+            http: self.http.clone(),
+            account: self.address_text(),
+        }))
     }
 
     fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
@@ -758,88 +940,14 @@ impl VenueGateway for HyperliquidGateway {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<VenueExecution>, VenueError> {
-        // The venue answers at most 2000 fills per query and returns the
-        // oldest first, so a long window walks forward from the last fill seen
-        // rather than assuming one reply covered it.
-        const PAGE_LIMIT: usize = 2000;
-        const MAX_PAGES: usize = 20;
-        let mut out: Vec<VenueExecution> = Vec::new();
-        let mut from = start_ms;
-        for _ in 0..MAX_PAGES {
-            if from > end_ms {
-                return Ok(out);
-            }
-            let page: Vec<Box<serde_json::value::RawValue>> = self
-                .info_as(json!({
-                    "type": "userFillsByTime",
-                    "user": self.address_text(),
-                    "startTime": from,
-                    "endTime": end_ms,
-                }))
-                .await?;
-            let rows = page
-                .iter()
-                .map(|row| super::execution::decode_raw(row.get()))
-                .collect::<Result<Vec<_>, _>>()?;
-            let count = rows.len();
-            let newest = rows.iter().map(|r| r.venue_ts_ms).max();
-            // Fills already held are dropped by their own id, so a page that
-            // overlaps the last one does not double-count.
-            for row in rows {
-                if !out.iter().any(|held| held.exec_id == row.exec_id) {
-                    out.push(row);
-                }
-            }
-            if count < PAGE_LIMIT {
-                return Ok(out);
-            }
-            match newest {
-                // Every fill in a full page shares one millisecond: stepping
-                // past it would drop fills, and not stepping loops forever.
-                Some(newest) if newest > from => from = newest,
-                _ => {
-                    return Err(VenueError::BadReply(
-                        "a full page of fills shares one timestamp, so the history cannot be \
-                         walked without losing some"
-                            .to_string(),
-                    ))
-                }
-            }
-        }
-        // A truncated history would quietly leave fills missing, which is the
-        // one answer this read must never give.
-        Err(VenueError::BadReply(format!(
-            "fill history still had pages after {MAX_PAGES}"
-        )))
+        engine_types::orders::AccountRecoveryClient::executions(
+            &recovery::RecoveryClient::new(self),
+            self.symbols.names(),
+            start_ms,
+            end_ms,
+        )
+        .await
     }
-}
-
-/// The side and size of an open position in one coin, or `None` when there is
-/// none.
-fn position_of(state: &Value, coin: &str) -> Result<Option<(Side, f64)>, VenueError> {
-    let rows = state
-        .get("assetPositions")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            VenueError::BadReply("no assetPositions in the account reply".to_string())
-        })?;
-    for row in rows {
-        let Some(position) = row.get("position") else {
-            continue;
-        };
-        if position.get("coin").and_then(Value::as_str) != Some(coin) {
-            continue;
-        }
-        let signed = crate::json::num_field(position, "szi")?;
-        if signed == 0.0 {
-            return Ok(None);
-        }
-        return Ok(Some((
-            if signed > 0.0 { Side::Buy } else { Side::Sell },
-            signed.abs(),
-        )));
-    }
-    Ok(None)
 }
 
 /// The venue's order numbers of every reduce-only stop standing on one coin.
@@ -878,6 +986,55 @@ fn stop_oids(orders: &Value, coin: &str) -> Result<Vec<i64>, VenueError> {
     Ok(out)
 }
 
+#[derive(Debug)]
+struct CatalogSnapshot {
+    base: String,
+    pages: Vec<String>,
+    data: Assets,
+}
+
+impl engine_types::orders::InstrumentCatalogCache for CatalogSnapshot {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn checkpoint(
+        &self,
+    ) -> Result<engine_types::orders::InstrumentCatalogCacheSnapshot, VenueError> {
+        crate::catalog_checkpoint::encode("hyperliquid", &self.base, &self.pages)
+    }
+    fn retain_previous(
+        &self,
+        checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+    ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let previous = crate::catalog_checkpoint::decode(checkpoint, "hyperliquid", &self.base)?;
+        crate::catalog_checkpoint::check(
+            checkpoint,
+            catalog_from_pages(&self.base, previous.clone())?,
+        )?;
+        let pages =
+            crate::catalog_checkpoint::merge_pages("hyperliquid", previous, self.pages.clone())?;
+        let catalog = catalog_from_pages(&self.base, pages)?;
+        catalog.checkpoint()?.validate_bounds()?;
+        Ok(catalog)
+    }
+}
+
+#[engine_types::async_trait]
+impl engine_types::orders::InstrumentCatalogClient for LookupClient {
+    async fn fetch(&self) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        let raw: Box<serde_json::value::RawValue> = self
+            .http
+            .post_as(
+                PATH_INFO,
+                r#"{"type":"meta"}"#.to_owned(),
+                "application/json",
+                &[],
+            )
+            .await?;
+        catalog_from_pages(self.http.base(), vec![raw.get().to_owned()])
+    }
+}
+
 struct LookupClient {
     http: HttpClient,
     account: String,
@@ -896,6 +1053,28 @@ impl engine_types::orders::OrderLookupClient for LookupClient {
             .await?;
         super::lookup::parse(raw.get(), name, client_order_id)
     }
+}
+
+fn catalog_from_pages(
+    base: &str,
+    pages: Vec<String>,
+) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+    if pages.len() != 1 {
+        return Err(VenueError::BadReply(
+            "catalog requires one metadata page".into(),
+        ));
+    }
+    let raw = pages[0].as_str();
+    let catalog = Assets::from_rows(parse_meta_raw(raw)?);
+    Ok(engine_types::orders::InstrumentCatalog {
+        rules: catalog.instrument_rules(),
+        specs: catalog.instrument_specs()?,
+        cache: Some(std::sync::Arc::new(CatalogSnapshot {
+            pages,
+            base: base.to_owned(),
+            data: catalog,
+        })),
+    })
 }
 
 #[cfg(test)]
@@ -1064,9 +1243,21 @@ mod tests {
             {"position": {"coin": "BTC", "szi": "-0.5", "entryPx": "95000"}},
             {"position": {"coin": "ETH", "szi": "0", "entryPx": "0"}}
         ]});
-        assert_eq!(position_of(&state, "BTC").unwrap(), Some((Side::Sell, 0.5)));
-        assert_eq!(position_of(&state, "ETH").unwrap(), None);
-        assert_eq!(position_of(&state, "SOL").unwrap(), None);
+        assert_eq!(
+            crate::stop_state::hyperliquid(&state.to_string(), "BTC").unwrap(),
+            (
+                Side::Sell,
+                engine_types::numeric::Exact::parse_decimal("0.5").unwrap()
+            )
+        );
+        assert!(matches!(
+            crate::stop_state::hyperliquid(&state.to_string(), "ETH"),
+            Err(VenueError::BadRequest(_))
+        ));
+        assert!(matches!(
+            crate::stop_state::hyperliquid(&state.to_string(), "SOL"),
+            Err(VenueError::BadRequest(_))
+        ));
     }
 
     #[test]

@@ -310,7 +310,8 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
         WalWriter::open_unsynced(&opts.wal_path)?
     };
     let replayed: Vec<WalRecord> = replayed.into_iter().map(|(_, r)| r).collect();
-    let symbols: Vec<Symbol> = assembly::symbol_order(&replayed, &wanted);
+    let symbols: Vec<Symbol> = assembly::symbol_order(&replayed, &wanted)
+        .map_err(|error| EngineError::Boot(error.to_string()))?;
 
     let rules: Vec<(Symbol, InstrumentRule)> = read_instruments(&opts.instruments_path)
         .map_err(|e| EngineError::Boot(format!("instruments: {e}")))?;

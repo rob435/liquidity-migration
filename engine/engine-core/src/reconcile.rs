@@ -19,12 +19,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use engine_types::{
-    AccountView, OrderRequest, OrderUpdate, Side, StrategyId, SymbolId, VenueOrder, WalRecord,
-};
+use engine_types::{AccountView, OrderRequest, OrderUpdate, Side, SymbolId, VenueOrder, WalRecord};
 
 use crate::attribution::{forced_close_owner, Attribution};
 use crate::inflight::LedgerOfOrders;
+use engine_types::numeric::{Exact, ExecutionAmounts};
+
+pub(crate) type PhysicalExposure = BTreeMap<SymbolId, Exact>;
 
 /// The smallest difference worth calling a difference when nothing better is
 /// known. Real comparisons use the symbol's own quantity step instead — see
@@ -257,7 +258,7 @@ pub fn reconcile(
     resolve: impl Fn(&str) -> Option<SymbolId>,
     qty_step_of: impl Fn(SymbolId) -> Option<f64>,
     px_tick_of: impl Fn(SymbolId) -> Option<f64>,
-) -> Reconciliation {
+) -> Result<Reconciliation, String> {
     let mut findings = Vec::new();
 
     // Orders the log still shows working, against the venue's own list.
@@ -287,9 +288,9 @@ pub fn reconcile(
         });
     }
 
-    findings.extend(foreign_fills(replayed));
+    findings.extend(foreign_fills(replayed)?);
 
-    let (logged, intended) = position_state(replayed);
+    let (logged, intended) = position_state(replayed)?;
 
     for position in &account.positions {
         let intended_px = intended
@@ -314,8 +315,15 @@ pub fn reconcile(
             });
         }
         let venue_qty = signed(position.side, position.qty);
-        let logged_qty = logged.get(&position.symbol).copied().unwrap_or(0.0);
-        if (venue_qty - logged_qty).abs() > tolerance(qty_step_of(position.symbol)) {
+        let logged_qty = logged
+            .get(&position.symbol)
+            .map(|qty| qty.to_f64())
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0.0);
+        if (venue_qty != 0.0 && !logged.contains_key(&position.symbol))
+            || (venue_qty - logged_qty).abs() > tolerance(qty_step_of(position.symbol))
+        {
             findings.push(Finding::UnaccountedExposure {
                 symbol: position.symbol,
                 venue_qty,
@@ -327,7 +335,7 @@ pub fn reconcile(
     // A symbol the log has fills for but the venue reports flat is not a
     // finding: the position was closed while the engine was down, which is
     // ordinary. The venue is the truth about what is held.
-    Reconciliation { findings }
+    Ok(Reconciliation { findings })
 }
 
 /// Fills that cannot join to an order this log sent since its latest compact
@@ -337,6 +345,7 @@ fn has_allocation(record: &WalRecord) -> bool {
     matches!(
         record,
         WalRecord::OrderUpdate {
+            callbacks: _,
             update: OrderUpdate::Fill {
                 allocation: Some(_),
                 ..
@@ -348,8 +357,8 @@ fn has_allocation(record: &WalRecord) -> bool {
     )
 }
 
-fn foreign_fills(replayed: &[WalRecord]) -> Vec<Finding> {
-    let mut sent: HashMap<String, StrategyId> = HashMap::new();
+fn foreign_fills(replayed: &[WalRecord]) -> Result<Vec<Finding>, String> {
+    let mut sent: HashMap<String, engine_types::OrderRequest> = HashMap::new();
     let mut claims = Attribution::default();
     let mut strategy_names = Vec::new();
     let mut findings = Vec::new();
@@ -361,7 +370,7 @@ fn foreign_fills(replayed: &[WalRecord]) -> Vec<Finding> {
         }
         match record {
             WalRecord::OrderSent { request, .. } => {
-                sent.insert(request.client_order_id.clone(), request.strategy);
+                sent.insert(request.client_order_id.clone(), request.clone());
             }
             WalRecord::OrderUpdate {
                 update:
@@ -373,6 +382,7 @@ fn foreign_fills(replayed: &[WalRecord]) -> Vec<Finding> {
                         forced_close,
                         ..
                     },
+                ..
             }
             | WalRecord::RecoveredFill {
                 client_order_id,
@@ -382,14 +392,28 @@ fn foreign_fills(replayed: &[WalRecord]) -> Vec<Finding> {
                 forced_close,
                 ..
             } => {
-                let owner = sent.get(client_order_id).copied().or_else(|| {
-                    if has_allocation(record) {
-                        None
-                    } else {
-                        forced_close_owner(&claims, client_order_id, *symbol, *side, *forced_close)
-                    }
-                });
-                match claims.fold_record_fill(record, owner, &strategy_names) {
+                let owner = sent
+                    .get(client_order_id)
+                    .and_then(|request| request.sleeve_owner())
+                    .or_else(|| {
+                        if has_allocation(record) {
+                            None
+                        } else {
+                            forced_close_owner(
+                                &claims,
+                                client_order_id,
+                                *symbol,
+                                *side,
+                                *forced_close,
+                            )
+                        }
+                    });
+                match claims.fold_record_fill(
+                    record,
+                    owner,
+                    sent.get(client_order_id),
+                    &strategy_names,
+                ) {
                     Ok(true) => {}
                     _ => findings.push(Finding::ForeignFill {
                         client_order_id: client_order_id.clone(),
@@ -397,40 +421,44 @@ fn foreign_fills(replayed: &[WalRecord]) -> Vec<Finding> {
                     }),
                 }
             }
+            WalRecord::PortfolioOffsetSettled { settlement } => {
+                let prepared = claims.prepare_internal_settlement(settlement)?;
+                claims.commit_internal_settlement(prepared)?;
+            }
+            WalRecord::SleeveStopSet {
+                strategy,
+                symbol,
+                side,
+                trigger_price,
+                ..
+            } => {
+                claims.set_sleeve_stop_exact(*strategy, *symbol, *side, trigger_price.clone())?;
+            }
             WalRecord::ClaimsDropped { rows, .. } => claims.forget(rows),
             WalRecord::LatchCleared {
                 restated_exposure, ..
             } => {
-                claims.keep_held(restated_exposure);
+                claims.keep_held(restated_exposure)?;
                 findings.clear();
             }
-            WalRecord::SegmentBase {
-                open_orders,
-                attribution,
-                ..
-            } => {
-                claims.restate(attribution);
+            WalRecord::SegmentBase { open_orders, .. } => {
+                claims = Attribution::try_from_records(std::slice::from_ref(record))?;
                 sent = open_orders
                     .iter()
-                    .map(|order| {
-                        (
-                            order.request.client_order_id.clone(),
-                            order.request.strategy,
-                        )
-                    })
+                    .map(|order| (order.request.client_order_id.clone(), order.request.clone()))
                     .collect();
                 findings.clear();
             }
             _ => {}
         }
     }
-    findings
+    Ok(findings)
 }
 
-fn side_of(signed_qty: f64) -> Option<Side> {
-    if signed_qty > QTY_EPS {
+fn side_of(signed_qty: &Exact) -> Option<Side> {
+    if signed_qty.is_positive() {
         Some(Side::Buy)
-    } else if signed_qty < -QTY_EPS {
+    } else if signed_qty.is_negative() {
         Some(Side::Sell)
     } else {
         None
@@ -457,29 +485,35 @@ fn request_stop_for_fill(
 /// request; a missing, malformed, mismatched, or reduce-only request clears
 /// repair authority instead of borrowing a sibling's stop.
 pub(crate) fn note_owned_fill(
-    exposure: &mut BTreeMap<SymbolId, f64>,
+    exposure: &mut PhysicalExposure,
     intended: &mut BTreeMap<SymbolId, IntendedPositionStop>,
     request: Option<&OrderRequest>,
     symbol: SymbolId,
     side: Side,
-    qty: f64,
-) {
-    if !qty.is_finite() || qty <= 0.0 {
-        return;
+    qty: &Exact,
+) -> Result<(), String> {
+    if !qty.is_positive() {
+        return Err("physical fill quantity must be positive".into());
     }
 
-    let prior = exposure.get(&symbol).copied().unwrap_or(0.0);
-    let next = prior + signed(side, qty);
-    if side_of(next).is_none() {
+    let prior = exposure.get(&symbol).cloned().unwrap_or_default();
+    let next = &prior
+        + &match side {
+            Side::Buy => qty.clone(),
+            Side::Sell => -qty,
+        };
+    next.validate_storage().map_err(|e| e.to_string())?;
+    next.to_f64().map_err(|e| e.to_string())?;
+    if side_of(&next).is_none() {
         exposure.remove(&symbol);
         intended.remove(&symbol);
-        return;
+        return Ok(());
     }
 
-    exposure.insert(symbol, next);
-    let next_side = side_of(next).expect("non-flat quantity has a side");
-    let crossed_or_opened = side_of(prior) != Some(next_side);
-    let grew = next.abs() > prior.abs() + QTY_EPS;
+    exposure.insert(symbol, next.clone());
+    let next_side = side_of(&next).expect("non-flat quantity has a side");
+    let crossed_or_opened = side_of(&prior) != Some(next_side);
+    let grew = next.abs() > prior.abs();
     if crossed_or_opened {
         match request_stop_for_fill(request, symbol, side) {
             Some(trigger_px) => {
@@ -518,29 +552,77 @@ pub(crate) fn note_owned_fill(
     {
         intended.remove(&symbol);
     }
+    Ok(())
+}
+
+pub(crate) fn fill_quantity(qty: f64, amounts: Option<&ExecutionAmounts>) -> Result<Exact, String> {
+    let quantity = match amounts {
+        Some(amounts) => {
+            amounts
+                .quantity
+                .validate_provenance()
+                .map_err(|e| e.to_string())?;
+            if amounts.quantity.value.to_f64().map_err(|e| e.to_string())? != qty {
+                return Err("physical fill quantity disagrees with its exact amount".into());
+            }
+            amounts.quantity.value.clone()
+        }
+        None => Exact::from_legacy_f64(qty).map_err(|e| e.to_string())?,
+    };
+    if !quantity.is_positive() {
+        return Err("physical fill quantity must be positive".into());
+    }
+    Ok(quantity)
+}
+
+fn restored_exposure(rows: &[engine_types::SymbolTotal]) -> Result<PhysicalExposure, String> {
+    let mut exposure = PhysicalExposure::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for row in rows {
+        if !seen.insert(row.symbol) {
+            return Err("repeated physical exposure symbol".into());
+        }
+        let quantity = row.exact_quantity().map_err(|e| e.to_string())?;
+        if !quantity.is_zero() {
+            exposure.insert(row.symbol, quantity);
+        }
+    }
+    Ok(exposure)
+}
+
+pub(crate) fn snapshot_exposure(exposure: &PhysicalExposure) -> Vec<engine_types::SymbolTotal> {
+    exposure
+        .iter()
+        .map(|(symbol, quantity)| engine_types::SymbolTotal {
+            symbol: *symbol,
+            signed_qty: quantity
+                .to_f64()
+                .expect("validated physical exposure projection"),
+            exact_signed_qty: Some(engine_types::numeric::ExactNumber::derived(
+                quantity.clone(),
+            )),
+        })
+        .collect()
 }
 
 fn matching_intended_stop(
     row: &engine_types::IntendedStop,
-    exposure: &BTreeMap<SymbolId, f64>,
+    exposure: &PhysicalExposure,
 ) -> Option<(SymbolId, IntendedPositionStop)> {
     let side = row.side?;
     let trigger_px = row.trigger_px;
     if !trigger_px.is_finite()
         || trigger_px <= 0.0
-        || side_of(exposure.get(&row.symbol).copied().unwrap_or(0.0)) != Some(side)
+        || exposure.get(&row.symbol).and_then(side_of) != Some(side)
     {
         return None;
     }
     Some((row.symbol, IntendedPositionStop { side, trigger_px }))
 }
 
-fn position_state(
-    replayed: &[WalRecord],
-) -> (
-    BTreeMap<SymbolId, f64>,
-    BTreeMap<SymbolId, IntendedPositionStop>,
-) {
+type PositionState = (PhysicalExposure, BTreeMap<SymbolId, IntendedPositionStop>);
+
+fn position_state(replayed: &[WalRecord]) -> Result<PositionState, String> {
     let mut exposure = BTreeMap::new();
     let mut intended = BTreeMap::new();
     let mut sent: HashMap<String, OrderRequest> = HashMap::new();
@@ -570,6 +652,7 @@ fn position_state(
                         forced_close,
                         ..
                     },
+                ..
             }
             | WalRecord::RecoveredFill {
                 client_order_id,
@@ -580,22 +663,52 @@ fn position_state(
                 ..
             } => {
                 let request = sent.get(client_order_id);
-                let owner = request.map(|request| request.strategy).or_else(|| {
-                    if has_allocation(record) {
-                        None
-                    } else {
-                        forced_close_owner(&claims, client_order_id, *symbol, *side, *forced_close)
-                    }
-                });
-                if claims.fold_record_fill(record, owner, &strategy_names) == Ok(true) {
-                    note_owned_fill(&mut exposure, &mut intended, request, *symbol, *side, *qty);
+                let owner = request
+                    .and_then(|request| request.sleeve_owner())
+                    .or_else(|| {
+                        if has_allocation(record) {
+                            None
+                        } else {
+                            forced_close_owner(
+                                &claims,
+                                client_order_id,
+                                *symbol,
+                                *side,
+                                *forced_close,
+                            )
+                        }
+                    });
+                if claims.fold_record_fill(
+                    record,
+                    owner,
+                    sent.get(client_order_id),
+                    &strategy_names,
+                ) == Ok(true)
+                {
+                    let amounts = match record {
+                        WalRecord::OrderUpdate {
+                            update: OrderUpdate::Fill { amounts, .. },
+                            ..
+                        } => amounts.as_deref(),
+                        WalRecord::RecoveredFill { amounts, .. } => amounts.as_ref(),
+                        _ => unreachable!(),
+                    };
+                    let quantity = fill_quantity(*qty, amounts)?;
+                    note_owned_fill(
+                        &mut exposure,
+                        &mut intended,
+                        request,
+                        *symbol,
+                        *side,
+                        &quantity,
+                    )?;
                 }
             }
             WalRecord::StopSet {
                 symbol, trigger_px, ..
             } => {
                 if trigger_px.is_finite() && *trigger_px > 0.0 {
-                    if let Some(side) = side_of(exposure.get(symbol).copied().unwrap_or(0.0)) {
+                    if let Some(side) = exposure.get(symbol).and_then(side_of) {
                         intended.insert(
                             *symbol,
                             IntendedPositionStop {
@@ -606,20 +719,28 @@ fn position_state(
                     }
                 }
             }
+            WalRecord::PortfolioOffsetSettled { settlement } => {
+                let prepared = claims.prepare_internal_settlement(settlement)?;
+                claims.commit_internal_settlement(prepared)?;
+            }
+            WalRecord::SleeveStopSet {
+                strategy,
+                symbol,
+                side,
+                trigger_price,
+                ..
+            } => {
+                claims.set_sleeve_stop_exact(*strategy, *symbol, *side, trigger_price.clone())?;
+            }
             WalRecord::ClaimsDropped { rows, .. } => claims.forget(rows),
             WalRecord::SegmentBase {
                 logged_exposure,
                 intended_stops,
                 open_orders,
-                attribution,
                 ..
             } => {
-                claims.restate(attribution);
-                exposure = logged_exposure
-                    .iter()
-                    .filter(|row| row.signed_qty.is_finite() && row.signed_qty.abs() > QTY_EPS)
-                    .map(|row| (row.symbol, row.signed_qty))
-                    .collect();
+                claims = Attribution::try_from_records(std::slice::from_ref(record))?;
+                exposure = restored_exposure(logged_exposure)?;
                 intended = intended_stops
                     .iter()
                     .filter_map(|row| matching_intended_stop(row, &exposure))
@@ -632,12 +753,8 @@ fn position_state(
             WalRecord::LatchCleared {
                 restated_exposure, ..
             } => {
-                claims.keep_held(restated_exposure);
-                exposure = restated_exposure
-                    .iter()
-                    .filter(|row| row.signed_qty.is_finite() && row.signed_qty.abs() > QTY_EPS)
-                    .map(|row| (row.symbol, row.signed_qty))
-                    .collect();
+                claims.keep_held(restated_exposure)?;
+                exposure = restored_exposure(restated_exposure)?;
                 // The operator accepted the venue's quantity, not an old
                 // order's stop provenance. Reusing a same-direction stop from
                 // before the clear could attach one writer's intent to
@@ -648,22 +765,36 @@ fn position_state(
         }
     }
 
-    (exposure, intended)
+    Ok((exposure, intended))
 }
 
 /// Signed quantity per symbol from fills that join to orders this log sent.
 /// Foreign fills remain durable records but never become trusted engine
 /// exposure. A segment restatement is "set", not "add": at its place in the
 /// stream it is exactly what the records before it added up to.
-pub(crate) fn logged_exposure(replayed: &[WalRecord]) -> BTreeMap<SymbolId, f64> {
-    position_state(replayed).0
+pub(crate) fn logged_exposure(replayed: &[WalRecord]) -> Result<BTreeMap<SymbolId, f64>, String> {
+    physical_exposure(replayed)?
+        .into_iter()
+        .map(|(symbol, quantity)| {
+            quantity
+                .to_f64()
+                .map(|quantity| (symbol, quantity))
+                .map_err(|e| e.to_string())
+        })
+        .collect()
+}
+
+pub(crate) fn physical_exposure(replayed: &[WalRecord]) -> Result<PhysicalExposure, String> {
+    Ok(position_state(replayed)?.0)
 }
 
 /// The stop belonging to each trusted filled position. Merely sending an
 /// opposite-side sibling cannot alter this state; only an owned fill that
 /// grows or crosses the position can do so.
-pub(crate) fn intended_stops(replayed: &[WalRecord]) -> BTreeMap<SymbolId, IntendedPositionStop> {
-    position_state(replayed).1
+pub(crate) fn intended_stops(
+    replayed: &[WalRecord],
+) -> Result<BTreeMap<SymbolId, IntendedPositionStop>, String> {
+    Ok(position_state(replayed)?.1)
 }
 
 fn signed(side: Side, qty: f64) -> f64 {
@@ -705,6 +836,7 @@ mod tests {
 
     fn fill(id: &str, symbol: u16, side: Side, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -745,6 +877,7 @@ mod tests {
 
     fn held(symbol: u16, side: Side, qty: f64, stop_attached: bool) -> PositionView {
         PositionView {
+            exact_stop_px: None,
             symbol: SymbolId(symbol),
             side,
             qty,
@@ -768,7 +901,7 @@ mod tests {
 
     fn run(replayed: &[WalRecord], venue: &[VenueOrder], acct: &AccountView) -> Reconciliation {
         let log = LedgerOfOrders::from_records(replayed);
-        reconcile(&log, replayed, venue, acct, names, steps, |_| Some(0.5))
+        reconcile(&log, replayed, venue, acct, names, steps, |_| Some(0.5)).unwrap()
     }
 
     #[test]
@@ -1044,7 +1177,7 @@ mod tests {
             fill("buy", 3, Side::Buy, 1.0),
         ];
 
-        let stops = intended_stops(&log);
+        let stops = intended_stops(&log).unwrap();
         assert_eq!(
             stops.get(&SymbolId(3)),
             Some(&IntendedPositionStop {
@@ -1064,7 +1197,7 @@ mod tests {
             fill("sell", 3, Side::Sell, 1.0),
         ];
 
-        let stops = intended_stops(&log);
+        let stops = intended_stops(&log).unwrap();
         assert_eq!(
             stops.get(&SymbolId(3)),
             Some(&IntendedPositionStop {
@@ -1082,6 +1215,7 @@ mod tests {
             sent("buy", 3, Side::Buy, 1.0, Some(90.0)),
             sent("sell", 3, Side::Sell, 1.0, Some(110.0)),
             WalRecord::OrderUpdate {
+                callbacks: None,
                 update: OrderUpdate::Reject {
                     client_order_id: "sell".into(),
                     code: 10001,
@@ -1104,7 +1238,7 @@ mod tests {
             fill("sell", 3, Side::Sell, 1.0),
         ];
         assert_eq!(
-            intended_stops(&log).get(&SymbolId(3)),
+            intended_stops(&log).unwrap().get(&SymbolId(3)),
             Some(&IntendedPositionStop {
                 side: Side::Buy,
                 trigger_px: 90.0,
@@ -1114,7 +1248,7 @@ mod tests {
         let mut crossed = log;
         crossed.push(fill("sell", 3, Side::Sell, 2.0));
         assert_eq!(
-            intended_stops(&crossed).get(&SymbolId(3)),
+            intended_stops(&crossed).unwrap().get(&SymbolId(3)),
             Some(&IntendedPositionStop {
                 side: Side::Sell,
                 trigger_px: 110.0,
@@ -1132,7 +1266,7 @@ mod tests {
         ];
 
         assert_eq!(
-            intended_stops(&log).get(&SymbolId(3)),
+            intended_stops(&log).unwrap().get(&SymbolId(3)),
             Some(&IntendedPositionStop {
                 side: Side::Buy,
                 trigger_px: 95.0,
@@ -1150,7 +1284,7 @@ mod tests {
         ];
 
         assert_eq!(
-            intended_stops(&log).get(&SymbolId(3)),
+            intended_stops(&log).unwrap().get(&SymbolId(3)),
             Some(&IntendedPositionStop {
                 side: Side::Sell,
                 trigger_px: 105.0,
@@ -1160,6 +1294,7 @@ mod tests {
 
     fn recovered(exec: &str, id: &str, symbol: u16, side: Side, qty: f64) -> WalRecord {
         WalRecord::RecoveredFill {
+            callbacks: None,
             allocation: None,
             amounts: None,
             exec_id: exec.into(),
@@ -1214,7 +1349,7 @@ mod tests {
         ];
         let out = run(&log, &[], &account(vec![held(3, Side::Buy, 3.0, true)]));
 
-        assert_eq!(logged_exposure(&log).get(&SymbolId(3)), Some(&2.0));
+        assert_eq!(logged_exposure(&log).unwrap().get(&SymbolId(3)), Some(&2.0));
         assert!(out.findings.iter().any(|finding| matches!(
             finding,
             Finding::ForeignFill { client_order_id, symbol }
@@ -1237,7 +1372,7 @@ mod tests {
         ];
         let out = run(&log, &[], &account(vec![held(3, Side::Buy, 1.0, true)]));
 
-        assert_eq!(logged_exposure(&log).get(&SymbolId(3)), Some(&2.0));
+        assert_eq!(logged_exposure(&log).unwrap().get(&SymbolId(3)), Some(&2.0));
         assert!(out.findings.iter().any(|finding| matches!(
             finding,
             Finding::ForeignFill { client_order_id, symbol }
@@ -1253,6 +1388,7 @@ mod tests {
     #[test]
     fn a_venue_stop_squares_trusted_exposure_on_replay() {
         let stop = WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -1277,7 +1413,7 @@ mod tests {
         let out = run(&log, &[], &account(vec![]));
 
         assert_eq!(
-            logged_exposure(&log).get(&SymbolId(3)),
+            logged_exposure(&log).unwrap().get(&SymbolId(3)),
             None,
             "the stop closed it"
         );
@@ -1304,6 +1440,7 @@ mod tests {
                 wall_ts_ms: 9,
                 note: "looked at the log".into(),
                 restated_exposure: vec![SymbolTotal {
+                    exact_signed_qty: None,
                     symbol: SymbolId(3),
                     signed_qty: 371.1,
                 }],
@@ -1330,5 +1467,222 @@ mod tests {
             assert!(line.len() > 20, "too terse to act on: {line}");
         }
         assert_eq!(out.lines().len(), out.findings.len());
+    }
+
+    fn decimal_fill(id: &str, symbol: u16, side: Side, quantity: &str) -> WalRecord {
+        use engine_types::numeric::{AssetAmount, AssetId, ExactNumber, ExecutionAmounts};
+        let quantity = ExactNumber::venue_decimal(quantity).unwrap();
+        let mut record = fill(id, symbol, side, quantity.value.to_f64().unwrap());
+        if let WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill { amounts, .. },
+            ..
+        } = &mut record
+        {
+            *amounts = Some(Box::new(ExecutionAmounts {
+                settlement_asset: AssetId::Unknown,
+                quantity,
+                price: ExactNumber::venue_decimal("100").unwrap(),
+                fee: Some(AssetAmount {
+                    asset: AssetId::Unknown,
+                    amount: ExactNumber::venue_decimal("0").unwrap(),
+                }),
+            }));
+        }
+        record
+    }
+
+    #[test]
+    fn physical_frontier_preserves_a_real_tiny_exact_position_and_its_stop() {
+        let log = [
+            sent("tiny", 3, Side::Buy, 0.000000000005, Some(90.0)),
+            decimal_fill("tiny", 3, Side::Buy, "0.000000000005"),
+        ];
+        assert_eq!(
+            logged_exposure(&log).unwrap().get(&SymbolId(3)),
+            Some(&0.000000000005)
+        );
+        assert_eq!(
+            intended_stops(&log).unwrap().get(&SymbolId(3)),
+            Some(&IntendedPositionStop {
+                side: Side::Buy,
+                trigger_px: 90.0
+            })
+        );
+    }
+
+    #[test]
+    fn physical_frontier_uses_decimal_execution_amounts_without_float_drift() {
+        let mut log = vec![
+            sent("decimal", 3, Side::Buy, 1.0, Some(90.0)),
+            decimal_fill("decimal", 3, Side::Buy, "0.1"),
+            decimal_fill("decimal", 3, Side::Buy, "0.2"),
+        ];
+        assert_eq!(logged_exposure(&log).unwrap().get(&SymbolId(3)), Some(&0.3));
+        log.extend([
+            sent("reduce", 3, Side::Sell, 0.3, None),
+            decimal_fill("reduce", 3, Side::Sell, "0.3"),
+        ]);
+        assert!(logged_exposure(&log).unwrap().is_empty());
+        assert!(intended_stops(&log).unwrap().is_empty());
+    }
+
+    #[test]
+    fn physical_frontier_keeps_an_accepted_tiny_manual_baseline_and_detects_unknown_tiny_holdings()
+    {
+        let log = [WalRecord::LatchCleared {
+            wall_ts_ms: 1,
+            note: "accepted external position".into(),
+            restated_exposure: vec![engine_types::SymbolTotal {
+                exact_signed_qty: None,
+                symbol: SymbolId(3),
+                signed_qty: 0.000000000005,
+            }],
+            findings: Vec::new(),
+        }];
+        assert_eq!(
+            logged_exposure(&log).unwrap().get(&SymbolId(3)),
+            Some(&0.000000000005)
+        );
+        assert!(intended_stops(&log).unwrap().is_empty());
+        let out = run(
+            &[],
+            &[],
+            &account(vec![held(3, Side::Buy, 0.000000000005, true)]),
+        );
+        assert_eq!(
+            out.findings,
+            [Finding::UnaccountedExposure {
+                symbol: SymbolId(3),
+                venue_qty: 0.000000000005,
+                logged_qty: 0.0
+            }]
+        );
+    }
+
+    #[test]
+    fn physical_frontier_internal_settlement_cannot_leave_ghost_forced_close_owners() {
+        use engine_types::numeric::{AssetId, Exact};
+        use engine_types::portfolio_control::{PortfolioOffsetSettlement, PortfolioOffsetSlice};
+        let mut log = vec![WalRecord::Names {
+            strategies: vec!["long".into(), "short".into(), "next".into()],
+            symbols: vec!["A".into(), "B".into(), "C".into(), "BTCUSDT".into()],
+        }];
+        let mut order = sent("short", 3, Side::Sell, 1.0, Some(110.0));
+        if let WalRecord::OrderSent { request, .. } = &mut order {
+            request.strategy = StrategyId(1);
+        }
+        log.extend([
+            sent("long", 3, Side::Buy, 1.0, Some(90.0)),
+            decimal_fill("long", 3, Side::Buy, "1"),
+            order,
+            decimal_fill("short", 3, Side::Sell, "1"),
+        ]);
+        log.push(WalRecord::PortfolioOffsetSettled {
+            settlement: PortfolioOffsetSettlement {
+                emergency_id: 1,
+                symbol: SymbolId(3),
+                price: Exact::parse_decimal("100").unwrap(),
+                settled_ms: 1,
+                slices: vec![
+                    PortfolioOffsetSlice {
+                        strategy: StrategyId(0),
+                        signed_quantity: Exact::parse_decimal("-1").unwrap(),
+                        settlement_asset: AssetId::Unknown,
+                    },
+                    PortfolioOffsetSlice {
+                        strategy: StrategyId(1),
+                        signed_quantity: Exact::parse_decimal("1").unwrap(),
+                        settlement_asset: AssetId::Unknown,
+                    },
+                ],
+            },
+        });
+        let mut next = sent("next", 3, Side::Buy, 1.0, Some(90.0));
+        if let WalRecord::OrderSent { request, .. } = &mut next {
+            request.strategy = StrategyId(2);
+        }
+        log.extend([next, decimal_fill("next", 3, Side::Buy, "1")]);
+        let mut close = decimal_fill("", 3, Side::Sell, "1");
+        if let WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill { forced_close, .. },
+            ..
+        } = &mut close
+        {
+            *forced_close = Some(engine_types::ForcedClose::StopLoss);
+        }
+        log.push(close);
+        assert!(
+            foreign_fills(&log).unwrap().is_empty(),
+            "settled sleeves changed ownership of the later real stop fill"
+        );
+        assert!(logged_exposure(&log).unwrap().is_empty());
+    }
+
+    #[test]
+    fn physical_frontier_unknown_tiny_venue_position_cannot_fit_inside_a_float_epsilon() {
+        let out = run(
+            &[],
+            &[],
+            &account(vec![held(3, Side::Buy, 0.000000000005, true)]),
+        );
+        assert_eq!(
+            out.findings,
+            [Finding::UnaccountedExposure {
+                symbol: SymbolId(3),
+                venue_qty: 0.000000000005,
+                logged_qty: 0.0
+            }]
+        );
+    }
+
+    #[test]
+    fn physical_frontier_recovered_decimals_preserve_accepted_external_quantity() {
+        let mut log = vec![
+            WalRecord::LatchCleared {
+                wall_ts_ms: 1,
+                note: "accepted external".into(),
+                findings: vec![],
+                restated_exposure: vec![engine_types::SymbolTotal {
+                    symbol: SymbolId(3),
+                    signed_qty: 0.5,
+                    exact_signed_qty: None,
+                }],
+            },
+            sent("recovered", 3, Side::Buy, 0.3, Some(90.0)),
+        ];
+        for (exec_id, quantity) in [("r1", "0.1"), ("r2", "0.2")] {
+            let WalRecord::OrderUpdate {
+                update: OrderUpdate::Fill { qty, amounts, .. },
+                ..
+            } = decimal_fill("recovered", 3, Side::Buy, quantity)
+            else {
+                unreachable!()
+            };
+            log.push(WalRecord::RecoveredFill {
+                callbacks: None,
+                exec_id: exec_id.into(),
+                client_order_id: "recovered".into(),
+                symbol: SymbolId(3),
+                side: Side::Buy,
+                qty,
+                px: 100.0,
+                fee: Some(0.0),
+                amounts: amounts.map(|value| *value),
+                allocation: None,
+                is_maker: false,
+                forced_close: None,
+                venue_ts_ms: 2,
+                recovered_wall_ts_ms: 3,
+            });
+        }
+        assert_eq!(
+            physical_exposure(&log).unwrap().get(&SymbolId(3)),
+            Some(&Exact::parse_decimal("0.8").unwrap())
+        );
+        let owned = Attribution::try_from_records(&log).unwrap();
+        assert_eq!(
+            owned.snapshot().positions[0].signed_qty,
+            Exact::parse_decimal("0.3").unwrap()
+        );
     }
 }

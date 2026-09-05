@@ -157,6 +157,7 @@ async fn the_group_flush_tick_walks_a_resting_entry_after_the_market() {
     assert_eq!(
         amends[0].2,
         AmendSpec {
+            exact_terms: None,
             px: Some(30_001.0),
             qty: None
         },
@@ -223,6 +224,7 @@ async fn the_stated_price_is_where_the_supervisor_believes_the_order_is() {
         .run(
             &mut ScriptFeed::wide_quotes(symbol, 0, false),
             &mut ScriptOrderFeed::playing(vec![OrderUpdate::Amended {
+                exact_terms: None,
                 client_order_id: id.clone(),
                 px: moved_to,
                 qty: 0.01,

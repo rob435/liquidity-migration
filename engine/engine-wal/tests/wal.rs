@@ -74,6 +74,7 @@ fn every_variant() -> Vec<WalRecord> {
             arrival_mid: 0.0,
         },
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -215,6 +216,7 @@ fn new_checkpoints_and_unknown_fees_are_readable_by_the_previous_shape() {
             through_wall_ts_ms: 1_770_000_000_000,
         },
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -232,6 +234,7 @@ fn new_checkpoints_and_unknown_fees_are_readable_by_the_previous_shape() {
             },
         },
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -249,6 +252,7 @@ fn new_checkpoints_and_unknown_fees_are_readable_by_the_previous_shape() {
             },
         },
         WalRecord::RecoveredFill {
+            callbacks: None,
             allocation: None,
             amounts: None,
             exec_id: "unknown-recovered-fee".to_string(),
@@ -264,6 +268,7 @@ fn new_checkpoints_and_unknown_fees_are_readable_by_the_previous_shape() {
             recovered_wall_ts_ms: 1_770_000_000_004,
         },
         WalRecord::RecoveredFill {
+            callbacks: None,
             allocation: None,
             amounts: None,
             exec_id: "explicit-zero-recovered-fee".to_string(),
@@ -298,12 +303,14 @@ fn new_checkpoints_and_unknown_fees_are_readable_by_the_previous_shape() {
     assert!(matches!(
         &legacy_view[1],
         WalRecord::OrderUpdate {
+            callbacks: _,
             update: OrderUpdate::Fill { fee: Some(0.0), .. }
         }
     ));
     assert!(matches!(
         &legacy_view[2],
         WalRecord::OrderUpdate {
+            callbacks: _,
             update: OrderUpdate::Fill { fee: Some(0.0), .. }
         }
     ));
@@ -569,11 +576,17 @@ fn a_barrier_after_a_rotation_covers_the_new_segment() {
     let (mut wal, _) = WalWriter::open(&path).unwrap();
     wal.append(&note("before rotation")).unwrap();
     let base = WalRecord::SegmentBase {
+        portfolio_control: Default::default(),
         pending_order_dispatches: Vec::new(),
         signal_producers: Vec::new(),
+        identities: None,
+        instrument_catalog: None,
         signal_suspensions: Vec::new(),
         portfolio: Some(Default::default()),
         strategy_processes: Vec::new(),
+        strategy_callback_queues: Vec::new(),
+        strategy_callback_sources: Vec::new(),
+        signal_callback_deliveries: Vec::new(),
         strategy_callbacks: Vec::new(),
         wall_ts_ms: 1_770_000_000_000,
         strategies: Vec::new(),
@@ -814,6 +827,7 @@ fn a_number_that_is_not_a_number_is_refused_instead_of_bricking_the_log() {
     for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let err = wal
             .append(&WalRecord::OrderUpdate {
+                callbacks: None,
                 update: OrderUpdate::Fill {
                     allocation: None,
                     amounts: None,
@@ -1036,4 +1050,273 @@ fn writing_a_legacy_order_preserves_its_legacy_tag() {
     assert_eq!(value["kind"], "order_sent");
     assert!(value.get("dispatch").is_none());
     assert_eq!(replay(&path).unwrap(), [(1, record)]);
+}
+
+#[test]
+fn callback_cursor_reads_parent_owner_and_unknown_fee_without_moving_the_writer() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let mut parent = every_variant()
+        .into_iter()
+        .find(|record| {
+            matches!(
+                record,
+                WalRecord::OrderUpdate {
+                    update: OrderUpdate::Fill { .. },
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    let WalRecord::OrderUpdate {
+        callbacks,
+        update: OrderUpdate::Fill { fee, .. },
+    } = &mut parent
+    else {
+        unreachable!()
+    };
+    *callbacks = Some(vec![StrategyId(0)]);
+    *fee = None;
+    let (mut writer, _) = WalWriter::open(&path).unwrap();
+    writer.append(&note(&"x".repeat(1024 * 1024))).unwrap();
+    writer.append(&parent).unwrap();
+    let mut reader = writer.callback_reader().unwrap().unwrap();
+    let first = reader.next(reader.start()).unwrap().unwrap();
+    assert!(first.source.is_none());
+    writer
+        .append(&note("writer remains at the append frontier"))
+        .unwrap();
+    writer.flush().unwrap();
+    let second = reader.next(first.next).unwrap().unwrap();
+    let (owners, update) = second.source.unwrap();
+    assert_eq!(owners, [StrategyId(0)]);
+    assert!(matches!(
+        update,
+        engine_types::strategy_process::CallbackEvent::Order {
+            update: OrderUpdate::Fill { fee: None, .. }
+        }
+    ));
+    assert_eq!(second.next.sequence, 3);
+    let third = reader.next(second.next).unwrap().unwrap();
+    assert!(third.source.is_none());
+    assert!(reader.next(third.next).unwrap().is_none());
+    assert_eq!(replay(&path).unwrap()[1].1, parent);
+    assert_eq!(
+        replay(path).unwrap()[2].1,
+        note("writer remains at the append frontier")
+    );
+}
+
+#[test]
+fn current_order_news_cannot_omit_its_callback_ownership() {
+    for missing in [false, true] {
+        let mut value = serde_json::to_value(
+            every_variant()
+                .into_iter()
+                .find(|record| matches!(record, WalRecord::OrderUpdate { .. }))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["kind"], "order_update_v2");
+        if !missing {
+            value["callbacks"] = serde_json::Value::Null;
+        }
+        let payload = serde_json::to_vec(&value).unwrap();
+        let mut bytes = b"EWAL0001".to_vec();
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&crc32c::crc32c(&payload).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        let dir = TempDir::new().unwrap();
+        let path = log_path(&dir);
+        fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            WalWriter::open(&path),
+            Err(WalError::Corrupt { .. })
+        ));
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn exact_amend_records_require_typed_values_and_legacy_bytes_still_decode() {
+    use engine_types::numeric::ExactNumber;
+    let record = WalRecord::AmendResolved {
+        client_order_id: "eng-1".into(),
+        effective_px: 100.1,
+        exact_effective_px: Some(ExactNumber::venue_decimal("100.1").unwrap()),
+    };
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    write_records(&path, std::slice::from_ref(&record));
+    assert_eq!(
+        replay(&path)
+            .unwrap()
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect::<Vec<_>>(),
+        vec![record.clone()]
+    );
+    for field in [None, Some(serde_json::Value::Null)] {
+        let mut value = serde_json::to_value(&record).unwrap();
+        if let Some(field) = field {
+            value["exact_effective_px"] = field;
+        } else {
+            value.as_object_mut().unwrap().remove("exact_effective_px");
+        }
+        for legacy in [false, true] {
+            value["kind"] = if legacy {
+                "amend_resolved"
+            } else {
+                "amend_resolved_v2"
+            }
+            .into();
+            let payload = serde_json::to_vec(&value).unwrap();
+            let mut bytes = b"EWAL0001".to_vec();
+            bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&crc32c::crc32c(&payload).to_le_bytes());
+            bytes.extend_from_slice(&payload);
+            fs::write(&path, &bytes).unwrap();
+            if legacy {
+                assert!(WalWriter::open(&path).is_ok());
+            } else {
+                assert!(matches!(
+                    WalWriter::open(&path),
+                    Err(WalError::Corrupt { .. })
+                ));
+            }
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+}
+
+fn recovered_callback_record() -> WalRecord {
+    WalRecord::RecoveredFill {
+        callbacks: Some(engine_types::wal::RecoveredCallbacks {
+            owners: vec![StrategyId(0), StrategyId(1)],
+            recv_ns: 123,
+        }),
+        allocation: Some(Box::new(
+            engine_types::execution_allocation::ExecutionAllocation {
+                policy: engine_types::execution_allocation::AllocationPolicy::EmergencyNetFifo,
+                slices: [(0, "a", "0.25"), (1, "b", "0.75")]
+                    .into_iter()
+                    .map(|(strategy, key, qty)| {
+                        engine_types::execution_allocation::ExecutionSlice {
+                            strategy: StrategyId(strategy),
+                            strategy_key: key.into(),
+                            quantity: qty.parse().unwrap(),
+                            fee: None,
+                        }
+                    })
+                    .collect(),
+            },
+        )),
+        amounts: None,
+        exec_id: "recovered-owned-parent".into(),
+        client_order_id: String::new(),
+        symbol: SymbolId(0),
+        side: Side::Sell,
+        qty: 1.0,
+        px: 100.0,
+        fee: None,
+        is_maker: false,
+        forced_close: Some(engine_types::ForcedClose::StopLoss),
+        venue_ts_ms: 10,
+        recovered_wall_ts_ms: 20,
+    }
+}
+
+#[test]
+fn recovered_callback_ownership_and_fill_share_every_partial_frame_restart_cut() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let record = recovered_callback_record();
+    write_records(&path, std::slice::from_ref(&record));
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes[16..]).unwrap()["kind"],
+        "recovered_fill_v2"
+    );
+    for cut in 8..=bytes.len() {
+        fs::write(&path, &bytes[..cut]).unwrap();
+        let (mut writer, rows) = WalWriter::open(&path).unwrap();
+        if cut < bytes.len() {
+            assert!(
+                rows.is_empty(),
+                "partial parent exposed a fill without its callback at byte {cut}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), &bytes[..8]);
+        } else {
+            assert_eq!(rows, [(1, record.clone())]);
+            let mut reader = writer.callback_reader().unwrap().unwrap();
+            let source = reader
+                .next(reader.start())
+                .unwrap()
+                .unwrap()
+                .source
+                .unwrap();
+            assert_eq!(source.0, [StrategyId(0), StrategyId(1)]);
+            assert!(matches!(
+                source.1,
+                engine_types::strategy_process::CallbackEvent::Order {
+                    update: OrderUpdate::Fill {
+                        fee: None,
+                        recv_ns: 123,
+                        ..
+                    }
+                }
+            ));
+        }
+    }
+}
+
+#[test]
+fn recovered_callback_metadata_is_required_only_on_the_current_tag() {
+    let record = recovered_callback_record();
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    for legacy in [false, true] {
+        for missing in [false, true] {
+            let mut value = serde_json::to_value(&record).unwrap();
+            value["kind"] = if legacy {
+                "recovered_fill"
+            } else {
+                "recovered_fill_v2"
+            }
+            .into();
+            if missing {
+                value.as_object_mut().unwrap().remove("callbacks");
+            } else {
+                value["callbacks"] = serde_json::Value::Null;
+            }
+            let payload = serde_json::to_vec(&value).unwrap();
+            let mut bytes = b"EWAL0001".to_vec();
+            bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&crc32c::crc32c(&payload).to_le_bytes());
+            bytes.extend_from_slice(&payload);
+            fs::write(&path, &bytes).unwrap();
+            if legacy {
+                assert!(WalWriter::open(&path).is_ok());
+            } else {
+                assert!(matches!(
+                    WalWriter::open(&path),
+                    Err(WalError::Corrupt { .. })
+                ));
+            }
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+    let mut legacy = record;
+    let WalRecord::RecoveredFill { callbacks, .. } = &mut legacy else {
+        unreachable!()
+    };
+    *callbacks = None;
+    fs::remove_file(&path).unwrap();
+    write_records(&path, std::slice::from_ref(&legacy));
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes[16..]).unwrap()["kind"],
+        "recovered_fill"
+    );
+    assert_eq!(replay(&path).unwrap(), [(1, legacy)]);
 }

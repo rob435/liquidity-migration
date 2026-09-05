@@ -1800,3 +1800,144 @@ fn the_gate_file_is_read_whole_and_an_absent_one_is_nothing() {
     assert!(error.is_lane_local_source_failure());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn live_startup_waits_for_named_destinations_and_the_durable_successor_grant() {
+    use engine_types::{
+        ManagedSignalSource, SignalGenerationState, SignalLifecycleRequest,
+        SignalLifecycleResponse, SignalProducerLifecycle, SignalProducerRoute,
+        SignalSourceFrontier,
+    };
+    let root = temporary_root("named-startup");
+    let options = LiveRunOptions {
+        state_dir: root.join("state"),
+        spool_dir: root.join("spool"),
+        heartbeat: root.join("heartbeat.json"),
+    };
+    let mut runner =
+        LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options.clone())
+            .unwrap();
+    let before = serde_json::to_vec(runner.durable.worker().state()).unwrap();
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        runner.resolve_named_destinations()
+    )
+    .await
+    .is_err());
+    assert!(!runner.durable.destinations_verified());
+    assert_eq!(
+        serde_json::to_vec(runner.durable.worker().state()).unwrap(),
+        before
+    );
+    let keys = [
+        &runner.config.routing.carry_sleeve,
+        &runner.config.routing.long_sleeve,
+    ]
+    .into_iter()
+    .map(|key| engine_types::identity::SleeveKey::new(key.clone()).unwrap())
+    .collect::<Vec<_>>();
+    let request_store = AtomicJsonStore::new(
+        options
+            .spool_dir
+            .join(engine_types::SIGNAL_READINESS_REQUEST_FILE),
+    );
+    request_store
+        .save(&SignalLifecycleRequest {
+            schema_version: 2,
+            boot_nonce: "discover".into(),
+            sleeve_keys: keys.clone(),
+            producers: Vec::new(),
+            legacy_sources: Vec::new(),
+        })
+        .unwrap();
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            runner.resolve_named_destinations()
+        )
+        .await
+        .is_err(),
+        "naming alone cannot publish before the epoch grant"
+    );
+    assert!(runner.durable.destinations_verified());
+    let response: SignalLifecycleResponse = AtomicJsonStore::new(
+        options
+            .spool_dir
+            .join(engine_types::SIGNAL_READINESS_RESPONSE_FILE),
+    )
+    .load()
+    .unwrap()
+    .unwrap();
+    assert!(response.producer.sealed);
+    assert!(response
+        .producer
+        .sources
+        .iter()
+        .all(|source| source.published_through == 0));
+    let report = response.producer;
+    let grant = SignalProducerLifecycle {
+        producer: report.producer.clone(),
+        retired_through: 0,
+        active: Some(SignalGenerationState {
+            epoch: 1,
+            generation: report.generation.clone(),
+            sealed: false,
+            sources: report
+                .sources
+                .iter()
+                .map(|source| SignalSourceFrontier {
+                    source: ManagedSignalSource {
+                        producer: &report.producer,
+                        epoch: 1,
+                        generation: &report.generation,
+                        lane: engine_types::legacy_signal_lane(&report.producer, &source.source)
+                            .unwrap(),
+                    }
+                    .encode()
+                    .unwrap(),
+                    destination: source.destination,
+                    published_through: 0,
+                })
+                .collect(),
+        }),
+        routes: report
+            .sources
+            .iter()
+            .map(|source| SignalProducerRoute {
+                destination: source.destination,
+                subscriptions: Vec::new(),
+            })
+            .collect(),
+        legacy: Vec::new(),
+        unresolved_tail: false,
+        previous_seal: report.sources,
+    };
+    request_store
+        .save(&SignalLifecycleRequest {
+            schema_version: 2,
+            boot_nonce: "grant".into(),
+            sleeve_keys: keys,
+            producers: vec![grant],
+            legacy_sources: Vec::new(),
+        })
+        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        runner.resolve_named_destinations(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let state = runner.durable.worker().state();
+    assert_eq!(state.signal_lifecycle.as_ref().unwrap().epoch, Some(1));
+    assert!(!state.signal_lifecycle.as_ref().unwrap().sealed);
+    assert_eq!(
+        (
+            state.long_output_sequence,
+            state.carry_output_sequence,
+            state.last_input_sequence
+        ),
+        (0, 0, 0)
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

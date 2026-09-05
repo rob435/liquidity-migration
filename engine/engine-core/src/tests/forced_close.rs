@@ -34,6 +34,7 @@ fn bought_ten() -> Vec<WalRecord> {
             arrival_mid: 100.0,
         },
         WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,
@@ -55,6 +56,7 @@ fn bought_ten() -> Vec<WalRecord> {
 
 fn still_held() -> Vec<engine_types::PositionView> {
     vec![engine_types::PositionView {
+        exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
         qty: 10.0,
@@ -360,6 +362,7 @@ fn two_sleeves_held() -> Vec<WalRecord> {
                         client_order_id,
                         ..
                     },
+                ..
             } => {
                 *exec_id = "old-exec-2".into();
                 *client_order_id = "eng-old-2".into();
@@ -460,6 +463,7 @@ async fn shared_forced_fill_allocates_once_and_replays_exactly_after_rotation() 
                         allocation,
                         ..
                     },
+                ..
             } if exec_id == "venue-stop" => allocation.as_ref(),
             _ => None,
         })
@@ -650,5 +654,129 @@ async fn boot_history_allocates_shared_emergency_fill_before_account_reconciliat
             .unwrap()
             .snapshot(),
         after
+    );
+}
+
+#[tokio::test]
+async fn exact_shared_close_after_rotation_keeps_reconciliation_in_step_with_inventory() {
+    use engine_types::execution_allocation::{
+        AllocationPolicy, ExecutionAllocation, ExecutionSlice,
+    };
+    use engine_types::numeric::{AssetId, Exact, ExecutionAmounts};
+    use engine_types::portfolio::{PortfolioPosition, PortfolioState};
+    let exact = |s: &str| Exact::parse_decimal(s).unwrap();
+    let (buyer, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let probe = Probe {
+        saw: Rc::new(RefCell::new(Vec::new())),
+    };
+    let (engine, _) = build(
+        allow_all(),
+        vec![Box::new(buyer), Box::new(probe)],
+        &["BTCUSDT"],
+        &[],
+    )
+    .await;
+    let mut base = engine.rotation_base(clock::wall_ms());
+    let names = ["buyer", "probe"];
+    if let WalRecord::SegmentBase {
+        portfolio,
+        attribution,
+        logged_exposure,
+        ..
+    } = &mut base
+    {
+        *portfolio = Some(PortfolioState {
+            positions: (0..2)
+                .map(|id| PortfolioPosition {
+                    strategy: StrategyId(id),
+                    symbol: SymbolId(0),
+                    signed_qty: exact("0.1"),
+                    entry_value: Some(exact("10")),
+                    stop_px: Some(exact("90")),
+                    settlement_asset: AssetId::Unknown,
+                })
+                .collect(),
+            ..PortfolioState::default()
+        });
+        *attribution = (0..2)
+            .map(|id| engine_types::FilledTotal {
+                strategy: StrategyId(id),
+                symbol: SymbolId(0),
+                signed_qty: 0.1,
+            })
+            .collect();
+        *logged_exposure = vec![engine_types::SymbolTotal {
+            exact_signed_qty: Some(engine_types::numeric::ExactNumber::derived(exact("0.2"))),
+            symbol: SymbolId(0),
+            signed_qty: 0.2,
+        }];
+    }
+    let mut update = stop_fired(SymbolId(0), Side::Sell, Some(ForcedClose::StopLoss));
+    if let OrderUpdate::Fill {
+        qty,
+        fee,
+        amounts,
+        allocation,
+        ..
+    } = &mut update
+    {
+        *qty = 0.2;
+        *fee = None;
+        *amounts = Some(Box::new(ExecutionAmounts {
+            quantity: engine_types::numeric::ExactNumber::venue_decimal("0.2").unwrap(),
+            price: engine_types::numeric::ExactNumber::venue_decimal("110").unwrap(),
+            fee: None,
+            settlement_asset: AssetId::Unknown,
+        }));
+        *allocation = Some(Box::new(ExecutionAllocation {
+            policy: AllocationPolicy::EmergencyNetFifo,
+            slices: (0..2)
+                .map(|id| ExecutionSlice {
+                    strategy: StrategyId(id),
+                    strategy_key: names[id as usize].into(),
+                    quantity: exact("0.1"),
+                    fee: None,
+                })
+                .collect(),
+        }));
+    }
+    let records = vec![
+        base,
+        WalRecord::OrderUpdate {
+            callbacks: None,
+            update,
+        },
+    ];
+    let restored = crate::attribution::Attribution::try_from_records(&records).unwrap();
+    assert!(
+        restored.snapshot().positions.is_empty(),
+        "the exact owned fill closes both sleeves"
+    );
+    assert!(
+        crate::reconcile::logged_exposure(&records)
+            .unwrap()
+            .is_empty(),
+        "reconciliation must replay the exact allocation after rotation"
+    );
+    let account = AccountView {
+        equity_usdt: 1000.0,
+        available_usdt: 1000.0,
+        positions: vec![],
+        observed_ns: clock::now_ns(),
+    };
+    let result = crate::reconcile::reconcile(
+        &crate::inflight::LedgerOfOrders::from_records(&records),
+        &records,
+        &[],
+        &account,
+        |_| Some(SymbolId(0)),
+        |_| Some(0.1),
+        |_| Some(0.1),
+    )
+    .unwrap();
+    assert!(
+        !result.must_not_open(),
+        "an exact owned close is not a foreign fill: {:?}",
+        result.findings
     );
 }

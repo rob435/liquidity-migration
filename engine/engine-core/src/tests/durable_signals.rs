@@ -203,7 +203,7 @@ async fn a_new_worker_generation_starts_at_sequence_one_after_an_old_cursor() {
                 events: VecDeque::new(),
                 close_at_end: false,
                 admitted: Rc::new(RefCell::new(Vec::new())),
-                known: 3,
+                symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "HELDUSDT".into()],
                 admits_wrongly: false,
             },
             &mut ScriptOrderFeed::empty(),
@@ -281,7 +281,7 @@ async fn a_gap_retains_the_last_contiguous_cursor_without_delivering_the_later_r
                 events: VecDeque::new(),
                 close_at_end: false,
                 admitted: Rc::new(RefCell::new(Vec::new())),
-                known: 3,
+                symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "HELDUSDT".into()],
                 admits_wrongly: false,
             },
             &mut ScriptOrderFeed::empty(),
@@ -332,13 +332,19 @@ async fn signal_admits_quote_and_ticker_everywhere_before_durable_delivery() {
             done: Some(done),
         }),
     ];
-    let (mut engine, h) = build(allow_all(), strategies, &["BTCUSDT", "ETHUSDT"], &[]).await;
+    let (mut engine, h) = build(
+        allow_all(),
+        strategies,
+        &["BTCUSDT", "ETHUSDT", "HELDUSDT"],
+        &[],
+    )
+    .await;
     let admitted = Rc::new(RefCell::new(Vec::new()));
     let mut market = ScriptFeed {
         events: VecDeque::new(),
         close_at_end: false,
         admitted: admitted.clone(),
-        known: 2,
+        symbols: vec!["BTCUSDT".into(), "ETHUSDT".into()],
         admits_wrongly: false,
     };
     let mut orders = ScriptOrderFeed::empty();
@@ -764,7 +770,7 @@ async fn source_gap_blocks_dependent_openings_across_restart_rotation_and_genera
         )
         .await;
         let mut market = ScriptFeed::quotes(SymbolId(0), 1, true);
-        market.known = 3;
+        market.symbols = vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()];
         market
             .events
             .extend(ScriptFeed::quotes(SymbolId(1), 1, true).events);
@@ -868,6 +874,7 @@ async fn a_source_gap_cancels_only_affected_openings_and_keeps_exit_edits_live()
     request.client_order_id = "eng-held-2".into();
     prior.push(held_order);
     prior.push(WalRecord::OrderUpdate {
+        callbacks: None,
         update: OrderUpdate::Fill {
             allocation: None,
             amounts: None,
@@ -888,6 +895,7 @@ async fn a_source_gap_cancels_only_affected_openings_and_keeps_exit_edits_live()
         symbol: SymbolId(symbol),
         client_order_id: id.into(),
         spec: AmendSpec {
+            exact_terms: None,
             px: Some(30_001.0),
             qty: None,
         },
@@ -926,6 +934,7 @@ async fn a_source_gap_cancels_only_affected_openings_and_keeps_exit_edits_live()
         &prior,
         working,
         vec![engine_types::PositionView {
+            exact_stop_px: None,
             symbol: SymbolId(2),
             side: Side::Buy,
             qty: 0.01,
@@ -937,7 +946,7 @@ async fn a_source_gap_cancels_only_affected_openings_and_keeps_exit_edits_live()
     )
     .await;
     let mut market = ScriptFeed::quotes(SymbolId(0), 1, true);
-    market.known = 3;
+    market.symbols = vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()];
     market
         .events
         .extend(ScriptFeed::quotes(SymbolId(1), 1, true).events);
@@ -984,6 +993,7 @@ async fn a_source_gap_preserves_attributed_reduce_only_placements() {
     let (record, _) = working_order(2, 2, false);
     prior.push(record);
     prior.push(WalRecord::OrderUpdate {
+        callbacks: None,
         update: OrderUpdate::Fill {
             allocation: None,
             amounts: None,
@@ -1014,6 +1024,7 @@ async fn a_source_gap_preserves_attributed_reduce_only_placements() {
         &prior,
         vec![],
         vec![engine_types::PositionView {
+            exact_stop_px: None,
             symbol: SymbolId(2),
             side: Side::Buy,
             qty: 0.01,
@@ -1025,7 +1036,7 @@ async fn a_source_gap_preserves_attributed_reduce_only_placements() {
     )
     .await;
     let mut market = ScriptFeed::quotes(SymbolId(2), 1, true);
-    market.known = 3;
+    market.symbols = vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()];
     engine
         .run(
             &mut market,
@@ -1279,7 +1290,7 @@ async fn runtime_entry_permission_also_cancels_and_refuses_amends_only_for_its_o
     let mut working = Vec::new();
     let mut strategies: Vec<Box<dyn Strategy>> = Vec::new();
     let mut market = ScriptFeed::quotes(SymbolId(0), 0, true);
-    market.known = 3;
+    market.symbols = vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()];
     for (owner, (name, symbol)) in [
         ("independent", "BTCUSDT"),
         ("source", "ETHUSDT"),
@@ -1297,6 +1308,7 @@ async fn runtime_entry_permission_also_cancels_and_refuses_amends_only_for_its_o
                 symbol: SymbolId(owner as u16),
                 client_order_id: row.client_order_id.clone(),
                 spec: AmendSpec {
+                    exact_terms: None,
                     px: Some(30_001.0),
                     qty: None,
                 },
@@ -1452,6 +1464,7 @@ async fn an_absent_producer_does_not_strand_attributed_reductions_or_protective_
     let (record, _) = working_order(0, 0, false);
     prior.push(record);
     prior.push(WalRecord::OrderUpdate {
+        callbacks: None,
         update: OrderUpdate::Fill {
             allocation: None,
             amounts: None,
@@ -1480,6 +1493,7 @@ async fn an_absent_producer_does_not_strand_attributed_reductions_or_protective_
         &prior,
         vec![],
         vec![engine_types::PositionView {
+            exact_stop_px: None,
             symbol: SymbolId(0),
             side: Side::Buy,
             qty: 0.01,

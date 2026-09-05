@@ -8,7 +8,7 @@
 //! engine's own order id has to fit into.
 
 pub mod gateway;
-pub mod realm;
+pub use engine_public::venues::hyperliquid::realm;
 
 mod assets;
 mod cloid;

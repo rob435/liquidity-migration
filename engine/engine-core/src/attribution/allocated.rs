@@ -21,14 +21,30 @@ struct ExecutionRef<'a> {
     amounts: Option<&'a ExecutionAmounts>,
     allocation: Option<&'a ExecutionAllocation>,
     forced_close: Option<ForcedClose>,
+    engine_net: bool,
 }
 
 impl Attribution {
-    pub(crate) fn prepare_portfolio_update(
+    pub(crate) fn prepare_portfolio_update_for_order(
+        &self,
+        request: Option<&engine_types::OrderRequest>,
+        names: &[String],
+        update: &OrderUpdate,
+    ) -> Result<Option<PreparedPortfolioFill>, String> {
+        self.prepare_portfolio_update_authorized(
+            request.and_then(|r| r.sleeve_owner()),
+            names,
+            update,
+            request.is_some_and(|r| r.is_portfolio_reduction()),
+        )
+    }
+
+    fn prepare_portfolio_update_authorized(
         &self,
         owner: Option<StrategyId>,
         names: &[String],
         update: &OrderUpdate,
+        engine_net: bool,
     ) -> Result<Option<PreparedPortfolioFill>, String> {
         let OrderUpdate::Fill {
             client_order_id,
@@ -58,15 +74,31 @@ impl Attribution {
                 amounts: amounts.as_deref(),
                 allocation: allocation.as_deref(),
                 forced_close: *forced_close,
+                engine_net,
             },
         )
     }
 
-    pub(crate) fn prepare_portfolio_recovered(
+    pub(crate) fn prepare_portfolio_recovered_for_order(
+        &self,
+        request: Option<&engine_types::OrderRequest>,
+        names: &[String],
+        record: &WalRecord,
+    ) -> Result<Option<PreparedPortfolioFill>, String> {
+        self.prepare_portfolio_recovered_authorized(
+            request.and_then(|r| r.sleeve_owner()),
+            names,
+            record,
+            request.is_some_and(|r| r.is_portfolio_reduction()),
+        )
+    }
+
+    fn prepare_portfolio_recovered_authorized(
         &self,
         owner: Option<StrategyId>,
         names: &[String],
         record: &WalRecord,
+        engine_net: bool,
     ) -> Result<Option<PreparedPortfolioFill>, String> {
         let WalRecord::RecoveredFill {
             client_order_id,
@@ -96,6 +128,7 @@ impl Attribution {
                 amounts: amounts.as_ref(),
                 allocation: allocation.as_deref(),
                 forced_close: *forced_close,
+                engine_net,
             },
         )
     }
@@ -106,7 +139,8 @@ impl Attribution {
         names: &[String],
         execution: ExecutionRef<'_>,
     ) -> Result<Option<PreparedPortfolioFill>, String> {
-        let forced = execution.client_order_id.is_empty() && execution.forced_close.is_some();
+        let forced = execution.engine_net
+            || (execution.client_order_id.is_empty() && execution.forced_close.is_some());
         if owner.is_none() && !forced {
             if execution.allocation.is_some() {
                 return Err("unowned execution carries sleeve allocation".into());
@@ -239,11 +273,13 @@ impl Attribution {
         &mut self,
         record: &WalRecord,
         owner: Option<StrategyId>,
+        request: Option<&engine_types::OrderRequest>,
         names: &[String],
     ) -> Result<bool, String> {
         let allocated = matches!(
             record,
             WalRecord::OrderUpdate {
+                callbacks: _,
                 update: OrderUpdate::Fill {
                     allocation: Some(_),
                     ..
@@ -255,23 +291,32 @@ impl Attribution {
         );
         if allocated {
             let prepared = match record {
-                WalRecord::OrderUpdate { update } => {
-                    self.prepare_portfolio_update(owner, names, update)?
-                }
-                WalRecord::RecoveredFill { .. } => {
-                    self.prepare_portfolio_recovered(owner, names, record)?
-                }
+                WalRecord::OrderUpdate { update, .. } => self.prepare_portfolio_update_authorized(
+                    owner,
+                    names,
+                    update,
+                    request.is_some_and(|r| r.is_portfolio_reduction()),
+                )?,
+                WalRecord::RecoveredFill { .. } => self.prepare_portfolio_recovered_authorized(
+                    owner,
+                    names,
+                    record,
+                    request.is_some_and(|r| r.is_portfolio_reduction()),
+                )?,
                 _ => unreachable!(),
             }
             .ok_or("recorded allocation has no owner")?;
             self.commit_portfolio_fill(prepared)?;
             return Ok(true);
         }
+        if request.is_some_and(|r| r.is_portfolio_reduction()) {
+            return Err("engine net execution is missing its durable allocation".into());
+        }
         let Some(owner) = owner else {
             return Ok(false);
         };
         match record {
-            WalRecord::OrderUpdate { update } => self.try_on_update(owner, update)?,
+            WalRecord::OrderUpdate { update, .. } => self.try_on_update(owner, update)?,
             WalRecord::RecoveredFill { .. } => self.try_on_recovered(owner, record)?,
             _ => return Err("expected a fill record".into()),
         }

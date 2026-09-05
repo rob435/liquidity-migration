@@ -488,7 +488,8 @@ impl Decoder {
                     // resting order is now working at, which is the only
                     // answer an accepted amend ever gets.
                     if !self.remember_ack(&ack.client_order_id) {
-                        if let Some(amended) = amended_from_row(row, &ack.client_order_id, recv_ns)
+                        if let Some(amended) =
+                            amended_from_raw(raw.get(), &ack.client_order_id, recv_ns)
                         {
                             self.pending.push_back(amended);
                         }
@@ -652,31 +653,8 @@ pub(crate) fn map_order_row(row: &Value, recv_ns: u64) -> Result<Option<OrderUpd
     Ok(Some(update))
 }
 
-/// A republished resting order, read as the price it is working at.
-///
-/// `None` rather than an error for anything unreadable. This row is a repeat
-/// the engine would otherwise have dropped, so silence leaves it exactly
-/// where it was — whereas a wrong price here would end an amend's ambiguity
-/// with a number the venue never said.
-fn amended_from_row(row: &Value, client_order_id: &str, recv_ns: u64) -> Option<OrderUpdate> {
-    let px = number(row, "price").ok()?;
-    if !px.is_finite() || px <= 0.0 {
-        return None;
-    }
-    // What is still working, not what was ordered. Bybit names it leavesQty;
-    // an order that has partly filled is smaller than the qty it was sent at.
-    let qty = number(row, "leavesQty")
-        .or_else(|_| number(row, "qty"))
-        .ok()?;
-    if !qty.is_finite() || qty <= 0.0 {
-        return None;
-    }
-    Some(OrderUpdate::Amended {
-        client_order_id: client_order_id.to_string(),
-        px,
-        qty,
-        recv_ns,
-    })
+fn amended_from_raw(raw: &str, client_order_id: &str, recv_ns: u64) -> Option<OrderUpdate> {
+    crate::amend_state::bybit(raw, client_order_id, recv_ns).ok()
 }
 
 /// One `execution` row.
@@ -828,6 +806,13 @@ mod tests {
             "ETHUSDT" => Some(SymbolId(1)),
             _ => None,
         }
+    }
+
+    #[test]
+    fn malformed_remaining_quantity_does_not_become_the_original_order_quantity() {
+        assert!(
+            amended_from_raw(r#"{"price":"10","leavesQty":"broken","qty":"2"}"#, "id", 1).is_none()
+        );
     }
 
     #[test]

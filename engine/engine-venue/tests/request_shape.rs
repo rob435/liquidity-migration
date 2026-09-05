@@ -543,6 +543,7 @@ async fn an_amend_carries_only_the_field_it_changes() {
         SymbolId(0),
         "eng-1",
         AmendSpec {
+            exact_terms: None,
             px: Some(94_000.5),
             qty: None,
         },
@@ -570,6 +571,7 @@ async fn an_amend_renders_a_new_size_as_a_venue_string() {
         SymbolId(1),
         "eng-2",
         AmendSpec {
+            exact_terms: None,
             px: None,
             qty: Some(1.5),
         },
@@ -593,6 +595,7 @@ async fn an_amend_that_changes_nothing_never_reaches_the_venue() {
             SymbolId(0),
             "eng-1",
             AmendSpec {
+                exact_terms: None,
                 px: None,
                 qty: None
             }
@@ -601,16 +604,17 @@ async fn an_amend_that_changes_nothing_never_reaches_the_venue() {
         Err(VenueError::BadRequest(_))
     ));
     let mut bad_size = AmendSpec {
+        exact_terms: None,
         px: None,
         qty: Some(f64::NAN),
     };
     assert!(gw
-        .amend_order(SymbolId(0), "eng-1", bad_size)
+        .amend_order(SymbolId(0), "eng-1", bad_size.clone())
         .await
         .is_err());
     bad_size.qty = Some(0.0);
     assert!(gw
-        .amend_order(SymbolId(0), "eng-1", bad_size)
+        .amend_order(SymbolId(0), "eng-1", bad_size.clone())
         .await
         .is_err());
     assert!(
@@ -700,13 +704,15 @@ async fn account_view_reads_wallet_and_positions() {
     .await;
     let mut gw = gateway(&server);
 
+    let scan_started_after = engine_types::clock::mono_ns();
     let view = gw.account_view().await.unwrap();
+    let scan_completed_before = engine_types::clock::mono_ns();
     assert_eq!(view.equity_usdt, 1500.25);
     assert_eq!(view.available_usdt, 1200.5);
     assert_eq!(view.positions.len(), 1);
     assert_eq!(view.positions[0].symbol, SymbolId(0));
     assert!(view.positions[0].stop_attached);
-    assert!(view.observed_ns > 0);
+    assert!((scan_started_after..=scan_completed_before).contains(&view.observed_ns));
 
     // A signed GET signs the raw query string, not the body.
     let wallet = server.only("/v5/account/wallet-balance");
@@ -1192,4 +1198,109 @@ async fn exact_wire_values_keep_physical_and_sleeve_stops_separate() {
         1,
         "corrupt projection reached the wire"
     );
+}
+
+#[tokio::test]
+async fn exact_amendment_values_survive_the_signed_wire_without_decimal_truncation() {
+    use engine_types::numeric::Exact;
+    use engine_types::order_terms::{ExactAmendTerms, OrderInputPolicy};
+    let server = TestServer::start(|request, _| {
+        if request.path == "/v5/market/instruments-info" {
+            ok(r#"{"category":"linear","list":[{"symbol":"BTCUSDT","status":"Trading","priceFilter":{"tickSize":"0.0000000000001"},"lotSizeFilter":{"qtyStep":"0.0000000000001","minOrderQty":"0.0000000000001","maxOrderQty":"100","maxMktOrderQty":"100"}}],"nextPageCursor":""}"#)
+        } else { ok("{}") }
+    }).await;
+    let mut gw = gateway(&server);
+    let catalog = gw
+        .instrument_catalog_client()
+        .unwrap()
+        .fetch()
+        .await
+        .unwrap();
+    gw.install_instrument_catalog(&catalog).unwrap();
+    let terms = ExactAmendTerms {
+        quantity: Some(Exact::parse_decimal("2.1234567890123").unwrap()),
+        limit_price: Some(Exact::parse_decimal("1.1234567890123").unwrap()),
+        input_policy: OrderInputPolicy::StrategyShortestDecimal,
+    };
+    let mut amendment = AmendSpec {
+        px: None,
+        qty: None,
+        exact_terms: None,
+    };
+    terms.apply_projection(&mut amendment).unwrap();
+    gw.amend_order(SymbolId(0), "precise-amend", amendment)
+        .await
+        .unwrap();
+    let request = server.only("/v5/order/amend");
+    assert_eq!(request.json()["price"], "1.1234567890123");
+    assert_eq!(request.json()["qty"], "2.1234567890123");
+    assert_signed(&request, &request.body);
+}
+
+#[tokio::test]
+async fn independent_catalog_pages_rules_and_specs_together_and_preserves_read_errors() {
+    let server = TestServer::start(|request, count| {
+        assert_eq!(request.path, "/v5/market/instruments-info");
+        assert!(request.header("x-bapi-sign").is_none());
+        if count > 1 { return (200, r#"{"retCode":10006,"retMsg":"overloaded"}"#.into()); }
+        let symbol = if count == 0 { "BTCUSDT" } else { "ETHUSDT" };
+        let cursor = if count == 0 { "next" } else { "" };
+        ok(&format!(r#"{{"category":"linear","list":[{{"symbol":"{symbol}","status":"Trading","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","priceFilter":{{"tickSize":"0.1"}},"lotSizeFilter":{{"qtyStep":"0.001","minOrderQty":"0.001","maxOrderQty":"100","maxMktOrderQty":"10","minNotionalValue":"5"}}}}],"nextPageCursor":"{cursor}"}}"#))
+    }).await;
+    let mut gw = gateway(&server);
+    let client = gw.instrument_catalog_client().unwrap();
+    let catalog = client.fetch().await.unwrap();
+    assert_eq!(catalog.rules.len(), 2);
+    assert_eq!(catalog.specs.len(), 2);
+    gw.install_instrument_catalog(&catalog).unwrap();
+    assert_eq!(server.requests().len(), 2);
+    assert!(matches!(
+        client.fetch().await,
+        Err(VenueError::Rejected { code: 10006, .. })
+    ));
+}
+
+#[tokio::test]
+async fn independent_account_recovery_uses_requested_ids_and_preserves_protection() {
+    let server = TestServer::start(|request, _| match request.path.as_str() {
+        "/v5/account/wallet-balance" => ok(r#"{"list":[{"accountType":"UNIFIED",
+             "totalEquity":"1500.25","totalAvailableBalance":"1200.5","coin":[]}]}"#),
+        "/v5/position/list" => ok(r#"{"list":[
+             {"symbol":"BTCUSDT","side":"Buy","size":"0.01","avgPrice":"95000",
+              "stopLoss":"93000","positionIdx":0},
+             {"symbol":"ETHUSDT","side":"","size":"0","avgPrice":"0","stopLoss":""}
+            ],"nextPageCursor":""}"#),
+        other => panic!("unexpected path {other}"),
+    })
+    .await;
+    let gw = gateway(&server);
+
+    let scan_started_after = engine_types::clock::mono_ns();
+    let view = gw
+        .account_recovery_client()
+        .expect("independent account recovery client")
+        .account_view(&["ETHUSDT".into(), "BTCUSDT".into()])
+        .await
+        .unwrap();
+    let scan_completed_before = engine_types::clock::mono_ns();
+    assert_eq!(view.equity_usdt, 1500.25);
+    assert_eq!(view.available_usdt, 1200.5);
+    assert_eq!(view.positions.len(), 1);
+    assert_eq!(view.positions[0].symbol, SymbolId(1));
+    assert!(view.positions[0].stop_attached);
+    assert!((scan_started_after..=scan_completed_before).contains(&view.observed_ns));
+
+    // A signed GET signs the raw query string, not the body.
+    let wallet = server.only("/v5/account/wallet-balance");
+    assert_eq!(wallet.method, "GET");
+    assert_eq!(wallet.query, "accountType=UNIFIED");
+    assert_eq!(wallet.body, "");
+    assert_signed(&wallet, &wallet.query);
+
+    let positions = server.only("/v5/position/list");
+    assert_eq!(positions.query, "category=linear&settleCoin=USDT&limit=200");
+    assert_signed(&positions, &positions.query);
+
+    // The two reads go out together rather than one after the other.
+    assert_eq!(server.connections(), 2);
 }

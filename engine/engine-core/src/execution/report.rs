@@ -525,6 +525,7 @@ mod tests {
                 arrival_mid: 100.0,
             },
             WalRecord::OrderUpdate {
+                callbacks: None,
                 update: OrderUpdate::Fill {
                     allocation: None,
                     amounts: None,
@@ -615,6 +616,7 @@ mod tests {
             arrival_mid: 0.0,
         });
         records.push(WalRecord::OrderUpdate {
+            callbacks: None,
             update: OrderUpdate::Fill {
                 allocation: None,
                 amounts: None,

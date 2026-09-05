@@ -102,6 +102,7 @@ mod tests {
 
     fn trade(symbol: &str, net: Option<f64>) -> ClosedTrade {
         ClosedTrade {
+            internal_settlement: None,
             sleeve: "carry".into(),
             symbol: symbol.into(),
             side: "long",

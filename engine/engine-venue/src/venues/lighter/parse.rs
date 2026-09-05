@@ -72,6 +72,7 @@ pub(crate) fn parse_positions(
         let side = if sign >= 0 { Side::Buy } else { Side::Sell };
         let stop_px = stops.get(&market_index).map(|held| held.nearest(side));
         out.push(PositionView {
+            exact_stop_px: None,
             symbol,
             side,
             qty: size.abs(),

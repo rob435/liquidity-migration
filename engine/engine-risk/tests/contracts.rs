@@ -13,3 +13,5 @@ mod rolling_loss;
 mod stops;
 
 mod portfolio;
+
+mod margin_frontier;

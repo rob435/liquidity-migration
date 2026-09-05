@@ -239,6 +239,7 @@ mod tests {
                 SymbolId(0),
                 "eng-1-1",
                 AmendSpec {
+                    exact_terms: None,
                     px: Some(1.0),
                     qty: None,
                 },

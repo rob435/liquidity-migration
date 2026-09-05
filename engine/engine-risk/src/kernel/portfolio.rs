@@ -101,12 +101,55 @@ impl PortfolioFacts {
 }
 
 impl Kernel {
+    pub(super) fn physical_interval_for(
+        &mut self,
+        symbol: SymbolId,
+        account: &AccountView,
+    ) -> Result<engine_types::risk::PhysicalExposureInterval, DenyReason> {
+        let view = ViewFacts::read(account, 0.0)?;
+        let physical = view.net_qty(symbol)
+            + self
+                .book
+                .fills_after(account.observed_ns)
+                .get(&symbol.0)
+                .map_or(0.0, |row| row.signed_qty);
+        let (low, high) = self.book.physical_interval(symbol, physical);
+        engine_types::risk::PhysicalExposureInterval::try_new(low, high)
+    }
+
     pub(super) fn physical_reduction(&self, intent: &Intent, qty: f64, physical_qty: f64) -> bool {
         let (low, high) = self.book.physical_interval(intent.symbol, physical_qty);
+        if !low.is_finite() || !high.is_finite() {
+            return false;
+        }
         match intent.side {
             Side::Sell => low >= qty,
             Side::Buy => high <= -qty,
         }
+    }
+
+    pub(super) fn incremental_physical_quantity(
+        &self,
+        intent: &Intent,
+        qty: f64,
+        physical_qty: f64,
+    ) -> Result<f64, DenyReason> {
+        let delta = signed(intent.side, qty);
+        let (low, high) = self.book.physical_interval(intent.symbol, physical_qty);
+        if !qty.is_finite() || qty <= 0.0 || !low.is_finite() || !high.is_finite() {
+            return Err(unknown("unreadable physical margin reservation"));
+        }
+        let endpoint = if delta < 0.0 { low } else { high };
+        // Maximize this order's increase over all earlier pending fill orderings.
+        Ok(
+            if endpoint == 0.0 || endpoint.is_sign_positive() == delta.is_sign_positive() {
+                delta.abs()
+            } else if endpoint.abs() >= delta.abs() / 2.0 {
+                0.0
+            } else {
+                delta.abs() - 2.0 * endpoint.abs()
+            },
+        )
     }
 
     pub(super) fn check_virtual_reduction(
@@ -138,6 +181,11 @@ impl Kernel {
         let price = self.price_for(intent.symbol, view).ok_or_else(|| {
             unknown("no price for physical exposure produced by a virtual reduction")
         })?;
+        let current = self
+            .book
+            .px(intent.symbol)
+            .or_else(|| view.entry_px(intent.symbol))
+            .ok_or_else(|| unknown("no current reference for virtual reduction protection"))?;
         // An exit may expose either side when other outstanding orders fill first.
         for row in portfolio
             .positions
@@ -156,13 +204,14 @@ impl Kernel {
                 continue;
             }
             let stop = row.stop_px.ok_or(DenyReason::MissingStop)?;
-            if (remaining > 0.0 && stop >= price) || (remaining < 0.0 && stop <= price) {
+            if (remaining > 0.0 && stop >= current) || (remaining < 0.0 && stop <= current) {
                 return Err(DenyReason::MissingStop);
             }
         }
-        let additional_qty =
-            (after.0.abs().max(after.1.abs()) - low.abs().max(high.abs())).max(0.0);
-        let additional_margin_usdt = additional_qty * price / self.cfg.leverage;
+        let additional_margin_usdt =
+            self.incremental_physical_quantity(intent, qty, physical_qty)? * price
+                / self.cfg.leverage
+                + self.unreflected_margin(view)?;
         if !additional_margin_usdt.is_finite() {
             return Err(unknown("portfolio reduction produces unreadable margin"));
         }
@@ -198,8 +247,8 @@ impl Kernel {
             let low = current.min(entry);
             let stop = row.stop_px.ok_or(DenyReason::MissingStop)?;
             let fraction = match row.qty.is_sign_positive() {
-                true if stop < price => (price - stop) / price,
-                false if stop > low => (stop - low) / price,
+                true if stop < current => (price - stop) / price,
+                false if stop > current => (stop - low) / price,
                 _ => return Err(DenyReason::MissingStop),
             };
             let notional = row.qty.abs() * price;
@@ -218,13 +267,13 @@ impl Kernel {
             let pending_fill = recent.get(&symbol.0);
             let physical = view.net_qty(symbol) + pending_fill.map_or(0.0, |p| p.signed_qty);
             let residual = physical - portfolio.net.get(&symbol).copied().unwrap_or(0.0);
-            if residual.abs() <= self.cfg.qty_tolerance {
+            if residual == 0.0 {
                 continue;
             }
             let price = self
                 .price_for(symbol, view)
                 .ok_or_else(|| unknown("no price for unallocated physical exposure"))?;
-            let stop = if view.net_qty(symbol).abs() > self.cfg.qty_tolerance {
+            let stop = if view.net_qty(symbol) != 0.0 {
                 self.held_stop_fraction(symbol, view)?
             } else {
                 pending_fill

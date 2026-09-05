@@ -5,6 +5,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         &mut self,
         market: &mut M,
     ) -> Result<(), EngineError> {
+        self.maintain_portfolio_routes(market)?;
         if !self.pending_mutations.is_empty() {
             return Ok(());
         }
@@ -14,6 +15,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             for route in &mut producer.routes {
                 let sid = route.destination;
                 if self.host.effects.earliest(sid).is_some()
+                    || self.host.callbacks.order_news.unread_for(sid)
+                    || self.host.callbacks.pages.owner_pending(sid)
                     || self
                         .host
                         .pending
@@ -153,7 +156,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         continue;
                     }
                     self.routing.remove(symbol, subscription.feed, sid);
-                    if !self.routing.listens(symbol, subscription.feed)
+                    if !self.portfolio_subscriptions.contains(&subscription)
+                        && !self.routing.listens(symbol, subscription.feed)
                         && market.retire(&subscription.symbol, subscription.feed)
                     {
                         self.subscriptions.retain(|row| row != &subscription);

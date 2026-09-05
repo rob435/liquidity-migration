@@ -471,16 +471,10 @@ impl Decoder {
                 if bookkeeping {
                     return Ok(());
                 }
-                let total = num_field(order, "q").map_err(bad)?;
-                let filled = num_field(order, "z").map_err(bad)?;
-                self.pending.push_back(OrderUpdate::Amended {
-                    client_order_id,
-                    px: num_field(order, "p").map_err(bad)?,
-                    // What is still working: a fill that landed while the
-                    // amend was in flight shows here as a smaller number.
-                    qty: (total - filled).max(0.0),
-                    recv_ns,
-                });
+                self.pending.push_back(
+                    crate::amend_state::binance(raw_order.get(), &client_order_id, recv_ns)
+                        .map_err(bad)?,
+                );
             }
             // CALCULATED is liquidation settlement bookkeeping; the fills
             // themselves arrive as TRADE rows.
@@ -776,32 +770,23 @@ mod tests {
     }
 
     #[test]
-    fn rest_and_stream_agree_on_scoped_ids_and_non_usdt_fee_handling() {
-        let rest = super::super::parse::parse_trades(&serde_json::json!([{
-            "id": 22, "orderId": 991, "symbol": "BTCUSDT", "side": "SELL",
-            "price": "74990.1", "qty": "0.004", "commission": "0.015",
-            "commissionAsset": "BNB", "maker": false, "time": 1568879465650i64
-        }]))
-        .unwrap()
-        .pop()
-        .unwrap()
-        .1;
-
-        let mut d = decoder();
-        d.ingest(&frame(
+    fn stream_scopes_trade_ids_by_symbol_and_keeps_non_usdt_fees_unknown() {
+        let fill = frame(
             r#""s":"BTCUSDT","c":"eng-1","S":"SELL","o":"MARKET","q":"0.004",
                "p":"0","sp":"0","x":"TRADE","X":"FILLED","i":991,"l":"0.004",
                "z":"0.004","L":"74990.1","n":"0.015","N":"BNB",
                "T":1568879465650,"t":22,"m":false"#,
-        ))
-        .unwrap();
-        match d.pending.pop_front() {
-            Some(OrderUpdate::Fill { exec_id, fee, .. }) => {
-                assert_eq!(exec_id, rest.exec_id);
-                assert_eq!(fee, rest.fee);
-                assert_eq!(fee, None);
+        );
+        for (symbol, expected_id) in [("BTCUSDT", "BTCUSDT:22"), ("ETHUSDT", "ETHUSDT:22")] {
+            let mut d = decoder();
+            d.ingest(&fill.replace("BTCUSDT", symbol)).unwrap();
+            match d.pending.pop_front() {
+                Some(OrderUpdate::Fill { exec_id, fee, .. }) => {
+                    assert_eq!(exec_id, expected_id);
+                    assert_eq!(fee, None);
+                }
+                other => panic!("expected a fill, got {other:?}"),
             }
-            other => panic!("expected a fill, got {other:?}"),
         }
     }
 

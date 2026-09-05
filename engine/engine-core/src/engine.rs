@@ -1,10 +1,8 @@
 //! The loop.
 //!
-//! One process and one deterministic state owner. Market data, strategy
-//! decisions, risk and the durable ledger stay on the current-thread runtime.
-//! A bounded actor owns venue I/O, so a slow API round trip cannot stop market
-//! events, private fills or timers. Every queue and resume boundary is stamped
-//! into the latency ledger.
+//! The current-thread runtime owns account, risk and durable state. Registered
+//! callbacks run in supervised child processes. Venue mutations and independent
+//! status lookups return through bounded completion channels.
 //!
 //! What the loop waits on, all in one `select!`:
 //!
@@ -21,15 +19,10 @@
 //! `tokio::sync::mpsc::Receiver::recv` keeps. A feed that reads a socket must
 //! park partial reads in its own buffer, not in the future.
 //!
-//! Every placement records its intent, verdict and quantized order before
-//! dispatch. A callback carrying durable strategy/input state first journals
-//! its ordered transition and settles the order barrier before venue I/O.
-//! Restart restores its unfinished effects using the persisted order IDs.
-//!
-//! Ordinary order-only callbacks retain optimistic submission: the barrier
-//! runs alongside venue I/O and settles before dependent completion. A machine
-//! failure before that barrier finishes can leave an order absent from the WAL;
-//! reconciliation then blocks growth for the unaccounted order.
+//! Each placement durably records its exact request before marking an attempt
+//! and dispatching. Queued work resumes with its original ID; attempted work
+//! requires authoritative venue disposition. Callback state commits with its
+//! ordered effects, whose suffix remains owned until every disposition commits.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
@@ -102,6 +95,7 @@ const AMEND_CONFIRM_NS: u64 = 2_000_000_000;
 const AMEND_CONFIRM_NS: u64 = 25_000_000;
 
 mod free_helpers;
+mod portfolio_runtime;
 use free_helpers::*;
 pub(crate) use free_helpers::{
     durable_risk_verdict, forget_leverage_where_flat, mint_unused, named_entry_blockers,
@@ -224,6 +218,10 @@ struct PreparedOrder {
 }
 
 enum PendingMutation {
+    SetStop {
+        stop: stop_runtime::DurableStop,
+        queued_ns: u64,
+    },
     Orders {
         requests: Vec<OrderRequest>,
         timings: Vec<(u64, u64)>,
@@ -277,7 +275,6 @@ enum HaltCancelState {
 /// is here, because the completion that opened it is long gone by then.
 struct AwaitingAmend {
     symbol: SymbolId,
-    existing: crate::inflight::OrderRec,
     amended_intent: Box<Intent>,
     remaining_qty: f64,
     tif: TimeInForce,
@@ -333,6 +330,7 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     instrument_specs:
         std::collections::BTreeMap<SymbolId, engine_types::numeric::ExactInstrumentSpec>,
     require_exact_instruments: bool,
+    identities: engine_types::identity::IdentityState,
     routing: Routing,
     /// Present only after a venue mutation has completed while the same
     /// strategy wake still has actions. The run loop polls the private stream
@@ -369,6 +367,10 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// Each one is a gap the engine had to recover across.
     stream_resets: u64,
     dispatches: crate::order_dispatch::OrderDispatches,
+    portfolio_controls: crate::portfolio_control::PortfolioControls,
+    portfolio_dirty: bool,
+    portfolio_cursor: u64,
+    portfolio_physical_after: BTreeMap<SymbolId, u64>,
     /// Halt pulls bypass the ordinary per-wake action drain. One native-sized
     /// group is submitted per main-loop turn, with private order updates
     /// biased ahead of the next group.
@@ -379,6 +381,7 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// Filled while a signal is validated and drained by the run loop, which
     /// is the only place that holds the feeds.
     wanted_symbols: Vec<WantedSymbol>,
+    symbol_admission: symbol_admission::SymbolAdmission,
     /// What leverage each symbol was last set to by this engine.
     ///
     /// A symbol keeps its leverage at the venue until somebody changes it, so
@@ -418,12 +421,13 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// recovery succeed. Unlike `may_open`, a healthy reconnect may restore
     /// it without operator action.
     private_stream_ready: bool,
+    recovery: account_recovery::Recovery,
     /// Signed quantity per symbol over every fill this log ever held —
     /// strangers' included, because it mirrors the log's records, not the
     /// strategies. It is what reconcile compares the venue's positions
     /// against, seeded at boot by the same scan reconcile uses and kept
     /// live by the same arithmetic, so a rotation can restate it exactly.
-    logged_exposure: std::collections::BTreeMap<SymbolId, f64>,
+    logged_exposure: crate::reconcile::PhysicalExposure,
     /// The stop belonging to each trusted filled position, kept live for the
     /// same reason: a stop the venue drops after a rotation must still be
     /// repairable at the level and direction the log proved. Unfilled
@@ -432,6 +436,9 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// Stop moves the venue accepted since the latest account reading. This
     /// closes the short gap before that reading reflects the new stop without
     /// confusing a durable intent with a successful API call.
+    stop_repairs_pending: std::collections::BTreeSet<SymbolId>,
+    confirmed_native_stops:
+        std::collections::BTreeMap<SymbolId, engine_types::order_terms::ExactStopTerms>,
     confirmed_stop_moves: std::collections::BTreeMap<SymbolId, reconcile::IntendedPositionStop>,
     /// Everything the venue traded before this wall time is in the log —
     /// delivered by the stream or recovered from the venue's history.
@@ -449,6 +456,8 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     recent_fills: std::collections::VecDeque<(String, i64, f64)>,
     group_flush: Duration,
     refresh_after_ns: u64,
+    account_refresh_requested_after: Option<u64>,
+    account_refresh_started_ns: u64,
     /// Rotate the log once the current segment passes this, checked on the
     /// group-flush tick. Zero means never.
     rotate_after_bytes: u64,
@@ -459,16 +468,26 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// Counted for the whole run. The ledger's own count clears every minute.
     events_seen: u64,
     subscriptions: Vec<Subscription>,
+    portfolio_subscriptions: Vec<Subscription>,
 }
 
+mod account_recovery;
 mod boot_recovery;
+mod history_recovery;
 mod intent_admission;
 mod order_dispatch;
+#[cfg(test)]
+mod physical_exposure_tests;
+mod portfolio_routes;
+#[cfg(test)]
+mod portfolio_routes_tests;
 mod scheduling;
 mod signal_intake;
 mod signal_routes;
+pub(crate) mod stop_runtime;
 mod strategy_callbacks;
 mod strategy_effects;
+mod symbol_admission;
 mod telemetry;
 mod venue_completion;
 
@@ -610,6 +629,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut signals_open = true;
         let mut controls_open = true;
         if self.signals.readiness_required() {
+            if self.identities.scope.is_some() {
+                signal_feed
+                    .set_sleeve_keys(self.identities.sleeves.clone())
+                    .map_err(|error| EngineError::State(error.to_string()))?;
+            }
             self.signals.begin_readiness_request();
             signal_feed
                 .request_lifecycle(
@@ -649,6 +673,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             break reason;
                         }
                     }
+                    recovery = self.recovery.completed.recv(), if self.recovery.waiting() => {
+                        self.on_recovery_completion(recovery.ok_or_else(|| EngineError::State("recovery task stopped".into()))?).await?;
+                    }
+                    _ = std::future::ready(()), if self.recovery.applying() => { self.service_account_recovery().await?; }
                     lookup = self.dispatches.lookups.recv(), if !self.dispatches.lookup_pending.is_empty() => {
                         if let Some((id, result)) = lookup { self.on_order_lookup(id, result).await?; }
                     }
@@ -657,6 +685,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     }
                     durable = self.host.callbacks.durable.recv(), if self.host.callbacks.write.is_some() => {
                         self.on_callback_durable(durable)?;
+                    }
+                    callback_page = self.host.callbacks.pages.completed.recv(), if self.host.callbacks.pages.loading() && self.host.callbacks.write.is_none() => {
+                        self.on_callback_page(callback_page.ok_or_else(|| EngineError::State("callback page reader stopped".into()))?)?;
+                    }
+                    order_source = self.host.callbacks.order_news.completed.recv(), if self.host.callbacks.order_news.pending() => {
+                        self.on_order_callback_source(order_source.ok_or_else(|| EngineError::State("order callback reader stopped".into()))?)?;
                     }
                     callback = self.host.callbacks.completions.recv(), if self.host.callbacks.running() && self.host.callbacks.write.is_none() => {
                         self.on_strategy_callback(callback)?;
@@ -679,7 +713,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             break reason;
                         }
                     }
-                    observation = signal_feed.next_event(), if signals_open => {
+                    observation = signal_feed.next_event(), if signals_open && self.pending_signal_deliveries.is_empty() => {
                         self.on_signal_feed(observation, signal_feed, &mut signals_open)?;
                     }
                     request = control_feed.next_request(), if controls_open => {
@@ -694,6 +728,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             if self.drain_progress.is_some() {
                 tokio::select! {
                     biased;
+                    recovery = self.recovery.completed.recv(), if self.recovery.waiting() => {
+                        self.on_recovery_completion(recovery.ok_or_else(|| EngineError::State("recovery task stopped".into()))?).await?;
+                    }
+                    _ = std::future::ready(()), if self.recovery.applying() => { self.service_account_recovery().await?; }
                     lookup = self.dispatches.lookups.recv(), if !self.dispatches.lookup_pending.is_empty() => {
                         if let Some((id, result)) = lookup { self.on_order_lookup(id, result).await?; }
                     }
@@ -702,6 +740,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     }
                     durable = self.host.callbacks.durable.recv(), if self.host.callbacks.write.is_some() => {
                         self.on_callback_durable(durable)?;
+                    }
+                    callback_page = self.host.callbacks.pages.completed.recv(), if self.host.callbacks.pages.loading() && self.host.callbacks.write.is_none() => {
+                        self.on_callback_page(callback_page.ok_or_else(|| EngineError::State("callback page reader stopped".into()))?)?;
+                    }
+                    order_source = self.host.callbacks.order_news.completed.recv(), if self.host.callbacks.order_news.pending() => {
+                        self.on_order_callback_source(order_source.ok_or_else(|| EngineError::State("order callback reader stopped".into()))?)?;
                     }
                     callback = self.host.callbacks.completions.recv(), if self.host.callbacks.running() && self.host.callbacks.write.is_none() => {
                         self.on_strategy_callback(callback)?;
@@ -763,6 +807,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         break reason;
                     }
                 }
+                    recovery = self.recovery.completed.recv(), if self.recovery.waiting() => {
+                        self.on_recovery_completion(recovery.ok_or_else(|| EngineError::State("recovery task stopped".into()))?).await?;
+                    }
+                    _ = std::future::ready(()), if self.recovery.applying() => { self.service_account_recovery().await?; }
                 lookup = self.dispatches.lookups.recv(), if !self.dispatches.lookup_pending.is_empty() => {
                         if let Some((id, result)) = lookup { self.on_order_lookup(id, result).await?; }
                     }
@@ -771,6 +819,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     }
                     durable = self.host.callbacks.durable.recv(), if self.host.callbacks.write.is_some() => {
                         self.on_callback_durable(durable)?;
+                    }
+                    callback_page = self.host.callbacks.pages.completed.recv(), if self.host.callbacks.pages.loading() && self.host.callbacks.write.is_none() => {
+                        self.on_callback_page(callback_page.ok_or_else(|| EngineError::State("callback page reader stopped".into()))?)?;
+                    }
+                    order_source = self.host.callbacks.order_news.completed.recv(), if self.host.callbacks.order_news.pending() => {
+                        self.on_order_callback_source(order_source.ok_or_else(|| EngineError::State("order callback reader stopped".into()))?)?;
                     }
                     callback = self.host.callbacks.completions.recv(), if self.host.callbacks.running() && self.host.callbacks.write.is_none() => {
                     self.on_strategy_callback(callback)?;
@@ -783,7 +837,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         break reason;
                     }
                 }
-                observation = signal_feed.next_event(), if signals_open => {
+                observation = signal_feed.next_event(), if signals_open && self.pending_signal_deliveries.is_empty() => {
                     self.on_signal_feed(observation, signal_feed, &mut signals_open)?;
                 }
                 request = control_feed.next_request(), if controls_open => {
@@ -956,7 +1010,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         O: OrderFeed,
         F: SignalFeed,
     {
-        if !self.wanted_symbols.is_empty() {
+        self.service_account_recovery().await?;
+        if !self.wanted_symbols.is_empty() || self.symbol_admission.busy() {
             self.admit_wanted(market_feed, order_feed).await?;
         }
         if !self.pending_signal_deliveries.is_empty() {
@@ -977,6 +1032,28 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// a graceful stop that leaves its closing updates in the page cache
     /// tells the next boot's audit a lie.
     pub async fn finish(&mut self) -> Result<(), EngineError> {
+        self.recovery.stop_read();
+        while self.recovery.uncommitted() {
+            if self.recovery.applying() {
+                let account_recovery::Phase::Applying(batch) =
+                    std::mem::replace(&mut self.recovery.phase, account_recovery::Phase::Idle)
+                else {
+                    unreachable!()
+                };
+                self.apply_history_batch(*batch)?;
+            } else {
+                let completion =
+                    tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.recovery.completed.recv())
+                        .await
+                        .map_err(|_| {
+                            EngineError::State(
+                                "graceful stop timed out settling execution history".into(),
+                            )
+                        })?
+                        .ok_or_else(|| EngineError::State("recovery task stopped".into()))?;
+                self.on_recovery_completion(completion).await?;
+            }
+        }
         loop {
             self.service_strategy_callbacks()?;
             if self.host.callbacks.write.is_none() {
@@ -1057,6 +1134,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // when nothing closes.
         self.risk.observe_wall_clock_ms(clock::wall_ms());
         self.confirmed_stop_moves.clear();
+        self.confirmed_native_stops.clear();
         match self.leverage_authority {
             crate::config::LeverageAuthority::Shared => {
                 forget_leverage_where_flat(&mut self.leverage_at, &view.positions)
@@ -1076,91 +1154,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.books.covers.absorb(&self.books.account);
     }
 
-    /// Keep a venue-global position stop at least as protective as the
-    /// fill-owned durable intent. This runs on every fresh account reading,
-    /// closing the loop if a venue applies a later entry's Full TP/SL to the
-    /// entire position or silently drops an attached stop.
-    async fn enforce_position_stop_intent(&mut self) -> Result<(), EngineError> {
-        let mut repairs = Vec::new();
-        let mut failures = Vec::new();
-        for position in &self.books.account.positions {
-            let wanted = self
-                .intended_stops
-                .get(&position.symbol)
-                .filter(|stop| stop.side == position.side)
-                .map(|stop| stop.trigger_px);
-            let venue =
-                (position.stop_attached && position.stop_px.is_finite() && position.stop_px > 0.0)
-                    .then_some(position.stop_px);
-            let tolerance = self
-                .books
-                .rules
-                .get(position.symbol.0 as usize)
-                .and_then(|rule| rule.as_ref())
-                .map(|rule| rule.tick_size / 2.0)
-                .unwrap_or(1e-9);
-            match (wanted, venue) {
-                (Some(wanted), None) => repairs.push((position.symbol, position.side, wanted)),
-                (Some(wanted), Some(venue))
-                    if stop_is_looser(position.side, venue, wanted, tolerance) =>
-                {
-                    repairs.push((position.symbol, position.side, wanted));
-                }
-                (None, None) => failures.push(format!(
-                    "{}: held {:?} position has no venue stop and no fill-owned durable stop intent",
-                    self.books.market.table.name(position.symbol),
-                    position.side
-                )),
-                _ => {}
-            }
-        }
-
-        for (symbol, side, trigger_px) in repairs {
-            match self.venue.set_stop(symbol, trigger_px).await {
-                Ok(()) => {
-                    if let Some(position) = self
-                        .books
-                        .account
-                        .positions
-                        .iter_mut()
-                        .find(|position| position.symbol == symbol && position.side == side)
-                    {
-                        position.stop_attached = true;
-                        position.stop_px = trigger_px;
-                    }
-                    self.wal.append(&WalRecord::Note {
-                        source: "stop-supervisor".into(),
-                        text: format!(
-                            "restored {} {:?} position stop to durable level {trigger_px}",
-                            self.books.market.table.name(symbol),
-                            side
-                        ),
-                    })?;
-                }
-                Err(error) => failures.push(format!(
-                    "{}: failed to restore {:?} position stop {trigger_px}: {error}",
-                    self.books.market.table.name(symbol),
-                    side
-                )),
-            }
-        }
-
-        if failures.is_empty() {
-            return Ok(());
-        }
-        self.may_open = false;
-        for finding in &failures {
-            tracing::error!(%finding, "position-stop supervision latched opening off");
-        }
-        self.wal.append(&WalRecord::Reconciled {
-            wall_ts_ms: clock::wall_ms(),
-            findings: failures,
-            may_open: false,
-        })?;
-        self.wal.barrier()?;
-        Ok(())
-    }
-
     /// Stop trusting the account snapshot as soon as the private stream says
     /// continuity is gone. `observed_ns = 0` also makes the risk kernel's
     /// ordinary freshness check fail closed; the explicit readiness bit keeps
@@ -1168,16 +1161,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// history has closed the stream gap.
     fn invalidate_private_stream(&mut self) -> Result<(), EngineError> {
         self.private_stream_ready = false;
+        self.recovery.disconnected();
         self.books.account.observed_ns = 0;
         self.queue_halted_entry_cancels()
     }
 
-    fn is_live_opening(&self, client_order_id: &str) -> bool {
+    fn is_live_halt_order(&self, client_order_id: &str) -> bool {
         self.books
             .orders
             .orders
             .get(client_order_id)
-            .is_some_and(|order| !order.request.reduce_only && order.in_flight())
+            .is_some_and(|order| order.in_flight())
     }
 
     /// Under sole leverage authority: hold what we set against what the venue
@@ -1274,6 +1268,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// ends those; the marks written so far are in the archived segments).
     pub(crate) fn rotation_base(&self, wall_ts_ms: i64) -> WalRecord {
         WalRecord::SegmentBase {
+            portfolio_control: self.portfolio_controls.snapshot(),
             strategy_processes: self
                 .host
                 .callbacks
@@ -1282,7 +1277,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .values()
                 .cloned()
                 .collect(),
-            strategy_callbacks: self.host.callbacks.state.inputs.values().cloned().collect(),
+            strategy_callback_queues: self.host.callbacks.pages.slots.values().cloned().collect(),
+            strategy_callback_sources: self.host.callbacks.order_news.snapshot(),
+            signal_callback_deliveries: self.signals.callback_deliveries(),
+            strategy_callbacks: if self.host.callbacks.pages.enabled() {
+                Vec::new()
+            } else {
+                self.host.callbacks.state.inputs.values().cloned().collect()
+            },
             portfolio: Some(self.books.attribution.snapshot()),
             wall_ts_ms,
             strategies: self.host.names.clone(),
@@ -1304,14 +1306,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     signed_qty,
                 })
                 .collect(),
-            logged_exposure: self
-                .logged_exposure
-                .iter()
-                .map(|(symbol, signed_qty)| engine_types::SymbolTotal {
-                    symbol: *symbol,
-                    signed_qty: *signed_qty,
-                })
-                .collect(),
+            logged_exposure: crate::reconcile::snapshot_exposure(&self.logged_exposure),
             intended_stops: self
                 .intended_stops
                 .iter()
@@ -1344,6 +1339,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             signal_gaps: self.signals.gaps().cloned().collect(),
             pending_order_dispatches: self.dispatches.orders.values().cloned().collect(),
             signal_producers: self.signals.producers().cloned().collect(),
+            identities: Some(self.identities.clone()),
+            instrument_catalog: self.symbol_admission.checkpoint.clone(),
             signal_suspensions: self.signals.suspensions().collect(),
             strategy_effects: self.host.effects.snapshot(),
             runtime_control_requests: self.runtime_control_requests.clone(),
@@ -1359,6 +1356,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     arrival_mid: order.arrival_mid,
                     acked: order.acked,
                     filled_qty: order.filled_qty,
+                    fill_quantity: Some(order.fill_quantity.clone()),
                     reservation_low_px: order.reservation_low_px,
                     reservation_high_px: order.reservation_high_px,
                 })

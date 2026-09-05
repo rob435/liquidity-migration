@@ -15,35 +15,61 @@ pub(super) fn restore_configuration(
     sleeves: &[String],
     replayed: &[WalRecord],
 ) -> Result<ConfiguredStrategies, EngineError> {
+    let names: Vec<_> = strategies
+        .iter()
+        .enumerate()
+        .map(|(index, strategy)| {
+            sleeves
+                .get(index)
+                .filter(|name| !name.is_empty())
+                .cloned()
+                .unwrap_or_else(|| strategy.name().to_string())
+        })
+        .collect();
+    let requested: Vec<_> = strategies
+        .iter()
+        .flat_map(|strategy| strategy.subscriptions())
+        .map(|subscription| subscription.symbol)
+        .collect();
+    let plan = crate::identities::plan_identities(replayed, &names, None, &Default::default(), &[])
+        .map_err(|error| EngineError::Boot(error.to_string()))?;
+    if plan
+        .slot_configs
+        .iter()
+        .enumerate()
+        .any(|(index, config)| *config != Some(index))
+    {
+        return Err(EngineError::Boot("strategy instances must be constructed in durable identity order; use assembly::strategies_for_registry before boot".into()));
+    }
+    let symbol_count = plan
+        .state
+        .instruments
+        .iter()
+        .map(|binding| binding.symbol.as_str())
+        .chain(requested.iter().map(String::as_str))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if symbol_count > engine_types::identity::DENSE_ID_CAPACITY {
+        return Err(EngineError::Boot(
+            engine_types::identity::IdentityError::SymbolIdsExhausted.to_string(),
+        ));
+    }
     let mut market = MarketState::default();
-    // Ids are interning positions, so the previous run's table is
-    // re-interned first, in its own order: every id the replayed records
-    // name then means the same symbol in this run. Attribution, the
-    // reconcile's exposure accounting, and in-flight recovery all join
-    // the OLD run's numbers against this table — a symbol a signal
-    // admitted at runtime last run would otherwise come back at a
-    // different position, or not at all. `assembly::symbol_order` seeds
-    // the gateway and the private stream with this same order.
-    for name in crate::replay::LogNames::of_log(replayed).symbols {
-        market.add_symbol(&name);
+    for binding in &plan.state.instruments {
+        market.add_symbol(&binding.symbol);
     }
     let mut routing = Routing::default();
-    let mut names = Vec::with_capacity(strategies.len());
     let mut subscriptions = Vec::new();
     for (index, strategy) in strategies.iter().enumerate() {
         let sid = StrategyId(
             u16::try_from(index)
-                .map_err(|_| EngineError::Boot("more than 65535 strategies".to_string()))?,
+                .map_err(|_| EngineError::Boot("strategy id capacity exhausted".into()))?,
         );
-        names.push(match sleeves.get(index) {
-            Some(sleeve) if !sleeve.is_empty() => sleeve.clone(),
-            _ => strategy.name().to_string(),
-        });
         for sub in strategy.subscriptions() {
             let symbol = market.add_symbol(&sub.symbol);
             routing.add(symbol, sub.feed, sid);
             if !subscriptions.contains(&sub) {
-                subscriptions.push(sub.clone());
+                subscriptions.push(sub);
             }
         }
     }
@@ -55,26 +81,6 @@ pub(super) fn restore_configuration(
             .collect::<Vec<_>>(),
     )
     .map_err(EngineError::Boot)?;
-    let prior_names = crate::replay::LogNames::of_log(replayed).strategies;
-    if !sleeves.is_empty()
-        && !prior_names.is_empty()
-        && !names.as_slice().starts_with(prior_names.as_slice())
-    {
-        return Err(EngineError::Boot(format!(
-            "configured strategy identity/order {:?} does not preserve the WAL prefix {:?}",
-            names, prior_names
-        )));
-    }
-    let mut distinct = std::collections::HashSet::new();
-    if !sleeves.is_empty()
-        && names
-            .iter()
-            .any(|name| name.is_empty() || !distinct.insert(name))
-    {
-        return Err(EngineError::Boot(
-            "strategy sleeve names must be non-empty and unique".to_string(),
-        ));
-    }
     let restored_symbol_checkpoints = replay_strategy_checkpoints(replayed);
     for ((owner, _), checkpoint) in &restored_symbol_checkpoints {
         let strategy = strategies.get(owner.idx()).ok_or_else(|| {
@@ -98,10 +104,11 @@ pub(super) fn restore_configuration(
                 owner.0
             ))
         })?;
-        if state
-            .provenance
-            .as_ref()
-            .is_some_and(|provenance| !provenance.import_complete)
+        if strategy.callback_enabled()
+            && state
+                .provenance
+                .as_ref()
+                .is_some_and(|provenance| !provenance.import_complete)
         {
             return Err(EngineError::Boot(format!(
                 "strategy {} has an incomplete stopped-runtime import",
@@ -115,54 +122,48 @@ pub(super) fn restore_configuration(
             ))
         })?;
     }
+    let prior_slots = crate::identities::replay_identities(replayed)
+        .map_err(|error| EngineError::Boot(error.to_string()))?
+        .map_or(0, |state| state.sleeves.len());
     let mut initial_global_checkpoints = std::collections::BTreeMap::new();
-    if replayed.is_empty() {
-        for (index, strategy) in strategies.iter().enumerate() {
-            let id = StrategyId(
-                u16::try_from(index)
-                    .map_err(|_| EngineError::Boot("more than 65535 strategies".to_string()))?,
-            );
-            match strategy.initial_checkpoint() {
-                Some(checkpoint) => {
-                    validate_strategy_checkpoint(strategy.as_ref(), &checkpoint).map_err(
-                        |error| {
-                            EngineError::Boot(format!(
-                                "strategy {} refused its initial checkpoint: {error}",
-                                names[index]
-                            ))
-                        },
-                    )?;
-                    initial_global_checkpoints.insert(
-                        id,
-                        StrategyGlobalCheckpointState {
-                            strategy: id,
-                            checkpoint,
-                            provenance: None,
-                        },
-                    );
-                }
-                None if strategy.checkpoint_identity().is_some() => {
-                    return Err(EngineError::Boot(format!(
-                        "strategy {} declares whole-sleeve state but no canonical initial checkpoint",
-                        names[index]
-                    )));
-                }
-                None => {}
-            }
+    for (index, strategy) in strategies.iter().enumerate() {
+        let id = StrategyId(
+            u16::try_from(index)
+                .map_err(|_| EngineError::Boot("strategy id capacity exhausted".into()))?,
+        );
+        if !strategy.callback_enabled() || restored_global_before_boot.contains_key(&id) {
+            continue;
         }
-    } else {
-        for (index, strategy) in strategies.iter().enumerate() {
-            if strategy.checkpoint_identity().is_some()
-                && !restored_global_before_boot
-                    .contains_key(&StrategyId(u16::try_from(index).map_err(|_| {
-                        EngineError::Boot("more than 65535 strategies".to_string())
-                    })?))
-            {
-                return Err(EngineError::Boot(format!(
-                    "strategy {} has no whole-sleeve checkpoint in this nonempty WAL; import retired state while the engine is stopped",
-                    names[index]
-                )));
+        if index < prior_slots {
+            if strategy.checkpoint_identity().is_some() {
+                return Err(EngineError::Boot(format!("strategy {} has no whole-sleeve checkpoint in this nonempty WAL; import retired state while the engine is stopped", names[index])));
             }
+            continue;
+        }
+        match strategy.initial_checkpoint() {
+            Some(checkpoint) => {
+                validate_strategy_checkpoint(strategy.as_ref(), &checkpoint).map_err(|error| {
+                    EngineError::Boot(format!(
+                        "strategy {} refused its initial checkpoint: {error}",
+                        names[index]
+                    ))
+                })?;
+                initial_global_checkpoints.insert(
+                    id,
+                    StrategyGlobalCheckpointState {
+                        strategy: id,
+                        checkpoint,
+                        provenance: None,
+                    },
+                );
+            }
+            None if strategy.checkpoint_identity().is_some() => {
+                return Err(EngineError::Boot(format!(
+                    "strategy {} declares whole-sleeve state but no canonical initial checkpoint",
+                    names[index]
+                )))
+            }
+            None => {}
         }
     }
     routing.size_to(market.table.len());

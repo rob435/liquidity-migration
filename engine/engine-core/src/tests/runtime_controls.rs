@@ -101,7 +101,7 @@ fn two_quotes() -> ScriptFeed {
         events: VecDeque::from([quote(SymbolId(0)), quote(SymbolId(1))]),
         close_at_end: true,
         admitted: Rc::new(RefCell::new(Vec::new())),
-        known: 2,
+        symbols: vec!["BTCUSDT".into(), "ETHUSDT".into()],
         admits_wrongly: false,
     }
 }

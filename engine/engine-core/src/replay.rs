@@ -133,7 +133,14 @@ impl LogNames {
 
 pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
     match record {
+        WalRecord::PortfolioExitChanged { state } => format!("portfolio exit {} {} {} attempt={}", state.id, names.strategy(state.strategy), names.symbol(state.symbol), state.attempt),
+        WalRecord::PortfolioExitCompleted { id, .. } => format!("portfolio exit {id} completed"),
+        WalRecord::PortfolioEmergencyChanged { state } => format!("portfolio emergency {} {} {:?}", state.id, names.symbol(state.symbol), state.phase),
+        WalRecord::PortfolioEmergencyCompleted { id, .. } => format!("portfolio emergency {id} completed"),
+        WalRecord::PortfolioOffsetSettled { settlement } => format!("internal settlement {} {} slices={}", settlement.emergency_id, names.symbol(settlement.symbol), settlement.slices.len()),
+        WalRecord::SleeveStopSet { strategy, symbol, trigger_price, .. } => format!("sleeve stop {} {} {trigger_price:?}", names.strategy(*strategy), names.symbol(*symbol)),
         WalRecord::SignalAdmissionChanged { destination, suspension } => format!("signal admission {}: {suspension:?}", names.strategy(*destination)),
+        WalRecord::StrategyCallbackSource { strategy, event, .. } => format!("callback source {} {event:?}", names.strategy(*strategy)),
         WalRecord::StrategyCallbackQueued { input } => format!(
             "callback   {} queued for {}", input.callback_id, names.strategy(input.strategy)
         ),
@@ -147,6 +154,8 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             "callback   {input_id} committed for {} with {} effects",
             names.strategy(process.strategy), transition.as_ref().map_or(0, |row| row.effects.len())
         ),
+        WalRecord::InstrumentCatalogCheckpoint { checkpoint, .. } => format!("instrument catalog: {} exact instruments", checkpoint.specs.len()),
+        WalRecord::IdentityState { state, .. } => format!("identity registry: {} sleeves, {} instruments", state.sleeves.len(), state.instruments.len()),
         WalRecord::SignalProducerLifecycle { state, .. } => format!(
             "producer   {} retired through epoch {}", state.producer, state.retired_through
         ),
@@ -203,7 +212,7 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
                 String::new()
             }
         ),
-        WalRecord::OrderUpdate { update } => format!("news       {}", update_words(update, names)),
+        WalRecord::OrderUpdate { update , .. } => format!("news       {}", update_words(update, names)),
         WalRecord::StopSet {
             symbol,
             trigger_px,
@@ -242,6 +251,7 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
         WalRecord::AmendResolved {
             client_order_id,
             effective_px,
+            ..
         } => format!("move known {client_order_id} is working at {effective_px}"),
         WalRecord::LatencyLedger {
             window_s,
@@ -679,6 +689,7 @@ mod tests {
                 arrival_mid: 0.0,
             },
             WalRecord::OrderUpdate {
+                callbacks: None,
                 update: OrderUpdate::Cancelled {
                     client_order_id: "a".into(),
                     recv_ns: 20,
@@ -712,6 +723,7 @@ mod tests {
     fn an_unstated_fee_is_rendered_as_unknown() {
         let report = describe(
             &[WalRecord::OrderUpdate {
+                callbacks: None,
                 update: OrderUpdate::Fill {
                     allocation: None,
                     amounts: None,

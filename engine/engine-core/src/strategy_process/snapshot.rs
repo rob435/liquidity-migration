@@ -42,7 +42,7 @@ impl Ctx<'_> {
         }
         let mut orders = Vec::new();
         for (id, order) in &self.books.orders.orders {
-            if order.request.strategy != self.strategy {
+            if order.request.sleeve_owner() != Some(self.strategy) {
                 continue;
             }
             let request = &order.request;
@@ -53,7 +53,8 @@ impl Ctx<'_> {
                 kind: request.kind,
                 qty: request.qty,
                 filled_qty: order.filled_qty,
-                reduce_only: request.reduce_only,
+                remaining_qty: Some(order.remaining_qty()?),
+                reduce_only: request.is_sleeve_reduction(),
                 acked: order.acked,
                 resting: order.in_flight()
                     && self.books.registry.owner_of(id) == Some(self.strategy),

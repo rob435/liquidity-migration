@@ -906,6 +906,7 @@ impl SimulatedVenue {
             .filter_map(|i| {
                 let p = self.positions[i].as_ref()?;
                 Some(PositionView {
+                    exact_stop_px: None,
                     symbol: SymbolId(i as u16),
                     side: p.side,
                     qty: p.qty,
@@ -1016,6 +1017,7 @@ impl SimulatedVenue {
             }
         }
         self.queue_private(OrderUpdate::Amended {
+            exact_terms: None,
             client_order_id: client_order_id.to_string(),
             px,
             qty: remaining,
@@ -1103,6 +1105,7 @@ fn on_grid(value: f64, step: f64) -> bool {
 /// The engine's side of the venue: every command flies for half a round
 /// trip, is answered by the venue as it stands then, and the reply flies
 /// back for the other half.
+#[derive(Clone)]
 pub struct SimVenueGateway {
     venue: Arc<Mutex<SimulatedVenue>>,
     scheduler: Scheduler,
@@ -1130,6 +1133,12 @@ impl SimVenueGateway {
 
 #[engine_types::async_trait]
 impl VenueGateway for SimVenueGateway {
+    fn account_recovery_client(
+        &self,
+    ) -> Option<Box<dyn engine_types::orders::AccountRecoveryClient>> {
+        Some(Box::new(self.clone()))
+    }
+
     fn caps(&self) -> VenueCaps {
         VenueCaps {
             native_position_stop: true,
@@ -1237,6 +1246,27 @@ impl VenueGateway for SimVenueGateway {
     /// A fresh account: nothing traded before this run.
     async fn executions(
         &mut self,
+        _start_ms: i64,
+        _end_ms: i64,
+    ) -> Result<Vec<VenueExecution>, VenueError> {
+        Ok(Vec::new())
+    }
+}
+
+#[engine_types::async_trait]
+impl engine_types::orders::AccountRecoveryClient for SimVenueGateway {
+    async fn account_view(&self, _symbols: &[Symbol]) -> Result<AccountView, VenueError> {
+        let started_ns = self.scheduler.now_ns();
+        self.half_flight().await;
+        let mut view = self.lock().account_view();
+        view.observed_ns = started_ns;
+        self.half_flight().await;
+        Ok(view)
+    }
+
+    async fn executions(
+        &self,
+        _symbols: &[Symbol],
         _start_ms: i64,
         _end_ms: i64,
     ) -> Result<Vec<VenueExecution>, VenueError> {
