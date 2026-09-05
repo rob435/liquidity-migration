@@ -175,10 +175,12 @@ def qualification_workspace(
     return repo, commit, target, calls, behavior
 
 
-def test_artifact_producer_qualifies_before_upload_for_deploy_and_qualify() -> None:
+def test_qualification_runs_on_demand_and_uploads_only_after_it_passes() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/vps-deploy.yml").read_text())
-    job = workflow["jobs"]["rust-artifact"]
-    assert "inputs.mode == 'deploy'" in job["if"]
+    deploy = workflow["jobs"]["rust-artifact"]
+    assert "inputs.mode == 'deploy'" in deploy["if"]
+    assert not any("release_artifact.py qualify" in step.get("run", "") for step in deploy["steps"])
+    job = workflow["jobs"]["rust-qualify"]
     assert "inputs.mode == 'qualify'" in job["if"]
     steps = job["steps"]
     upload = next(i for i, step in enumerate(steps) if "actions/upload-artifact@" in step.get("uses", ""))

@@ -37,6 +37,25 @@ edit STATE.md to match.
     fix, deploy and first report stays. The preamble and AGENTS.md now state
     the rule: one entry per change or first report, updated in place; a
     refused deploy, a re-fire or a check that changed nothing gets no entry.
+  - Release qualification leaves the deploy path. `15c60924` had made the
+    `deploy` artifact job run `release_artifact.py qualify` — the whole
+    workspace suite compiled and run in the release profile, the account-state
+    soak, the engine benchmark and a smoke test — before packaging: 21 minutes
+    on a hosted runner against 3 minutes for the build alone, and the
+    2026-09-05 08:30 deploy had taken 6.5 minutes end to end. The job is again
+    `cargo build --release --locked --workspace --bins` plus `binaries.sha256`
+    and a `--help` smoke run, uploaded as `engine-binaries-<sha>`. A new
+    `rust-qualify` job runs the full qualification for `mode=qualify` only and
+    uploads `engine-binaries-<sha>-qualified`. `vps` still needs `ci`, `rust`
+    and the artifact job. Run `33992823838` (`deploy` at `d78b08f6`, 21:21
+    UTC) failed in qualification after 20 minutes without reaching the host.
+    What failed there: `runner::tests::a_systemd_stop_reaches_the_shutdown_path`
+    timed out (`Elapsed(())`) in the release profile. The test paused tokio's
+    clock and waited five seconds for a raised SIGTERM; the signal reaches the
+    runtime through the I/O driver, and a paused clock jumps to the timeout
+    the moment the runtime idles, so the bound was zero on a loaded four-core
+    runner. The test now runs on the wall clock. It did not fail on this Mac
+    in 50 release runs of the old form, idle or with the CPU saturated.
 
 - **2026-09-05 19:55 UTC — The heavy-seed crash loop is fixed: a halt
   cancel the venue refuses, loses or never confirms is settled by a status

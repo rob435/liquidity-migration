@@ -283,7 +283,9 @@ async fn single_writer(venue: &mut Venue) -> Result<Claim, Box<dyn Error>> {
 mod tests {
     use std::time::Duration;
 
-    #[tokio::test(start_paused = true)]
+    // Wall clock: the signal reaches the runtime through the I/O driver, and a
+    // paused clock jumps to the timeout the moment the runtime idles.
+    #[tokio::test]
     async fn a_systemd_stop_reaches_the_shutdown_path() {
         // The handler is registered by the call below, before the raise:
         // an unregistered SIGTERM would kill this test binary outright.

@@ -103,13 +103,47 @@ jobs:
         run: cargo test --workspace --all-targets --locked
         working-directory: engine
 
-  # Optimized tests, local workloads and packaging share one Cargo target.
-  # Upload only the qualified bytes; deployment does not rebuild them.
+  # The deployed binaries, built beside `rust` rather than after it: `vps`
+  # gates on both jobs, so a red debug test still blocks the deploy that
+  # consumes this artifact. Release-profile tests run in `qualify`, off the
+  # deploy path.
   rust-artifact:
+    name: Release artifact
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust cache
+        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          workspaces: "engine -> target"
+      - name: Build and smoke-test release binaries (locked)
+        run: |
+          cargo build --release --locked --workspace --bins
+          (
+            cd target/release
+            sha256sum engine signal-worker market-tape > binaries.sha256
+            ./engine --help >/dev/null
+            ./signal-worker --help >/dev/null
+            ./market-tape help >/dev/null 2>&1 || true
+            tar -czf "$RUNNER_TEMP/engine-binaries-${GITHUB_SHA}.tar.gz" engine signal-worker market-tape binaries.sha256
+          )
+        working-directory: engine
+      - name: Upload release binaries
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: engine-binaries-${{ github.sha }}
+          path: ${{ runner.temp }}/engine-binaries-${{ github.sha }}.tar.gz
+          retention-days: 2
+
+  # On demand: the optimized suite and the local workloads on the dispatched
+  # commit, packaged with their evidence. Never on the deploy path.
+  rust-qualify:
     name: Qualified release artifact
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.mode == 'deploy' || inputs.mode == 'qualify')
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'qualify'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -124,12 +158,12 @@ jobs:
         run: >-
           python3 scripts/release_artifact.py qualify
           --commit "$GITHUB_SHA"
-          --output "$RUNNER_TEMP/engine-binaries-${GITHUB_SHA}.tar.gz"
+          --output "$RUNNER_TEMP/engine-binaries-${GITHUB_SHA}-qualified.tar.gz"
       - name: Upload qualified release binaries
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
-          name: engine-binaries-${{ github.sha }}
-          path: ${{ runner.temp }}/engine-binaries-${{ github.sha }}.tar.gz
+          name: engine-binaries-${{ github.sha }}-qualified
+          path: ${{ runner.temp }}/engine-binaries-${{ github.sha }}-qualified.tar.gz
           retention-days: 2
 
   # Safety action: stopping and persistently disarming funded units must remain
@@ -242,7 +276,6 @@ jobs:
     needs: [ci, rust, rust-artifact]
     runs-on: ubuntu-latest
     environment: production
-    # Qualification finishes before the host begins a fleet handover.
     timeout-minutes: 120
     env:
       VPS_HOST: ${{ vars.VPS_HOST || '208.84.103.4' }}
@@ -270,13 +303,13 @@ jobs:
           test "$host_fingerprints" = "$VPS_ED25519_FINGERPRINT"
           mv ~/.ssh/known_hosts.candidate ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
-      - name: Download qualified release binaries
+      - name: Download release binaries
         if: inputs.mode == 'deploy'
         uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
         with:
           name: engine-binaries-${{ github.sha }}
           path: staged-binaries
-      - name: Stage qualified release binaries onto VPS
+      - name: Stage release binaries onto VPS
         if: inputs.mode == 'deploy'
         run: |
           set -euo pipefail
