@@ -117,7 +117,44 @@ edit STATE.md to match.
     `tests/repo/test_dev_tooling.py::test_repository_doctor_emits_machine_readable_state`
     reads `drift` where it wants `matched`, because this container had no
     `.venv` and the one built for these checks resolved off the lock.
-    ShellCheck is not installed here; CI runs it. The fifth page from the same free-space floor, and
+    ShellCheck is not installed here; CI runs it.
+  - **Deploy receipt: refused a twelfth time.** Run `33938359607`, `deploy` on
+    `main@06e17d4a`, dispatched 02:11:19 UTC and failed at 02:11:25. `ci`,
+    `rust` and `Deploy artifact` were all dead 3 s in at 02:11:24; `diagnose`
+    and `disarm` skipped at 02:11:21, and the release-test job and `vps`
+    skipped at 02:11:24-25 — so nothing reached the host. All three failed
+    jobs' log downloads return HTTP 404 — `failed to download logs: HTTP 404`
+    — the same no-job-ever-started signature as `33937280978`, `33934970737`,
+    `33934851698`, `33933927629`, `33933636343`, `33932188757`, `33931474693`,
+    `33928248402`, `33922197522`, `33921858031` and `33911912004`. It is the
+    account's failed payments, not any commit: this run's `rust` did not even
+    reach the 39 s in `queued` that `33937280978` managed. Deployed commit
+    stays `65ee75a7`; all four recorder fixes are merged and undeployed, and
+    the recorders keep crossing the floor until the owner runs the SSH path
+    below.
+  - Host action, and only the owner can run it. `06e17d4a` is the tip and
+    carries all four recorder fixes; `capture_fingerprint`
+    (`scripts/deploy_vps_live.sh:524-534`) hashes every `market_tape/*.py`, so
+    `start_independent_units` restarts both recorders on the new code and no
+    hand restart is needed. It also hands over both realms — the engine
+    fingerprint hashes the whole `engine` tree — so the funded engine
+    restarts:
+    ```bash
+    EXPECTED_COMMIT=06e17d4a82f9a5a19e00f1cd0928b4a0da96e315 scripts/ops.sh deploy
+    scripts/ops.sh status
+    ```
+    Then the reading still open since 22:54 — whether tape or non-tape files
+    hold the room, which decides whether the caps in `deploy/capture/*.toml`
+    also want revisiting once the recorders stop blocking — and the equity and
+    heartbeat record through the incident:
+    ```bash
+    df -h /var/lib
+    du -sh /var/lib/liquidity-migration/forward-market \
+           /var/lib/liquidity-migration/forward-market-binance
+    scripts/ops.sh curve mainnet 120
+    ```
+
+- **2026-09-05 01:32 UTC — The fifth page from the same free-space floor, and
   the first one that measures a third defect the two merged fixes do not
   reach: the pruner frees room but cannot open the writer's gate, so the
   recorder keeps discarding frames onto a disk that already has space until
