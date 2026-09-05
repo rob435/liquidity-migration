@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "recorded_at_utc": "2026-09-05T07:55:22.582228+00:00",
+  "recorded_at_utc": "2026-09-05T08:10:13.827697+00:00",
   "baseline_commit": "f69a5fbf63afe11da78dde8bcf06a0ab6ba75046",
-  "implementation_commit": null,
+  "implementation_commit": "584844fa381f2b17fde0cab7e411509b213e81f8",
   "compiler": [
     "rustc 1.90.0 (1159e78c4 2025-09-14)",
     "binary: rustc",
@@ -17,7 +17,8 @@
     "github_actions_used": false,
     "production_or_live_state_changed": false,
     "capital_or_credentials_changed": false,
-    "complete": false
+    "complete": true,
+    "complete_meaning": "Every finding is dispositioned and local implementation/verification is complete; retained architecture limitations and no funded deployment remain explicit."
   },
   "checks": {
     "fmt": {
@@ -102,6 +103,18 @@
       "exit_code": 0,
       "seconds": 81.338,
       "log_sha256": "9db5328c00f968bc44684b876c595ad93f8ae0bcf38b76893151ba5172d0a8f2",
+      "python_passed": 1499,
+      "mypy_files": 100,
+      "components": [
+        "repository doctor",
+        "ruff",
+        "shellcheck",
+        "mypy",
+        "pytest",
+        "cargo fmt",
+        "cargo clippy",
+        "cargo test"
+      ],
       "result_lines": [
         "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
         "test result: ok. 97 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
@@ -139,6 +152,127 @@
         "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
         "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
       ]
+    },
+    "release": {
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "engine/Cargo.toml",
+        "--workspace",
+        "--all-targets",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "seconds": 249.939,
+      "log_sha256": "25375ed3e7770478feee0ad636221c38b4719f2691cf7938875c75beeaf26375",
+      "passed": 1839,
+      "failed": 0,
+      "ignored": 5
+    },
+    "release-doc": {
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "engine/Cargo.toml",
+        "--workspace",
+        "--doc",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "seconds": 47.852,
+      "log_sha256": "3ddba33d2d9e8aa523709f6249f9ff5b6c0941c35c216ec6747d4ea846a17e57",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    "release-binaries": {
+      "command": [
+        "cargo",
+        "build",
+        "--manifest-path",
+        "engine/Cargo.toml",
+        "--release",
+        "-p",
+        "engine-core",
+        "-p",
+        "engine-strategies",
+        "--bins",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "seconds": 77.42,
+      "log_sha256": "b26a3b3423a3a1c9b011d49edb72cea10306df05eba330afed8b72df937413d1"
+    },
+    "python-fixtures": {
+      "command": [
+        ".venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/research/backtest/test_native_directional_contract.py"
+      ],
+      "exit_code": 0,
+      "seconds": 0.384,
+      "log_sha256": "fa665775964cf05a4b8c9ca6f3bb541d55819b03a8e9277e22b2aa4799804700",
+      "result_lines": [
+        "2 passed in 0.25s"
+      ]
+    },
+    "worker-resource-envelope": {
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "engine/Cargo.toml",
+        "--release",
+        "-p",
+        "signal-worker",
+        "--test",
+        "perpetual_resource_envelope",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "--ignored",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "seconds": 500.549,
+      "log_sha256": "a7acfab9e90f5bb3e626b110153f2312428795598b425f398fd08dfb219e21e4",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "resource_result": [
+        "resource_envelope union=270 long=120 carry=150 cold_klines=736560 cold_funding=442800 ticker_cadence_ms=5000 ticker_events=1440 ticker_hours=2 outage_watermark_hours=12 final_klines=410880 final_funding=118950 checkpoint_bytes=105943638 spool_files=4 spool_bytes=7299677 sequence=3306"
+      ]
+    },
+    "documentation": {
+      "command": [
+        ".venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/repo/test_docs_links.py"
+      ],
+      "exit_code": 0,
+      "passed": 3,
+      "failed": 0,
+      "structure": "Purpose, Spec Tables, Invariants, Operational Recipes in audit, engine specification and handoff",
+      "source_hashes_checked": 308
     }
   },
   "fail_before_regressions": [
@@ -148,7 +282,11 @@
       "test": "tests::order_path::a_flooded_wake_drops_entries_but_never_exits",
       "before": "failed assertion",
       "failure_excerpt": "thread 'tests::order_path::a_flooded_wake_drops_entries_but_never_exits' panicked at engine-core/src/tests/order_path.rs:1513:5:\nassertion `left == right` failed: both exits reach the venue\n  left: 0\n right: 2\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    tests::order_path::a_flooded_wake_drops_entries_but_never_exits\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 576 filtered out; finished in 0.02s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "3a11ced0f214ab16427456e0eeaa053d6b0646f6741a9b5e5c87d96390a9f2da"
+      "log_sha256": "3a11ced0f214ab16427456e0eeaa053d6b0646f6741a9b5e5c87d96390a9f2da",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "effects-second-sleeve",
@@ -156,7 +294,11 @@
       "test": "tests::order_path::a_flooded_sleeve_cannot_discard_another_sleeves_exit",
       "before": "failed assertion",
       "failure_excerpt": "thread 'tests::order_path::a_flooded_sleeve_cannot_discard_another_sleeves_exit' panicked at engine-core/src/tests/order_path.rs:2645:5:\nassertion `left == right` failed: the flood must retain both sleeves' exits\n  left: [0, 0]\n right: [2, 1]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    tests::order_path::a_flooded_sleeve_cannot_discard_another_sleeves_exit\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 581 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "e626ebf0ac1123e1c7023ff960f2b08ae7bf735ea6045524cd1696bfa7cf181b"
+      "log_sha256": "e626ebf0ac1123e1c7023ff960f2b08ae7bf735ea6045524cd1696bfa7cf181b",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "effects-order",
@@ -164,7 +306,11 @@
       "test": "tests::strategy_checkpoints::a_checkpoint_cannot_overtake_an_earlier_batched_order",
       "before": "failed assertion",
       "failure_excerpt": "thread 'tests::strategy_checkpoints::a_checkpoint_cannot_overtake_an_earlier_batched_order' panicked at engine-core/src/tests/strategy_checkpoints.rs:620:5:\nthe committed checkpoint must not overtake its preceding effect\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    tests::strategy_checkpoints::a_checkpoint_cannot_overtake_an_earlier_batched_order\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 576 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "4402716dbc77c39c18b5029ee184a548b4f258bd1be58d085ba332d3c109d170"
+      "log_sha256": "4402716dbc77c39c18b5029ee184a548b4f258bd1be58d085ba332d3c109d170",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "effects-owner",
@@ -172,7 +318,11 @@
       "test": "tests::ownership::callback_cannot_cancel_or_amend_another_sleeves_order",
       "before": "failed assertion",
       "failure_excerpt": "thread 'tests::ownership::callback_cannot_cancel_or_amend_another_sleeves_order' panicked at engine-core/src/tests/ownership.rs:458:5:\nassertion `left == right` failed: foreign cancel or amend reached venue\n  left: [(1, 0), (0, 1)]\n right: [(0, 0), (0, 0)]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    tests::ownership::callback_cannot_cancel_or_amend_another_sleeves_order\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 581 filtered out; finished in 0.02s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "6442fd206d717b233dfbf86d88d055bbe50e2d8418c8837d9d7c09bcadc8d7c7"
+      "log_sha256": "6442fd206d717b233dfbf86d88d055bbe50e2d8418c8837d9d7c09bcadc8d7c7",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "effects-stop",
@@ -180,7 +330,11 @@
       "test": "tests::ownership::foreign_ownership_preserves_own_exit_orders_but_not_foreign_stop_control",
       "before": "failed assertion",
       "failure_excerpt": "thread 'tests::ownership::foreign_ownership_preserves_own_exit_orders_but_not_foreign_stop_control' panicked at engine-core/src/tests/ownership.rs:423:5:\nassertion failed: !h.stops.lock().unwrap().contains(&(SymbolId(0), 29_500.0))\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    tests::ownership::foreign_ownership_preserves_own_exit_orders_but_not_foreign_stop_control\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 576 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "47037e5020a242db20b70fb7ea1e8e1f4f779ae0e8e0207117123f994b82198e"
+      "log_sha256": "47037e5020a242db20b70fb7ea1e8e1f4f779ae0e8e0207117123f994b82198e",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "effects-crash",
@@ -188,7 +342,11 @@
       "test": "tests::strategy_checkpoints::restart_after_checkpoint_retains_the_unsent_exit",
       "before": "failed assertion",
       "failure_excerpt": "thread 'tests::strategy_checkpoints::restart_after_checkpoint_retains_the_unsent_exit' panicked at engine-core/src/tests/strategy_checkpoints.rs:658:5:\nassertion `left == right` failed: checkpoint recovery lost its dependent exit\n  left: 0\n right: 1\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    tests::strategy_checkpoints::restart_after_checkpoint_retains_the_unsent_exit\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 578 filtered out; finished in 0.02s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "dce1570b7643ebabced7ecca11c7d2016d58db39bc9ef30541087c8226218077"
+      "log_sha256": "dce1570b7643ebabced7ecca11c7d2016d58db39bc9ef30541087c8226218077",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "effects-durable-fairness",
@@ -196,7 +354,11 @@
       "test": "tests::scheduler_fairness::durable_effect_flood_yields_to_private_input_and_restarts_its_suffix",
       "before": "failed assertion",
       "failure_excerpt": "thread 'tests::scheduler_fairness::durable_effect_flood_yields_to_private_input_and_restarts_its_suffix' panicked at engine-core/src/tests/scheduler_fairness.rs:214:5:\ndurable effects starved the private input: 1024\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    tests::scheduler_fairness::durable_effect_flood_yields_to_private_input_and_restarts_its_suffix\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 579 filtered out; finished in 0.02s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "fa471a6b0309753daa556aad0b552e0b34e52fd2b9fd6530d5b5231319cf2019"
+      "log_sha256": "fa471a6b0309753daa556aad0b552e0b34e52fd2b9fd6530d5b5231319cf2019",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "effects-checkpoint-write",
@@ -204,7 +366,11 @@
       "test": "tests::strategy_checkpoints::failed_checkpoint_write_does_not_publish_uncommitted_strategy_state",
       "before": "failed assertion",
       "failure_excerpt": "thread 'tests::strategy_checkpoints::failed_checkpoint_write_does_not_publish_uncommitted_strategy_state' panicked at engine-core/src/tests/strategy_checkpoints.rs:689:9:\nfailed checkpoint append published uncommitted state\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    tests::strategy_checkpoints::failed_checkpoint_write_does_not_publish_uncommitted_strategy_state\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 580 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "99398a3bfe4a7f471873ba9af197ae05effb00c2a05cbbfa096fe9702ed38163"
+      "log_sha256": "99398a3bfe4a7f471873ba9af197ae05effb00c2a05cbbfa096fe9702ed38163",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "effects-stateful-barrier",
@@ -212,7 +378,11 @@
       "test": "tests::strategy_checkpoints::stateful_order_barrier_failure_never_reaches_the_venue",
       "before": "failed assertion",
       "failure_excerpt": "thread 'tests::strategy_checkpoints::stateful_order_barrier_failure_never_reaches_the_venue' panicked at engine-core/src/tests/strategy_checkpoints.rs:731:5:\nstateful order escaped before its failing OrderSent barrier\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    tests::strategy_checkpoints::stateful_order_barrier_failure_never_reaches_the_venue\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 596 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "fca22f797356c9f255960d6b6bccf7742f5023d7e476c94ab5aeb67d30d3b06a"
+      "log_sha256": "fca22f797356c9f255960d6b6bccf7742f5023d7e476c94ab5aeb67d30d3b06a",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "effects-stall",
@@ -220,7 +390,11 @@
       "test": "tests::strategy_checkpoints::restoring_a_stalled_venue_mutation_uses_the_existing_drain_deadline",
       "before": "failed assertion",
       "failure_excerpt": "thread 'tests::strategy_checkpoints::restoring_a_stalled_venue_mutation_uses_the_existing_drain_deadline' panicked at engine-core/src/tests/strategy_checkpoints.rs:705:14:\nrestoring effects hung past the existing ten-second mutation drain deadline: Elapsed(())\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    tests::strategy_checkpoints::restoring_a_stalled_venue_mutation_uses_the_existing_drain_deadline\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 596 filtered out; finished in 10.51s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "4845c17683095a4f42a87d4e6aac2eb29279a15c5d154a22b54b0e26195b4684"
+      "log_sha256": "4845c17683095a4f42a87d4e6aac2eb29279a15c5d154a22b54b0e26195b4684",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "inputs-noop",
@@ -228,7 +402,11 @@
       "test": "tests::durable_signals::a_noop_consumer_backpressures_its_next_row_and_preserves_an_independent_consumer",
       "before": "failed assertion",
       "failure_excerpt": "thread 'tests::durable_signals::a_noop_consumer_backpressures_its_next_row_and_preserves_an_independent_consumer' panicked at engine-core/src/tests/durable_signals.rs:1367:5:\nassertion `left == right` failed: an unfinished consumer owns only its current delivery\n  left: 2\n right: 1\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest tests::durable_signals::a_noop_consumer_backpressures_its_next_row_and_preserves_an_independent_consumer ... FAILED\n\nfailures:\n\nfailures:\n    tests::durable_signals::a_noop_consumer_backpressures_its_next_row_and_preserves_an_independent_consumer\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 575 filtered out; finished in 0.03s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "771cbf661fb0bed0d50fc4ad2e79de317a2dded10ea01fe985769f48bf0724e0"
+      "log_sha256": "771cbf661fb0bed0d50fc4ad2e79de317a2dded10ea01fe985769f48bf0724e0",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "inputs-reject",
@@ -236,7 +414,11 @@
       "test": "native_long::plug::tests::malformed_input_emits_an_explicit_terminal_rejection",
       "before": "failed assertion",
       "failure_excerpt": "thread 'native_long::plug::tests::malformed_input_emits_an_explicit_terminal_rejection' panicked at engine-strategies/src/native_long/plug.rs:1218:9:\ninvalid input must receive a terminal rejection rather than remain retained\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest native_long::plug::tests::malformed_input_emits_an_explicit_terminal_rejection ... FAILED\n\nfailures:\n\nfailures:\n    native_long::plug::tests::malformed_input_emits_an_explicit_terminal_rejection\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 218 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `-p engine-strategies --lib`\n",
-      "log_sha256": "de80bbe954e95d44cc5b96842fab55c85c71f91119d11e5006db3598c5ba76c5"
+      "log_sha256": "de80bbe954e95d44cc5b96842fab55c85c71f91119d11e5006db3598c5ba76c5",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "inputs-readiness",
@@ -244,7 +426,11 @@
       "test": "tests::durable_signals::startup_frontier_absence_blocks_restored_openings",
       "before": "failed assertion",
       "failure_excerpt": "thread 'tests::durable_signals::startup_frontier_absence_blocks_restored_openings' panicked at engine-core/src/tests/durable_signals.rs:1395:5:\nrestored growth requires producer participation before unseen history can be ruled out\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest tests::durable_signals::startup_frontier_absence_blocks_restored_openings ... FAILED\n\nfailures:\n\nfailures:\n    tests::durable_signals::startup_frontier_absence_blocks_restored_openings\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 576 filtered out; finished in 0.02s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "b55d88a7e6105a6391eb26d01de98cae7f3ad8293807b5b268aa8c1352d3c39a"
+      "log_sha256": "b55d88a7e6105a6391eb26d01de98cae7f3ad8293807b5b268aa8c1352d3c39a",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "inputs-readiness-cancel",
@@ -252,7 +438,11 @@
       "test": "tests::durable_signals::startup_unready_cancels_existing_growth_but_keeps_reduction_orders",
       "before": "failed assertion",
       "failure_excerpt": "thread 'tests::durable_signals::startup_unready_cancels_existing_growth_but_keeps_reduction_orders' panicked at engine-core/src/tests/durable_signals.rs:1564:5:\nassertion `left == right` failed: existing growth needs the same producer readiness as a new opening\n  left: []\n right: [(SymbolId(0), \"eng-gap-0-false\")]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest tests::durable_signals::startup_unready_cancels_existing_growth_but_keeps_reduction_orders ... FAILED\n\nfailures:\n\nfailures:\n    tests::durable_signals::startup_unready_cancels_existing_growth_but_keeps_reduction_orders\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 592 filtered out; finished in 0.03s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "7b5703c3c65babbafffc01cdd46cbeb54fd829899eac68128d4667c7a859288e"
+      "log_sha256": "7b5703c3c65babbafffc01cdd46cbeb54fd829899eac68128d4667c7a859288e",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "inputs-rewind",
@@ -260,7 +450,11 @@
       "test": "signal_state::tests::a_rewound_producer_cannot_declare_its_generation_ready",
       "before": "failed assertion",
       "failure_excerpt": "thread 'signal_state::tests::a_rewound_producer_cannot_declare_its_generation_ready' panicked at engine-core/src/signal_state.rs:809:9:\na same-generation producer behind the durable accepted cursor must not waive history\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest signal_state::tests::a_rewound_producer_cannot_declare_its_generation_ready ... FAILED\n\nfailures:\n\nfailures:\n    signal_state::tests::a_rewound_producer_cannot_declare_its_generation_ready\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 597 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "38348f9ae330153d4e4351a7679c5ad8a52e048983535e9a4558d6ffea23743d"
+      "log_sha256": "38348f9ae330153d4e4351a7679c5ad8a52e048983535e9a4558d6ffea23743d",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "inputs-readiness-error",
@@ -268,7 +462,11 @@
       "test": "signals::delivery_tests::readiness_response_failure_is_a_control_event_not_a_signal_feed_failure",
       "before": "failed assertion",
       "failure_excerpt": "thread 'signals::delivery_tests::readiness_response_failure_is_a_control_event_not_a_signal_feed_failure' panicked at engine-core/src/signals/delivery_tests.rs:713:5:\nreadiness failure must suspend growth without aborting account and exit service: Err(Source(\"key must be a string at line 1 column 3\"))\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest signals::delivery_tests::readiness_response_failure_is_a_control_event_not_a_signal_feed_failure ... FAILED\n\nfailures:\n\nfailures:\n    signals::delivery_tests::readiness_response_failure_is_a_control_event_not_a_signal_feed_failure\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 600 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "9ca271c86521a5729723ce4badfb737f46dc6f9e45c10d53be5296c587775d88"
+      "log_sha256": "9ca271c86521a5729723ce4badfb737f46dc6f9e45c10d53be5296c587775d88",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "inputs-readiness-race",
@@ -276,7 +474,11 @@
       "test": "signal_state::tests::readiness_response_can_trail_rows_accepted_after_its_request",
       "before": "failed assertion",
       "failure_excerpt": "thread 'signal_state::tests::readiness_response_can_trail_rows_accepted_after_its_request' panicked at engine-core/src/signal_state.rs:829:9:\nreadiness compares against the request cursor, not observations racing the response\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest signal_state::tests::readiness_response_can_trail_rows_accepted_after_its_request ... FAILED\n\nfailures:\n\nfailures:\n    signal_state::tests::readiness_response_can_trail_rows_accepted_after_its_request\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 601 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `-p engine-core --lib`\n",
-      "log_sha256": "f7d9f7a24f89d90a266b10423c09e3754e01a89ac4c92207a0ce98e92b1aa408"
+      "log_sha256": "f7d9f7a24f89d90a266b10423c09e3754e01a89ac4c92207a0ce98e92b1aa408",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     },
     {
       "probe": "worker-rejected-batch",
@@ -284,7 +486,11 @@
       "test": "worker::tests::rejected_durable_batch_keeps_memory_and_restart_at_same_input",
       "before": "failed assertion",
       "failure_excerpt": "thread 'worker::tests::rejected_durable_batch_keeps_memory_and_restart_at_same_input' panicked at signal-worker/src/worker/tests.rs:3247:5:\nassertion `left == right` failed: rejected unjournaled batch must not advance memory or coverage\n  left: [123, 34, 115, 99, 104, 101, 109, 97, 95, 118, 101, 114, 115, 105, 111, 110, 34, 58, 49, 44, 34, 99, 111, 110, 102, 105, 103, 34, 58, 123, 34, 115, 99, 104, 101, 109, 97, 95, 118, 101, 114, 115, 105, 111, 110, 34, 58, 49, 44, 34, 115, 105, 103, 110, 97, 108, 95, 99, 111, 110, 102, 105, 103, 95, 105, 100, 34, 58, 34, 116, 101, 115, 116, 34, 44, 34, 108, 111, 110, 103, 95, 112, 114, 111, 102, 105, 108, 101, 34, 58, 34, 118, 49, 50, 34, 44, 34, 108, 111, 110, 103, 95, 101, 120, 101, 99, 117, 116, 105, 111, 110, 95, 115, 116, 114, 97, 116, 101, 103, 121, 95, 105, 100, 34, 58, 34, 108, 111, 110, 103, 95, 110, 97, 116, 105, 118, 101, 95, 118, 49, 50, 95",
-      "log_sha256": "cf0862c2761f641fa085b8d1d4a5cfdc7f9c30c51f8d1d73652885ec43c514a2"
+      "log_sha256": "cf0862c2761f641fa085b8d1d4a5cfdc7f9c30c51f8d1d73652885ec43c514a2",
+      "after": {
+        "debug": "passed",
+        "release": "passed"
+      }
     }
   ],
   "additional_contract_evidence": {
@@ -375,6 +581,385 @@
       "result_lines": [
         "2 passed in 0.34s"
       ]
+    }
+  },
+  "release_cli_smoke": {
+    "binary_sha256": "dd1f3e3480fd50760df191703a4819fca81df39b4c512d2b319a3996735d2c53",
+    "initial_probe_correction": "Initial probe incorrectly expected the literal Usage:; actual help begins with the engine description. Probe now checks the documented run command. No source change.",
+    "checks": [
+      {
+        "args": [
+          "--help"
+        ],
+        "exit_code": 0,
+        "stdout_sha256": "84b6196d6870d8aa6846e5b0043bd1e5bd4f675e15109eabe3fecbff6cb2baf5"
+      },
+      {
+        "args": [
+          "venues"
+        ],
+        "exit_code": 0,
+        "stdout_sha256": "7e27117671da0a8e5f6d9d992ef5c061e0d272e8ac934158110ac06c54d5ca24"
+      },
+      {
+        "args": [
+          "strategies"
+        ],
+        "exit_code": 0,
+        "stdout_sha256": "34a42e867dc1964628f2878992b45bf2578db763c2df4f031b3f0e98855fbd54"
+      },
+      {
+        "args": [
+          "bench",
+          "--venue-delay-ms",
+          "bad",
+          "--wal",
+          "<temporary>/never-created.wal"
+        ],
+        "exit_code": 1,
+        "stderr": "engine: --venue-delay-ms wants whole milliseconds",
+        "wal_created": false
+      }
+    ]
+  },
+  "optimized_fixture_binary": {
+    "path": "engine/target/release/strategy_contract",
+    "sha256": "3d5850b020d17d08013f081b97e658b3b92d6afedc59f27aa8a3c95484e8ffec",
+    "environment": "LIQUIDITY_MIGRATION_STRATEGY_CONTRACT_BIN points to this freshly built release binary"
+  },
+  "independent_effect_baseline_check": {
+    "baseline_commit": "f69a5fbf63afe11da78dde8bcf06a0ab6ba75046",
+    "tracked_engine_files_checked": 267,
+    "only_differences": [
+      "engine/engine-core/src/tests/order_path.rs",
+      "engine/engine-core/src/tests/ownership.rs",
+      "engine/engine-core/src/tests/resting_orders.rs",
+      "engine/engine-core/src/tests/scheduler_fairness.rs",
+      "engine/engine-core/src/tests/strategy_checkpoints.rs"
+    ],
+    "production_and_manifest_bytes_identical": true
+  },
+  "independent_per_test_reducer_comparison": {
+    "method": "Exact raw serialized JSON, ordered per test invocation; includes checkpoint payload bytes and effect sequence",
+    "tests": 42,
+    "outputs": 62,
+    "tests_and_output_sha256": {
+      "native_carry::plan::tests::checkpoint_round_trips_integer_sizing_anchor_keys": [],
+      "native_carry::plan::tests::disabled_entries_never_block_a_due_exit": [
+        {
+          "sleeve": "CARRY",
+          "sha256": "f52747bae6e3c9a2216d32d12cd7a67864bd7efb6d85f8aaa6558573534abdc5"
+        }
+      ],
+      "native_carry::plan::tests::event_identity_matches_the_checked_in_exodus_fixture": [],
+      "native_carry::plan::tests::fixture_lifecycle_emits_event_then_checkpoint_then_orders": [
+        {
+          "sleeve": "CARRY",
+          "sha256": "6ab6d0864c89e6c57d23bd0e899b453058e2408dfd5af585455c1fcaeffa2ed7"
+        },
+        {
+          "sleeve": "CARRY",
+          "sha256": "fbfdba4d543e5aceb527f7cd9bee485882107fff19d7053c87b334dd3cd66810"
+        },
+        {
+          "sleeve": "CARRY",
+          "sha256": "a0ee6426172d0e853ddac68bb9b80cbfd50b5f03bbf1469ea59888a564c581ac"
+        },
+        {
+          "sleeve": "CARRY",
+          "sha256": "6feb31b6b3b82fb02cb1520fae996d51e56f806ac3ad87797aae1c759d05a5aa"
+        }
+      ],
+      "native_carry::plan::tests::future_durable_decision_blocks_only_entries_and_growth": [
+        {
+          "sleeve": "CARRY",
+          "sha256": "bcef5590f5ad3f4a357a3f61756e501aaf5062e48c1580be0cdaa1d6f714d87b"
+        },
+        {
+          "sleeve": "CARRY",
+          "sha256": "a5aaea152450285b8c53ad3893343a2876149d10bc079de4786bbbd3d4c6e5e5"
+        }
+      ],
+      "native_carry::plan::tests::missing_planner_facts_do_not_consume_the_entry_budget": [
+        {
+          "sleeve": "CARRY",
+          "sha256": "eac9377540557ce413e39d8d334d8cae3eef00db4784589d508f190ad685e318"
+        },
+        {
+          "sleeve": "CARRY",
+          "sha256": "70adceeacc11b6d0df73dd6a86d0d67b9eb539950ec3acb1111b617055d1a742"
+        }
+      ],
+      "native_carry::plan::tests::recovered_planner_facts_retry_a_stale_blocker_at_the_next_cycle": [
+        {
+          "sleeve": "CARRY",
+          "sha256": "831390c071900e248ab63a2e07ef516cb70dc40ba1b221a07e84e46bc3e34533"
+        }
+      ],
+      "native_carry::plan::tests::scorer_catchup_advances_only_scorer_then_current_batch_plans_once": [
+        {
+          "sleeve": "CARRY",
+          "sha256": "e9ba10c06cb3511126340d12877917d8e161ca6f07164ecd7de1aa00cb0c82aa"
+        },
+        {
+          "sleeve": "CARRY",
+          "sha256": "9a318e403bd1833ebdb18eeb2f1c30c126ee86274e40f4ae8edfb4f8555109d3"
+        }
+      ],
+      "native_carry::plan::tests::takeover_entry_budget_is_durable_and_replans_only_at_allowed_boundaries": [
+        {
+          "sleeve": "CARRY",
+          "sha256": "bfb7f64f92eae7239175a155be09bc4a9ed4865f6f0199feac341f5cda6fa9bf"
+        },
+        {
+          "sleeve": "CARRY",
+          "sha256": "4678ae741fb466d6ddcdd1eca4c6c60319290b39eebfab303593461cb7064fdd"
+        },
+        {
+          "sleeve": "CARRY",
+          "sha256": "bfb7f64f92eae7239175a155be09bc4a9ed4865f6f0199feac341f5cda6fa9bf"
+        },
+        {
+          "sleeve": "CARRY",
+          "sha256": "daad06aa85342ba00ed741187edf75a9eef1b08f592fc076dda6b8e104d20ff4"
+        },
+        {
+          "sleeve": "CARRY",
+          "sha256": "13c9ba11c279238027bb2e00bc0ba835a0e900aaa6df58eb21a3c430bf1ce3d1"
+        },
+        {
+          "sleeve": "CARRY",
+          "sha256": "898faaff577f966cf374aaee33f9ed7eec444afff3bf378d122e97f4461d4e6c"
+        }
+      ],
+      "native_carry::plan::tests::unhealthy_account_keeps_orphan_exits_live_across_wakes_and_boot": [
+        {
+          "sleeve": "CARRY",
+          "sha256": "6e34891cdfbf52f09cff886e6ed27bf2d747608f5ee2e4063c56a0232cfd498c"
+        },
+        {
+          "sleeve": "CARRY",
+          "sha256": "6e34891cdfbf52f09cff886e6ed27bf2d747608f5ee2e4063c56a0232cfd498c"
+        },
+        {
+          "sleeve": "CARRY",
+          "sha256": "6e34891cdfbf52f09cff886e6ed27bf2d747608f5ee2e4063c56a0232cfd498c"
+        }
+      ],
+      "native_exodus::plan::tests::consumed_event_tombstone_retires_after_the_engine_event_is_gone": [
+        {
+          "sleeve": "EXODUS",
+          "sha256": "d8fd2527eaa1845b3dec06bc3137b0eaf77fde5d7bdb08d90ac64e9267d06f23"
+        }
+      ],
+      "native_exodus::plan::tests::disabled_entries_leave_valid_fire_pending_but_still_cover_open_record": [
+        {
+          "sleeve": "EXODUS",
+          "sha256": "99875f9a9b2b04b345a1f92e32d372023a55e5c8bf7d631f057ed7272f4bda24"
+        },
+        {
+          "sleeve": "EXODUS",
+          "sha256": "332db7ffb8aa2f9b96117cb9e21dd469e83761ee03ea37b3252e7699141600c4"
+        }
+      ],
+      "native_exodus::plan::tests::durable_consumption_retires_redelivered_fire_without_reopening": [
+        {
+          "sleeve": "EXODUS",
+          "sha256": "2219f42fe2e63aa6a786411c51a78a6c738b604920f6093b487c744b2d3e4bbb"
+        }
+      ],
+      "native_exodus::plan::tests::expired_fire_is_consumed_even_while_account_health_is_unavailable": [
+        {
+          "sleeve": "EXODUS",
+          "sha256": "45b120533f10f30368080185e1bc6e02bf2640e7b737c238c3f7fc57d596044a"
+        }
+      ],
+      "native_exodus::plan::tests::fixture_cycles_replay_open_fill_cover_and_retire": [
+        {
+          "sleeve": "EXODUS",
+          "sha256": "f88987ac988e77e5eea1e1dc3145c093d11f70aafdf9152e28a5078c436433b6"
+        },
+        {
+          "sleeve": "EXODUS",
+          "sha256": "643ce14523bac934f4c6719af1cfa6a484011f31bd4c1138210a12a50cebfa01"
+        },
+        {
+          "sleeve": "EXODUS",
+          "sha256": "337df7a61f0f33feb85614eedb18bac5b489781d93b55dbdf0aa66d9e8a9be9a"
+        },
+        {
+          "sleeve": "EXODUS",
+          "sha256": "2251cea985f43b4d541525868067b2b8c39d3ea2dd0b0970edf08d824b50f78f"
+        }
+      ],
+      "native_exodus::plan::tests::future_durable_fire_blocks_only_entries_and_growth": [
+        {
+          "sleeve": "EXODUS",
+          "sha256": "74ba2e8969608be63cb495064e80bd6a2b432fb6c1b1b57784ae5b9e1e4e82ea"
+        },
+        {
+          "sleeve": "EXODUS",
+          "sha256": "6c7bf73ff998927bd8d35785c0079602b5ed6c484d6d7139f1da4f203a6c36ec"
+        },
+        {
+          "sleeve": "EXODUS",
+          "sha256": "4c2c456e0060fecba6f67b19762b64d8e21a79464b17b4b8860b6d54d31d6060"
+        },
+        {
+          "sleeve": "EXODUS",
+          "sha256": "001e9404b4d165e65dba1b7375cb1f0e591a0400e690dcd791e0eb15a45f4bdb"
+        },
+        {
+          "sleeve": "EXODUS",
+          "sha256": "d46478b5df19b42c9c4f82bfe8f3bbaee1a1e9042807e8475c1da29add9bb437"
+        },
+        {
+          "sleeve": "EXODUS",
+          "sha256": "0c3ee497d58627e7e72f99b24bb506677aa75c08b37f4ad38e41fde4b96d5804"
+        }
+      ],
+      "native_exodus::plan::tests::unhealthy_account_blocks_partial_growth_but_keeps_reductions_live": [
+        {
+          "sleeve": "EXODUS",
+          "sha256": "646366f73e4ceae389f34843d3e6f3eacdbe8bf6d42849507b09a08fcca49de5"
+        },
+        {
+          "sleeve": "EXODUS",
+          "sha256": "d9a9dd2eb713500c03346019cbe5134fbc3b878b3238ed3b2debe3eadbc0eb05"
+        }
+      ],
+      "native_long::plan::tests::a_gate_publication_replaces_waiting_gate_candidates_and_survives_a_checkpoint": [
+        {
+          "sleeve": "LONG",
+          "sha256": "75e5792ca5221f8b966911bc1304a218f6abea27e3fa498a65bc56a1a3e5dbdf"
+        },
+        {
+          "sleeve": "LONG",
+          "sha256": "19f08715540991d82b72e816fd5379ecb2f4dcd0637ce224a1ea343d4a475956"
+        },
+        {
+          "sleeve": "LONG",
+          "sha256": "4bc88eaf7c30e64aefd55945c8e9c5e3c2d3e4a96822e7c374177ac762b5142e"
+        }
+      ],
+      "native_long::plan::tests::a_gate_trigger_enters_at_market_through_native_sizing_with_its_own_tag": [
+        {
+          "sleeve": "LONG",
+          "sha256": "ad18b0e1bb366029a059e0e4c7e3ecbb304ce15719e0e771921dc758f8321e40"
+        }
+      ],
+      "native_long::plan::tests::a_gate_trigger_that_is_stale_unmeasured_or_repeated_is_rejected": [],
+      "native_long::plan::tests::a_wide_band_gate_entry_is_tagged_apart": [
+        {
+          "sleeve": "LONG",
+          "sha256": "afe2f704ad01085ac43a140d62c6524780b3a1cfd48a92278f81d67ecf92af10"
+        }
+      ],
+      "native_long::plan::tests::backward_clock_preserves_a_pending_signal_until_it_can_enter": [
+        {
+          "sleeve": "LONG",
+          "sha256": "b4363cecb2573c880e5a272bda4422b1ea8dfeb0b41a6b029e346bf3868637e8"
+        },
+        {
+          "sleeve": "LONG",
+          "sha256": "cfdfe44d58099faae411334cf94cd9cb26b60753adfb3172da8ca1952cd57248"
+        }
+      ],
+      "native_long::plan::tests::checkpoint_mismatch_cancels_a_flat_working_opening_order": [
+        {
+          "sleeve": "LONG",
+          "sha256": "de6ac5976f210408fc3216183e55df00f2145d7cdb285315adb58b0124c2c7df"
+        }
+      ],
+      "native_long::plan::tests::delayed_batch_uses_engine_wall_time_for_the_entry_cutoff": [
+        {
+          "sleeve": "LONG",
+          "sha256": "ebe283d2108a2859a4315e85f77b986718b5e23edba4a540eb7c8f30a36b1216"
+        },
+        {
+          "sleeve": "LONG",
+          "sha256": "4c036aa57dd8d09fa9ee79ae9fc3d61aed2d3b3f5921745c64d314f0b2592a8d"
+        }
+      ],
+      "native_long::plan::tests::disabled_entries_never_top_up_a_partial_position_but_allow_reduction": [
+        {
+          "sleeve": "LONG",
+          "sha256": "915818f1bdc95d1db3c3dfdfbd1b693b4db16e6130e37b19e927f761c2d8acc7"
+        },
+        {
+          "sleeve": "LONG",
+          "sha256": "3063c7f81419bc1b25a4243d942f5a46e33b3cabd95e2c9b709f70d2b8a5e520"
+        }
+      ],
+      "native_long::plan::tests::disabled_signal_and_cycle_budget_survive_repeated_wakes": [
+        {
+          "sleeve": "LONG",
+          "sha256": "4e2c4a21c48e38e2f297d9255ea3949481d2c2d042c01bee038f5132b84a53e8"
+        },
+        {
+          "sleeve": "LONG",
+          "sha256": "494562712686b06130bfcd0bfea1af82256a5202e95666e187fc7a880b57a93f"
+        },
+        {
+          "sleeve": "LONG",
+          "sha256": "f44aa942549ff73f6296eef43901fb3d7aeae29ca9e071b3546711fdad07c24b"
+        }
+      ],
+      "native_long::plan::tests::every_recorded_decision_matches_the_rust_contract": [],
+      "native_long::plan::tests::future_attempted_signal_blocks_only_growth_and_resumes_at_its_clock": [
+        {
+          "sleeve": "LONG",
+          "sha256": "78854a26af71bcc7bc9b919fd239a127a57ec4c25b3eab1263f3b2042450e868"
+        },
+        {
+          "sleeve": "LONG",
+          "sha256": "ebc46f2d012194e6d9f4e9a9116d2bf92ac28ebab7de3c35a7de86f865e075b9"
+        }
+      ],
+      "native_long::plan::tests::future_signal_and_checkpoint_mismatch_fail_closed": [
+        {
+          "sleeve": "LONG",
+          "sha256": "1631ee04d224eb718d05b9df344279ac19675e3bcc19d9e126a15bf7e8bede7e"
+        }
+      ],
+      "native_long::plan::tests::research_classification_is_the_reducer_entry_rule": [],
+      "native_long::plan::tests::takeover_budget_is_durable_silent_same_cycle_and_exact_on_boot": [
+        {
+          "sleeve": "LONG",
+          "sha256": "26478c751e25206a02029cf0f4c124d68e3eb009b7c6c0a4b6abbe97156c411e"
+        },
+        {
+          "sleeve": "LONG",
+          "sha256": "0cb78d04d7d07fb5e58b97ac8fd17f8a4ac1544e17ecddbacd77c6a7d8259e31"
+        },
+        {
+          "sleeve": "LONG",
+          "sha256": "6499dd93edd5a24df3699f0b38ec6eaa18df74cac7430ea40f5bef3ec74fd84b"
+        },
+        {
+          "sleeve": "LONG",
+          "sha256": "a2318a5e84f2fa505bed6f1d58dd3a0e3960aa82ec3d8c66299e4b75d6143b0f"
+        },
+        {
+          "sleeve": "LONG",
+          "sha256": "f691e0a4be0777ade593b8ba24dc81b71e0866da78588581930cb2d47424161b"
+        },
+        {
+          "sleeve": "LONG",
+          "sha256": "7f8429df5361546615e64af882c23067705dfb9e696c3273eef930e1d6e3a757"
+        }
+      ],
+      "quoter::plan::tests::a_crossed_book_is_not_quoted_around": [],
+      "quoter::plan::tests::a_pulled_side_is_removed_while_the_other_keeps_quoting": [],
+      "quoter::plan::tests::a_quote_that_has_drifted_too_far_is_moved": [],
+      "quoter::plan::tests::a_quote_that_is_nearly_right_is_left_where_it_is": [],
+      "quoter::plan::tests::a_resting_quote_on_a_full_side_is_pulled": [],
+      "quoter::plan::tests::an_empty_book_pulls_everything_and_quotes_nothing": [],
+      "quoter::plan::tests::an_empty_book_side_quotes_both_sides_around_mid": [],
+      "quoter::plan::tests::every_quote_carries_a_stop_because_the_kernel_demands_one": [],
+      "quoter::plan::tests::one_sided_protection_leaves_the_other_quote_exactly_alone": [],
+      "quoter::plan::tests::the_short_side_has_its_own_ceiling": [],
+      "quoter::plan::tests::the_side_that_would_break_the_inventory_ceiling_stops_being_quoted": []
     }
   },
   "native_rejection_exact_proof": {
@@ -648,6 +1233,12 @@
       "LM-T1-308"
     ]
   },
+  "validation_notes": [
+    "Initial integrated Clippy rejected a redundant rest pattern in LaneContext; the pattern was corrected without a lint allowance.",
+    "Initial WAL emission fixture expected v2; current emission is v3, while explicit legacy/v2 decode fixtures remain.",
+    "Test-discovery study initially had an incorrect module import; measurements use only the corrected passing candidate.",
+    "Native rejection isolated setup initially omitted existing config fixtures; exact fixtures were copied before the full affected rerun."
+  ],
   "limitations": [
     "Trusted synchronous callbacks cannot be forcibly preempted; callback output allocation is unbounded.",
     "Ordinary order-only callbacks retain optimistic submission and existing machine-failure reconciliation.",
@@ -966,5 +1557,49 @@
     "engine/signal-worker/src/worker.rs": "dca4b011cbeeeed02118e59438c6ec0b9acf178d0761875e40e35d6fd2d20675",
     "engine/signal-worker/src/worker/tests.rs": "5afdf7a8fcb11010575bec147a25a50bde2a4ab7feef43ab853256f2b55032b6",
     "engine/signal-worker/tests/perpetual_resource_envelope.rs": "7014a0f9a00ac82a5810f708cd6f89640b5894e8b33d2448ef3424f45eebaffd"
-  }
+  },
+  "completion_requirements": {
+    "all_findings_dispositioned": {
+      "execution": 4,
+      "claude": 22,
+      "original_handoff": 30
+    },
+    "delegation": "Three focused subagents: effects, inputs/recovery/reducers, venue boundaries/transitions; root owns integration, worker/heartbeat/CLI/build work and independent verification.",
+    "independent_checks": [
+      "Full debug and release suites",
+      "Per-test ordered reducer-byte comparison",
+      "Effect baseline production-byte comparison",
+      "Exact before-failure log and after-suite matching",
+      "Preserved test discovery/assertions and risk-target test identity",
+      "Old-reader refusal and v3 rotation/legacy compatibility",
+      "Full developer checks and optimized Rust/Python fixture consumers",
+      "Release CLI no-write parsing failure",
+      "270-symbol cold-start/outage/restart resource envelope"
+    ],
+    "local_checkpoint": "584844fa381f2b17fde0cab7e411509b213e81f8",
+    "preservation": "Original dirty audit receipt retained; no unrelated source edits, push, funded deployment, credentials, capital or live-state mutation."
+  },
+  "ignored_in_default_suites": [
+    [
+      "bybit::feed::tests::live_public_feed_delivers_l50_and_aggressor_trades",
+      "needs network"
+    ],
+    [
+      "bybit::feed::tests::live_public_feed_delivers_quotes_and_tickers",
+      "needs network"
+    ],
+    [
+      "bybit_ws::tests::live_public_stream_accepts_btc_topics_and_delivers_a_ticker",
+      "needs network"
+    ],
+    [
+      "live::tests::the_venues_real_instrument_lists_normalize",
+      "reads the venue's instrument lists from LM_BYBIT_INSTRUMENTS_JSON"
+    ],
+    [
+      "full_population_outage_resource_envelope_is_bounded",
+      "release-only 270-symbol cold-start, outage, and restart resource envelope"
+    ]
+  ],
+  "required_checks_complete_at_utc": "2026-09-05T08:10:13.902901+00:00"
 }

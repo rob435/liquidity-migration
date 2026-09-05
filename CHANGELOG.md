@@ -6,6 +6,37 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 08:11 UTC — Complete local audit integration and optimized verification.**
+  - Source checkpoint `584844fa` passes final Rust 1.90 workspace/all-target
+    debug and release suites: 1,839 tests in each, with the same five opt-in
+    ignores; debug/release doctests, strict Clippy and formatting pass. The
+    developer suite passes 1,499 Python tests, Ruff, ShellCheck and mypy over
+    100 files. No GitHub Actions minutes are used.
+  - The separately executed release resource envelope passes 270-symbol cold
+    history, 1,440 ticker updates, a simulated twelve-hour source outage and
+    exact restart at sequence 3,306. Final checkpoint is 105,943,638 bytes;
+    spool remains four files / 7,299,677 bytes. Existing bounds hold; test
+    execution takes 316.21 seconds. This is not a baseline speed comparison
+    or a measurement of total process memory.
+  - Independent integration checks compare 267 baseline engine files (only
+    the five declared test files differ) and match all 18 failing probes to
+    final passing debug/release tests. Exact LONG/CARRY rejection tests also
+    fail with their emission blocks removed and pass when restored. All 62
+    serialized reducer outputs match within their original 42 tests and call
+    order. Fresh optimized Rust/Python fixture consumers and release CLI
+    read-only/error paths pass; invalid CLI input creates no WAL.
+  - `docs/tier1-audit.md` and its resolution artifact close every finding with
+    implementation or a deliberate retained-policy decision, evidence and
+    limits. Worker/venue/public protocol maps, the handoff and source hashes
+    are current. Documentation checks pass. No test assertion or ignore is
+    weakened to obtain these results; initial setup/lint corrections remain
+    recorded in the evidence.
+  - Exclusive symbols, current numeric/accounting and capital semantics,
+    authoritative reconciliation, protective stops and reductions remain.
+    Synchronous callback/output, historical identity and partial typed-wire
+    limits are explicit. No push, funded rollout, credential change, live WAL
+    migration or operational-state mutation occurs.
+
 - **2026-09-05 07:55 UTC — Resolve audit execution ownership and lifecycle defects (local implementation checkpoint).**
   - A-001's destructive action cap is replaced by retained cooperative dispatch
     and explicit opening refusals. Caller identity survives deferral for
