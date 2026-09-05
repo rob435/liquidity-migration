@@ -59,7 +59,7 @@ The one document for the engine audit round: what is implemented on this tree, w
 | Finding | Reproduction | Decision needed |
 | --- | --- | --- |
 | History checkpoint on an empty page | `history_recovery` advances the history checkpoint when the recovery client's `executions` page is empty for the window. The simulator's client serves the venue's history so the simulator no longer hides it; a live endpoint answering empty for a window loses the fill the same way | Whether an empty window may advance the checkpoint |
-| Deployment | Hosted CI runners are refused ([STATE.md](../STATE.md) CI / Deploy Gate); nothing on this tree has reached the host, the funding-identity fix included | Owner: repository visibility or a private runner, then `scripts/ops.sh deploy` |
+| Deployment | Hosted runners accept jobs again, and `deploy` at `d501ffcf` passed every gate, but the host refuses the handover: `build_engine` requires a qualified artifact for the incumbent `cece1d9f`, whose staged archive predates qualification metadata ([STATE.md](../STATE.md) CI / Deploy Gate; [CHANGELOG.md](../CHANGELOG.md) 2026-09-05 20:55 UTC). Nothing on this tree has reached the host | Owner: accept a legacy incumbent artifact whose checksums match the installed binaries, or stage a qualified `cece1d9f` artifact built on Linux x86_64; then dispatch `deploy` |
 
 ### Remaining boundaries
 
@@ -86,7 +86,7 @@ The one document for the engine audit round: what is implemented on this tree, w
 | 3 | Linux resource/process and worker overload opt-in tests | Explicit workload results on a Linux host; ordinary-suite ignores preserved |
 | 4 | Aggregate-parent rejection, restart and failure cuts; exact target sizing for general sleeve exits | A failing mutation and the restored passing behaviour per fix |
 | 5 | Global recovery-response memory and remaining projected account and risk arithmetic | Tested root-cause changes or an exact remaining boundary |
-| 6 | Deploy through `scripts/ops.sh deploy` once runners are available; verify on the host | [operations.md](operations.md) recipe, [STATE.md](../STATE.md) change point |
+| 6 | Decide the incumbent-qualification crossing above, then dispatch `deploy`; verify on the host with `scripts/ops.sh status` | [operations.md](operations.md) recipe, [STATE.md](../STATE.md) change point |
 
 ## Invariants
 

@@ -6,6 +6,49 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 20:55 UTC — The deploy of `d501ffcf` is refused on the host
+  by the incumbent-qualification gate: `cece1d9f` runs from an artifact built
+  before qualification metadata existed, and every deploy needs a qualified
+  rollback artifact for the incumbent. Nothing changed on the host. The
+  decision is the owner's.**
+  - Run `33990169753` (`deploy` at `d501ffcf`, dispatched 20:27 UTC): the
+    Python gate (20:29), the Rust debug gate (20:32) and the release
+    qualification (20:49, the heartbeat test fixed below passes) all
+    succeeded on hosted runners; the `vps` job staged
+    `staged/d501ffcf….tar.gz` on the host and stopped in `build_engine`
+    before any unit was touched: `release artifact lacks binaries or
+    qualification metadata` then `deploy failed: stage a qualified rollback
+    artifact for incumbent cece1d9f… before deploy`. `scripts/ops.sh status`
+    afterwards: `deployed cece1d9f`, `real-money armed`, every unit active
+    with heartbeats 0–12 s old, disk 45 %.
+  - Why. `15c60924` (owner, "Qualify release bytes before deployment")
+    reached `main` in this afternoon's merge and is not in `cece1d9f`. It
+    makes `release_artifact.py verify` require `qualification.json` and
+    `qualification.log` beside the binaries, and `build_engine` require the
+    incumbent's staged artifact to verify before a handover, so a rollback
+    target is guaranteed. The host's `staged/cece1d9f….tar.gz` (08:33) holds
+    the three binaries and `binaries.sha256` only; the same is true of every
+    older archive there. The gate cannot be satisfied by any dispatch: the
+    workflow qualifies the dispatched ref's own tip, `cece1d9f`'s tree has
+    no qualification step, and a qualified artifact must be built on the
+    host's platform (Linux x86_64), which rules out this machine.
+    `tests/scripts/test_release_artifact.py` asserts both refusals
+    (`test_deploy_refuses_legacy_checksums_without_qualification`,
+    `test_preparation_requires_incumbent_qualification_for_rollback`), so
+    the gate is deliberate and its first crossing is a decision, not a fix.
+  - Options for the owner. (a) Accept the incumbent's legacy artifact as
+    the rollback target when its `binaries.sha256` matches the sha256 of
+    the installed `bin/engine`, `bin/signal-worker` and `bin/market-tape`:
+    the rollback bytes are then exactly what runs now; new deploys keep
+    requiring qualification; one function and one test change. (b) Produce
+    a qualified artifact for `cece1d9f` on a Linux x86_64 machine by running
+    the current `scripts/release_artifact.py qualify --repo <clean checkout
+    at cece1d9f> --commit cece1d9f…` (release tests, soak, bench and smoke on
+    that tree, then packaging) and staging the result at
+    `/opt/liquidity-migration-engine/staged/cece1d9f….tar.gz`; no code
+    change, but no runner does it today. Until one of these, no commit can
+    reach the fleet, this fix included.
+
 - **2026-09-05 20:25 UTC — The release qualification of `a26e297d` failed
   on one heartbeat test that races on the paused clock; the test now ends
   when the beat has caught up.**
