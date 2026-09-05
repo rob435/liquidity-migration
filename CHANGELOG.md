@@ -7,6 +7,24 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 08:09 UTC — The thirty-sixth refused deploy.** Run
+  `33954490246`, `deploy` on `main@38b3c047`, created 08:09:24 UTC and dead at
+  08:09:30. `ci` 08:09:26 → 08:09:28, `rust` 08:09:26 → 08:09:29 and `Deploy
+  artifact` 08:09:26 → 08:09:29 — two to three seconds each, none alive long
+  enough to check out the repository — and every failed job's log download
+  returns the same error verbatim, re-read on this run: `failed to download
+  logs: HTTP 404`. `diagnose` and `disarm` skipped at 08:09:26; `Engine
+  release tests, soak and benchmarks` and `vps` both created 08:09:29 and
+  skipped, `vps` never scheduled against a runner. No job started and nothing
+  reached the host. **Thirty-six consecutive refusals since 19:17 UTC on
+  2026-09-04**, every one with the account-payment signature — thirteen hours
+  in which no repository change can reach the fleet through GitHub. Deployed
+  commit stays `65ee75a7`; the eight recorder fixes and the uploader's leak
+  fix remain merged and undeployed, and the recorders have now thrown away
+  65 332 005 frames. The SSH path needs no runner:
+  `EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db scripts/ops.sh
+  deploy`.
+
 - **2026-09-05 08:02 UTC — The twenty-sixth page: the pruner's per-pass
   deficit grows 31× in fifteen minutes while the tape writes almost nothing,
   and the pair sets a new discard record of 5 005.1 frames/s. No ninth defect
