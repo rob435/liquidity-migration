@@ -89,6 +89,7 @@ struct GateCandidateRow {
     trigger_window_h: Option<i64>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NativeLong {
     pub core: SleeveCore<StrategyConfig, SleeveState>,
 }
@@ -746,8 +747,31 @@ fn validate_feature_coverage(
 }
 
 impl Strategy for NativeLong {
+    fn runtime_state(
+        &self,
+    ) -> Result<Option<engine_types::strategy_process::StrategyRuntimeState>, String> {
+        crate::runtime::snapshot(NAME, self, &(self.core.id, &self.core.config)).map(Some)
+    }
     fn name(&self) -> &str {
         NAME
+    }
+
+    fn retained_signal_subscriptions(&self) -> Option<Vec<Subscription>> {
+        if !self.core.restored {
+            return None;
+        }
+        let mut symbols = self
+            .core
+            .state
+            .symbols
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        symbols.extend(self.core.state.pending_signals.keys().cloned());
+        symbols.extend(self.core.state.exit_pending.iter().cloned());
+        symbols.extend(self.core.state.refused_entries.iter().cloned());
+        symbols.extend(self.core.state.entry_cycle_selected_symbols.iter().cloned());
+        Some(crate::native_common::retained_market_subscriptions(symbols))
     }
 
     fn subscriptions(&self) -> Vec<Subscription> {
@@ -956,6 +980,64 @@ mod tests {
     use serde_json::json;
 
     const NOW_MS: i64 = 1_700_000_000_000;
+
+    #[test]
+    fn runtime_restore_rejects_semantically_invalid_native_state_and_configuration() {
+        let mut plug = NativeLong::new(config(), SleeveState::default()).unwrap();
+        plug.core
+            .state
+            .cooldown_until_ms
+            .insert("BTCUSDT".into(), -1);
+        let invalid_state = plug.runtime_state().unwrap().unwrap();
+        assert!(
+            crate::runtime::restore(&invalid_state).is_err(),
+            "serialized state with a negative cooldown was restored"
+        );
+        plug.core.state.cooldown_until_ms.clear();
+        plug.core.config.notional_multiplier = -1.0;
+        let invalid_config = plug.runtime_state().unwrap().unwrap();
+        assert!(
+            crate::runtime::restore(&invalid_config).is_err(),
+            "self-consistent configuration hash bypassed semantic config validation"
+        );
+    }
+
+    #[test]
+    fn retained_routes_follow_live_retry_state_and_release_history() {
+        let mut plug = NativeLong::new(config(), SleeveState::default()).unwrap();
+        plug.core.state.exit_pending.insert("EXITUSDT".into());
+        plug.core.state.entry_cycle_started_ms = 10;
+        plug.core
+            .state
+            .entry_cycle_selected_symbols
+            .insert("RETRYUSDT".into());
+        plug.core
+            .state
+            .cooldown_until_ms
+            .insert("HISTORYUSDT".into(), 10);
+        plug.core
+            .state
+            .attempted_signal_ts_ms
+            .insert("HISTORYUSDT".into(), 10);
+        let routes = plug
+            .retained_signal_subscriptions()
+            .expect("native consumer declares retained routes");
+        assert_eq!(routes.len(), 4);
+        assert!(routes.iter().all(|route| route.symbol != "HISTORYUSDT"));
+        for symbol in ["EXITUSDT", "RETRYUSDT"] {
+            for feed in [engine_types::Feed::Quote, engine_types::Feed::Ticker] {
+                assert!(routes.contains(&Subscription {
+                    symbol: symbol.into(),
+                    feed
+                }));
+            }
+        }
+        let runtime = plug.runtime_state().unwrap().unwrap();
+        let restored = crate::runtime::restore(&runtime).unwrap();
+        assert_eq!(restored.retained_signal_subscriptions(), Some(routes));
+        plug.core.state = SleeveState::default();
+        assert_eq!(plug.retained_signal_subscriptions(), Some(Vec::new()));
+    }
 
     fn config() -> StrategyConfig {
         serde_json::from_value(json!({

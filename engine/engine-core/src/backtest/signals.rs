@@ -70,6 +70,9 @@ impl SignalReplayFeed {
         let mut observations = Vec::with_capacity(paths.len());
         for path in paths {
             if let Some(observation) = SpoolSignalFeed::read_one(&path)? {
+                if engine_types::ManagedSignalSource::parse(&observation.source).is_some() {
+                    return Err(SignalError::Source("managed signal replay requires chronological lifecycle grants and seals from the engine WAL; an observation-only directory cannot establish producer ownership".into()));
+                }
                 observations.push(observation);
             }
         }
@@ -413,5 +416,23 @@ mod tests {
         .is_err());
         feed.set_gap_requests(&[], &[]).unwrap();
         assert_eq!(feed.next_observation().await.unwrap(), newer);
+    }
+    #[test]
+    fn managed_observation_only_tape_requires_the_recorded_lifecycle_wal() {
+        let directory = crate::testpath::temp_path("managed-replay-context");
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let source = format!("native.e{:020}.g{}.long", 1, "a".repeat(32));
+        let observation = row(&source, 1, 2);
+        let path = directory.path().join(format!(
+            "{:020}-{}.json",
+            observation.sequence, observation.content_sha256
+        ));
+        std::fs::write(&path, serde_json::to_vec(&observation).unwrap()).unwrap();
+        let result =
+            SignalReplayFeed::from_directory(directory.path(), Scheduler::starting_at(2_000_000));
+        assert!(
+            matches!(result, Err(SignalError::Source(reason)) if reason.contains("chronological lifecycle grants and seals"))
+        );
+        std::fs::remove_dir_all(directory.path()).unwrap();
     }
 }

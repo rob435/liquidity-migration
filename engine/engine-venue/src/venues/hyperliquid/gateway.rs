@@ -35,8 +35,8 @@ use serde_json::{json, Value};
 use super::assets::{venue_px, venue_sz, Asset, Assets};
 use super::cloid;
 use super::parse::{
-    all_accepted, first_status, parse_executions, parse_margin, parse_meta, parse_order_ack,
-    parse_positions, parse_working_orders, stops_by_coin, venue_result,
+    all_accepted, first_status, parse_margin, parse_meta_raw, parse_order_ack, parse_positions,
+    parse_working_orders, stops_by_coin, venue_result,
 };
 use super::realm::HyperliquidRealm;
 use super::sign::{address_of, address_text, parse_address, parse_key, sign_l1_action};
@@ -181,6 +181,14 @@ impl HyperliquidGateway {
             .await
     }
 
+    async fn info_as<T: serde::de::DeserializeOwned>(&self, body: Value) -> Result<T, VenueError> {
+        let text =
+            serde_json::to_string(&body).map_err(|e| VenueError::BadRequest(e.to_string()))?;
+        self.http
+            .post_as(PATH_INFO, text, "application/json", &[])
+            .await
+    }
+
     /// Sign one action and send it. The value that was hashed is the value
     /// that is rendered, so what was signed and what goes out cannot differ.
     async fn exchange(&mut self, action: super::msgpack::Mp) -> Result<Value, VenueError> {
@@ -208,8 +216,8 @@ impl HyperliquidGateway {
     }
 
     async fn load_assets(&mut self) -> Result<(), VenueError> {
-        let meta = self.info(json!({"type": "meta"})).await?;
-        self.assets = Assets::from_rows(parse_meta(&meta)?);
+        let meta: Box<serde_json::value::RawValue> = self.info_as(json!({"type": "meta"})).await?;
+        self.assets = Assets::from_rows(parse_meta_raw(meta.get())?);
         Ok(())
     }
 
@@ -241,6 +249,60 @@ impl HyperliquidGateway {
         asset: &Asset,
         reference_px: f64,
     ) -> Result<OrderWire, VenueError> {
+        if let Some(terms) = crate::order_wire::terms(req)? {
+            use engine_types::numeric::Exact;
+            use engine_types::order_terms::{decimal_wire, quantize_price, strategy_decimal};
+            let spec = asset.exact_spec()?;
+            terms
+                .validate_wire_grid(
+                    &spec,
+                    req.kind,
+                    engine_types::order_terms::QuantityPolicy::Normal,
+                )
+                .map_err(crate::order_wire::error)?;
+            let (price, kind) = match req.kind {
+                OrderKind::Market => {
+                    let reference =
+                        strategy_decimal(reference_px).map_err(crate::order_wire::error)?;
+                    let slippage = Exact::parse_decimal(&MARKET_SLIPPAGE.to_string())
+                        .map_err(crate::order_wire::error)?;
+                    let multiplier = if req.side == Side::Buy {
+                        Exact::one() + slippage
+                    } else {
+                        Exact::one() - slippage
+                    };
+                    let price =
+                        quantize_price(&(reference * multiplier), req.side.flipped(), &spec)
+                            .map_err(crate::order_wire::error)?;
+                    (
+                        price,
+                        OrderKindWire::Limit {
+                            tif: TimeInForce::Ioc,
+                        },
+                    )
+                }
+                OrderKind::Limit { tif, .. } => {
+                    let price = terms.limit_price.as_ref().expect("validated limit");
+                    if quantize_price(price, req.side, &spec).map_err(crate::order_wire::error)?
+                        != *price
+                    {
+                        return Err(crate::order_wire::error(
+                            "exact limit is not legal at venue precision",
+                        ));
+                    }
+                    (price.clone(), OrderKindWire::Limit { tif })
+                }
+            };
+            return Ok(OrderWire {
+                asset: asset.index,
+                is_buy: req.side == Side::Buy,
+                px: decimal_wire(&price).map_err(crate::order_wire::error)?,
+                sz: decimal_wire(&terms.quantity).map_err(crate::order_wire::error)?,
+                reduce_only: req.reduce_only,
+                kind,
+                cloid: Some(cloid::to_cloid(&req.client_order_id)),
+            });
+        }
         let (px, kind) = match req.kind {
             OrderKind::Market => {
                 let through = match req.side {
@@ -270,6 +332,46 @@ impl HyperliquidGateway {
             kind,
             cloid: Some(cloid::to_cloid(&req.client_order_id)),
         })
+    }
+
+    fn attached_stop_wire(
+        &self,
+        asset: &Asset,
+        req: &OrderRequest,
+        trigger_px: f64,
+    ) -> Result<OrderWire, VenueError> {
+        match crate::order_wire::terms(req)? {
+            None => self.stop_wire(asset, req.side, req.qty, trigger_px),
+            Some(terms) => {
+                use engine_types::order_terms::{decimal_wire, quantize_price};
+                let trigger = terms
+                    .physical_stop_trigger_price
+                    .as_ref()
+                    .expect("validated physical stop");
+                if quantize_price(trigger, req.side.flipped(), &asset.exact_spec()?)
+                    .map_err(crate::order_wire::error)?
+                    != *trigger
+                {
+                    return Err(crate::order_wire::error(
+                        "exact stop is not legal at venue precision",
+                    ));
+                }
+                let text = decimal_wire(trigger).map_err(crate::order_wire::error)?;
+                Ok(OrderWire {
+                    asset: asset.index,
+                    is_buy: req.side.flipped() == Side::Buy,
+                    px: text.clone(),
+                    sz: decimal_wire(&terms.quantity).map_err(crate::order_wire::error)?,
+                    reduce_only: true,
+                    kind: OrderKindWire::Trigger {
+                        is_market: true,
+                        trigger_px: text,
+                        tpsl: TPSL_STOP,
+                    },
+                    cloid: None,
+                })
+            }
+        }
     }
 
     /// A stop, as the reduce-only trigger order this venue keeps stops as.
@@ -370,7 +472,7 @@ impl VenueGateway for HyperliquidGateway {
             Some(stop) if !req.reduce_only => (
                 vec![
                     entry,
-                    self.stop_wire(&asset, req.side, req.qty, stop.trigger_px)?,
+                    self.attached_stop_wire(&asset, req, stop.trigger_px)?,
                 ],
                 GROUPING_ORDER_TPSL,
             ),
@@ -614,6 +716,30 @@ impl VenueGateway for HyperliquidGateway {
         })
     }
 
+    fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
+        Some(Box::new(LookupClient {
+            http: self.http.clone(),
+            account: self.address_text(),
+        }))
+    }
+
+    async fn order_status(
+        &mut self,
+        symbol: SymbolId,
+        client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        let name = self.name_of(symbol)?.to_owned();
+        let raw:Box<serde_json::value::RawValue>=self.info_as(json!({"type":"orderStatus","user":self.address_text(),"oid":cloid::to_cloid(client_order_id)})).await?;
+        super::lookup::parse(raw.get(), &name, client_order_id)
+    }
+
+    async fn instrument_specs(
+        &mut self,
+    ) -> Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError> {
+        self.load_assets().await?;
+        self.assets.instrument_specs()
+    }
+
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {
         self.load_assets().await?;
         Ok(self.assets.instrument_rules())
@@ -643,15 +769,18 @@ impl VenueGateway for HyperliquidGateway {
             if from > end_ms {
                 return Ok(out);
             }
-            let page = self
-                .info(json!({
+            let page: Vec<Box<serde_json::value::RawValue>> = self
+                .info_as(json!({
                     "type": "userFillsByTime",
                     "user": self.address_text(),
                     "startTime": from,
                     "endTime": end_ms,
                 }))
                 .await?;
-            let rows = parse_executions(&page)?;
+            let rows = page
+                .iter()
+                .map(|row| super::execution::decode_raw(row.get()))
+                .collect::<Result<Vec<_>, _>>()?;
             let count = rows.len();
             let newest = rows.iter().map(|r| r.venue_ts_ms).max();
             // Fills already held are dropped by their own id, so a page that
@@ -749,6 +878,26 @@ fn stop_oids(orders: &Value, coin: &str) -> Result<Vec<i64>, VenueError> {
     Ok(out)
 }
 
+struct LookupClient {
+    http: HttpClient,
+    account: String,
+}
+#[engine_types::async_trait]
+impl engine_types::orders::OrderLookupClient for LookupClient {
+    async fn lookup(
+        &self,
+        name: &str,
+        client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        let body = json!({"type":"orderStatus", "user":self.account, "oid":cloid::to_cloid(client_order_id)}).to_string();
+        let raw: Box<serde_json::value::RawValue> = self
+            .http
+            .post_as(PATH_INFO, body, "application/json", &[])
+            .await?;
+        super::lookup::parse(raw.get(), name, client_order_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,6 +934,8 @@ mod tests {
             kind,
             stop: None,
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         }
     }

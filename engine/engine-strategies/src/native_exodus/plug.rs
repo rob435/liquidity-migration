@@ -39,6 +39,7 @@ pub fn decision_fingerprint_from_params(params: &toml::Value) -> Result<String, 
     Ok(config_from_params(params)?.fingerprint())
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NativeExodus {
     pub core: SleeveCore<StrategyConfig, SleeveState>,
 }
@@ -329,12 +330,33 @@ impl NativeExodus {
 }
 
 impl Strategy for NativeExodus {
+    fn runtime_state(
+        &self,
+    ) -> Result<Option<engine_types::strategy_process::StrategyRuntimeState>, String> {
+        crate::runtime::snapshot(NAME, self, &(self.core.id, &self.core.config)).map(Some)
+    }
     fn name(&self) -> &str {
         NAME
     }
 
     fn input_dependencies(&self) -> Vec<String> {
         vec![self.core.config.carry_sleeve_name.clone()]
+    }
+
+    fn retained_signal_subscriptions(&self) -> Option<Vec<Subscription>> {
+        if !self.core.restored {
+            return None;
+        }
+        let mut symbols = self
+            .core
+            .state
+            .open
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        symbols.extend(self.core.state.refused_entries.iter().cloned());
+        symbols.extend(self.core.state.entry_retry_after_ms.keys().cloned());
+        Some(crate::native_common::retained_market_subscriptions(symbols))
     }
 
     fn subscriptions(&self) -> Vec<Subscription> {
@@ -524,6 +546,51 @@ mod tests {
     use crate::native_common::{checkpoint_payload, DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION};
     use crate::native_exodus::plan::{OpenRecord, RuleConfig};
     use engine_types::{Action, OrderKind, Side};
+
+    #[test]
+    fn retained_routes_follow_live_retry_state_and_release_history() {
+        let mut plug = NativeExodus::new(config(), SleeveState::default()).unwrap();
+        plug.core.state.refused_entries.insert("EXITUSDT".into());
+        plug.core.state.refused_entries.insert("RETRYUSDT".into());
+        plug.core
+            .state
+            .entry_retry_after_ms
+            .insert("RETRYUSDT".into(), 10);
+        for symbol in ["EXITUSDT", "RETRYUSDT"] {
+            plug.core.state.open.insert(
+                symbol.into(),
+                OpenRecord {
+                    symbol: symbol.into(),
+                    notional_usdt: 10.0,
+                    settlement_ts_ms: 120_000,
+                    fired_ts_ms: 60_000,
+                    target_qty: Some(1.0),
+                },
+            );
+        }
+        plug.core
+            .state
+            .consumed_event_ids
+            .insert("carry-presettlement-HISTORYUSDT".into());
+        let routes = plug
+            .retained_signal_subscriptions()
+            .expect("native consumer declares retained routes");
+        assert_eq!(routes.len(), 4);
+        assert!(routes.iter().all(|route| route.symbol != "HISTORYUSDT"));
+        for symbol in ["EXITUSDT", "RETRYUSDT"] {
+            for feed in [engine_types::Feed::Quote, engine_types::Feed::Ticker] {
+                assert!(routes.contains(&Subscription {
+                    symbol: symbol.into(),
+                    feed
+                }));
+            }
+        }
+        let runtime = plug.runtime_state().unwrap().unwrap();
+        let restored = crate::runtime::restore(&runtime).unwrap();
+        assert_eq!(restored.retained_signal_subscriptions(), Some(routes));
+        plug.core.state = SleeveState::default();
+        assert_eq!(plug.retained_signal_subscriptions(), Some(Vec::new()));
+    }
 
     fn config() -> StrategyConfig {
         StrategyConfig {

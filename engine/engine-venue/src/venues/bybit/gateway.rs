@@ -20,8 +20,8 @@ use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway, VenueMu
 use serde_json::{Map, Value};
 
 use super::parse::{
-    parse_active_strategies, parse_asset_overview, parse_cancel_batch, parse_executions,
-    parse_instruments, parse_inventory_orders, parse_inventory_positions, parse_inventory_wallet,
+    parse_active_strategies, parse_asset_overview, parse_cancel_batch, parse_instruments,
+    parse_inventory_orders, parse_inventory_positions, parse_inventory_wallet,
     parse_linear_settle_coins, parse_order_ack, parse_positions, parse_rfq_quotes,
     parse_rfq_requests, parse_spread_orders, parse_wallet, parse_working_orders, venue_result,
     verify_attestation_key, verify_funded_key, verify_one_way_position,
@@ -535,6 +535,7 @@ impl BybitGateway {
     }
 
     fn order_body(&self, req: &OrderRequest) -> Result<Value, VenueError> {
+        crate::order_wire::terms(req)?;
         if req.close_position && (!req.reduce_only || !matches!(req.kind, OrderKind::Market)) {
             return Err(VenueError::BadRequest(
                 "a full-position close must be a reduce-only market order".into(),
@@ -549,7 +550,7 @@ impl BybitGateway {
             if req.close_position {
                 "0".into()
             } else {
-                venue_num(req.qty)?.into()
+                crate::order_wire::quantity(req)?.into()
             },
         );
         body.insert("reduceOnly".into(), req.reduce_only.into());
@@ -563,14 +564,17 @@ impl BybitGateway {
             }
             OrderKind::Limit { px, tif } => {
                 body.insert("orderType".into(), "Limit".into());
-                body.insert("price".into(), venue_num(px)?.into());
+                body.insert("price".into(), crate::order_wire::price(req, px)?.into());
                 body.insert("timeInForce".into(), tif_str(tif).into());
             }
         }
         if let Some(stop) = req.stop {
             if !req.reduce_only {
                 body.insert("tpslMode".into(), "Full".into());
-                body.insert("stopLoss".into(), venue_num(stop.trigger_px)?.into());
+                body.insert(
+                    "stopLoss".into(),
+                    crate::order_wire::stop(req, stop.trigger_px)?.into(),
+                );
                 body.insert("slTriggerBy".into(), "MarkPrice".into());
                 body.insert("slOrderType".into(), "Market".into());
                 body.insert("positionIdx".into(), 0.into());
@@ -1616,8 +1620,10 @@ impl VenueGateway for BybitGateway {
                         percent_encode(&cursor)
                     )
                 };
-                let envelope = self.rest.get_signed(PATH_EXECUTIONS, &query).await?;
-                let (rows, next) = parse_executions(&venue_result(envelope)?)?;
+                let envelope: engine_public::numeric_wire::RawObject<
+                    super::execution::HistoryReply,
+                > = self.rest.get_signed_as(PATH_EXECUTIONS, &query).await?;
+                let (rows, next) = envelope.0.executions()?;
                 out.extend(rows);
                 if next.is_empty() {
                     break;
@@ -1628,6 +1634,63 @@ impl VenueGateway for BybitGateway {
             from = to;
         }
         Ok(out)
+    }
+
+    fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
+        Some(Box::new(LookupClient {
+            rest: self.rest.clone(),
+        }))
+    }
+
+    async fn order_status(
+        &mut self,
+        symbol: SymbolId,
+        client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        let name = self.name_of(symbol)?;
+        let query = format!(
+            "category={CATEGORY}&symbol={}&orderLinkId={}&limit=1",
+            percent_encode(name),
+            percent_encode(client_order_id)
+        );
+        for path in [PATH_ORDERS_OPEN, PATH_ORDER_HISTORY] {
+            let raw: Box<serde_json::value::RawValue> =
+                self.rest.get_signed_as(path, &query).await?;
+            if let Some(status) = super::lookup::parse(raw.get(), name, client_order_id)? {
+                return Ok(status);
+            }
+        }
+        Ok(crate::order_lookup::unknown(
+            "Bybit realtime and retained history contain no matching order",
+        ))
+    }
+
+    async fn instrument_specs(
+        &mut self,
+    ) -> Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError> {
+        let mut out = Vec::new();
+        let mut cursor = String::new();
+        for _ in 0..MAX_PAGES {
+            let query = if cursor.is_empty() {
+                format!("category={CATEGORY}&limit=1000")
+            } else {
+                format!(
+                    "category={CATEGORY}&limit=1000&cursor={}",
+                    percent_encode(&cursor)
+                )
+            };
+            let raw: Box<serde_json::value::RawValue> =
+                self.rest.get_public_as(PATH_INSTRUMENTS, &query).await?;
+            let (rows, next) = engine_public::venues::bybit::spec::parse_page(raw.get())?;
+            out.extend(rows);
+            if next.is_empty() {
+                return Ok(out);
+            }
+            cursor = next;
+        }
+        Err(VenueError::BadReply(format!(
+            "instrument listing still had pages after {MAX_PAGES}"
+        )))
     }
 
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {
@@ -1818,6 +1881,34 @@ fn realm_name(realm: VenueRealm) -> &'static str {
     }
 }
 
+struct LookupClient {
+    rest: RestClient,
+}
+#[engine_types::async_trait]
+impl engine_types::orders::OrderLookupClient for LookupClient {
+    async fn lookup(
+        &self,
+        name: &str,
+        client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        let query = format!(
+            "category={CATEGORY}&symbol={}&orderLinkId={}&limit=1",
+            percent_encode(name),
+            percent_encode(client_order_id)
+        );
+        for path in [PATH_ORDERS_OPEN, PATH_ORDER_HISTORY] {
+            let raw: Box<serde_json::value::RawValue> =
+                self.rest.get_signed_as(path, &query).await?;
+            if let Some(status) = super::lookup::parse(raw.get(), name, client_order_id)? {
+                return Ok(status);
+            }
+        }
+        Ok(crate::order_lookup::unknown(
+            "Bybit realtime and retained history contain no matching order",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1974,6 +2065,8 @@ mod tests {
             },
             stop: Some(engine_types::StopSpec { trigger_px: 8.0 }),
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         }
     }

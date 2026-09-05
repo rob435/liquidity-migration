@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::wire::{self, Field};
+use crate::wire::{self, Field, RawField};
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::market::{FeedError, OrderFeed};
 use engine_types::orders::{OrderAck, OrderUpdate};
@@ -287,7 +287,7 @@ struct PrivateEnvelope {
     #[serde(default, rename = "e")]
     event: Field<String>,
     #[serde(default, rename = "o")]
-    order: Field<Value>,
+    order: RawField<Box<serde_json::value::RawValue>>,
     #[serde(default, rename = "T")]
     transaction_time: Field<i64>,
 }
@@ -312,9 +312,8 @@ impl Decoder {
     }
 
     pub(crate) fn ingest(&mut self, text: &str) -> Result<(), FeedError> {
-        let frame: Value = serde_json::from_str(text)
+        let frame: PrivateEnvelope = wire::raw_object(text)
             .map_err(|e| FeedError::BadMessage(format!("{e}: {}", first_chars(text))))?;
-        let frame: PrivateEnvelope = wire::object(&frame);
         match frame.event.0.as_deref() {
             Some("ORDER_TRADE_UPDATE") => self.order_trade_update(&frame),
             Some("ALGO_UPDATE") => self.algo_update(&frame),
@@ -331,10 +330,13 @@ impl Decoder {
     }
 
     fn order_trade_update(&mut self, frame: &PrivateEnvelope) -> Result<(), FeedError> {
-        let order =
+        let raw_order =
             frame.order.0.as_ref().ok_or_else(|| {
                 FeedError::BadMessage("ORDER_TRADE_UPDATE carries no order".into())
             })?;
+        let order: Value = serde_json::from_str(raw_order.get())
+            .map_err(|e| FeedError::BadMessage(e.to_string()))?;
+        let order = &order;
         let client_order_id =
             str_field(order, "c").map_err(|e| FeedError::BadMessage(e.to_string()))?;
         let execution_type = order.get("x").and_then(Value::as_str).unwrap_or_default();
@@ -417,8 +419,8 @@ impl Decoder {
                     .get("s")
                     .and_then(Value::as_str)
                     .ok_or_else(|| FeedError::BadMessage("a fill carried no symbol".into()))?;
-                let qty = num_field(order, "l").map_err(bad)?;
-                let px = num_field(order, "L").map_err(bad)?;
+                let (qty, px, fee, amounts) =
+                    super::execution::decode(raw_order.get()).map_err(bad)?;
                 let venue_ts_ms = frame.transaction_time.0.unwrap_or(0);
                 if qty <= 0.0 || px <= 0.0 || venue_ts_ms <= 0 {
                     return Err(FeedError::BadMessage(
@@ -428,20 +430,8 @@ impl Decoder {
                 let is_maker = order.get("m").and_then(Value::as_bool).ok_or_else(|| {
                     FeedError::BadMessage("a fill has no boolean maker flag".into())
                 })?;
-                let mut fee = opt_num_field(order, "n").map_err(bad)?;
-                if fee.is_some() {
-                    let fee_asset = str_field(order, "N").map_err(bad)?;
-                    if fee_asset != "USDT" {
-                        tracing::warn!(
-                            symbol = symbol_name,
-                            trade_id = native_exec_id,
-                            asset = %fee_asset,
-                            "a Binance fee is not USDT; preserving the fill with an unknown fee"
-                        );
-                        fee = None;
-                    }
-                }
                 self.pending.push_back(OrderUpdate::Fill {
+                    allocation: None,
                     exec_id: scoped_execution_id(symbol_name, &native_exec_id.to_string()),
                     // The stop's fill belongs to the position, not to any
                     // strategy order; the empty id is how the engine spells
@@ -456,6 +446,7 @@ impl Decoder {
                     qty,
                     px,
                     fee,
+                    amounts: Some(Box::new(amounts)),
                     is_maker,
                     // Binance states no reason for a close on this row.
                     forced_close: None,
@@ -499,11 +490,14 @@ impl Decoder {
     }
 
     fn algo_update(&mut self, frame: &PrivateEnvelope) -> Result<(), FeedError> {
-        let order = frame
+        let raw_order = frame
             .order
             .0
             .as_ref()
             .ok_or_else(|| FeedError::BadMessage("ALGO_UPDATE carries no order".into()))?;
+        let order: Value = serde_json::from_str(raw_order.get())
+            .map_err(|e| FeedError::BadMessage(e.to_string()))?;
+        let order = &order;
         let native_stop = order.get("at").and_then(Value::as_str) == Some("CONDITIONAL")
             && order.get("o").and_then(Value::as_str) == Some("STOP_MARKET")
             && order.get("cp").and_then(Value::as_bool) == Some(true);

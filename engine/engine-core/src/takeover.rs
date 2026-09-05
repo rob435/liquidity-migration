@@ -144,6 +144,12 @@ fn initial_state_record(
     }
     let wall_ts_ms = clock::wall_ms();
     Ok(WalRecord::SegmentBase {
+        portfolio: Some(Default::default()),
+        pending_order_dispatches: Vec::new(),
+        signal_producers: Vec::new(),
+        signal_suspensions: Vec::new(),
+        strategy_processes: Vec::new(),
+        strategy_callbacks: Vec::new(),
         wall_ts_ms,
         strategies: configured.to_vec(),
         symbols: Vec::new(),
@@ -414,6 +420,12 @@ fn initialize_or_verify_names<W: Wal>(
     if replayed.is_empty() {
         let wall_ts_ms = clock::wall_ms();
         let names = WalRecord::SegmentBase {
+            portfolio: Some(Default::default()),
+            pending_order_dispatches: Vec::new(),
+            signal_producers: Vec::new(),
+            signal_suspensions: Vec::new(),
+            strategy_processes: Vec::new(),
+            strategy_callbacks: Vec::new(),
             wall_ts_ms,
             strategies: configured.to_vec(),
             symbols: Vec::new(),

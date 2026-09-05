@@ -32,6 +32,8 @@ fn a_fill_newer_than_the_view_still_counts_against_the_envelope() {
     let filled = entry(CARRY, BUSDT, Side::Buy, 40_000.0, 10.0, 9.0, SEC);
     kernel.register_order("f1", &filled, 40_000.0);
     kernel.on_update(&OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: String::new(),
         client_order_id: "f1".to_string(),
         symbol: BUSDT,

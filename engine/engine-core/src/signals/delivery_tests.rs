@@ -752,3 +752,78 @@ async fn readiness_response_failure_is_a_control_event_not_a_signal_feed_failure
     assert!(result.is_ok(), "readiness failure must suspend growth without aborting account and exit service: {result:?}");
     assert!(format!("{result:?}").contains("ReadinessUnavailable"));
 }
+
+#[tokio::test]
+async fn lifecycle_readiness_observes_a_later_seal_without_restarting_or_duplicate_events() {
+    use engine_types::{
+        SignalFeedEvent, SignalLifecycleRequest, SignalLifecycleResponse, SignalProducerReport,
+        SignalSourceFrontier,
+    };
+    let directory = crate::testpath::temp_path("producer-later-seal");
+    std::fs::create_dir_all(directory.path()).unwrap();
+    let mut feed =
+        SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
+    feed.request_lifecycle(Vec::new(), Vec::new()).unwrap();
+    let request_path = directory
+        .path()
+        .join(engine_types::SIGNAL_READINESS_REQUEST_FILE);
+    let request: SignalLifecycleRequest = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Ok(bytes) = std::fs::read(&request_path) {
+                break serde_json::from_slice(&bytes).unwrap();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut response = SignalLifecycleResponse {
+        schema_version: 2,
+        boot_nonce: request.boot_nonce,
+        producer: SignalProducerReport {
+            producer: "native".into(),
+            epoch: Some(1),
+            generation: "a".repeat(32),
+            sealed: false,
+            sources: vec![SignalSourceFrontier {
+                source: format!("native.e{:020}.g{}.long", 1, "a".repeat(32)),
+                destination: StrategyId(0),
+                published_through: 0,
+            }],
+        },
+    };
+    let path = directory
+        .path()
+        .join(engine_types::SIGNAL_READINESS_RESPONSE_FILE);
+    publish_test_row(&path, &serde_json::to_vec(&response).unwrap());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), feed.next_event())
+            .await
+            .unwrap()
+            .unwrap(),
+        SignalFeedEvent::LifecycleReady(response.clone())
+    );
+    for _ in 0..3 {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), feed.next_event())
+                .await
+                .is_err(),
+            "unchanged frontier must not flood the engine"
+        );
+    }
+    response.producer.sources[0].published_through = 3;
+    response.producer.sealed = true;
+    publish_test_row(&path, &serde_json::to_vec(&response).unwrap());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), feed.next_event())
+            .await
+            .expect("seal must arrive without another engine boot")
+            .unwrap(),
+        SignalFeedEvent::LifecycleReady(response)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(5), feed.next_event())
+            .await
+            .is_err()
+    );
+}

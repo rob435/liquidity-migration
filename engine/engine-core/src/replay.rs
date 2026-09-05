@@ -133,6 +133,23 @@ impl LogNames {
 
 pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
     match record {
+        WalRecord::SignalAdmissionChanged { destination, suspension } => format!("signal admission {}: {suspension:?}", names.strategy(*destination)),
+        WalRecord::StrategyCallbackQueued { input } => format!(
+            "callback   {} queued for {}", input.callback_id, names.strategy(input.strategy)
+        ),
+        WalRecord::OrderDispatchQueued { order } => format!("order_dispatch_queued id={}", order.request.client_order_id),
+        WalRecord::OrderDispatchAttempted { client_order_id } => format!("order_dispatch_attempted id={client_order_id}"),
+        WalRecord::OrderDispatchCompleted { client_order_id } => format!("order_dispatch_completed id={client_order_id}"),
+        WalRecord::StrategyCallbackPrepared { input } => format!(
+            "callback   {} prepared for {}", input.callback_id, names.strategy(input.strategy)
+        ),
+        WalRecord::StrategyProcessTransitionQueued { input_id, transition, process } => format!(
+            "callback   {input_id} committed for {} with {} effects",
+            names.strategy(process.strategy), transition.as_ref().map_or(0, |row| row.effects.len())
+        ),
+        WalRecord::SignalProducerLifecycle { state, .. } => format!(
+            "producer   {} retired through epoch {}", state.producer, state.retired_through
+        ),
         WalRecord::Boot {
             version,
             config_sha256,
@@ -170,7 +187,7 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             request,
             wire_ns,
             arrival_mid,
-        } => format!(
+         .. } => format!(
             "sent       {} {:?} {} of {} {} (at +{} from start){}",
             request.client_order_id,
             request.side,
@@ -614,6 +631,8 @@ mod tests {
             kind: OrderKind::Market,
             stop: None,
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         }
     }
@@ -654,6 +673,7 @@ mod tests {
                 commit: String::new(),
             },
             WalRecord::OrderSent {
+                dispatch: None,
                 request: request("a"),
                 wire_ns: 10,
                 arrival_mid: 0.0,
@@ -677,6 +697,7 @@ mod tests {
     fn an_unanswered_send_is_still_out_there_at_the_end() {
         let report = describe(
             &[WalRecord::OrderSent {
+                dispatch: None,
                 request: request("b"),
                 wire_ns: 1,
                 arrival_mid: 0.0,
@@ -692,6 +713,8 @@ mod tests {
         let report = describe(
             &[WalRecord::OrderUpdate {
                 update: OrderUpdate::Fill {
+                    allocation: None,
+                    amounts: None,
                     exec_id: "exec-1".into(),
                     client_order_id: "eng-1".into(),
                     symbol: SymbolId(0),

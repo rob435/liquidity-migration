@@ -187,6 +187,7 @@ async fn an_equal_stop_is_retried_after_the_first_venue_call_fails() {
 
 fn sent(id: &str, symbol: u16, qty: f64, stop: f64) -> WalRecord {
     WalRecord::OrderSent {
+        dispatch: None,
         request: OrderRequest {
             client_order_id: id.to_string(),
             strategy: StrategyId(0),
@@ -196,6 +197,8 @@ fn sent(id: &str, symbol: u16, qty: f64, stop: f64) -> WalRecord {
             kind: OrderKind::Market,
             stop: Some(StopSpec { trigger_px: stop }),
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         },
         wire_ns: 5,
@@ -206,6 +209,8 @@ fn sent(id: &str, symbol: u16, qty: f64, stop: f64) -> WalRecord {
 fn fill(id: &str, symbol: u16, qty: f64) -> WalRecord {
     WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: String::new(),
             client_order_id: id.to_string(),
             symbol: SymbolId(symbol),

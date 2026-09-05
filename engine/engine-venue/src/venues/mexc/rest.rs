@@ -18,6 +18,7 @@ use crate::venues::mexc::sign::{
 };
 use crate::wall_ms;
 
+#[derive(Clone)]
 pub(crate) struct RestClient {
     http: HttpClient,
     creds: Credentials,
@@ -43,9 +44,12 @@ impl RestClient {
         self.creds.key()
     }
 
-    /// Unsigned GET, for the public endpoints. Market data needs no key.
-    pub(crate) async fn get_public(&self, path: &str, query: &str) -> Result<Value, VenueError> {
-        self.http.get(path, query, &[]).await
+    pub(crate) async fn get_public_as<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &str,
+    ) -> Result<T, VenueError> {
+        self.http.get_as(path, query, &[]).await
     }
 
     /// Signed GET. The parameters are sorted once, here, and the same string
@@ -59,6 +63,19 @@ impl RestClient {
         let ts = wall_ms();
         let sign = rest_signature(self.creds.secret(), self.creds.key(), ts, &query);
         self.http.get(path, &query, &self.headers(ts, sign)).await
+    }
+
+    pub(crate) async fn get_signed_as<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+    ) -> Result<T, VenueError> {
+        let query = query_string(params);
+        let ts = wall_ms();
+        let sign = rest_signature(self.creds.secret(), self.creds.key(), ts, &query);
+        self.http
+            .get_as(path, &query, &self.headers(ts, sign))
+            .await
     }
 
     /// Signed POST. The signature covers the exact body bytes sent — the

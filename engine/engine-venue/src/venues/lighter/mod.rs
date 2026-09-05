@@ -12,9 +12,10 @@ pub mod public;
 pub mod realm;
 
 pub(crate) mod crypto;
+pub(crate) mod execution;
 pub mod markets;
 pub(crate) mod order_index;
-pub(crate) mod parse;
+mod parse;
 pub(crate) mod tx;
 pub(crate) mod ws;
 
@@ -25,3 +26,5 @@ pub use ws::LighterOrderFeed;
 /// What this venue is called in an account identity, a lease file name, and
 /// the engine's heartbeat.
 pub const VENUE_NAME: &str = "lighter";
+
+mod lookup;

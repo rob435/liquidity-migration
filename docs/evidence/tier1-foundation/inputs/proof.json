@@ -1,0 +1,32 @@
+{
+  "scope": "current candidate snapshot; exact new tests retained; only indicated lifecycle controls disabled for before runs",
+  "files": {
+    "engine/signal-worker/src/worker.rs": {
+      "candidate_sha256": "4f3bca27edee5d241024400a7b4c2b7e6efc2075fe27c48bc456f327d86eb491",
+      "disabled_sha256": "b8f1a22ab2b5e14a8b7446b68f2e398fd246eaef753d32c68d575722eaa888be"
+    },
+    "engine/signal-worker/src/worker/lifecycle.rs": {
+      "candidate_sha256": "48048073c4b332acf0f4ef0cf4a5c693a31043194d8ec7cad5ffa4a284cb2ae9",
+      "disabled_sha256": "3d21fe5e22f3ec67643a9f60587b9b5797572119e494c18d95bc6d941e0d9236"
+    },
+    "engine/engine-core/src/signal_state/lifecycle.rs": {
+      "candidate_sha256": "a34f05fcc54450899827c6b4620b80e585c137a79c34c12920c4e5941ea0cf0a",
+      "disabled_sha256": "859dc09cf0fd3622fe2f65a3974e48369b5a0957a6d52421ba26060733aea608"
+    },
+    "engine/engine-core/src/tests/durable_signals.rs": {
+      "candidate_sha256": "71287dd5dc872b2caf03da0e5886a1bce4643d1dbbf98b8ab2a72fc055e1eac0",
+      "disabled_sha256": "71287dd5dc872b2caf03da0e5886a1bce4643d1dbbf98b8ab2a72fc055e1eac0"
+    },
+    "engine/engine-core/src/engine/signal_intake.rs": {
+      "candidate_sha256": "2ea778f0a1ff12474b7ac2c60051a3b82a7d018e4c13b7429f60a509e01e38ed",
+      "disabled_sha256": "7da9878c50d36817a1f6f809fb283f3b0910d0a3a03015c213c176bd7e435c1c"
+    }
+  },
+  "compilation_shim": "Add amounts:None to existing reconcile.rs RecoveredFill test fixture at parent numeric integration seam; no reconciliation production change.",
+  "worker_before": {
+    "log": "/tmp/tier1-next-inputs/worker-lifecycle-before.log",
+    "exit_code": 101,
+    "passed": 1,
+    "failed": 2
+  }
+}

@@ -630,35 +630,49 @@ pub fn planner_facts(ctx: &dyn StrategyCtx, symbols: &BTreeSet<String>) -> Plann
             facts.foreign_owned.insert(name.clone());
         }
         let venue = ctx.position(symbol);
-        let in_flight = ctx.in_flight(symbol);
+        let own = ctx.my_position_facts(symbol);
+        let allocation = own.as_ref().and_then(|facts| facts.allocated.as_ref());
+        let in_flight = if allocation.is_some() {
+            own.as_ref()
+                .map_or(0.0, |position| position.in_flight_signed_qty)
+        } else {
+            ctx.in_flight(symbol)
+        };
         // The account reading is the account's whole holding, the owner's
         // hand trades included, so it is not what a sleeve sizes against. Its
         // own fills are; the reading only caps them, and flat at the venue is
         // the fact whatever the fills sum to.
-        let signed_qty = match venue.as_ref() {
-            None => in_flight,
-            Some(position) => {
-                let at_venue = signed(position.side, position.qty);
-                let own = ctx.my_position(symbol) + in_flight;
-                let step = facts.rules.get(name).map_or(0.0, |rule| rule.qty_step);
-                let own = if step > 0.0 {
-                    round_clean(own.abs(), step).copysign(own)
-                } else {
-                    own
-                };
-                if own.abs() <= f64::EPSILON || own.signum() != at_venue.signum() {
-                    0.0
-                } else if at_venue.abs() <= own.abs() {
-                    at_venue
-                } else {
-                    own
+        let signed_qty = if allocation.is_some() {
+            ctx.my_position(symbol) + in_flight
+        } else {
+            match venue.as_ref() {
+                None => in_flight,
+                Some(position) => {
+                    let at_venue = signed(position.side, position.qty);
+                    let own = ctx.my_position(symbol) + in_flight;
+                    let step = facts.rules.get(name).map_or(0.0, |rule| rule.qty_step);
+                    let own = if step > 0.0 {
+                        round_clean(own.abs(), step).copysign(own)
+                    } else {
+                        own
+                    };
+                    if own.abs() <= f64::EPSILON || own.signum() != at_venue.signum() {
+                        0.0
+                    } else if at_venue.abs() <= own.abs() {
+                        at_venue
+                    } else {
+                        own
+                    }
                 }
             }
         };
         if signed_qty.abs() <= f64::EPSILON {
             continue;
         }
-        let entry_px = venue.as_ref().map_or(mark, |position| position.entry_px);
+        let entry_px = allocation.map_or_else(
+            || venue.as_ref().map_or(mark, |position| position.entry_px),
+            |position| position.entry_px.unwrap_or(0.0),
+        );
         let px = if mark > 0.0 { mark } else { entry_px };
         facts.held.insert(
             name.clone(),
@@ -671,7 +685,10 @@ pub fn planner_facts(ctx: &dyn StrategyCtx, symbols: &BTreeSet<String>) -> Plann
                 },
                 px,
                 entry_px,
-                stop_px: venue.as_ref().map_or(0.0, |position| position.stop_px),
+                stop_px: allocation.map_or_else(
+                    || venue.as_ref().map_or(0.0, |position| position.stop_px),
+                    |position| position.stop_px.unwrap_or(0.0),
+                ),
             },
         );
     }
@@ -720,11 +737,33 @@ pub fn attributed_exposure_is_flat(ctx: &dyn StrategyCtx, symbols: &BTreeSet<Str
         let Some(symbol) = ctx.symbol_id(name) else {
             return false;
         };
-        let venue_flat = ctx
-            .position(symbol)
-            .is_none_or(|position| position.qty.abs() <= f64::EPSILON);
-        venue_flat && ctx.in_flight(symbol).abs() <= f64::EPSILON
+        if let Some(position) = ctx
+            .my_position_facts(symbol)
+            .filter(|position| position.allocated.is_some())
+        {
+            position.attributed_signed_qty.abs() <= f64::EPSILON && position.open_order_count == 0
+        } else {
+            ctx.my_position(symbol).abs() <= f64::EPSILON
+                && ctx.in_flight(symbol).abs() <= f64::EPSILON
+        }
     })
+}
+
+/// Historical deduplication and cooldown keys do not require a live market route.
+pub(crate) fn retained_market_subscriptions(
+    symbols: std::collections::BTreeSet<String>,
+) -> Vec<engine_types::Subscription> {
+    symbols
+        .into_iter()
+        .flat_map(|symbol| {
+            [engine_types::Feed::Quote, engine_types::Feed::Ticker].map(|feed| {
+                engine_types::Subscription {
+                    symbol: symbol.clone(),
+                    feed,
+                }
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -734,6 +773,61 @@ mod tests {
     use crate::mock_ctx::MockCtx;
 
     const PEPE: &str = "1000PEPEUSDT";
+
+    #[test]
+    fn sleeve_flatness_does_not_inherit_another_sleeves_holding() {
+        let (mut ctx, symbols) = pepe_ctx();
+        ctx.set_foreign_position(PEPE, Side::Buy, 100_000.0, 0.004);
+        assert!(attributed_exposure_is_flat(&ctx, &symbols));
+    }
+
+    #[test]
+    fn opposing_sleeve_remains_nonflat_when_venue_nets_to_zero() {
+        let (mut ctx, symbols) = pepe_ctx();
+        ctx.set_position(PEPE, Side::Buy, 0.0, 0.004);
+        ctx.set_my_position(PEPE, -100_000.0);
+        assert!(!attributed_exposure_is_flat(&ctx, &symbols));
+    }
+
+    #[test]
+    fn allocated_sleeve_keeps_its_own_quantity_basis_and_stop_across_venue_net_changes() {
+        for (side, net) in [
+            (Side::Buy, 50_000.0),
+            (Side::Sell, 50_000.0),
+            (Side::Buy, 0.0),
+        ] {
+            let (mut ctx, symbols) = pepe_ctx();
+            ctx.set_position(PEPE, side, net, 0.008);
+            ctx.set_allocated_position(PEPE, -100_000.0, Some(0.004), Some(0.005));
+            let held = planner_facts(&ctx, &symbols)
+                .held(PEPE)
+                .expect("virtual short remains held");
+            assert_eq!(held.side, Side::Sell);
+            assert_eq!(held.qty, 100_000.0);
+            assert_eq!(held.entry_px, 0.004);
+            assert_eq!(held.stop_px, 0.005);
+        }
+    }
+
+    #[test]
+    fn unknown_allocated_basis_is_not_borrowed_from_another_sleeve() {
+        let (mut ctx, symbols) = pepe_ctx();
+        ctx.set_position(PEPE, Side::Buy, 200_000.0, 0.008);
+        ctx.set_allocated_position(PEPE, 100_000.0, None, Some(0.003));
+        let held = planner_facts(&ctx, &symbols)
+            .held(PEPE)
+            .expect("quantity is known");
+        assert_eq!(
+            held.entry_px, 0.0,
+            "legacy unknown is not the account basis"
+        );
+        assert_eq!(held.stop_px, 0.003);
+        let plan = plan_pepe_target(&ctx, 0.0);
+        assert!(matches!(
+            plan.steps.as_slice(),
+            [Step::Exit { qty: 100_000.0, .. }]
+        ));
+    }
 
     fn pepe_ctx() -> (MockCtx, BTreeSet<String>) {
         let mut ctx = MockCtx::new();

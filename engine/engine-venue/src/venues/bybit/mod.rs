@@ -7,6 +7,7 @@
 pub mod gateway;
 pub mod realm;
 
+mod execution;
 mod parse;
 mod rest;
 mod sign;
@@ -24,3 +25,5 @@ pub const API_SECRET_ENV: &str = "BYBIT_DEMO_API_SECRET";
 
 /// Every request is `linear` — USDT perpetuals, the only thing we trade.
 pub(crate) const CATEGORY: &str = "linear";
+
+mod lookup;

@@ -15,5 +15,6 @@ hyper = { workspace = true, features = ["client", "http1"] }
 hyper-rustls = { workspace = true, features = ["webpki-roots", "http1", "ring"] }
 hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
 rustls = { workspace = true, features = ["ring", "std"] }
-serde_json = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "macros", "sync"] }

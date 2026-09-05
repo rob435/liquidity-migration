@@ -23,9 +23,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(test)]
+use engine_types::SignalSubscriptionState;
 use engine_types::{
-    SignalError, SignalFeed, SignalGapRequest, SignalObservation, SignalSubscriptionState,
-    StrategyId, Subscription, WalRecord, MAX_SIGNAL_OBSERVATION_BYTES, MAX_SIGNAL_SUBSCRIPTIONS,
+    SignalError, SignalFeed, SignalGapRequest, SignalObservation, StrategyId, Subscription,
+    WalRecord, MAX_SIGNAL_OBSERVATION_BYTES, MAX_SIGNAL_SUBSCRIPTIONS,
     SIGNAL_OBSERVATION_SCHEMA_VERSION,
 };
 use sha2::{Digest, Sha256};
@@ -39,7 +41,7 @@ const SPOOL_METADATA_CAPACITY: usize = 4_096;
 // The producer permits byte-array JSON encoding as well as UTF-8 strings.
 const MAX_SIGNAL_FILE_BYTES: u64 = 80 * 1024 * 1024;
 const FIELD_BYTES_MAX: usize = 256;
-const SYMBOL_BYTES_MAX: usize = 128;
+pub(crate) const SYMBOL_BYTES_MAX: usize = 128;
 
 pub(crate) fn ordered_gap_requests(
     gaps: &[SignalGapRequest],
@@ -268,41 +270,52 @@ pub fn validate(observation: &SignalObservation) -> Result<(), String> {
 /// The monotonic subscription union for each source/destination after replay.
 /// Runner adds it to its boot feed before core restore.
 pub fn active_subscriptions(replayed: &[WalRecord]) -> Vec<Subscription> {
-    let mut active: std::collections::BTreeMap<(String, u16), SignalSubscriptionState> =
-        std::collections::BTreeMap::new();
+    let mut sources = BTreeMap::<String, Vec<Subscription>>::new();
+    let mut producers = BTreeMap::<String, engine_types::SignalProducerLifecycle>::new();
     for record in replayed {
         match record {
             WalRecord::SignalObservation { observation, .. } => {
-                let row = active
-                    .entry((observation.source.clone(), observation.destination.0))
-                    .or_insert_with(|| SignalSubscriptionState {
-                        source: observation.source.clone(),
-                        destination: observation.destination,
-                        subscriptions: Vec::new(),
-                    });
+                let rows = sources.entry(observation.source.clone()).or_default();
                 for subscription in &observation.subscriptions {
-                    if !row.subscriptions.contains(subscription) {
-                        row.subscriptions.push(subscription.clone());
+                    if !rows.contains(subscription) {
+                        rows.push(subscription.clone());
                     }
                 }
             }
+            WalRecord::SignalProducerLifecycle { state, .. } => {
+                sources.retain(|source, _| {
+                    engine_types::ManagedSignalSource::parse(source)
+                        .is_none_or(|identity| identity.producer != state.producer)
+                        && engine_types::legacy_signal_lane(&state.producer, source).is_none()
+                });
+                producers.insert(state.producer.clone(), state.clone());
+            }
             WalRecord::SegmentBase {
                 signal_subscriptions,
+                signal_producers,
                 ..
             } => {
-                active = signal_subscriptions
+                sources = signal_subscriptions
                     .iter()
-                    .map(|row| ((row.source.clone(), row.destination.0), row.clone()))
+                    .map(|row| (row.source.clone(), row.subscriptions.clone()))
+                    .collect();
+                producers = signal_producers
+                    .iter()
+                    .map(|state| (state.producer.clone(), state.clone()))
                     .collect();
             }
             _ => {}
         }
     }
     let mut subscriptions = Vec::new();
-    for row in active.values() {
-        for subscription in &row.subscriptions {
-            if !subscriptions.contains(subscription) {
-                subscriptions.push(subscription.clone());
+    for rows in sources.values().chain(
+        producers
+            .values()
+            .flat_map(|state| state.routes.iter().map(|route| &route.subscriptions)),
+    ) {
+        for row in rows {
+            if !subscriptions.contains(row) {
+                subscriptions.push(row.clone());
             }
         }
     }

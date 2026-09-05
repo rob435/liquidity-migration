@@ -6,6 +6,13 @@ Index the local audit implementation, verification evidence and retained limitat
 
 ## Spec Tables
 
+| Current task | Status |
+| --- | --- |
+| Full architecture completion and shared tickers | Active; the owner authorizes same and opposing virtual sleeves and local root-cause decisions |
+| Checkpoint evidence below | Applies to `584844fa`; it does not qualify the changing worktree |
+| Work owners | Root: portfolio/risk/identity/integration; effects: isolated callbacks/durability; inputs: sealed generations/recovery; venues: exact numbers/typed wire contracts |
+| Completion | Requires failing-before/passing-after regressions and new integrated local debug/release/developer suites |
+
 | Document | Authority / scope |
 | --- | --- |
 | [Audit](docs/tier1-audit.md) | Current resolutions for A-001–A-004, all 22 CL findings and all 30 original LM-T1 tickets |
@@ -16,14 +23,17 @@ Index the local audit implementation, verification evidence and retained limitat
 | [STATE.md](STATE.md) | Operational snapshot; local work does not establish current deployed behavior |
 | [Research governance](docs/research/governance.md) | Engineering checks do not promote a strategy or arm funds |
 
-| Boundary | Implemented resolution | Remaining limitation |
+| Boundary | Implemented local behavior | Remaining work |
 | --- | --- | --- |
-| A-001/A-004 | Retained cooperative effects, caller-bound order/stop operations, durable stateful transitions and restart suffix | Trusted synchronous callbacks and output allocation are not globally bounded; ordinary order-only callbacks retain optimistic durability |
-| A-002/A-003 | Consumed/rejected/retained input outcomes, accepted-payload backpressure, prefix slot and fresh producer frontier | Historical identity metadata remains; erased legacy history cannot be reconstructed |
-| CL-01–CL-15 | Typed selected wire/error/output boundaries, public/private capabilities and explicit admission/completion/boot/worker/reducer phases | Dynamic inner venue rows and broad later accounting handlers remain; file moves are not presented as architecture fixes |
-| CL-16–CL-22 | Pure risk targets share one process, workspace dependencies preserve resolved features, ownership maps are current | Venue environment tests remain separate processes; no unsupported whole-workspace performance claim |
-| Portfolio / numeric proposals | Retain exclusive symbols, dense durable identity and current quantization/accounting | Reconsider with a concrete shared-symbol or adapter requirement and coherent allocation/fees/stops/legacy migration |
-| Operations | Local engineering checks and checkpoints | No funded deployment, credentials, capital, host permissions or live-state changes |
+| Callback execution | Registered native runtime runs in child processes; complete private state/effect transactions; asynchronous durability; Linux memory/CPU/process bounds | Global retained-state pools, bounded process concurrency and durable retry of full callback inboxes are isolated pending integration |
+| Every order dispatch | Atomic order/outbox acceptance, attempted marker durable before wire, independent read-only lookup lane, ambiguous outcomes block growth | Shared physical order translation and exact owned reduction recheck |
+| Producer lifecycle | Managed epochs, sealed tails, durable terminal consumption, bounded retirement and exact blocked route demand | Named sleeve binding across config reorder; erased legacy tails remain explicit unknowns |
+| Virtual inventory/accounting | Exact per-sleeve quantities, basis and asset fees; prepared atomic allocation of real emergency fills; serialized rotation/recovery | Shared admission, independent stops, emergency cancellation and internal offset settlement |
+| Portfolio risk | Separate portfolio API counts opposing gross and owning-sleeve exits | Integrate tested numeric corrections, pending margin ownership and core admission |
+| Venue numeric boundaries | Lexical execution values and exact instrument/order terms for five supported adapters; explicit unavailable metadata | Typed amend/standalone stop path and remaining dynamic account/reference rows |
+| Durable identities | Pure namespaced registry migration and dense-slot preservation tested separately | Wire assembly, boot/rotation/dynamic admission, passive removed sleeves and producer binding |
+| Verification | macOS 1,997 / Linux 2,000 workspace debug tests, Python 1,499 and strict Clippy pass; [foundation evidence](docs/tier1-foundation-evidence.json) preserves regression scopes | Final integrated debug/release/developer suites remain required |
+| Operations | All work is local | No push, funded deployment, credentials, capital or live-state mutation |
 
 ## Invariants
 

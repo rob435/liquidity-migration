@@ -5,6 +5,8 @@ use engine_types::{
     WalRecord,
 };
 
+mod lifecycle;
+
 pub(crate) fn dependency_closure(
     names: &[String],
     dependencies: &[Vec<String>],
@@ -56,17 +58,21 @@ pub(crate) enum Admission {
     Duplicate,
     Ready,
     Gap(SignalGap),
+    Unregistered,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct SignalState {
     observations: BTreeMap<(String, u64), SignalObservation>,
+    delivered: BTreeSet<(String, u64)>,
+    suspensions: BTreeMap<StrategyId, engine_types::SignalAdmissionSuspensionReason>,
     cursors: BTreeMap<String, SignalCursor>,
     subscriptions: BTreeMap<(String, u16), SignalSubscriptionState>,
     gaps: BTreeMap<String, SignalGap>,
     required_readiness: BTreeSet<StrategyId>,
     producer_frontiers: BTreeMap<String, engine_types::SignalSourceFrontier>,
     readiness_request_cursors: BTreeMap<String, u64>,
+    producers: BTreeMap<String, engine_types::SignalProducerLifecycle>,
 }
 
 impl SignalState {
@@ -74,8 +80,19 @@ impl SignalState {
         let mut state = Self::default();
         for record in records {
             match record {
+                WalRecord::SignalAdmissionChanged {
+                    destination,
+                    suspension,
+                } => {
+                    state.set_suspension(*destination, suspension.clone(), strategies)?;
+                }
                 WalRecord::SignalObservation { observation, .. } => {
                     state.validate_destination(observation, strategies)?;
+                    state.validate_retained_source(
+                        &observation.source,
+                        observation.destination,
+                        observation.sequence,
+                    )?;
                     if state.gaps.contains_key(&observation.source)
                         && state.classify(observation)? != Admission::Ready
                     {
@@ -109,14 +126,34 @@ impl SignalState {
                     state.validate_gap(gap, strategies)?;
                     state.record_gap(gap.clone());
                 }
+                WalRecord::SignalProducerLifecycle {
+                    state: producer, ..
+                } => {
+                    state.apply_producer_lifecycle(producer.clone(), strategies)?;
+                }
                 WalRecord::SegmentBase {
                     signal_observations,
                     signal_cursors,
                     signal_subscriptions,
                     signal_gaps,
+                    signal_producers,
+                    signal_suspensions,
                     ..
                 } => {
                     state = Self::default();
+                    for row in signal_suspensions {
+                        if state.suspensions.contains_key(&row.destination) {
+                            return Err("rotation repeats signal admission suspension".into());
+                        }
+                        state.set_suspension(
+                            row.destination,
+                            Some(row.reason.clone()),
+                            strategies,
+                        )?;
+                    }
+                    for producer in signal_producers {
+                        state.restore_producer_snapshot(producer.clone(), strategies)?;
+                    }
                     for cursor in signal_cursors {
                         if cursor.sequence == 0
                             || cursor.source.is_empty()
@@ -172,6 +209,36 @@ impl SignalState {
                             return Err("repeated signal gap in rotation".into());
                         }
                     }
+                    for cursor in state.cursors.values() {
+                        state.validate_retained_source(
+                            &cursor.source,
+                            state
+                                .destination(&cursor.source)
+                                .expect("checked cursor route"),
+                            cursor.sequence,
+                        )?;
+                    }
+                    for gap in state.gaps.values() {
+                        state.validate_retained_source(
+                            &gap.source,
+                            gap.destination,
+                            gap.observed_sequence,
+                        )?;
+                    }
+                    for route in state.subscriptions.values() {
+                        if let Some(owner) = state
+                            .producer_routes()
+                            .find(|owner| owner.destination == route.destination)
+                        {
+                            if route
+                                .subscriptions
+                                .iter()
+                                .any(|subscription| !owner.subscriptions.contains(subscription))
+                            {
+                                return Err("rotated signal route is absent from its producer subscription ownership".into());
+                            }
+                        }
+                    }
                     for observation in signal_observations {
                         state.validate_destination(observation, strategies)?;
                         let cursor = state.cursors.get(&observation.source).ok_or_else(|| {
@@ -208,6 +275,46 @@ impl SignalState {
         Ok(state)
     }
 
+    pub fn suspensions(
+        &self,
+    ) -> impl Iterator<Item = engine_types::SignalAdmissionSuspension> + '_ {
+        self.suspensions.iter().map(|(destination, reason)| {
+            engine_types::SignalAdmissionSuspension {
+                destination: *destination,
+                reason: reason.clone(),
+            }
+        })
+    }
+
+    pub fn set_suspension(
+        &mut self,
+        destination: StrategyId,
+        reason: Option<engine_types::SignalAdmissionSuspensionReason>,
+        strategies: usize,
+    ) -> Result<(), String> {
+        if destination.idx() >= strategies {
+            return Err("signal admission suspension addresses an unknown strategy".into());
+        }
+        if let Some(reason) = reason {
+            let engine_types::SignalAdmissionSuspensionReason::SubscriptionBudget { subscriptions } =
+                &reason;
+            if subscriptions.is_empty()
+                || subscriptions.len() > engine_types::MAX_SIGNAL_SUBSCRIPTIONS
+                || subscriptions.iter().enumerate().any(|(index, row)| {
+                    row.symbol.is_empty()
+                        || row.symbol.len() > crate::signals::SYMBOL_BYTES_MAX
+                        || subscriptions[..index].contains(row)
+                })
+            {
+                return Err("invalid signal subscription suspension footprint".into());
+            }
+            self.suspensions.insert(destination, reason);
+        } else {
+            self.suspensions.remove(&destination);
+        }
+        Ok(())
+    }
+
     pub fn require_readiness(&mut self, strategies: impl IntoIterator<Item = StrategyId>) {
         self.required_readiness = strategies.into_iter().collect();
         self.begin_readiness_request();
@@ -231,21 +338,22 @@ impl SignalState {
     }
 
     pub fn readiness_blocked(&self, destination: StrategyId) -> bool {
-        self.required_readiness.contains(&destination)
-            && (!self
-                .producer_frontiers
-                .values()
-                .any(|row| row.destination == destination)
-                || self
+        self.lifecycle_blocked(destination)
+            || self.required_readiness.contains(&destination)
+                && (!self
                     .producer_frontiers
                     .values()
-                    .filter(|row| row.destination == destination)
-                    .any(|row| {
-                        self.cursors
-                            .get(&row.source)
-                            .map_or(0, |cursor| cursor.sequence)
-                            < row.published_through
-                    }))
+                    .any(|row| row.destination == destination)
+                    || self
+                        .producer_frontiers
+                        .values()
+                        .filter(|row| row.destination == destination)
+                        .any(|row| {
+                            self.cursors
+                                .get(&row.source)
+                                .map_or(0, |cursor| cursor.sequence)
+                                < row.published_through
+                        }))
     }
 
     pub fn frontier_gaps(
@@ -277,7 +385,12 @@ impl SignalState {
                 .readiness_request_cursors
                 .get(&row.source)
                 .copied()
-                .unwrap_or(0);
+                .unwrap_or(0)
+                .max(
+                    self.producer_frontiers
+                        .get(&row.source)
+                        .map_or(0, |row| row.published_through),
+                );
             if row.published_through < requested {
                 return Err(format!(
                     "producer {} rewound to {} behind durable cursor {} at readiness request",
@@ -311,6 +424,12 @@ impl SignalState {
             .collect();
     }
 
+    pub fn set_producer_frontiers(&mut self, frontiers: Vec<engine_types::SignalSourceFrontier>) {
+        for row in frontiers {
+            self.producer_frontiers.insert(row.source.clone(), row);
+        }
+    }
+
     pub fn consumer_pending(&self, destination: StrategyId) -> bool {
         self.observations
             .values()
@@ -323,8 +442,9 @@ impl SignalState {
     }
 
     pub fn prefix_capacity(&self, destination: StrategyId) -> bool {
-        (!self.consumer_pending(destination) && self.ordinary_capacity())
-            || self.recovery_capacity()
+        !self.suspensions.contains_key(&destination)
+            && ((!self.consumer_pending(destination) && self.ordinary_capacity())
+                || self.recovery_capacity())
     }
 
     fn recovery_capacity(&self) -> bool {
@@ -338,6 +458,9 @@ impl SignalState {
     }
 
     pub fn can_accept(&self, observation: &SignalObservation) -> bool {
+        if self.suspensions.contains_key(&observation.destination) {
+            return false;
+        }
         let bytes = crate::signals::retained_bytes(observation);
         let retained = self.retained_bytes();
         let ordinary = !self.consumer_pending(observation.destination)
@@ -358,6 +481,9 @@ impl SignalState {
     }
 
     pub fn classify(&self, observation: &SignalObservation) -> Result<Admission, String> {
+        if let Some(admission) = self.managed_admission(observation)? {
+            return Ok(admission);
+        }
         if self
             .destination(&observation.source)
             .is_some_and(|id| id != observation.destination)
@@ -406,10 +532,25 @@ impl SignalState {
     }
 
     pub fn blocked(&self, strategy: StrategyId) -> bool {
-        self.gaps.values().any(|gap| gap.destination == strategy)
+        self.suspensions.contains_key(&strategy)
+            || self.lifecycle_blocked(strategy)
+            || self.gaps.values().any(|gap| gap.destination == strategy)
     }
 
     pub fn accept(&mut self, observation: SignalObservation) {
+        for producer in self.producers.values_mut() {
+            if let Some(route) = producer
+                .routes
+                .iter_mut()
+                .find(|row| row.destination == observation.destination)
+            {
+                for subscription in &observation.subscriptions {
+                    if !route.subscriptions.contains(subscription) {
+                        route.subscriptions.push(subscription.clone());
+                    }
+                }
+            }
+        }
         self.cursors.insert(
             observation.source.clone(),
             SignalCursor {
@@ -465,12 +606,33 @@ impl SignalState {
 
     pub fn consume(&mut self, source: &str, sequence: u64) {
         self.observations.remove(&(source.to_string(), sequence));
+        self.delivered.remove(&(source.to_string(), sequence));
     }
 
     pub fn route_subscriptions(&self, source: &str, destination: StrategyId) -> &[Subscription] {
+        if let Some(route) = self
+            .producer_routes()
+            .find(|row| row.destination == destination)
+        {
+            return &route.subscriptions;
+        }
         self.subscriptions
             .get(&(source.to_string(), destination.0))
             .map_or(&[], |row| row.subscriptions.as_slice())
+    }
+
+    pub fn undelivered(&self) -> impl Iterator<Item = &SignalObservation> {
+        self.observations
+            .iter()
+            .filter(|(key, _)| !self.delivered.contains(*key))
+            .map(|(_, row)| row)
+    }
+
+    pub fn mark_delivered(&mut self, source: &str, sequence: u64) {
+        let key = (source.to_string(), sequence);
+        if self.observations.contains_key(&key) {
+            self.delivered.insert(key);
+        }
     }
 
     pub fn observations(&self) -> impl Iterator<Item = &SignalObservation> {
@@ -513,6 +675,17 @@ impl SignalState {
         strategies: usize,
     ) -> Result<(), String> {
         crate::signals::validate(observation)?;
+        let retained = self.route_subscriptions(&observation.source, observation.destination);
+        if retained.len()
+            + observation
+                .subscriptions
+                .iter()
+                .filter(|row| !retained.contains(row))
+                .count()
+            > engine_types::MAX_DURABLE_SIGNAL_SUBSCRIPTIONS
+        {
+            return Err("signal exceeds its durable subscription ownership budget".into());
+        }
         if observation.destination.0 as usize >= strategies
             || self
                 .destination(&observation.source)

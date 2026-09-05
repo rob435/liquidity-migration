@@ -66,6 +66,8 @@ pub struct LighterPublicFeed {
     ids: Arc<RwLock<HashMap<String, SymbolId>>>,
     admissions: Option<mpsc::UnboundedSender<String>>,
     inbox: Option<Inbox>,
+    pending_reset: bool,
+    subs: Vec<Subscription>,
 }
 
 struct Inbox {
@@ -100,6 +102,15 @@ impl LighterPublicFeed {
             ids,
             admissions: None,
             inbox: None,
+            pending_reset: false,
+            subs: subs
+                .iter()
+                .cloned()
+                .map(|mut row| {
+                    row.symbol = row.symbol.to_uppercase();
+                    row
+                })
+                .collect(),
         }
     }
 
@@ -108,8 +119,15 @@ impl LighterPublicFeed {
         ids.get(&symbol.to_uppercase()).copied()
     }
 
-    pub fn admit(&mut self, symbol: &str, _feed: Feed) -> SymbolId {
+    pub fn admit(&mut self, symbol: &str, feed: Feed) -> SymbolId {
         let symbol = symbol.to_uppercase();
+        let row = Subscription {
+            symbol: symbol.clone(),
+            feed,
+        };
+        if !self.subs.contains(&row) {
+            self.subs.push(row);
+        }
         if !self.wanted.contains(&symbol) {
             self.wanted.push(symbol.clone());
             if let Some(tx) = &self.admissions {
@@ -155,6 +173,15 @@ impl Drop for LighterPublicFeed {
 
 impl MarketFeed for LighterPublicFeed {
     async fn next_event(&mut self) -> Result<MarketEvent, FeedError> {
+        if self.pending_reset {
+            self.pending_reset = false;
+            return Ok(MarketEvent::FeedReset {
+                recv_ns: engine_types::clock::mono_ns(),
+            });
+        }
+        if self.subs.is_empty() {
+            return std::future::pending().await;
+        }
         if self.inbox.is_none() {
             self.start();
         }
@@ -163,6 +190,26 @@ impl MarketFeed for LighterPublicFeed {
             Some(event) => event,
             None => Err(FeedError::Closed),
         }
+    }
+
+    fn retire(&mut self, symbol: &str, feed: Feed) -> bool {
+        let symbol = symbol.to_uppercase();
+        let before = self.subs.len();
+        self.subs
+            .retain(|row| row.symbol != symbol || row.feed != feed);
+        if self.subs.len() == before {
+            return false;
+        }
+        if self.subs.iter().any(|row| row.symbol == symbol) {
+            return true;
+        }
+        self.wanted.retain(|known| known != &symbol);
+        if let Some(inbox) = self.inbox.take() {
+            inbox.worker.abort();
+        }
+        self.admissions = None;
+        self.pending_reset = true;
+        true
     }
 
     fn admit(&mut self, symbol: &str, feed: Feed) -> Option<SymbolId> {
@@ -832,4 +879,39 @@ mod tests {
         assert_eq!(feed.admit("ETHUSDT", Feed::Quote), SymbolId(1));
         assert_eq!(feed.admit("ETHUSDT", Feed::Quote), SymbolId(1));
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn empty_demand_after_retirement_stays_idle_until_readmission() {
+    use std::future::Future;
+    let subs = [Subscription {
+        symbol: "BTCUSDT".into(),
+        feed: Feed::Quote,
+    }];
+    let mut feed = LighterPublicFeed::new(LighterRealm::Testnet, &subs);
+    assert!(MarketFeed::retire(&mut feed, "BTCUSDT", Feed::Quote));
+    assert!(matches!(
+        feed.next_event().await.unwrap(),
+        MarketEvent::FeedReset { .. }
+    ));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut event = Box::pin(feed.next_event());
+    assert!(event.as_mut().poll(&mut context).is_pending());
+    drop(event);
+    assert!(
+        feed.inbox.is_none(),
+        "empty demand must not start a socket or poll worker"
+    );
+    assert_eq!(
+        MarketFeed::admit(&mut feed, "BTCUSDT", Feed::Quote),
+        Some(SymbolId(0))
+    );
+    let mut event = Box::pin(feed.next_event());
+    assert!(event.as_mut().poll(&mut context).is_pending());
+    drop(event);
+    assert!(
+        feed.inbox.is_some(),
+        "readmission restarts the worker with its original symbol ID"
+    );
 }

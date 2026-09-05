@@ -366,6 +366,45 @@ impl VenueGateway for Venue {
         }
     }
 
+    fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
+        match self {
+            Venue::Bybit(gw) => gw.order_lookup_client(),
+            Venue::Hyperliquid(gw) => gw.order_lookup_client(),
+            Venue::Lighter(gw) => gw.order_lookup_client(),
+            Venue::Mexc(gw) => gw.order_lookup_client(),
+            Venue::Binance(gw) => gw.order_lookup_client(),
+            Venue::Variational(gw) => gw.order_lookup_client(),
+        }
+    }
+
+    async fn order_status(
+        &mut self,
+        symbol: SymbolId,
+        client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        match self {
+            Venue::Bybit(gw) => gw.order_status(symbol, client_order_id).await,
+            Venue::Hyperliquid(gw) => gw.order_status(symbol, client_order_id).await,
+            Venue::Lighter(gw) => gw.order_status(symbol, client_order_id).await,
+            Venue::Mexc(gw) => gw.order_status(symbol, client_order_id).await,
+            Venue::Binance(gw) => gw.order_status(symbol, client_order_id).await,
+            Venue::Variational(gw) => gw.order_status(symbol, client_order_id).await,
+        }
+    }
+
+    async fn instrument_specs(
+        &mut self,
+    ) -> Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError> {
+        match self {
+            Venue::Bybit(gw) => gw.instrument_specs().await,
+            Venue::Hyperliquid(gw) => gw.instrument_specs().await,
+            Venue::Lighter(gw) => gw.instrument_specs().await,
+            Venue::Mexc(gw) => gw.instrument_specs().await,
+            Venue::Binance(gw) => gw.instrument_specs().await,
+            Venue::Variational(gw) => gw.instrument_specs().await,
+        }
+    }
+
     async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError> {
         match self {
             Venue::Bybit(gw) => gw.working_orders().await,
@@ -494,6 +533,21 @@ impl OrderFeed for OrderFeeds {
             OrderFeeds::Lighter(feed) => OrderFeed::learn(feed, symbol, id),
             OrderFeeds::Mexc(feed) => OrderFeed::learn(feed, symbol, id),
             OrderFeeds::Binance(feed) => OrderFeed::learn(feed, symbol, id),
+            OrderFeeds::Silent => (),
+        }
+    }
+
+    fn learn_instrument(
+        &mut self,
+        id: SymbolId,
+        spec: &engine_types::numeric::ExactInstrumentSpec,
+    ) {
+        match self {
+            OrderFeeds::Bybit(feed) => feed.learn_instrument(id, spec),
+            OrderFeeds::Hyperliquid(feed) => feed.learn_instrument(id, spec),
+            OrderFeeds::Lighter(feed) => feed.learn_instrument(id, spec),
+            OrderFeeds::Mexc(feed) => feed.learn_instrument(id, spec),
+            OrderFeeds::Binance(feed) => feed.learn_instrument(id, spec),
             OrderFeeds::Silent => (),
         }
     }

@@ -59,6 +59,7 @@ pub struct MexcPublicFeed {
     inbox: Option<mpsc::Receiver<Result<MarketEvent, FeedError>>>,
     admissions: Option<mpsc::UnboundedSender<Vec<Subscription>>>,
     worker: Option<JoinHandle<()>>,
+    pending_reset: bool,
 }
 
 impl MexcPublicFeed {
@@ -68,6 +69,7 @@ impl MexcPublicFeed {
             subs: Vec::new(),
             ids: Arc::new(RwLock::new(HashMap::new())),
             inbox: None,
+            pending_reset: false,
             admissions: None,
             worker: None,
         };
@@ -101,6 +103,9 @@ impl MexcPublicFeed {
     /// kinds, so a symbol is asked for once however many plugs want it.
     fn remember(&mut self, sub: Subscription) -> bool {
         intern(&self.ids, &sub.symbol);
+        if self.subs.contains(&sub) {
+            return false;
+        }
         if self.subs.iter().any(|held| held.symbol == sub.symbol) {
             self.subs.push(sub);
             return false;
@@ -138,9 +143,18 @@ impl Drop for MexcPublicFeed {
 
 impl MarketFeed for MexcPublicFeed {
     async fn next_event(&mut self) -> Result<MarketEvent, FeedError> {
+        if self.pending_reset {
+            self.pending_reset = false;
+            return Ok(MarketEvent::FeedReset {
+                recv_ns: engine_types::clock::mono_ns(),
+            });
+        }
         // The worker is spawned here rather than in the constructor: building
         // a feed is not necessarily done inside a tokio runtime, and reading
         // from one always is.
+        if self.subs.is_empty() {
+            return std::future::pending().await;
+        }
         if self.inbox.is_none() {
             self.start();
         }
@@ -148,6 +162,26 @@ impl MarketFeed for MexcPublicFeed {
             Some(inbox) => inbox.recv().await.unwrap_or(Err(FeedError::Closed)),
             None => Err(FeedError::Closed),
         }
+    }
+
+    fn retire(&mut self, symbol: &str, feed: Feed) -> bool {
+        let symbol = symbol.to_uppercase();
+        let before = self.subs.len();
+        self.subs
+            .retain(|row| row.symbol != symbol || row.feed != feed);
+        if self.subs.len() == before {
+            return false;
+        }
+        if self.subs.iter().any(|row| row.symbol == symbol) {
+            return true;
+        }
+        if let Some(worker) = self.worker.take() {
+            worker.abort();
+        }
+        self.inbox = None;
+        self.admissions = None;
+        self.pending_reset = true;
+        true
     }
 
     fn admit(&mut self, symbol: &str, feed: Feed) -> Option<SymbolId> {
@@ -675,4 +709,57 @@ mod tests {
         ];
         assert_eq!(unique_symbols(&subs), vec!["BTCUSDT", "ETHUSDT"]);
     }
+    #[test]
+    fn repeated_admission_retains_one_demand_row_per_symbol_and_feed() {
+        let mut feed = MexcPublicFeed::new(MexcRealm::Mainnet, &[]);
+        for _ in 0..4096 {
+            feed.admit("BTCUSDT", Feed::Quote);
+        }
+        assert_eq!(feed.subs.len(), 1);
+        feed.admit("BTCUSDT", Feed::Ticker);
+        assert_eq!(feed.subs.len(), 2);
+        assert!(MarketFeed::retire(&mut feed, "BTCUSDT", Feed::Quote));
+        assert_eq!(
+            feed.subs,
+            vec![Subscription {
+                symbol: "BTCUSDT".into(),
+                feed: Feed::Ticker
+            }]
+        );
+    }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn empty_demand_after_retirement_stays_idle_until_readmission() {
+    use std::future::Future;
+    let subs = [Subscription {
+        symbol: "BTCUSDT".into(),
+        feed: Feed::Quote,
+    }];
+    let mut feed = MexcPublicFeed::new(MexcRealm::Mainnet, &subs);
+    assert!(MarketFeed::retire(&mut feed, "BTCUSDT", Feed::Quote));
+    assert!(matches!(
+        feed.next_event().await.unwrap(),
+        MarketEvent::FeedReset { .. }
+    ));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut event = Box::pin(feed.next_event());
+    assert!(event.as_mut().poll(&mut context).is_pending());
+    drop(event);
+    assert!(
+        feed.inbox.is_none(),
+        "empty demand must not start a socket or poll worker"
+    );
+    assert_eq!(
+        MarketFeed::admit(&mut feed, "BTCUSDT", Feed::Quote),
+        Some(SymbolId(0))
+    );
+    let mut event = Box::pin(feed.next_event());
+    assert!(event.as_mut().poll(&mut context).is_pending());
+    drop(event);
+    assert!(
+        feed.inbox.is_some(),
+        "readmission restarts the worker with its original symbol ID"
+    );
 }

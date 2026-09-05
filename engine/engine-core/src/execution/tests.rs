@@ -527,6 +527,7 @@ fn a_mark_at_a_horizon_this_build_does_not_measure_is_not_miscounted() {
 
 fn sent(id: &str, strategy: StrategyId, arrival_mid: f64) -> WalRecord {
     WalRecord::OrderSent {
+        dispatch: None,
         request: OrderRequest {
             client_order_id: id.into(),
             strategy,
@@ -536,6 +537,8 @@ fn sent(id: &str, strategy: StrategyId, arrival_mid: f64) -> WalRecord {
             kind: OrderKind::Market,
             stop: None,
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         },
         wire_ns: 1,
@@ -546,6 +549,8 @@ fn sent(id: &str, strategy: StrategyId, arrival_mid: f64) -> WalRecord {
 fn filled(id: &str, px: f64, is_maker: bool) -> WalRecord {
     WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: String::new(),
             client_order_id: id.into(),
             symbol: BTC,
@@ -720,6 +725,7 @@ fn names_with(strategies: &[&str], symbols: &[&str]) -> WalRecord {
 
 fn sent_for(id: &str, strategy: StrategyId, symbol: SymbolId) -> WalRecord {
     WalRecord::OrderSent {
+        dispatch: None,
         request: OrderRequest {
             client_order_id: id.into(),
             strategy,
@@ -729,6 +735,8 @@ fn sent_for(id: &str, strategy: StrategyId, symbol: SymbolId) -> WalRecord {
             kind: OrderKind::Market,
             stop: None,
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         },
         wire_ns: 1,
@@ -739,6 +747,8 @@ fn sent_for(id: &str, strategy: StrategyId, symbol: SymbolId) -> WalRecord {
 fn filled_for(id: &str, symbol: SymbolId, px: f64) -> WalRecord {
     WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: String::new(),
             client_order_id: id.into(),
             symbol,
@@ -822,6 +832,8 @@ fn an_id_no_table_ever_named_still_reads_as_a_number() {
 
 fn recovered(id: &str, symbol: SymbolId, px: f64, venue_ts_ms: i64) -> WalRecord {
     WalRecord::RecoveredFill {
+        allocation: None,
+        amounts: None,
         exec_id: format!("venue-{id}"),
         client_order_id: id.into(),
         symbol,
@@ -963,6 +975,7 @@ fn a_fill_older_than_the_engine_itself_is_owed_no_mark() {
 fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
     fn order(id: &str, strategy: StrategyId, symbol: SymbolId) -> WalRecord {
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: id.into(),
                 strategy,
@@ -972,6 +985,8 @@ fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
                 kind: OrderKind::Market,
                 stop: None,
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 1,
@@ -981,6 +996,8 @@ fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
     fn traded(id: &str, symbol: SymbolId, side: Side, px: f64, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: String::new(),
                 client_order_id: id.into(),
                 symbol,
@@ -1053,6 +1070,12 @@ fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
 #[test]
 fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
     let held = WalRecord::SegmentBase {
+        pending_order_dispatches: Vec::new(),
+        signal_producers: Vec::new(),
+        signal_suspensions: Vec::new(),
+        portfolio: Some(Default::default()),
+        strategy_processes: Vec::new(),
+        strategy_callbacks: Vec::new(),
         wall_ts_ms: 1,
         strategies: vec!["carry".into()],
         symbols: vec!["ONGUSDT".into()],
@@ -1083,6 +1106,7 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
     };
     fn order(id: &str) -> WalRecord {
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: id.into(),
                 strategy: CARRY,
@@ -1092,6 +1116,8 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
                 kind: OrderKind::Market,
                 stop: None,
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 1,
@@ -1101,6 +1127,8 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
     fn traded(id: &str, side: Side, px: f64, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: String::new(),
                 client_order_id: id.into(),
                 symbol: BTC,
@@ -1139,6 +1167,7 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
 /// One sleeve's own order, and the fill that answered it, both at `px`.
 fn entry(log: &mut Vec<WalRecord>, id: &str, strategy: StrategyId, side: Side, px: f64, qty: f64) {
     log.push(WalRecord::OrderSent {
+        dispatch: None,
         request: OrderRequest {
             client_order_id: id.into(),
             strategy,
@@ -1148,6 +1177,8 @@ fn entry(log: &mut Vec<WalRecord>, id: &str, strategy: StrategyId, side: Side, p
             kind: OrderKind::Market,
             stop: None,
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         },
         wire_ns: 1,
@@ -1155,6 +1186,8 @@ fn entry(log: &mut Vec<WalRecord>, id: &str, strategy: StrategyId, side: Side, p
     });
     log.push(WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: format!("{id}-exec"),
             client_order_id: id.into(),
             symbol: BTC,
@@ -1174,6 +1207,8 @@ fn entry(log: &mut Vec<WalRecord>, id: &str, strategy: StrategyId, side: Side, p
 fn venue_stop(side: Side, px: f64, qty: f64) -> WalRecord {
     WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: "venue-stop".into(),
             client_order_id: String::new(),
             symbol: BTC,
@@ -1220,6 +1255,8 @@ fn a_recovered_venue_stop_closes_and_prices_the_same_trip() {
     let mut log = vec![names()];
     entry(&mut log, "eng-1", CARRY, Side::Buy, 100.0, 10.0);
     log.push(WalRecord::RecoveredFill {
+        allocation: None,
+        amounts: None,
         exec_id: "venue-stop".into(),
         client_order_id: String::new(),
         symbol: BTC,

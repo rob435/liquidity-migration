@@ -820,6 +820,7 @@ fn working_order(owner: u16, symbol: u16, reduce_only: bool) -> (WalRecord, Venu
     let id = format!("eng-gap-{owner}-{reduce_only}");
     let side = if reduce_only { Side::Sell } else { Side::Buy };
     let record = WalRecord::OrderSent {
+        dispatch: None,
         request: OrderRequest {
             client_order_id: id.clone(),
             strategy: StrategyId(owner),
@@ -834,6 +835,8 @@ fn working_order(owner: u16, symbol: u16, reduce_only: bool) -> (WalRecord, Venu
                 trigger_px: 29_000.0,
             }),
             reduce_only,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         },
         wire_ns: 1,
@@ -866,6 +869,8 @@ async fn a_source_gap_cancels_only_affected_openings_and_keeps_exit_edits_live()
     prior.push(held_order);
     prior.push(WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: "gap-edit-held-fill".into(),
             client_order_id: "eng-held-2".into(),
             symbol: SymbolId(2),
@@ -980,6 +985,8 @@ async fn a_source_gap_preserves_attributed_reduce_only_placements() {
     prior.push(record);
     prior.push(WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: "gap-held-fill".into(),
             client_order_id: "eng-gap-2-false".into(),
             symbol: SymbolId(2),
@@ -1446,6 +1453,8 @@ async fn an_absent_producer_does_not_strand_attributed_reductions_or_protective_
     prior.push(record);
     prior.push(WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: "producer-outage-fill".into(),
             client_order_id: "eng-gap-0-false".into(),
             symbol: SymbolId(0),

@@ -1,0 +1,142 @@
+{
+  "scope": "Input/source generation and route lifecycle candidate; no live deployment/account mutation. Shared files include other agents edits. Root owns final integrated debug/release and identity bound integration.",
+  "toolchain": "Rust1.90.0-aarch64-apple-darwin, --locked, -j2, dedicated /tmp target",
+  "before_proofs": [
+    "/tmp/tier1-next-inputs/proof/manifest.json",
+    "/tmp/tier1-next-inputs/proof-late/manifest.json",
+    "/tmp/tier1-next-inputs/proof-routes/manifest.json",
+    "/tmp/tier1-next-inputs/proof-final-routes/manifest.json",
+    "/tmp/tier1-next-inputs/proof-footprint/manifest.json"
+  ],
+  "before_source_purity": "These next-stage proofs disable named controls in isolated evolving candidate snapshots. They are not historical f69a source and preserve current capabilities and unchanged regressions. Individual manifests document controls and compilation-only adjustments. Setup failures remain in logs and do not count as behavioral proof.",
+  "contracts": [
+    "Engine grants durable monotonic producer epochs after immutable complete generation seals and terminal consumer dispositions. Retired floor replaces old per-source metadata; latest predecessor frontier prevents checkpoint rewind at activation.",
+    "Version2 readiness covers exact granted lane/destination roster and preserves known legacy omitted tails; version1 remains explicit legacy mode until adoption. Every boot challenges producer again.",
+    "Live readiness watcher continues through later seals and acknowledges only selected response version.",
+    "Accepted signal callback enqueue failures retain durable input and retry; restart joins exact durable callback identity rather than duplicating.",
+    "Subscription cap produces typed per-destination suspension and exact-row backpressure; account service and exits remain available.",
+    "Complete consumer manifests plus account/order/callback/effect leases drive durable route release. Pending Signal rows lease requested routes only; last transport demand retirement stops old socket/poll and preserves symbol IDs.",
+    "Typed subscription-budget suspension carries the exact bounded requested footprint; resumption requires the unique union of retained routes and the entire blocked row to fit. Partial capacity does not churn durable resume records; restart preserves this decision."
+  ],
+  "remaining_limits": [
+    "Missing pre-upgrade historical identity or final frontier cannot be reconstructed from erased state; known legacy unknown final tails stay unresolved.",
+    "Managed observation-only directory replay explicitly refuses missing lifecycle history. Physical WAL replay/restart is supported and tested through current/v4 rotation and torn-tail fallback; legacy observation tapes remain supported.",
+    "Stable symbol/accounting identity tables are not renumbered or reused. Route demand is retired independently; existing symbol ID representation bound is unchanged.",
+    "Plugins returning no complete retained manifest remain conservative and can hit explicit route backpressure. Native LONG/CARRY/Exodus manifests are parent-owned and tested separately."
+  ],
+  "artifacts": {
+    "engine/engine-types/src/signal_lifecycle.rs": "ecc2b06d702b3603ed946b5c89a3e6ea21cd11840a05f74849e2a1062fd64ae2",
+    "engine/engine-core/src/signal_state.rs": "83d1c089a3e2dfdec9649d78296c854b29afc0664501ff828de6287a7dfa69dc",
+    "engine/engine-core/src/signal_state/lifecycle.rs": "94c2bae7de5b91e62dfc3a52a6c0a5b7c4e1a0b952debceed25aa51fa514583e",
+    "engine/engine-core/src/engine/signal_routes.rs": "ccfba7663bb80179c15c3815aaa189dd222f7ae7e679b11c7ba8d2c8fc43c538",
+    "engine/engine-core/src/engine/signal_intake.rs": "d671ec78ab5bf013a092247d14002d6c951172c05c28218844ab7b680c832101",
+    "engine/engine-core/src/engine/signal_intake_tests.rs": "a02af7d687d051f8c57c39492b89268afb9a617099886b540ece584ded4ea4b0",
+    "engine/engine-core/src/signals/readiness.rs": "6ae29f945f9cd1b7b92d0b59386539105f76888a1b05c6ebcd43b3fb4d108732",
+    "engine/engine-core/src/signals/spool.rs": "b21f49c73444c6e824d771ec0723e18c46b813390d893d21f389bb898326c713",
+    "engine/engine-core/src/signals/unix.rs": "72ef0b54ca5cc10bd9d8b4dfcc17eb0e617bbaed7afbf37f022a288d321c4f52",
+    "engine/engine-core/src/signals/mod.rs": "afaec761d896aef65373f2534c079c5b93638620e2552c84ea98e23e6f1dbd78",
+    "engine/engine-core/src/signals/delivery_tests.rs": "105f12c0929585a5069815b191f8ddc491921740bf822f461711974dec58e5ad",
+    "engine/engine-core/src/backtest/signals.rs": "32dda9d64c3a745e29f528008d01f31cd479a1aacfd33736984001492a8fedb1",
+    "engine/engine-core/src/routing.rs": "5157263fcbda5ca2962b42fef1200f7418ebc4c60b92ff13bc9d3198d376b18a",
+    "engine/signal-worker/src/worker/lifecycle.rs": "627b084a7e8ba26795bcffe5c31e341c6003abd4241817cc640eb6cbd14e444a",
+    "engine/signal-worker/src/worker.rs": "932571cae729427351209572cdb6e13831d98ab669a6db7a84146a926400da14",
+    "engine/signal-worker/src/store.rs": "4badb643bb91a77a41dc0c50ef7821a8a74aa66338585a16fca05c86ca0ff308",
+    "engine/signal-worker/src/live.rs": "c27a76bf28d2e1d80bd7f10c34588c2eb4935fc277323157df36687c6b046ec9",
+    "engine/engine-marketdata/src/feeds.rs": "67a278616751848e535dc216234a62c207f5b787a94a6f896256d1ad199d3c32",
+    "engine/engine-marketdata/src/bybit/feed.rs": "e0c297443a783164ceac1535a2d37ca7a027815d6018ef40ccee18926f646b91",
+    "engine/engine-marketdata/src/bybit/feed/tests.rs": "987201999a1b6e9011ddf4a1f02e19f1f83d0846047d66cb32ca8acc3eddbca1",
+    "engine/engine-marketdata/src/binance.rs": "9487eb0e39cd0dab5a3fe6206c5305f5664e6808a4a6104f61d9c9a6e752aae1",
+    "engine/engine-marketdata/src/hyperliquid.rs": "2c42752c1e0bd766eb53155536430c1e7c4869f988cd965b4fa66a918d1c3792",
+    "engine/engine-marketdata/src/lighter.rs": "fbc70864f457a7c7faafb61b1011ac81a87d6f0bcb4155bc61233294d6aa509b",
+    "engine/engine-marketdata/src/mexc.rs": "3736a8cdf2bf12ba54f9490ad3077042ebc72c1763a45ac3955477233572a45b",
+    "engine/engine-marketdata/src/variational.rs": "52ab98227507d7f7f48018468643b7c26c9e5a8cc1d418a40037d6b4c4eb6ed8",
+    "engine/engine-core/src/backtest/feed.rs": "3a8c76951257cf852c5e96b04531093554a47ef02a01e71b1d8a0ea0a83f1156",
+    "engine/engine-types/src/market.rs": "516dfdf326d8c503e7629a3065d202e2ff842cb381ed1a0be23ba6c33783207a",
+    "engine/signal-worker/src/worker/tests.rs": "2ac8713b3eda6e8bc8fd4ee23a9ae6b4bc4f845bae3db74bf27caf32dd7d5f19"
+  },
+  "checks": [
+    {
+      "log": "/tmp/tier1-next-inputs/current-core-signals-final.log",
+      "source": "current shared checkout at run",
+      "toolchain": "Rust1.90 RUSTC/RUSTDOC",
+      "passed": 94,
+      "failed": 0
+    },
+    {
+      "log": "/tmp/tier1-next-inputs/worker-marketdata-final.log",
+      "source": "current shared checkout at run",
+      "marketdata": {
+        "passed": 107,
+        "ignored": 2
+      },
+      "worker_library": {
+        "passed": 126,
+        "ignored": 2
+      },
+      "worker_binary": {
+        "passed": 1
+      },
+      "resource_envelope": {
+        "ignored": 1,
+        "reason": "existing release-only test; root owns integrated measured release checks"
+      }
+    },
+    {
+      "log": "/tmp/tier1-next-inputs/worker-marketdata-clippy-final.log",
+      "scope": "engine-marketdata + signal-worker --all-targets -D warnings",
+      "toolchain": "Rust1.90 cargo-clippy explicitly on PATH",
+      "exit_code": 0
+    }
+  ],
+  "tooling_setup_logs": [
+    {
+      "log": "/tmp/tier1-next-inputs/worker-marketdata-clippy-wrong-driver.log",
+      "reason": "cargo subcommand resolved Homebrew1.97 clippy-driver despite pinned RUSTC; rerun prepended pinned1.90 bin to PATH and passed."
+    }
+  ],
+  "fixture_repairs": {
+    "scope": "Current integrated production ownership rules; fixture-only changes preserve every existing assertion. Before four affected modules contain six failures; after all31 tests pass.",
+    "modules": {
+      "quote_staleness": {
+        "before_log": "/tmp/tier1-next-inputs/owned-exit-quote_staleness-before.log",
+        "after_log": "/tmp/tier1-next-inputs/owned-exit-quote_staleness-after.log",
+        "after_passed": 4
+      },
+      "rolling_loss": {
+        "before_log": "/tmp/tier1-next-inputs/owned-exit-rolling_loss-before.log",
+        "after_log": "/tmp/tier1-next-inputs/owned-exit-rolling_loss-after.log",
+        "after_passed": 7
+      },
+      "worked_entries": {
+        "before_log": "/tmp/tier1-next-inputs/owned-exit-worked_entries-before.log",
+        "after_log": "/tmp/tier1-next-inputs/owned-exit-worked_entries-after.log",
+        "after_passed": 6
+      },
+      "strategy_checkpoints": {
+        "before_log": "/tmp/tier1-next-inputs/owned-exit-strategy_checkpoints-before.log",
+        "after_log": "/tmp/tier1-next-inputs/owned-exit-strategy_checkpoints-after.log",
+        "after_passed": 14
+      }
+    },
+    "paths": [
+      "engine/engine-core/src/tests/quote_staleness.rs",
+      "engine/engine-core/src/tests/rolling_loss.rs",
+      "engine/engine-core/src/tests/worked_entries.rs",
+      "engine/engine-core/src/tests/strategy_checkpoints.rs",
+      "engine/engine-core/src/tests.rs (new owned_exit_fixture helper only)",
+      "engine/engine-core/src/tests/order_path.rs (missing exact_terms None in existing helper only)"
+    ],
+    "details": [
+      "Five reduction/restart/stall fixtures now have actual durable entry+fill and matching venue inventory. Checkpoint cut selects reduce_only OrderSent after seeded entry history.",
+      "Unpriced-close rotation preserves quantity-only portfolio inventory, unknown entry_value and unknown settlement asset; no opening fills or invented cost added."
+    ],
+    "setup_failures": [
+      "/tmp/tier1-next-inputs/owned-exit-after-compile-setup.log",
+      "/tmp/tier1-next-inputs/owned-exit-after-integration-setup.log"
+    ]
+  },
+  "final_native_retained_manifests": {
+    "manifest": "/tmp/tier1-next-inputs/proof-manifests-final/manifest.json",
+    "scope": "Latest runtime-valid Exodus OpenRecords fixture plus unchanged LONG/CARRY; all original assertions preserved. Isolated current candidate with exactly three manifest overrides disabled gives three failures; restored candidate gives three passes."
+  }
+}

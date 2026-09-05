@@ -66,6 +66,7 @@ const KNOWN_PARAMS: &[&str] = &[
     "enabled",
 ];
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Probe {
     id: StrategyId,
     symbol_name: String,
@@ -341,6 +342,26 @@ fn size(px: f64, notional_usdt: f64, rule: &InstrumentRule) -> Option<f64> {
 }
 
 impl Strategy for Probe {
+    fn runtime_state(
+        &self,
+    ) -> Result<Option<engine_types::strategy_process::StrategyRuntimeState>, String> {
+        crate::runtime::snapshot(
+            NAME,
+            self,
+            &(
+                self.id,
+                &self.symbol_name,
+                self.enabled,
+                self.every_ms,
+                self.rest_ns,
+                self.offset,
+                self.notional_usdt,
+                self.stop_fraction,
+                self.max_quote_age_ns,
+            ),
+        )
+        .map(Some)
+    }
     fn name(&self) -> &str {
         NAME
     }

@@ -23,6 +23,12 @@ fn note(text: &str) -> WalRecord {
 /// replayed base from a replayed record.
 fn base(mark: &str) -> WalRecord {
     WalRecord::SegmentBase {
+        pending_order_dispatches: Vec::new(),
+        signal_producers: Vec::new(),
+        signal_suspensions: Vec::new(),
+        portfolio: Some(Default::default()),
+        strategy_processes: Vec::new(),
+        strategy_callbacks: Vec::new(),
         wall_ts_ms: 7,
         strategies: vec!["carry".to_string()],
         symbols: vec!["BTCUSDT".to_string()],
@@ -228,7 +234,7 @@ fn gap_record_and_rotation_keep_the_exact_missing_prefix() {
     assert_eq!(records[0].1, rotated);
     let bytes = fs::read(dir.path().join("engine.wal.000002")).unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&bytes[16..]).unwrap();
-    assert_eq!(payload["kind"], "segment_base_v3");
+    assert_eq!(payload["kind"], "segment_base_v4");
 }
 
 /// The crash test: a rotation cut off at ANY byte leaves boot replaying the
@@ -395,11 +401,18 @@ fn the_lock_on_the_family_path_survives_a_rotation() {
 
 #[test]
 fn effect_rotation_requires_all_mandatory_state_without_truncating() {
-    for missing in ["strategy_effects", "signal_gaps"] {
+    for missing in [
+        "strategy_effects",
+        "signal_gaps",
+        "portfolio",
+        "signal_producers",
+        "strategy_processes",
+        "strategy_callbacks",
+    ] {
         let dir = TempDir::new().unwrap();
         let path = log_path(&dir);
         let mut value = serde_json::to_value(base("required-effects")).unwrap();
-        assert_eq!(value["kind"], "segment_base_v3");
+        assert_eq!(value["kind"], "segment_base_v4");
         value.as_object_mut().unwrap().remove(missing);
         let bytes = write_raw_record(&path, &value);
         assert!(
@@ -436,6 +449,7 @@ fn durable_effect_identity_and_suffix_survive_rotation() {
     let dir = TempDir::new().unwrap();
     let path = log_path(&dir);
     let transition = StrategyTransitionState {
+        origin: engine_types::wal::StrategyTransitionOrigin::Embedded,
         id: 17,
         strategy: StrategyId(0),
         effects: vec![Action::Cancel {

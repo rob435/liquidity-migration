@@ -36,6 +36,8 @@ fn market_order() -> OrderRequest {
             trigger_px: 93000.5,
         }),
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     }
 }

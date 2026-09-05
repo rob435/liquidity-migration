@@ -100,7 +100,7 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     // dial or repeatedly failing authentication.
     order_feed.await_ready().await?;
 
-    let mut engine = Engine::boot_as(
+    let mut engine = Engine::boot_as_isolated(
         &settings,
         &loaded.sha256,
         wal,
@@ -109,6 +109,7 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         strategies,
         &sleeves,
         &replayed,
+        std::env::current_exe()?,
     )
     .await?;
 

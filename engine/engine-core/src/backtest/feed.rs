@@ -337,6 +337,15 @@ impl MarketFeed for TapeFeed {
         }
     }
 
+    fn retire(&mut self, symbol: &str, feed: Feed) -> bool {
+        let mut cursor = lock(&self.cursor);
+        let Some(index) = cursor.symbols.iter().position(|known| known == symbol) else {
+            return false;
+        };
+        cursor.subscribed[index].retain(|known| *known != feed);
+        true
+    }
+
     fn admit(&mut self, symbol: &str, feed: Feed) -> Option<SymbolId> {
         let mut cursor = lock(&self.cursor);
         let id = cursor.intern(symbol);

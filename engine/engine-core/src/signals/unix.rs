@@ -207,6 +207,14 @@ impl SignalFeed for HybridSignalFeed {
         self.spool.request_readiness()
     }
 
+    fn request_lifecycle(
+        &mut self,
+        producers: Vec<engine_types::SignalProducerLifecycle>,
+        legacy_sources: Vec<engine_types::SignalSourceFrontier>,
+    ) -> Result<(), SignalError> {
+        self.spool.request_lifecycle(producers, legacy_sources)
+    }
+
     async fn next_event(&mut self) -> Result<engine_types::SignalFeedEvent, SignalError> {
         let Some(unix) = self.unix.as_mut() else {
             return self.spool.next_event().await;

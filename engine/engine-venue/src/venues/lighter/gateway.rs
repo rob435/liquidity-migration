@@ -43,8 +43,7 @@ use super::crypto::schnorr;
 use super::markets::{venue_price, venue_size, Market, Markets};
 use super::order_index;
 use super::parse::{
-    parse_executions, parse_margin, parse_markets, parse_nonce, parse_positions,
-    parse_working_orders, stops_by_market, venue_result,
+    parse_margin, parse_nonce, parse_positions, parse_working_orders, stops_by_market, venue_result,
 };
 use super::realm::{AccountKey, LighterRealm};
 use super::tx::{
@@ -183,6 +182,17 @@ impl LighterGateway {
         venue_result(reply)
     }
 
+    async fn get_signed_as<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &str,
+    ) -> Result<T, VenueError> {
+        let token = self.auth_token()?;
+        self.http
+            .get_as(path, query, &[("Authorization", token)])
+            .await
+    }
+
     /// `<deadline>:<account>:<key slot>`, signed, with the signature appended.
     ///
     /// The message is hashed as bytes-in-field-elements, which is the venue's
@@ -199,8 +209,11 @@ impl LighterGateway {
     }
 
     async fn load_markets(&mut self) -> Result<(), VenueError> {
-        let reply = self.get(PATH_MARKETS, "").await?;
-        self.markets = Markets::from_rows(parse_markets(&reply)?);
+        let reply: Box<serde_json::value::RawValue> =
+            self.http.get_as(PATH_MARKETS, "", &[]).await?;
+        self.markets = Markets::from_rows(
+            engine_public::venues::lighter::parse::parse_markets_raw(reply.get())?,
+        );
         Ok(())
     }
 
@@ -285,12 +298,25 @@ impl LighterGateway {
         name: &str,
     ) -> Result<(), VenueError> {
         let trigger = venue_price(trigger_px, covering, market)?;
+        let base_amount = venue_size(qty, market)?;
+        self.send_stop_units(market, covering, base_amount, trigger, name)
+            .await
+    }
+
+    async fn send_stop_units(
+        &mut self,
+        market: &Market,
+        covering: Side,
+        base_amount: i64,
+        trigger: u32,
+        name: &str,
+    ) -> Result<(), VenueError> {
         let protection = CreateOrder {
             account_index: self.account.account_index,
             api_key_index: self.account.api_key_index,
             market_index: market.index,
             client_order_index: order_index::to_index(name),
-            base_amount: venue_size(qty, market)?,
+            base_amount,
             // Not the trigger. On this venue the price field bounds how far
             // the immediate-or-cancel that a stop becomes may fill, so a bound
             // set at the trigger is a stop that fills nothing the moment the
@@ -380,15 +406,36 @@ impl VenueGateway for LighterGateway {
     }
 
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
+        let terms = crate::order_wire::terms(req)?;
         let symbol = self.name_of(req.symbol)?.to_string();
         let market = self.market_for(&symbol).await?;
+        if let Some(terms) = terms {
+            let spec = market
+                .exact_spec
+                .as_ref()
+                .ok_or_else(|| crate::order_wire::error("exact market metadata is unavailable"))?;
+            terms
+                .validate_wire_grid(
+                    spec,
+                    req.kind,
+                    engine_types::order_terms::QuantityPolicy::Normal,
+                )
+                .map_err(crate::order_wire::error)?;
+        }
         let (order_type, time_in_force) = self.order_type_and_tif(req.kind);
         let is_ask = u8::from(matches!(req.side, Side::Sell));
 
         // A market order still carries a price on this venue: the field is not
         // optional, and it bounds how far an immediate-or-cancel may fill.
         let price = match req.kind {
-            OrderKind::Limit { px, .. } => venue_price(px, req.side, &market)?,
+            OrderKind::Limit { px, .. } => match terms {
+                Some(terms) => crate::order_wire::scaled(
+                    terms.limit_price.as_ref().expect("validated limit"),
+                    market.price_decimals,
+                    u32::MAX as u64,
+                )? as u32,
+                None => venue_price(px, req.side, &market)?,
+            },
             // Nothing to bound it against without a book read, so the widest
             // the field allows: the order is immediate-or-cancel and takes
             // what is there.
@@ -398,13 +445,40 @@ impl VenueGateway for LighterGateway {
             },
         };
 
+        let exact_stop = terms
+            .filter(|_| req.stop.is_some() && !req.reduce_only)
+            .map(|terms| {
+                Ok::<_, VenueError>((
+                    crate::order_wire::scaled(
+                        &terms.quantity,
+                        market.size_decimals,
+                        (1u64 << 48) - 1,
+                    )? as i64,
+                    crate::order_wire::scaled(
+                        terms
+                            .physical_stop_trigger_price
+                            .as_ref()
+                            .expect("validated physical stop"),
+                        market.price_decimals,
+                        u32::MAX as u64,
+                    )? as u32,
+                ))
+            })
+            .transpose()?;
         let now = wall_ms();
         let order = CreateOrder {
             account_index: self.account.account_index,
             api_key_index: self.account.api_key_index,
             market_index: market.index,
             client_order_index: order_index::to_index(&req.client_order_id),
-            base_amount: venue_size(req.qty, &market)?,
+            base_amount: match terms {
+                Some(terms) => crate::order_wire::scaled(
+                    &terms.quantity,
+                    market.size_decimals,
+                    (1u64 << 48) - 1,
+                )? as i64,
+                None => venue_size(req.qty, &market)?,
+            },
             price,
             is_ask,
             order_type,
@@ -439,16 +513,19 @@ impl VenueGateway for LighterGateway {
         // the missing stop is caught where a missing stop is always caught, by
         // `stop_attached` in the next account view.
         let stop_failed = match req.stop {
-            Some(stop) if !req.reduce_only => self
-                .send_stop(
-                    &market,
-                    req.side.flipped(),
-                    req.qty,
-                    stop.trigger_px,
-                    &format!("{}-stop", req.client_order_id),
-                )
-                .await
-                .err(),
+            Some(stop) if !req.reduce_only => {
+                let name = format!("{}-stop", req.client_order_id);
+                match exact_stop {
+                    Some((qty, trigger)) => self
+                        .send_stop_units(&market, req.side.flipped(), qty, trigger, &name)
+                        .await
+                        .err(),
+                    None => self
+                        .send_stop(&market, req.side.flipped(), req.qty, stop.trigger_px, &name)
+                        .await
+                        .err(),
+                }
+            }
             _ => None,
         };
         if let Some(refused) = &stop_failed {
@@ -655,6 +732,45 @@ impl VenueGateway for LighterGateway {
         })
     }
 
+    fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
+        Some(Box::new(LookupClient {
+            http: self.http.clone(),
+            account_index: self.account.account_index,
+            api_key_index: self.account.api_key_index,
+            secret: self.secret,
+        }))
+    }
+
+    async fn order_status(
+        &mut self,
+        symbol: SymbolId,
+        client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        let name = self.name_of(symbol)?.to_owned();
+        let market = self.market_for(&name).await?;
+        let query = format!(
+            "account_index={}&client_order_indexes={}",
+            self.account.account_index,
+            order_index::to_index(client_order_id)
+        );
+        let raw: Box<serde_json::value::RawValue> =
+            self.get_signed_as("/api/v1/accountOrders", &query).await?;
+        super::lookup::parse(
+            raw.get(),
+            &name,
+            client_order_id,
+            market.index,
+            self.account.account_index,
+        )
+    }
+
+    async fn instrument_specs(
+        &mut self,
+    ) -> Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError> {
+        self.load_markets().await?;
+        self.markets.instrument_specs()
+    }
+
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {
         self.load_markets().await?;
         Ok(self.markets.instrument_rules())
@@ -694,9 +810,11 @@ impl VenueGateway for LighterGateway {
                  &limit={PAGE_LIMIT}",
                 self.account.account_index
             );
-            let reply = self.get_signed(PATH_TRADES, &query).await?;
-            let rows = parse_executions(&reply, self.account.account_index, &self.markets)?;
-            let count = rows.len();
+            let reply: engine_public::numeric_wire::RawObject<super::execution::HistoryReply> =
+                self.get_signed_as(PATH_TRADES, &query).await?;
+            let (rows, count) = reply
+                .0
+                .executions(self.account.account_index, &self.markets)?;
             let newest = rows.iter().map(|r| r.venue_ts_ms).max();
             // Fills already held are dropped by their own id, so a page that
             // overlaps the last one does not double-count.
@@ -771,6 +889,50 @@ fn base64_signature(bytes: &[u8; 80]) -> String {
         .as_str()
         .expect("the encoder writes a string")
         .to_string()
+}
+
+struct LookupClient {
+    http: HttpClient,
+    account_index: i64,
+    api_key_index: u8,
+    secret: Scalar,
+}
+#[engine_types::async_trait]
+impl engine_types::orders::OrderLookupClient for LookupClient {
+    async fn lookup(
+        &self,
+        name: &str,
+        client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        let raw: Box<serde_json::value::RawValue> = self.http.get_as(PATH_MARKETS, "", &[]).await?;
+        let markets = Markets::from_rows(engine_public::venues::lighter::parse::parse_markets_raw(
+            raw.get(),
+        )?);
+        let market = markets.for_symbol(name)?;
+        let deadline = wall_ms() / 1000 + AUTH_LIFETIME_S;
+        let message = format!("{deadline}:{}:{}", self.account_index, self.api_key_index);
+        let hashed = hash_to_quintic_extension(&order_index::bytes_as_fields(message.as_bytes()));
+        let token = format!(
+            "{message}:{}",
+            hex::encode(schnorr::sign(&hashed, &self.secret).to_bytes())
+        );
+        let query = format!(
+            "account_index={}&client_order_indexes={}",
+            self.account_index,
+            order_index::to_index(client_order_id)
+        );
+        let raw: Box<serde_json::value::RawValue> = self
+            .http
+            .get_as("/api/v1/accountOrders", &query, &[("Authorization", token)])
+            .await?;
+        super::lookup::parse(
+            raw.get(),
+            name,
+            client_order_id,
+            market.index,
+            self.account_index,
+        )
+    }
 }
 
 #[cfg(test)]

@@ -66,6 +66,7 @@ pub struct MockCtx {
     /// test delivers, so a plug that reads its own inventory reads the same
     /// number here that it would live.
     mine: HashMap<SymbolId, f64>,
+    allocated: HashMap<SymbolId, engine_types::strategy::StrategyAllocatedPosition>,
     /// What the engine's cover book would say this strategy has sent that
     /// the account reading has not absorbed yet, signed, positive long. The
     /// engine books and releases the real one (`engine-core/src/covers.rs`);
@@ -106,6 +107,7 @@ impl MockCtx {
             positions: HashMap::new(),
             foreign: HashSet::new(),
             mine: HashMap::new(),
+            allocated: HashMap::new(),
             in_flight: HashMap::new(),
             rules: HashMap::new(),
             checkpoints: HashMap::new(),
@@ -217,6 +219,21 @@ impl MockCtx {
         *self.mine.entry(symbol).or_insert(0.0) += signed;
     }
 
+    pub fn set_allocated_position(
+        &mut self,
+        symbol: &str,
+        signed_qty: f64,
+        entry_px: Option<f64>,
+        stop_px: Option<f64>,
+    ) {
+        let symbol = self.add_symbol(symbol);
+        self.mine.insert(symbol, signed_qty);
+        self.allocated.insert(
+            symbol,
+            engine_types::strategy::StrategyAllocatedPosition { entry_px, stop_px },
+        );
+    }
+
     /// Start a test with this strategy already holding something of its own,
     /// without walking it through the fills that got there.
     pub fn set_my_position(&mut self, symbol: &str, signed_qty: f64) {
@@ -321,6 +338,13 @@ impl StrategyCtx for MockCtx {
             attributed_signed_qty,
             venue: self.position(symbol),
             in_flight_signed_qty,
+            open_order_count: self
+                .resting
+                .iter()
+                .filter(|order| order.symbol == symbol && order.qty > order.filled_qty)
+                .count()
+                .max(usize::from(in_flight_signed_qty != 0.0)),
+            allocated: self.allocated.get(&symbol).cloned(),
         })
     }
 
@@ -555,6 +579,8 @@ impl Harness {
         let id = self.ctx.id_of(symbol);
         self.ctx.charge_fill(id, side, qty);
         self.deliver(EngineEvent::Order(OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: exec_id.to_string(),
             client_order_id: client_order_id.to_string(),
             symbol: id,
@@ -584,6 +610,8 @@ impl Harness {
         // position inside the fill callback must already see the fill.
         self.ctx.charge_fill(id, side, qty);
         self.deliver(EngineEvent::Order(OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: String::new(),
             client_order_id: client_order_id.to_string(),
             symbol: id,

@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::wire::{self, Field};
+use crate::wire::{self, Field, RawField};
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::market::{FeedError, OrderFeed};
 use engine_types::orders::{OrderAck, OrderUpdate, Side};
@@ -37,7 +37,7 @@ use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStre
 use super::realm::VenueRealm;
 use super::sign::ws_signature;
 use crate::creds::Credentials;
-use crate::json::{int_field, num_field, opt_num_field, str_field};
+use crate::json::{int_field, num_field, str_field};
 use crate::{mono_ns, wall_ms};
 
 /// Bybit drops a private socket that goes quiet for 30 seconds.
@@ -68,6 +68,7 @@ pub struct BybitOrderFeed {
     /// decodable the instant the engine says it is following the name, not one
     /// message later.
     ids: Arc<RwLock<HashMap<Symbol, SymbolId>>>,
+    settlement_assets: Arc<RwLock<HashMap<SymbolId, engine_types::numeric::AssetId>>>,
     updates: Option<mpsc::Receiver<Handover>>,
 }
 
@@ -107,6 +108,7 @@ impl BybitOrderFeed {
             creds,
             fast_execution,
             ids: Arc::new(RwLock::new(ids)),
+            settlement_assets: Arc::new(RwLock::new(HashMap::new())),
             updates: None,
         }
     }
@@ -126,7 +128,7 @@ impl BybitOrderFeed {
             url: self.url.clone(),
             creds: self.creds.clone(),
             fast_execution: self.fast_execution,
-            decoder: Decoder::new(self.ids.clone()),
+            decoder: Decoder::with_settlement(self.ids.clone(), self.settlement_assets.clone()),
             backoff: ReconnectBackoff::default(),
         };
         tokio::spawn(worker.run(tx));
@@ -137,6 +139,17 @@ impl BybitOrderFeed {
 impl OrderFeed for BybitOrderFeed {
     fn learn(&mut self, symbol: &str, id: SymbolId) {
         BybitOrderFeed::learn(self, symbol, id);
+    }
+
+    fn learn_instrument(
+        &mut self,
+        id: SymbolId,
+        spec: &engine_types::numeric::ExactInstrumentSpec,
+    ) {
+        self.settlement_assets
+            .write()
+            .expect("the settlement map lock is poisoned")
+            .insert(id, spec.settlement_asset.clone());
     }
 
     async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
@@ -338,13 +351,14 @@ struct PrivateEnvelope {
     #[serde(default)]
     ret_msg: Field<String>,
     #[serde(default)]
-    data: Field<Vec<Value>>,
+    data: RawField<Vec<Box<serde_json::value::RawValue>>>,
 }
 
 /// Frames in, updates out, plus the memory of which orders have already
 /// acked. No socket and no clock but the receive stamp.
 struct Decoder {
     ids: Arc<RwLock<HashMap<Symbol, SymbolId>>>,
+    settlement_assets: Arc<RwLock<HashMap<SymbolId, engine_types::numeric::AssetId>>>,
     pending: VecDeque<OrderUpdate>,
     acknowledgements: AckMemory,
     order_links: HashMap<String, String>,
@@ -356,9 +370,18 @@ struct Decoder {
 }
 
 impl Decoder {
+    #[cfg(test)]
     fn new(ids: Arc<RwLock<HashMap<Symbol, SymbolId>>>) -> Self {
+        Self::with_settlement(ids, Arc::new(RwLock::new(HashMap::new())))
+    }
+
+    fn with_settlement(
+        ids: Arc<RwLock<HashMap<Symbol, SymbolId>>>,
+        settlement_assets: Arc<RwLock<HashMap<SymbolId, engine_types::numeric::AssetId>>>,
+    ) -> Self {
         Self {
             ids,
+            settlement_assets,
             pending: VecDeque::new(),
             acknowledgements: AckMemory::new(ACK_MEMORY),
             order_links: HashMap::new(),
@@ -372,10 +395,8 @@ impl Decoder {
 
     /// Turn one frame into updates and queue them.
     fn ingest(&mut self, text: &str) -> Result<bool, FeedError> {
-        let frame: Value = serde_json::from_str(text)
+        let frame: PrivateEnvelope = wire::raw_object(text)
             .map_err(|e| FeedError::BadMessage(format!("{e}: {}", first_chars(text))))?;
-
-        let frame: PrivateEnvelope = wire::object(&frame);
         let Some(topic) = frame.topic.0.as_deref() else {
             if frame.success.0 == Some(false) {
                 let why = frame.ret_msg.0.as_deref().unwrap_or("no reason");
@@ -390,7 +411,10 @@ impl Decoder {
         let mut first_error = None;
         let mut execution_row_failed = false;
 
-        for row in rows {
+        for raw in rows {
+            let row: Value = serde_json::from_str(raw.get())
+                .map_err(|e| FeedError::BadMessage(e.to_string()))?;
+            let row = &row;
             let mapped = if topic.starts_with("order") {
                 if let (Ok(order_id), Ok(client_order_id)) =
                     (field(row, "orderId"), field(row, "orderLinkId"))
@@ -410,7 +434,7 @@ impl Decoder {
                 )
             } else if execution_topic {
                 let ids = self.ids.read().expect("the symbol map lock is poisoned");
-                map_execution_row(row, &|name: &str| ids.get(name).copied(), recv_ns)
+                map_execution_raw(raw.get(), &|name: &str| ids.get(name).copied(), recv_ns)
             } else {
                 Ok(None)
             };
@@ -424,7 +448,22 @@ impl Decoder {
                     continue;
                 }
             };
-            if let Some(update) = update {
+            if let Some(mut update) = update {
+                if let OrderUpdate::Fill {
+                    symbol,
+                    amounts: Some(amounts),
+                    ..
+                } = &mut update
+                {
+                    if let Some(asset) = self
+                        .settlement_assets
+                        .read()
+                        .expect("the settlement map lock is poisoned")
+                        .get(symbol)
+                    {
+                        amounts.settlement_asset = asset.clone();
+                    }
+                }
                 if let OrderUpdate::FastFill { ref exec_id, .. } = update {
                     // The two topics are independent. When the ordinary,
                     // fee-bearing execution wins the race, a later fast row
@@ -641,65 +680,45 @@ fn amended_from_row(row: &Value, client_order_id: &str, recv_ns: u64) -> Option<
 }
 
 /// One `execution` row.
+#[cfg(test)]
 pub(crate) fn map_execution_row(
     row: &Value,
     resolve: &dyn Fn(&str) -> Option<SymbolId>,
     recv_ns: u64,
 ) -> Result<Option<OrderUpdate>, FeedError> {
-    // Funding and session-PnL rows also land here, but do not move quantity.
-    // `Settle` does move the position and must match REST gap recovery.
-    let exec_type = field(row, "execType")?;
-    if !matches!(
-        exec_type.as_str(),
-        "Trade" | "AdlTrade" | "BustTrade" | "Settle"
-    ) {
+    map_execution_raw(&row.to_string(), resolve, recv_ns)
+}
+
+fn map_execution_raw(
+    raw: &str,
+    resolve: &dyn Fn(&str) -> Option<SymbolId>,
+    recv_ns: u64,
+) -> Result<Option<OrderUpdate>, FeedError> {
+    let Some(execution) = super::execution::ExecutionRow::decode_raw(raw)
+        .and_then(|row| row.normalized(true))
+        .map_err(bad_field)?
+    else {
         return Ok(None);
-    }
-    let client_order_id = field(row, "orderLinkId")?;
-    let exec_id = field(row, "execId")?;
-    if exec_id.is_empty() {
-        return Err(FeedError::BadMessage(
-            "a quantity-moving execution has no execId".to_string(),
-        ));
-    }
-    let symbol_name = field(row, "symbol")?;
-    let symbol = resolve(&symbol_name).ok_or_else(|| {
+    };
+    let symbol = resolve(&execution.symbol).ok_or_else(|| {
         FeedError::BadMessage(format!(
-            "fill on {symbol_name}, which the engine does not know"
+            "fill on {}, which the engine does not know",
+            execution.symbol
         ))
     })?;
-    let side = match field(row, "side")?.as_str() {
-        "Buy" => Side::Buy,
-        "Sell" => Side::Sell,
-        other => {
-            return Err(FeedError::BadMessage(format!(
-                "fill on {symbol_name} has an unknown side {other:?}"
-            )))
-        }
-    };
-    let qty = number(row, "execQty")?;
-    let px = number(row, "execPrice")?;
-    let venue_ts_ms = int_field(row, "execTime").map_err(bad_field)?;
-    if qty <= 0.0 || px <= 0.0 || venue_ts_ms <= 0 {
-        return Err(FeedError::BadMessage(format!(
-            "execution {exec_id} on {symbol_name} has non-positive quantity, price, or timestamp"
-        )));
-    }
     Ok(Some(OrderUpdate::Fill {
-        exec_id,
-        client_order_id,
+        allocation: None,
+        exec_id: execution.exec_id,
+        client_order_id: execution.client_order_id,
         symbol,
-        side,
-        qty,
-        px,
-        // A maker rebate comes back negative; absence is not a zero charge.
-        fee: opt_num_field(row, "execFee").map_err(bad_field)?,
-        // Absent means taker. The venue sends this on every execution, so an
-        // absent one is a message shape we do not know — and the expensive
-        // side is the safe thing to assume about a fill we cannot classify.
-        is_maker: row.get("isMaker").and_then(Value::as_bool).unwrap_or(false),
-        forced_close: super::parse::forced_close(row),
-        venue_ts_ms,
+        side: execution.side,
+        qty: execution.qty,
+        px: execution.px,
+        fee: execution.fee,
+        amounts: execution.amounts.map(Box::new),
+        is_maker: execution.is_maker,
+        forced_close: execution.forced_close,
+        venue_ts_ms: execution.venue_ts_ms,
         recv_ns,
     }))
 }
@@ -926,7 +945,14 @@ mod tests {
                 forced_close,
                 venue_ts_ms,
                 recv_ns,
+                amounts,
+                allocation,
             } => {
+                assert!(allocation.is_none());
+                assert_eq!(
+                    amounts.unwrap().quantity.value.to_decimal_string().unwrap(),
+                    "0.5"
+                );
                 assert_eq!(exec_id, "0ab1bdf7-4219-438b-b30a-32ec863018f7");
                 assert_eq!(client_order_id, "eng-11");
                 assert_eq!(symbol, SymbolId(0));

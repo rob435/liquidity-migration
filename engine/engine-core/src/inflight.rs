@@ -112,6 +112,7 @@ impl LedgerOfOrders {
                 request,
                 wire_ns,
                 arrival_mid,
+                ..
             } => {
                 let exact_px = limit_px(request);
                 self.insert_live_order(
@@ -480,7 +481,7 @@ fn opening_stop(request: &OrderRequest) -> Option<((SymbolId, Side), StopPrice)>
 }
 
 fn opening_key(request: &OrderRequest) -> Option<(StrategyId, SymbolId)> {
-    (!request.reduce_only).then_some((request.strategy, request.symbol))
+    (!request.is_sleeve_reduction()).then_some((request.strategy, request.symbol))
 }
 
 fn limit_px(request: &OrderRequest) -> f64 {
@@ -611,12 +612,15 @@ mod tests {
             kind: OrderKind::Market,
             stop: None,
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         }
     }
 
     fn sent(id: &str, qty: f64) -> WalRecord {
         WalRecord::OrderSent {
+            dispatch: None,
             request: request(id, qty),
             wire_ns: 1,
             arrival_mid: 0.0,
@@ -629,6 +633,7 @@ mod tests {
         request.side = side;
         request.stop = Some(StopSpec { trigger_px: stop });
         WalRecord::OrderSent {
+            dispatch: None,
             request,
             wire_ns: 1,
             arrival_mid: 100.0,
@@ -638,6 +643,8 @@ mod tests {
     fn fill(id: &str, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: String::new(),
                 client_order_id: id.into(),
                 symbol: SymbolId(0),
@@ -673,6 +680,8 @@ mod tests {
 
     fn recovered(id: &str, qty: f64) -> WalRecord {
         WalRecord::RecoveredFill {
+            allocation: None,
+            amounts: None,
             exec_id: format!("e-{id}-{qty}"),
             client_order_id: id.into(),
             symbol: SymbolId(0),
@@ -824,6 +833,7 @@ mod tests {
         reduce.symbol = SymbolId(9);
         reduce.reduce_only = true;
         let reduce = WalRecord::OrderSent {
+            dispatch: None,
             request: reduce,
             wire_ns: 1,
             arrival_mid: 100.0,
@@ -877,6 +887,7 @@ mod tests {
             tif: TimeInForce::Gtc,
         };
         let sent = WalRecord::OrderSent {
+            dispatch: None,
             request: original,
             wire_ns: 1,
             arrival_mid: 100.0,

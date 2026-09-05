@@ -102,6 +102,7 @@ struct Readiness {
     rejected_symbols: Vec<DataRejection>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NativeCarry {
     pub core: SleeveCore<StrategyConfig, SleeveState>,
 }
@@ -885,8 +886,33 @@ fn validate_tickers(rows: &[TickerObservation], observed_ts_ms: i64) -> Result<(
 }
 
 impl Strategy for NativeCarry {
+    fn runtime_state(
+        &self,
+    ) -> Result<Option<engine_types::strategy_process::StrategyRuntimeState>, String> {
+        crate::runtime::snapshot(NAME, self, &(self.core.id, &self.core.config)).map(Some)
+    }
     fn name(&self) -> &str {
         NAME
+    }
+
+    fn retained_signal_subscriptions(&self) -> Option<Vec<Subscription>> {
+        if !self.core.restored {
+            return None;
+        }
+        let mut symbols = self
+            .core
+            .state
+            .desired_targets
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if let Some(decision) = &self.core.state.current_decision {
+            symbols.extend(decision.weights.keys().cloned());
+        }
+        symbols.extend(self.core.state.refused_entries.iter().cloned());
+        symbols.extend(self.core.state.entry_retry_after_ms.keys().cloned());
+        symbols.extend(self.core.state.entry_cycle_selected_symbols.iter().cloned());
+        Some(crate::native_common::retained_market_subscriptions(symbols))
     }
 
     fn subscriptions(&self) -> Vec<Subscription> {
@@ -1084,6 +1110,36 @@ mod tests {
     use serde_json::json;
 
     const NOW_MS: i64 = 1_700_000_000_000;
+
+    #[test]
+    fn retained_routes_follow_live_retry_state_and_release_history() {
+        let mut plug = NativeCarry::new(config(), SleeveState::default()).unwrap();
+        plug.core.state.refused_entries.insert("EXITUSDT".into());
+        plug.core.state.refused_entries.insert("RETRYUSDT".into());
+        plug.core
+            .state
+            .entry_retry_after_ms
+            .insert("RETRYUSDT".into(), 10);
+        plug.core.state.fired_exits.insert("HISTORYUSDT".into(), 10);
+        let routes = plug
+            .retained_signal_subscriptions()
+            .expect("native consumer declares retained routes");
+        assert_eq!(routes.len(), 4);
+        assert!(routes.iter().all(|route| route.symbol != "HISTORYUSDT"));
+        for symbol in ["EXITUSDT", "RETRYUSDT"] {
+            for feed in [engine_types::Feed::Quote, engine_types::Feed::Ticker] {
+                assert!(routes.contains(&Subscription {
+                    symbol: symbol.into(),
+                    feed
+                }));
+            }
+        }
+        let runtime = plug.runtime_state().unwrap().unwrap();
+        let restored = crate::runtime::restore(&runtime).unwrap();
+        assert_eq!(restored.retained_signal_subscriptions(), Some(routes));
+        plug.core.state = SleeveState::default();
+        assert_eq!(plug.retained_signal_subscriptions(), Some(Vec::new()));
+    }
 
     fn config() -> StrategyConfig {
         serde_json::from_value(json!({

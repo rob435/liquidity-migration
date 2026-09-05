@@ -13,6 +13,7 @@ engine-types = { workspace = true }
 # One writer per log file, enforced by the kernel — see `lock` in src/lib.rs.
 # Already in the workspace lock through tokio, so nothing new is pulled in.
 libc = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

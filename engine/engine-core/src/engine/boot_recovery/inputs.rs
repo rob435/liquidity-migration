@@ -65,23 +65,31 @@ pub(super) fn restore_strategy_inputs(
         }
     }
     let mut routes = Vec::new();
-    for row in signals.subscriptions() {
-        if row.subscriptions.len() > engine_types::MAX_DURABLE_SIGNAL_SUBSCRIPTIONS {
+    let durable_routes = signals
+        .subscriptions()
+        .map(|row| (row.source.as_str(), row.destination, &row.subscriptions))
+        .chain(
+            signals
+                .producer_routes()
+                .map(|row| ("managed producer", row.destination, &row.subscriptions)),
+        );
+    for (source, destination, subscriptions) in durable_routes {
+        if subscriptions.len() > engine_types::MAX_DURABLE_SIGNAL_SUBSCRIPTIONS {
             return Err(EngineError::Boot(format!(
                 "durable signal source {} has {} subscriptions; maximum is {}",
-                row.source,
-                row.subscriptions.len(),
+                source,
+                subscriptions.len(),
                 engine_types::MAX_DURABLE_SIGNAL_SUBSCRIPTIONS
             )));
         }
-        for subscription in &row.subscriptions {
+        for subscription in subscriptions {
             let Some(symbol) = table.get(&subscription.symbol) else {
                 return Err(EngineError::Boot(format!(
                     "durable signal source {} names {} outside the restored symbol table",
-                    row.source, subscription.symbol
+                    source, subscription.symbol
                 )));
             };
-            routes.push((symbol, row.destination, subscription.clone()));
+            routes.push((symbol, destination, subscription.clone()));
         }
     }
     Ok(RecoveredStrategyInputs {

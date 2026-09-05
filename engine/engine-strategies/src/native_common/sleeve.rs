@@ -12,7 +12,7 @@ use engine_types::{
     StrategyCheckpoint, StrategyCheckpointIdentity, StrategyCtx, StrategyId, WorkPolicy,
 };
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{checkpoint_payload, DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION};
 
@@ -32,6 +32,7 @@ pub trait SleeveState: Serialize + DeserializeOwned + Default {
     fn validate(&self) -> Result<(), &'static str>;
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct SleeveCore<C, S> {
     pub id: StrategyId,
     pub config: C,

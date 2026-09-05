@@ -269,6 +269,7 @@ pub struct SignalSourceFrontier {
 pub enum SignalFeedEvent {
     Observation(SignalObservation),
     Ready(Vec<SignalSourceFrontier>),
+    LifecycleReady(crate::SignalLifecycleResponse),
     ReadinessUnavailable { reason: String },
 }
 
@@ -280,6 +281,14 @@ pub trait SignalFeed {
     /// Begin a fresh producer participation handshake for this engine run.
     fn request_readiness(&mut self) -> Result<(), SignalError> {
         Ok(())
+    }
+
+    fn request_lifecycle(
+        &mut self,
+        _producers: Vec<crate::SignalProducerLifecycle>,
+        _legacy_sources: Vec<SignalSourceFrontier>,
+    ) -> Result<(), SignalError> {
+        self.request_readiness()
     }
 
     /// Readiness carries the producer's durable publication frontier. Feeds
@@ -386,22 +395,31 @@ pub trait RuntimeControlFeed {
 }
 
 /// Account-wide capital facts exposed read-only to one strategy callback.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StrategyAccountSummary {
     pub equity_usdt: f64,
     pub available_margin_usdt: f64,
     pub observed_ns: u64,
 }
 
-/// One strategy-attributed position joined to the venue's latest row and the
-/// engine's send-ahead cover. The signed attributed quantity moves on fills;
-/// the optional venue row remains the account fact.
-#[derive(Clone, Debug, PartialEq)]
+/// Per-sleeve basis and stop projections; absent historical prices stay unknown.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StrategyAllocatedPosition {
+    pub entry_px: Option<f64>,
+    pub stop_px: Option<f64>,
+}
+
+/// The sleeve's allocation and the venue's physical position are separate facts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StrategyPositionFacts {
     pub symbol: SymbolId,
     pub attributed_signed_qty: f64,
     pub venue: Option<PositionView>,
     pub in_flight_signed_qty: f64,
+    #[serde(default)]
+    pub open_order_count: usize,
+    #[serde(default)]
+    pub allocated: Option<StrategyAllocatedPosition>,
 }
 
 /// Everything a strategy can be woken by.
@@ -647,6 +665,17 @@ pub trait StrategyCtx {
 /// edit.
 pub trait Strategy {
     fn name(&self) -> &str;
+    /// Complete private state for an isolated callback process. Registered
+    /// plugs include configuration and transient decision state; reducer
+    /// checkpoints alone do not capture pending requests and retry state.
+    fn runtime_state(
+        &self,
+    ) -> Result<Option<crate::strategy_process::StrategyRuntimeState>, String> {
+        Ok(None)
+    }
+    fn retained_signal_subscriptions(&self) -> Option<Vec<Subscription>> {
+        None
+    }
     /// Market data wanted, collected once at boot.
     fn subscriptions(&self) -> Vec<Subscription>;
 

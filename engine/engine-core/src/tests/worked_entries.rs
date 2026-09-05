@@ -92,11 +92,14 @@ async fn an_exit_is_sent_as_written_even_when_it_asks_to_be_worked() {
         }
     }
 
-    let (mut engine, h) = build(
+    let (replay, held) = owned_exit_fixture("exiter", Side::Buy, 0.01);
+    let (mut engine, h) = build_with_venue_state(
         allow_all(),
         vec![Box::new(Exiter { sent: false })],
         &["BTCUSDT"],
-        &[],
+        &replay,
+        Vec::new(),
+        held,
     )
     .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();

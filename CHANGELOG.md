@@ -6,6 +6,60 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 — Checkpoint local audit foundations; shared trading remains in integration.**
+  - Every order records its dispatch authority atomically before a durable
+    attempted marker permits network submission. Independent read-only lookups
+    preserve cancels and reductions during stalled status queries; ambiguous
+    send replies block new growth immediately.
+  - Registered callbacks run in bounded child processes with complete private
+    runtime restoration and asynchronous durable state/effect publication.
+    Managed producer epochs and exact route-demand retirement retain unresolved
+    inputs through restart instead of silently discarding them.
+  - Exact execution quantities, asset fees and per-sleeve inventory/accounting
+    support atomic allocation of real emergency fills. Exact instrument terms
+    reach five venue adapters without a second floating-point quantization.
+  - Workspace debug: macOS 1,997 passed; Linux 2,000 passed, including Linux
+    process limits; five existing opt-in ignores on each. Python: 1,499 passed.
+    Machine-load failures in two resync tests and one amend fixture are corrected
+    with deterministic clocks; cancellation/deadline assertions remain enabled.
+    Linux build disk exhaustion is resolved by deleting disposable incremental
+    compiler cache, with no source or test changes.
+  - Durable evidence is indexed by `docs/tier1-foundation-evidence.json`.
+    Portfolio admission, independent stops, offset settlement, stable identities,
+    global callback bounds and full final debug/release/developer qualification
+    remain open. No push, funded deployment or live-state mutation occurs.
+
+- **2026-09-05 — Reopen remaining audit architecture under shared-ticker mandate (local work in progress).**
+  - The owner replaces retained exclusive-symbol and numeric-boundary policies
+    with authority to implement shared and opposing sleeve ownership. The prior
+    `584844fa` qualification remains scoped to that earlier checkpoint.
+  - Exact per-sleeve quantities and entry values survive serialized rotation;
+    unknown legacy cost and asset identity remain explicit. Prepared inventory
+    updates validate aggregate limits before live or recovered fill journaling.
+    Flat physical account readings retain unsettled shared holdings.
+  - A separate portfolio risk path counts opposing virtual gross and clamps
+    reductions against the owning sleeve and its outstanding exits. Four
+    regressions fail through the original physical-only path; all 101 current
+    risk contract tests pass. Admission remains exclusive until physical order
+    translation, stops, emergency settlement and replay are integrated.
+  - Native reducers declare live candidate/exit/retry market routes separately
+    from historical deduplication keys. Three retained-route regressions fail
+    before implementation and pass afterward, including runtime restoration.
+  - Real venue emergency fills allocate in stable sleeve-key order across
+    contributing holdings, preserving exact fee currency and quantity. The
+    live shared-fill regression fails before allocation and passes afterward;
+    664 core tests pass at that integration boundary. Internal offsetting
+    settlement and shared order admission remain unfinished.
+  - Prepared accounting retains consideration, realized values and fees by
+    named asset through serialized restart and later full closure; seven unit
+    and three integration checks pass, with explicit unknown-prefix markers.
+  - Actual Linux callback tests cover memory limits, process-fork denial,
+    registered runtime restoration, stalled children and independent exits.
+    Producer route retirement covers at-cap replacement and dormant feeds.
+    Universal atomic order/outbox acceptance, exact order legality and stable
+    identities are being integrated. This worktree has no complete-suite qualification yet. No push,
+    funded deployment, capital/credential change or live-state mutation occurs.
+
 - **2026-09-05 08:11 UTC — Complete local audit integration and optimized verification.**
   - Source checkpoint `584844fa` passes final Rust 1.90 workspace/all-target
     debug and release suites: 1,839 tests in each, with the same five opt-in

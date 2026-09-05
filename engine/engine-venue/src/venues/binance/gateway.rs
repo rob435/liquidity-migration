@@ -186,7 +186,8 @@ pub struct BinanceGateway {
     rest: RestClient,
     symbols: engine_public::symbols::SymbolCatalog,
     market_qty_rules: HashMap<Symbol, MarketQtyRule>,
-    weight_budget: RollingBudget,
+    weight_budget: crate::shared_budget::SharedBudget,
+    weight_reservation: Option<crate::shared_budget::Reservation>,
     order_ten_second_budget: RollingBudget,
     order_minute_budget: RollingBudget,
     /// Makes a stop's client id unique when two are minted in one
@@ -241,7 +242,11 @@ impl BinanceGateway {
             rest: RestClient::new(base_url, creds),
             symbols: engine_public::symbols::SymbolCatalog::from_names(symbols),
             market_qty_rules: HashMap::new(),
-            weight_budget: RollingBudget::new(WEIGHT_WINDOW),
+            weight_budget: crate::shared_budget::SharedBudget::new(
+                WEIGHT_WINDOW + RATE_LIMIT_GUARD,
+                REQUEST_WEIGHT_PER_MINUTE,
+            ),
+            weight_reservation: None,
             order_ten_second_budget: RollingBudget::new(ORDER_WINDOW),
             order_minute_budget: RollingBudget::new(ORDER_MINUTE_WINDOW),
             stop_seq: 0,
@@ -257,11 +262,13 @@ impl BinanceGateway {
     }
 
     async fn spend_weight(&mut self, cost: u32) {
-        reserve(&mut self.weight_budget, cost, REQUEST_WEIGHT_PER_MINUTE).await;
+        debug_assert!(self.weight_reservation.is_none());
+        self.weight_reservation = Some(self.weight_budget.reserve(cost).await);
     }
 
     fn settle_weight(&mut self, cost: u32) {
-        self.weight_budget.anchor_completion(Instant::now(), cost);
+        let _ = cost;
+        self.weight_reservation.take();
     }
 
     async fn spend_orders(&mut self, cost: u32) -> u64 {
@@ -313,10 +320,10 @@ impl BinanceGateway {
             OrderKind::Limit { px, tif } => {
                 params.push(("type", "LIMIT".to_string()));
                 params.push(("timeInForce", Self::venue_tif(tif).to_string()));
-                params.push(("price", venue_num(px)?));
+                params.push(("price", crate::order_wire::price(req, px)?));
             }
         }
-        params.push(("quantity", venue_num(req.qty)?));
+        params.push(("quantity", crate::order_wire::quantity(req)?));
         if req.reduce_only {
             params.push(("reduceOnly", "true".to_string()));
         }
@@ -333,6 +340,15 @@ impl BinanceGateway {
         trigger_px: f64,
         client_order_id: String,
     ) -> Result<Vec<(&'static str, String)>, VenueError> {
+        Self::stop_params_text(name, position_side, venue_num(trigger_px)?, client_order_id)
+    }
+
+    fn stop_params_text(
+        name: &str,
+        position_side: Side,
+        trigger_px: String,
+        client_order_id: String,
+    ) -> Result<Vec<(&'static str, String)>, VenueError> {
         Ok(vec![
             ("algoType", "CONDITIONAL".to_string()),
             ("symbol", name.to_string()),
@@ -343,7 +359,7 @@ impl BinanceGateway {
             ),
             ("type", "STOP_MARKET".to_string()),
             ("closePosition", "true".to_string()),
-            ("triggerPrice", venue_num(trigger_px)?),
+            ("triggerPrice", trigger_px),
             // The mark price: the price the venue liquidates against, and the
             // one a stop that exists to prevent liquidation should watch.
             ("workingType", "MARK_PRICE".to_string()),
@@ -558,7 +574,12 @@ impl VenueGateway for BinanceGateway {
         let stop_plan = match req.stop.filter(|_| !req.reduce_only) {
             Some(stop) => {
                 let stop_id = Self::attached_stop_id(&req.client_order_id);
-                let params = Self::stop_params(&name, req.side, stop.trigger_px, stop_id.clone())?;
+                let params = Self::stop_params_text(
+                    &name,
+                    req.side,
+                    crate::order_wire::stop(req, stop.trigger_px)?,
+                    stop_id.clone(),
+                )?;
                 Some((stop_id, params))
             }
             None => None,
@@ -630,12 +651,9 @@ impl VenueGateway for BinanceGateway {
         client_order_id: &str,
     ) -> Result<(), VenueError> {
         let name = self.name_of(symbol)?.clone();
-        let waited = reserve(
-            &mut self.weight_budget,
-            WEIGHT_CANCEL,
-            REQUEST_WEIGHT_PER_MINUTE,
-        )
-        .await;
+        let began = Instant::now();
+        self.spend_weight(WEIGHT_CANCEL).await;
+        let waited = began.elapsed().as_nanos() as u64;
         self.last_rate_wait_ns = Some(waited);
         let reply = self
             .rest
@@ -857,6 +875,50 @@ impl VenueGateway for BinanceGateway {
         })
     }
 
+    fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
+        Some(Box::new(LookupClient {
+            rest: self.rest.clone(),
+            budget: self.weight_budget.clone(),
+        }))
+    }
+
+    async fn order_status(
+        &mut self,
+        symbol: SymbolId,
+        client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        let name = self.name_of(symbol)?.clone();
+        self.spend_weight(WEIGHT_QUERY_ORDER).await;
+        let reply: Result<Box<serde_json::value::RawValue>, VenueError> = self
+            .rest
+            .get_signed_as(
+                PATH_ORDER,
+                &[
+                    ("symbol", name.clone()),
+                    ("origClientOrderId", client_order_id.into()),
+                ],
+            )
+            .await;
+        self.settle_weight(WEIGHT_QUERY_ORDER);
+        match reply {
+            Ok(raw)=>super::lookup::parse(raw.get(),&name,client_order_id),
+            Err(VenueError::Rejected{code:-2013,..})=>Ok(crate::order_lookup::unknown("Binance order lookup cannot distinguish expired history from a never accepted request")),
+            Err(error)=>Err(error),
+        }
+    }
+
+    async fn instrument_specs(
+        &mut self,
+    ) -> Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError> {
+        self.spend_weight(WEIGHT_EXCHANGE_INFO).await;
+        let reply = self
+            .rest
+            .get_public_as::<Box<serde_json::value::RawValue>>(PATH_EXCHANGE_INFO, "")
+            .await;
+        self.settle_weight(WEIGHT_EXCHANGE_INFO);
+        engine_public::venues::binance::spec::parse(reply?.get())
+    }
+
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {
         self.spend_weight(WEIGHT_EXCHANGE_INFO).await;
         let reply = self.rest.get_public(PATH_EXCHANGE_INFO, "").await;
@@ -904,6 +966,36 @@ impl VenueGateway for BinanceGateway {
     }
 }
 
+struct LookupClient {
+    rest: RestClient,
+    budget: crate::shared_budget::SharedBudget,
+}
+#[engine_types::async_trait]
+impl engine_types::orders::OrderLookupClient for LookupClient {
+    async fn lookup(
+        &self,
+        name: &str,
+        client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        let _reservation = self.budget.reserve(WEIGHT_QUERY_ORDER).await;
+        let reply: Result<Box<serde_json::value::RawValue>, VenueError> = self
+            .rest
+            .get_signed_as(
+                PATH_ORDER,
+                &[
+                    ("symbol", name.into()),
+                    ("origClientOrderId", client_order_id.into()),
+                ],
+            )
+            .await;
+        match reply {
+            Ok(raw) => super::lookup::parse(raw.get(), name, client_order_id),
+            Err(VenueError::Rejected { code: -2013, .. }) => Ok(crate::order_lookup::unknown("Binance order lookup cannot distinguish expired history from a never accepted request")),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,6 +1023,8 @@ mod tests {
                 trigger_px: 75000.5,
             }),
             reduce_only,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         }
     }
@@ -1154,6 +1248,50 @@ mod tests {
         assert_eq!(
             VenueGateway::add_symbol(&mut gw, "ETHUSDT"),
             Some(SymbolId(1))
+        );
+    }
+}
+
+#[cfg(test)]
+mod exact_wire_tests {
+    use super::*;
+    #[test]
+    fn exact_order_terms_are_not_rounded_a_second_time_on_the_wire() {
+        use engine_types::numeric::Exact;
+        use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
+        let terms = ExactOrderTerms {
+            quantity: Exact::parse_decimal("0.1234567890123").unwrap(),
+            limit_price: Some(Exact::parse_decimal("1.234567890123").unwrap()),
+            stop_trigger_price: None,
+            physical_stop_trigger_price: None,
+            input_policy: OrderInputPolicy::StrategyShortestDecimal,
+        };
+        let mut request = OrderRequest {
+            exact_terms: None,
+            sleeve_effect: None,
+            client_order_id: "id".into(),
+            strategy: engine_types::StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 1.0,
+            kind: OrderKind::Limit {
+                px: 1.0,
+                tif: TimeInForce::Gtc,
+            },
+            stop: None,
+            reduce_only: true,
+            close_position: false,
+        };
+        terms.apply_projection(&mut request).unwrap();
+        let wire = BinanceGateway::order_params("BTCUSDT", &request).unwrap();
+        assert_eq!(
+            wire.iter().find(|(k, _)| *k == "quantity").unwrap().1,
+            "0.1234567890123",
+            "wire changed the durable exact quantity"
+        );
+        assert_eq!(
+            wire.iter().find(|(k, _)| *k == "price").unwrap().1,
+            "1.234567890123"
         );
     }
 }

@@ -23,6 +23,7 @@ use crate::venues::binance::parse::refine_rejection;
 use crate::venues::binance::sign::{query_string, signed_query, HEADER_KEY, RECV_WINDOW_MS};
 use crate::wall_ms;
 
+#[derive(Clone)]
 pub(crate) struct RestClient {
     http: HttpClient,
     creds: Credentials,
@@ -52,6 +53,14 @@ impl RestClient {
 
     /// POST with the API key header and no signature: the venue's
     /// `USER_STREAM` security type, which is the listen-key endpoints only.
+    pub(crate) async fn get_public_as<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &str,
+    ) -> Result<T, VenueError> {
+        self.http.get_as(path, query, &[]).await
+    }
+
     pub(crate) async fn post_keyed(&self, path: &str) -> Result<Value, VenueError> {
         self.http
             .post(path, String::new(), CONTENT_TYPE, &self.key_header())
@@ -76,6 +85,18 @@ impl RestClient {
         let query = self.sign(params);
         self.http
             .get(path, &query, &self.key_header())
+            .await
+            .map_err(refine_rejection)
+    }
+
+    pub(crate) async fn get_signed_as<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+    ) -> Result<T, VenueError> {
+        let query = self.sign(params);
+        self.http
+            .get_as(path, &query, &self.key_header())
             .await
             .map_err(refine_rejection)
     }

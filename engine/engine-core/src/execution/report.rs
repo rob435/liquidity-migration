@@ -14,7 +14,10 @@ use crate::replay::LogNames;
 
 /// Read a log and say what its trading cost, and what its positions made.
 pub fn of_log(records: &[WalRecord]) -> String {
-    let fills = Fills::from_records(records);
+    let fills = match Fills::try_from_records(records) {
+        Ok(fills) => fills,
+        Err(error) => return format!("Invalid execution accounting WAL: {error}"),
+    };
     format!(
         "{}\n{}\n{}",
         table(&fills),
@@ -504,6 +507,7 @@ mod tests {
                 symbols: vec!["BTCUSDT".into(), "ETHUSDT".into()],
             },
             WalRecord::OrderSent {
+                dispatch: None,
                 request: OrderRequest {
                     client_order_id: "eng-1".into(),
                     strategy: StrategyId(0),
@@ -513,6 +517,8 @@ mod tests {
                     kind: OrderKind::Market,
                     stop: None,
                     reduce_only: false,
+                    exact_terms: None,
+                    sleeve_effect: None,
                     close_position: false,
                 },
                 wire_ns: 1,
@@ -520,6 +526,8 @@ mod tests {
             },
             WalRecord::OrderUpdate {
                 update: OrderUpdate::Fill {
+                    allocation: None,
+                    amounts: None,
                     exec_id: String::new(),
                     client_order_id: "eng-1".into(),
                     symbol: SymbolId(0),
@@ -589,6 +597,7 @@ mod tests {
         // did not say so would read as a complete picture.
         let mut records = log();
         records.push(WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: "eng-2".into(),
                 strategy: StrategyId(1),
@@ -598,6 +607,8 @@ mod tests {
                 kind: OrderKind::Market,
                 stop: None,
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 2,
@@ -605,6 +616,8 @@ mod tests {
         });
         records.push(WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: String::new(),
                 client_order_id: "eng-2".into(),
                 symbol: SymbolId(1),

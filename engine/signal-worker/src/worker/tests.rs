@@ -3329,7 +3329,7 @@ fn producer_readiness_echoes_each_boot_nonce_and_recovers_published_frontiers() 
     let spool_dir = root.join("spool");
     let config = test_config();
     let universe = test_universe();
-    let durable = DurableSignalWorker::open_with_universe(
+    let mut durable = DurableSignalWorker::open_with_universe(
         config.clone(),
         universe.clone(),
         &state_dir,
@@ -3363,7 +3363,7 @@ fn producer_readiness_echoes_each_boot_nonce_and_recovers_published_frontiers() 
     committed_state.carry_output_sequence = 11;
     durable.checkpoint.save(&committed_state).unwrap();
     drop(durable);
-    let reopened =
+    let mut reopened =
         DurableSignalWorker::open_with_universe(config, universe, &state_dir, &spool_dir).unwrap();
     request
         .save(&SignalReadinessRequest {
@@ -3387,5 +3387,321 @@ fn producer_readiness_echoes_each_boot_nonce_and_recovers_published_frontiers() 
     assert_eq!(second.sources[0].published_through, 7);
     assert_eq!(second.sources[1].published_through, 11);
     assert_eq!(reopened.spool.inventory().unwrap().files, 0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn lifecycle_request(
+    durable: &DurableSignalWorker,
+    producers: Vec<engine_types::SignalProducerLifecycle>,
+    nonce: &str,
+) {
+    AtomicJsonStore::new(
+        durable
+            .spool
+            .directory()
+            .join(engine_types::SIGNAL_READINESS_REQUEST_FILE),
+    )
+    .save(&engine_types::SignalLifecycleRequest {
+        schema_version: 2,
+        boot_nonce: nonce.into(),
+        producers,
+        legacy_sources: Vec::new(),
+    })
+    .unwrap();
+}
+
+fn lifecycle_response(durable: &DurableSignalWorker) -> engine_types::SignalLifecycleResponse {
+    AtomicJsonStore::new(
+        durable
+            .spool
+            .directory()
+            .join(engine_types::SIGNAL_READINESS_RESPONSE_FILE),
+    )
+    .load()
+    .unwrap()
+    .unwrap()
+}
+
+fn successor_grant(
+    report: &engine_types::SignalProducerReport,
+) -> engine_types::SignalProducerLifecycle {
+    use engine_types::{
+        ManagedSignalSource, SignalGenerationState, SignalProducerLifecycle, SignalProducerRoute,
+        SignalSourceFrontier,
+    };
+    let epoch = report.epoch.unwrap_or(0) + 1;
+    let sources = report
+        .sources
+        .iter()
+        .map(|source| {
+            let lane = ManagedSignalSource::parse(&source.source)
+                .map(|identity| identity.lane)
+                .or_else(|| engine_types::legacy_signal_lane(&report.producer, &source.source))
+                .unwrap();
+            SignalSourceFrontier {
+                source: ManagedSignalSource {
+                    producer: &report.producer,
+                    epoch,
+                    generation: &report.generation,
+                    lane,
+                }
+                .encode()
+                .unwrap(),
+                destination: source.destination,
+                published_through: 0,
+            }
+        })
+        .collect();
+    SignalProducerLifecycle {
+        producer: report.producer.clone(),
+        retired_through: epoch - 1,
+        active: Some(SignalGenerationState {
+            epoch,
+            generation: report.generation.clone(),
+            sources,
+            sealed: false,
+        }),
+        legacy: Vec::new(),
+        routes: report
+            .sources
+            .iter()
+            .map(|row| SignalProducerRoute {
+                destination: row.destination,
+                subscriptions: Vec::new(),
+            })
+            .collect(),
+        unresolved_tail: false,
+        previous_seal: report.sources.clone(),
+    }
+}
+
+fn lifecycle_ticker(sequence: u64) -> WireEvent {
+    WireEvent::BybitTickerSnapshot {
+        schema_version: SCHEMA_VERSION,
+        sequence,
+        observed_ts_ms: 10_000 + sequence as i64,
+        available_at_ms: 10_000 + sequence as i64,
+        rows: vec![ticker_wire("BTCUSDT", 100.0 + sequence as f64)],
+    }
+}
+
+#[test]
+fn producer_lifecycle_seal_blocks_publication_until_matching_grant_across_restart() {
+    let root = temporary_root("epoch-publication");
+    let state_dir = root.join("state");
+    let spool_dir = root.join("spool");
+    let mut durable = DurableSignalWorker::open_with_universe(
+        test_config(),
+        test_universe(),
+        &state_dir,
+        &spool_dir,
+    )
+    .unwrap();
+    let first = durable.apply_and_commit(lifecycle_ticker(1)).unwrap();
+    assert_eq!(first.len(), 1);
+    lifecycle_request(&durable, Vec::new(), "discover");
+    durable.respond_to_readiness_request().unwrap();
+    let sealed = lifecycle_response(&durable);
+    assert!(sealed.producer.sealed);
+    assert_eq!(sealed.producer.epoch, None);
+    assert_eq!(
+        sealed
+            .producer
+            .sources
+            .iter()
+            .map(|row| row.published_through)
+            .sum::<u64>(),
+        1
+    );
+    let checkpoint = serde_json::to_vec(durable.worker.state()).unwrap();
+    let receipt = durable
+        .apply_many_and_commit([lifecycle_ticker(2)])
+        .unwrap();
+    assert_eq!(
+        receipt.committed_events, 0,
+        "sealed producer must retain the next input for retry"
+    );
+    assert!(receipt.observations.is_empty());
+    assert_eq!(
+        serde_json::to_vec(durable.worker.state()).unwrap(),
+        checkpoint
+    );
+    drop(durable);
+    let mut durable = DurableSignalWorker::open_with_universe(
+        test_config(),
+        test_universe(),
+        &state_dir,
+        &spool_dir,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(durable.worker.state()).unwrap(),
+        checkpoint
+    );
+    let mut wrong = successor_grant(&sealed.producer);
+    wrong
+        .previous_seal
+        .iter_mut()
+        .for_each(|row| row.published_through = 0);
+    lifecycle_request(&durable, vec![wrong], "wrong-seal");
+    assert!(
+        durable.respond_to_readiness_request().is_err(),
+        "a stale grant must not reset the publication sequence"
+    );
+    assert_eq!(
+        serde_json::to_vec(durable.worker.state()).unwrap(),
+        checkpoint
+    );
+    for observation in &first {
+        std::fs::remove_file(spool_dir.join(format!(
+            "{:020}-{}.json",
+            observation.sequence, observation.content_sha256
+        )))
+        .unwrap();
+    }
+    lifecycle_request(&durable, vec![successor_grant(&sealed.producer)], "granted");
+    durable.respond_to_readiness_request().unwrap();
+    let ready = lifecycle_response(&durable);
+    assert!(!ready.producer.sealed);
+    assert_eq!(ready.producer.epoch, Some(1));
+    let next = durable.apply_and_commit(lifecycle_ticker(2)).unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].sequence, 1);
+    assert_eq!(
+        engine_types::ManagedSignalSource::parse(&next[0].source)
+            .unwrap()
+            .epoch,
+        1
+    );
+    assert_ne!(next[0].source, first[0].source);
+    assert_eq!(
+        durable.spool.inventory().unwrap().files,
+        1,
+        "protocol metadata must not count as output inventory"
+    );
+    drop(durable);
+    let durable = DurableSignalWorker::open_with_universe(
+        test_config(),
+        test_universe(),
+        &state_dir,
+        &spool_dir,
+    )
+    .unwrap();
+    assert_eq!(
+        durable
+            .worker
+            .state
+            .signal_lifecycle
+            .as_ref()
+            .unwrap()
+            .epoch,
+        Some(1)
+    );
+    assert_eq!(durable.worker.state.carry_output_sequence, 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn producer_lifecycle_cannot_seal_an_unpublished_journal_tail() {
+    let root = temporary_root("epoch-publication-failure");
+    let state_dir = root.join("state");
+    let spool_dir = root.join("spool");
+    let mut durable = DurableSignalWorker::open_with_universe(
+        test_config(),
+        test_universe(),
+        &state_dir,
+        &spool_dir,
+    )
+    .unwrap();
+    let checkpoint = durable.checkpoint.load_bytes().unwrap().unwrap();
+    std::fs::rename(&spool_dir, root.join("spool-held")).unwrap();
+    std::fs::write(&spool_dir, b"unavailable directory").unwrap();
+    assert!(durable.apply_and_commit(lifecycle_ticker(1)).is_err());
+    assert_eq!(durable.worker.state.last_input_sequence, 1);
+    assert!(durable.journal.len().unwrap() > 0);
+    assert!(
+        durable.seal_signal_generation().is_err(),
+        "a seal must not compact away an unpublished output"
+    );
+    assert_eq!(
+        durable.checkpoint.load_bytes().unwrap().unwrap(),
+        checkpoint
+    );
+    assert!(durable.journal.len().unwrap() > 0);
+    std::fs::remove_file(&spool_dir).unwrap();
+    std::fs::rename(root.join("spool-held"), &spool_dir).unwrap();
+    drop(durable);
+    let mut durable = DurableSignalWorker::open_with_universe(
+        test_config(),
+        test_universe(),
+        &state_dir,
+        &spool_dir,
+    )
+    .unwrap();
+    assert_eq!(durable.spool.inventory().unwrap().files, 1);
+    assert_eq!(durable.worker.state.carry_output_sequence, 1);
+    durable.seal_signal_generation().unwrap();
+    assert!(
+        durable
+            .worker
+            .state
+            .signal_lifecycle
+            .as_ref()
+            .unwrap()
+            .sealed
+    );
+    assert_eq!(durable.spool.inventory().unwrap().files, 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn producer_lifecycle_failed_seal_write_preserves_old_checkpoint_and_restarts() {
+    let root = temporary_root("epoch-seal-write");
+    let state_dir = root.join("state");
+    let spool_dir = root.join("spool");
+    let mut durable = DurableSignalWorker::open_with_universe(
+        test_config(),
+        test_universe(),
+        &state_dir,
+        &spool_dir,
+    )
+    .unwrap();
+    let checkpoint = durable.checkpoint.load_bytes().unwrap().unwrap();
+    std::fs::create_dir(state_dir.join("pending-next-state.json")).unwrap();
+    assert!(durable.seal_signal_generation().is_err());
+    assert!(durable.worker.state.signal_lifecycle.is_none());
+    assert_eq!(
+        durable.checkpoint.load_bytes().unwrap().unwrap(),
+        checkpoint
+    );
+    std::fs::remove_dir(state_dir.join("pending-next-state.json")).unwrap();
+    drop(durable);
+    let mut durable = DurableSignalWorker::open_with_universe(
+        test_config(),
+        test_universe(),
+        &state_dir,
+        &spool_dir,
+    )
+    .unwrap();
+    durable.seal_signal_generation().unwrap();
+    drop(durable);
+    let durable = DurableSignalWorker::open_with_universe(
+        test_config(),
+        test_universe(),
+        &state_dir,
+        &spool_dir,
+    )
+    .unwrap();
+    assert!(
+        durable
+            .worker
+            .state
+            .signal_lifecycle
+            .as_ref()
+            .unwrap()
+            .sealed
+    );
+    assert_eq!(durable.worker.state.long_output_sequence, 0);
+    assert_eq!(durable.worker.state.carry_output_sequence, 0);
     std::fs::remove_dir_all(root).unwrap();
 }

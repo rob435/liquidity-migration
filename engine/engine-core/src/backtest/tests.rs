@@ -441,6 +441,8 @@ fn order(id: &str, side: Side, qty: f64, kind: OrderKind) -> OrderRequest {
         kind,
         stop: None,
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     }
 }

@@ -5,8 +5,10 @@
 //! did what was asked — an HTTP 200 with `code` anything else is a refusal,
 //! which is the same trap Hyperliquid sets in a different shape.
 
-use engine_types::orders::{VenueExecution, VenueOrder};
+use engine_types::orders::VenueOrder;
 use engine_types::risk::PositionView;
+#[cfg(test)]
+use engine_types::VenueExecution;
 use engine_types::{Side, SymbolId, VenueError};
 use serde_json::Value;
 
@@ -14,7 +16,9 @@ use super::markets::{engine_symbol, Markets};
 use super::order_index;
 use crate::json::{int_field, num_field, opt_num_field, str_field};
 
-pub(crate) use engine_public::venues::lighter::parse::{parse_markets, venue_result};
+#[cfg(test)]
+use engine_public::venues::lighter::parse::parse_markets;
+pub(crate) use engine_public::venues::lighter::parse::venue_result;
 
 /// The account row out of an `account` reply.
 fn account_row(reply: &Value) -> Result<&Value, VenueError> {
@@ -215,73 +219,18 @@ pub(crate) fn stops_by_market(
 }
 
 /// Fills out of a `trades` reply.
+#[cfg(test)]
 pub(crate) fn parse_executions(
     reply: &Value,
     account_index: i64,
     markets: &Markets,
 ) -> Result<Vec<VenueExecution>, VenueError> {
-    let rows = reply
-        .get("trades")
-        .and_then(Value::as_array)
-        .ok_or_else(|| VenueError::BadReply("the trade reply carries no trades".to_string()))?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let market_index = i16::try_from(int_field(row, "market_id")?)
-            .map_err(|_| VenueError::BadReply("a market index out of range".to_string()))?;
-        let symbol = markets
-            .by_index(market_index)
-            .map(|m| engine_symbol(&m.symbol))
-            .unwrap_or_else(|| format!("market-{market_index}"));
-        // A trade names both sides, and this reply is account-wide. Which side
-        // was ours decides the fill's direction and which client order index
-        // to read, so it is read rather than assumed: defaulting the account
-        // id would make every fill a buy, and the exposure ledger is a running
-        // sum of signed fills.
-        let ask_account = int_field(row, "ask_account_id")?;
-        let bid_account = int_field(row, "bid_account_id")?;
-        let we_sold = if ask_account == account_index {
-            true
-        } else if bid_account == account_index {
-            false
-        } else {
-            // Neither side is us. Not an error — the venue answers for the
-            // account, and a trade that names neither is one to leave alone
-            // rather than record as a buy.
-            continue;
-        };
-        let we_made = row
-            .get("is_maker_ask")
-            .and_then(Value::as_bool)
-            .map(|maker_was_ask| maker_was_ask == we_sold)
-            .unwrap_or(false);
-        let client_index = if we_sold {
-            row.get("ask_client_order_index")
-        } else {
-            row.get("bid_client_order_index")
-        }
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-        out.push(VenueExecution {
-            exec_id: int_field(row, "trade_id")?.to_string(),
-            client_order_id: order_index::from_index(client_index).unwrap_or_default(),
-            symbol,
-            side: if we_sold { Side::Sell } else { Side::Buy },
-            qty: num_field(row, "size")?,
-            px: num_field(row, "price")?,
-            // The row states only the taker's fee. When we made the price it
-            // states the counterparty's cost, not that our own fee was zero.
-            fee: if we_made {
-                None
-            } else {
-                opt_num_field(row, "fee")?
-            },
-            is_maker: we_made,
-            // Lighter states no reason for a close on this row.
-            forced_close: None,
-            venue_ts_ms: int_field(row, "timestamp")?,
-        });
-    }
-    Ok(out)
+    let raw = serde_json::json!({"code":200,"trades": reply.get("trades")}).to_string();
+    let reply: super::execution::HistoryReply =
+        crate::wire::raw_object(&raw).map_err(|e| VenueError::BadReply(e.to_string()))?;
+    reply
+        .executions(account_index, markets)
+        .map(|(rows, _)| rows)
 }
 
 /// The next nonce for this account's key.
@@ -304,6 +253,7 @@ mod tests {
             price_decimals: 1,
             min_base_amount: 0.0001,
             min_quote_amount: 10.0,
+            exact_spec: None,
         }])
     }
 

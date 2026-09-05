@@ -29,8 +29,8 @@ pub(super) fn restore_order_reservations<R: RiskKernel>(
                 side: request.side,
                 qty: remaining_qty,
                 kind: request.kind,
-                stop: request.stop,
-                reduce_only: request.reduce_only,
+                stop: request.sleeve_stop(),
+                reduce_only: request.is_sleeve_reduction(),
                 tag: "recovered".to_string(),
                 decided_ns: 0,
                 // The order is already at the venue; there is nothing

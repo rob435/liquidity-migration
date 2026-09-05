@@ -12,6 +12,7 @@ use crate::venues::bybit::sign::{
 };
 use crate::wall_ms;
 
+#[derive(Clone)]
 pub(crate) struct RestClient {
     http: HttpClient,
     creds: Credentials,
@@ -43,11 +44,29 @@ impl RestClient {
         self.http.get(path, query, &[]).await
     }
 
+    pub(crate) async fn get_public_as<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &str,
+    ) -> Result<T, VenueError> {
+        self.http.get_as(path, query, &[]).await
+    }
+
     /// Signed GET. The signature covers the raw query string.
     pub(crate) async fn get_signed(&self, path: &str, query: &str) -> Result<Value, VenueError> {
         let ts = wall_ms();
         let sign = rest_signature(self.creds.secret(), ts, self.creds.key(), query);
         self.http.get(path, query, &self.headers(ts, sign)).await
+    }
+
+    pub(crate) async fn get_signed_as<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &str,
+    ) -> Result<T, VenueError> {
+        let ts = wall_ms();
+        let sign = rest_signature(self.creds.secret(), ts, self.creds.key(), query);
+        self.http.get_as(path, query, &self.headers(ts, sign)).await
     }
 
     /// Signed POST. The signature covers the exact body bytes sent.

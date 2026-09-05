@@ -354,6 +354,8 @@ impl OrderFeed for FillingOrderFeed {
             (OrderKind::Market, Side::Sell) => bid,
         };
         Ok(OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: String::new(),
             client_order_id: request.client_order_id,
             symbol: request.symbol,

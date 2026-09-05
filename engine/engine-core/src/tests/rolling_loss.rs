@@ -24,6 +24,7 @@ fn names() -> WalRecord {
 
 fn sent(id: &str, side: Side, qty: f64) -> WalRecord {
     WalRecord::OrderSent {
+        dispatch: None,
         request: OrderRequest {
             client_order_id: id.to_string(),
             strategy: StrategyId(0),
@@ -33,6 +34,8 @@ fn sent(id: &str, side: Side, qty: f64) -> WalRecord {
             kind: OrderKind::Market,
             stop: Some(StopSpec { trigger_px: 90.0 }),
             reduce_only: side == Side::Sell,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         },
         wire_ns: 1,
@@ -43,6 +46,8 @@ fn sent(id: &str, side: Side, qty: f64) -> WalRecord {
 fn filled(id: &str, side: Side, qty: f64, px: f64, venue_ts_ms: i64) -> WalRecord {
     WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: format!("exec-{id}"),
             client_order_id: id.to_string(),
             symbol: SymbolId(0),
@@ -83,6 +88,8 @@ fn still_held() -> Vec<engine_types::PositionView> {
 /// says why it traded.
 fn stop_fired(symbol: SymbolId) -> OrderUpdate {
     OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: "venue-stop".to_string(),
         client_order_id: String::new(),
         symbol,
@@ -108,6 +115,27 @@ fn segment_base(
     rolling_loss_rows: Vec<ClosedTradeRow>,
 ) -> WalRecord {
     WalRecord::SegmentBase {
+        pending_order_dispatches: Vec::new(),
+        signal_producers: Vec::new(),
+        signal_suspensions: Vec::new(),
+        portfolio: Some(engine_types::portfolio::PortfolioState {
+            positions: attribution
+                .iter()
+                .map(|row| engine_types::portfolio::PortfolioPosition {
+                    strategy: row.strategy,
+                    symbol: row.symbol,
+                    signed_qty: engine_types::numeric::Exact::from_legacy_f64(row.signed_qty)
+                        .unwrap(),
+                    entry_value: None,
+                    stop_px: Some(engine_types::numeric::Exact::from_legacy_f64(90.0).unwrap()),
+                    settlement_asset: engine_types::numeric::AssetId::Unknown,
+                })
+                .collect(),
+            accounting_complete_from_start: false,
+            ..Default::default()
+        }),
+        strategy_processes: Vec::new(),
+        strategy_callbacks: Vec::new(),
         wall_ts_ms: recent_replay_ms(),
         strategies: vec!["buyer".to_string()],
         symbols: vec!["BTCUSDT".to_string()],
@@ -433,6 +461,7 @@ async fn the_shipped_kernel_refuses_the_next_entry_and_still_lets_the_exit_out()
         sent("eng-2", Side::Sell, 10.0),
         filled("eng-2", Side::Sell, 10.0, 90.0, recent_replay_ms() + 1),
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: "eng-3".to_string(),
                 strategy: StrategyId(1),
@@ -442,6 +471,8 @@ async fn the_shipped_kernel_refuses_the_next_entry_and_still_lets_the_exit_out()
                 kind: OrderKind::Market,
                 stop: Some(StopSpec { trigger_px: 90.0 }),
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 1,

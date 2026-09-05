@@ -8,6 +8,30 @@ Record the audit baseline and each finding’s local resolution, verified eviden
 
 ### Decision index
 
+**Implementation continues.** The verified `584844fa` checkpoint resolves the
+first defect pass; its retained architecture policies are open work under the
+owner's shared-ticker mandate. The checkpoint's passing suites do not qualify
+the current worktree or establish completion of the architecture below.
+
+| Active work | Findings | Completion condition |
+| --- | --- | --- |
+| Shared and opposing sleeve positions | A-004; LM-T1-102–105 | Independent quantities, basis, stops and real fill/fee ownership; gross risk, physical order translation, emergency settlement and restart agree |
+| Isolated callback transactions | A-001; LM-T1-006/106/206 | Bounded process protocol, recoverable complete private state and timers, committed suffix retention, universal durability before dispatch |
+| Durable producer generations | A-002/A-003; LM-T1-001/206 | Exact active/legacy roster, sealed tails, terminal consumption and bounded retirement survive restart and replay |
+| Exact execution and accounting | CL-01; LM-T1-203–205/207 | Exact lexical wire values and asset units reach owned execution accounting; legacy precision and unknown values remain explicit |
+| Stable durable identities | CL-05; LM-T1-005 | Namespaced keys survive registration reorder with validated legacy dense-ID mapping |
+
+| Current local verification | Evidence | Limit |
+| --- | --- | --- |
+| Owned inventory and shared fills | Prepared inventory/accounting commits; shared emergency fill regression fails before allocation and passes after; core debug suite 664 passes at that integration boundary | Internal settlement and physical order translation remain incomplete |
+| Portfolio risk ownership | `engine-risk`: 101 contract tests pass; four new portfolio regressions fail on the original physical-only path | The portfolio API is not enabled in order admission yet |
+| Native subscription and producer retirement | Three native manifests fail before/pass after; 94 signal tests pass; at-cap replacement, exact blocked demand and six dormant-feed regressions fail before/pass after | Erased legacy tails remain unknown; stable identity migration is separate work |
+| Exact execution accounting | Seven unit and three integration tests pass; discarded-accounting and contradictory-prefix regressions fail before the fixes | Raw unknown-unit values require archived execution WAL; funding values are not invented |
+| Callback processes and dispatch | Eleven actual Linux process tests pass; disabled OS limits fail allocation/fork regressions; atomic order/outbox acceptance, authority validation and independent lookup regressions fail before/pass after | Global retained-state bounds and durable retry of full order-news inboxes remain in integration |
+| Foundation checkpoint | macOS 1,997 / Linux 2,000 workspace debug tests pass; five existing ignores each; Python 1,499 passes; strict Clippy passes. [Durable evidence](tier1-foundation-evidence.json) | Final shared-admission/resource/identity integration and complete debug/release/developer qualification remain required |
+
+The table below records the first checkpoint’s behavior; its remaining boundaries are active implementation work above.
+
 | Order | Finding | Resolution | Remaining boundary |
 | --- | --- | --- | --- |
 | 1 | **A-001: discarded exits** | Retained cooperative draining, explicit opening refusals, durable state/effect transitions and restart suffix recovery | Trusted synchronous callbacks cannot be preempted; callback output allocation is not globally bounded |
@@ -17,7 +41,7 @@ Record the audit baseline and each finding’s local resolution, verified eviden
 | 5 | CL-01–CL-15 | Typed boundaries, public/private crate separation and explicit admission/completion/worker/reducer phases | Wire rows outside selected envelopes remain dynamic; file movement alone is not an architecture fix |
 | 6 | CL-16–CL-22 | Shared manifest versions, measured pure-risk target consolidation and ownership maps | Process isolation and real I/O tests retained; no unsupported latency or allocation claim |
 | Retain | Prefix/availability, foreign-owner admission, timers, latency and candle coverage | Existing regressions remain enabled | Local tests do not establish live account parity |
-| Decided | Portfolio allocation, stable identity migration and exact accounting units | Retain current exclusive ownership, durable dense ordering and validated numeric semantics | Revisit only with a concrete adapter/strategy requirement and a complete fee/stop/legacy migration contract |
+| Open | Portfolio allocation, stable identity migration and exact accounting units | Shared-ticker implementation replaces the retained exclusive policy after integrated protection and recovery verification | Current admission remains exclusive while the replacement is incomplete |
 
 ### Evidence boundary
 

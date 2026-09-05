@@ -32,6 +32,7 @@ pub struct Market {
     /// The venue's minimums, in ordinary decimal units.
     pub min_base_amount: f64,
     pub min_quote_amount: f64,
+    pub exact_spec: Option<engine_types::numeric::ExactInstrumentSpec>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -70,6 +71,23 @@ impl Markets {
 
     pub fn by_index(&self, index: i16) -> Option<&Market> {
         self.by_symbol.values().find(|m| m.index == index)
+    }
+
+    pub fn instrument_specs(
+        &self,
+    ) -> Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError> {
+        let mut out = Vec::with_capacity(self.by_symbol.len());
+        for market in self.by_symbol.values() {
+            let spec = market.exact_spec.clone().ok_or_else(|| {
+                VenueError::BadReply(format!(
+                    "exact instrument metadata is unavailable for {}",
+                    market.symbol
+                ))
+            })?;
+            out.push((engine_symbol(&market.symbol), spec));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
     }
 
     pub fn instrument_rules(&self) -> Vec<(Symbol, InstrumentRule)> {
@@ -174,6 +192,7 @@ mod tests {
             price_decimals: 1,
             min_base_amount: 0.0001,
             min_quote_amount: 10.0,
+            exact_spec: None,
         }
     }
 

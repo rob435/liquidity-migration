@@ -31,7 +31,7 @@
 //! failure before that barrier finishes can leave an order absent from the WAL;
 //! reconciliation then blocks growth for the unaccounted order.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::time::Duration;
 
@@ -46,7 +46,7 @@ use engine_types::{
     WorkPolicy,
 };
 
-use crate::attribution::{self, Attribution};
+use crate::attribution::Attribution;
 use crate::clock;
 use crate::config::EngineSection;
 use crate::covers::CoverBook;
@@ -217,6 +217,7 @@ pub struct RunOutcome {
 }
 
 struct PreparedOrder {
+    intent: Intent,
     request: OrderRequest,
     decided_ns: u64,
     origin_ns: u64,
@@ -236,7 +237,7 @@ enum PendingMutation {
         symbol: SymbolId,
         client_order_id: String,
         spec: AmendSpec,
-        existing: crate::inflight::OrderRec,
+        existing: Box<crate::inflight::OrderRec>,
         amended_intent: Box<Intent>,
         remaining_qty: f64,
         old_px: f64,
@@ -250,6 +251,7 @@ enum PendingMutation {
 /// The counters stay live across the cooperative turn so returning to the
 /// feeds cannot reset the per-wake flood limit. `origin_ns` likewise keeps
 /// every remaining sibling on the latency clock of the event that emitted it.
+#[derive(Clone)]
 struct DrainProgress {
     origin_ns: u64,
     handled: usize,
@@ -328,11 +330,15 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// What every strategy reads and none may edit: the market, the account
     /// reading, instrument rules, and the books about orders and ownership.
     books: Books,
+    instrument_specs:
+        std::collections::BTreeMap<SymbolId, engine_types::numeric::ExactInstrumentSpec>,
+    require_exact_instruments: bool,
     routing: Routing,
     /// Present only after a venue mutation has completed while the same
     /// strategy wake still has actions. The run loop polls the private stream
     /// and a due account-refresh tick before resuming it.
     drain_progress: Option<DrainProgress>,
+    suspended_wakes: BTreeMap<u64, DrainProgress>,
     signals: crate::signal_state::SignalState,
     signal_dependencies: Vec<Vec<StrategyId>>,
     /// Every accepted operator command, retained for request-id idempotence
@@ -362,12 +368,7 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// Since boot: private-stream resets, including the initial subscription.
     /// Each one is a gap the engine had to recover across.
     stream_resets: u64,
-    /// A durability barrier the order path started and has not confirmed.
-    ///
-    /// The bytes are with the operating system; the disk has not said so yet.
-    /// Held here because the thing that must wait for it is not the send —
-    /// it is the first news that an order traded.
-    pending_barrier: Option<engine_types::wal::PendingBarrier>,
+    dispatches: crate::order_dispatch::OrderDispatches,
     /// Halt pulls bypass the ordinary per-wake action drain. One native-sized
     /// group is submitted per main-loop turn, with private order updates
     /// biased ahead of the next group.
@@ -462,8 +463,11 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
 
 mod boot_recovery;
 mod intent_admission;
+mod order_dispatch;
 mod scheduling;
 mod signal_intake;
+mod signal_routes;
+mod strategy_callbacks;
 mod strategy_effects;
 mod telemetry;
 mod venue_completion;
@@ -598,6 +602,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         S: Future<Output = ()>,
         T: LoopTimer,
     {
+        for (symbol, spec) in &self.instrument_specs {
+            order_feed.learn_instrument(*symbol, spec);
+        }
         tokio::pin!(shutdown);
         let mut flush_tick = timer.interval(self.group_flush);
         let mut signals_open = true;
@@ -605,16 +612,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if self.signals.readiness_required() {
             self.signals.begin_readiness_request();
             signal_feed
-                .request_readiness()
+                .request_lifecycle(
+                    self.signals.producers().cloned().collect(),
+                    self.signals.lifecycle_legacy_sources(),
+                )
                 .map_err(|error| EngineError::State(error.to_string()))?;
         }
         self.update_signal_requests(signal_feed)?;
 
         // Boot-restored cross-sleeve events and external observations were
         // delivered into this FIFO only after all checkpoints were restored.
-        if !self.host.pending.is_empty() {
-            self.drain(clock::now_ns()).await?;
-        }
+        self.drain(clock::now_ns()).await?;
 
         let stopped_by = loop {
             let timer_wait = self
@@ -640,6 +648,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         if let Turn::Stop(reason) = self.on_order_feed(update, true).await? {
                             break reason;
                         }
+                    }
+                    lookup = self.dispatches.lookups.recv(), if !self.dispatches.lookup_pending.is_empty() => {
+                        if let Some((id, result)) = lookup { self.on_order_lookup(id, result).await?; }
+                    }
+                    dispatch = self.dispatches.durable.recv(), if self.dispatches.write.is_some() => {
+                        self.on_order_dispatch_durable(dispatch).await?;
+                    }
+                    durable = self.host.callbacks.durable.recv(), if self.host.callbacks.write.is_some() => {
+                        self.on_callback_durable(durable)?;
+                    }
+                    callback = self.host.callbacks.completions.recv(), if self.host.callbacks.running() && self.host.callbacks.write.is_none() => {
+                        self.on_strategy_callback(callback)?;
                     }
                     completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
                         self.on_completion(completion, order_feed).await?;
@@ -674,6 +694,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             if self.drain_progress.is_some() {
                 tokio::select! {
                     biased;
+                    lookup = self.dispatches.lookups.recv(), if !self.dispatches.lookup_pending.is_empty() => {
+                        if let Some((id, result)) = lookup { self.on_order_lookup(id, result).await?; }
+                    }
+                    dispatch = self.dispatches.durable.recv(), if self.dispatches.write.is_some() => {
+                        self.on_order_dispatch_durable(dispatch).await?;
+                    }
+                    durable = self.host.callbacks.durable.recv(), if self.host.callbacks.write.is_some() => {
+                        self.on_callback_durable(durable)?;
+                    }
+                    callback = self.host.callbacks.completions.recv(), if self.host.callbacks.running() && self.host.callbacks.write.is_none() => {
+                        self.on_strategy_callback(callback)?;
+                    }
                     completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
                         let completion = completion.ok_or_else(|| EngineError::State("venue task stopped with mutations outstanding".into()))?;
                         self.take_venue_completion(completion).await?;
@@ -730,6 +762,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     if let Turn::Stop(reason) = self.on_order_feed(update, true).await? {
                         break reason;
                     }
+                }
+                lookup = self.dispatches.lookups.recv(), if !self.dispatches.lookup_pending.is_empty() => {
+                        if let Some((id, result)) = lookup { self.on_order_lookup(id, result).await?; }
+                    }
+                    dispatch = self.dispatches.durable.recv(), if self.dispatches.write.is_some() => {
+                        self.on_order_dispatch_durable(dispatch).await?;
+                    }
+                    durable = self.host.callbacks.durable.recv(), if self.host.callbacks.write.is_some() => {
+                        self.on_callback_durable(durable)?;
+                    }
+                    callback = self.host.callbacks.completions.recv(), if self.host.callbacks.running() && self.host.callbacks.write.is_none() => {
+                    self.on_strategy_callback(callback)?;
                 }
                 completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
                     self.on_completion(completion, order_feed).await?;
@@ -844,6 +888,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             Ok(engine_types::SignalFeedEvent::Ready(frontiers)) => {
                 self.accept_signal_frontiers(frontiers, signal_feed)
             }
+            Ok(engine_types::SignalFeedEvent::LifecycleReady(response)) => {
+                self.accept_signal_lifecycle(response, signal_feed)
+            }
             Ok(engine_types::SignalFeedEvent::ReadinessUnavailable { reason }) => {
                 self.refuse_signal_readiness(reason, signal_feed)
             }
@@ -916,6 +963,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.accept_pending_signals(signal_feed)?;
             self.drain(clock::now_ns()).await?;
         }
+        self.deliver_pending_signal_callbacks();
+        if self.host.callbacks.isolated() {
+            self.drain(clock::now_ns()).await?;
+        }
+        self.maintain_signal_routes(market_feed)?;
+        self.advance_signal_lifecycles(signal_feed)?;
         self.update_signal_requests(signal_feed)?;
         Ok(())
     }
@@ -924,7 +977,43 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// a graceful stop that leaves its closing updates in the page cache
     /// tells the next boot's audit a lie.
     pub async fn finish(&mut self) -> Result<(), EngineError> {
-        while !self.pending_mutations.is_empty() {
+        loop {
+            self.service_strategy_callbacks()?;
+            if self.host.callbacks.write.is_none() {
+                break;
+            }
+            let result =
+                tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.host.callbacks.durable.recv())
+                    .await
+                    .map_err(|_| {
+                        EngineError::State(
+                            "graceful stop timed out settling callback durability".into(),
+                        )
+                    })?;
+            self.on_callback_durable(result)?;
+        }
+        self.host.callbacks.stop().await;
+        while self.dispatches.write.is_some()
+            || !self.pending_mutations.is_empty()
+            || !self.ready_actions.is_empty()
+        {
+            if self.dispatches.write.is_some() {
+                let result =
+                    tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.dispatches.durable.recv())
+                        .await
+                        .map_err(|_| {
+                            EngineError::State(
+                                "graceful stop timed out settling order dispatch durability".into(),
+                            )
+                        })?;
+                self.on_order_dispatch_durable(result).await?;
+                self.drain(clock::now_ns()).await?;
+                continue;
+            }
+            if self.pending_mutations.is_empty() {
+                self.drain(clock::now_ns()).await?;
+                continue;
+            }
             let completion =
                 tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.venue_completions.recv())
                     .await
@@ -947,10 +1036,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 "graceful stop found deferred actions without a live venue mutation".to_string(),
             ));
         }
-        // The barrier below covers these bytes too, but an outstanding one
-        // carries an answer, and a stop that dropped it would be a failed
-        // barrier nobody heard about.
-        self.settle_barrier()?;
         // A trip that closed since the last tick is still a closed trip.
         self.record_trades();
         let now = clock::now_ns();
@@ -1189,6 +1274,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// ends those; the marks written so far are in the archived segments).
     pub(crate) fn rotation_base(&self, wall_ts_ms: i64) -> WalRecord {
         WalRecord::SegmentBase {
+            strategy_processes: self
+                .host
+                .callbacks
+                .state
+                .committed
+                .values()
+                .cloned()
+                .collect(),
+            strategy_callbacks: self.host.callbacks.state.inputs.values().cloned().collect(),
+            portfolio: Some(self.books.attribution.snapshot()),
             wall_ts_ms,
             strategies: self.host.names.clone(),
             symbols: (0..self.books.market.table.len())
@@ -1247,6 +1342,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             signal_cursors: self.signals.cursors().cloned().collect(),
             signal_subscriptions: self.signals.subscriptions().cloned().collect(),
             signal_gaps: self.signals.gaps().cloned().collect(),
+            pending_order_dispatches: self.dispatches.orders.values().cloned().collect(),
+            signal_producers: self.signals.producers().cloned().collect(),
+            signal_suspensions: self.signals.suspensions().collect(),
             strategy_effects: self.host.effects.snapshot(),
             runtime_control_requests: self.runtime_control_requests.clone(),
             runtime_control_consumed: self.runtime_control_consumed.iter().cloned().collect(),

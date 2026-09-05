@@ -97,7 +97,7 @@ impl Strategy for QuoteCoalescingProbe {
 async fn until_both(crossing: Arc<Mutex<Vec<&'static str>>>) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
-        if crossing.lock().unwrap().len() >= 3 {
+        if crossing.lock().unwrap().len() >= 4 {
             return;
         }
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -105,16 +105,8 @@ async fn until_both(crossing: Arc<Mutex<Vec<&'static str>>>) {
 }
 
 #[tokio::test]
-async fn the_order_leaves_while_the_disk_works_and_the_news_waits_for_it() {
-    // Both halves of the change, in one ordered list.
-    //
-    // The order goes out while the disk is still confirming — that is the
-    // millisecond this bought. But news that the order traded does not
-    // overtake the disk: acting on a fill whose order is not yet written down
-    // would leave a crash holding a position it has no record of asking for.
-    //
-    // The barrier here takes 30 ms and the venue answers at once, which is the
-    // race inverted — on a real venue the round trip is the longer of the two.
+async fn every_order_waits_for_durable_dispatch_before_the_wire_and_its_news() {
+    // Delay both dispatch phases so a send racing either barrier is visible.
     let tape = tape();
     let (mut wal, _records) = MockWal::new(tape.clone());
     let crossing = wal.defer_barriers();
@@ -147,11 +139,12 @@ async fn the_order_leaves_while_the_disk_works_and_the_news_waits_for_it() {
     assert_eq!(
         crossing.lock().unwrap().as_slice(),
         [
-            "order on the wire",
             "disk confirmed",
+            "disk confirmed",
+            "order on the wire",
             "order news written down"
         ],
-        "the send waited for the disk, or the news did not"
+        "the wire overtook queued/attempted durability or its update overtook the send"
     );
 }
 
@@ -272,8 +265,10 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
         "intent",
         "verdict",
         "order_sent",
+        "order_dispatch_attempted",
         "venue_timing",
         "order_update",
+        "order_dispatch_completed",
         "latency_ledger",
     ];
     assert_eq!(kinds, want, "log records in order");
@@ -477,6 +472,7 @@ async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
     // After a restart the partition would otherwise believe every share is
     // free while last boot's orders are still working at the venue.
     let replayed = vec![WalRecord::OrderSent {
+        dispatch: None,
         request: OrderRequest {
             client_order_id: "eng-1700000000000-4".into(),
             strategy: StrategyId(0),
@@ -486,6 +482,8 @@ async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
             kind: OrderKind::Market,
             stop: None,
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         },
         wire_ns: 3,
@@ -524,6 +522,7 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
     let id = "eng-1700000000000-5";
     let replayed = vec![
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: id.into(),
                 strategy: StrategyId(0),
@@ -533,6 +532,8 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
                 kind: OrderKind::Market,
                 stop: Some(StopSpec { trigger_px: 90.0 }),
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 3,
@@ -540,6 +541,8 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: "partial".into(),
                 client_order_id: id.into(),
                 symbol: SymbolId(0),
@@ -627,6 +630,7 @@ async fn an_order_the_venue_is_not_working_is_reaped_at_boot() {
     // the one-order-per-symbol gate closed against the symbol, exits
     // included.
     let replayed = vec![WalRecord::OrderSent {
+        dispatch: None,
         request: OrderRequest {
             client_order_id: "eng-1700000000000-4".into(),
             strategy: StrategyId(0),
@@ -636,6 +640,8 @@ async fn an_order_the_venue_is_not_working_is_reaped_at_boot() {
             kind: OrderKind::Market,
             stop: None,
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         },
         wire_ns: 3,
@@ -864,7 +870,7 @@ impl Strategy for BurstEmitter {
 }
 
 #[tokio::test]
-async fn sibling_orders_share_one_barrier_before_the_first_send() {
+async fn sibling_orders_share_both_dispatch_barriers_before_the_first_send() {
     let burst = BurstEmitter {
         symbol: "BTCUSDT".into(),
         entries: 3,
@@ -907,8 +913,8 @@ async fn sibling_orders_share_one_barrier_before_the_first_send() {
             .iter()
             .filter(|step| matches!(step, Step::Barrier))
             .count(),
-        1,
-        "one durability barrier covers the batch"
+        2,
+        "queued and attempted durability each cover the entire batch"
     );
 }
 
@@ -1073,6 +1079,7 @@ async fn a_fresh_account_view_repairs_a_loosened_whole_position_stop() {
     let fill_ms = clock::wall_ms();
     let replayed = vec![
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: id.into(),
                 strategy: StrategyId(0),
@@ -1082,6 +1089,8 @@ async fn a_fresh_account_view_repairs_a_loosened_whole_position_stop() {
                 kind: OrderKind::Market,
                 stop: Some(StopSpec { trigger_px: 95.0 }),
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 1,
@@ -1089,6 +1098,8 @@ async fn a_fresh_account_view_repairs_a_loosened_whole_position_stop() {
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: "protected-fill".into(),
                 client_order_id: id.into(),
                 symbol: SymbolId(0),
@@ -1198,13 +1209,17 @@ async fn oversized_sibling_bursts_are_revalidated_after_each_bounded_send() {
         .take(sends[10] - sent[0] + 1)
         .filter_map(|(at, step)| matches!(step, Step::Barrier).then_some(at))
         .collect();
-    assert_eq!(batch_barriers.len(), 2);
+    assert_eq!(batch_barriers.len(), 4);
     assert!(
-        sent[9] < batch_barriers[0] && batch_barriers[0] < sends[0],
+        sent[9] < batch_barriers[0]
+            && batch_barriers[0] < batch_barriers[1]
+            && batch_barriers[1] < sends[0],
         "the first bounded group is durable before its first send"
     );
     assert!(
-        sent[10] < batch_barriers[1] && batch_barriers[1] < sends[10],
+        sent[10] < batch_barriers[2]
+            && batch_barriers[2] < batch_barriers[3]
+            && batch_barriers[3] < sends[10],
         "the second bounded group is durable before its send"
     );
 }
@@ -1349,7 +1364,9 @@ async fn due_account_refresh_is_polled_between_bounded_sibling_sends() {
         "the due refresh never ran; tape={tape:?}"
     );
     assert!(
-        sends[9] < account_reads[1] && account_reads[1] < sends[10],
+        account_reads
+            .iter()
+            .any(|read| sends[9] < *read && *read < sends[10]),
         "the due account view must be adopted between native-sized sibling groups"
     );
 }
@@ -1362,7 +1379,12 @@ async fn shutdown_after_a_batch_does_not_abandon_a_trailing_exit() {
         exits: 1,
         fired: false,
     };
-    let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build_exit_inventory(
+        vec![Box::new(burst)],
+        &[(StrategyId(0), Side::Buy, 0.1)],
+        None,
+    )
+    .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let sends = h.sends.clone();
     let shutdown = async move {
@@ -1457,7 +1479,12 @@ async fn same_symbol_siblings_with_conflicting_leverage_are_refused_before_mutat
         symbol: "BTCUSDT".into(),
         fired: false,
     };
-    let (mut engine, h) = build(allow_all(), vec![Box::new(strategy)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build_exit_inventory(
+        vec![Box::new(strategy)],
+        &[(StrategyId(0), Side::Buy, 0.1)],
+        None,
+    )
+    .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -1510,7 +1537,12 @@ async fn a_flooded_wake_drops_entries_but_never_exits() {
             exits: 2,
             fired: false,
         };
-        let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
+        let (mut engine, h) = build_exit_inventory(
+            vec![Box::new(burst)],
+            &[(StrategyId(0), Side::Buy, 0.1)],
+            None,
+        )
+        .await;
         let symbol = engine.market().table.get("BTCUSDT").unwrap();
         engine
             .run(
@@ -1584,7 +1616,12 @@ async fn an_exit_sheds_its_stop_before_the_log_and_the_wire() {
         sent: false,
         qty: 0.01,
     };
-    let (mut engine, h) = build(allow_all(), vec![Box::new(exiter)], &["BTCUSDT"], &[]).await;
+    let (mut engine, h) = build_exit_inventory(
+        vec![Box::new(exiter)],
+        &[(StrategyId(0), Side::Buy, 0.01)],
+        None,
+    )
+    .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -1604,6 +1641,80 @@ async fn an_exit_sheds_its_stop_before_the_log_and_the_wire() {
             assert!(request.stop.is_none(), "the log saw a stop on an exit");
         }
     }
+}
+
+async fn build_exit_inventory(
+    strategies: Vec<Box<dyn Strategy>>,
+    holdings: &[(StrategyId, Side, f64)],
+    rule: Option<InstrumentRule>,
+) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
+    let mut replay = vec![WalRecord::Names {
+        strategies: strategies
+            .iter()
+            .map(|strategy| strategy.name().into())
+            .collect(),
+        symbols: vec!["BTCUSDT".into()],
+    }];
+    let mut net = 0.0;
+    for (strategy, side, qty) in holdings {
+        let id = format!("eng-owned-exit-fixture-{}", strategy.0);
+        let request = OrderRequest {
+            client_order_id: id.clone(),
+            strategy: *strategy,
+            symbol: SymbolId(0),
+            side: *side,
+            qty: *qty,
+            kind: OrderKind::Market,
+            stop: Some(StopSpec {
+                trigger_px: 27_000.0,
+            }),
+            reduce_only: false,
+            close_position: false,
+            sleeve_effect: None,
+            exact_terms: None,
+        };
+        replay.push(WalRecord::OrderSent {
+            dispatch: None,
+            request,
+            wire_ns: 1,
+            arrival_mid: 30_000.0,
+        });
+        replay.push(WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                client_order_id: id,
+                exec_id: format!("owned-fill-{}", strategy.0),
+                allocation: None,
+                symbol: SymbolId(0),
+                side: *side,
+                qty: *qty,
+                px: 30_000.0,
+                fee: Some(0.0),
+                is_maker: false,
+                forced_close: None,
+                venue_ts_ms: recent_replay_ms(),
+                recv_ns: 2,
+                amounts: None,
+            },
+        });
+        net += if *side == Side::Buy { *qty } else { -*qty };
+    }
+    let held = if net == 0.0 {
+        Vec::new()
+    } else {
+        let mut held = held_long(net.abs());
+        held.side = if net > 0.0 { Side::Buy } else { Side::Sell };
+        vec![held]
+    };
+    build_with_venue_state_and_rule(
+        allow_all(),
+        strategies,
+        &["BTCUSDT"],
+        &replay,
+        Vec::new(),
+        held,
+        rule,
+    )
+    .await
 }
 
 fn held_long(qty: f64) -> engine_types::PositionView {
@@ -1634,13 +1745,9 @@ async fn a_whole_position_below_the_minimum_uses_the_venue_close_path() {
         sent: false,
         qty: 0.001,
     };
-    let (mut engine, h) = build_with_venue_state_and_rule(
-        allow_all(),
+    let (mut engine, h) = build_exit_inventory(
         vec![Box::new(exiter)],
-        &["BTCUSDT"],
-        &[],
-        Vec::new(),
-        vec![held_long(0.001)],
+        &[(StrategyId(0), Side::Buy, 0.001)],
         Some(raised_minimum_rule()),
     )
     .await;
@@ -1668,13 +1775,9 @@ async fn a_whole_position_below_one_step_keeps_its_real_accounting_quantity() {
         sent: false,
         qty: 0.0005,
     };
-    let (mut engine, h) = build_with_venue_state_and_rule(
-        allow_all(),
+    let (mut engine, h) = build_exit_inventory(
         vec![Box::new(exiter)],
-        &["BTCUSDT"],
-        &[],
-        Vec::new(),
-        vec![held_long(0.0005)],
+        &[(StrategyId(0), Side::Buy, 0.0005)],
         Some(raised_minimum_rule()),
     )
     .await;
@@ -1788,6 +1891,7 @@ async fn a_refused_retired_maker_exit_retries_on_a_later_wake_without_hitting_th
             symbols: vec!["BTCUSDT".into(), "OLDUSDT".into()],
         },
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: old_order.into(),
                 strategy: StrategyId(0),
@@ -1797,6 +1901,8 @@ async fn a_refused_retired_maker_exit_retries_on_a_later_wake_without_hitting_th
                 kind: OrderKind::Market,
                 stop: Some(StopSpec { trigger_px: 110.0 }),
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 1,
@@ -1804,6 +1910,8 @@ async fn a_refused_retired_maker_exit_retries_on_a_later_wake_without_hitting_th
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: "old-maker-fill".into(),
                 client_order_id: old_order.into(),
                 symbol: SymbolId(1),
@@ -2000,6 +2108,7 @@ async fn a_venue_rejected_native_long_exit_retries_only_after_its_timer() {
             symbols: vec!["BTCUSDT".into()],
         },
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: opening.into(),
                 strategy: StrategyId(0),
@@ -2009,6 +2118,8 @@ async fn a_venue_rejected_native_long_exit_retries_only_after_its_timer() {
                 kind: OrderKind::Market,
                 stop: Some(StopSpec { trigger_px: 80.0 }),
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 1,
@@ -2016,6 +2127,8 @@ async fn a_venue_rejected_native_long_exit_retries_only_after_its_timer() {
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: "old-long-fill".into(),
                 client_order_id: opening.into(),
                 symbol: SymbolId(0),
@@ -2340,6 +2453,8 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
         kind: OrderKind::Market,
         stop: None,
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     };
     let finished = OrderRequest {
@@ -2354,12 +2469,15 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
             commit: String::new(),
         },
         WalRecord::OrderSent {
+            dispatch: None,
             request: finished.clone(),
             wire_ns: 1,
             arrival_mid: 0.0,
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: String::new(),
                 client_order_id: finished.client_order_id.clone(),
                 symbol: SymbolId(0),
@@ -2374,6 +2492,7 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
             },
         },
         WalRecord::OrderSent {
+            dispatch: None,
             request: stale.clone(),
             wire_ns: 3,
             arrival_mid: 0.0,
@@ -2399,6 +2518,8 @@ async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() 
     let mut orders = ScriptOrderFeed {
         learned: Rc::new(RefCell::new(Vec::new())),
         updates: VecDeque::from(vec![OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: String::new(),
             client_order_id: stale.client_order_id.clone(),
             symbol,
@@ -2653,11 +2774,13 @@ async fn a_flooded_sleeve_cannot_discard_another_sleeves_exit() {
     };
     let (mut other, _) = Buyer::new("BTCUSDT", 1, 0.01);
     other.reduce_only = true;
-    let (mut engine, h) = build(
-        allow_all(),
+    let (mut engine, h) = build_exit_inventory(
         vec![Box::new(burst), Box::new(other)],
-        &["BTCUSDT"],
-        &[],
+        &[
+            (StrategyId(0), Side::Buy, 0.1),
+            (StrategyId(1), Side::Sell, 0.01),
+        ],
+        None,
     )
     .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
@@ -2683,5 +2806,75 @@ async fn a_flooded_sleeve_cannot_discard_another_sleeves_exit() {
         ],
         [2, 1],
         "the flood must retain both sleeves' exits"
+    );
+}
+
+#[tokio::test]
+async fn exact_catalog_applies_market_lot_instead_of_limit_lot() {
+    use engine_types::numeric::{AssetId, Exact, ExactInstrumentSpec, PricePrecision};
+    let requested = 0.29;
+    let (buyer, _) = Buyer::new("BTCUSDT", 1, requested);
+    let tape = tape();
+    let (wal, _) = MockWal::new(tape.clone());
+    let (mut venue, sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+    venue.rules[0].1.qty_step = 0.01;
+    let dec = |value| Some(Exact::parse_decimal(value).unwrap());
+    venue.exact_specs = Some(vec![(
+        "BTCUSDT".into(),
+        ExactInstrumentSpec {
+            native_symbol: "BTCUSDT".into(),
+            base_asset: AssetId::Named("BTC".into()),
+            quote_asset: AssetId::Named("USDT".into()),
+            settlement_asset: AssetId::Named("USDT".into()),
+            tick_size: dec("0.5"),
+            min_price: None,
+            max_price: None,
+            price_precision: PricePrecision::Tick,
+            qty_step: dec("0.01"),
+            min_qty: dec("0.01"),
+            market_qty_step: dec("0.1"),
+            market_min_qty: dec("0.1"),
+            max_qty: None,
+            max_market_qty: None,
+            min_notional: dec("5"),
+            contract_multiplier: dec("1"),
+            fee_assets: None,
+            fee_step: None,
+        },
+    )]);
+    let (risk, _) = MockRisk::with(allow_all());
+    let mut engine = Engine::boot(
+        &settings(),
+        "0",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(buyer)],
+        &[],
+    )
+    .await
+    .unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    let sends = sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    assert!(
+        sends[0].qty <= requested,
+        "rounding cannot enlarge the approved order: {} > {requested}",
+        sends[0].qty
+    );
+    assert_eq!(
+        sends[0].qty, 0.2,
+        "market orders must use the market lot, not the limit lot"
+    );
+    assert_eq!(
+        sends[0].exact_terms.as_ref().unwrap().quantity,
+        Exact::parse_decimal("0.2").unwrap()
     );
 }

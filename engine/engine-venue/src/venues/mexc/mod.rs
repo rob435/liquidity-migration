@@ -14,6 +14,7 @@ pub mod gateway;
 pub mod public;
 pub mod realm;
 
+mod execution;
 mod parse;
 mod rest;
 mod sign;
@@ -26,3 +27,5 @@ pub use ws::MexcOrderFeed;
 /// What this venue is called in an account identity, a lease file name, and
 /// the engine's heartbeat.
 pub const VENUE_NAME: &str = "mexc";
+
+mod lookup;

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{StrategyId, SymbolId};
+use crate::ids::{StrategyId, Symbol, SymbolId};
 use crate::strategy::{StrategyCheckpoint, StrategyEvent};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -382,6 +382,7 @@ pub struct VenueExecution {
     /// not state it; zero is reserved for a fee the venue explicitly stated
     /// was zero.
     pub fee: Option<f64>,
+    pub amounts: Option<crate::numeric::ExecutionAmounts>,
     pub is_maker: bool,
     /// The venue's own reason for closing the position, when it says one.
     pub forced_close: Option<ForcedClose>,
@@ -420,10 +421,21 @@ impl RestingOrder<'_> {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SleeveOrderEffect {
+    Increase { stop: StopSpec },
+    Reduce,
+}
+
 /// A risk-approved order on its way to the venue. Quantities and prices are
 /// already quantized to the instrument's step and tick.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrderRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_terms: Option<Box<crate::order_terms::ExactOrderTerms>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleeve_effect: Option<SleeveOrderEffect>,
     /// Engine-minted, unique per boot, recorded in the log before send.
     pub client_order_id: String,
     pub strategy: StrategyId,
@@ -438,6 +450,24 @@ pub struct OrderRequest {
     /// sentinel such as Bybit's zero-quantity close.
     #[serde(default)]
     pub close_position: bool,
+}
+
+impl OrderRequest {
+    pub fn is_sleeve_reduction(&self) -> bool {
+        match self.sleeve_effect {
+            Some(SleeveOrderEffect::Reduce) => true,
+            Some(SleeveOrderEffect::Increase { .. }) => false,
+            None => self.reduce_only,
+        }
+    }
+
+    pub fn sleeve_stop(&self) -> Option<StopSpec> {
+        match self.sleeve_effect {
+            Some(SleeveOrderEffect::Reduce) => None,
+            Some(SleeveOrderEffect::Increase { stop }) => Some(stop),
+            None => self.stop,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -498,6 +528,8 @@ pub enum OrderUpdate {
         reason: String,
     },
     Fill {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allocation: Option<Box<crate::execution_allocation::ExecutionAllocation>>,
         /// The venue's unique identity for this execution. Empty only when a
         /// legacy log predates execution identity.
         #[serde(default)]
@@ -515,6 +547,8 @@ pub enum OrderUpdate {
         /// a number here and deserialize as `Some`; an absent field is unknown.
         #[serde(default)]
         fee: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amounts: Option<Box<crate::numeric::ExecutionAmounts>>,
         /// We were the resting side: somebody else crossed the spread to
         /// trade with us. The venue says so on every execution, and it is the
         /// difference between earning the spread and paying it — so a maker
@@ -599,6 +633,8 @@ mod tests {
 
     fn stop_fill() -> OrderUpdate {
         OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: "exec-1".to_string(),
             client_order_id: String::new(),
             symbol: SymbolId(3),
@@ -648,4 +684,45 @@ pub enum VenueError {
     BadReply(String),
     #[error("venue credentials missing or malformed: {0}")]
     Credentials(String),
+}
+
+/// A status lookup is disposition evidence; executions remain fill authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderLookupRow {
+    pub symbol: Symbol,
+    pub client_order_id: String,
+    pub venue_order_id: String,
+    pub filled_qty: crate::numeric::ExactNumber,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TerminalOrderStatus {
+    Filled,
+    Cancelled,
+    Rejected,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderLookup {
+    Working(OrderLookupRow),
+    Terminal {
+        status: TerminalOrderStatus,
+        row: OrderLookupRow,
+    },
+    /// Requires endpoint-specific proof that the request was never accepted.
+    NeverAccepted,
+    Unknown {
+        reason: String,
+    },
+    Unavailable,
+}
+
+/// Read-only client with no ownership of the serialized venue mutation path.
+#[crate::async_trait]
+pub trait OrderLookupClient: Send + Sync + 'static {
+    async fn lookup(
+        &self,
+        symbol: &str,
+        client_order_id: &str,
+    ) -> Result<OrderLookup, crate::VenueError>;
 }

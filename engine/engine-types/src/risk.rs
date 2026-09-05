@@ -124,9 +124,28 @@ pub struct RollingLossView {
     pub tripped: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum PortfolioRiskVerdict {
+    Allow { qty: f64, venue_reduce_only: bool },
+    Deny { reason: DenyReason },
+}
+
 /// The account-level capital controls. Unknown state refuses the order.
 pub trait RiskKernel {
     fn assess(&mut self, intent: &Intent, account: &AccountView) -> RiskVerdict;
+    fn assess_portfolio(
+        &mut self,
+        _intent: &Intent,
+        _account: &AccountView,
+        _portfolio: &crate::portfolio::PortfolioState,
+    ) -> PortfolioRiskVerdict {
+        PortfolioRiskVerdict::Deny {
+            reason: DenyReason::UnknownState {
+                detail: "risk kernel does not support virtual portfolio ownership".into(),
+            },
+        }
+    }
+
     /// Reassess the remaining quantity of an existing opening order at a new
     /// price. Implementations that track reservations override this to
     /// temporarily exclude the order's old reservation; the conservative

@@ -52,6 +52,7 @@ async fn recover_one_fill_with_fee(fee: Option<f64>) -> Recovered {
 
     // The venue traded it while the stream was away.
     *h.executions.lock().unwrap() = Some(vec![VenueExecution {
+        amounts: None,
         exec_id: "e-1".into(),
         client_order_id: sent,
         symbol: "BTCUSDT".into(),
@@ -129,6 +130,8 @@ async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
         .run(
             &mut ScriptFeed::quotes(symbol, 0, false),
             &mut ScriptOrderFeed::playing(vec![OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: "entry-exec".into(),
                 client_order_id: sent,
                 symbol,
@@ -158,6 +161,7 @@ async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
     assert_eq!(attributed_qty(&engine), 0.01);
 
     *h.executions.lock().unwrap() = Some(vec![VenueExecution {
+        amounts: None,
         exec_id: "native-stop-exec".into(),
         client_order_id: String::new(),
         symbol: "BTCUSDT".into(),
@@ -205,6 +209,8 @@ async fn a_repeated_live_exec_id_mutates_the_engine_once() {
     let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let fill = OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: "exec-once".to_string(),
         client_order_id: "external".to_string(),
         symbol,
@@ -282,6 +288,8 @@ async fn a_known_live_fill_with_the_wrong_side_is_durable_but_mutates_nothing() 
         .run(
             &mut ScriptFeed::quotes(symbol, 0, false),
             &mut ScriptOrderFeed::playing(vec![OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: "wrong-side-live".into(),
                 client_order_id: sent.clone(),
                 symbol,
@@ -357,6 +365,7 @@ async fn a_known_recovered_fill_with_the_wrong_symbol_preserves_the_order() {
     let sent = h.sends.lock().unwrap()[0].client_order_id.clone();
     h.risk_saw.lock().unwrap().clear();
     *h.executions.lock().unwrap() = Some(vec![VenueExecution {
+        amounts: None,
         exec_id: "wrong-symbol-recovered".into(),
         client_order_id: sent.clone(),
         symbol: "ETHUSDT".into(),
@@ -457,6 +466,7 @@ async fn an_unmapped_gap_execution_is_durable_and_latches_entries() {
     let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     *h.executions.lock().unwrap() = Some(vec![VenueExecution {
+        amounts: None,
         exec_id: "foreign-unknown-1".into(),
         client_order_id: "manual-order".into(),
         symbol: "DELISTEDUSDT".into(),
@@ -772,6 +782,8 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
     // ledger, all by a position that was never opened.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 0, 0.01);
     let already = OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: String::new(),
         client_order_id: "eng-last-run-1".into(),
         symbol: SymbolId(0),
@@ -802,6 +814,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
     // has something to finish on whichever way the dedup goes.
     *h.executions.lock().unwrap() = Some(vec![
         VenueExecution {
+            amounts: None,
             exec_id: "e-old".into(),
             client_order_id: "eng-last-run-1".into(),
             symbol: "BTCUSDT".into(),
@@ -816,6 +829,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
         // Same legacy tuple, distinct venue execution. The one delivered log
         // row may consume only one occurrence, not hide both.
         VenueExecution {
+            amounts: None,
             exec_id: "e-old-2".into(),
             client_order_id: "eng-last-run-1".into(),
             symbol: "BTCUSDT".into(),
@@ -828,6 +842,7 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
             venue_ts_ms,
         },
         VenueExecution {
+            amounts: None,
             exec_id: "e-new".into(),
             client_order_id: "eng-never-seen".into(),
             symbol: "BTCUSDT".into(),

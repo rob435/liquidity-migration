@@ -1,12 +1,9 @@
-//! The one place a number becomes a venue string.
-//!
-//! Every qty, price and stop goes through [`venue_num`]. Bybit reads these
-//! as decimal strings and rejects exponent notation, so nothing else in this
-//! crate is allowed to format a float.
+//! Historical decimal formatting for requests without exact order terms.
+//! Prepared orders use `order_wire` and preserve their retained decimals.
 
 use engine_types::VenueError;
 
-/// Deepest precision any Bybit tick or step uses, with room to spare.
+/// The legacy request formatter's fixed decimal ceiling.
 const MAX_DECIMALS: usize = 10;
 
 /// Render a positive, finite number as a plain decimal string.

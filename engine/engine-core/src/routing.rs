@@ -15,6 +15,28 @@ pub struct Routing {
 }
 
 impl Routing {
+    pub fn remove(&mut self, symbol: SymbolId, feed: Feed, strategy: StrategyId) {
+        let lists = match feed {
+            Feed::Quote => &mut self.quote,
+            Feed::Depth => &mut self.depth,
+            Feed::Trades => &mut self.trades,
+            Feed::Ticker => &mut self.ticker,
+        };
+        if let Some(list) = lists.get_mut(symbol.0 as usize) {
+            list.retain(|known| *known != strategy);
+        }
+    }
+
+    pub fn listens(&self, symbol: SymbolId, feed: Feed) -> bool {
+        !match feed {
+            Feed::Quote => self.quote_listeners(symbol),
+            Feed::Depth => self.depth_listeners(symbol),
+            Feed::Trades => self.trade_listeners(symbol),
+            Feed::Ticker => self.ticker_listeners(symbol),
+        }
+        .is_empty()
+    }
+
     pub fn add(&mut self, symbol: SymbolId, feed: Feed, strategy: StrategyId) {
         let index = symbol.0 as usize;
         let list = match feed {

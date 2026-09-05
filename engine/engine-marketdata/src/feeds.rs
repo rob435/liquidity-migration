@@ -100,6 +100,17 @@ impl MarketFeed for MarketFeeds {
         }
     }
 
+    fn retire(&mut self, symbol: &str, feed: Feed) -> bool {
+        match self {
+            MarketFeeds::Bybit(inner) => inner.retire(symbol, feed),
+            MarketFeeds::Hyperliquid(inner) => inner.retire(symbol, feed),
+            MarketFeeds::Lighter(inner) => inner.retire(symbol, feed),
+            MarketFeeds::Mexc(inner) => inner.retire(symbol, feed),
+            MarketFeeds::Binance(inner) => inner.retire(symbol, feed),
+            MarketFeeds::Variational(inner) => inner.retire(symbol, feed),
+        }
+    }
+
     fn admit(&mut self, symbol: &str, feed: Feed) -> Option<SymbolId> {
         match self {
             MarketFeeds::Bybit(inner) => MarketFeed::admit(inner, symbol, feed),
@@ -174,5 +185,37 @@ mod tests {
             );
             assert_eq!(feed.id_of("ETHUSDT"), Some(SymbolId(1)), "{name}");
         }
+    }
+    #[test]
+    fn every_feed_retires_only_the_requested_demand_and_preserves_symbol_ids() {
+        let mut failures = Vec::new();
+        for name in [
+            VenueName::BybitDemo,
+            VenueName::HyperliquidTestnet,
+            VenueName::LighterTestnet,
+            VenueName::MexcMainnet,
+            VenueName::BinanceTestnet,
+            VenueName::VariationalMainnet,
+        ] {
+            let mut feed = MarketFeeds::build(name, &subs());
+            for _ in 0..64 {
+                assert_eq!(feed.admit("BTCUSDT", Feed::Quote), Some(SymbolId(0)));
+            }
+            assert_eq!(feed.admit("BTCUSDT", Feed::Ticker), Some(SymbolId(0)));
+            assert_eq!(feed.admit("ETHUSDT", Feed::Quote), Some(SymbolId(1)));
+            let actual = [
+                feed.retire("BTCUSDT", Feed::Quote),
+                feed.retire("BTCUSDT", Feed::Quote),
+                feed.retire("BTCUSDT", Feed::Ticker),
+                feed.retire("BTCUSDT", Feed::Ticker),
+            ];
+            if actual != [true, false, true, false] {
+                failures.push(format!("{name}: {actual:?}"));
+            }
+            assert_eq!(feed.id_of("ETHUSDT"), Some(SymbolId(1)));
+            assert_eq!(feed.admit("NEWUSDT", Feed::Quote), Some(SymbolId(2)));
+            assert_eq!(feed.admit("BTCUSDT", Feed::Quote), Some(SymbolId(0)));
+        }
+        assert!(failures.is_empty(), "retirement failures: {failures:?}");
     }
 }

@@ -78,6 +78,31 @@ fn fee_payload_mut(
 /// Preserve legacy fee/checkpoint encodings. Required signal gap state uses
 /// versioned records so an older reader refuses it without discarding it.
 fn write_record<W: Write>(writer: &mut W, record: &WalRecord) -> Result<(), WalError> {
+    if let WalRecord::OrderSent {
+        dispatch: None,
+        request,
+        wire_ns,
+        arrival_mid,
+    } = record
+    {
+        #[derive(serde::Serialize)]
+        struct LegacyOrder<'a> {
+            kind: &'static str,
+            request: &'a engine_types::OrderRequest,
+            wire_ns: u64,
+            arrival_mid: f64,
+        }
+        return serde_json::to_writer(
+            writer,
+            &LegacyOrder {
+                kind: "order_sent",
+                request,
+                wire_ns: *wire_ns,
+                arrival_mid: *arrival_mid,
+            },
+        )
+        .map_err(json_error);
+    }
     if let WalRecord::ExecutionHistoryCheckpoint { through_wall_ts_ms } = record {
         let mut value = serde_json::Map::new();
         value.insert(
@@ -123,10 +148,46 @@ fn write_record<W: Write>(writer: &mut W, record: &WalRecord) -> Result<(), WalE
 
 fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
     let record = read_compatible_record(payload)?;
+    if matches!(record, WalRecord::OrderSent { dispatch: None, .. }) {
+        let value: serde_json::Value = serde_json::from_slice(payload)?;
+        if value.get("kind").and_then(serde_json::Value::as_str) == Some("order_sent_v2") {
+            return Err(serde_json::Error::io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "order_sent_v2 is missing required dispatch authority",
+            )));
+        }
+    }
     if matches!(record, WalRecord::SegmentBase { .. }) {
         let value: serde_json::Value = serde_json::from_slice(payload)?;
-        if value.get("kind").and_then(serde_json::Value::as_str) == Some("segment_base_v3")
-            && value.get("strategy_effects").is_none()
+        if value.get("kind").and_then(serde_json::Value::as_str) == Some("segment_base_v4") {
+            for field in [
+                "signal_producers",
+                "signal_suspensions",
+                "strategy_processes",
+                "strategy_callbacks",
+                "pending_order_dispatches",
+            ] {
+                if !value.get(field).is_some_and(serde_json::Value::is_array) {
+                    return Err(serde_json::Error::io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("segment_base_v4 is missing required {field} state"),
+                    )));
+                }
+            }
+            if !value
+                .get("portfolio")
+                .is_some_and(serde_json::Value::is_object)
+            {
+                return Err(serde_json::Error::io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "segment_base_v4 is missing required portfolio state",
+                )));
+            }
+        }
+        if matches!(
+            value.get("kind").and_then(serde_json::Value::as_str),
+            Some("segment_base_v3" | "segment_base_v4")
+        ) && value.get("strategy_effects").is_none()
         {
             return Err(serde_json::Error::io(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -135,7 +196,7 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
         }
         if matches!(
             value.get("kind").and_then(serde_json::Value::as_str),
-            Some("segment_base_v2" | "segment_base_v3")
+            Some("segment_base_v2" | "segment_base_v3" | "segment_base_v4")
         ) && value.get("signal_gaps").is_none()
         {
             return Err(serde_json::Error::io(io::Error::new(
@@ -1032,6 +1093,7 @@ fn sample_record() -> WalRecord {
     use engine_types::orders::{OrderKind, OrderRequest, Side, StopSpec, TimeInForce};
 
     WalRecord::OrderSent {
+        dispatch: None,
         request: OrderRequest {
             client_order_id: "eng-0000000000000042".to_string(),
             strategy: StrategyId(1),
@@ -1046,6 +1108,8 @@ fn sample_record() -> WalRecord {
                 trigger_px: 63500.0,
             }),
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         },
         wire_ns: 1_234_567_890,

@@ -12,6 +12,9 @@ use crate::exposure::{Book, Pending};
 use crate::loss_window::LossWindow;
 use crate::ROLLING_LOSS_WINDOW_MS;
 
+mod portfolio;
+use portfolio::PortfolioFacts;
+
 pub struct Kernel {
     cfg: KernelConfig,
     envelope: Envelope,
@@ -100,6 +103,7 @@ impl Kernel {
         self.book.register(
             client_order_id,
             Pending {
+                strategy: intent.strategy,
                 symbol: intent.symbol,
                 signed_qty: signed(intent.side, approved_qty),
                 reduce_only: intent.reduce_only,
@@ -198,6 +202,15 @@ impl Kernel {
     }
 
     fn evaluate(&mut self, intent: &Intent, account: &AccountView) -> Result<f64, DenyReason> {
+        self.evaluate_inventory(intent, account, None)
+    }
+
+    fn evaluate_inventory(
+        &mut self,
+        intent: &Intent,
+        account: &AccountView,
+        portfolio: Option<&PortfolioFacts>,
+    ) -> Result<f64, DenyReason> {
         // 1. A view stamped after the decision is nonsense for everyone.
         if account.observed_ns > intent.decided_ns {
             return Err(unknown("account view is newer than the decision it judges"));
@@ -213,11 +226,14 @@ impl Kernel {
         //    orders flow while blind, and the venue's reduce-only enforcement
         //    bounds an exit sized from an old reading.
         let recent = self.book.fills_after(account.observed_ns);
-        let settled_qty = view.net_qty(intent.symbol)
+        let physical_qty = view.net_qty(intent.symbol)
             + recent
                 .get(&intent.symbol.0)
                 .map(|row| row.signed_qty)
                 .unwrap_or(0.0);
+        let settled_qty = portfolio.map_or(physical_qty, |portfolio| {
+            portfolio.owned(intent.strategy, intent.symbol)
+        });
         let delta = signed(intent.side, ask_qty);
         let reduces_settled =
             settled_qty.abs() > self.cfg.qty_tolerance && delta * settled_qty < 0.0;
@@ -234,14 +250,22 @@ impl Kernel {
             }
             // The venue bounds ONE reduce-only order to the position, not a
             // stack of them: what resting exits already cover is spoken for.
-            let covered = self.book.pending_reduce_qty(intent.symbol);
+            let covered = if portfolio.is_some() {
+                self.book.owned_reduce_qty(intent.strategy, intent.symbol)
+            } else {
+                self.book.pending_reduce_qty(intent.symbol)
+            };
             let open = settled_qty.abs() - covered;
             if open <= self.cfg.qty_tolerance {
                 return Err(unknown(
                     "the position is already fully covered by resting exits",
                 ));
             }
-            return Ok(ask_qty.min(open));
+            let qty = ask_qty.min(open);
+            if let Some(portfolio) = portfolio {
+                self.check_virtual_reduction(intent, qty, physical_qty, age_ns, &view, portfolio)?;
+            }
+            return Ok(qty);
         }
 
         // 4. Entries are judged only against evidence about the account now.
@@ -272,7 +296,12 @@ impl Kernel {
         // An unflagged reduction is judged as an entry from here on, but must
         // not cross through flat to the other side.
         if reduces_settled {
-            let already_opposite = self.book.pending_open_qty(intent.symbol, intent.side);
+            let already_opposite = if portfolio.is_some() {
+                self.book
+                    .owned_open_qty(intent.strategy, intent.symbol, intent.side)
+            } else {
+                self.book.pending_open_qty(intent.symbol, intent.side)
+            };
             if already_opposite + ask_qty > settled_qty.abs() + self.cfg.qty_tolerance {
                 return Err(unknown("intent crosses through flat to the other side"));
             }
@@ -290,7 +319,11 @@ impl Kernel {
         // The book this order leaves, walked once so the envelope and the
         // account caps below can never disagree about what is on it.
         let notional = ask_qty * px;
-        let projected = self.projected_book(notional, stop_fraction, account, &view)?;
+        let projected = if let Some(portfolio) = portfolio {
+            self.projected_portfolio(notional, stop_fraction, account, &view, portfolio)?
+        } else {
+            self.projected_book(notional, stop_fraction, account, &view)?
+        };
 
         // 7. The equity-anchored envelope.
         let allowance_usdt = self.envelope.allowance_usdt();
@@ -483,6 +516,38 @@ impl RiskKernel for Kernel {
         match self.evaluate(intent, account) {
             Ok(qty) => RiskVerdict::Allow { qty },
             Err(reason) => RiskVerdict::Deny { reason },
+        }
+    }
+
+    fn assess_portfolio(
+        &mut self,
+        intent: &Intent,
+        account: &AccountView,
+        portfolio: &engine_types::portfolio::PortfolioState,
+    ) -> engine_types::risk::PortfolioRiskVerdict {
+        use engine_types::risk::PortfolioRiskVerdict;
+        let result = PortfolioFacts::read(portfolio)
+            .and_then(|portfolio| self.evaluate_inventory(intent, account, Some(&portfolio)));
+        match result {
+            Ok(qty) => {
+                let physical = account
+                    .positions
+                    .iter()
+                    .filter(|p| p.symbol == intent.symbol)
+                    .map(|p| signed(p.side, p.qty))
+                    .sum::<f64>()
+                    + self
+                        .book
+                        .fills_after(account.observed_ns)
+                        .get(&intent.symbol.0)
+                        .map_or(0.0, |r| r.signed_qty);
+                PortfolioRiskVerdict::Allow {
+                    qty,
+                    venue_reduce_only: intent.reduce_only
+                        && self.physical_reduction(intent, qty, physical),
+                }
+            }
+            Err(reason) => PortfolioRiskVerdict::Deny { reason },
         }
     }
 

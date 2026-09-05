@@ -8,7 +8,7 @@
 use engine_types::VenueError;
 
 use super::markets::Market;
-use super::parse::{parse_markets, venue_result};
+use super::parse::parse_markets_raw;
 use super::realm::LighterRealm;
 use crate::http::HttpClient;
 
@@ -22,6 +22,6 @@ pub async fn markets(realm: LighterRealm) -> Result<Vec<Market>, VenueError> {
 /// The same read against a named host. Tests only.
 pub async fn markets_from(base_url: &str) -> Result<Vec<Market>, VenueError> {
     let http = HttpClient::new(base_url);
-    let reply = http.get(PATH_MARKETS, "", &[]).await?;
-    parse_markets(&venue_result(reply)?)
+    let reply: Box<serde_json::value::RawValue> = http.get_as(PATH_MARKETS, "", &[]).await?;
+    parse_markets_raw(reply.get())
 }

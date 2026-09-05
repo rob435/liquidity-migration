@@ -51,6 +51,26 @@ impl Timers {
         });
     }
 
+    pub(crate) fn restore(
+        &mut self,
+        strategy: StrategyId,
+        timers: &[engine_types::strategy_process::StrategyTimerState],
+        now_ns: u64,
+        wall_ms: i64,
+    ) {
+        self.scheduled
+            .retain(|pending| pending.strategy != strategy.0);
+        self.armed.retain(|(owner, _), _| *owner != strategy.0);
+        for timer in timers {
+            let remaining_ms = timer.deadline_wall_ms.saturating_sub(wall_ms).max(0) as u64;
+            self.arm(
+                strategy,
+                timer.id,
+                now_ns.saturating_add(remaining_ms.saturating_mul(1_000_000)),
+            );
+        }
+    }
+
     /// Earliest deadline among the currently armed timers.
     pub fn next_deadline(&mut self) -> Option<u64> {
         self.scheduled.first().map(|pending| pending.deadline_ns)
@@ -131,6 +151,7 @@ pub struct StrategyHost {
     /// Actions emitted and not yet drained, in emission order.
     pub pending: VecDeque<PendingAction>,
     pub(crate) effects: crate::effects::Effects,
+    pub(crate) callbacks: crate::strategy_process::host::CallbackHost,
     /// Strategy-owned state, persisted before the action it guards and
     /// restated through rotation. The engine stores bytes, not meaning.
     pub checkpoints: BTreeMap<(StrategyId, SymbolId), StrategyCheckpoint>,
@@ -144,10 +165,52 @@ pub struct StrategyHost {
 }
 
 impl StrategyHost {
+    pub(crate) fn snapshot(
+        &mut self,
+        books: &Books,
+        sid: StrategyId,
+        now_ns: u64,
+    ) -> Result<engine_types::strategy_process::CallbackSnapshot, String> {
+        let mut actions = VecDeque::new();
+        let ctx = Ctx {
+            books,
+            now_ns,
+            strategy: sid,
+            out: &mut actions,
+            timers: &mut self.timers,
+            checkpoints: &self.checkpoints,
+            global_checkpoints: &self.global_checkpoints,
+            strategy_events: &self.events,
+            strategy_names: &self.names,
+            runtime_entries_enabled: self.entries_enabled.get(&sid).copied(),
+        };
+        ctx.callback_snapshot()
+    }
+
     /// Wake one strategy with an event. Its actions land in `pending`.
-    pub fn feed(&mut self, books: &Books, sid: StrategyId, event: &EngineEvent, now_ns: u64) {
+    pub fn feed(
+        &mut self,
+        books: &Books,
+        sid: StrategyId,
+        event: &EngineEvent,
+        now_ns: u64,
+    ) -> bool {
+        if self.callbacks.isolated() {
+            if let Err(error) = self.callbacks.enqueue(sid, event) {
+                if self.callbacks.faults.get(&sid) != Some(&error) {
+                    tracing::error!(
+                        strategy = sid.0,
+                        error,
+                        "strategy callback not accepted; source must retain delivery"
+                    );
+                }
+                self.callbacks.faults.insert(sid, error);
+                return false;
+            }
+            return true;
+        }
         let Some(strategy) = self.strategies.get_mut(sid.idx()) else {
-            return;
+            return false;
         };
         let mut actions = VecDeque::new();
         let mut ctx = Ctx {
@@ -164,7 +227,7 @@ impl StrategyHost {
         };
         strategy.on_event(event, &mut ctx);
         if actions.is_empty() {
-            return;
+            return true;
         }
         let actions: Vec<_> = actions.into_iter().collect();
         let durable = actions.iter().any(|action| {
@@ -191,7 +254,7 @@ impl StrategyHost {
                     effect: None,
                     callback_id: Some(callback_id),
                 }));
-            return;
+            return true;
         }
         let transition_id = self.effects.capture(sid, actions.clone());
         self.pending.extend(
@@ -208,6 +271,7 @@ impl StrategyHost {
                     callback_id: Some(transition_id),
                 }),
         );
+        true
     }
 }
 
@@ -222,6 +286,75 @@ pub struct Ctx<'a> {
     pub strategy_events: &'a BTreeMap<(StrategyId, String), StrategyEvent>,
     pub strategy_names: &'a [String],
     pub runtime_entries_enabled: Option<bool>,
+}
+
+pub(crate) fn bind_action(strategy: StrategyId, now_ns: u64, action: Action) -> Action {
+    match action {
+        Action::Place(mut intent) => {
+            intent.strategy = strategy;
+            if intent.decided_ns == 0 {
+                intent.decided_ns = now_ns;
+            }
+            Action::Place(intent)
+        }
+        Action::RecordQuoteFill { mut features } => {
+            features.strategy = strategy;
+            Action::RecordQuoteFill { features }
+        }
+        Action::SetStrategyCheckpoint {
+            symbol, checkpoint, ..
+        } => Action::SetStrategyCheckpoint {
+            strategy,
+            symbol,
+            checkpoint,
+        },
+        Action::SetStrategyGlobalCheckpoint { checkpoint, .. } => {
+            Action::SetStrategyGlobalCheckpoint {
+                strategy,
+                checkpoint,
+            }
+        }
+        Action::PublishStrategyEvent { mut event } => {
+            event.source = strategy;
+            Action::PublishStrategyEvent { event }
+        }
+        Action::ConsumeStrategyEvent {
+            source, event_id, ..
+        } => Action::ConsumeStrategyEvent {
+            source,
+            destination: strategy,
+            event_id,
+        },
+        Action::ConsumeSignalObservation {
+            source,
+            sequence,
+            observation_id,
+            ..
+        } => Action::ConsumeSignalObservation {
+            strategy,
+            source,
+            sequence,
+            observation_id,
+        },
+        Action::RejectSignalObservation {
+            source,
+            sequence,
+            observation_id,
+            reason,
+            ..
+        } => Action::RejectSignalObservation {
+            strategy,
+            source,
+            sequence,
+            observation_id,
+            reason,
+        },
+        Action::ConsumeRuntimeControl { request_id, .. } => Action::ConsumeRuntimeControl {
+            strategy,
+            request_id,
+        },
+        other => other,
+    }
 }
 
 impl StrategyCtx for Ctx<'_> {
@@ -308,8 +441,22 @@ impl StrategyCtx for Ctx<'_> {
 
     fn my_position_facts(&self, symbol: SymbolId) -> Option<StrategyPositionFacts> {
         let attributed_signed_qty = self.books.attribution.signed(self.strategy, symbol);
-        let in_flight_signed_qty = self.books.covers.in_flight(self.strategy, symbol);
-        if attributed_signed_qty == 0.0 && in_flight_signed_qty == 0.0 {
+        let mut in_flight_signed_qty = 0.0;
+        let mut open_order_count = 0;
+        for order in self.books.orders.orders.values().filter(|order| {
+            order.request.strategy == self.strategy
+                && order.request.symbol == symbol
+                && order.in_flight()
+        }) {
+            let qty = (order.request.qty - order.filled_qty).max(0.0);
+            in_flight_signed_qty += if order.request.side == engine_types::Side::Buy {
+                qty
+            } else {
+                -qty
+            };
+            open_order_count += 1;
+        }
+        if attributed_signed_qty == 0.0 && open_order_count == 0 {
             return None;
         }
         Some(StrategyPositionFacts {
@@ -317,6 +464,16 @@ impl StrategyCtx for Ctx<'_> {
             attributed_signed_qty,
             venue: self.position(symbol),
             in_flight_signed_qty,
+            open_order_count,
+            allocated: Some(
+                self.books
+                    .attribution
+                    .allocated(self.strategy, symbol)
+                    .unwrap_or(engine_types::strategy::StrategyAllocatedPosition {
+                        entry_px: None,
+                        stop_px: None,
+                    }),
+            ),
         })
     }
 
@@ -327,12 +484,10 @@ impl StrategyCtx for Ctx<'_> {
             .symbols(self.strategy)
             .map(|symbol| symbol.0)
             .collect();
-        symbols.extend(
-            self.books
-                .covers
-                .symbols(self.strategy)
-                .map(|symbol| symbol.0),
-        );
+        symbols.extend(self.books.orders.orders.values().filter_map(|order| {
+            (order.request.strategy == self.strategy && order.in_flight())
+                .then_some(order.request.symbol.0)
+        }));
         out.extend(
             symbols
                 .into_iter()
@@ -351,75 +506,8 @@ impl StrategyCtx for Ctx<'_> {
     }
 
     fn emit(&mut self, action: Action) {
-        // Order-id and position effects keep this caller in PendingAction;
-        // dispatch checks ownership again after any symbol deferral.
-        let action = match action {
-            Action::Place(mut intent) => {
-                intent.strategy = self.strategy;
-                if intent.decided_ns == 0 {
-                    intent.decided_ns = self.now_ns;
-                }
-                Action::Place(intent)
-            }
-            Action::RecordQuoteFill { mut features } => {
-                features.strategy = self.strategy;
-                Action::RecordQuoteFill { features }
-            }
-            Action::SetStrategyCheckpoint {
-                symbol, checkpoint, ..
-            } => Action::SetStrategyCheckpoint {
-                strategy: self.strategy,
-                symbol,
-                checkpoint,
-            },
-            Action::SetStrategyGlobalCheckpoint { checkpoint, .. } => {
-                Action::SetStrategyGlobalCheckpoint {
-                    strategy: self.strategy,
-                    checkpoint,
-                }
-            }
-            Action::PublishStrategyEvent { mut event } => {
-                event.source = self.strategy;
-                Action::PublishStrategyEvent { event }
-            }
-            Action::ConsumeStrategyEvent {
-                source, event_id, ..
-            } => Action::ConsumeStrategyEvent {
-                source,
-                destination: self.strategy,
-                event_id,
-            },
-            Action::ConsumeSignalObservation {
-                source,
-                sequence,
-                observation_id,
-                ..
-            } => Action::ConsumeSignalObservation {
-                strategy: self.strategy,
-                source,
-                sequence,
-                observation_id,
-            },
-            Action::RejectSignalObservation {
-                source,
-                sequence,
-                observation_id,
-                reason,
-                ..
-            } => Action::RejectSignalObservation {
-                strategy: self.strategy,
-                source,
-                sequence,
-                observation_id,
-                reason,
-            },
-            Action::ConsumeRuntimeControl { request_id, .. } => Action::ConsumeRuntimeControl {
-                strategy: self.strategy,
-                request_id,
-            },
-            other => other,
-        };
-        self.out.push_back(action);
+        self.out
+            .push_back(bind_action(self.strategy, self.now_ns, action));
     }
 
     fn arm_timer(&mut self, id: TimerId, after_ns: u64) {
@@ -442,7 +530,7 @@ impl StrategyCtx for Ctx<'_> {
                 kind: request.kind,
                 qty: request.qty,
                 filled_qty: order.filled_qty,
-                reduce_only: request.reduce_only,
+                reduce_only: request.is_sleeve_reduction(),
                 acked: order.acked,
             });
         }
@@ -462,7 +550,7 @@ impl StrategyCtx for Ctx<'_> {
             side: order.request.side,
             qty: order.request.qty,
             filled_qty: order.filled_qty,
-            reduce_only: order.request.reduce_only,
+            reduce_only: order.request.is_sleeve_reduction(),
         })
     }
 
@@ -503,6 +591,7 @@ mod tests {
 
     fn sent(id: &str, strategy: StrategyId) -> WalRecord {
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: id.into(),
                 strategy,
@@ -515,6 +604,8 @@ mod tests {
                 },
                 stop: None,
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 1,
@@ -576,6 +667,56 @@ mod tests {
             strategy_events: NO_STRATEGY_EVENTS.get_or_init(Default::default),
             strategy_names: NO_STRATEGY_NAMES.get_or_init(Vec::new),
             runtime_entries_enabled: None,
+        }
+    }
+
+    #[test]
+    fn sleeve_pending_is_unfilled_quantity_before_account_catchup_and_after_restart() {
+        let owner = StrategyId(0);
+        let symbol = SymbolId(0);
+        let records = vec![
+            sent("entry", owner),
+            engine_types::WalRecord::OrderUpdate {
+                update: engine_types::OrderUpdate::Fill {
+                    allocation: None,
+                    amounts: None,
+                    exec_id: "partial".into(),
+                    client_order_id: "entry".into(),
+                    symbol,
+                    side: engine_types::Side::Buy,
+                    qty: 0.4,
+                    px: 100.0,
+                    fee: Some(0.0),
+                    is_maker: false,
+                    forced_close: None,
+                    venue_ts_ms: 2,
+                    recv_ns: 2,
+                },
+            },
+        ];
+        for restarted in [false, true] {
+            let mut books = books_over(
+                MarketState::default(),
+                LedgerOfOrders::from_records(&records),
+                OrderRegistry::default(),
+            );
+            books.attribution = Attribution::from_records(&records);
+            if !restarted {
+                books
+                    .covers
+                    .register(owner, symbol, engine_types::Side::Buy, 1.0, &books.account);
+            }
+            let mut out = VecDeque::new();
+            let mut timers = Timers::default();
+            let ctx = ctx_over(&books, &mut out, &mut timers, owner);
+            let facts = ctx
+                .my_position_facts(symbol)
+                .expect("owned partial execution");
+            assert_eq!(facts.attributed_signed_qty, 0.4);
+            assert_eq!(
+                facts.in_flight_signed_qty, 0.6,
+                "restart={restarted}: only the unfilled remainder is pending"
+            );
         }
     }
 
@@ -798,6 +939,8 @@ mod tests {
             sent("mine-filled", StrategyId(1)),
             WalRecord::OrderUpdate {
                 update: OrderUpdate::Fill {
+                    allocation: None,
+                    amounts: None,
                     exec_id: String::new(),
                     client_order_id: "mine-filled".into(),
                     symbol: SymbolId(0),

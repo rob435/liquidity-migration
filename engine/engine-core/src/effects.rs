@@ -22,6 +22,7 @@ impl Effects {
         self.transitions.insert(
             id,
             StrategyTransitionState {
+                origin: engine_types::wal::StrategyTransitionOrigin::Embedded,
                 id,
                 strategy,
                 order_ids: vec![None; effects.len()],
@@ -88,7 +89,11 @@ impl Effects {
                         result.restore(transition.clone(), strategy_count)?;
                     }
                 }
-                WalRecord::StrategyTransitionQueued { transition } => {
+                WalRecord::StrategyTransitionQueued { transition }
+                | WalRecord::StrategyProcessTransitionQueued {
+                    transition: Some(transition),
+                    ..
+                } => {
                     if transition.id < result.next_id {
                         return Err(format!(
                             "strategy transition id {} is reused",

@@ -16,6 +16,7 @@ fn prior() -> Vec<WalRecord> {
             symbols: vec!["BTCUSDT".into()],
         },
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: ORDER_ID.into(),
                 strategy: StrategyId(0),
@@ -30,6 +31,8 @@ fn prior() -> Vec<WalRecord> {
                     trigger_px: 29_000.0,
                 }),
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 1,
@@ -40,6 +43,8 @@ fn prior() -> Vec<WalRecord> {
 
 fn fill(exec_id: &str, qty: f64) -> OrderUpdate {
     OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: exec_id.into(),
         client_order_id: ORDER_ID.into(),
         symbol: SymbolId(0),
@@ -172,9 +177,9 @@ async fn late_partial_fills_keep_exact_delivery_order_and_dedup_after_rotation()
     assert_eq!(state(&restarted.rotation_base(clock::wall_ms())), before);
 }
 
-struct FailingUpdateWal {
-    inner: MockWal,
-    fail_next: Arc<std::sync::atomic::AtomicBool>,
+pub(super) struct FailingUpdateWal {
+    pub(super) inner: MockWal,
+    pub(super) fail_next: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Wal for FailingUpdateWal {
     fn append(&mut self, record: &WalRecord) -> Result<u64, WalError> {
@@ -258,5 +263,23 @@ async fn a_failed_fill_append_cannot_change_books_risk_delivery_or_dedup() {
     assert_eq!(
         after["executions"],
         serde_json::json!(["retry-after-append"])
+    );
+}
+
+#[tokio::test]
+async fn contradictory_portfolio_snapshot_cannot_erase_legacy_quantity_projection() {
+    let (buyer, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let (engine, _) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let mut base = engine.rotation_base(clock::wall_ms());
+    if let WalRecord::SegmentBase { attribution, .. } = &mut base {
+        attribution.push(engine_types::FilledTotal {
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            signed_qty: 1.0,
+        });
+    }
+    assert!(
+        crate::attribution::Attribution::try_from_records(&[base]).is_err(),
+        "a current portfolio snapshot silently erased the nonempty quantity projection"
     );
 }

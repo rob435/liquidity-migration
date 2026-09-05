@@ -101,6 +101,8 @@ fn a_fresh_fill_is_immediately_available_to_a_reduce_only_exit() {
     let filled = entry(CARRY, BUSDT, Side::Buy, 3.0, 10.0, 9.0, SEC);
     k.register_order("fresh-entry", &filled, 3.0);
     k.on_update(&OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: String::new(),
         client_order_id: "fresh-entry".to_string(),
         symbol: BUSDT,
@@ -134,6 +136,8 @@ fn a_fresh_reduce_only_fill_does_not_poison_unrelated_admission() {
     assert_eq!(k.assess(&trim, &held), RiskVerdict::Allow { qty: 4.0 });
     k.register_order("fresh-trim", &trim, 4.0);
     k.on_update(&OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: String::new(),
         client_order_id: "fresh-trim".to_string(),
         symbol: BUSDT,
@@ -164,6 +168,8 @@ fn a_partial_reduce_fill_nets_the_view_and_keeps_only_the_unfilled_exit_covered(
     assert_eq!(k.assess(&trim, &held), RiskVerdict::Allow { qty: 4.0 });
     k.register_order("partial-trim", &trim, 4.0);
     k.on_update(&OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: "partial-trim-1".into(),
         client_order_id: "partial-trim".into(),
         symbol: BUSDT,
@@ -198,6 +204,8 @@ fn a_full_reduce_fill_skips_the_closed_positions_stale_stop() {
     assert_eq!(k.assess(&close, &held), RiskVerdict::Allow { qty: 5.0 });
     k.register_order("full-close", &close, 5.0);
     k.on_update(&OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: "full-close-1".into(),
         client_order_id: "full-close".into(),
         symbol: BUSDT,
@@ -219,6 +227,8 @@ fn a_full_reduce_fill_skips_the_closed_positions_stale_stop() {
 fn an_unreserved_opening_fill_has_a_specific_durable_refusal() {
     let mut k = kernel();
     k.on_update(&OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: "foreign-open-1".into(),
         client_order_id: String::new(),
         symbol: BUSDT,
@@ -246,6 +256,8 @@ fn an_unreserved_full_close_does_not_require_an_unknown_stop() {
     old.stop_px = 12.0;
     let held = view(1_000.0, vec![old], NOW);
     k.on_update(&OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: "native-stop-1".into(),
         client_order_id: String::new(),
         symbol: BUSDT,
@@ -578,6 +590,8 @@ fn a_fill_from_a_flat_two_sided_pair_blocks_extra_opposite_admission() {
     RiskKernel::on_update(
         &mut kernel,
         &engine_types::OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: "fill-buy".into(),
             client_order_id: "buy".into(),
             symbol: BUSDT,
@@ -690,6 +704,8 @@ fn a_wide_stop_keeps_its_full_loss_charge_as_pending_filled_and_restarted() {
     let mut kernel = narrow_wide_stop_kernel();
     kernel.register_order("filled", &wide, 4.0);
     kernel.on_update(&engine_types::OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: "wide-fill".into(),
         client_order_id: "filled".into(),
         symbol: BUSDT,
@@ -724,6 +740,8 @@ fn a_recent_reduction_preserves_a_wide_opening_fills_stop_charge() {
     );
     kernel.register_order("wide-open", &wide, 4.0);
     kernel.on_update(&OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: "wide-open-1".into(),
         client_order_id: "wide-open".into(),
         symbol: BUSDT,
@@ -744,6 +762,8 @@ fn a_recent_reduction_preserves_a_wide_opening_fills_stop_charge() {
     );
     kernel.register_order("wide-reduce", &reduce, 1.0);
     kernel.on_update(&OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
         exec_id: "wide-reduce-1".into(),
         client_order_id: "wide-reduce".into(),
         symbol: BUSDT,

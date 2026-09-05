@@ -2,6 +2,7 @@
 
 pub mod http;
 pub mod json;
+pub mod numeric_wire;
 pub mod symbols;
 pub mod tls;
 pub mod venues;

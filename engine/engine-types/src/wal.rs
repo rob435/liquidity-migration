@@ -27,8 +27,28 @@ pub enum WalRecord {
         #[serde(default)]
         commit: String,
     },
+    OrderDispatchQueued {
+        order: crate::order_dispatch::OrderDispatchState,
+    },
+    OrderDispatchAttempted {
+        client_order_id: String,
+    },
+    OrderDispatchCompleted {
+        client_order_id: String,
+    },
     StrategyTransitionQueued {
         transition: StrategyTransitionState,
+    },
+    StrategyCallbackQueued {
+        input: crate::strategy_process::StrategyCallbackInput,
+    },
+    StrategyCallbackPrepared {
+        input: crate::strategy_process::StrategyCallbackInput,
+    },
+    StrategyProcessTransitionQueued {
+        input_id: u64,
+        transition: Option<StrategyTransitionState>,
+        process: crate::strategy_process::StrategyProcessState,
     },
     StrategyEffectCompleted {
         transition_id: u64,
@@ -44,7 +64,10 @@ pub enum WalRecord {
     /// Written and made durable BEFORE the order bytes leave the socket. A
     /// crash between this record and the ack can never forget an in-flight
     /// order.
+    #[serde(rename = "order_sent_v2", alias = "order_sent")]
     OrderSent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dispatch: Option<Box<crate::order_dispatch::QueuedOrderDispatch>>,
         request: OrderRequest,
         wire_ns: u64,
         /// `M0`: the midpoint of the book at the moment this order left, which
@@ -277,6 +300,8 @@ pub enum WalRecord {
     /// exactly like a delivered fill, so the log stays an account of what the
     /// position actually is rather than only of what this process witnessed.
     RecoveredFill {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allocation: Option<Box<crate::execution_allocation::ExecutionAllocation>>,
         /// The venue's own execution id — the dedup key against fetching the
         /// same history twice.
         exec_id: String,
@@ -292,6 +317,8 @@ pub enum WalRecord {
         /// older WAL becomes `Some`; missing or explicit null stays unknown.
         #[serde(default)]
         fee: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amounts: Option<crate::numeric::ExecutionAmounts>,
         is_maker: bool,
         /// The venue's own reason for closing the position, when it says one.
         /// Missing in an older WAL, which reads as no reason recorded.
@@ -403,6 +430,14 @@ pub enum WalRecord {
         wall_ts_ms: i64,
         gap: SignalGap,
     },
+    SignalAdmissionChanged {
+        destination: StrategyId,
+        suspension: Option<crate::SignalAdmissionSuspensionReason>,
+    },
+    SignalProducerLifecycle {
+        wall_ts_ms: i64,
+        state: crate::SignalProducerLifecycle,
+    },
     /// One operator request, durable before its gate changes in memory.
     RuntimeControlAccepted {
         wall_ts_ms: i64,
@@ -439,11 +474,20 @@ pub enum WalRecord {
     /// already produced, which is what makes chain reads and single-segment
     /// reads agree.
     #[serde(
-        rename = "segment_base_v3",
+        rename = "segment_base_v4",
+        alias = "segment_base_v3",
         alias = "segment_base_v2",
         alias = "segment_base"
     )]
     SegmentBase {
+        #[serde(default)]
+        pending_order_dispatches: Vec<crate::order_dispatch::OrderDispatchState>,
+        #[serde(default)]
+        strategy_processes: Vec<crate::strategy_process::StrategyProcessState>,
+        #[serde(default)]
+        strategy_callbacks: Vec<crate::strategy_process::StrategyCallbackInput>,
+        #[serde(default)]
+        portfolio: Option<crate::portfolio::PortfolioState>,
         wall_ts_ms: i64,
         /// The id tables, same meaning as [`WalRecord::Names`].
         strategies: Vec<String>,
@@ -501,6 +545,10 @@ pub enum WalRecord {
         #[serde(default)]
         signal_gaps: Vec<SignalGap>,
         #[serde(default)]
+        signal_producers: Vec<crate::SignalProducerLifecycle>,
+        #[serde(default)]
+        signal_suspensions: Vec<crate::SignalAdmissionSuspension>,
+        #[serde(default)]
         strategy_effects: StrategyEffectsState,
         /// Accepted runtime entry requests in append order. The whole history
         /// is retained so a retried old request id stays a no-op after
@@ -527,8 +575,20 @@ pub struct StrategyEffectsState {
     pub transitions: Vec<StrategyTransitionState>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "owner", rename_all = "snake_case")]
+pub enum StrategyTransitionOrigin {
+    #[default]
+    Embedded,
+    Process {
+        callback_id: u64,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StrategyTransitionState {
+    #[serde(default)]
+    pub origin: StrategyTransitionOrigin,
     pub id: u64,
     pub strategy: StrategyId,
     pub effects: Vec<crate::Action>,
@@ -858,6 +918,8 @@ mod tests {
     #[test]
     fn old_numeric_fees_stay_known_and_absent_fees_stay_unknown() {
         let recovered = WalRecord::RecoveredFill {
+            allocation: None,
+            amounts: None,
             exec_id: "exec-1".into(),
             client_order_id: "eng-1".into(),
             symbol: SymbolId(2),
@@ -890,6 +952,8 @@ mod tests {
 
         let delivered = WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: "exec-2".into(),
                 client_order_id: "eng-2".into(),
                 symbol: SymbolId(1),
@@ -920,6 +984,8 @@ mod tests {
     #[test]
     fn a_recovered_fill_written_before_the_venue_reason_still_replays() {
         let recovered = WalRecord::RecoveredFill {
+            allocation: None,
+            amounts: None,
             exec_id: "exec-1".into(),
             client_order_id: String::new(),
             symbol: SymbolId(2),
@@ -950,6 +1016,12 @@ mod tests {
     #[test]
     fn old_segment_base_without_new_defaulted_fields_still_reads() {
         let base = WalRecord::SegmentBase {
+            pending_order_dispatches: Vec::new(),
+            signal_producers: Vec::new(),
+            signal_suspensions: Vec::new(),
+            portfolio: Some(Default::default()),
+            strategy_processes: Vec::new(),
+            strategy_callbacks: Vec::new(),
             wall_ts_ms: 1,
             strategies: Vec::new(),
             symbols: Vec::new(),
@@ -978,7 +1050,7 @@ mod tests {
             }],
         };
         let mut encoded = serde_json::to_value(&base).expect("serialize segment base");
-        assert_eq!(encoded["kind"], "segment_base_v3");
+        assert_eq!(encoded["kind"], "segment_base_v4");
         encoded["kind"] = serde_json::Value::String("segment_base".into());
         encoded
             .as_object_mut()
@@ -996,6 +1068,11 @@ mod tests {
             "signal_subscriptions",
             "signal_gaps",
             "strategy_effects",
+            "portfolio",
+            "signal_producers",
+            "strategy_processes",
+            "strategy_callbacks",
+            "pending_order_dispatches",
             "runtime_control_requests",
             "runtime_control_consumed",
             "rolling_loss_rows",

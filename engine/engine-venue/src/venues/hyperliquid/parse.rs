@@ -16,9 +16,11 @@
 //! what makes the risk kernel's existing stop discipline mean the same thing
 //! here as it does on Bybit.
 
+#[cfg(test)]
+use engine_types::VenueExecution;
 use std::collections::HashMap;
 
-use engine_types::orders::{OrderAck, VenueExecution, VenueOrder};
+use engine_types::orders::{OrderAck, VenueOrder};
 use engine_types::risk::PositionView;
 use engine_types::{Side, SymbolId, VenueError};
 use serde_json::Value;
@@ -121,36 +123,63 @@ pub(crate) fn parse_order_ack(
 
 /// The venue's asset list out of a `meta` reply. Position in the list is the
 /// asset number that goes on the wire.
+#[cfg(test)]
 pub(crate) fn parse_meta(result: &Value) -> Result<Vec<Asset>, VenueError> {
-    let universe = result
-        .get("universe")
-        .and_then(Value::as_array)
-        .ok_or_else(|| VenueError::BadReply("meta carries no universe".to_string()))?;
-    let mut out = Vec::with_capacity(universe.len());
-    for (index, row) in universe.iter().enumerate() {
-        // A delisted asset keeps its position in the list — the numbers are
-        // positional, so it cannot be skipped — but it must not be offered as
-        // tradable.
-        let delisted = row
-            .get("isDelisted")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if delisted {
+    parse_meta_raw(&result.to_string())
+}
+
+pub(crate) fn parse_meta_raw(raw: &str) -> Result<Vec<Asset>, VenueError> {
+    use crate::wire::{Field, IntegerField};
+    use engine_public::numeric_wire::{decode_object, DecimalField};
+    #[derive(serde::Deserialize)]
+    struct Meta {
+        universe: Vec<Box<serde_json::value::RawValue>>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Row {
+        name: String,
+        sz_decimals: IntegerField,
+        #[serde(default)]
+        is_delisted: Field<bool>,
+        #[serde(default)]
+        max_leverage: DecimalField,
+    }
+    let meta: Meta = decode_object(raw).map_err(|e| VenueError::BadReply(e.to_string()))?;
+    let mut out = Vec::with_capacity(meta.universe.len());
+    for (index, raw) in meta.universe.into_iter().enumerate() {
+        let row: Row = decode_object(raw.get()).map_err(|e| VenueError::BadReply(e.to_string()))?;
+        if row.is_delisted.0.unwrap_or(false) {
             continue;
         }
+        let sz_decimals = u32::try_from(row.sz_decimals.required("szDecimals")?)
+            .map_err(|_| VenueError::BadReply("szDecimals is negative".into()))?;
+        if sz_decimals > 6 {
+            return Err(VenueError::BadReply(
+                "perpetual szDecimals exceeds the six-decimal price budget".into(),
+            ));
+        }
         out.push(Asset {
-            coin: str_field(row, "name")?,
+            coin: row.name,
             index: u32::try_from(index).map_err(|_| {
-                VenueError::BadReply("the venue lists more assets than fit an index".to_string())
+                VenueError::BadReply("the venue lists more assets than fit an index".into())
             })?,
-            sz_decimals: u32::try_from(int_field(row, "szDecimals")?)
-                .map_err(|_| VenueError::BadReply("szDecimals is negative".to_string()))?,
-            max_leverage: opt_num_field(row, "maxLeverage")?.unwrap_or(1.0),
+            sz_decimals,
+            max_leverage: row
+                .max_leverage
+                .optional("maxLeverage")?
+                .map(|n| {
+                    n.value
+                        .to_f64()
+                        .map_err(|e| VenueError::BadReply(e.to_string()))
+                })
+                .transpose()?
+                .unwrap_or(1.0),
         });
     }
     if out.is_empty() {
         return Err(VenueError::BadReply(
-            "the venue listed no tradable assets".to_string(),
+            "the venue listed no tradable assets".into(),
         ));
     }
     Ok(out)
@@ -357,6 +386,7 @@ fn is_supported_native_stop(row: &Value) -> Result<bool, VenueError> {
 }
 
 /// Fills out of a `userFillsByTime` reply.
+#[cfg(test)]
 pub(crate) fn parse_executions(fills: &Value) -> Result<Vec<VenueExecution>, VenueError> {
     let rows = fills
         .as_array()
@@ -368,28 +398,9 @@ pub(crate) fn parse_executions(fills: &Value) -> Result<Vec<VenueExecution>, Ven
     Ok(out)
 }
 
+#[cfg(test)]
 pub(crate) fn parse_execution(row: &Value) -> Result<VenueExecution, VenueError> {
-    let coin = str_field(row, "coin")?;
-    Ok(VenueExecution {
-        // The venue's own trade id. Unique per fill, and the dedup key when
-        // history is read twice.
-        exec_id: int_field(row, "tid")?.to_string(),
-        client_order_id: row
-            .get("cloid")
-            .and_then(Value::as_str)
-            .and_then(cloid::from_cloid)
-            .unwrap_or_default(),
-        symbol: symbol_of(&coin),
-        side: side_of(row)?,
-        qty: num_field(row, "sz")?,
-        px: num_field(row, "px")?,
-        fee: Some(num_field(row, "fee")?),
-        // `crossed` says we took liquidity, so the maker share is its opposite.
-        is_maker: !row.get("crossed").and_then(Value::as_bool).unwrap_or(true),
-        // Hyperliquid states no reason for a close on this row.
-        forced_close: None,
-        venue_ts_ms: int_field(row, "time")?,
-    })
+    super::execution::decode(row)
 }
 
 /// `A` is the ask side and `B` the bid. Spelled out rather than guessed at:
@@ -459,6 +470,15 @@ mod tests {
 
         // Anything else is unreadable rather than assumed acknowledged.
         assert!(parse_order_ack(&json!({"waitingForFill": {}}), "x", 1).is_err());
+    }
+
+    #[test]
+    fn excessive_size_precision_is_refused_before_integer_scaling() {
+        let meta = json!({"universe":[{"name":"BTC","szDecimals":4294967295u32}]});
+        assert!(
+            parse_meta(&meta).is_err(),
+            "unbounded szDecimals reached integer scaling"
+        );
     }
 
     #[test]

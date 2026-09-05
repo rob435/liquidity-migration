@@ -20,17 +20,41 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         for earlier in earlier {
             self.journal_transition(earlier)?;
         }
-        let mut transition = self
+        let transition = self.prepare_transition(id)?;
+        self.wal.append(&WalRecord::StrategyTransitionQueued {
+            transition: transition.clone(),
+        })?;
+        self.wal.barrier()?;
+        for id in transition.order_ids.iter().flatten() {
+            self.books.registry.own(id, transition.strategy);
+        }
+        self.host.effects.transitions.insert(id, transition);
+        self.host.effects.journaled.insert(id);
+        Ok(())
+    }
+
+    pub(super) fn prepare_transition(
+        &mut self,
+        id: u64,
+    ) -> Result<engine_types::StrategyTransitionState, EngineError> {
+        let transition = self
             .host
             .effects
             .transitions
             .get(&id)
             .ok_or_else(|| EngineError::State(format!("missing strategy transition {id}")))?
             .clone();
+        self.prepare_effect_transition(transition)
+    }
+
+    pub(super) fn prepare_effect_transition(
+        &mut self,
+        mut transition: engine_types::StrategyTransitionState,
+    ) -> Result<engine_types::StrategyTransitionState, EngineError> {
+        let id = transition.id;
         for (action, order_id) in transition.effects.iter().zip(&mut transition.order_ids) {
             if matches!(action, Action::Place(_)) {
                 let id = self.mint_id();
-                self.books.registry.own(&id, transition.strategy);
                 *order_id = Some(id);
             }
         }
@@ -43,13 +67,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 ))
             },
         )?;
-        self.wal.append(&WalRecord::StrategyTransitionQueued {
-            transition: transition.clone(),
-        })?;
-        self.wal.barrier()?;
-        self.host.effects.transitions.insert(id, transition);
-        self.host.effects.journaled.insert(id);
-        Ok(())
+        Ok(transition)
     }
 
     pub(super) fn complete_effect(&mut self, effect: Option<EffectKey>) -> Result<(), EngineError> {
@@ -140,10 +158,23 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         while !self.host.pending.is_empty()
             || !self.ready_actions.is_empty()
             || !self.pending_mutations.is_empty()
+            || self.dispatches.write.is_some()
         {
             tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.drain(clock::now_ns()))
                 .await
                 .map_err(|_| EngineError::Boot("timed out restoring strategy effects".into()))??;
+            if self.dispatches.write.is_some() {
+                let result =
+                    tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.dispatches.durable.recv())
+                        .await
+                        .map_err(|_| {
+                            EngineError::Boot(
+                                "timed out restoring order dispatch durability".into(),
+                            )
+                        })?;
+                self.on_order_dispatch_durable(result).await?;
+                continue;
+            }
             if !self.pending_mutations.is_empty() {
                 let completion =
                     tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.venue_completions.recv())
@@ -159,7 +190,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.take_venue_completion(completion).await?;
             }
         }
-        self.settle_barrier()?;
         Ok(())
     }
 }

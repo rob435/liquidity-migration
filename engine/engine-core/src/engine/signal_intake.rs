@@ -39,6 +39,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         frontiers: Vec<engine_types::SignalSourceFrontier>,
         feed: &mut F,
     ) -> Result<(), EngineError> {
+        if self.signals.producers().next().is_some() {
+            return self.refuse_signal_readiness(
+                "managed producer cannot downgrade to readiness schema one".into(),
+                feed,
+            );
+        }
         let gaps = match self
             .signals
             .frontier_gaps(&frontiers, self.host.strategies.len())
@@ -74,8 +80,132 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             text: format!("producer readiness refused: {reason}"),
         })?;
         self.queue_halted_entry_cancels()?;
-        feed.request_readiness()
-            .map_err(|error| EngineError::State(error.to_string()))
+        feed.request_lifecycle(
+            self.signals.producers().cloned().collect(),
+            self.signals.lifecycle_legacy_sources(),
+        )
+        .map_err(|error| EngineError::State(error.to_string()))
+    }
+
+    pub(super) fn persist_signal_lifecycle(
+        &mut self,
+        state: engine_types::SignalProducerLifecycle,
+    ) -> Result<(), EngineError> {
+        self.signals
+            .validate_producer_lifecycle(&state, self.host.strategies.len())
+            .map_err(EngineError::State)?;
+        self.wal.append(&WalRecord::SignalProducerLifecycle {
+            wall_ts_ms: clock::wall_ms(),
+            state: state.clone(),
+        })?;
+        self.wal.barrier()?;
+        self.signals
+            .apply_producer_lifecycle(state, self.host.strategies.len())
+            .map_err(EngineError::State)
+    }
+
+    pub(super) fn accept_signal_lifecycle<F: SignalFeed>(
+        &mut self,
+        response: engine_types::SignalLifecycleResponse,
+        feed: &mut F,
+    ) -> Result<(), EngineError> {
+        if response.schema_version != engine_types::SIGNAL_LIFECYCLE_SCHEMA_VERSION {
+            return self
+                .refuse_signal_readiness("unsupported producer lifecycle schema".into(), feed);
+        }
+        if response.producer.sealed
+            && self.pending_signal_deliveries.iter().any(|pending| {
+                response.producer.sources.iter().any(|source| {
+                    source.source == pending.source && pending.sequence > source.published_through
+                })
+            })
+        {
+            return self.refuse_signal_readiness(
+                "producer seal omits an input already waiting for symbol admission".into(),
+                feed,
+            );
+        }
+        let state = match self
+            .signals
+            .plan_producer_report(&response.producer, self.host.strategies.len())
+        {
+            Ok(state) => state,
+            Err(reason) => return self.refuse_signal_readiness(reason, feed),
+        };
+        let gaps = match self.signals.lifecycle_gaps(&state) {
+            Ok(gaps) => gaps,
+            Err(reason) => return self.refuse_signal_readiness(reason, feed),
+        };
+        if self
+            .signals
+            .producers()
+            .find(|known| known.producer == state.producer)
+            != Some(&state)
+        {
+            self.persist_signal_lifecycle(state.clone())?;
+        }
+        for gap in gaps {
+            if self.signals.gap_changed(&gap) {
+                self.wal.append(&WalRecord::SignalGapRecorded {
+                    wall_ts_ms: clock::wall_ms(),
+                    gap: gap.clone(),
+                })?;
+                self.wal.barrier()?;
+                self.signals.record_gap(gap);
+            }
+        }
+        if state.legacy.is_empty()
+            && !state.unresolved_tail
+            && response.producer.epoch.is_some()
+            && !response.producer.sealed
+        {
+            let frontiers = response.producer.sources;
+            let gaps = match self
+                .signals
+                .frontier_gaps(&frontiers, self.host.strategies.len())
+            {
+                Ok(gaps) => gaps,
+                Err(reason) => return self.refuse_signal_readiness(reason, feed),
+            };
+            for gap in gaps {
+                if self.signals.gap_changed(&gap) {
+                    self.wal.append(&WalRecord::SignalGapRecorded {
+                        wall_ts_ms: clock::wall_ms(),
+                        gap: gap.clone(),
+                    })?;
+                    self.wal.barrier()?;
+                    self.signals.record_gap(gap);
+                }
+            }
+            self.signals.set_producer_frontiers(frontiers);
+        } else {
+            self.signals.clear_readiness();
+        }
+        self.advance_signal_lifecycles(feed)?;
+        self.update_signal_requests(feed)?;
+        self.queue_halted_entry_cancels()
+    }
+
+    pub(super) fn advance_signal_lifecycles<F: SignalFeed>(
+        &mut self,
+        feed: &mut F,
+    ) -> Result<(), EngineError> {
+        let updates = self
+            .signals
+            .lifecycle_advances()
+            .map_err(EngineError::State)?;
+        if updates.is_empty() {
+            return Ok(());
+        }
+        for state in updates {
+            self.persist_signal_lifecycle(state)?;
+        }
+        self.signals.begin_readiness_request();
+        feed.request_lifecycle(
+            self.signals.producers().cloned().collect(),
+            self.signals.lifecycle_legacy_sources(),
+        )
+        .map_err(|error| EngineError::State(error.to_string()))
     }
 
     pub(super) fn queue_signal_observation<F: SignalFeed>(
@@ -102,6 +232,29 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .signals
             .classify(&observation)
             .map_err(EngineError::State)?;
+        if admission == crate::signal_state::Admission::Unregistered {
+            let producer = self
+                .signals
+                .producers()
+                .find(|state| {
+                    state
+                        .routes
+                        .iter()
+                        .any(|route| route.destination == observation.destination)
+                })
+                .cloned();
+            if let Some(mut state) = producer {
+                if !state.unresolved_tail {
+                    state.unresolved_tail = true;
+                    self.persist_signal_lifecycle(state)?;
+                }
+            }
+            self.signals.clear_readiness();
+            self.queue_halted_entry_cancels()?;
+            return feed
+                .defer_last(observation)
+                .map_err(|error| EngineError::State(error.to_string()));
+        }
         if admission != crate::signal_state::Admission::Duplicate
             && self.signal_inputs_blocked(observation.destination)
             && !self
@@ -138,6 +291,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .map_err(|error| EngineError::State(error.to_string()));
             }
             crate::signal_state::Admission::Ready => {}
+            crate::signal_state::Admission::Unregistered => {
+                unreachable!("handled before admission")
+            }
         }
 
         if !self.signals.can_accept(&observation) {
@@ -156,13 +312,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
         if durable.len() > engine_types::MAX_DURABLE_SIGNAL_SUBSCRIPTIONS {
-            return Err(EngineError::State(format!(
-                "signal source {} would retain {} subscriptions for strategy {}; maximum is {}",
-                observation.source,
-                durable.len(),
-                observation.destination.0,
-                engine_types::MAX_DURABLE_SIGNAL_SUBSCRIPTIONS
-            )));
+            return self.suspend_signal_subscription_budget(observation, feed);
         }
 
         for subscription in &observation.subscriptions {
@@ -204,8 +354,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         feed: &mut F,
     ) -> Result<(), EngineError> {
         let observations = std::mem::take(&mut self.pending_signal_deliveries);
-        let now = clock::now_ns();
         for observation in observations {
+            if self
+                .signals
+                .classify(&observation)
+                .map_err(EngineError::State)?
+                != crate::signal_state::Admission::Ready
+            {
+                self.queue_signal_observation(observation, feed)?;
+                continue;
+            }
             // Symbol admission can yield while wall time is corrected.
             if !crate::signals::signal_available(&observation, clock::wall_ms()) {
                 feed.defer_last(observation)
@@ -242,22 +400,70 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .map_err(|error| EngineError::State(error.to_string()))?;
                 continue;
             }
+            let known = self
+                .signals
+                .route_subscriptions(&observation.source, observation.destination);
+            if known.len()
+                + observation
+                    .subscriptions
+                    .iter()
+                    .filter(|row| !known.contains(row))
+                    .count()
+                > engine_types::MAX_DURABLE_SIGNAL_SUBSCRIPTIONS
+            {
+                self.suspend_signal_subscription_budget(observation, feed)?;
+                continue;
+            }
             self.wal.append(&WalRecord::SignalObservation {
                 wall_ts_ms: clock::wall_ms(),
                 observation: observation.clone(),
             })?;
             self.wal.barrier()?;
             self.signals.accept(observation.clone());
-            self.feed_one_strategy(
-                observation.destination,
-                &EngineEvent::Signal(observation),
-                now,
-            );
+            self.deliver_pending_signal_callbacks();
             feed.acknowledge_last()
                 .map_err(|error| EngineError::State(error.to_string()))?;
         }
         self.update_signal_requests(feed)?;
         Ok(())
+    }
+
+    fn suspend_signal_subscription_budget<F: SignalFeed>(
+        &mut self,
+        observation: SignalObservation,
+        feed: &mut F,
+    ) -> Result<(), EngineError> {
+        let suspension = Some(
+            engine_types::SignalAdmissionSuspensionReason::SubscriptionBudget {
+                subscriptions: observation.subscriptions.clone(),
+            },
+        );
+        self.wal.append(&WalRecord::SignalAdmissionChanged {
+            destination: observation.destination,
+            suspension: suspension.clone(),
+        })?;
+        self.wal.barrier()?;
+        self.signals
+            .set_suspension(
+                observation.destination,
+                suspension,
+                self.host.strategies.len(),
+            )
+            .map_err(EngineError::State)?;
+        self.update_signal_requests(feed)?;
+        self.queue_halted_entry_cancels()?;
+        feed.defer_last(observation)
+            .map_err(|error| EngineError::State(error.to_string()))
+    }
+
+    pub(super) fn deliver_pending_signal_callbacks(&mut self) {
+        let rows: Vec<_> = self.signals.undelivered().cloned().collect();
+        let now = clock::now_ns();
+        for row in rows {
+            if self.feed_one_strategy(row.destination, &EngineEvent::Signal(row.clone()), now) {
+                self.signals.mark_delivered(&row.source, row.sequence);
+            }
+        }
     }
 
     /// Start following symbols a durable observation names that the engine
@@ -355,6 +561,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                  the next attempt"
             ),
         }
+        match self.venue.instrument_specs().await {
+            Ok(specs) => {
+                for (name, spec) in specs {
+                    if let Some(symbol) = self.books.market.table.get(&name) {
+                        order_feed.learn_instrument(symbol, &spec);
+                        self.instrument_specs.insert(symbol, spec);
+                    }
+                }
+            }
+            Err(error) if self.require_exact_instruments => {
+                tracing::warn!(%error, "exact instrument catalog unavailable; new symbols cannot open")
+            }
+            Err(_) => {}
+        }
         for observation in &self.pending_signal_deliveries {
             for subscription in &observation.subscriptions {
                 let Some(symbol) = self.books.market.table.get(&subscription.symbol) else {
@@ -378,3 +598,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "signal_intake_tests.rs"]
+mod tests;

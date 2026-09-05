@@ -103,7 +103,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_resync_survives_being_dropped_over_and_over() {
         // The engine polls this in a `select!` and drops the losing branch's
         // future every turn. A relative sleep would restart on each drop and,
@@ -112,7 +112,7 @@ mod tests {
         const PERIOD: Duration = Duration::from_millis(400);
         let mut feed = MexcOrderFeed::with_period(PERIOD);
         feed.next_update().await.unwrap();
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         for _ in 0..30 {
             let cancelled =
                 tokio::time::timeout(Duration::from_millis(10), feed.next_update()).await;
@@ -129,7 +129,7 @@ mod tests {
         assert!(matches!(resumed, OrderUpdate::StreamReset { .. }));
         let waited = started.elapsed();
         assert!(
-            waited < PERIOD + PERIOD / 2,
+            waited <= PERIOD + Duration::from_millis(1),
             "the period restarted on every cancellation: {waited:?} for a {PERIOD:?} period"
         );
     }

@@ -1671,3 +1671,76 @@ async fn live_public_feed_delivers_l50_and_aggressor_trades() {
     assert!(depth_seen, "no L50 event arrived");
     assert!(trades_seen, "no public trade event arrived");
 }
+
+#[tokio::test]
+async fn retired_topics_leave_the_live_socket_and_reconnect_without_renumbering_ids() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let message = socket.next().await.unwrap().unwrap();
+        let (id, topics) = subscribe_request(&message);
+        assert_eq!(topics, vec!["orderbook.1.BTCUSDT", "orderbook.1.ETHUSDT"]);
+        socket
+            .send(Message::text(subscribe_reply(&id, true, "")))
+            .await
+            .unwrap();
+        socket
+            .send(Message::text(snapshot(1, 10.0, 10.1)))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), socket.next())
+            .await
+            .expect("retirement closes the old socket");
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let message = socket.next().await.unwrap().unwrap();
+        let (id, topics) = subscribe_request(&message);
+        assert_eq!(topics, vec!["orderbook.1.ETHUSDT"]);
+        socket
+            .send(Message::text(subscribe_reply(&id, true, "")))
+            .await
+            .unwrap();
+        socket
+            .send(Message::text(
+                snapshot(2, 20.0, 20.1).replace("BTCUSDT", "ETHUSDT"),
+            ))
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    });
+    let mut feed = BybitPublicFeed::with_url(
+        format!("ws://{address}"),
+        &[
+            Subscription {
+                symbol: "BTCUSDT".into(),
+                feed: Feed::Quote,
+            },
+            Subscription {
+                symbol: "ETHUSDT".into(),
+                feed: Feed::Quote,
+            },
+        ],
+    );
+    assert!(matches!(
+        next(&mut feed).await,
+        MarketEvent::Quote {
+            symbol: SymbolId(0),
+            ..
+        }
+    ));
+    assert!(MarketFeed::retire(&mut feed, "BTCUSDT", Feed::Quote));
+    assert!(matches!(
+        next(&mut feed).await,
+        MarketEvent::FeedReset { .. }
+    ));
+    assert!(
+        matches!(next(&mut feed).await, MarketEvent::Quote { symbol: SymbolId(1), quote } if quote.bid_px == 20.0)
+    );
+    assert_eq!(feed.symbols().get("BTCUSDT"), Some(SymbolId(0)));
+    assert_eq!(feed.symbols().get("ETHUSDT"), Some(SymbolId(1)));
+    assert_eq!(feed.admit("BTCUSDT", Feed::Quote), SymbolId(0));
+    drop(feed);
+    server.abort();
+}

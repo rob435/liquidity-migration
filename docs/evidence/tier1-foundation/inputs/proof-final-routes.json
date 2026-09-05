@@ -1,0 +1,91 @@
+{
+  "scope": "Evolving current candidate snapshot with unchanged new regressions; only old all-pending-signal veto and empty-demand worker controls restored. Not historical source. No compilation shims.",
+  "files": {
+    "engine/engine-core/src/engine/signal_routes.rs": {
+      "candidate_sha256": "aa5fef9358169f37003ed6e4e982148e26f483b0ddd2554aea4cd81c235bb6b3",
+      "disabled_sha256": "7cae1dbde9f47363d4e0a53afa0423e8a5f5be9fcbf595fc0d23a05bf587cb57"
+    },
+    "engine/engine-marketdata/src/bybit/feed.rs": {
+      "candidate_sha256": "e0c297443a783164ceac1535a2d37ca7a027815d6018ef40ccee18926f646b91",
+      "disabled_sha256": "52f35f9a4d2ae3741c38061a4745c4285816b95be999ee9ed29f37752b6ae802"
+    },
+    "engine/engine-marketdata/src/binance.rs": {
+      "candidate_sha256": "9487eb0e39cd0dab5a3fe6206c5305f5664e6808a4a6104f61d9c9a6e752aae1",
+      "disabled_sha256": "ac260ea40d4729173b985baf9a6ffc3e8aef182714538ea280db16cf93c18e9c"
+    },
+    "engine/engine-marketdata/src/hyperliquid.rs": {
+      "candidate_sha256": "2c42752c1e0bd766eb53155536430c1e7c4869f988cd965b4fa66a918d1c3792",
+      "disabled_sha256": "162a6f457f8ecee2806ff0b157107562d420801ffd37a0e3e8792fada4c10e2b"
+    },
+    "engine/engine-marketdata/src/lighter.rs": {
+      "candidate_sha256": "fbc70864f457a7c7faafb61b1011ac81a87d6f0bcb4155bc61233294d6aa509b",
+      "disabled_sha256": "8181ee53b7b3087069c70dbd02480c6897e3a9df5452495ca00696dbe20988d4"
+    },
+    "engine/engine-marketdata/src/mexc.rs": {
+      "candidate_sha256": "3736a8cdf2bf12ba54f9490ad3077042ebc72c1763a45ac3955477233572a45b",
+      "disabled_sha256": "32569bceace50da09322bea1ba47c03bf4d57db91ae99f4f06184d26a2ec8345"
+    },
+    "engine/engine-marketdata/src/variational.rs": {
+      "candidate_sha256": "52ab98227507d7f7f48018468643b7c26c9e5a8cc1d418a40037d6b4c4eb6ed8",
+      "disabled_sha256": "230fa57425075b6583eada57d92e8ab986a1ec59971bade84ffd3860a39e16ba"
+    }
+  },
+  "controls": [
+    {
+      "file": "engine/engine-core/src/engine/signal_routes.rs",
+      "disabled": "Restore all-pending-signal veto on obsolete route retirement"
+    },
+    {
+      "file": "engine/engine-marketdata/src/bybit/feed.rs",
+      "disabled": "Remove no-demand worker suspension"
+    },
+    {
+      "file": "engine/engine-marketdata/src/binance.rs",
+      "disabled": "Remove no-demand worker suspension"
+    },
+    {
+      "file": "engine/engine-marketdata/src/hyperliquid.rs",
+      "disabled": "Remove no-demand worker suspension"
+    },
+    {
+      "file": "engine/engine-marketdata/src/lighter.rs",
+      "disabled": "Remove no-demand worker suspension"
+    },
+    {
+      "file": "engine/engine-marketdata/src/mexc.rs",
+      "disabled": "Remove no-demand worker suspension"
+    },
+    {
+      "file": "engine/engine-marketdata/src/variational.rs",
+      "disabled": "Remove no-demand worker suspension"
+    }
+  ],
+  "before_core": {
+    "log": "/tmp/tier1-next-inputs/pending-route-before.log",
+    "exit_code": 101,
+    "failed": 1,
+    "passed": 0
+  },
+  "before_marketdata": {
+    "log": "/tmp/tier1-next-inputs/empty-demand-before.log",
+    "exit_code": 101,
+    "failed": 6,
+    "passed": 0
+  },
+  "after_setup_failure": {
+    "log": "/tmp/tier1-next-inputs/pending-route-after-stale-dependency.log",
+    "reason": "Shared dedicated target reused a dependency from later snapshot with newer suspension enum. Touch every snapshot Rust source and Cargo.toml before crossing snapshots to force correct local dependency graph rebuild; setup is not behavioral evidence."
+  },
+  "after_core": {
+    "log": "/tmp/tier1-next-inputs/pending-route-after.log",
+    "exit_code": 0,
+    "passed": 1,
+    "failed": 0
+  },
+  "after_marketdata": {
+    "log": "/tmp/tier1-next-inputs/empty-demand-after.log",
+    "exit_code": 0,
+    "passed": 6,
+    "failed": 0
+  }
+}

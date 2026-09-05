@@ -84,6 +84,11 @@ enum Command {
     },
     AccountView(oneshot::Sender<Result<AccountView, VenueError>>),
     InstrumentRules(oneshot::Sender<Result<Vec<(Symbol, InstrumentRule)>, VenueError>>),
+    InstrumentSpecs(
+        oneshot::Sender<
+            Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError>,
+        >,
+    ),
     WorkingOrders(oneshot::Sender<Result<Vec<VenueOrder>, VenueError>>),
     AccountInventory(oneshot::Sender<Result<AccountInventory, VenueError>>),
     Executions {
@@ -93,8 +98,15 @@ enum Command {
     },
 }
 
+struct LookupRequest {
+    symbol: String,
+    client_order_id: String,
+    reply: oneshot::Sender<Result<engine_types::orders::OrderLookup, VenueError>>,
+}
+
 pub struct VenueClient {
     caps: VenueCaps,
+    lookups: Option<mpsc::Sender<LookupRequest>>,
     commands: mpsc::Sender<Command>,
     next_command_id: u64,
 }
@@ -102,12 +114,18 @@ pub struct VenueClient {
 impl VenueClient {
     pub fn spawn<V: VenueGateway>(venue: V) -> (Self, mpsc::Receiver<MutationCompletion>) {
         let caps = venue.caps();
+        let lookups = venue.order_lookup_client().map(|client| {
+            let (send, receive) = mpsc::channel(1);
+            tokio::spawn(run_lookups(client, receive));
+            send
+        });
         let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (completion_tx, completion_rx) = mpsc::channel(COMPLETION_CAPACITY);
         tokio::spawn(run(venue, command_rx, completion_tx));
         (
             Self {
                 caps,
+                lookups,
                 commands: command_tx,
                 next_command_id: 1,
             },
@@ -150,6 +168,39 @@ impl VenueClient {
             spec,
         })?;
         Ok(command_id)
+    }
+
+    pub fn dispatch_order_status(
+        &self,
+        symbol: &str,
+        client_order_id: &str,
+    ) -> Result<oneshot::Receiver<Result<engine_types::orders::OrderLookup, VenueError>>, VenueError>
+    {
+        let (reply, receive) = oneshot::channel();
+        if let Some(lookups) = &self.lookups {
+            lookups
+                .try_send(LookupRequest {
+                    symbol: symbol.into(),
+                    client_order_id: client_order_id.into(),
+                    reply,
+                })
+                .map_err(|error| {
+                    VenueError::Transport(format!("order lookup queue unavailable: {error}"))
+                })?;
+        } else {
+            let _ = reply.send(Ok(engine_types::orders::OrderLookup::Unavailable));
+        }
+        Ok(receive)
+    }
+
+    pub async fn order_status_named(
+        &self,
+        symbol: &str,
+        client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        self.dispatch_order_status(symbol, client_order_id)?
+            .await
+            .map_err(worker_gone)?
     }
 
     pub async fn add_symbol_async(&mut self, symbol: &str) -> Result<Option<SymbolId>, VenueError> {
@@ -303,6 +354,14 @@ impl VenueGateway for VenueClient {
         receive.await.map_err(worker_gone)?
     }
 
+    async fn instrument_specs(
+        &mut self,
+    ) -> Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError> {
+        let (reply, receive) = oneshot::channel();
+        self.send(Command::InstrumentSpecs(reply))?;
+        receive.await.map_err(worker_gone)?
+    }
+
     async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError> {
         let (reply, receive) = oneshot::channel();
         self.send(Command::WorkingOrders(reply))?;
@@ -327,6 +386,24 @@ impl VenueGateway for VenueClient {
             reply,
         })?;
         receive.await.map_err(worker_gone)?
+    }
+}
+
+async fn run_lookups(
+    client: Box<dyn engine_types::orders::OrderLookupClient>,
+    mut requests: mpsc::Receiver<LookupRequest>,
+) {
+    while let Some(LookupRequest {
+        symbol,
+        client_order_id,
+        mut reply,
+    }) = requests.recv().await
+    {
+        tokio::select! {
+            biased;
+            _ = reply.closed() => {}
+            result = client.lookup(&symbol, &client_order_id) => { let _ = reply.send(result); }
+        }
     }
 }
 
@@ -436,6 +513,9 @@ async fn run<V: VenueGateway>(
             }
             Command::InstrumentRules(reply) => {
                 let _ = reply.send(venue.instrument_rules().await);
+            }
+            Command::InstrumentSpecs(reply) => {
+                let _ = reply.send(venue.instrument_specs().await);
             }
             Command::WorkingOrders(reply) => {
                 let _ = reply.send(venue.working_orders().await);

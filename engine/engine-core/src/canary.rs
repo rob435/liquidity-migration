@@ -377,6 +377,8 @@ fn make_plan(
                 trigger_px: stop_px,
             }),
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         },
         close_id,
@@ -990,6 +992,8 @@ fn close_request(plan: &CanaryPlan, qty: f64) -> OrderRequest {
         kind: OrderKind::Market,
         stop: None,
         reduce_only: true,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: true,
     }
 }
@@ -1303,6 +1307,7 @@ mod tests {
             qty: plan.request.qty,
         });
         let fill = VenueExecution {
+            amounts: None,
             exec_id: "fill-1".into(),
             client_order_id: plan.request.client_order_id.clone(),
             symbol: "XRPUSDT".into(),
@@ -1439,6 +1444,7 @@ mod tests {
             qty: plan.request.qty,
         });
         let fill = VenueExecution {
+            amounts: None,
             exec_id: "late-fill".into(),
             client_order_id: plan.request.client_order_id.clone(),
             symbol: "XRPUSDT".into(),
@@ -1493,6 +1499,7 @@ mod tests {
             qty: plan.request.qty,
         });
         let fill = VenueExecution {
+            amounts: None,
             exec_id: "fill-before-lost-close-reply".into(),
             client_order_id: plan.request.client_order_id.clone(),
             symbol: "XRPUSDT".into(),

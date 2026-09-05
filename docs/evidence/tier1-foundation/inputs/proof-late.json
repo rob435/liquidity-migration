@@ -1,0 +1,66 @@
+{
+  "scope": "Current candidate snapshot, unchanged regression tests; only explicitly listed controls disabled. No claim this is the historical f69a source.",
+  "files": {
+    "engine/engine-core/src/engine/signal_intake.rs": {
+      "candidate_sha256": "4875f3fb4af8921d4dd9c8d28cc8c3e8d0cc3f427d26b4cbde37feeed26fab9c",
+      "disabled_sha256": "76e4cdfb457e5de506666aef116211a57f23f9e97ed26b4a1ecacf89db48e6d6"
+    },
+    "engine/engine-core/src/signals/readiness.rs": {
+      "candidate_sha256": "6ae29f945f9cd1b7b92d0b59386539105f76888a1b05c6ebcd43b3fb4d108732",
+      "disabled_sha256": "673db65bccbbc7b7ce001da32e6491c2fae536b6a3d9eeb84cdda6c1c659c84c"
+    },
+    "engine/engine-core/src/signal_state/lifecycle.rs": {
+      "candidate_sha256": "d1569d32e93455466f44c2792ed4d5d3c1c9157babe52c55e7eccc950fbe31f5",
+      "disabled_sha256": "c6c50e2610e1e45fa0d19c9078d734f1e6e94c750b13fdc98ba69449043dd2cb"
+    },
+    "engine/engine-core/src/signals/mod.rs": {
+      "candidate_sha256": "aa1b674329f78a53d4ceb53326624f121f13c8cf18d949be9c73de40781e62b0",
+      "disabled_sha256": "af8341dd749c0fcdd535d201b0980f99f3f15f378610a22646631159cf858538"
+    },
+    "engine/engine-core/src/backtest/signals.rs": {
+      "candidate_sha256": "32dda9d64c3a745e29f528008d01f31cd479a1aacfd33736984001492a8fedb1",
+      "disabled_sha256": "64b97aeb530d36ab188ae50808be6c749716e5a40101a397daa1546893d01ed1"
+    }
+  },
+  "mutations": [
+    {
+      "file": "engine/engine-core/src/engine/signal_intake.rs",
+      "control_disabled": "Mark failed callback admission delivered"
+    },
+    {
+      "file": "engine/engine-core/src/engine/signal_intake.rs",
+      "control_disabled": "Omit pending symbol-admission tail seal check"
+    },
+    {
+      "file": "engine/engine-core/src/signals/readiness.rs",
+      "control_disabled": "Acknowledge latest watch version instead of selected; stop lifecycle watcher after first response"
+    },
+    {
+      "file": "engine/engine-core/src/signal_state/lifecycle.rs",
+      "control_disabled": "Omit retired identity generation/destination validation"
+    },
+    {
+      "file": "engine/engine-core/src/signal_state/lifecycle.rs",
+      "control_disabled": "Omit latest retired seal upper frontier validation"
+    },
+    {
+      "file": "engine/engine-core/src/signal_state/lifecycle.rs",
+      "control_disabled": "Omit predecessor seal identity validation in rotation"
+    },
+    {
+      "file": "engine/engine-core/src/signals/mod.rs",
+      "control_disabled": "Omit retired producer subscription routes from runner restore"
+    },
+    {
+      "file": "engine/engine-core/src/backtest/signals.rs",
+      "control_disabled": "Allow managed observation-only replay without lifecycle context"
+    }
+  ],
+  "compilation_adjustment": "Explicit BTreeSet<StrategyId> type after disabled predecessor check removes its inference; no behavior change.",
+  "before": {
+    "log": "/tmp/tier1-next-inputs/late-controls-before.log",
+    "exit_code": 101,
+    "passed": 81,
+    "failed": 8
+  }
+}

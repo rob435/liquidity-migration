@@ -7,11 +7,10 @@
 
 use crate::wire::{self, Field};
 use engine_types::ids::{Symbol, SymbolId};
-use engine_types::orders::{
-    AccountOrder, AccountPosition, ForcedClose, InstrumentRule, OrderAck, VenueExecution,
-    VenueOrder,
-};
+use engine_types::orders::{AccountOrder, AccountPosition, InstrumentRule, OrderAck, VenueOrder};
 use engine_types::risk::PositionView;
+#[cfg(test)]
+use engine_types::{ForcedClose, VenueExecution};
 use engine_types::{Side, VenueError};
 use serde::Deserialize;
 use serde_json::Value;
@@ -1060,86 +1059,25 @@ fn is_supported_native_position_stop(row: &Value) -> Result<bool, VenueError> {
 /// the last word on the two closes no order precedes — the venue taking the
 /// position over, and the exchange handing it to the other side of the book.
 /// A row that matches none of them is ordinary trading.
-pub(crate) fn forced_close(row: &Value) -> Option<ForcedClose> {
+#[cfg(test)]
+fn forced_close(row: &Value) -> Option<ForcedClose> {
     let text = |name: &str| row.get(name).and_then(Value::as_str).unwrap_or_default();
-    let from_create = match text("createType") {
-        "CreateByStopLoss" | "CreateByPartialStopLoss" | "CreateByTrailingStop" => {
-            Some(ForcedClose::StopLoss)
-        }
-        "CreateByTakeProfit" | "CreateByPartialTakeProfit" | "CreateByTrailingProfit" => {
-            Some(ForcedClose::TakeProfit)
-        }
-        "CreateByLiq" | "CreateByTakeOver_PassThrough" => Some(ForcedClose::Liquidation),
-        "CreateByAdl_PassThrough" => Some(ForcedClose::AutoDeleverage),
-        _ => None,
-    };
-    let from_stop = || match text("stopOrderType") {
-        "StopLoss" | "PartialStopLoss" | "TrailingStop" => Some(ForcedClose::StopLoss),
-        "TakeProfit" | "PartialTakeProfit" => Some(ForcedClose::TakeProfit),
-        _ => None,
-    };
-    let from_exec = || match text("execType") {
-        "BustTrade" => Some(ForcedClose::Liquidation),
-        "AdlTrade" => Some(ForcedClose::AutoDeleverage),
-        _ => None,
-    };
-    from_create.or_else(from_stop).or_else(from_exec)
+    super::execution::classify_close(text("createType"), text("stopOrderType"), text("execType"))
 }
 
 /// One page of `/v5/execution/list`. Only quantity-moving executions come
 /// back: a funding charge appears in this history too, and folding it into a
 /// position sum would corrupt the very number this read exists to repair.
+#[cfg(test)]
 pub(crate) fn parse_executions(
     result: &Value,
 ) -> Result<(Vec<VenueExecution>, String), VenueError> {
     let rows = list_field(result)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        // Trade, AdlTrade, BustTrade and Settle move the position; Funding
-        // and the rest do not.
-        let exec_type = str_field(row, "execType").unwrap_or_default();
-        if !matches!(
-            exec_type.as_str(),
-            "Trade" | "AdlTrade" | "BustTrade" | "Settle"
-        ) {
-            continue;
+        if let Some(execution) = super::execution::ExecutionRow::decode(row)?.normalized(false)? {
+            out.push(execution);
         }
-        let symbol = str_field(row, "symbol")?;
-        let side = match str_field(row, "side")?.as_str() {
-            "Buy" => Side::Buy,
-            "Sell" => Side::Sell,
-            other => {
-                return Err(VenueError::BadReply(format!(
-                    "execution in {symbol} has an unknown side {other:?}"
-                )));
-            }
-        };
-        let exec_id = str_field(row, "execId")?;
-        if exec_id.is_empty() {
-            return Err(VenueError::BadReply(format!(
-                "quantity-moving execution in {symbol} has no execId"
-            )));
-        }
-        let qty = num_field(row, "execQty")?;
-        let px = num_field(row, "execPrice")?;
-        let venue_ts_ms = int_field(row, "execTime")?;
-        if qty <= 0.0 || px <= 0.0 || venue_ts_ms <= 0 {
-            return Err(VenueError::BadReply(format!(
-                "execution {exec_id} in {symbol} has non-positive quantity, price, or timestamp"
-            )));
-        }
-        out.push(VenueExecution {
-            exec_id,
-            client_order_id: str_field(row, "orderLinkId").unwrap_or_default(),
-            symbol,
-            side,
-            qty,
-            px,
-            fee: opt_num_field(row, "execFee")?,
-            is_maker: row.get("isMaker").and_then(Value::as_bool).unwrap_or(false),
-            forced_close: forced_close(row),
-            venue_ts_ms,
-        });
     }
     Ok((out, str_field(result, "nextPageCursor")?))
 }

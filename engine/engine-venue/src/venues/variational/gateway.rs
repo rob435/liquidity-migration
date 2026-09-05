@@ -213,6 +213,8 @@ mod tests {
             kind: OrderKind::Market,
             stop: None,
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         }
     }

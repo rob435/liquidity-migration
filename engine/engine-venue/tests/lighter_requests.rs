@@ -44,6 +44,8 @@ fn entry(kind: OrderKind, stop: Option<StopSpec>) -> OrderRequest {
         kind,
         stop,
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     }
 }
@@ -551,4 +553,89 @@ async fn the_account_identity_names_the_venue_the_account_and_the_realm() {
     assert_eq!(who.user_id, "42");
     // The lease has to be able to name a file after it.
     assert!(engine_venue::lease::account_key_text(&who.user_id).is_some());
+}
+
+#[tokio::test]
+async fn filtered_history_rows_do_not_make_a_full_wire_page_look_complete() {
+    let server = TestServer::start(|request, seen| {
+        if request.path != "/api/v1/trades" {
+            return answer(request);
+        }
+        let own = |id, account, time| {
+            serde_json::json!({
+                "trade_id":id,"market_id":0,"ask_account_id":999,"bid_account_id":account,
+                "is_maker_ask":true,"bid_client_order_index":0,"size":"0.01","price":"100",
+                "fee":"0.001","timestamp":time
+            })
+        };
+        let rows = if seen == 0 {
+            let mut rows = (0..99).map(|i| own(1000 + i, 900, 199)).collect::<Vec<_>>();
+            rows.push(own(1, 42, 200));
+            rows
+        } else {
+            vec![own(2, 42, 201)]
+        };
+        (
+            200,
+            serde_json::json!({"code":200,"trades":rows}).to_string(),
+        )
+    })
+    .await;
+    let mut venue = gateway(&server);
+    let rows = venue.executions(100, 300).await.unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "filtered rows falsely ended a full execution-history page"
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.exec_id.as_str())
+            .collect::<Vec<_>>(),
+        ["1", "2"]
+    );
+    assert_eq!(server.to_path("/api/v1/trades").len(), 2);
+}
+
+#[tokio::test]
+async fn exact_order_size_does_not_lose_a_lot_during_integer_wire_scaling() {
+    use engine_types::numeric::Exact;
+    use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
+    let server = TestServer::start(|request, _| {
+        if request.path == "/api/v1/orderBookDetails" {
+            (
+                200,
+                MARKETS.replace(
+                    "\"supported_size_decimals\":5",
+                    "\"supported_size_decimals\":8",
+                ),
+            )
+        } else {
+            answer(request)
+        }
+    })
+    .await;
+    let mut gw = gateway(&server);
+    let mut request = entry(
+        OrderKind::Limit {
+            px: 95000.0,
+            tif: TimeInForce::Gtc,
+        },
+        None,
+    );
+    ExactOrderTerms {
+        quantity: Exact::parse_decimal("1.23456789").unwrap(),
+        limit_price: Some(Exact::from_u64(95000)),
+        stop_trigger_price: None,
+        physical_stop_trigger_price: None,
+        input_policy: OrderInputPolicy::StrategyShortestDecimal,
+    }
+    .apply_projection(&mut request)
+    .unwrap();
+    gw.send_order(&request).await.unwrap();
+    let (_, tx) = transaction(&server.to_path("/api/v1/sendTx")[0]);
+    assert_eq!(
+        tx["BaseAmount"], 123_456_789,
+        "a legal decimal lot was lost after exact preparation"
+    );
 }

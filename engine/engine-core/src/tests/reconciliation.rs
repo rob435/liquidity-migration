@@ -235,6 +235,7 @@ async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
             symbols: vec!["ZECUSDT".to_string()],
         },
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: "eng-old-1".to_string(),
                 strategy: StrategyId(0),
@@ -244,6 +245,8 @@ async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
                 kind: OrderKind::Market,
                 stop: None,
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 1,
@@ -251,6 +254,8 @@ async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: String::new(),
                 client_order_id: "eng-old-1".to_string(),
                 symbol: SymbolId(0),
@@ -319,6 +324,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
             symbols: vec!["ZECUSDT".to_string()],
         },
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: "eng-old-1".to_string(),
                 strategy: StrategyId(0),
@@ -328,6 +334,8 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
                 kind: OrderKind::Market,
                 stop: None,
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 1,
@@ -335,6 +343,8 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: String::new(),
                 client_order_id: "eng-old-1".to_string(),
                 symbol: SymbolId(0),
@@ -370,6 +380,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
     let mut log = previous.clone();
     log.extend(h.records.lock().unwrap().iter().cloned());
     log.push(WalRecord::OrderSent {
+        dispatch: None,
         request: OrderRequest {
             client_order_id: "eng-new-1".to_string(),
             strategy: StrategyId(1),
@@ -379,6 +390,8 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
             kind: OrderKind::Market,
             stop: None,
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         },
         wire_ns: 3,
@@ -386,6 +399,8 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
     });
     log.push(WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: String::new(),
             client_order_id: "eng-new-1".to_string(),
             symbol: SymbolId(0),

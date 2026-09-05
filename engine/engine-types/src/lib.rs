@@ -4,20 +4,26 @@
 //! public signature in this crate is an integration decision, not a local
 //! edit — the orchestrating session owns this file set.
 //!
-//! Numbers: prices and quantities are `f64` end to end (matching the Python
-//! research system); they are quantized to the instrument's tick and step
-//! only at the venue boundary, via [`quantize`].
+//! Strategy observations retain binary64 compatibility. Execution amounts
+//! retain exact values and provenance; prepared order terms carry exact
+//! quantities and prices through the WAL to venue encoding.
 //! Time: `recv_ns`-style fields are monotonic nanoseconds from the engine's
 //! own clock (comparable to each other, not to wall time); `*_ms` fields are
 //! venue wall-clock milliseconds.
 
 pub mod clock;
+pub mod execution_allocation;
 pub mod ids;
 pub mod market;
+pub mod numeric;
+pub mod order_terms;
 pub mod orders;
+pub mod portfolio;
 pub mod quantize;
 pub mod risk;
+pub mod signal_lifecycle;
 pub mod strategy;
+pub mod strategy_process;
 pub mod wal;
 
 pub use async_trait::async_trait;
@@ -33,6 +39,12 @@ pub use orders::{
     VenueOrder, WorkPolicy,
 };
 pub use risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};
+pub use signal_lifecycle::{
+    legacy_signal_lane, valid_signal_generation, ManagedSignalSource, SignalAdmissionSuspension,
+    SignalAdmissionSuspensionReason, SignalGenerationState, SignalLane, SignalLegacyGeneration,
+    SignalLifecycleRequest, SignalLifecycleResponse, SignalProducerLifecycle, SignalProducerReport,
+    SignalProducerRoute, SIGNAL_LIFECYCLE_SCHEMA_VERSION,
+};
 pub use strategy::{
     CheckpointProvenance, EngineEvent, RuntimeControlCommand, RuntimeControlError,
     RuntimeControlFeed, RuntimeControlRequest, SignalError, SignalFeed, SignalFeedEvent,
@@ -218,6 +230,27 @@ pub trait VenueGateway: Send + 'static {
     async fn account_view(&mut self) -> Result<AccountView, VenueError>;
     /// Tick size, quantity step, and minimums for every tradable symbol.
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError>;
+    fn order_lookup_client(&self) -> Option<Box<dyn orders::OrderLookupClient>> {
+        None
+    }
+
+    /// Exact client-ID lookup; absence in a retained history is not proof of no acceptance.
+    async fn order_status(
+        &mut self,
+        _symbol: SymbolId,
+        _client_order_id: &str,
+    ) -> Result<orders::OrderLookup, VenueError> {
+        Ok(orders::OrderLookup::Unavailable)
+    }
+
+    /// Exact instrument capabilities; absence is never reconstructed from legacy floats.
+    async fn instrument_specs(
+        &mut self,
+    ) -> Result<Vec<(Symbol, numeric::ExactInstrumentSpec)>, VenueError> {
+        Err(VenueError::BadReply(
+            "exact instrument capabilities are unavailable for this venue".to_owned(),
+        ))
+    }
     /// Every order the venue is currently working on this account, whoever
     /// placed it. Read at boot: the log says what this engine sent, and only
     /// the venue can say what is actually out there.
@@ -262,3 +295,5 @@ pub struct VenueMutationTiming {
 }
 
 pub use wal::{StrategyEffectsState, StrategyTransitionState};
+
+pub mod order_dispatch;

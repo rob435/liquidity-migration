@@ -405,6 +405,7 @@ fn prior_state(history_rows: usize, now_ms: i64) -> (Vec<WalRecord>, AccountView
         Vec::new()
     } else {
         replayed.push(WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: ORDER_ID.to_string(),
                 strategy: StrategyId(0),
@@ -414,6 +415,8 @@ fn prior_state(history_rows: usize, now_ms: i64) -> (Vec<WalRecord>, AccountView
                 kind: OrderKind::Market,
                 stop: Some(StopSpec { trigger_px: 99.0 }),
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 1,
@@ -444,6 +447,7 @@ fn history(rows: usize, now_ms: i64) -> Vec<VenueExecution> {
     (0..rows)
         .rev()
         .map(|n| VenueExecution {
+            amounts: None,
             exec_id: format!("venue-exec-{n:016x}"),
             client_order_id: ORDER_ID.to_string(),
             symbol: SYMBOL.to_string(),

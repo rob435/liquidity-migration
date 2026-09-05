@@ -691,11 +691,14 @@ impl Strategy for CheckpointThenExit {
 }
 
 async fn completed_exit_records() -> Vec<WalRecord> {
-    let (mut engine, h) = build(
+    let (mut replay, held) = owned_exit_fixture("checkpoint-exit", Side::Buy, 0.01);
+    let (mut engine, h) = build_with_venue_state(
         allow_all(),
         vec![Box::new(CheckpointThenExit)],
         &["BTCUSDT"],
-        &[],
+        &replay,
+        Vec::new(),
+        held,
     )
     .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
@@ -708,8 +711,8 @@ async fn completed_exit_records() -> Vec<WalRecord> {
         .await
         .unwrap();
     assert_eq!(h.sends.lock().unwrap().len(), 1);
-    let records = h.records.lock().unwrap().clone();
-    records
+    replay.extend(h.records.lock().unwrap().iter().cloned());
+    replay
 }
 
 #[tokio::test]
@@ -720,11 +723,14 @@ async fn restart_after_checkpoint_retains_the_unsent_exit() {
         .position(|record| matches!(record, WalRecord::StrategyGlobalCheckpoint { .. }))
         .unwrap()
         + 1;
-    let (mut restarted, h) = build(
+    let (_, held) = owned_exit_fixture("checkpoint-exit", Side::Buy, 0.01);
+    let (mut restarted, h) = build_with_venue_state(
         allow_all(),
         vec![Box::new(CheckpointThenExit)],
         &["BTCUSDT"],
         &records[..cut],
+        Vec::new(),
+        held,
     )
     .await;
     restarted.finish().await.unwrap();
@@ -739,14 +745,16 @@ async fn restart_after_checkpoint_retains_the_unsent_exit() {
 #[tokio::test]
 async fn restart_after_send_before_effect_completion_does_not_duplicate_the_exit() {
     let records = completed_exit_records().await;
-    let cut = records
+    let request = records
         .iter()
-        .position(|record| matches!(record, WalRecord::OrderSent { .. }))
-        .unwrap()
-        + 1;
-    let WalRecord::OrderSent { request, .. } = &records[cut - 1] else {
-        unreachable!()
-    };
+        .find_map(|record| match record {
+            WalRecord::OrderSent { request, .. } if request.reduce_only => Some(request),
+            _ => None,
+        })
+        .unwrap();
+    let cut = records.iter().position(|record| matches!(record,
+        WalRecord::OrderDispatchAttempted { client_order_id } if client_order_id == &request.client_order_id
+    )).unwrap() + 1;
     let venue_order = VenueOrder {
         client_order_id: request.client_order_id.clone(),
         symbol: "BTCUSDT".into(),
@@ -755,12 +763,14 @@ async fn restart_after_send_before_effect_completion_does_not_duplicate_the_exit
         filled_qty: 0.0,
         reduce_only: true,
     };
-    let (mut restarted, h) = build_with_venue_orders(
+    let (_, held) = owned_exit_fixture("checkpoint-exit", Side::Buy, 0.01);
+    let (mut restarted, h) = build_with_venue_state(
         allow_all(),
         vec![Box::new(CheckpointThenExit)],
         &["BTCUSDT"],
         &records[..cut],
         vec![venue_order],
+        held,
     )
     .await;
     restarted.finish().await.unwrap();
@@ -829,6 +839,8 @@ async fn restoring_a_stalled_venue_mutation_uses_the_existing_drain_deadline() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());
     let (mut venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
+    let (_, held) = owned_exit_fixture("checkpoint-exit", Side::Buy, 0.01);
+    venue.account_readings.lock().unwrap().push_back(held);
     venue.send_delay = Duration::from_secs(60);
     let (risk, _) = MockRisk::with(allow_all());
     let result = tokio::time::timeout(

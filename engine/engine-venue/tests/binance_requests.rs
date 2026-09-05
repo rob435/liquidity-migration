@@ -44,6 +44,8 @@ fn entry(stop: Option<StopSpec>) -> OrderRequest {
         },
         stop,
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     }
 }
@@ -457,6 +459,8 @@ async fn market_orders_use_the_distinct_market_lot_minimum_step_and_maximum() {
         },
         stop: None,
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     };
     let error = gateway.send_order(&too_large_entry).await.unwrap_err();
@@ -475,6 +479,8 @@ async fn market_orders_use_the_distinct_market_lot_minimum_step_and_maximum() {
         kind: OrderKind::Market,
         stop: None,
         reduce_only: true,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     };
     for bad in [0.5, 1.5, 31.0] {

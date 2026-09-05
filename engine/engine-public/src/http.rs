@@ -21,6 +21,7 @@ use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 /// A reply this slow is no use to a trading loop; the caller is told the
@@ -28,6 +29,7 @@ use serde_json::Value;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
+#[derive(Clone)]
 pub struct HttpClient {
     client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
     base: String,
@@ -91,6 +93,15 @@ impl HttpClient {
         query: &str,
         headers: &[(&str, String)],
     ) -> Result<Value, VenueError> {
+        self.get_as(path, query, headers).await
+    }
+
+    pub async fn get_as<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &str,
+        headers: &[(&str, String)],
+    ) -> Result<T, VenueError> {
         let mut req = Request::builder().method("GET").uri(self.url(path, query));
         for (name, value) in headers {
             req = req.header(*name, value);
@@ -110,6 +121,16 @@ impl HttpClient {
         content_type: &str,
         headers: &[(&str, String)],
     ) -> Result<Value, VenueError> {
+        self.post_as(path, body, content_type, headers).await
+    }
+
+    pub async fn post_as<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: String,
+        content_type: &str,
+        headers: &[(&str, String)],
+    ) -> Result<T, VenueError> {
         let mut req = Request::builder()
             .method("POST")
             .uri(self.url(path, ""))
@@ -162,14 +183,14 @@ impl HttpClient {
         self.send(req).await
     }
 
-    async fn send(&self, req: Request<Full<Bytes>>) -> Result<Value, VenueError> {
+    async fn send<T: DeserializeOwned>(&self, req: Request<Full<Bytes>>) -> Result<T, VenueError> {
         let exchange = async {
             let resp = self
                 .client
                 .request(req)
                 .await
                 .map_err(|e| VenueError::Transport(e.to_string()))?;
-            read_json(resp).await
+            read_json_as(resp).await
         };
         match tokio::time::timeout(self.request_timeout, exchange).await {
             Ok(result) => result,
@@ -181,7 +202,7 @@ impl HttpClient {
     }
 }
 
-async fn read_json<B>(resp: Response<B>) -> Result<Value, VenueError>
+async fn read_json_as<B, T: DeserializeOwned>(resp: Response<B>) -> Result<T, VenueError>
 where
     B: Body<Data = Bytes>,
     B::Error: std::error::Error + Send + Sync + 'static,
@@ -253,7 +274,9 @@ mod tests {
     #[tokio::test]
     async fn an_oversized_reply_is_rejected_before_json_parsing() {
         let body = Full::new(Bytes::from(vec![b'x'; MAX_RESPONSE_BYTES + 1]));
-        let err = read_json(Response::new(body)).await.unwrap_err();
+        let err = read_json_as::<_, Value>(Response::new(body))
+            .await
+            .unwrap_err();
         assert!(matches!(err, VenueError::Transport(_)));
     }
 

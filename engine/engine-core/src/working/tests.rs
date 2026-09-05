@@ -43,6 +43,7 @@ fn market(bid_px: f64, ask_px: f64) -> MarketState {
 
 fn sent(id: &str) -> WalRecord {
     WalRecord::OrderSent {
+        dispatch: None,
         request: OrderRequest {
             client_order_id: id.into(),
             strategy: StrategyId(0),
@@ -55,6 +56,8 @@ fn sent(id: &str) -> WalRecord {
             },
             stop: None,
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         },
         wire_ns: 1,
@@ -88,6 +91,8 @@ fn an_order_the_log_has_ended_stops_being_worked() {
         sent("a"),
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: String::new(),
                 client_order_id: "a".into(),
                 symbol: SYMBOL,

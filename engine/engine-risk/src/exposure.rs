@@ -4,11 +4,12 @@
 
 use std::collections::HashMap;
 
-use engine_types::ids::SymbolId;
+use engine_types::ids::{StrategyId, SymbolId};
 use engine_types::orders::Side;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Pending {
+    pub strategy: StrategyId,
     pub symbol: SymbolId,
     pub signed_qty: f64,
     pub reduce_only: bool,
@@ -115,6 +116,37 @@ impl Book {
             .sum()
     }
 
+    pub(crate) fn owned_reduce_qty(&self, strategy: StrategyId, symbol: SymbolId) -> f64 {
+        self.pending
+            .values()
+            .filter(|p| p.reduce_only && p.strategy == strategy && p.symbol == symbol)
+            .map(|p| p.signed_qty.abs())
+            .sum()
+    }
+
+    pub(crate) fn owned_open_qty(&self, strategy: StrategyId, symbol: SymbolId, side: Side) -> f64 {
+        let sign = if side == Side::Buy { 1.0 } else { -1.0 };
+        self.pending
+            .values()
+            .filter(|p| {
+                !p.reduce_only
+                    && p.strategy == strategy
+                    && p.symbol == symbol
+                    && p.signed_qty.signum() == sign
+            })
+            .map(|p| p.signed_qty.abs())
+            .sum()
+    }
+
+    pub(crate) fn physical_interval(&self, symbol: SymbolId, settled: f64) -> (f64, f64) {
+        self.pending
+            .values()
+            .filter(|p| p.symbol == symbol)
+            .fold((settled, settled), |(low, high), p| {
+                (low + p.signed_qty.min(0.0), high + p.signed_qty.max(0.0))
+            })
+    }
+
     /// Non-reduce-only quantity already admitted on one side. Admission uses
     /// the opposite-side total as a worst-case path: those orders may all fill
     /// before any same-side reservation does, so netting them would hide a
@@ -193,6 +225,7 @@ mod tests {
 
     fn entry(symbol: u16, qty: f64) -> Pending {
         Pending {
+            strategy: StrategyId(0),
             symbol: SymbolId(symbol),
             signed_qty: qty,
             reduce_only: false,

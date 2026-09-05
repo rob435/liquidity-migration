@@ -48,6 +48,8 @@ async fn a_fill_is_priced_against_its_own_orders_midpoint_across_a_restart() {
         kind: OrderKind::Market,
         stop: None,
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     };
     let replayed = vec![
@@ -58,6 +60,7 @@ async fn a_fill_is_priced_against_its_own_orders_midpoint_across_a_restart() {
             commit: String::new(),
         },
         WalRecord::OrderSent {
+            dispatch: None,
             request: before.clone(),
             wire_ns: 1,
             arrival_mid: 30_000.0,
@@ -70,6 +73,8 @@ async fn a_fill_is_priced_against_its_own_orders_midpoint_across_a_restart() {
     let mut orders = ScriptOrderFeed {
         learned: Rc::new(RefCell::new(Vec::new())),
         updates: VecDeque::from(vec![OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: String::new(),
             client_order_id: before.client_order_id.clone(),
             symbol,
@@ -114,6 +119,8 @@ async fn a_fill_the_log_cannot_anchor_is_counted_but_not_priced() {
     let mut orders = ScriptOrderFeed {
         learned: Rc::new(RefCell::new(Vec::new())),
         updates: VecDeque::from(vec![OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: String::new(),
             client_order_id: "placed-by-hand".into(),
             symbol,

@@ -643,10 +643,18 @@ impl Fills {
     /// than left in the queue, so nothing announces them a second time and a
     /// caller that has to count them can still see them.
     pub fn seed_lots(&mut self, records: &[WalRecord]) -> Vec<roundtrip::ClosedTrade> {
-        let mut rebuilt = Fills::from_records(records);
+        self.try_seed_lots(records)
+            .expect("validated execution accounting WAL")
+    }
+
+    pub fn try_seed_lots(
+        &mut self,
+        records: &[WalRecord],
+    ) -> Result<Vec<roundtrip::ClosedTrade>, String> {
+        let mut rebuilt = Fills::try_from_records(records)?;
         let already_closed = rebuilt.lots.take_closed();
         self.lots = rebuilt.lots;
-        already_closed
+        Ok(already_closed)
     }
 
     /// Rebuild everything the log can account for.
@@ -659,12 +667,87 @@ impl Fills {
     /// One pass is enough: an `OrderSent` record is made durable before its
     /// bytes leave the socket, so it is always ahead of its own fills.
     pub fn from_records(records: &[WalRecord]) -> Self {
+        Self::try_from_records(records).expect("validated execution accounting WAL")
+    }
+
+    pub fn try_from_records(records: &[WalRecord]) -> Result<Self, String> {
         let mut sent: HashMap<&str, (StrategyId, f64)> = HashMap::new();
         let mut me = Fills::default();
         for record in records {
             // Before the record is folded, never after: a row is keyed by what
             // its ids meant at its own place in the log, not at the end of it.
             me.learn(record);
+            let allocated = match record {
+                WalRecord::OrderUpdate {
+                    update:
+                        update @ OrderUpdate::Fill {
+                            allocation: Some(_),
+                            ..
+                        },
+                } => Some((update.clone(), false)),
+                WalRecord::RecoveredFill {
+                    allocation: Some(_),
+                    ..
+                } => crate::portfolio_allocation::recovered_update(record, 0)
+                    .map(|update| (update, true)),
+                _ => None,
+            };
+            if let Some((update, recovered)) = allocated {
+                if let OrderUpdate::Fill {
+                    allocation: Some(allocation),
+                    ..
+                } = &update
+                {
+                    for slice in &allocation.slices {
+                        if me.names.strategies.get(slice.strategy.idx())
+                            != Some(&slice.strategy_key)
+                        {
+                            return Err(
+                                "execution allocation owner does not match durable names".into()
+                            );
+                        }
+                    }
+                }
+                for (strategy, update) in crate::portfolio_allocation::slice_updates(&update)?
+                    .ok_or("expected execution slices")?
+                {
+                    let OrderUpdate::Fill {
+                        client_order_id,
+                        symbol,
+                        side,
+                        qty,
+                        px,
+                        fee,
+                        is_maker,
+                        venue_ts_ms,
+                        ..
+                    } = update
+                    else {
+                        unreachable!()
+                    };
+                    let arrival_mid = sent
+                        .get(client_order_id.as_str())
+                        .map_or(0.0, |(_, mid)| *mid);
+                    let fill = Fill {
+                        client_order_id,
+                        strategy,
+                        symbol,
+                        side,
+                        qty,
+                        px,
+                        fee,
+                        is_maker,
+                        venue_ts_ms,
+                        arrival_mid,
+                    };
+                    if recovered {
+                        me.on_recovered_fill(&fill, Some(0));
+                    } else {
+                        me.on_fill(&fill, 0);
+                    }
+                }
+                continue;
+            }
             match record {
                 WalRecord::OrderSent {
                     request,
@@ -842,7 +925,7 @@ impl Fills {
         // incident that never was.
         me.pending.clear();
         me.dropped = 0;
-        me
+        Ok(me)
     }
 }
 

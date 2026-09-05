@@ -56,6 +56,7 @@ fn every_variant() -> Vec<WalRecord> {
             },
         },
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: "eng-0001".to_string(),
                 strategy: StrategyId(2),
@@ -65,6 +66,8 @@ fn every_variant() -> Vec<WalRecord> {
                 kind: OrderKind::Market,
                 stop: None,
                 reduce_only: true,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 99_000_555_000,
@@ -72,6 +75,8 @@ fn every_variant() -> Vec<WalRecord> {
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: String::new(),
                 client_order_id: "eng-0001".to_string(),
                 symbol: SymbolId(11),
@@ -211,6 +216,8 @@ fn new_checkpoints_and_unknown_fees_are_readable_by_the_previous_shape() {
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: "unknown-stream-fee".to_string(),
                 client_order_id: "eng-1".to_string(),
                 symbol: SymbolId(1),
@@ -226,6 +233,8 @@ fn new_checkpoints_and_unknown_fees_are_readable_by_the_previous_shape() {
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: "explicit-zero-stream-fee".to_string(),
                 client_order_id: "eng-2".to_string(),
                 symbol: SymbolId(1),
@@ -240,6 +249,8 @@ fn new_checkpoints_and_unknown_fees_are_readable_by_the_previous_shape() {
             },
         },
         WalRecord::RecoveredFill {
+            allocation: None,
+            amounts: None,
             exec_id: "unknown-recovered-fee".to_string(),
             client_order_id: "eng-3".to_string(),
             symbol: SymbolId(1),
@@ -253,6 +264,8 @@ fn new_checkpoints_and_unknown_fees_are_readable_by_the_previous_shape() {
             recovered_wall_ts_ms: 1_770_000_000_004,
         },
         WalRecord::RecoveredFill {
+            allocation: None,
+            amounts: None,
             exec_id: "explicit-zero-recovered-fee".to_string(),
             client_order_id: "eng-4".to_string(),
             symbol: SymbolId(1),
@@ -556,6 +569,12 @@ fn a_barrier_after_a_rotation_covers_the_new_segment() {
     let (mut wal, _) = WalWriter::open(&path).unwrap();
     wal.append(&note("before rotation")).unwrap();
     let base = WalRecord::SegmentBase {
+        pending_order_dispatches: Vec::new(),
+        signal_producers: Vec::new(),
+        signal_suspensions: Vec::new(),
+        portfolio: Some(Default::default()),
+        strategy_processes: Vec::new(),
+        strategy_callbacks: Vec::new(),
         wall_ts_ms: 1_770_000_000_000,
         strategies: Vec::new(),
         symbols: Vec::new(),
@@ -796,6 +815,8 @@ fn a_number_that_is_not_a_number_is_refused_instead_of_bricking_the_log() {
         let err = wal
             .append(&WalRecord::OrderUpdate {
                 update: OrderUpdate::Fill {
+                    allocation: None,
+                    amounts: None,
                     exec_id: String::new(),
                     client_order_id: "eng-1-1".to_string(),
                     symbol: SymbolId(3),
@@ -879,4 +900,140 @@ fn a_record_written_before_a_field_existed_still_replays() {
     // The fields that were always there are unchanged by the default.
     assert_eq!(policy.window_ms, 120_000);
     assert_eq!(policy.max_amends, 8);
+}
+
+fn atomic_queued_order() -> WalRecord {
+    let mut record = every_variant()
+        .into_iter()
+        .find(|record| matches!(record, WalRecord::OrderSent { .. }))
+        .unwrap();
+    let WalRecord::OrderSent {
+        request, dispatch, ..
+    } = &mut record
+    else {
+        unreachable!()
+    };
+    *dispatch = Some(Box::new(
+        engine_types::order_dispatch::QueuedOrderDispatch {
+            intent: Intent {
+                strategy: request.strategy,
+                symbol: request.symbol,
+                side: request.side,
+                qty: request.qty,
+                kind: request.kind,
+                stop: request.stop,
+                reduce_only: true,
+                tag: "atomic-exit".into(),
+                decided_ns: 7,
+                work: None,
+                leverage: None,
+            },
+            origin_ns: 6,
+        },
+    ));
+    record
+}
+
+#[test]
+fn a_partial_atomic_order_frame_never_replays_an_order_without_its_dispatch() {
+    let dir = TempDir::new().unwrap();
+    let source = dir.path().join("complete.wal");
+    let before = note("checkpoint already committed");
+    let order = atomic_queued_order();
+    write_records(&source, &[before.clone(), order.clone()]);
+    let complete = fs::read(&source).unwrap();
+    let start = frame_spans(&source)[1].0 as usize;
+    let path = dir.path().join("cut.wal");
+    for cut in start..complete.len() {
+        fs::write(&path, &complete[..cut]).unwrap();
+        let (writer, records) = WalWriter::open(&path).unwrap();
+        assert_eq!(
+            records
+                .into_iter()
+                .map(|(_, record)| record)
+                .collect::<Vec<_>>(),
+            std::slice::from_ref(&before),
+            "cut at byte {cut} exposed a partial order/outbox pair"
+        );
+        drop(writer);
+        assert_eq!(
+            fs::read(&path).unwrap().len(),
+            start,
+            "cut at byte {cut} was not repaired to the prior complete frame"
+        );
+    }
+    fs::write(&path, &complete).unwrap();
+    let (_, records) = WalWriter::open(&path).unwrap();
+    assert_eq!(
+        records
+            .into_iter()
+            .map(|(_, record)| record)
+            .collect::<Vec<_>>(),
+        [before, order]
+    );
+}
+
+#[test]
+fn atomic_order_has_a_new_required_tag_and_legacy_order_bytes_still_replay() {
+    let record = atomic_queued_order();
+    let mut value = serde_json::to_value(&record).unwrap();
+    assert_eq!(value["kind"], "order_sent_v2");
+    assert!(value["dispatch"].is_object());
+    value["kind"] = "order_sent".into();
+    value.as_object_mut().unwrap().remove("dispatch");
+    let payload = serde_json::to_vec(&value).unwrap();
+    let mut bytes = b"EWAL0001".to_vec();
+    bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&crc32c::crc32c(&payload).to_le_bytes());
+    bytes.extend_from_slice(&payload);
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    fs::write(&path, &bytes).unwrap();
+    let (_, records) = WalWriter::open(&path).unwrap();
+    assert!(matches!(
+        &records[0].1,
+        WalRecord::OrderSent { dispatch: None, .. }
+    ));
+    assert_eq!(fs::read(path).unwrap(), bytes);
+}
+
+#[test]
+fn an_atomic_order_missing_dispatch_authority_is_refused_without_truncation() {
+    for null in [false, true] {
+        let mut value = serde_json::to_value(atomic_queued_order()).unwrap();
+        if null {
+            value["dispatch"] = serde_json::Value::Null;
+        } else {
+            value.as_object_mut().unwrap().remove("dispatch");
+        }
+        let payload = serde_json::to_vec(&value).unwrap();
+        let mut bytes = b"EWAL0001".to_vec();
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&crc32c::crc32c(&payload).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        let dir = TempDir::new().unwrap();
+        let path = log_path(&dir);
+        fs::write(&path, &bytes).unwrap();
+        assert!(
+            matches!(WalWriter::open(&path), Err(WalError::Corrupt { .. })),
+            "new atomic record silently became a legacy order"
+        );
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn writing_a_legacy_order_preserves_its_legacy_tag() {
+    let record = every_variant()
+        .into_iter()
+        .find(|record| matches!(record, WalRecord::OrderSent { dispatch: None, .. }))
+        .unwrap();
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    write_records(&path, std::slice::from_ref(&record));
+    let bytes = fs::read(&path).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes[16..]).unwrap();
+    assert_eq!(value["kind"], "order_sent");
+    assert!(value.get("dispatch").is_none());
+    assert_eq!(replay(&path).unwrap(), [(1, record)]);
 }

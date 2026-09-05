@@ -59,6 +59,14 @@ fn recent_replay_ms() -> i64 {
 
 fn kind_of(record: &WalRecord) -> String {
     match record {
+        WalRecord::SignalAdmissionChanged { .. } => "signal_admission_changed",
+        WalRecord::StrategyCallbackQueued { .. } => "strategy_callback_queued",
+        WalRecord::OrderDispatchQueued { .. } => "order_dispatch_queued",
+        WalRecord::OrderDispatchAttempted { .. } => "order_dispatch_attempted",
+        WalRecord::OrderDispatchCompleted { .. } => "order_dispatch_completed",
+        WalRecord::StrategyCallbackPrepared { .. } => "strategy_callback_prepared",
+        WalRecord::StrategyProcessTransitionQueued { .. } => "strategy_process_transition_queued",
+        WalRecord::SignalProducerLifecycle { .. } => "signal_producer_lifecycle",
         WalRecord::Boot { .. } => "boot",
         WalRecord::Intent { .. } => "intent",
         WalRecord::Verdict { .. } => "verdict",
@@ -185,12 +193,12 @@ fn appends(tape: &Tape) -> Vec<String> {
 
 // ------------------------------------------------------------------- mocks
 
-struct MockWal {
+pub(crate) struct MockWal {
     tape: Tape,
     records: Rc<RefCell<Vec<WalRecord>>>,
     seq: u64,
     fail_on: Option<String>,
-    fail_barrier_after: Option<&'static str>,
+    pub(crate) fail_barrier_after: Option<&'static str>,
     /// A tape the barrier's own thread can also write to. The ordinary tape
     /// is an `Rc` and cannot leave this thread, and the whole point of a
     /// barrier that runs beside the send is that something else finishes it.
@@ -302,13 +310,14 @@ fn bybit_like_caps() -> VenueCaps {
     }
 }
 
-struct MockVenue {
+pub(crate) struct MockVenue {
     tape: Tape,
     /// Shared with the log's deferred barrier, so one ordered list holds the
     /// send, the disk's answer, and the news that follows. Set by
     /// `watch_with`; `None` records nothing.
     crossing_tape: Option<Arc<Mutex<Vec<&'static str>>>>,
     rules: Vec<(Symbol, InstrumentRule)>,
+    exact_specs: Option<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>>,
     sends: Rc<RefCell<Vec<OrderRequest>>>,
     cancels: Rc<RefCell<Vec<(SymbolId, String)>>>,
     amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>,
@@ -316,6 +325,7 @@ struct MockVenue {
     stop_failures_remaining: Rc<RefCell<usize>>,
     caps: VenueCaps,
     reply: Option<VenueError>,
+    lookup_started: Option<Arc<tokio::sync::Notify>>,
     send_delay: Duration,
     /// What the venue would say it is working. Seeded by a test that wants
     /// boot to find an order the log does not know about.
@@ -355,6 +365,7 @@ impl MockVenue {
                 tape,
                 crossing_tape: None,
                 rules,
+                exact_specs: None,
                 sends: sends.clone(),
                 cancels: Rc::new(RefCell::new(Vec::new())),
                 amends: Rc::new(RefCell::new(Vec::new())),
@@ -362,6 +373,7 @@ impl MockVenue {
                 stop_failures_remaining: Rc::new(RefCell::new(0)),
                 caps: bybit_like_caps(),
                 reply: None,
+                lookup_started: None,
                 send_delay: Duration::ZERO,
                 working: Vec::new(),
                 account_readings: Rc::new(RefCell::new(VecDeque::new())),
@@ -376,6 +388,25 @@ impl MockVenue {
 
 #[engine_types::async_trait]
 impl VenueGateway for MockVenue {
+    fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
+        self.lookup_started.as_ref().map(|started| {
+            Box::new(StalledLookup(started.clone()))
+                as Box<dyn engine_types::orders::OrderLookupClient>
+        })
+    }
+
+    async fn order_status(
+        &mut self,
+        _symbol: SymbolId,
+        _client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        if let Some(started) = &self.lookup_started {
+            started.notify_one();
+            std::future::pending::<()>().await;
+        }
+        Ok(engine_types::orders::OrderLookup::Unavailable)
+    }
+
     fn caps(&self) -> VenueCaps {
         self.caps
     }
@@ -503,6 +534,14 @@ impl VenueGateway for MockVenue {
         })
     }
 
+    async fn instrument_specs(
+        &mut self,
+    ) -> Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError> {
+        self.exact_specs
+            .clone()
+            .ok_or_else(|| VenueError::BadReply("no scripted exact instrument catalog".into()))
+    }
+
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {
         self.tape.lock().unwrap().push(Step::ReadRules);
         Ok(self.rules.clone())
@@ -549,7 +588,7 @@ impl MockRolling {
     }
 }
 
-struct MockRisk {
+pub(crate) struct MockRisk {
     verdict: RiskVerdict,
     amend_verdict: Option<RiskVerdict>,
     seen: Rc<RefCell<Vec<OrderUpdate>>>,
@@ -909,6 +948,72 @@ impl Strategy for Ticker {
             _ => {}
         }
     }
+}
+
+fn owned_exit_fixture(
+    strategy: &str,
+    side: Side,
+    qty: f64,
+) -> (Vec<WalRecord>, Vec<engine_types::PositionView>) {
+    let stop_px = if side == Side::Buy {
+        27_000.0
+    } else {
+        33_000.0
+    };
+    let id = "eng-owned-exit-fixture".to_string();
+    let records = vec![
+        WalRecord::Names {
+            strategies: vec![strategy.into()],
+            symbols: vec!["BTCUSDT".into()],
+        },
+        WalRecord::OrderSent {
+            dispatch: None,
+            request: OrderRequest {
+                client_order_id: id.clone(),
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                side,
+                qty,
+                kind: OrderKind::Market,
+                stop: Some(StopSpec {
+                    trigger_px: stop_px,
+                }),
+                reduce_only: false,
+                close_position: false,
+                sleeve_effect: None,
+                exact_terms: None,
+            },
+            wire_ns: 1,
+            arrival_mid: 30_000.0,
+        },
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                client_order_id: id,
+                exec_id: "owned-exit-fixture-fill".into(),
+                allocation: None,
+                symbol: SymbolId(0),
+                side,
+                qty,
+                px: 30_000.0,
+                fee: Some(0.0),
+                is_maker: false,
+                forced_close: None,
+                venue_ts_ms: recent_replay_ms(),
+                recv_ns: 2,
+                amounts: None,
+            },
+        },
+    ];
+    let held = vec![engine_types::PositionView {
+        symbol: SymbolId(0),
+        side,
+        qty,
+        entry_px: 30_000.0,
+        stop_attached: true,
+        stop_px,
+        leverage: None,
+    }];
+    (records, held)
 }
 
 // ------------------------------------------------------------------ helpers
@@ -1271,3 +1376,91 @@ mod strategy_checkpoints;
 mod strategy_events;
 mod update_contract;
 mod worked_entries;
+
+pub(crate) async fn lifecycle_test_fixture(
+    strategies: Vec<Box<dyn Strategy>>,
+) -> (
+    Engine<MockWal, MockRisk, MockVenue>,
+    Arc<Mutex<Vec<WalRecord>>>,
+) {
+    let (engine, harness) = build(allow_all(), strategies, &[], &[]).await;
+    (engine, harness.records)
+}
+
+pub(crate) async fn callback_test_fixture(
+    strategies: Vec<Box<dyn Strategy>>,
+) -> (
+    Engine<MockWal, MockRisk, MockVenue>,
+    Arc<Mutex<Vec<WalRecord>>>,
+) {
+    let (engine, harness) = build(allow_all(), strategies, &["BTCUSDT"], &[]).await;
+    (engine, harness.records)
+}
+
+impl MockWal {
+    pub(crate) fn delay_callback_barriers(&mut self, duration: Duration) {
+        self.defer_barriers();
+        self.barrier_takes = duration;
+    }
+}
+
+#[tokio::test]
+async fn a_stalled_order_lookup_cannot_hold_a_cancel_or_a_reduction() {
+    let (mut venue, sends) = MockVenue::new(tape(), &["BTCUSDT"]);
+    let started = Arc::new(tokio::sync::Notify::new());
+    venue.lookup_started = Some(started.clone());
+    let (mut client, mut completions) = crate::venue_runtime::VenueClient::spawn(venue);
+    let lookup = client
+        .dispatch_order_status("BTCUSDT", "ambiguous-order")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), started.notified())
+        .await
+        .unwrap();
+    client
+        .dispatch_cancels(vec![(SymbolId(0), "working-opening".into())])
+        .unwrap();
+    let cancellation = tokio::time::timeout(Duration::from_millis(100), completions.recv())
+        .await
+        .expect("lookup held the urgent cancel")
+        .unwrap();
+    assert!(
+        matches!(cancellation, crate::venue_runtime::MutationCompletion::Cancels { replies, .. } if replies.len() == 1 && replies[0].is_ok())
+    );
+    client
+        .dispatch_orders(vec![OrderRequest {
+            client_order_id: "protective-reduction".into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Sell,
+            qty: 0.1,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: true,
+            close_position: false,
+            sleeve_effect: None,
+            exact_terms: None,
+        }])
+        .unwrap();
+    let reduction = tokio::time::timeout(Duration::from_millis(100), completions.recv())
+        .await
+        .expect("lookup held the protective reduction")
+        .unwrap();
+    assert!(
+        matches!(reduction, crate::venue_runtime::MutationCompletion::Orders { replies, .. } if replies.len() == 1 && replies[0].is_ok())
+    );
+    assert_eq!(sends.lock().unwrap().len(), 1);
+    drop(lookup);
+}
+
+struct StalledLookup(Arc<tokio::sync::Notify>);
+#[engine_types::async_trait]
+impl engine_types::orders::OrderLookupClient for StalledLookup {
+    async fn lookup(
+        &self,
+        _symbol: &str,
+        _client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}

@@ -227,6 +227,12 @@ mod tests {
     #[test]
     fn a_rotation_base_restores_duplicate_memory() {
         let record = WalRecord::SegmentBase {
+            pending_order_dispatches: Vec::new(),
+            signal_producers: Vec::new(),
+            signal_suspensions: Vec::new(),
+            portfolio: Some(Default::default()),
+            strategy_processes: Vec::new(),
+            strategy_callbacks: Vec::new(),
             wall_ts_ms: 20,
             strategies: Vec::new(),
             symbols: Vec::new(),

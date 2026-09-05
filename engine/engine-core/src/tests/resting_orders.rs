@@ -11,6 +11,7 @@ pub(super) fn owned_resting_replay(strategy: &str, ids: &[String]) -> Vec<WalRec
         symbols: vec!["BTCUSDT".into()],
     }];
     records.extend(ids.iter().map(|id| WalRecord::OrderSent {
+        dispatch: None,
         request: OrderRequest {
             client_order_id: id.clone(),
             strategy: StrategyId(0),
@@ -25,6 +26,8 @@ pub(super) fn owned_resting_replay(strategy: &str, ids: &[String]) -> Vec<WalRec
                 trigger_px: 28_000.0,
             }),
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         },
         wire_ns: 1,
@@ -361,9 +364,12 @@ async fn amended_once() -> (Engine<MockWal, MockRisk, MockVenue>, Harness, Symbo
             trigger_px: 28_000.0,
         }),
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     };
     let replayed = [WalRecord::OrderSent {
+        dispatch: None,
         request: old,
         wire_ns: 1,
         arrival_mid: 29_500.0,
@@ -440,6 +446,7 @@ async fn an_accepted_amend_waits_for_its_price_instead_of_pulling_the_order() {
 
 #[tokio::test]
 async fn the_venue_stating_the_price_settles_the_amend_and_keeps_the_order() {
+    let _clock = engine_types::clock::install_virtual(clock::wall_ns(), clock::now_ns()).unwrap();
     // The private stream republishes a resting order whenever it changes
     // without trading, and that republication carries the price. It is the
     // answer the acknowledgement did not give.
@@ -522,9 +529,12 @@ async fn a_second_move_while_the_price_is_owed_waits_rather_than_pulling_the_ord
             trigger_px: 28_000.0,
         }),
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     };
     let replayed = [WalRecord::OrderSent {
+        dispatch: None,
         request: old,
         wire_ns: 1,
         arrival_mid: 29_500.0,
@@ -603,9 +613,12 @@ async fn a_nonfinite_amend_approval_never_reaches_the_venue() {
             trigger_px: 28_000.0,
         }),
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     };
     let replayed = [WalRecord::OrderSent {
+        dispatch: None,
         request: old,
         wire_ns: 1,
         arrival_mid: 29_500.0,
@@ -849,6 +862,8 @@ async fn each_strategy_reads_only_its_own_working_orders() {
         },
         stop: None,
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     };
     let theirs = OrderRequest {
@@ -862,22 +877,27 @@ async fn each_strategy_reads_only_its_own_working_orders() {
     };
     let replayed = vec![
         WalRecord::OrderSent {
+            dispatch: None,
             request: mine.clone(),
             wire_ns: 1,
             arrival_mid: 0.0,
         },
         WalRecord::OrderSent {
+            dispatch: None,
             request: theirs.clone(),
             wire_ns: 2,
             arrival_mid: 0.0,
         },
         WalRecord::OrderSent {
+            dispatch: None,
             request: finished.clone(),
             wire_ns: 3,
             arrival_mid: 0.0,
         },
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: String::new(),
                 client_order_id: finished.client_order_id.clone(),
                 symbol: SymbolId(0),

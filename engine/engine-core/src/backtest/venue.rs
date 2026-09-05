@@ -616,6 +616,8 @@ impl SimulatedVenue {
             format!("sim-exec-{}", self.exec_counter)
         };
         self.queue_private(OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id,
             client_order_id: request.client_order_id.clone(),
             symbol: request.symbol,
@@ -720,6 +722,8 @@ impl SimulatedVenue {
             kind: OrderKind::Market,
             stop: None,
             reduce_only: true,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: true,
         };
         let filled = self.walk_book(&request, None, false, Some(why));

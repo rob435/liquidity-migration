@@ -23,7 +23,48 @@ pub(crate) fn object<T: DeserializeOwned + Default>(value: &Value) -> T {
     T::deserialize(value).unwrap_or_default()
 }
 
-#[derive(Deserialize)]
+#[derive(Debug)]
+pub(crate) struct RawField<T>(pub(crate) Option<T>);
+impl<T> Default for RawField<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+impl<'de, T: DeserializeOwned> Deserialize<'de> for RawField<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+        Ok(Self(serde_json::from_str(raw.get()).ok()))
+    }
+}
+
+pub(crate) fn raw_object<T: DeserializeOwned + Default>(
+    text: &str,
+) -> Result<T, serde_json::Error> {
+    let raw: Box<serde_json::value::RawValue> = serde_json::from_str(text)?;
+    if !raw.get().starts_with('{') {
+        return Ok(T::default());
+    }
+    // Only object keys are normalized: duplicate fields keep the last value,
+    // while numeric lexemes remain raw until their typed field decodes them.
+    let fields: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+        serde_json::from_str(raw.get())?;
+    serde_json::from_str(&serde_json::to_string(&fields)?)
+}
+
+impl Field<String> {
+    pub(crate) fn required(&self, name: &str) -> Result<&str, engine_types::VenueError> {
+        self.0.as_deref().ok_or_else(|| {
+            engine_types::VenueError::BadReply(format!("field {name} is missing or not a string"))
+        })
+    }
+    pub(crate) fn text(&self) -> &str {
+        self.0.as_deref().unwrap_or_default()
+    }
+}
+
+pub(crate) use engine_public::numeric_wire::IntegerField;
+
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum Id {
     Text(String),
@@ -36,4 +77,32 @@ impl Id {
             Self::Number(n) => n.to_string(),
         }
     }
+}
+
+/// Exact quantities and prices share the fill identity with compatibility floats.
+#[cfg(test)]
+pub(crate) fn execution_amounts(
+    row: &serde_json::Value,
+    quantity: &str,
+    price: &str,
+    fee: Option<&str>,
+    asset: Option<&str>,
+) -> Result<engine_types::numeric::ExecutionAmounts, engine_types::VenueError> {
+    use engine_types::numeric::{AssetAmount, AssetId, ExecutionAmounts};
+    let fee = match fee {
+        Some(name) => engine_public::json::opt_exact_field(row, name)?.map(|amount| AssetAmount {
+            asset: asset
+                .filter(|asset| !asset.is_empty())
+                .map(|asset| AssetId::Named(asset.to_owned()))
+                .unwrap_or(AssetId::Unknown),
+            amount,
+        }),
+        None => None,
+    };
+    Ok(ExecutionAmounts {
+        settlement_asset: AssetId::Unknown,
+        quantity: engine_public::json::exact_field(row, quantity)?,
+        price: engine_public::json::exact_field(row, price)?,
+        fee,
+    })
 }

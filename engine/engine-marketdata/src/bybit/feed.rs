@@ -124,6 +124,7 @@ pub struct BybitPublicFeed {
     clock: MonoClock,
     timing: FeedTiming,
     inbox: Option<Inbox>,
+    pending_reset: bool,
 }
 
 /// The running worker: where its events land, and the handle that stops it.
@@ -310,6 +311,7 @@ impl BybitPublicFeed {
             clock: MonoClock::new(),
             timing: FeedTiming::default(),
             inbox: None,
+            pending_reset: false,
         }
     }
 
@@ -404,6 +406,10 @@ impl BybitPublicFeed {
         let events = Arc::new(Handoff::new());
         let (admit_tx, admit_rx) = mpsc::unbounded_channel();
         self.admissions = Some(admit_tx);
+        let mut state = FeedState::default();
+        for index in 0..self.table.len() {
+            state.intern(self.table.name(SymbolId(index as u16)));
+        }
         let worker = FeedWorker {
             url: self.url.clone(),
             topics: self.topics.clone(),
@@ -413,7 +419,7 @@ impl BybitPublicFeed {
             manual_reprobes_in_window: 0,
             active_topics: BTreeSet::new(),
             topic_status: self.topic_status.clone(),
-            state: FeedState::new(&self.subs),
+            state,
             clock: self.clock,
             events: events.clone(),
             backoff: BACKOFF_START,
@@ -1298,6 +1304,15 @@ impl MarketFeed for BybitPublicFeed {
     /// One receive, nothing else. Dropped part-way it loses nothing, which is
     /// what the engine core's `select!` needs.
     async fn next_event(&mut self) -> Result<MarketEvent, FeedError> {
+        if self.pending_reset {
+            self.pending_reset = false;
+            return Ok(MarketEvent::FeedReset {
+                recv_ns: engine_types::clock::mono_ns(),
+            });
+        }
+        if self.subs.is_empty() {
+            return std::future::pending().await;
+        }
         if self.inbox.is_none() {
             self.start();
         }
@@ -1305,6 +1320,28 @@ impl MarketFeed for BybitPublicFeed {
         // No sender left means the worker is gone for good.
         inbox.events.recv().await.unwrap_or(Err(FeedError::Closed))
     }
+    fn retire(&mut self, symbol: &str, feed: Feed) -> bool {
+        let symbol = symbol.to_uppercase();
+        let before = self.subs.len();
+        self.subs
+            .retain(|row| row.symbol != symbol || row.feed != feed);
+        if self.subs.len() == before {
+            return false;
+        }
+        self.topics = self.subs.iter().map(topic_for).collect();
+        self.topic_status
+            .lock()
+            .expect("market topic status lock is poisoned")
+            .quarantined
+            .retain(|topic, _| self.topics.contains(topic));
+        if let Some(inbox) = self.inbox.take() {
+            inbox.worker.abort();
+        }
+        self.admissions = None;
+        self.pending_reset = true;
+        true
+    }
+
     fn admit(&mut self, symbol: &str, feed: Feed) -> Option<SymbolId> {
         Some(BybitPublicFeed::admit(self, symbol, feed))
     }
@@ -1435,3 +1472,38 @@ fn message_topic(message: &Message) -> Option<&str> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[tokio::test]
+async fn empty_demand_after_retirement_stays_idle_until_readmission() {
+    use std::future::Future;
+    let subs = [Subscription {
+        symbol: "BTCUSDT".into(),
+        feed: Feed::Quote,
+    }];
+    let mut feed = BybitPublicFeed::new(&subs);
+    assert!(MarketFeed::retire(&mut feed, "BTCUSDT", Feed::Quote));
+    assert!(matches!(
+        feed.next_event().await.unwrap(),
+        MarketEvent::FeedReset { .. }
+    ));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut event = Box::pin(feed.next_event());
+    assert!(event.as_mut().poll(&mut context).is_pending());
+    drop(event);
+    assert!(
+        feed.inbox.is_none(),
+        "empty demand must not start a socket or poll worker"
+    );
+    assert_eq!(
+        MarketFeed::admit(&mut feed, "BTCUSDT", Feed::Quote),
+        Some(SymbolId(0))
+    );
+    let mut event = Box::pin(feed.next_event());
+    assert!(event.as_mut().poll(&mut context).is_pending());
+    drop(event);
+    assert!(
+        feed.inbox.is_some(),
+        "readmission restarts the worker with its original symbol ID"
+    );
+}

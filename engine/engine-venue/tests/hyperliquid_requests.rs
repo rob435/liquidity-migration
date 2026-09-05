@@ -43,6 +43,8 @@ fn entry(kind: OrderKind, stop: Option<StopSpec>) -> OrderRequest {
         kind,
         stop,
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     }
 }
@@ -320,6 +322,8 @@ async fn an_asset_the_venue_spells_in_lower_case_can_be_stopped_and_priced() {
         kind: OrderKind::Market,
         stop: None,
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     })
     .await
@@ -719,4 +723,39 @@ fn cloid_of(client_order_id: &str) -> String {
     bytes[1..7].copy_from_slice(&boot.to_be_bytes()[2..]);
     bytes[7..12].copy_from_slice(&counter.to_be_bytes()[3..]);
     format!("0x{}", hex::encode(bytes))
+}
+
+#[tokio::test]
+async fn exact_terms_reach_signed_action_and_illegal_grid_is_refused_before_send() {
+    use engine_types::numeric::Exact;
+    use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
+    let server = TestServer::start(|request, _| answer(request)).await;
+    let mut gw = gateway(&server);
+    let mut request = entry(
+        OrderKind::Limit {
+            px: 94000.0,
+            tif: TimeInForce::Gtc,
+        },
+        Some(StopSpec {
+            trigger_px: 93000.0,
+        }),
+    );
+    let terms = ExactOrderTerms {
+        quantity: Exact::parse_decimal("1.23456").unwrap(),
+        limit_price: Some(Exact::from_u64(94000)),
+        stop_trigger_price: Some(Exact::from_u64(93000)),
+        physical_stop_trigger_price: Some(Exact::from_u64(93000)),
+        input_policy: OrderInputPolicy::StrategyShortestDecimal,
+    };
+    terms.apply_projection(&mut request).unwrap();
+    gw.send_order(&request).await.unwrap();
+    let signed = action(&server.to_path("/exchange")[0]);
+    assert_eq!(signed["orders"][0]["s"], "1.23456");
+    assert_eq!(signed["orders"][0]["p"], "94000");
+    assert_eq!(signed["orders"][1]["t"]["trigger"]["triggerPx"], "93000");
+    let mut illegal = terms;
+    illegal.quantity = Exact::parse_decimal("1.234567").unwrap();
+    illegal.apply_projection(&mut request).unwrap();
+    assert!(gw.send_order(&request).await.is_err());
+    assert_eq!(server.to_path("/exchange").len(), 1);
 }

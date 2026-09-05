@@ -12,6 +12,7 @@ pub mod realm;
 
 mod assets;
 mod cloid;
+mod execution;
 mod msgpack;
 mod parse;
 mod sign;
@@ -25,3 +26,5 @@ pub use ws::HyperliquidOrderFeed;
 /// What this venue is called in an account identity, a lease file name, and
 /// the engine's heartbeat.
 pub const VENUE_NAME: &str = "hyperliquid";
+
+mod lookup;

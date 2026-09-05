@@ -18,6 +18,39 @@ pub fn str_field(obj: &Value, name: &str) -> Result<String, VenueError> {
         .ok_or_else(|| VenueError::BadReply(format!("field {name} is missing or not a string")))
 }
 
+pub fn exact_field(
+    obj: &Value,
+    name: &str,
+) -> Result<engine_types::numeric::ExactNumber, VenueError> {
+    opt_exact_field(obj, name)?
+        .ok_or_else(|| VenueError::BadReply(format!("field {name} is missing or blank")))
+}
+
+pub fn opt_exact_field(
+    obj: &Value,
+    name: &str,
+) -> Result<Option<engine_types::numeric::ExactNumber>, VenueError> {
+    use engine_types::numeric::ExactNumber;
+    match obj.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
+        Some(Value::String(s)) => ExactNumber::venue_decimal(s.trim())
+            .map(Some)
+            .map_err(|e| VenueError::BadReply(format!("field {name}: {e}"))),
+        Some(Value::Number(n)) => (if n.is_f64() {
+            ExactNumber::legacy_binary64(n.as_f64().expect("finite JSON number"))
+        } else {
+            ExactNumber::venue_decimal(&n.to_string())
+        })
+        .map(Some)
+        .map_err(|e| VenueError::BadReply(format!("field {name}: {e}"))),
+        Some(other) => Err(VenueError::BadReply(format!(
+            "field {name} is a {}, not a number",
+            kind_of(other)
+        ))),
+    }
+}
+
 pub fn num_field(obj: &Value, name: &str) -> Result<f64, VenueError> {
     opt_num_field(obj, name)?
         .ok_or_else(|| VenueError::BadReply(format!("field {name} is missing or blank")))
@@ -25,24 +58,15 @@ pub fn num_field(obj: &Value, name: &str) -> Result<f64, VenueError> {
 
 /// `None` means present-but-blank or absent; an unparseable value is an error.
 pub fn opt_num_field(obj: &Value, name: &str) -> Result<Option<f64>, VenueError> {
-    match obj.get(name) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
-        Some(Value::String(s)) => match s.trim().parse::<f64>() {
-            Ok(value) if value.is_finite() => Ok(Some(value)),
-            _ => Err(VenueError::BadReply(format!(
-                "field {name} is not a finite number: {s:?}"
-            ))),
-        },
-        Some(Value::Number(n)) => n
-            .as_f64()
-            .map(Some)
-            .ok_or_else(|| VenueError::BadReply(format!("field {name} is not a finite number"))),
-        Some(other) => Err(VenueError::BadReply(format!(
-            "field {name} is a {}, not a number",
-            kind_of(other)
-        ))),
-    }
+    opt_exact_field(obj, name)?
+        .map(|number| {
+            number.value.to_f64().map_err(|e| {
+                VenueError::BadReply(format!(
+                    "field {name} cannot be represented as binary64: {e}"
+                ))
+            })
+        })
+        .transpose()
 }
 
 /// An integer field, refusing a value that is not one. Hyperliquid and Lighter
@@ -104,5 +128,42 @@ mod tests {
             int_field(&row, "fractional").is_err(),
             "a fractional order id must not be rounded into a cancel"
         );
+    }
+    #[test]
+    fn transport_numeric_lexemes_are_not_rounded_before_exact_execution_decoding() {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            qty: crate::numeric_wire::DecimalField,
+            fee: crate::numeric_wire::DecimalField,
+        }
+        let row: Row = serde_json::from_str(r#"{"qty":9007199254740993.0000000000000000001,"fee":-0.0000000000000000000000000000001}"#).unwrap();
+        assert_eq!(
+            row.qty
+                .required("qty")
+                .unwrap()
+                .value
+                .to_decimal_string()
+                .unwrap(),
+            "9007199254740993.0000000000000000001"
+        );
+        assert_eq!(
+            row.fee
+                .required("fee")
+                .unwrap()
+                .value
+                .to_decimal_string()
+                .unwrap(),
+            "-0.0000000000000000000000000000001"
+        );
+    }
+
+    #[test]
+    fn a_nonzero_wire_fee_cannot_underflow_into_an_explicit_zero_charge() {
+        let row = serde_json::json!({"fee":"1e-400"});
+        assert!(
+            opt_num_field(&row, "fee").is_err(),
+            "nonzero fee underflow was accepted as zero"
+        );
+        assert!(!exact_field(&row, "fee").unwrap().value.is_zero());
     }
 }

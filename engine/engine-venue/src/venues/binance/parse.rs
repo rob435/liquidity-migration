@@ -676,6 +676,13 @@ pub(crate) fn parse_trades(rows: &Value) -> Result<Vec<(i64, VenueExecution)>, V
                 qty,
                 px,
                 fee,
+                amounts: Some(crate::wire::execution_amounts(
+                    row,
+                    "qty",
+                    "price",
+                    Some("commission"),
+                    row.get("commissionAsset").and_then(Value::as_str),
+                )?),
                 is_maker,
                 forced_close: None,
                 venue_ts_ms,

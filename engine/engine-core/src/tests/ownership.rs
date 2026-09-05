@@ -101,6 +101,7 @@ fn prior_order(owner: u16, side: Side) -> Vec<WalRecord> {
             symbols: vec!["BTCUSDT".into()],
         },
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: "eng-prior-1".into(),
                 strategy: StrategyId(owner),
@@ -112,6 +113,8 @@ fn prior_order(owner: u16, side: Side) -> Vec<WalRecord> {
                     trigger_px: stop(side),
                 }),
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 1,
@@ -123,6 +126,8 @@ fn prior_order(owner: u16, side: Side) -> Vec<WalRecord> {
 fn fill(side: Side) -> WalRecord {
     WalRecord::OrderUpdate {
         update: OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
             exec_id: "prior-fill".into(),
             client_order_id: "eng-prior-1".into(),
             symbol: SymbolId(0),

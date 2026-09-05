@@ -46,12 +46,64 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub async fn boot_as(
         settings: &EngineSection,
         config_sha256: &str,
+        wal: W,
+        risk: R,
+        venue: V,
+        strategies: Vec<Box<dyn Strategy>>,
+        sleeves: &[String],
+        replayed: &[WalRecord],
+    ) -> Result<Self, EngineError> {
+        Self::boot_as_with_execution(
+            settings,
+            config_sha256,
+            wal,
+            risk,
+            venue,
+            strategies,
+            sleeves,
+            replayed,
+            crate::strategy_process::host::CallbackExecution::Embedded,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn boot_as_isolated(
+        settings: &EngineSection,
+        config_sha256: &str,
+        wal: W,
+        risk: R,
+        venue: V,
+        strategies: Vec<Box<dyn Strategy>>,
+        sleeves: &[String],
+        replayed: &[WalRecord],
+        executable: std::path::PathBuf,
+    ) -> Result<Self, EngineError> {
+        Self::boot_as_with_execution(
+            settings,
+            config_sha256,
+            wal,
+            risk,
+            venue,
+            strategies,
+            sleeves,
+            replayed,
+            crate::strategy_process::host::CallbackExecution::Isolated { executable },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn boot_as_with_execution(
+        settings: &EngineSection,
+        config_sha256: &str,
         mut wal: W,
         mut risk: R,
         mut venue: V,
         strategies: Vec<Box<dyn Strategy>>,
         sleeves: &[String],
         replayed: &[WalRecord],
+        execution: crate::strategy_process::host::CallbackExecution,
     ) -> Result<Self, EngineError> {
         if !(1..=crate::config::MAX_GROUP_FLUSH_MS).contains(&settings.group_flush_ms) {
             return Err(EngineError::Boot(format!(
@@ -63,6 +115,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // below, so a fill the venue saw while this process was down seeds
         // every accounting view the same way a delivered one would have.
 
+        let require_exact_instruments = matches!(
+            &execution,
+            crate::strategy_process::host::CallbackExecution::Isolated { .. }
+        );
+        let callbacks =
+            crate::strategy_process::host::CallbackHost::new(execution, &strategies, replayed)
+                .map_err(EngineError::Boot)?;
+        let dispatches =
+            crate::order_dispatch::OrderDispatches::replay(replayed).map_err(EngineError::Boot)?;
         let boot_ms = clock::wall_ms();
         let ConfiguredStrategies {
             market,
@@ -104,6 +165,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 rules[id.0 as usize] = Some(rule);
             }
         }
+        let instrument_specs = match venue.instrument_specs().await {
+            Ok(specs) => specs
+                .into_iter()
+                .filter_map(|(name, spec)| market.table.get(&name).map(|id| (id, spec)))
+                .collect(),
+            Err(error) if require_exact_instruments => {
+                return Err(EngineError::Boot(format!(
+                    "exact instrument catalog unavailable: {error}"
+                )))
+            }
+            Err(_) => std::collections::BTreeMap::new(),
+        };
         let mut missing: Vec<&str> = Vec::new();
         for subscription in &subscriptions {
             let Some(id) = market.table.get(&subscription.symbol) else {
@@ -150,9 +223,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut orders = LedgerOfOrders::from_records(effective);
         // Same records, same join: a restart must not forget whose
         // position is whose, or the other sleeve trades straight into it.
-        let mut attribution = Attribution::from_records(effective);
+        let mut attribution =
+            Attribution::try_from_records(effective).map_err(EngineError::Boot)?;
         let mut fills = Fills::default();
-        let already_closed = fills.seed_lots(effective);
+        let already_closed = fills.try_seed_lots(effective).map_err(EngineError::Boot)?;
         // The rolling loss window, put back before anything can be assessed
         // against it. The order is a contract with the kernel: the newest
         // restatement SETS the window, this segment's own closes go on top,
@@ -246,6 +320,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // the venue. The venue's own working-order listing is evidence, not
         // a guess, so the ending is written down as what it was.
         for client_order_id in vanished {
+            if dispatches.orders.contains_key(&client_order_id) {
+                continue;
+            }
             tracing::warn!(
                 id = %client_order_id,
                 "this order ended while the engine was down; recording the ending"
@@ -357,6 +434,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             ready_actions: VecDeque::new(),
             _venue: std::marker::PhantomData,
             host: StrategyHost {
+                callbacks,
                 effects: crate::effects::Effects::replay(replayed, names.len())
                     .map_err(EngineError::Boot)?,
                 strategies,
@@ -380,8 +458,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 // in flight.
                 covers: CoverBook::default(),
             },
+            instrument_specs,
+            require_exact_instruments,
             routing,
             drain_progress: None,
+            suspended_wakes: Default::default(),
             signals,
             signal_dependencies,
             runtime_control_requests,
@@ -398,7 +479,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             amends_confirmed: 0,
             amends_pulled_unconfirmed: 0,
             stream_resets: 0,
-            pending_barrier: None,
+            dispatches,
             halt_cancel_queue: VecDeque::new(),
             wanted_symbols: Vec::new(),
             leverage_at: std::collections::HashMap::new(),
@@ -434,7 +515,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         engine
             .fills
             .learn(&names_record(&engine.host.names, &engine.books.market));
+        engine.restore_order_dispatches().await?;
         engine.restore_strategy_effects().await?;
+        engine.restore_strategy_callbacks().await?;
         engine.wake_restored_strategies()?;
         engine.redeliver_durable_strategy_inputs();
         engine.queue_halted_entry_cancels()?;
@@ -510,7 +593,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut recovered = 0usize;
         let mut unknown_findings = Vec::new();
         let mut recovered_orders = LedgerOfOrders::from_records(replayed);
-        let mut recovered_attribution = Attribution::from_records(replayed);
+        let mut recovered_attribution =
+            Attribution::try_from_records(replayed).map_err(EngineError::Boot)?;
+        let strategy_names = replayed
+            .iter()
+            .rev()
+            .find_map(|record| match record {
+                WalRecord::Names { strategies, .. } | WalRecord::SegmentBase { strategies, .. } => {
+                    Some(strategies.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
         for exec in execs {
             if execution_ids.contains(&exec.exec_id, now_ms) {
                 continue;
@@ -555,13 +649,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 continue;
             };
             let dedup_id = exec.exec_id.clone();
-            if let Err(reason) = recovered_orders.validate_fill(
-                &exec.client_order_id,
-                symbol,
-                exec.side,
-                exec.qty,
-                exec.px,
-            ) {
+            if let Err(reason) = recovered_orders
+                .validate_fill(&exec.client_order_id, symbol, exec.side, exec.qty, exec.px)
+                .and_then(|()| {
+                    exec.amounts.as_ref().map_or(Ok(()), |values| {
+                        values
+                            .validate_projection(exec.qty, exec.px, exec.fee)
+                            .map_err(|error| error.to_string())
+                    })
+                })
+            {
                 unknown_findings.push(Self::untrusted_fill_line(
                     &exec.exec_id,
                     &exec.client_order_id,
@@ -576,7 +673,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 continue;
             }
             let client_order_id = exec.client_order_id.clone();
-            let record = WalRecord::RecoveredFill {
+            let mut record = WalRecord::RecoveredFill {
+                allocation: None,
+                amounts: exec.amounts.clone(),
                 exec_id: exec.exec_id,
                 client_order_id: exec.client_order_id,
                 symbol,
@@ -589,21 +688,55 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 venue_ts_ms: exec.venue_ts_ms,
                 recovered_wall_ts_ms: now_ms,
             };
+            let owner = recovered_orders.owner_of(&client_order_id);
+            let allocation = match recovered_attribution.prepare_portfolio_recovered(
+                owner,
+                &strategy_names,
+                &record,
+            ) {
+                Ok(allocation) => allocation,
+                Err(reason) => {
+                    unknown_findings.push(Self::untrusted_fill_line(
+                        &dedup_id,
+                        &client_order_id,
+                        symbol,
+                        exec.side,
+                        exec.qty,
+                        exec.px,
+                        &reason,
+                    ));
+                    execution_ids.insert(dedup_id, now_ms);
+                    recovered += 1;
+                    continue;
+                }
+            };
+            if let (
+                Some(prepared),
+                WalRecord::RecoveredFill {
+                    allocation: recorded,
+                    ..
+                },
+            ) = (&allocation, &mut record)
+            {
+                if prepared.allocation.policy
+                    == engine_types::execution_allocation::AllocationPolicy::EmergencyNetFifo
+                {
+                    *recorded = Some(Box::new(prepared.allocation.clone()));
+                }
+            }
             wal.append(&record)?;
+            if let Some(allocation) = allocation {
+                recovered_attribution
+                    .commit_portfolio_fill(allocation)
+                    .map_err(EngineError::State)?;
+            }
             out.push(record.clone());
             execution_ids.insert(dedup_id, now_ms);
-            let owner = recovered_orders.owner_of(&client_order_id).or_else(|| {
-                attribution::forced_close_owner(
-                    &recovered_attribution,
-                    &client_order_id,
-                    symbol,
-                    exec.side,
-                    exec.forced_close,
-                )
-            });
             recovered_orders.apply(&record);
-            if let Some(owner) = owner {
-                recovered_attribution.note(owner, symbol, exec.side, exec.qty);
+            if owner.is_some() {
+                if let Some(order) = recovered_orders.orders.get(&client_order_id) {
+                    recovered_attribution.remember_order_stop(&order.request);
+                }
             }
             recovered += 1;
         }
@@ -855,13 +988,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 recovered += 1;
                 continue;
             };
-            if let Err(reason) = self.books.orders.validate_fill(
-                &exec.client_order_id,
-                symbol,
-                exec.side,
-                exec.qty,
-                exec.px,
-            ) {
+            if let Err(reason) = self
+                .books
+                .orders
+                .validate_fill(&exec.client_order_id, symbol, exec.side, exec.qty, exec.px)
+                .and_then(|()| {
+                    exec.amounts.as_ref().map_or(Ok(()), |values| {
+                        values
+                            .validate_projection(exec.qty, exec.px, exec.fee)
+                            .map_err(|error| error.to_string())
+                    })
+                })
+            {
                 foreign.push(Self::untrusted_fill_line(
                     &exec.exec_id,
                     &exec.client_order_id,
@@ -875,7 +1013,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 recovered += 1;
                 continue;
             }
-            let record = WalRecord::RecoveredFill {
+            let mut record = WalRecord::RecoveredFill {
+                allocation: None,
+                amounts: exec.amounts.clone(),
                 exec_id: exec.exec_id.clone(),
                 client_order_id: exec.client_order_id.clone(),
                 symbol,
@@ -888,31 +1028,59 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 venue_ts_ms: exec.venue_ts_ms,
                 recovered_wall_ts_ms: now_ms,
             };
-            self.wal.append(&record)?;
-            self.recovered_exec_ids.insert(exec.exec_id.clone(), now_ms);
-            // The order ledger first; then, for a close the venue itself
-            // started, the position it reduced.
-            let owner = self
-                .books
-                .orders
-                .owner_of(&exec.client_order_id)
-                .or_else(|| {
-                    attribution::forced_close_owner(
-                        &self.books.attribution,
-                        &exec.client_order_id,
-                        symbol,
-                        exec.side,
-                        exec.forced_close,
-                    )
-                });
+            let owner = self.books.orders.owner_of(&exec.client_order_id);
             let owned_request = self
                 .books
                 .orders
                 .orders
                 .get(&exec.client_order_id)
                 .map(|order| order.request.clone());
+            let allocation = match self.books.attribution.prepare_portfolio_recovered(
+                owner,
+                &self.host.names,
+                &record,
+            ) {
+                Ok(allocation) => allocation,
+                Err(reason) => {
+                    foreign.push(Self::untrusted_fill_line(
+                        &exec.exec_id,
+                        &exec.client_order_id,
+                        symbol,
+                        exec.side,
+                        exec.qty,
+                        exec.px,
+                        &reason,
+                    ));
+                    self.recovered_exec_ids.insert(exec.exec_id, now_ms);
+                    recovered += 1;
+                    continue;
+                }
+            };
+            if let (
+                Some(prepared),
+                WalRecord::RecoveredFill {
+                    allocation: recorded,
+                    ..
+                },
+            ) = (&allocation, &mut record)
+            {
+                if prepared.allocation.policy
+                    == engine_types::execution_allocation::AllocationPolicy::EmergencyNetFifo
+                {
+                    *recorded = Some(Box::new(prepared.allocation.clone()));
+                }
+            }
+            let owned = allocation.is_some();
+            self.wal.append(&record)?;
+            if let Some(allocation) = allocation {
+                self.books
+                    .attribution
+                    .commit_portfolio_fill(allocation)
+                    .map_err(EngineError::State)?;
+            }
+            self.recovered_exec_ids.insert(exec.exec_id.clone(), now_ms);
             self.books.orders.apply(&record);
-            if let Some(sid) = owner {
+            if owned {
                 reconcile::note_owned_fill(
                     &mut self.logged_exposure,
                     &mut self.intended_stops,
@@ -921,9 +1089,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     exec.side,
                     exec.qty,
                 );
-                self.books
-                    .attribution
-                    .note(sid, symbol, exec.side, exec.qty);
+                if let Some(request) = owned_request.as_ref() {
+                    self.books.attribution.remember_order_stop(request);
+                }
                 // What it cost is the same question whichever way it arrived,
                 // and the anchor is the book its own order left at.
                 let late_ns = now_ms
@@ -933,21 +1101,32 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 // Dated to when it traded, not to when it was found, or a
                 // trade from minutes ago is marked against this minute's book
                 // and the number is read as a one-second fact.
-                self.fills.on_recovered_fill(
-                    &execution::Fill {
-                        client_order_id: exec.client_order_id.clone(),
-                        strategy: sid,
-                        symbol,
-                        side: exec.side,
-                        qty: exec.qty,
-                        px: exec.px,
-                        fee: exec.fee,
-                        is_maker: exec.is_maker,
-                        arrival_mid: self.arrival_mid_of(&exec.client_order_id),
-                        venue_ts_ms: exec.venue_ts_ms,
-                    },
-                    clock::now_ns().checked_sub(late_ns),
-                );
+                let update =
+                    crate::portfolio_allocation::recovered_update(&record, clock::now_ns())
+                        .expect("recovered fill");
+                let slices = crate::portfolio_allocation::slice_updates(&update)
+                    .map_err(EngineError::State)?
+                    .unwrap_or_else(|| owner.map(|sid| vec![(sid, update)]).unwrap_or_default());
+                for (sid, update) in slices {
+                    let OrderUpdate::Fill { qty, fee, .. } = update else {
+                        unreachable!()
+                    };
+                    self.fills.on_recovered_fill(
+                        &execution::Fill {
+                            client_order_id: exec.client_order_id.clone(),
+                            strategy: sid,
+                            symbol,
+                            side: exec.side,
+                            qty,
+                            px: exec.px,
+                            fee,
+                            is_maker: exec.is_maker,
+                            arrival_mid: self.arrival_mid_of(&exec.client_order_id),
+                            venue_ts_ms: exec.venue_ts_ms,
+                        },
+                        clock::now_ns().checked_sub(late_ns),
+                    );
+                }
             } else {
                 foreign.push(Self::foreign_fill_line(&exec.client_order_id, symbol));
             }
@@ -957,6 +1136,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // once in the account view — and every later entry judged against
             // the sum.
             self.risk.on_update(&OrderUpdate::Fill {
+                allocation: None,
+                amounts: exec.amounts.clone().map(Box::new),
                 exec_id: exec.exec_id.clone(),
                 client_order_id: exec.client_order_id.clone(),
                 symbol,

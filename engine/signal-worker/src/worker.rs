@@ -32,6 +32,9 @@ use crate::store::{
 use crate::universe::{same_membership, universe_is_resolved, unresolved_universe};
 use crate::{DAY_MS, HOUR_MS, SCHEMA_VERSION};
 
+mod lifecycle;
+pub use lifecycle::WorkerSignalLifecycle;
+
 pub(crate) fn required_carry_history_hours(
     config: &SignalWorkerConfig,
     state: &WorkerState,
@@ -177,6 +180,8 @@ pub struct WorkerState {
     pub config: ConfigIdentity,
     #[serde(default)]
     pub source_generation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_lifecycle: Option<WorkerSignalLifecycle>,
     pub source_contract_sha256: String,
     pub long_feature_sha256: String,
     pub carry_feature_sha256: String,
@@ -297,6 +302,7 @@ impl WorkerState {
             schema_version: SCHEMA_VERSION,
             config: config.identity.clone(),
             source_generation,
+            signal_lifecycle: None,
             source_contract_sha256: source_history_hash(config),
             long_feature_sha256: state_part_hash(&config.long),
             carry_feature_sha256: state_part_hash(&config.carry),
@@ -1706,10 +1712,14 @@ impl SignalWorker {
             .long_output_sequence
             .checked_add(1)
             .ok_or_else(|| WorkerError::state("LONG output sequence exhausted"))?;
-        make_observation(
+        make_observation_in_epoch(
             &self.config,
             &self.state.universe,
             &self.state.source_generation,
+            self.state
+                .signal_lifecycle
+                .as_ref()
+                .and_then(|state| state.epoch),
             true,
             self.state.long_output_sequence,
             kind,
@@ -1733,10 +1743,14 @@ impl SignalWorker {
             .carry_output_sequence
             .checked_add(1)
             .ok_or_else(|| WorkerError::state("CARRY output sequence exhausted"))?;
-        make_observation(
+        make_observation_in_epoch(
             &self.config,
             &self.state.universe,
             &self.state.source_generation,
+            self.state
+                .signal_lifecycle
+                .as_ref()
+                .and_then(|state| state.epoch),
             false,
             self.state.carry_output_sequence,
             kind,
@@ -2249,11 +2263,41 @@ fn market_subscriptions(symbols: &[String]) -> Result<Vec<Subscription>, WorkerE
     Ok(subscriptions)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn make_observation(
     config: &SignalWorkerConfig,
     universe: &UniverseIdentity,
     source_generation: &str,
+    long: bool,
+    sequence: u64,
+    kind: &str,
+    observed_wall_ts_ms: i64,
+    available_wall_ts_ms: i64,
+    payload: ObservationPayload,
+    subscriptions: Vec<Subscription>,
+) -> Result<NormalizedObservation, WorkerError> {
+    make_observation_in_epoch(
+        config,
+        universe,
+        source_generation,
+        None,
+        long,
+        sequence,
+        kind,
+        observed_wall_ts_ms,
+        available_wall_ts_ms,
+        payload,
+        subscriptions,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_observation_in_epoch(
+    config: &SignalWorkerConfig,
+    universe: &UniverseIdentity,
+    source_generation: &str,
+    epoch: Option<u64>,
     long: bool,
     sequence: u64,
     kind: &str,
@@ -2280,7 +2324,15 @@ fn make_observation(
             "normalized signal payload exceeds {MAX_SIGNAL_OBSERVATION_BYTES} bytes"
         )));
     }
-    let source = output_source(&config.routing.source, source_generation, long)?;
+    let source = match epoch {
+        Some(epoch) => lifecycle::managed_output_source(
+            &config.routing.source,
+            source_generation,
+            epoch,
+            long,
+        )?,
+        None => output_source(&config.routing.source, source_generation, long)?,
+    };
     let destination = StrategyId(if long {
         config.long_destination
     } else {
@@ -2475,6 +2527,7 @@ pub struct DurableSignalWorker {
     replaceable_outputs_coalesced: u64,
     spool_backpressured: bool,
     spool_backpressured_classes: BTreeSet<String>,
+    publication_pending: bool,
 }
 
 impl DurableSignalWorker {
@@ -2652,6 +2705,7 @@ impl DurableSignalWorker {
             replaceable_outputs_coalesced: 0,
             spool_backpressured: false,
             spool_backpressured_classes: BTreeSet::new(),
+            publication_pending: false,
         })
     }
 
@@ -2756,6 +2810,20 @@ impl DurableSignalWorker {
         &mut self,
         events: Vec<WireEvent>,
     ) -> Result<Vec<NormalizedObservation>, WorkerError> {
+        if self.publication_pending {
+            return Err(WorkerError::state(
+                "publication recovery requires reopening the worker",
+            ));
+        }
+        if self
+            .worker
+            .state
+            .signal_lifecycle
+            .as_ref()
+            .is_some_and(|state| state.sealed)
+        {
+            return Ok(Vec::new());
+        }
         self.compact_if_due()?;
         self.refresh_spool_inventory_if_needed()?;
         let mut projected_by_class = BTreeMap::<&'static str, u64>::new();
@@ -2875,9 +2943,11 @@ impl DurableSignalWorker {
             self.journal.append(&entry)?;
             self.worker = candidate;
             self.journal_entries_retained = self.journal_entries_retained.saturating_add(1);
+            self.publication_pending = true;
             for json in &observation_json {
                 self.record_spool_write(json)?;
             }
+            self.publication_pending = false;
         }
         Ok(observations)
     }
@@ -2895,37 +2965,6 @@ impl DurableSignalWorker {
         }
         candidate.set_suppressed_output_kinds(BTreeSet::new());
         Ok((candidate, observations))
-    }
-
-    pub fn respond_to_readiness_request(&self) -> Result<(), WorkerError> {
-        use engine_types::{SignalReadinessRequest, SignalReadinessResponse, SignalSourceFrontier};
-        let directory = self.spool.directory();
-        let request = AtomicJsonStore::new(directory.join("input-readiness-request.json"));
-        let Some(request) = request.load::<SignalReadinessRequest>()? else {
-            return Ok(());
-        };
-        if request.schema_version != 1 || request.boot_nonce.is_empty() {
-            return Err(WorkerError::input("unsupported input readiness request"));
-        }
-        let state = self.worker.state();
-        let source = &self.worker.config.routing.source;
-        let response = SignalReadinessResponse {
-            schema_version: 1,
-            boot_nonce: request.boot_nonce,
-            sources: vec![
-                SignalSourceFrontier {
-                    source: output_source(source, &state.source_generation, true)?,
-                    destination: StrategyId(state.long_destination),
-                    published_through: state.long_output_sequence,
-                },
-                SignalSourceFrontier {
-                    source: output_source(source, &state.source_generation, false)?,
-                    destination: StrategyId(state.carry_destination),
-                    published_through: state.carry_output_sequence,
-                },
-            ],
-        };
-        AtomicJsonStore::new(directory.join("input-readiness-response.json")).save(&response)
     }
 
     pub fn durability_metrics(&self) -> Result<DurabilityMetrics, WorkerError> {

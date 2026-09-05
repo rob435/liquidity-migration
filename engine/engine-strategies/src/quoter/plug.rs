@@ -30,7 +30,7 @@
 //! adaptive terms; neither mode is evidence of profit until a forward run
 //! grades its fills and markouts.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use engine_types::{
     BookLevel, EngineEvent, Feed, Intent, MarketEvent, OrderKind, OrderUpdate, QuoteFillFeatures,
@@ -76,7 +76,7 @@ const FAST_FILL_MEMORY: usize = 8192;
 ///
 /// The engine's own working supervisor keeps the same short-lived request
 /// memory for the same reason.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Asked {
     /// When we last asked for anything about this order.
     at_ns: u64,
@@ -84,6 +84,7 @@ struct Asked {
     moved_to: Option<f64>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Quoter {
     id: StrategyId,
     /// The venue's spellings, and the ids once the engine has interned them.
@@ -96,6 +97,7 @@ pub struct Quoter {
     micro: HashMap<SymbolId, MicroState>,
     /// Scratch, kept between wakes so reading our own book allocates nothing
     /// on the hot path.
+    #[serde(skip)]
     working: Vec<WorkingQuote>,
     /// What we have already asked the venue about each order. Pruned every
     /// pass to what is still working, so it cannot outgrow the book.
@@ -108,11 +110,11 @@ pub struct Quoter {
     /// A reduce-only market exit has been emitted for this symbol. It stays
     /// here through partial fills so a busy market-data stream cannot emit a
     /// second exit while the first one is still working.
-    flatten_pending: HashSet<SymbolId>,
+    flatten_pending: BTreeSet<SymbolId>,
     /// Failed exits wait here for one shared timer. A persistent refusal must
     /// leave the current engine wake instead of feeding another identical
     /// exit straight back into the same action queue.
-    flatten_retry: HashSet<SymbolId>,
+    flatten_retry: BTreeSet<SymbolId>,
 }
 
 impl Quoter {
@@ -310,8 +312,8 @@ impl Quoter {
             fast_inventory: HashMap::new(),
             fast_fills: HashMap::new(),
             fast_fill_order: VecDeque::new(),
-            flatten_pending: HashSet::new(),
-            flatten_retry: HashSet::new(),
+            flatten_pending: BTreeSet::new(),
+            flatten_retry: BTreeSet::new(),
         })
     }
 
@@ -710,6 +712,22 @@ impl Quoter {
 }
 
 impl Strategy for Quoter {
+    fn runtime_state(
+        &self,
+    ) -> Result<Option<engine_types::strategy_process::StrategyRuntimeState>, String> {
+        crate::runtime::snapshot(
+            NAME,
+            self,
+            &(
+                self.id,
+                &self.symbol_names,
+                self.rules,
+                self.micro_rules,
+                self.quote_enabled,
+            ),
+        )
+        .map(Some)
+    }
     fn name(&self) -> &str {
         NAME
     }
@@ -732,6 +750,7 @@ impl Strategy for Quoter {
         self.resolve(&*ctx);
         let (symbol, signal) = match event {
             EngineEvent::Boot => {
+                self.asked.clear();
                 self.reset_market_epoch(ctx);
                 return;
             }

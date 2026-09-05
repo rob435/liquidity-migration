@@ -211,13 +211,16 @@ async fn an_entry_against_a_quote_past_the_bound_is_refused_and_the_strategy_hea
 async fn an_exit_under_the_same_staleness_flows() {
     age_the_clock();
     let (opener, refused) = Opener::new(&["BTCUSDT"], "BTCUSDT", true);
-    let (mut engine, h) = build_with(
+    let (replay, held) = owned_exit_fixture("opener", Side::Sell, 0.5);
+    let (mut engine, h) = build_holding(
         &tight(5),
         allow_all(),
         vec![Box::new(opener)],
         &["BTCUSDT"],
-        &[],
+        &replay,
         Vec::new(),
+        held,
+        None,
     )
     .await;
     let mut feed = feed_with_stamp(1);

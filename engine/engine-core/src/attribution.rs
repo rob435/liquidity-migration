@@ -1,28 +1,13 @@
-//! Which strategy's trading a venue position came from.
-//!
-//! The venue keeps one position per symbol however many strategies run, and
-//! its account reading carries no attribution at all. Two book-following plugs
-//! on one account therefore read the same position as each of theirs. On the
-//! first cycle where their books disagreed, one would exit the other's holding
-//! — a full-size close of a position it never opened — and both would size
-//! against exposure only one of them put on.
-//!
-//! The engine already knows the answer. It minted every order and wrote the
-//! strategy on it before the bytes left the socket, so the join is right there
-//! in the log: the order says who sent it, the fill says which order it was.
-//! This keeps that running total, and rebuilds it from the log at boot so a
-//! restart does not forget whose position is whose.
-//!
-//! It is **not** a second position record. It says who opened what; the
-//! account reading remains the only word on how much is actually there. Where
-//! the two disagree, the difference is somebody else's trading, and
-//! [`crate::reconcile`] is what has an opinion about that.
+//! Durable per-sleeve inventory; account reconciliation owns the physical net.
 
 use std::collections::HashMap;
 
 use engine_types::{
     FilledTotal, ForcedClose, OrderUpdate, Side, StrategyId, SymbolId, SymbolTotal, WalRecord,
 };
+
+mod allocated;
+pub(crate) use allocated::PreparedPortfolioFill;
 
 /// Smaller than this is flat. A venue position is a whole number of quantity
 /// steps, so anything under it is this sum's own rounding rather than a
@@ -63,8 +48,17 @@ pub fn forced_close_owner(
 
 #[derive(Debug, Default)]
 pub struct Attribution {
-    /// Signed filled quantity per strategy and symbol. Positive is long.
-    filled: HashMap<(StrategyId, SymbolId), f64>,
+    inventory: crate::inventory::Inventory,
+    accounting: crate::execution_accounting::ExecutionAccounting,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedAllocation {
+    change: crate::inventory::InventoryChange,
+    accounting: crate::execution_accounting::AccountingChange,
+    strategy: StrategyId,
+    symbol: SymbolId,
+    legacy: bool,
 }
 
 impl Attribution {
@@ -74,12 +68,18 @@ impl Attribution {
     /// One pass is enough: an order's `OrderSent` record is made durable
     /// before its bytes leave the socket, so it is always ahead of its fills.
     pub fn from_records(records: &[WalRecord]) -> Self {
-        let mut sender: HashMap<&str, StrategyId> = HashMap::new();
+        Self::try_from_records(records).expect("validated portfolio WAL")
+    }
+
+    pub fn try_from_records(records: &[WalRecord]) -> Result<Self, String> {
+        let mut sender: HashMap<&str, &engine_types::OrderRequest> = HashMap::new();
         let mut me = Attribution::default();
+        let mut strategy_names = Vec::new();
         for record in records {
             match record {
+                WalRecord::Names { strategies, .. } => strategy_names = strategies.clone(),
                 WalRecord::OrderSent { request, .. } => {
-                    sender.insert(request.client_order_id.as_str(), request.strategy);
+                    sender.insert(request.client_order_id.as_str(), request);
                 }
                 // A fill for an order this log never recorded sending belongs
                 // to somebody else on the account, unless the venue named it
@@ -98,13 +98,37 @@ impl Attribution {
                     else {
                         continue;
                     };
-                    let strategy = sender.get(client_order_id.as_str()).copied().or_else(|| {
+                    let request = sender.get(client_order_id.as_str()).copied();
+                    if matches!(
+                        update,
+                        OrderUpdate::Fill {
+                            allocation: Some(_),
+                            ..
+                        }
+                    ) {
+                        let prepared = me
+                            .prepare_portfolio_update(
+                                request.map(|request| request.strategy),
+                                &strategy_names,
+                                update,
+                            )?
+                            .ok_or("recorded fill has no valid allocation")?;
+                        me.commit_portfolio_fill(prepared)?;
+                        if let Some(request) = request {
+                            me.remember_order_stop(request);
+                        }
+                        continue;
+                    }
+                    let strategy = request.map(|request| request.strategy).or_else(|| {
                         forced_close_owner(&me, client_order_id, *symbol, *side, *forced_close)
                     });
                     let Some(strategy) = strategy else {
                         continue;
                     };
-                    me.on_update(strategy, update);
+                    me.try_on_update(strategy, update)?;
+                    if let Some(request) = request {
+                        me.remember_order_stop(request);
+                    }
                 }
                 // A fill recovered from the venue's history joins the same
                 // two ways: through the order that produced it, or through
@@ -113,17 +137,40 @@ impl Attribution {
                     client_order_id,
                     symbol,
                     side,
-                    qty,
                     forced_close,
                     ..
                 } => {
-                    let strategy = sender.get(client_order_id.as_str()).copied().or_else(|| {
+                    let request = sender.get(client_order_id.as_str()).copied();
+                    if matches!(
+                        record,
+                        WalRecord::RecoveredFill {
+                            allocation: Some(_),
+                            ..
+                        }
+                    ) {
+                        let prepared = me
+                            .prepare_portfolio_recovered(
+                                request.map(|request| request.strategy),
+                                &strategy_names,
+                                record,
+                            )?
+                            .ok_or("recorded recovered fill has no valid allocation")?;
+                        me.commit_portfolio_fill(prepared)?;
+                        if let Some(request) = request {
+                            me.remember_order_stop(request);
+                        }
+                        continue;
+                    }
+                    let strategy = request.map(|request| request.strategy).or_else(|| {
                         forced_close_owner(&me, client_order_id, *symbol, *side, *forced_close)
                     });
                     let Some(strategy) = strategy else {
                         continue;
                     };
-                    me.note(strategy, *symbol, *side, *qty);
+                    me.try_on_recovered(strategy, record)?;
+                    if let Some(request) = request {
+                        me.remember_order_stop(request);
+                    }
                 }
                 WalRecord::ClaimsDropped { rows, .. } => me.forget(rows),
                 WalRecord::LatchCleared {
@@ -133,28 +180,91 @@ impl Attribution {
                 // `sender` keeps resolving their later fills.
                 WalRecord::SegmentBase {
                     attribution,
+                    strategies,
+                    portfolio,
                     open_orders,
+                    intended_stops,
                     ..
                 } => {
-                    me.restate(attribution);
+                    strategy_names = strategies.clone();
+                    if let Some(state) = portfolio {
+                        let restored = Self::restore(state)?;
+                        let mut projected = std::collections::BTreeMap::new();
+                        for row in attribution {
+                            if !row.signed_qty.is_finite()
+                                || row.signed_qty == 0.0
+                                || projected
+                                    .insert((row.strategy, row.symbol), row.signed_qty.to_bits())
+                                    .is_some()
+                            {
+                                return Err("invalid portfolio quantity projection".into());
+                            }
+                        }
+                        let expected: std::collections::BTreeMap<_, _> = restored
+                            .rows()
+                            .into_iter()
+                            .map(|(strategy, symbol, quantity)| {
+                                ((strategy, symbol), quantity.to_bits())
+                            })
+                            .collect();
+                        if projected != expected {
+                            return Err(
+                                "portfolio snapshot disagrees with its quantity projection".into(),
+                            );
+                        }
+                        me = restored;
+                    } else {
+                        me.inventory.restate_legacy(attribution)?;
+                        let mut legacy = me.inventory.snapshot();
+                        legacy.schema_version = 1;
+                        me.accounting =
+                            crate::execution_accounting::ExecutionAccounting::restore(&legacy)?;
+                        for stop in intended_stops {
+                            if let Some(strategy) = me.sole_owner(stop.symbol) {
+                                let side = if me.signed(strategy, stop.symbol) > 0.0 {
+                                    Side::Buy
+                                } else {
+                                    Side::Sell
+                                };
+                                if stop.side.is_none_or(|recorded| recorded == side) {
+                                    me.remember_stop(strategy, stop.symbol, side, stop.trigger_px);
+                                }
+                            }
+                        }
+                    }
                     for open in open_orders {
-                        sender.insert(open.request.client_order_id.as_str(), open.request.strategy);
+                        sender.insert(open.request.client_order_id.as_str(), &open.request);
+                    }
+                }
+                WalRecord::StopSet {
+                    symbol, trigger_px, ..
+                } => {
+                    if let Some(strategy) = me.sole_owner(*symbol) {
+                        let side = if me.signed(strategy, *symbol) > 0.0 {
+                            Side::Buy
+                        } else {
+                            Side::Sell
+                        };
+                        me.remember_stop(strategy, *symbol, side, *trigger_px);
                     }
                 }
                 _ => {}
             }
         }
-        me
+        Ok(me)
     }
 
     /// Replace every claim with a rotation's own account of them. Set, not
     /// add: at its place in a chain read these rows are exactly what the fills
     /// before them summed to, and in a fresh segment they are all there is.
     pub fn restate(&mut self, rows: &[FilledTotal]) {
-        self.filled = rows
-            .iter()
-            .map(|row| ((row.strategy, row.symbol), row.signed_qty))
-            .collect();
+        self.inventory
+            .restate_legacy(rows)
+            .expect("validated legacy inventory");
+        let mut legacy = self.inventory.snapshot();
+        legacy.schema_version = 1;
+        self.accounting = crate::execution_accounting::ExecutionAccounting::restore(&legacy)
+            .expect("legacy accounting marker");
     }
 
     /// Forget the claims a boot dropped against a flat venue reading. The drop
@@ -163,30 +273,33 @@ impl Attribution {
     /// sleeve, making it undroppable.
     pub fn forget(&mut self, rows: &[FilledTotal]) {
         for row in rows {
-            self.filled.remove(&(row.strategy, row.symbol));
+            self.inventory.remove(row.strategy, row.symbol);
         }
     }
 
-    /// Keep only the symbols an operator's restatement (`engine
-    /// reconcile-clear`) still shows held. A symbol it reports flat is held by
-    /// nobody, whatever the fills before it summed to.
+    /// Restating physical flatness cannot remove balanced virtual holdings.
     pub fn keep_held(&mut self, restated: &[SymbolTotal]) {
-        self.filled.retain(|(_, symbol), _| {
-            restated
+        self.drop_where_flat(|symbol| {
+            !restated
                 .iter()
-                .any(|row| row.symbol == *symbol && row.signed_qty.abs() >= FLAT)
+                .any(|row| row.symbol == symbol && row.signed_qty.abs() >= FLAT)
         });
     }
 
     /// Every non-flat row, sorted, for a rotation to restate.
     pub fn rows(&self) -> Vec<(StrategyId, SymbolId, f64)> {
-        let mut rows: Vec<(StrategyId, SymbolId, f64)> = self
-            .filled
-            .iter()
-            .map(|((strategy, symbol), qty)| (*strategy, *symbol, *qty))
-            .collect();
-        rows.sort_by_key(|(strategy, symbol, _)| (*strategy, *symbol));
-        rows
+        self.inventory
+            .rows()
+            .map(|row| {
+                (
+                    row.strategy,
+                    row.symbol,
+                    row.signed_qty
+                        .to_f64()
+                        .expect("finite inventory projection"),
+                )
+            })
+            .collect()
     }
 
     /// Charge one fill to the strategy whose order produced it. The caller
@@ -194,82 +307,329 @@ impl Attribution {
     /// charged to a strategy that did not place it. Anything that is not a
     /// fill is ignored.
     pub fn on_update(&mut self, strategy: StrategyId, update: &OrderUpdate) {
-        let OrderUpdate::Fill {
-            symbol, side, qty, ..
-        } = update
-        else {
-            return;
-        };
-        self.note(strategy, *symbol, *side, *qty);
+        self.try_on_update(strategy, update)
+            .expect("validated owned execution");
     }
 
-    /// The one arithmetic behind both the delivered and the recovered path.
-    pub fn note(&mut self, strategy: StrategyId, symbol: SymbolId, side: Side, qty: f64) {
-        // An unreal number would poison the running total for good.
-        if !qty.is_finite() {
-            return;
+    pub fn try_on_update(
+        &mut self,
+        strategy: StrategyId,
+        update: &OrderUpdate,
+    ) -> Result<(), String> {
+        if let Some(change) = self.prepare_update(strategy, update)? {
+            self.commit_prepared(change)?;
         }
-        let signed = match side {
-            Side::Buy => qty,
-            Side::Sell => -qty,
+        Ok(())
+    }
+
+    pub(crate) fn prepare_update(
+        &self,
+        strategy: StrategyId,
+        update: &OrderUpdate,
+    ) -> Result<Option<PreparedAllocation>, String> {
+        let OrderUpdate::Fill {
+            symbol,
+            side,
+            qty,
+            px,
+            fee,
+            amounts,
+            ..
+        } = update
+        else {
+            return Ok(None);
         };
-        let key = (strategy, symbol);
-        let total = self.filled.entry(key).or_insert(0.0);
-        *total += signed;
-        if total.abs() < FLAT {
-            self.filled.remove(&key);
+        let fill = Self::execution_fill(
+            strategy,
+            *symbol,
+            *side,
+            *qty,
+            *px,
+            *fee,
+            amounts.as_deref(),
+        )?;
+        let accounting_input = Self::accounting_input(&fill, *fee, amounts.as_deref())?;
+        let change = self.inventory.prepare_fill(fill)?;
+        let accounting =
+            self.accounting
+                .prepare(crate::execution_accounting::ExecutionAccountingInput {
+                    realized: change.realized.clone(),
+                    ..accounting_input
+                })?;
+        Ok(Some(PreparedAllocation {
+            change,
+            accounting,
+            strategy,
+            symbol: *symbol,
+            legacy: amounts.is_none(),
+        }))
+    }
+
+    pub fn try_on_recovered(
+        &mut self,
+        strategy: StrategyId,
+        record: &WalRecord,
+    ) -> Result<(), String> {
+        let change = self.prepare_recovered(strategy, record)?;
+        self.commit_prepared(change)
+    }
+
+    pub(crate) fn prepare_recovered(
+        &self,
+        strategy: StrategyId,
+        record: &WalRecord,
+    ) -> Result<PreparedAllocation, String> {
+        let WalRecord::RecoveredFill {
+            symbol,
+            side,
+            qty,
+            px,
+            fee,
+            amounts,
+            ..
+        } = record
+        else {
+            return Err("expected recovered execution".into());
+        };
+        let fill =
+            Self::execution_fill(strategy, *symbol, *side, *qty, *px, *fee, amounts.as_ref())?;
+        let accounting_input = Self::accounting_input(&fill, *fee, amounts.as_ref())?;
+        let change = self.inventory.prepare_fill(fill)?;
+        let accounting =
+            self.accounting
+                .prepare(crate::execution_accounting::ExecutionAccountingInput {
+                    realized: change.realized.clone(),
+                    ..accounting_input
+                })?;
+        Ok(PreparedAllocation {
+            change,
+            accounting,
+            strategy,
+            symbol: *symbol,
+            legacy: amounts.is_none(),
+        })
+    }
+
+    pub(crate) fn commit_prepared(&mut self, prepared: PreparedAllocation) -> Result<(), String> {
+        let PreparedAllocation {
+            change,
+            accounting,
+            strategy,
+            symbol,
+            legacy,
+        } = prepared;
+        self.inventory.validate_change(&change)?;
+        self.accounting.validate_change(&accounting)?;
+        self.inventory.apply(change)?;
+        self.accounting.apply(accounting)?;
+        if legacy && self.signed(strategy, symbol).abs() < FLAT {
+            self.inventory.remove(strategy, symbol);
         }
+        Ok(())
+    }
+
+    fn accounting_input(
+        fill: &crate::inventory::InventoryFill,
+        fee: Option<f64>,
+        amounts: Option<&engine_types::numeric::ExecutionAmounts>,
+    ) -> Result<crate::execution_accounting::ExecutionAccountingInput, String> {
+        use engine_types::numeric::{AssetAmount, AssetId, ExactNumber};
+        let fee = if let Some(amounts) = amounts {
+            amounts.fee.clone()
+        } else {
+            fee.map(|value| {
+                ExactNumber::legacy_binary64(value).map(|amount| AssetAmount {
+                    asset: AssetId::Unknown,
+                    amount,
+                })
+            })
+            .transpose()
+            .map_err(|e| e.to_string())?
+        };
+        Ok(crate::execution_accounting::ExecutionAccountingInput {
+            strategy: fill.strategy,
+            symbol: fill.symbol,
+            side: fill.side,
+            qty: fill.qty.clone(),
+            px: fill.px.clone(),
+            settlement_asset: fill.settlement_asset.clone(),
+            fee,
+            realized: crate::inventory::RealizedValue {
+                amount: None,
+                asset: AssetId::Unknown,
+            },
+        })
+    }
+
+    fn execution_fill(
+        strategy: StrategyId,
+        symbol: SymbolId,
+        side: Side,
+        qty: f64,
+        px: f64,
+        fee: Option<f64>,
+        amounts: Option<&engine_types::numeric::ExecutionAmounts>,
+    ) -> Result<crate::inventory::InventoryFill, String> {
+        use engine_types::numeric::{AssetId, Exact};
+        let (qty, px, settlement_asset) = if let Some(amounts) = amounts {
+            amounts
+                .validate_projection(qty, px, fee)
+                .map_err(|error| error.to_string())?;
+            (
+                amounts.quantity.value.clone(),
+                amounts.price.value.clone(),
+                amounts.settlement_asset.clone(),
+            )
+        } else {
+            (
+                Exact::from_legacy_f64(qty).map_err(|error| error.to_string())?,
+                Exact::from_legacy_f64(px).map_err(|error| error.to_string())?,
+                AssetId::Unknown,
+            )
+        };
+        Ok(crate::inventory::InventoryFill {
+            strategy,
+            symbol,
+            side,
+            qty,
+            px: Some(px),
+            stop: None,
+            settlement_asset,
+        })
+    }
+
+    fn apply_fill(
+        &mut self,
+        fill: crate::inventory::InventoryFill,
+        legacy: bool,
+    ) -> Result<(), String> {
+        let (strategy, symbol) = (fill.strategy, fill.symbol);
+        let input = Self::accounting_input(&fill, None, None)?;
+        let change = self.inventory.prepare_fill(fill)?;
+        let accounting =
+            self.accounting
+                .prepare(crate::execution_accounting::ExecutionAccountingInput {
+                    realized: change.realized.clone(),
+                    ..input
+                })?;
+        self.commit_prepared(PreparedAllocation {
+            change,
+            accounting,
+            strategy,
+            symbol,
+            legacy,
+        })
+    }
+
+    pub fn note(&mut self, strategy: StrategyId, symbol: SymbolId, side: Side, qty: f64) {
+        use engine_types::numeric::{AssetId, Exact};
+        let Ok(qty) = Exact::from_legacy_f64(qty) else {
+            return;
+        };
+        let _ = self.apply_fill(
+            crate::inventory::InventoryFill {
+                strategy,
+                symbol,
+                side,
+                qty,
+                px: None,
+                stop: None,
+                settlement_asset: AssetId::Unknown,
+            },
+            true,
+        );
+    }
+
+    pub fn snapshot(&self) -> engine_types::portfolio::PortfolioState {
+        let mut state = self.inventory.snapshot();
+        self.accounting.write_snapshot(&mut state);
+        state
+    }
+
+    pub fn restore(state: &engine_types::portfolio::PortfolioState) -> Result<Self, String> {
+        Ok(Self {
+            inventory: crate::inventory::Inventory::restore(state)?,
+            accounting: crate::execution_accounting::ExecutionAccounting::restore(state)?,
+        })
+    }
+
+    pub fn remember_order_stop(&mut self, request: &engine_types::OrderRequest) {
+        if let Some(stop) = request.sleeve_stop() {
+            self.remember_stop(
+                request.strategy,
+                request.symbol,
+                request.side,
+                stop.trigger_px,
+            );
+        }
+    }
+
+    pub fn remember_stop(&mut self, strategy: StrategyId, symbol: SymbolId, side: Side, stop: f64) {
+        if let Ok(stop) = engine_types::numeric::Exact::from_legacy_f64(stop) {
+            self.inventory.tighten_stop(strategy, symbol, side, stop);
+        }
+    }
+
+    pub fn allocated(
+        &self,
+        strategy: StrategyId,
+        symbol: SymbolId,
+    ) -> Option<engine_types::strategy::StrategyAllocatedPosition> {
+        let position = self.inventory.position(strategy, symbol)?;
+        Some(engine_types::strategy::StrategyAllocatedPosition {
+            entry_px: position
+                .entry_value
+                .as_ref()
+                .and_then(|cost| cost.checked_div(&position.signed_qty.abs()).ok())
+                .and_then(|price| price.to_f64().ok()),
+            stop_px: position
+                .stop_px
+                .as_ref()
+                .and_then(|stop| stop.to_f64().ok()),
+        })
     }
 
     /// Signed quantity this strategy's own orders opened in this symbol.
     pub fn signed(&self, strategy: StrategyId, symbol: SymbolId) -> f64 {
-        self.filled.get(&(strategy, symbol)).copied().unwrap_or(0.0)
+        self.inventory
+            .position(strategy, symbol)
+            .map_or(0.0, |row| {
+                row.signed_qty
+                    .to_f64()
+                    .expect("validated inventory projection")
+            })
     }
 
     /// Symbols this strategy still has a non-flat fill claim on.
     pub fn symbols(&self, strategy: StrategyId) -> impl Iterator<Item = SymbolId> + '_ {
-        self.filled
-            .iter()
-            .filter_map(move |((owner, symbol), qty)| {
-                (*owner == strategy && qty.abs() >= FLAT).then_some(*symbol)
-            })
+        self.inventory
+            .rows()
+            .filter_map(move |row| (row.strategy == strategy).then_some(row.symbol))
     }
 
     /// The only sleeve with a non-flat claim on this symbol.
     pub fn sole_owner(&self, symbol: SymbolId) -> Option<StrategyId> {
-        let mut owners = self.filled.iter().filter_map(|((strategy, held), qty)| {
-            (*held == symbol && qty.abs() >= FLAT).then_some(*strategy)
-        });
+        let mut owners = self
+            .inventory
+            .rows()
+            .filter_map(|row| (row.symbol == symbol).then_some(row.strategy));
         let owner = owners.next()?;
         owners.next().is_none().then_some(owner)
     }
 
-    /// Drop every row in the symbols the caller says are flat, returning
-    /// what was dropped, sorted.
-    ///
-    /// The account reading is the only word on how much is actually there
-    /// (module note above). A row surviving in a symbol the venue holds
-    /// nothing of is a close this log never got to charge — a hand close, or
-    /// an inherited position wound down — and
-    /// left in place it keeps [`Attribution::held_by_another`] claiming a
-    /// holding that does not exist, locking every other sleeve out of the
-    /// name for good. The caller decides what "flat" means; boot asks it
-    /// with the venue reading reconcile just judged, skipping symbols with
-    /// an order still in flight.
+    /// Remove unexplained nonzero claims only when the venue is conclusively flat.
     pub fn drop_where_flat(
         &mut self,
         flat: impl Fn(SymbolId) -> bool,
     ) -> Vec<(StrategyId, SymbolId, f64)> {
-        let mut dropped: Vec<(StrategyId, SymbolId, f64)> = Vec::new();
-        self.filled.retain(|(strategy, symbol), qty| {
-            if flat(*symbol) {
-                dropped.push((*strategy, *symbol, *qty));
-                false
-            } else {
-                true
-            }
-        });
-        dropped.sort_by_key(|(strategy, symbol, _)| (*strategy, *symbol));
+        let dropped: Vec<_> = self
+            .rows()
+            .into_iter()
+            .filter(|(_, symbol, _)| flat(*symbol) && self.sole_owner(*symbol).is_some())
+            .collect();
+        for (strategy, symbol, _) in &dropped {
+            self.inventory.remove(*strategy, *symbol);
+        }
         dropped
     }
 
@@ -281,9 +641,9 @@ impl Attribution {
     /// their own stop on it, so sharing is not something to be sized around.
     /// The one who got there first keeps it until it is flat.
     pub fn held_by_another(&self, mine: StrategyId, symbol: SymbolId) -> bool {
-        self.filled.iter().any(|((strategy, held), qty)| {
-            *held == symbol && *strategy != mine && qty.abs() >= FLAT
-        })
+        self.inventory
+            .rows()
+            .any(|row| row.symbol == symbol && row.strategy != mine)
     }
 }
 
@@ -297,8 +657,62 @@ mod tests {
     const BTC: SymbolId = SymbolId(7);
     const ETH: SymbolId = SymbolId(8);
 
+    #[test]
+    fn physical_flatness_cannot_discard_unsettled_shared_inventory() {
+        let records = vec![
+            sent("a", CARRY, BTC),
+            fill("a", BTC, Side::Buy, 2.0),
+            sent("b", LONG, BTC),
+            fill("b", BTC, Side::Sell, 1.0),
+        ];
+        let mut attribution = Attribution::from_records(&records);
+        assert!(attribution.drop_where_flat(|_| true).is_empty());
+        attribution.keep_held(&[]);
+        assert_eq!(attribution.signed(CARRY, BTC), 2.0);
+        assert_eq!(attribution.signed(LONG, BTC), -1.0);
+        let state =
+            serde_json::from_slice(&serde_json::to_vec(&attribution.snapshot()).unwrap()).unwrap();
+        let mut restarted = Attribution::restore(&state).unwrap();
+        assert!(restarted.drop_where_flat(|_| true).is_empty());
+    }
+
+    #[test]
+    fn opposing_sleeves_survive_a_flat_venue_reading_and_restart() {
+        let records = vec![
+            sent("a", CARRY, BTC),
+            fill("a", BTC, Side::Buy, 2.0),
+            sent("b", LONG, BTC),
+            fill("b", BTC, Side::Sell, 2.0),
+        ];
+        let mut attribution = Attribution::from_records(&records);
+        assert!(attribution.drop_where_flat(|_| true).is_empty());
+        let encoded = serde_json::to_vec(&attribution.snapshot()).unwrap();
+        let state = serde_json::from_slice(&encoded).unwrap();
+        let mut restarted = Attribution::restore(&state).unwrap();
+        assert!(restarted.drop_where_flat(|_| true).is_empty());
+        assert_eq!(restarted.signed(CARRY, BTC), 2.0);
+        assert_eq!(restarted.signed(LONG, BTC), -2.0);
+    }
+
+    #[test]
+    fn net_flat_restatement_preserves_offsets_but_drops_unexplained_nonzero_claims() {
+        let mut attribution = Attribution::from_records(&[
+            sent("a", CARRY, BTC),
+            fill("a", BTC, Side::Buy, 2.0),
+            sent("b", LONG, BTC),
+            fill("b", BTC, Side::Sell, 2.0),
+            sent("c", CARRY, ETH),
+            fill("c", ETH, Side::Buy, 3.0),
+        ]);
+        attribution.keep_held(&[]);
+        assert_eq!(attribution.signed(CARRY, BTC), 2.0);
+        assert_eq!(attribution.signed(LONG, BTC), -2.0);
+        assert_eq!(attribution.signed(CARRY, ETH), 0.0);
+    }
+
     fn sent(id: &str, strategy: StrategyId, symbol: SymbolId) -> WalRecord {
         WalRecord::OrderSent {
+            dispatch: None,
             request: OrderRequest {
                 client_order_id: id.to_string(),
                 strategy,
@@ -308,6 +722,8 @@ mod tests {
                 kind: OrderKind::Market,
                 stop: None,
                 reduce_only: false,
+                exact_terms: None,
+                sleeve_effect: None,
                 close_position: false,
             },
             wire_ns: 1,
@@ -318,6 +734,8 @@ mod tests {
     fn fill(id: &str, symbol: SymbolId, side: Side, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: String::new(),
                 client_order_id: id.to_string(),
                 symbol,
@@ -337,6 +755,8 @@ mod tests {
     fn stop_fill(symbol: SymbolId, side: Side, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: "venue-stop".into(),
                 client_order_id: String::new(),
                 symbol,
@@ -359,6 +779,8 @@ mod tests {
         qty: f64,
     ) -> WalRecord {
         WalRecord::RecoveredFill {
+            allocation: None,
+            amounts: None,
             exec_id: "native-or-manual".into(),
             client_order_id: String::new(),
             symbol,

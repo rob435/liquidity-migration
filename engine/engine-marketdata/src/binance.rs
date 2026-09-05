@@ -45,6 +45,8 @@ pub struct BinancePublicFeed {
     inbox: Option<mpsc::Receiver<Result<MarketEvent, FeedError>>>,
     admissions: Option<mpsc::UnboundedSender<String>>,
     worker: Option<JoinHandle<()>>,
+    pending_reset: bool,
+    subs: Vec<Subscription>,
 }
 
 impl BinancePublicFeed {
@@ -63,6 +65,15 @@ impl BinancePublicFeed {
             symbols,
             ids,
             inbox: None,
+            pending_reset: false,
+            subs: subs
+                .iter()
+                .cloned()
+                .map(|mut row| {
+                    row.symbol = row.symbol.to_uppercase();
+                    row
+                })
+                .collect(),
             admissions: None,
             worker: None,
         }
@@ -73,8 +84,15 @@ impl BinancePublicFeed {
         ids.get(&symbol.to_uppercase()).copied()
     }
 
-    pub fn admit(&mut self, symbol: &str, _feed: Feed) -> SymbolId {
+    pub fn admit(&mut self, symbol: &str, feed: Feed) -> SymbolId {
         let symbol = symbol.to_uppercase();
+        let row = Subscription {
+            symbol: symbol.clone(),
+            feed,
+        };
+        if !self.subs.contains(&row) {
+            self.subs.push(row);
+        }
         let id = intern(&self.ids, &symbol);
         if !self.symbols.contains(&symbol) {
             self.symbols.push(symbol.clone());
@@ -113,6 +131,15 @@ impl Drop for BinancePublicFeed {
 
 impl MarketFeed for BinancePublicFeed {
     async fn next_event(&mut self) -> Result<MarketEvent, FeedError> {
+        if self.pending_reset {
+            self.pending_reset = false;
+            return Ok(MarketEvent::FeedReset {
+                recv_ns: engine_types::clock::mono_ns(),
+            });
+        }
+        if self.subs.is_empty() {
+            return std::future::pending().await;
+        }
         if self.inbox.is_none() {
             self.start();
         }
@@ -120,6 +147,27 @@ impl MarketFeed for BinancePublicFeed {
             Some(inbox) => inbox.recv().await.unwrap_or(Err(FeedError::Closed)),
             None => Err(FeedError::Closed),
         }
+    }
+
+    fn retire(&mut self, symbol: &str, feed: Feed) -> bool {
+        let symbol = symbol.to_uppercase();
+        let before = self.subs.len();
+        self.subs
+            .retain(|row| row.symbol != symbol || row.feed != feed);
+        if self.subs.len() == before {
+            return false;
+        }
+        if self.subs.iter().any(|row| row.symbol == symbol) {
+            return true;
+        }
+        self.symbols.retain(|known| known != &symbol);
+        if let Some(worker) = self.worker.take() {
+            worker.abort();
+        }
+        self.inbox = None;
+        self.admissions = None;
+        self.pending_reset = true;
+        true
     }
 
     fn admit(&mut self, symbol: &str, feed: Feed) -> Option<SymbolId> {
@@ -742,4 +790,39 @@ mod tests {
             Err(FeedError::Transport(_))
         ));
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn empty_demand_after_retirement_stays_idle_until_readmission() {
+    use std::future::Future;
+    let subs = [Subscription {
+        symbol: "BTCUSDT".into(),
+        feed: Feed::Quote,
+    }];
+    let mut feed = BinancePublicFeed::new(BinanceRealm::Testnet, &subs);
+    assert!(MarketFeed::retire(&mut feed, "BTCUSDT", Feed::Quote));
+    assert!(matches!(
+        feed.next_event().await.unwrap(),
+        MarketEvent::FeedReset { .. }
+    ));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut event = Box::pin(feed.next_event());
+    assert!(event.as_mut().poll(&mut context).is_pending());
+    drop(event);
+    assert!(
+        feed.inbox.is_none(),
+        "empty demand must not start a socket or poll worker"
+    );
+    assert_eq!(
+        MarketFeed::admit(&mut feed, "BTCUSDT", Feed::Quote),
+        Some(SymbolId(0))
+    );
+    let mut event = Box::pin(feed.next_event());
+    assert!(event.as_mut().poll(&mut context).is_pending());
+    drop(event);
+    assert!(
+        feed.inbox.is_some(),
+        "readmission restarts the worker with its original symbol ID"
+    );
 }

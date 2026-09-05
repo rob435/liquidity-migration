@@ -28,6 +28,7 @@ pub async fn symbol_map(realm: MexcRealm) -> Result<Vec<(Symbol, String)>, Venue
 /// The same read against a named host. Tests only.
 pub async fn symbol_map_from(base_url: &str) -> Result<Vec<(Symbol, String)>, VenueError> {
     let http = HttpClient::new(base_url);
-    let reply = http.get(PATH_CONTRACT_DETAIL, "", &[]).await?;
-    Ok(Contracts::parse(&reply)?.symbol_pairs())
+    let reply: Box<serde_json::value::RawValue> =
+        http.get_as(PATH_CONTRACT_DETAIL, "", &[]).await?;
+    Ok(Contracts::parse_raw(reply.get())?.symbol_pairs())
 }

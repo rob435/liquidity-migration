@@ -90,6 +90,22 @@ impl Assets {
         })
     }
 
+    pub(crate) fn instrument_specs(
+        &self,
+    ) -> Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError> {
+        let mut out = self
+            .by_coin
+            .values()
+            .map(|asset| {
+                asset
+                    .exact_spec()
+                    .map(|spec| (symbol_of(&asset.coin), spec))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
     /// Every listed asset as an instrument rule, under the engine's spelling
     /// of the symbol.
     pub(crate) fn instrument_rules(&self) -> Vec<(Symbol, InstrumentRule)> {
@@ -198,6 +214,43 @@ fn decimal_string(value: f64, decimals: usize) -> String {
         "0".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+impl Asset {
+    pub(crate) fn exact_spec(
+        &self,
+    ) -> Result<engine_types::numeric::ExactInstrumentSpec, VenueError> {
+        use engine_types::numeric::{AssetId, Exact, ExactInstrumentSpec, PricePrecision};
+        let step = Exact::parse_decimal(&format!("1e-{}", self.sz_decimals))
+            .map_err(|e| VenueError::BadReply(e.to_string()))?;
+        let decimals = (PRICE_DECIMAL_BUDGET as u32).saturating_sub(self.sz_decimals);
+        let tick = Exact::parse_decimal(&format!("1e-{decimals}"))
+            .map_err(|e| VenueError::BadReply(e.to_string()))?;
+        Ok(ExactInstrumentSpec {
+            native_symbol: self.coin.clone(),
+            base_asset: AssetId::Named(self.coin.clone()),
+            quote_asset: AssetId::Unknown,
+            settlement_asset: AssetId::Unknown,
+            tick_size: Some(tick),
+            min_price: None,
+            max_price: None,
+            price_precision: PricePrecision::SignificantFigures {
+                max_digits: MAX_SIGNIFICANT_FIGURES as u32,
+                max_decimals: decimals,
+                integer_exception: true,
+            },
+            qty_step: Some(step.clone()),
+            min_qty: Some(step.clone()),
+            market_qty_step: Some(step.clone()),
+            market_min_qty: Some(step),
+            max_qty: None,
+            max_market_qty: None,
+            min_notional: Some(Exact::from_u64(10)),
+            contract_multiplier: Some(Exact::one()),
+            fee_assets: None,
+            fee_step: None,
+        })
     }
 }
 

@@ -16,15 +16,17 @@
 //! examples, while `id` beside them is a bare number. Anything reading an id
 //! here accepts both rather than trusting either.
 
+#[cfg(test)]
+use engine_types::VenueExecution;
 use std::collections::HashMap;
 
 use engine_types::ids::SymbolId;
-use engine_types::orders::{Side, VenueExecution, VenueOrder};
+use engine_types::orders::{Side, VenueOrder};
 use engine_types::risk::PositionView;
 use engine_types::VenueError;
 use serde_json::Value;
 
-use crate::json::{int_field, num_field, opt_num_field, str_field};
+use crate::json::{num_field, str_field};
 
 use super::contracts::Contracts;
 
@@ -260,73 +262,15 @@ pub(crate) fn parse_open_orders(
 }
 
 /// One page of the venue's own fill history.
+#[cfg(test)]
 pub(crate) fn parse_deals(
     data: &Value,
     contracts: &Contracts,
 ) -> Result<(Vec<VenueExecution>, usize), VenueError> {
-    let rows =
-        rows_of(data).ok_or_else(|| VenueError::BadReply("order deals carried no rows".into()))?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let venue_symbol = str_field(row, "symbol")?;
-        let symbol = contracts.symbol_of(&venue_symbol).ok_or_else(|| {
-            VenueError::BadReply(format!("execution names unknown contract {venue_symbol}"))
-        })?;
-        let contract = contracts.any(symbol).ok_or_else(|| {
-            VenueError::BadReply(format!(
-                "contract metadata vanished for execution in {symbol}"
-            ))
-        })?;
-        let side_raw = int_field(row, "side")?;
-        let (side, _) = side_of(side_raw).ok_or_else(|| {
-            VenueError::BadReply(format!(
-                "execution in {venue_symbol} has unknown side {side_raw}"
-            ))
-        })?;
-        let exec_id = id_text(row, "id")
-            .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| {
-                VenueError::BadReply(format!("execution in {venue_symbol} has no readable id"))
-            })?;
-        let client_order_id = match row.get("externalOid") {
-            None | Some(Value::Null) => String::new(),
-            Some(Value::String(value)) => value.clone(),
-            Some(_) => {
-                return Err(VenueError::BadReply(format!(
-                    "execution {exec_id} in {venue_symbol} has a non-string externalOid"
-                )))
-            }
-        };
-        let contracts_qty = num_field(row, "vol")?;
-        let qty = contract.base_for(contracts_qty);
-        let px = num_field(row, "price")?;
-        let fee = opt_num_field(row, "fee")?;
-        let taker = row.get("taker").and_then(Value::as_bool).ok_or_else(|| {
-            VenueError::BadReply(format!(
-                "execution {exec_id} in {venue_symbol} has no boolean taker flag"
-            ))
-        })?;
-        let venue_ts_ms = int_field(row, "timestamp")?;
-        if contracts_qty <= 0.0 || !qty.is_finite() || qty <= 0.0 || px <= 0.0 || venue_ts_ms <= 0 {
-            return Err(VenueError::BadReply(format!(
-                "execution {exec_id} in {venue_symbol} has non-positive quantity, price, or timestamp"
-            )));
-        }
-        out.push(VenueExecution {
-            exec_id,
-            client_order_id,
-            symbol: symbol.to_string(),
-            side,
-            qty,
-            px,
-            fee,
-            is_maker: !taker,
-            // MEXC states no reason for a close on this row.
-            forced_close: None,
-            venue_ts_ms,
-        });
-    }
-    Ok((out, rows.len()))
+    let raw = serde_json::json!({"success":true,"code":0,"data":data}).to_string();
+    let reply: super::execution::HistoryReply =
+        crate::wire::raw_object(&raw).map_err(|e| VenueError::BadReply(e.to_string()))?;
+    reply.executions(contracts)
 }
 
 /// The venue's own id for an order it just accepted.

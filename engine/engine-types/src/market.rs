@@ -201,6 +201,12 @@ pub trait MarketFeed {
         let _ = (symbol, feed);
         None
     }
+
+    /// Retire demand while retaining the symbol's existing id.
+    fn retire(&mut self, symbol: &str, feed: crate::market::Feed) -> bool {
+        let _ = (symbol, feed);
+        false
+    }
 }
 
 /// A live order/fill update source (the venue's private stream).
@@ -216,6 +222,9 @@ pub trait OrderFeed {
     /// resolved is a fill the engine does not see.
     fn learn(&mut self, symbol: &str, id: SymbolId) {
         let _ = (symbol, id);
+    }
+    fn learn_instrument(&mut self, id: SymbolId, spec: &crate::numeric::ExactInstrumentSpec) {
+        let _ = (id, spec);
     }
 }
 

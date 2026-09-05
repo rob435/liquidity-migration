@@ -22,9 +22,11 @@
 
 use std::collections::HashMap;
 
+use crate::numeric_wire::DecimalField;
 use engine_types::ids::Symbol;
 use engine_types::orders::InstrumentRule;
 use engine_types::{quantize, VenueError};
+use serde::Deserialize;
 use serde_json::Value;
 
 /// One tradable contract, as the venue describes it.
@@ -34,6 +36,9 @@ pub struct Contract {
     pub venue_symbol: String,
     /// Base coin per contract. The multiplier everything here exists for.
     pub contract_size: f64,
+    pub exact_contract_size: engine_types::numeric::ExactNumber,
+    pub settlement_asset: engine_types::numeric::AssetId,
+    pub exact_spec: engine_types::numeric::ExactInstrumentSpec,
     /// Price tick.
     pub price_unit: f64,
     /// Smallest order, in contracts. The venue publishes 1 for every contract
@@ -137,16 +142,21 @@ pub struct Contracts {
 impl Contracts {
     /// Read `GET /api/v1/contract/detail`.
     pub fn parse(body: &Value) -> Result<Self, VenueError> {
-        let rows = body
-            .get("data")
-            .and_then(Value::as_array)
-            .ok_or_else(|| VenueError::BadReply("contract detail carried no data array".into()))?;
-        let mut by_symbol = HashMap::with_capacity(rows.len());
-        for row in rows {
-            let Some(contract) = read_row(row) else {
-                continue;
-            };
-            by_symbol.insert(contract.0, contract.1);
+        Self::parse_raw(&body.to_string())
+    }
+
+    pub fn parse_raw(raw: &str) -> Result<Self, VenueError> {
+        #[derive(Deserialize)]
+        struct Reply {
+            data: Vec<Box<serde_json::value::RawValue>>,
+        }
+        let body: Reply = crate::numeric_wire::decode_object(raw)
+            .map_err(|e| VenueError::BadReply(format!("contract detail: {e}")))?;
+        let mut by_symbol = HashMap::with_capacity(body.data.len());
+        for raw in body.data {
+            if let Some((symbol, contract)) = read_row(raw.get()) {
+                by_symbol.insert(symbol, contract);
+            }
         }
         if by_symbol.is_empty() {
             return Err(VenueError::BadReply(
@@ -204,6 +214,16 @@ impl Contracts {
             .collect()
     }
 
+    pub fn instrument_specs(&self) -> Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)> {
+        let mut rows = self
+            .by_symbol
+            .iter()
+            .map(|(symbol, contract)| (symbol.clone(), contract.exact_spec.clone()))
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    }
+
     pub fn is_empty(&self) -> bool {
         self.by_symbol.is_empty()
     }
@@ -212,60 +232,98 @@ impl Contracts {
 /// One row of `contract/detail`. A row missing anything load-bearing is
 /// skipped rather than defaulted: a contract size guessed at 1 would size
 /// every order on that symbol wrong by its real multiplier.
-fn read_row(row: &Value) -> Option<(Symbol, Contract)> {
-    let venue_symbol = row.get("symbol")?.as_str()?.to_string();
-    let base = row.get("baseCoin")?.as_str()?;
-    let quote = row.get("quoteCoin")?.as_str()?;
-    let settle = row.get("settleCoin")?.as_str()?;
-    let contract_size = row.get("contractSize")?.as_f64()?;
-    let price_unit = row.get("priceUnit")?.as_f64()?;
-    // An inverse contract settles in the coin it is quoted against, and its
-    // contract size is denominated in the QUOTE currency — one BTC_USD
-    // contract is 100 USD, not 100 BTC. Converting it with the linear rule
-    // below would size a position out by the price of the coin, so those
-    // contracts are not listed at all rather than listed and mis-sized. The
-    // engine is linear end to end; a venue's inverse book is a different
-    // instrument, not a variant of this one.
-    //
-    // `futureType` does NOT separate them — it is 1 for both kinds. Settling
-    // in something other than the quote currency is what an inverse contract
-    // is, and it matches the venue's ten USD-quoted contracts exactly.
-    if settle != quote {
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContractRow {
+    symbol: String,
+    base_coin: String,
+    quote_coin: String,
+    settle_coin: String,
+    contract_size: DecimalField,
+    price_unit: DecimalField,
+    #[serde(default)]
+    min_vol: DecimalField,
+    #[serde(default)]
+    max_vol: DecimalField,
+    #[serde(default)]
+    limit_max_vol: DecimalField,
+    #[serde(default)]
+    max_leverage: DecimalField,
+    #[serde(default)]
+    api_allowed: Option<bool>,
+}
+
+fn read_row(raw: &str) -> Option<(Symbol, Contract)> {
+    let row: ContractRow = crate::numeric_wire::decode_object(raw).ok()?;
+    if row.settle_coin != row.quote_coin {
         return None;
     }
-    if !(contract_size.is_finite() && contract_size > 0.0) {
+    let contract_size = row.contract_size.legacy("contractSize").ok()?;
+    let price_unit = row.price_unit.legacy("priceUnit").ok()?;
+    if contract_size <= 0.0 || price_unit <= 0.0 {
         return None;
     }
-    if !(price_unit.is_finite() && price_unit > 0.0) {
-        return None;
+    for (field, name) in [
+        (&row.min_vol, "minVol"),
+        (&row.max_vol, "maxVol"),
+        (&row.limit_max_vol, "limitMaxVol"),
+    ] {
+        if let Some(number) = field.optional(name).ok()? {
+            if !number.value.is_positive()
+                || !number
+                    .value
+                    .is_multiple_of(&engine_types::numeric::Exact::one())
+                    .ok()?
+            {
+                return None;
+            }
+            number.value.to_f64().ok()?;
+        }
     }
-    let max_vol = row
-        .get("maxVol")
-        .and_then(Value::as_f64)
-        .unwrap_or(f64::MAX);
+    let max_vol = row.max_vol.legacy("maxVol").unwrap_or(f64::MAX);
+    use engine_types::numeric::{AssetId, ExactInstrumentSpec, PricePrecision};
+    let multiplier = row.contract_size.required("contractSize").ok()?.value;
+    let base_qty = |field: &DecimalField, name: &str| {
+        field
+            .optional(name)
+            .ok()
+            .flatten()
+            .map(|number| &number.value * &multiplier)
+    };
+    let exact_spec = ExactInstrumentSpec {
+        native_symbol: row.symbol.clone(),
+        base_asset: AssetId::Named(row.base_coin.clone()),
+        quote_asset: AssetId::Named(row.quote_coin.clone()),
+        settlement_asset: AssetId::Named(row.settle_coin.clone()),
+        tick_size: Some(row.price_unit.required("priceUnit").ok()?.value),
+        min_price: None,
+        max_price: None,
+        price_precision: PricePrecision::Tick,
+        qty_step: Some(multiplier.clone()),
+        market_qty_step: Some(multiplier.clone()),
+        min_qty: base_qty(&row.min_vol, "minVol"),
+        market_min_qty: base_qty(&row.min_vol, "minVol"),
+        max_qty: base_qty(&row.limit_max_vol, "limitMaxVol"),
+        max_market_qty: base_qty(&row.max_vol, "maxVol"),
+        min_notional: None,
+        contract_multiplier: Some(multiplier),
+        fee_assets: None,
+        fee_step: None,
+    };
     Some((
-        format!("{base}{quote}"),
+        format!("{}{}", row.base_coin, row.quote_coin),
         Contract {
-            venue_symbol,
+            venue_symbol: row.symbol,
             contract_size,
+            exact_contract_size: row.contract_size.required("contractSize").ok()?,
+            exact_spec,
+            settlement_asset: engine_types::numeric::AssetId::Named(row.settle_coin),
             price_unit,
-            min_vol: row.get("minVol").and_then(Value::as_f64).unwrap_or(1.0),
+            min_vol: row.min_vol.legacy("minVol").unwrap_or(1.0),
             max_vol,
-            // Absent falls back to the market ceiling rather than to no limit.
-            limit_max_vol: row
-                .get("limitMaxVol")
-                .and_then(Value::as_f64)
-                .unwrap_or(max_vol),
-            max_leverage: row
-                .get("maxLeverage")
-                .and_then(Value::as_f64)
-                .unwrap_or(1.0),
-            // Absent reads as "not permitted". A contract whose row does not
-            // say is not one to find out about by sending an order.
-            api_allowed: row
-                .get("apiAllowed")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            limit_max_vol: row.limit_max_vol.legacy("limitMaxVol").unwrap_or(max_vol),
+            max_leverage: row.max_leverage.legacy("maxLeverage").unwrap_or(1.0),
+            api_allowed: row.api_allowed.unwrap_or(false),
         },
     ))
 }
@@ -492,6 +550,23 @@ mod tests {
             t.tradable("YUSDT").is_err(),
             "a silent row was treated as tradable"
         );
+    }
+
+    #[test]
+    fn malformed_volume_capability_is_refused_instead_of_becoming_unlimited() {
+        for (field, value) in [
+            ("maxVol", "\"broken\""),
+            ("limitMaxVol", "true"),
+            ("minVol", "-1"),
+        ] {
+            let raw = format!(
+                r#"{{"data":[{{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"apiAllowed":true,"{field}":{value}}}]}}"#
+            );
+            assert!(
+                Contracts::parse_raw(&raw).is_err(),
+                "invalid {field} became a permissive capability"
+            );
+        }
     }
 
     #[test]

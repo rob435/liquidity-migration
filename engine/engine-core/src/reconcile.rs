@@ -333,11 +333,32 @@ pub fn reconcile(
 /// Fills that cannot join to an order this log sent since its latest compact
 /// state. A clear accepts earlier account history; a segment base carries the
 /// durable latch and only keeps ids for orders still open at that boundary.
+fn has_allocation(record: &WalRecord) -> bool {
+    matches!(
+        record,
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill {
+                allocation: Some(_),
+                ..
+            }
+        } | WalRecord::RecoveredFill {
+            allocation: Some(_),
+            ..
+        }
+    )
+}
+
 fn foreign_fills(replayed: &[WalRecord]) -> Vec<Finding> {
     let mut sent: HashMap<String, StrategyId> = HashMap::new();
     let mut claims = Attribution::default();
+    let mut strategy_names = Vec::new();
     let mut findings = Vec::new();
     for record in replayed {
+        if let WalRecord::Names { strategies, .. } | WalRecord::SegmentBase { strategies, .. } =
+            record
+        {
+            strategy_names = strategies.clone();
+        }
         match record {
             WalRecord::OrderSent { request, .. } => {
                 sent.insert(request.client_order_id.clone(), request.strategy);
@@ -348,7 +369,7 @@ fn foreign_fills(replayed: &[WalRecord]) -> Vec<Finding> {
                         client_order_id,
                         symbol,
                         side,
-                        qty,
+                        qty: _,
                         forced_close,
                         ..
                     },
@@ -357,16 +378,20 @@ fn foreign_fills(replayed: &[WalRecord]) -> Vec<Finding> {
                 client_order_id,
                 symbol,
                 side,
-                qty,
+                qty: _,
                 forced_close,
                 ..
             } => {
                 let owner = sent.get(client_order_id).copied().or_else(|| {
-                    forced_close_owner(&claims, client_order_id, *symbol, *side, *forced_close)
+                    if has_allocation(record) {
+                        None
+                    } else {
+                        forced_close_owner(&claims, client_order_id, *symbol, *side, *forced_close)
+                    }
                 });
-                match owner {
-                    Some(owner) => claims.note(owner, *symbol, *side, *qty),
-                    None => findings.push(Finding::ForeignFill {
+                match claims.fold_record_fill(record, owner, &strategy_names) {
+                    Ok(true) => {}
+                    _ => findings.push(Finding::ForeignFill {
                         client_order_id: client_order_id.clone(),
                         symbol: *symbol,
                     }),
@@ -523,8 +548,14 @@ fn position_state(
     // `attribution` keeps them, so this walk resolves the same owner the live
     // path did and trusted exposure cannot drift across a restart.
     let mut claims = Attribution::default();
+    let mut strategy_names = Vec::new();
 
     for record in replayed {
+        if let WalRecord::Names { strategies, .. } | WalRecord::SegmentBase { strategies, .. } =
+            record
+        {
+            strategy_names = strategies.clone();
+        }
         match record {
             WalRecord::OrderSent { request, .. } => {
                 sent.insert(request.client_order_id.clone(), request.clone());
@@ -550,11 +581,14 @@ fn position_state(
             } => {
                 let request = sent.get(client_order_id);
                 let owner = request.map(|request| request.strategy).or_else(|| {
-                    forced_close_owner(&claims, client_order_id, *symbol, *side, *forced_close)
+                    if has_allocation(record) {
+                        None
+                    } else {
+                        forced_close_owner(&claims, client_order_id, *symbol, *side, *forced_close)
+                    }
                 });
-                if let Some(owner) = owner {
+                if claims.fold_record_fill(record, owner, &strategy_names) == Ok(true) {
                     note_owned_fill(&mut exposure, &mut intended, request, *symbol, *side, *qty);
-                    claims.note(owner, *symbol, *side, *qty);
                 }
             }
             WalRecord::StopSet {
@@ -654,12 +688,15 @@ mod tests {
             kind: OrderKind::Market,
             stop: stop.map(|trigger_px| StopSpec { trigger_px }),
             reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
             close_position: false,
         }
     }
 
     fn sent(id: &str, symbol: u16, side: Side, qty: f64, stop: Option<f64>) -> WalRecord {
         WalRecord::OrderSent {
+            dispatch: None,
             request: request(id, symbol, side, qty, stop),
             wire_ns: 1,
             arrival_mid: 0.0,
@@ -669,6 +706,8 @@ mod tests {
     fn fill(id: &str, symbol: u16, side: Side, qty: f64) -> WalRecord {
         WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: String::new(),
                 client_order_id: id.into(),
                 symbol: SymbolId(symbol),
@@ -974,6 +1013,7 @@ mod tests {
         let log = vec![
             sent("eng-1", 3, Side::Buy, 1.0, Some(88.5)),
             WalRecord::OrderSent {
+                dispatch: None,
                 request: exit,
                 wire_ns: 2,
                 arrival_mid: 0.0,
@@ -1120,6 +1160,8 @@ mod tests {
 
     fn recovered(exec: &str, id: &str, symbol: u16, side: Side, qty: f64) -> WalRecord {
         WalRecord::RecoveredFill {
+            allocation: None,
+            amounts: None,
             exec_id: exec.into(),
             client_order_id: id.into(),
             symbol: SymbolId(symbol),
@@ -1212,6 +1254,8 @@ mod tests {
     fn a_venue_stop_squares_trusted_exposure_on_replay() {
         let stop = WalRecord::OrderUpdate {
             update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
                 exec_id: "venue-stop".into(),
                 client_order_id: String::new(),
                 symbol: SymbolId(3),

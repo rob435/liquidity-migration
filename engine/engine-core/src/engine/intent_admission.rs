@@ -11,6 +11,8 @@ pub(crate) enum OpeningRefusal {
     /// A durable signal source this strategy depends on has a recorded gap.
     SignalSequenceGap,
     SignalProducerUnready,
+    StrategyCallbackUnavailable,
+    OrderDispatchUnresolved,
     /// The operator switched this strategy's entries off.
     RuntimeEntriesDisabled,
     /// The private account stream has not completed gap recovery.
@@ -25,6 +27,8 @@ impl OpeningRefusal {
             Self::ForeignStrategyOwner => "foreign_strategy_owner",
             Self::SignalSequenceGap => "signal_sequence_gap",
             Self::SignalProducerUnready => "signal_producer_unready",
+            Self::StrategyCallbackUnavailable => "strategy_callback_unavailable",
+            Self::OrderDispatchUnresolved => "order_dispatch_unresolved",
             Self::RuntimeEntriesDisabled => "runtime_entries_disabled",
             Self::PrivateStreamUnready => "private_stream_unready",
             Self::EngineLatched => "engine_latched",
@@ -40,6 +44,8 @@ impl OpeningRefusal {
                 "signal_sequence_gap: a required source has missing observations"
             }
             Self::SignalProducerUnready => "signal_producer_unready: a required producer has not established its startup frontier",
+            Self::StrategyCallbackUnavailable => "strategy_callback_unavailable: a strategy callback has no committed outcome",
+            Self::OrderDispatchUnresolved => "order_dispatch_unresolved: an attempted order has no authoritative venue outcome",
             Self::RuntimeEntriesDisabled => {
                 "this strategy's runtime entry permission is disabled"
             }
@@ -83,7 +89,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// operator switch. Per strategy, not per symbol, and not the engine's
     /// own state.
     pub(super) fn opening_permission_reason(&self, strategy: StrategyId) -> Option<OpeningRefusal> {
-        if self.signal_inputs_blocked(strategy) {
+        if self.host.callbacks.faults.contains_key(&strategy) {
+            Some(OpeningRefusal::StrategyCallbackUnavailable)
+        } else if self.signal_inputs_blocked(strategy) {
             Some(OpeningRefusal::SignalSequenceGap)
         } else if self
             .signal_dependencies
@@ -107,6 +115,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// private stream, then the boot latch. Exits flow past all of them.
     pub(super) fn opening_refusal(&self, strategy: StrategyId) -> Option<OpeningRefusal> {
         self.opening_permission_reason(strategy)
+            .or((!self.dispatches.unresolved.is_empty())
+                .then_some(OpeningRefusal::OrderDispatchUnresolved))
             .or((!self.private_stream_ready).then_some(OpeningRefusal::PrivateStreamUnready))
             .or((!self.may_open).then_some(OpeningRefusal::EngineLatched))
     }
@@ -310,6 +320,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(None);
         }
 
+        if let Some(spec) = self.instrument_specs.get(&intent.symbol).cloned() {
+            return self.quantize_exact_order(approval, &spec);
+        }
+        if self.require_exact_instruments {
+            self.refuse(
+                client_order_id,
+                intent,
+                "exact instrument metadata is unavailable for this symbol",
+            )?;
+            return Ok(None);
+        }
+
         let Some(rule) = self
             .books
             .rules
@@ -409,9 +431,129 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 })
             },
             reduce_only: intent.reduce_only,
+            exact_terms: None,
+            sleeve_effect: if intent.reduce_only {
+                Some(engine_types::orders::SleeveOrderEffect::Reduce)
+            } else {
+                intent
+                    .stop
+                    .map(|stop| engine_types::orders::SleeveOrderEffect::Increase {
+                        stop: StopSpec {
+                            trigger_px: quantize::quantize_px(
+                                stop.trigger_px,
+                                intent.side.flipped(),
+                                &rule,
+                            ),
+                        },
+                    })
+            },
             close_position,
         };
 
+        Ok(Some(LegalOrder { request, approval }))
+    }
+
+    fn quantize_exact_order(
+        &mut self,
+        approval: RiskApprovedIntent,
+        spec: &engine_types::numeric::ExactInstrumentSpec,
+    ) -> Result<Option<LegalOrder>, EngineError> {
+        use engine_types::order_terms::{quantize_order, strategy_decimal, QuantityPolicy};
+        use engine_types::orders::SleeveOrderEffect;
+        let intent = &approval.intent;
+        let reference = self.reference_px(intent.symbol, &intent.kind);
+        let stop = if intent.reduce_only {
+            None
+        } else {
+            intent.stop
+        };
+        let mut policy = QuantityPolicy::Normal;
+        let mut terms = quantize_order(
+            spec,
+            intent.side,
+            approval.allowed_qty,
+            intent.kind,
+            stop,
+            reference,
+            policy,
+        );
+        if terms.is_err()
+            && intent.reduce_only
+            && matches!(intent.kind, OrderKind::Market)
+            && self.venue.caps().close_position_below_minimum
+        {
+            let held: Vec<_> = self
+                .books
+                .account
+                .positions
+                .iter()
+                .filter(|p| p.symbol == intent.symbol)
+                .collect();
+            if let [position] = held.as_slice() {
+                let exact_match = strategy_decimal(approval.allowed_qty)
+                    .ok()
+                    .zip(strategy_decimal(position.qty).ok())
+                    .is_some_and(|(a, b)| a == b);
+                let below_minimum = strategy_decimal(position.qty).ok().is_some_and(|qty| {
+                    spec.market_min_qty.as_ref().is_some_and(|min| &qty < min)
+                        || reference
+                            .and_then(|px| strategy_decimal(px).ok())
+                            .is_some_and(|px| {
+                                spec.min_notional
+                                    .as_ref()
+                                    .is_some_and(|min| &qty * &px < *min)
+                            })
+                });
+                if exact_match && below_minimum && position.side == intent.side.flipped() {
+                    policy = QuantityPolicy::CloseEntirePosition;
+                    terms = quantize_order(
+                        spec,
+                        intent.side,
+                        approval.allowed_qty,
+                        intent.kind,
+                        None,
+                        reference,
+                        policy,
+                    );
+                }
+            }
+        }
+        let terms = match terms {
+            Ok(terms) => terms,
+            Err(error) => {
+                self.refuse(
+                    &approval.client_order_id,
+                    intent,
+                    &format!("exact instrument legality: {error}"),
+                )?;
+                return Ok(None);
+            }
+        };
+        let mut request = OrderRequest {
+            client_order_id: approval.client_order_id.clone(),
+            strategy: intent.strategy,
+            symbol: intent.symbol,
+            side: intent.side,
+            qty: approval.allowed_qty,
+            kind: intent.kind,
+            stop,
+            reduce_only: intent.reduce_only,
+            exact_terms: None,
+            sleeve_effect: if intent.reduce_only {
+                Some(SleeveOrderEffect::Reduce)
+            } else {
+                stop.map(|stop| SleeveOrderEffect::Increase { stop })
+            },
+            close_position: policy == QuantityPolicy::CloseEntirePosition,
+        };
+        terms
+            .apply_projection(&mut request)
+            .map_err(|error| EngineError::State(error.to_string()))?;
+        if request.qty > approval.allowed_qty {
+            return Err(EngineError::State(
+                "exact quantity projection enlarged the risk approval".into(),
+            ));
+        }
         Ok(Some(LegalOrder { request, approval }))
     }
 
@@ -490,7 +632,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let qty = request.qty;
         // Appended before reservation and venue dispatch. One disk barrier
         // covers every accepted sibling in the group.
+        let mut dispatch_intent = intent.clone();
+        dispatch_intent.decided_ns = decided_ns;
+        let dispatch = engine_types::order_dispatch::QueuedOrderDispatch {
+            intent: dispatch_intent.clone(),
+            origin_ns,
+        };
         let sent_record = WalRecord::OrderSent {
+            dispatch: Some(Box::new(dispatch)),
             request: request.clone(),
             wire_ns: clock::now_ns(),
             // `M0`. Read here rather than at the fill because this is the only
@@ -501,12 +650,21 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             arrival_mid: self.decision_mid(request.symbol),
         };
         self.wal.append(&sent_record)?;
+        self.dispatches.orders.insert(
+            client_order_id.clone(),
+            engine_types::order_dispatch::OrderDispatchState {
+                request: request.clone(),
+                intent: dispatch_intent,
+                origin_ns,
+                phase: engine_types::order_dispatch::OrderDispatchPhase::Queued,
+            },
+        );
         self.books.orders.apply(&sent_record);
         self.books.registry.own(&client_order_id, intent.strategy);
         // The engine's own note of what just went out, at the size that
         // actually went — strategies read it back as `ctx.in_flight`, so the
         // window between a fill and the next account reading cannot look flat.
-        if request.reduce_only {
+        if request.is_sleeve_reduction() {
             self.books.covers.register_reduce(
                 intent.strategy,
                 request.symbol,
@@ -536,6 +694,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
 
         Ok(PreparedOrder {
+            intent,
             request,
             decided_ns,
             origin_ns,
@@ -547,7 +706,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         intents: Vec<(Intent, Option<String>)>,
         origin_ns: u64,
     ) -> Result<bool, EngineError> {
-        let stateful = intents.iter().any(|(_, id)| id.is_some());
         if intents.len() > MAX_ORDERS_PER_BATCH {
             return Err(EngineError::State(format!(
                 "placement batch has {} orders; hard maximum is {MAX_ORDERS_PER_BATCH}",
@@ -638,43 +796,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(false);
         }
 
-        // Stateful effects wait for this barrier before dispatch so replay
-        // cannot resend an effect whose first order never reached the disk.
-        // Ordinary orders overlap the barrier and send; private news settles
-        // it before changing state. A machine failure during that overlap can
-        // leave a venue order unnamed in the WAL; reconciliation latches it.
-        self.settle_barrier()?;
-        self.pending_barrier = Some(self.wal.barrier_begin()?);
-        let durable_ns = clock::now_ns();
-        for order in &prepared {
-            self.ledger.record(
-                Segment::Durable,
-                durable_ns.saturating_sub(order.decided_ns),
-            );
-        }
-
-        let mut requests = Vec::with_capacity(prepared.len());
-        let mut timings = Vec::with_capacity(prepared.len());
-        for order in prepared {
-            requests.push(order.request);
-            timings.push((order.decided_ns, order.origin_ns));
-        }
-
-        if stateful {
-            self.settle_barrier()?;
-        }
-        let queued_ns = clock::now_ns();
-        let command_id = self.venue.dispatch_orders(requests.clone())?;
-        self.mark_symbols_busy(requests.iter().map(|request| request.symbol));
-        self.pending_mutations.insert(
-            command_id,
-            PendingMutation::Orders {
-                requests,
-                timings,
-                queued_ns,
-            },
-        );
-        Ok(true)
+        self.queue_order_dispatches(prepared)
     }
 
     /// Refuse an entry for an engine-level reason. The verdict is written

@@ -322,6 +322,20 @@ impl SignalFeed for SpoolSignalFeed {
         self.readiness = Some(super::readiness::ReadinessExchange::start(
             self.directory.clone(),
             self.poll,
+            None,
+        ));
+        Ok(())
+    }
+
+    fn request_lifecycle(
+        &mut self,
+        producers: Vec<engine_types::SignalProducerLifecycle>,
+        legacy_sources: Vec<engine_types::SignalSourceFrontier>,
+    ) -> Result<(), SignalError> {
+        self.readiness = Some(super::readiness::ReadinessExchange::start(
+            self.directory.clone(),
+            self.poll,
+            Some((producers, legacy_sources)),
         ));
         Ok(())
     }
@@ -335,10 +349,11 @@ impl SignalFeed for SpoolSignalFeed {
         };
         tokio::select! {
             biased;
-            frontiers = super::readiness::receive(receiver) => {
-                self.readiness = None;
+            (frontiers, receiver) = super::readiness::receive(receiver) => {
+                let continuous = self.readiness.as_mut().is_some_and(|exchange| exchange.acknowledged(receiver));
+                if !continuous || frontiers.is_err() { self.readiness = None; }
                 Ok(match frontiers {
-                    Ok(frontiers) => engine_types::SignalFeedEvent::Ready(frontiers),
+                    Ok(event) => event,
                     Err(error) => engine_types::SignalFeedEvent::ReadinessUnavailable { reason: error.to_string() },
                 })
             }

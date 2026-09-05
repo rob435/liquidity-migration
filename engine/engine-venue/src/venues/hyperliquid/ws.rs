@@ -24,7 +24,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::wire::{self, Field};
+use crate::wire::{self, Field, RawField};
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::market::{FeedError, OrderFeed};
 use engine_types::orders::{OrderAck, OrderUpdate};
@@ -38,7 +38,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
 use super::cloid;
-use super::parse::parse_execution;
+
 use super::realm::HyperliquidRealm;
 use super::sign::{address_text, parse_address};
 use crate::creds::Credentials;
@@ -279,7 +279,7 @@ struct PrivateEnvelope {
     #[serde(default)]
     channel: Field<String>,
     #[serde(default)]
-    data: Field<Value>,
+    data: RawField<Box<serde_json::value::RawValue>>,
 }
 
 pub(crate) struct Decoder {
@@ -301,26 +301,35 @@ impl Decoder {
     }
 
     pub(crate) fn ingest(&mut self, text: &str) -> Result<(), FeedError> {
-        let frame: Value = serde_json::from_str(text)
+        let frame: PrivateEnvelope = wire::raw_object(text)
             .map_err(|e| FeedError::BadMessage(format!("{e}: {}", first_chars(text))))?;
-        let frame: PrivateEnvelope = wire::object(&frame);
         let Some(channel) = frame.channel.0.as_deref() else {
             return Ok(());
         };
         match channel {
-            "orderUpdates" => self.order_updates(frame.data.0.as_ref().unwrap_or(&Value::Null)),
-            "userFills" => {
-                self.user_fills(frame.data.0.as_ref().ok_or_else(|| {
-                    FeedError::BadMessage("userFills carries no data".to_string())
-                })?)
-            }
+            "orderUpdates" => self.order_updates(
+                &frame
+                    .data
+                    .0
+                    .as_ref()
+                    .and_then(|raw| serde_json::from_str::<Value>(raw.get()).ok())
+                    .unwrap_or(Value::Null),
+            ),
+            "userFills" => self.user_fills(
+                frame
+                    .data
+                    .0
+                    .as_ref()
+                    .ok_or_else(|| FeedError::BadMessage("userFills carries no data".to_string()))?
+                    .get(),
+            ),
             "error" => {
                 let why = frame
                     .data
                     .0
                     .as_ref()
-                    .and_then(Value::as_str)
-                    .unwrap_or("no reason");
+                    .and_then(|raw| serde_json::from_str::<String>(raw.get()).ok())
+                    .unwrap_or_else(|| "no reason".to_owned());
                 Err(FeedError::Transport(format!(
                     "venue refused a subscription: {why}"
                 )))
@@ -408,11 +417,17 @@ impl Decoder {
         Ok(())
     }
 
-    fn user_fills(&mut self, data: &Value) -> Result<(), FeedError> {
-        let is_snapshot = data
-            .get("isSnapshot")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+    fn user_fills(&mut self, raw: &str) -> Result<(), FeedError> {
+        #[derive(Default, Deserialize)]
+        struct Fills {
+            #[serde(default, rename = "isSnapshot")]
+            snapshot: Field<bool>,
+            #[serde(default)]
+            fills: RawField<Vec<Box<serde_json::value::RawValue>>>,
+        }
+        let data: Fills =
+            wire::raw_object(raw).map_err(|e| FeedError::BadMessage(e.to_string()))?;
+        let is_snapshot = data.snapshot.0.unwrap_or(false);
         if is_snapshot && self.awaiting_snapshot {
             // Already in the engine's log; delivering them would double-count
             // every fill the account has recently had.
@@ -421,12 +436,12 @@ impl Decoder {
         }
         self.awaiting_snapshot = false;
         let fills = data
-            .get("fills")
-            .and_then(Value::as_array)
+            .fills
+            .0
             .ok_or_else(|| FeedError::BadMessage("userFills carries no fills".to_string()))?;
-        for row in fills {
-            let execution =
-                parse_execution(row).map_err(|e| FeedError::BadMessage(e.to_string()))?;
+        for raw in fills {
+            let execution = super::execution::decode_raw(raw.get())
+                .map_err(|e| FeedError::BadMessage(e.to_string()))?;
             let Some(symbol) = self.symbol_id(&execution.symbol) else {
                 // A fill on a symbol the engine has no id for cannot be
                 // routed. It is still a real fill, so it is said out loud.
@@ -437,6 +452,7 @@ impl Decoder {
                 continue;
             };
             self.pending.push_back(OrderUpdate::Fill {
+                allocation: None,
                 exec_id: execution.exec_id,
                 client_order_id: execution.client_order_id,
                 symbol,
@@ -444,6 +460,7 @@ impl Decoder {
                 qty: execution.qty,
                 px: execution.px,
                 fee: execution.fee,
+                amounts: execution.amounts.map(Box::new),
                 is_maker: execution.is_maker,
                 forced_close: execution.forced_close,
                 venue_ts_ms: execution.venue_ts_ms,

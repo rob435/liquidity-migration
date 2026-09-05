@@ -54,6 +54,8 @@ fn market_order() -> OrderRequest {
             trigger_px: 93000.5,
         }),
         reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     }
 }
@@ -255,6 +257,8 @@ async fn a_limit_order_carries_price_and_time_in_force() {
         },
         stop: None,
         reduce_only: true,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     };
     gw.send_order(&request).await.unwrap();
@@ -289,6 +293,8 @@ async fn a_reduce_only_order_never_renders_a_stop_even_when_handed_one() {
         kind: OrderKind::Market,
         stop: Some(engine_types::StopSpec { trigger_px: 2900.0 }),
         reduce_only: true,
+        exact_terms: None,
+        sleeve_effect: None,
         close_position: false,
     };
     gw.send_order(&request).await.unwrap();
@@ -1147,4 +1153,43 @@ async fn the_gateway_says_it_can_set_leverage() {
     // but said otherwise would block every levered entry.
     let server = TestServer::start(|_, _| ok("{}")).await;
     assert!(gateway(&server).caps().set_leverage);
+}
+
+#[tokio::test]
+async fn exact_wire_values_keep_physical_and_sleeve_stops_separate() {
+    use engine_types::numeric::Exact;
+    use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
+    use engine_types::orders::SleeveOrderEffect;
+    let server = TestServer::start(|_, _| ok(r#"{"orderId":"exact"}"#)).await;
+    let mut gw = gateway(&server);
+    let mut request = market_order();
+    request.kind = OrderKind::Limit {
+        px: 2.0,
+        tif: TimeInForce::Gtc,
+    };
+    request.sleeve_effect = Some(SleeveOrderEffect::Increase {
+        stop: StopSpec { trigger_px: 1.1 },
+    });
+    ExactOrderTerms {
+        quantity: Exact::parse_decimal("0.1234567890123").unwrap(),
+        limit_price: Some(Exact::parse_decimal("2.1234567890123").unwrap()),
+        stop_trigger_price: Some(Exact::parse_decimal("1.1234567890123").unwrap()),
+        physical_stop_trigger_price: Some(Exact::parse_decimal("1.2234567890123").unwrap()),
+        input_policy: OrderInputPolicy::StrategyShortestDecimal,
+    }
+    .apply_projection(&mut request)
+    .unwrap();
+    gw.send_order(&request).await.unwrap();
+    let sent = server.only("/v5/order/create").json();
+    assert_eq!(sent["qty"], "0.1234567890123");
+    assert_eq!(sent["price"], "2.1234567890123");
+    assert_eq!(sent["stopLoss"], "1.2234567890123");
+    assert_eq!(request.sleeve_stop().unwrap().trigger_px, 1.1234567890123);
+    request.qty = 0.2;
+    assert!(gw.send_order(&request).await.is_err());
+    assert_eq!(
+        server.to_path("/v5/order/create").len(),
+        1,
+        "corrupt projection reached the wire"
+    );
 }

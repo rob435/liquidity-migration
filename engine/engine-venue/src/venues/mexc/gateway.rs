@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 
 use super::contracts::{Ceiling, Contracts};
 use super::parse::{
-    id_text, parse_assets, parse_deals, parse_open_orders, parse_order_ack, parse_position_stops,
+    id_text, parse_assets, parse_open_orders, parse_order_ack, parse_position_stops,
     parse_positions, venue_result,
 };
 use super::realm::MexcRealm;
@@ -167,8 +167,9 @@ impl MexcGateway {
     /// anything.
     async fn contracts(&mut self) -> Result<&Contracts, VenueError> {
         if self.contracts.is_empty() {
-            let body = self.rest.get_public(PATH_CONTRACT_DETAIL, "").await?;
-            self.contracts = Contracts::parse(&body)?;
+            let body: Box<serde_json::value::RawValue> =
+                self.rest.get_public_as(PATH_CONTRACT_DETAIL, "").await?;
+            self.contracts = Contracts::parse_raw(body.get())?;
         }
         Ok(&self.contracts)
     }
@@ -276,6 +277,7 @@ impl VenueGateway for MexcGateway {
     }
 
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
+        let terms = crate::order_wire::terms(req)?;
         let name = self.name_of(req.symbol)?.clone();
         let ceiling = match req.kind {
             OrderKind::Market => Ceiling::Market,
@@ -285,7 +287,36 @@ impl VenueGateway for MexcGateway {
             let contract = self.contracts().await?.tradable(&name)?;
             (
                 contract.venue_symbol.clone(),
-                contract.vol_for(req.qty, ceiling)?,
+                match terms {
+                    Some(terms) => {
+                        terms
+                            .validate_wire_grid(
+                                &contract.exact_spec,
+                                req.kind,
+                                engine_types::order_terms::QuantityPolicy::Normal,
+                            )
+                            .map_err(crate::order_wire::error)?;
+                        let max = match ceiling {
+                            Ceiling::Market => contract.exact_spec.max_market_qty.as_ref(),
+                            Ceiling::Limit => contract
+                                .exact_spec
+                                .max_qty
+                                .as_ref()
+                                .or(contract.exact_spec.max_market_qty.as_ref()),
+                        };
+                        if max.is_some_and(|max| terms.quantity > *max) {
+                            return Err(crate::order_wire::error(
+                                "exact quantity exceeds contract order ceiling",
+                            ));
+                        }
+                        terms
+                            .quantity
+                            .checked_div(&contract.exact_contract_size.value)
+                            .and_then(|vol| vol.to_u64_exact())
+                            .map_err(crate::order_wire::error)?
+                    }
+                    None => contract.vol_for(req.qty, ceiling)?,
+                },
             )
         };
 
@@ -302,7 +333,7 @@ impl VenueGateway for MexcGateway {
         // a market order: a client exercised against the live venue omits it
         // for the market types, and there is no price to quantize anyway.
         if let OrderKind::Limit { px, .. } = req.kind {
-            body["price"] = json!(venue_num(px)?);
+            body["price"] = json!(crate::order_wire::price(req, px)?);
         }
         if req.reduce_only {
             body["reduceOnly"] = json!(true);
@@ -312,7 +343,7 @@ impl VenueGateway for MexcGateway {
         // order-bound stop — `set_stop` is what puts the position-level record
         // on, and its size is what tracks a position that later changes.
         if let Some(stop) = req.stop {
-            body["stopLossPrice"] = json!(venue_num(stop.trigger_px)?);
+            body["stopLossPrice"] = json!(crate::order_wire::stop(req, stop.trigger_px)?);
             body["lossTrend"] = json!(TREND_LAST_PRICE);
         }
 
@@ -497,12 +528,51 @@ impl VenueGateway for MexcGateway {
         })
     }
 
+    fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
+        Some(Box::new(LookupClient {
+            rest: self.rest.clone(),
+        }))
+    }
+
+    async fn order_status(
+        &mut self,
+        symbol: SymbolId,
+        client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        let name = self.name_of(symbol)?.clone();
+        let contract = self
+            .contracts()
+            .await?
+            .any(&name)
+            .ok_or_else(|| {
+                VenueError::BadRequest("order lookup symbol has no contract metadata".into())
+            })?
+            .clone();
+        let path = format!(
+            "/api/v1/private/order/external/{}/{}",
+            crate::http::percent_encode(&contract.venue_symbol),
+            crate::http::percent_encode(client_order_id)
+        );
+        let raw: Box<serde_json::value::RawValue> = self.rest.get_signed_as(&path, &[]).await?;
+        super::lookup::parse(raw.get(), &name, client_order_id, &contract)
+    }
+
+    async fn instrument_specs(
+        &mut self,
+    ) -> Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError> {
+        let body: Box<serde_json::value::RawValue> =
+            self.rest.get_public_as(PATH_CONTRACT_DETAIL, "").await?;
+        self.contracts = Contracts::parse_raw(body.get())?;
+        Ok(self.contracts.instrument_specs())
+    }
+
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {
         // Re-read rather than serve the cache: this is the call the engine
         // makes to learn the venue's current rules, and a contract's size or
         // tick can change under it.
-        let body = self.rest.get_public(PATH_CONTRACT_DETAIL, "").await?;
-        self.contracts = Contracts::parse(&body)?;
+        let body: Box<serde_json::value::RawValue> =
+            self.rest.get_public_as(PATH_CONTRACT_DETAIL, "").await?;
+        self.contracts = Contracts::parse_raw(body.get())?;
         Ok(self.contracts.rules())
     }
 
@@ -556,22 +626,21 @@ impl VenueGateway for MexcGateway {
                 .clone();
             let mut complete = false;
             for page in 1..=MAX_PAGES {
-                let body = self
-                    .rest
-                    .get_signed(
-                        PATH_DEALS,
-                        &[
-                            ("symbol", venue_symbol.clone()),
-                            ("start_time", start_ms.to_string()),
-                            ("end_time", end_ms.to_string()),
-                            ("page_num", page.to_string()),
-                            ("page_size", PAGE_SIZE.to_string()),
-                        ],
-                    )
-                    .await?;
-                let data = venue_result(&body)?.clone();
+                let body: engine_public::numeric_wire::RawObject<super::execution::HistoryReply> =
+                    self.rest
+                        .get_signed_as(
+                            PATH_DEALS,
+                            &[
+                                ("symbol", venue_symbol.clone()),
+                                ("start_time", start_ms.to_string()),
+                                ("end_time", end_ms.to_string()),
+                                ("page_num", page.to_string()),
+                                ("page_size", PAGE_SIZE.to_string()),
+                            ],
+                        )
+                        .await?;
                 let contracts = self.contracts().await?;
-                let (rows, raw_count) = parse_deals(&data, contracts)?;
+                let (rows, raw_count) = body.0.executions(contracts)?;
                 out.extend(rows);
                 if execution_page_complete(&name, page, raw_count)? {
                     complete = true;
@@ -585,6 +654,32 @@ impl VenueGateway for MexcGateway {
             }
         }
         Ok(out)
+    }
+}
+
+struct LookupClient {
+    rest: RestClient,
+}
+#[engine_types::async_trait]
+impl engine_types::orders::OrderLookupClient for LookupClient {
+    async fn lookup(
+        &self,
+        name: &str,
+        client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        let raw: Box<serde_json::value::RawValue> =
+            self.rest.get_public_as(PATH_CONTRACT_DETAIL, "").await?;
+        let contracts = Contracts::parse_raw(raw.get())?;
+        let contract = contracts.any(name).ok_or_else(|| {
+            VenueError::BadRequest("order lookup symbol has no contract metadata".into())
+        })?;
+        let path = format!(
+            "/api/v1/private/order/external/{}/{}",
+            crate::http::percent_encode(&contract.venue_symbol),
+            crate::http::percent_encode(client_order_id)
+        );
+        let raw: Box<serde_json::value::RawValue> = self.rest.get_signed_as(&path, &[]).await?;
+        super::lookup::parse(raw.get(), name, client_order_id, contract)
     }
 }
 

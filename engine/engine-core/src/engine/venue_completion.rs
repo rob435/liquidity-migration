@@ -142,7 +142,7 @@ impl CompletedMutation {
                     symbol,
                     client_order_id,
                     spec,
-                    existing,
+                    existing: *existing,
                     amended_intent,
                     remaining_qty,
                     old_px,
@@ -177,6 +177,7 @@ struct JournaledUpdate {
     fill_owner: Option<StrategyId>,
     fill_request: Option<OrderRequest>,
     dedup_seen_ms: i64,
+    allocation: Option<crate::attribution::PreparedPortfolioFill>,
 }
 
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
@@ -343,6 +344,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     reason: format!("never sent: {detail}"),
                 }),
                 Err(other) => {
+                    self.dispatches
+                        .unresolved
+                        .insert(request.client_order_id.clone(), other.to_string());
                     tracing::error!(id = %request.client_order_id, error = %other, "send failed with no answer");
                     self.wal.append(&WalRecord::Note {
                         source: "engine".into(),
@@ -587,25 +591,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// venue's own stated price when it did. Both are the same act: the
     /// range was held open because the price was unknown, and this is where
     /// it becomes known.
-    /// Wait for the outstanding durability barrier, if there is one.
-    ///
-    /// Almost always free: the barrier was started when the order was sent,
-    /// and the venue's round trip is longer than the disk's. What it costs
-    /// when it is not free is recorded, because that is the number that says
-    /// whether running the barrier beside the send is buying anything.
-    pub(super) fn settle_barrier(&mut self) -> Result<(), EngineError> {
-        let Some(pending) = self.pending_barrier.take() else {
-            return Ok(());
-        };
-        let began_ns = clock::now_ns();
-        pending.wait()?;
-        self.ledger.record(
-            Segment::BarrierWait,
-            clock::now_ns().saturating_sub(began_ns),
-        );
-        Ok(())
-    }
-
     fn resolve_amend(
         &mut self,
         client_order_id: &str,
@@ -621,7 +606,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         };
         self.wal.append(&resolved)?;
         self.books.orders.apply(&resolved);
-        if !existing.request.reduce_only {
+        if !existing.request.is_sleeve_reduction() {
             let mut settled = amended_intent.clone();
             settled.kind = OrderKind::Limit {
                 px: effective_px,
@@ -824,6 +809,25 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 requests.len()
             )));
         }
+        let mut wire_requests = Vec::with_capacity(requests.len());
+        for (symbol, id) in requests {
+            if self.dispatches.orders.get(&id).is_some_and(|order| {
+                order.phase == engine_types::order_dispatch::OrderDispatchPhase::Queued
+            }) {
+                self.take_update(OrderUpdate::Cancelled {
+                    client_order_id: id.clone(),
+                    recv_ns: clock::now_ns(),
+                })
+                .await?;
+                self.complete_order_dispatch(&id)?;
+            } else {
+                wire_requests.push((symbol, id));
+            }
+        }
+        let requests = wire_requests;
+        if requests.is_empty() {
+            return Ok(false);
+        }
         let wire_ns = clock::now_ns();
         for (symbol, client_order_id) in &requests {
             self.wal.append(&WalRecord::CancelSent {
@@ -859,7 +863,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 "private account stream is not ready"
             };
             match self.books.orders.orders.get(client_order_id) {
-                Some(order) if !order.request.reduce_only => {
+                Some(order) if !order.request.is_sleeve_reduction() => {
                     self.wal.append(&WalRecord::Note {
                         source: "risk".into(),
                         text: format!("{client_order_id} not amended: {halt}"),
@@ -890,7 +894,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .orders
             .orders
             .get(client_order_id)
-            .filter(|order| !order.request.reduce_only)
+            .filter(|order| !order.request.is_sleeve_reduction())
             .and_then(|order| {
                 self.opening_permission_reason(order.request.strategy)
                     .map(|reason| (reason, order.request.symbol))
@@ -1025,14 +1029,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 px: requested_px,
                 tif,
             },
-            stop: existing.request.stop,
-            reduce_only: existing.request.reduce_only,
+            stop: existing.request.sleeve_stop(),
+            reduce_only: existing.request.is_sleeve_reduction(),
             tag: format!("amend:{client_order_id}"),
             decided_ns: clock::now_ns(),
             work: None,
             leverage: None,
         };
-        if !existing.request.reduce_only {
+        if !existing.request.is_sleeve_reduction() {
             let verdict = if self.symbol_owned_by_another(existing.request.strategy, symbol) {
                 RiskVerdict::Deny {
                     reason: DenyReason::UnknownState {
@@ -1085,7 +1089,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         };
         self.wal.append(&sent)?;
         self.books.orders.apply(&sent);
-        if !existing.request.reduce_only {
+        if !existing.request.is_sleeve_reduction() {
             self.risk.register_order_price_range(
                 client_order_id,
                 &amended_intent,
@@ -1107,7 +1111,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 symbol,
                 client_order_id: client_order_id.to_string(),
                 spec,
-                existing,
+                existing: Box::new(existing),
                 amended_intent: Box::new(amended_intent),
                 remaining_qty,
                 old_px,
@@ -1120,7 +1124,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     /// Every order update, wherever it came from, goes through here.
     pub(super) async fn take_update(&mut self, update: OrderUpdate) -> Result<(), EngineError> {
-        self.settle_barrier()?;
         if Self::journal_fast_execution(&update, &mut self.wal)? {
             self.route_order_update(update);
             return Ok(());
@@ -1140,6 +1143,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             &mut self.wal,
             &self.books.orders,
             &self.books.attribution,
+            &self.host.names,
             &mut self.recovered_exec_ids,
             &mut self.may_open,
         )?
@@ -1147,6 +1151,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(());
         };
         let update = self.apply_journaled_update(journaled)?;
+        self.observe_order_dispatch(&update)?;
         if stream_reset {
             self.refresh_private_stream_after_gap().await?;
         }
@@ -1186,32 +1191,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     fn journal_update(
-        update: OrderUpdate,
+        mut update: OrderUpdate,
         wal: &mut W,
         orders: &LedgerOfOrders,
         attribution: &Attribution,
+        strategy_names: &[String],
         recovered_exec_ids: &mut ExecutionIds,
         may_open: &mut bool,
     ) -> Result<Option<JournaledUpdate>, EngineError> {
-        // Whose fill this is, answered once and used everywhere below. The
-        // order ledger first; then, for a close the venue itself started, the
-        // position it reduced. A fill that resolves to neither is a stranger's.
         let fill_owner = match &update {
             OrderUpdate::Fill {
-                client_order_id,
-                symbol,
-                side,
-                forced_close,
-                ..
-            } => orders.owner_of(client_order_id).or_else(|| {
-                attribution::forced_close_owner(
-                    attribution,
-                    client_order_id,
-                    *symbol,
-                    *side,
-                    *forced_close,
-                )
-            }),
+                client_order_id, ..
+            } => orders.owner_of(client_order_id),
             _ => None,
         };
         let fill_request = match &update {
@@ -1228,6 +1219,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             _ => None,
         };
         let dedup_seen_ms = clock::wall_ms();
+        let mut allocation = None;
         if let Some(exec_id) = delivered_exec_id.as_deref() {
             if !recovered_exec_ids
                 .can_insert(exec_id, dedup_seen_ms)
@@ -1244,10 +1236,29 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             side,
             qty,
             px,
+            fee,
+            amounts,
             ..
         } = &update
         {
-            if let Err(reason) = orders.validate_fill(client_order_id, *symbol, *side, *qty, *px) {
+            if let Err(reason) = orders
+                .validate_fill(client_order_id, *symbol, *side, *qty, *px)
+                .and_then(|()| {
+                    amounts.as_ref().map_or(Ok(()), |values| {
+                        values
+                            .validate_projection(*qty, *px, *fee)
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .and_then(|()| {
+                    allocation = attribution.prepare_portfolio_update(
+                        fill_owner,
+                        strategy_names,
+                        &update,
+                    )?;
+                    Ok(())
+                })
+            {
                 let finding = Self::untrusted_fill_line(
                     exec_id,
                     client_order_id,
@@ -1271,6 +1282,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 return Ok(None);
             }
         }
+        if let (
+            Some(prepared),
+            OrderUpdate::Fill {
+                allocation: recorded,
+                ..
+            },
+        ) = (&allocation, &mut update)
+        {
+            if prepared.allocation.policy
+                == engine_types::execution_allocation::AllocationPolicy::EmergencyNetFifo
+            {
+                *recorded = Some(Box::new(prepared.allocation.clone()));
+            }
+        }
         wal.append(&WalRecord::OrderUpdate {
             update: update.clone(),
         })?;
@@ -1282,6 +1307,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             fill_owner,
             fill_request,
             dedup_seen_ms,
+            allocation,
         }))
     }
 
@@ -1294,12 +1320,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             fill_owner,
             fill_request,
             dedup_seen_ms,
+            allocation,
         } = journaled;
+        let owned_fill = allocation.is_some();
+        if let Some(allocation) = allocation {
+            self.books
+                .attribution
+                .commit_portfolio_fill(allocation)
+                .map_err(EngineError::State)?;
+        }
         self.risk.on_update(&update);
         self.books.orders.apply_update(&update);
         self.resolve_private_order_state(&update)?;
-        self.update_fill_exposure(&update, fill_owner, fill_request.as_ref(), dedup_seen_ms)?;
-        self.attribute_order_update(&update, fill_owner);
+        self.update_fill_exposure(&update, owned_fill, fill_request.as_ref(), dedup_seen_ms)?;
+        self.attribute_order_update(&update, fill_owner)?;
         Ok(update)
     }
 
@@ -1356,18 +1390,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     fn update_fill_exposure(
         &mut self,
         update: &OrderUpdate,
-        fill_owner: Option<StrategyId>,
+        owned_fill: bool,
         fill_request: Option<&OrderRequest>,
         dedup_seen_ms: i64,
     ) -> Result<(), EngineError> {
         // Only fills joined to orders this log sent enter trusted exposure.
         // Foreign fills remain durable records and latch entries off below.
         if let (
-            Some(_),
+            true,
             OrderUpdate::Fill {
                 symbol, side, qty, ..
             },
-        ) = (fill_owner, update)
+        ) = (owned_fill, update)
         {
             reconcile::note_owned_fill(
                 &mut self.logged_exposure,
@@ -1400,7 +1434,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             ..
         } = update
         {
-            if fill_owner.is_none() {
+            if !owned_fill {
                 self.may_open = false;
                 self.wal.append(&WalRecord::Reconciled {
                     wall_ts_ms: dedup_seen_ms,
@@ -1413,7 +1447,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 
-    fn attribute_order_update(&mut self, update: &OrderUpdate, fill_owner: Option<StrategyId>) {
+    fn attribute_order_update(
+        &mut self,
+        update: &OrderUpdate,
+        fill_owner: Option<StrategyId>,
+    ) -> Result<(), EngineError> {
+        if let Some(slices) =
+            crate::portfolio_allocation::slice_updates(update).map_err(EngineError::State)?
+        {
+            for (owner, slice) in slices {
+                self.price_fill(owner, &slice);
+            }
+            return Ok(());
+        }
         // Whose fill it was, before any strategy is woken, so the one that
         // placed the order sees its own position already changed. The ledger
         // is asked rather than the registry: the registry knows only this
@@ -1422,7 +1468,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if let Some(id) = inflight::client_order_id(update) {
             match self.books.orders.owner_of(id).or(fill_owner) {
                 Some(sid) => {
-                    self.books.attribution.on_update(sid, update);
+                    if let Some(order) = self.books.orders.orders.get(id) {
+                        self.books.attribution.remember_order_stop(&order.request);
+                    }
                     self.price_fill(sid, update);
                     // Terminal news that ends size without a fill releases
                     // that much cover: the whole send on a reject, the
@@ -1459,6 +1507,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 None => {}
             }
         }
+        Ok(())
     }
 
     async fn refresh_private_stream_after_gap(&mut self) -> Result<(), EngineError> {
@@ -1487,6 +1536,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     fn route_order_update(&mut self, update: OrderUpdate) {
         let now = clock::now_ns();
+        if let Ok(Some(slices)) = crate::portfolio_allocation::slice_updates(&update) {
+            for (owner, slice) in slices {
+                self.host
+                    .feed(&self.books, owner, &EngineEvent::Order(slice), now);
+            }
+            return;
+        }
         let event = EngineEvent::Order(update.clone());
         match inflight::client_order_id(&update) {
             Some(id) => match self
