@@ -62,6 +62,7 @@ inaccessible after launch.
 | :--- | :--- |
 | Payload | Schema 2 text: `event_kind`, stable `incident_id`, scope, host, newly critical references, alert lines, and bounded relevant journals |
 | Prompt | [deploy/incident-routine-prompt.md](../deploy/incident-routine-prompt.md) |
+| Outcome branch | `main`, on the routine's Git outcome at claude.ai/code/routines. A `claude/…` value there gives every run its own suffixed branch regardless of the prompt |
 | First action | Dispatch `vps-deploy.yml` with `mode=diagnose`; this is fast, read-only, uses the pinned production SSH identity, and has a per-run concurrency group so a release soak cannot delay it |
 | Repository fault | Root-cause fix, regression test, local checks, dated `CHANGELOG.md`, direct push to `main`, green checks, sanctioned deploy, second diagnostic |
 | External / host fault | No code change; report exact evidence and owner action |

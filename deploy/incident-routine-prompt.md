@@ -9,6 +9,7 @@ Define the exact prompt and authority of the automated engineer fired once per a
 | Item | Contract |
 | :--- | :--- |
 | Repository | `rob435/liquidity-migration`, direct linear updates to `main` |
+| Outcome branch | `main`, set on the routine itself at claude.ai/code/routines (its Git outcome; `session_request.config.outcomes[].git_info.branches`). Any other value gets a per-session suffix appended and every run lands on its own `claude/…` branch; the prompt cannot override it. |
 | Trigger | API payload from `check_fleet_liveness.py`; `event_kind=incident` or `event_kind=drill` |
 | Fresh host evidence | `gh workflow run vps-deploy.yml --ref main -f mode=diagnose` |
 | Code deployment | `gh workflow run vps-deploy.yml --ref main -f mode=deploy` after local and GitHub checks pass |
