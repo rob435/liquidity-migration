@@ -6,6 +6,170 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 03:33 UTC — The eleventh page from the same free-space floor,
+  and the first that is not episodic. No code change here: the sixth defect
+  was found and fixed concurrently from the 03:18 payload (`1702d14d`, entry
+  below), this payload adds no seventh, and every mechanism in it is the
+  deployed behaviour of the six merged, undeployed recorder fixes. What
+  changed is the duty cycle. The 03:21 page measured an 810.6 s clean stretch;
+  this payload holds none — all ten resumptions across the two units last
+  exactly one 30-second status interval, the pair is blocked **74.2 %**
+  (Bybit) and **85.2 %** (Binance) of its window, and the loss rate since that
+  page is **3 444 frames/s**, the worst sustained rate of the incident. Two
+  measurements are new, and both are the sixth defect's premise seen from the
+  Bybit side: a pass that satisfied its own accounting and left the gate shut
+  for **76.0 s** across three status ticks, and an unblock that **no deletion
+  explains**. Deploy refused an eighteenth time, same account-payment
+  signature.**
+  - Incident `host-681737fd16e1f806`, scope `host`, host `ip-208-84-103-4`,
+    `new_critical_refs=capture-disk` — the unsuffixed ref, which is the Bybit
+    recorder (`key()` appends `:{label}` only for a labelled recorder,
+    `scripts/runtime/check_fleet_liveness.py:392-393`). Exact alert text:
+    `CRITICAL recorder storage is blocked; frames are counted but not
+    written`, level-triggered on `disk_blocked is True` and raised at
+    `scripts/runtime/check_fleet_liveness.py:431-433`. The id names whose
+    cooldown cleared first and nothing else; read the eleven pages since 22:54
+    as one incident, per the 03:21 entry's table.
+  - **The funded engine is not implicated and the host has not moved.** No
+    engine, worker or timer is named; both units are `market_tape` recorders,
+    research tape outside the order path. Pids unchanged across all eleven
+    pages — 2259813 (Bybit), 2263691 (Binance) — so neither recorder has
+    restarted and the host still runs `65ee75a7`. The 25 GiB floor is the
+    reservation held for mainnet's WAL: `writable()` blocks the recorder
+    *above* it (`market_tape/storage.py:426-433`), so it is intact by
+    construction and stayed intact. Both roots are on one filesystem —
+    `/var/lib/liquidity-migration/forward-market` and `…/forward-market-binance`
+    (`deploy/systemd/liquidity-migration-forward-capture*.service:18-20`) —
+    and both floors are `min_free_disk_gb = 25` (`deploy/capture/*.toml`).
+  - **The clean stretches are gone.** Every block and every resumption in the
+    payload:
+
+    | Unit | Blocks | Blocked | Window | Share |
+    | :--- | :--- | ---: | ---: | ---: |
+    | Bybit | 90.1, 120.1, 180.1, 60.1, 120.1, 120.1 s, then open at 03:33:15 | 690.6 s | 930.7 s | **74.2 %** |
+    | Binance | 120.1, 180.1, 210.1 s, then open ≥180.1 s at 03:33:35 | 690.5 s | 810.5 s | **85.2 %** |
+
+    Bybit's first two ticks (03:17:44, 03:18:14) are the tail of a clean
+    stretch that began before the excerpt, and it is the only one. After it,
+    all ten resumptions on the two units are a single status tick: Bybit wrote 87 124,
+    79 387, 87 845, 93 949, 95 883 and 94 607 rows in 30.02 s each, Binance
+    35 005, 41 708, 49 500 and 35 999. Then `rows` freezes until the next
+    unblock. That is `prune` stopping on the number `writable()` unblocks on
+    (`market_tape/storage.py:362` at `65ee75a7`), so the margin is ~30 s of
+    the pair's own output and zero by construction — the 03:21 entry priced
+    it. What is new is that nothing now puts free space back above the floor
+    for longer than that.
+  - **A pass satisfied its own accounting and the kernel disagreed for 76.0 s.**
+    Binance's 03:24:49.320 pass unlinked 37 files; deployed `prune` deletes
+    until its own running free count reaches `min_free_bytes`, so it stopped
+    believing the floor was met. `writable()` then read below the floor at
+    03:25:05.312 **and** 03:25:35.325 before the 03:26:05.340 tick opened the
+    gate — three ticks, 76.0 s. Tick phase explains at most one of them. Every
+    gate lag in the payload, measured from each unit's own pass:
+
+    | Unit | Pass | Files | Gate opened | Lag |
+    | :--- | :--- | ---: | :--- | ---: |
+    | Bybit | 03:22:36.886 | 11 | 03:22:45.112 | 8.2 s |
+    | Binance | 03:24:49.320 | 37 | 03:26:05.340 | **76.0 s** |
+    | Bybit | 03:27:41.707 | 16 | 03:27:45.344 | 3.6 s |
+    | Binance | 03:29:51.810 | 68 | 03:30:05.481 | 13.7 s |
+    | Bybit | 03:32:47.012 | 71 | — | pass ran 1.4 s *after* the unblock |
+
+    Every one of them opened on a status tick, never on the pass: `fd604613`
+    is undeployed. Pass cadence is the bare 300-second clock — Bybit 304.8 s
+    and 305.3 s between its own passes, Binance 302.5 s — so `1d8fad9a` is
+    undeployed too. This 76.0 s is the longest measurement the incident has of
+    the disagreement `3c1ebd22` exists to handle: `prune` counts the bytes it
+    unlinked, `writable()` reads the kernel, and a successor pass that trusts
+    the kernel alone re-derives the whole deficit and deletes it again. It is
+    also the window in which the sixth defect bites — a credited burst that
+    exits on the pass finding no deficit left, with the gate still shut and
+    nothing waking the pruner for `RETENTION_INTERVAL_SECONDS`, which
+    `1702d14d` fixes by arming `prune_now` on every blocked tick.
+  - **An unblock that no deletion explains.** Bybit's 03:30:45.488 → 03:32:45.593
+    block (120.1 s) ended with no retention pass on either unit since
+    03:29:51.810, 173.8 s earlier; Bybit's own pass followed the unblock by
+    1.4 s. Binance, on the same filesystem and the same 25 GiB floor, read the
+    disk blocked at 03:32:35.583 and again at 03:33:05.614, straddling it. So
+    free space rose above 25 GiB and fell back inside ~30 s while the tape
+    deleted nothing. Either the filesystem released the 03:29:51 unlink's
+    blocks 174 s late, or a **non-tape writer on `/var/lib`** gave the room
+    back and took it again. Both readings say the same thing: the free-space
+    line is being moved by something the pruner does not control, and the
+    pruner is paying for it out of the tape. That is exactly the condition
+    `1702d14d` arms for — a tape the pruner could still trim while the writer
+    is gated and nothing wakes it — measured here from the Bybit side.
+  - **What the escalation is, and what it is not.** Block length here is
+    consistent with waiting out the 300-second pass clock (Bybit mean 115.1 s,
+    Binance 170.1 s, both inside a uniform 0–300 s wait), so the blocks are
+    not longer by any new mechanism. The change is on the other side: free
+    space no longer recovers above the floor for more than one status
+    interval, where 12 minutes earlier it held clear for 810.6 s. Per-pass
+    file counts rose over the payload (Bybit 11 → 16 → 71, Binance 37 → 68),
+    which points the same way but does not prove it — a file count is not
+    bytes, and `prune` deletes for `age` and for `disk_limit` in the same
+    walk. The manifest's per-unlink `compressed_bytes` and `reason`
+    (`market_tape/storage.py:413-421`) is what separates them, and it is a
+    host reading.
+  - Loss, cumulative and never reset. Both windows are cut by the 40-line
+    payload, so every figure is a lower bound, and both recorders are inside
+    an open block at the last line.
+
+    | Unit | First line | Last line | Added since the 03:21 entry | Rate | Rows kept | Discarded per row kept |
+    | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+    | Bybit `forward-capture` | 15 736 002 (03:17:44) | 17 715 612 (03:33:15) | 1 649 737 | 2 289/s | 721 676 | 2.74 |
+    | Binance `forward-capture-binance` | 5 751 514 (03:20:05) | 6 658 668 (03:33:35) | 831 629 | 1 154/s | 162 366 | 5.59 |
+    | **Pair** | | **24 374 280** | **2 481 366** | **3 444/s** | **884 042** | **3.27** |
+
+    3 444/s over the 720.5 s since the 03:21 page beats the 03:00 entry's
+    3 268/s, which that entry called the worst sustained rate of the incident.
+  - **Deploy refused an eighteenth time, same signature.** Run
+    `33942452158`, `deploy main@10cb6aeb`, dispatched 03:39:20 UTC and dead by
+    03:39:26 — 6 s. `ci` created and failed 03:39:22 → 03:39:24, `rust` and
+    `Deploy artifact` 03:39:22 → 03:39:25, each of their log downloads
+    returning `failed to download logs: HTTP 404`; `disarm`, `diagnose`, the
+    release-test job and `vps` skipped. No job started, so nothing reached the
+    host: deployed commit stays `65ee75a7` and every recorder fix stays merged
+    and undeployed. The cause is outside the repository — the account's
+    payments failed, so GitHub assigns no runner. `10cb6aeb` was the tip when
+    it was dispatched; the sixth fix landed a minute later and its own
+    dispatch on `95798f18` was refused the same way for a nineteenth, in the
+    03:18 entry below.
+  - **The one action that ends this needs no runner**, from a workstation
+    holding the SSH key:
+
+    ```sh
+    EXPECTED_COMMIT=1702d14d1380d7bbe26eb0425b7811a3eeeeb2b8 scripts/ops.sh deploy
+    scripts/ops.sh status
+    scripts/ops.sh curve mainnet 240
+    ```
+
+    It restarts the funded engine — `1702d14d` carries `697341e4` and
+    `10ed1bd2`, so its `engine` tree differs from the deployed `65ee75a7` and
+    the fingerprint hands over both realms. Do **not** install `06e17d4a` or
+    `3c1ebd22` on their own; `1702d14d` is the commit that carries all six
+    recorder fixes.
+  - The open host reading is unchanged and this page sharpens it to one
+    question — what, other than the tape, is holding `/var/lib` at 25 GiB:
+
+    ```sh
+    scripts/ops.sh status
+    df -h /var/lib
+    du -sh /var/lib/liquidity-migration/forward-market \
+           /var/lib/liquidity-migration/forward-market-binance \
+           /var/lib/liquidity-migration-engine-mainnet /var/log/journal
+    ```
+
+    If the two tape roots sum well under their 60 + 18 GB caps while the disk
+    sits at the floor, the caps are not the dial to turn.
+  - No code changed by this entry. Pruner tests on the tree carrying
+    `1702d14d` are green: `tests/market_tape/test_record.py` and
+    `tests/market_tape/test_tape_storage.py`, **70 passed, 9 skipped**, the
+    seventieth being the sixth defect's own test. The full suite and
+    `scripts/dev.sh check` were not run: this routine's container has no
+    `zstd` and no `rsync`, which is the same sixteen environment failures the
+    03:21 entry recorded, and nothing in this entry touches code.
+
 - **2026-09-05 03:21 UTC — The tenth page from the same free-space floor. No
   sixth defect: every mechanism in this payload is the deployed behaviour of
   the five merged, undeployed recorder fixes. Two things are new. The three
