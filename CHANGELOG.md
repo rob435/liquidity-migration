@@ -124,7 +124,12 @@ edit STATE.md to match.
     02:28:03–02:33:03) — the worst rate of any window in this incident.
   - Checks run: none needed. This entry changes `CHANGELOG.md` and `STATE.md`
     only; no Python, Rust, config or unit file is touched.
-  - **Deploy receipt: refused a thirteenth time.** Run `33939474310`,
+  - **Deploy receipt: refused a fourteenth time.** This entry's own push was
+    dispatched on `cdefebcd` at 02:41:10 UTC as run `33939774257` and failed
+    at 02:41:17: `rust` and `Deploy artifact` dead 3 s in at 02:41:15, `ci`
+    4 s in at 02:41:16; `diagnose` and `disarm` skipped at 02:41:12, the
+    release-test job and `vps` at 02:41:16-17. Nothing reached the host.
+  - **The thirteenth, dispatched for the 02:30 page.** Run `33939474310`,
     `deploy` on `main@0af3fc29`, dispatched 02:34:52 UTC and failed at
     02:34:59. `ci` dead 3 s in at 02:34:56, `Deploy artifact` 4 s in at
     02:34:57, `rust` 5 s in at 02:34:58; `diagnose` and `disarm` skipped at
