@@ -44,7 +44,7 @@ const NO_TRADING_API: &str =
 pub struct VariationalGateway {
     realm: VariationalRealm,
     http: StatsClient,
-    names: Vec<Symbol>,
+    symbols: engine_public::symbols::SymbolCatalog,
 }
 
 impl VariationalGateway {
@@ -70,7 +70,7 @@ impl VariationalGateway {
         Self {
             realm,
             http: StatsClient::for_test(base_url),
-            names: symbols,
+            symbols: engine_public::symbols::SymbolCatalog::from_names(symbols),
         }
     }
 
@@ -79,12 +79,7 @@ impl VariationalGateway {
     }
 
     pub fn add_symbol(&mut self, name: &str) -> SymbolId {
-        if let Some(at) = self.names.iter().position(|held| held == name) {
-            return SymbolId(at as u16);
-        }
-        let id = SymbolId(u16::try_from(self.names.len()).expect("more than 65535 symbols"));
-        self.names.push(name.to_string());
-        id
+        self.symbols.intern(name).expect("more than 65535 symbols")
     }
 
     /// The venue's market statistics. The whole of its public API, and what

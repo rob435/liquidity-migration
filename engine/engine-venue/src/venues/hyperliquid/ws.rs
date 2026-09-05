@@ -485,8 +485,7 @@ impl Decoder {
     }
 
     fn symbol_id(&self, symbol: &str) -> Option<SymbolId> {
-        let ids = self.ids.read().expect("the symbol map lock is poisoned");
-        ids.get(symbol).copied()
+        engine_public::symbols::resolve(&self.ids, symbol)
     }
 
     /// True the first time this id acks. Bounded, so a long run's memory

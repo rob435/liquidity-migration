@@ -107,8 +107,7 @@ impl HyperliquidPublicFeed {
 
     /// The id this feed hands out for a symbol, if it follows it.
     pub fn id_of(&self, symbol: &str) -> Option<SymbolId> {
-        let ids = self.ids.read().expect("the symbol map lock is poisoned");
-        ids.get(&symbol.to_uppercase()).copied()
+        crate::symbols::resolve(&self.ids, &symbol.to_uppercase())
     }
 
     /// Start following a symbol this feed was not built with.
@@ -495,8 +494,7 @@ impl Worker {
 
 impl Worker {
     fn id_of(&self, symbol: &str) -> Option<SymbolId> {
-        let ids = self.ids.read().expect("the symbol map lock is poisoned");
-        ids.get(symbol).copied()
+        crate::symbols::resolve(&self.ids, symbol)
     }
 }
 

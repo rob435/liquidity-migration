@@ -80,8 +80,7 @@ impl BinancePublicFeed {
     }
 
     pub fn id_of(&self, symbol: &str) -> Option<SymbolId> {
-        let ids = self.ids.read().expect("the symbol map lock is poisoned");
-        ids.get(&symbol.to_uppercase()).copied()
+        crate::symbols::resolve(&self.ids, &symbol.to_uppercase())
     }
 
     pub fn admit(&mut self, symbol: &str, feed: Feed) -> SymbolId {

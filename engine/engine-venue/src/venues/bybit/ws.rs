@@ -425,16 +425,18 @@ impl Decoder {
                 }
                 map_order_row(row, recv_ns)
             } else if fast_topic {
-                let ids = self.ids.read().expect("the symbol map lock is poisoned");
                 map_fast_execution_row(
                     row,
-                    &|name: &str| ids.get(name).copied(),
+                    &|name: &str| engine_public::symbols::resolve(&self.ids, name),
                     &self.order_links,
                     recv_ns,
                 )
             } else if execution_topic {
-                let ids = self.ids.read().expect("the symbol map lock is poisoned");
-                map_execution_raw(raw.get(), &|name: &str| ids.get(name).copied(), recv_ns)
+                map_execution_raw(
+                    raw.get(),
+                    &|name: &str| engine_public::symbols::resolve(&self.ids, name),
+                    recv_ns,
+                )
             } else {
                 Ok(None)
             };
