@@ -260,7 +260,7 @@ jobs:
             -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             "$VPS_USER@$VPS_HOST" \
-            'systemctl --failed --no-pager; for unit in liquidity-migration-demo-liveness.service liquidity-migration-mainnet-liveness.service liquidity-migration-host-liveness.service liquidity-migration-equity-recorder.service; do systemctl show "$unit" --property=Id,Result,ExecMainStatus,ActiveEnterTimestamp --no-pager; journalctl -u "$unit" -n 12 --no-pager -o short-iso; done'
+            'systemctl --failed --no-pager; for unit in liquidity-migration-demo-liveness.service liquidity-migration-mainnet-liveness.service liquidity-migration-host-liveness.service liquidity-migration-equity-recorder.service liquidity-migration-signal-worker-demo.service liquidity-migration-signal-worker-mainnet.service; do systemctl show "$unit" --property=Id,Result,ExecMainStatus,NRestarts,ActiveEnterTimestamp --no-pager; journalctl -u "$unit" -n 12 --no-pager -o short-iso; done'
 
   vps:
     if: >-
