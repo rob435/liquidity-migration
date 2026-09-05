@@ -161,6 +161,113 @@ edit STATE.md to match.
     `test_a_successor_pass_credits_what_the_burst_already_unlinked` and
     `test_a_burst_of_owed_passes_deletes_the_deficit_once_not_the_whole_tape`.
 
+- **2026-09-05 03:18 UTC — The same crossing the 03:21 entry above measures,
+  paged three minutes earlier off the Binance unit alone, and read against the
+  undeployed fixes rather than the deployed code. It finds a **sixth defect,
+  in `3c1ebd22`**: a credited burst ends on its second pass with the gate
+  still shut whenever the kernel released the unlinked blocks and the
+  neighbouring recorder took them, and `_maintenance` armed the pruner on the
+  crossing only, so the writer then waited out the whole 300-second interval.
+  That is the 330.3 s, 360.2 s and 390.3 s blocks the 02:48 and 03:00 entries
+  measured, and the five merged fixes would have left them in place. Fixed in
+  `1702d14d` by arming on the level. This entry is deliberately thin on the
+  crossing itself: the 03:21 entry above has it from both units, prices the
+  margin, and shows the three incident ids are one incident.**
+  - Incident `host-16171e3c5e186136`, scope `host`, host `ip-208-84-103-4`,
+    `new_critical_refs=capture-disk:forward-market-binance`. Exact alert text:
+    `CRITICAL recorder forward-market-binance storage is blocked; frames are
+    counted but not written`. Level-triggered on `disk_blocked is True`
+    (`scripts/runtime/check_fleet_liveness.py:431`, raised at `:433`). One
+    unit named, a `market_tape` recorder, research tape outside the order
+    path; pid 2263691 unchanged, host still `65ee75a7`. **The funded engine is
+    not implicated**, and the 25 GiB floor is the reservation held for
+    mainnet's WAL, which `writable()` blocks the recorder *above*
+    (`market_tape/storage.py:426-433`).
+  - **The payload: 840.5 s clean, then the crossing at 03:18:35.057.** Every
+    line from 03:04:04.563 reads `disk_blocked=False` with `disk_dropped`
+    frozen at 5 651 210 — 1 010 501 frames taken and 1 010 470 rows written,
+    1 161/s each — and the block is 20 frames old at the tick that opens it.
+    The 03:21 entry follows the same block through to its 90.1 s end.
+
+    | Reading | 03:04:04.563 | 03:18:35.057 |
+    | :--- | ---: | ---: |
+    | `frames` | 25 548 129 | 26 558 630 |
+    | `rows` | 19 896 830 | 20 907 300 |
+    | `disk_dropped` | 5 651 210 | 5 651 230 |
+    | `disk_blocked` | `False` | `True` |
+  - **No Binance pass deleted a file in 871 s.** `_retention_pass` logs
+    `retention removed` only when `prune` returned paths
+    (`market_tape/record.py:1166`) and the excerpt carries no such line, while
+    Binance's last three logged passes — 02:49:33, 02:54:36, 02:59:39, spaced
+    302.6 s and 302.5 s — put the next three at ≈03:04:42, ≈03:09:44 and
+    ≈03:14:47, all inside it. On the deployed `prune` a pass deletes nothing
+    only when no file is past `retention_days`, the root is under `max_bytes`,
+    and free space is at or above the floor
+    (`65ee75a7:market_tape/storage.py:362`). This is the same reading the
+    03:21 entry takes independently on the Bybit unit over 990.8 s: **neither
+    tape is at its `max_disk_gb` cap, and `min_free_disk_gb` is what binds.**
+  - **The sixth defect, in `3c1ebd22` and not on the host.** A pass frees to
+    `free_target = min_free_bytes + 5%` (`market_tape/storage.py:383`,
+    `FREE_HEADROOM_FRACTION` at `:47`) — 25 GiB + 1.25 GiB — so the first pass
+    of a crossing unlinks `F1 ≈ free_target − S1`, where `S1` is the statvfs
+    reading it opened with. It is owed a successor when the next `writable()`
+    still reads under the floor (`market_tape/record.py:1178`). The credited
+    successor opens with `free = S2 + F1` (`market_tape/storage.py:396`) and
+    so deletes nothing as soon as **`S2 ≥ S1`** — which holds the moment the
+    kernel has shown any part of the release and the neighbour has not taken
+    more than the pass freed. That is the ordinary case here: the 02:33, 02:48
+    and 03:00 entries each show a crossing decided by the other recorder's
+    pass, and the 03:21 entry shows one 8-file Binance pass opening both
+    units' gates. The burst then ends with `disk_blocked` still `True`,
+    `_maintenance` armed `prune_now` on the crossing only, and `_write_loop`
+    never reaches an append to fail on — so the pruner waited out
+    `RETENTION_INTERVAL_SECONDS` (`market_tape/record.py:99`, waited at
+    `:1148`) with a tape it could still trim. `06e17d4a` closed that hole by
+    spinning until a fresh statvfs agreed, which is what cost the whole tape;
+    `3c1ebd22` stopped the spin and reopened the hole.
+  - **The fix (`1702d14d`).** `_maintenance` arms `prune_now` on every blocked
+    tick rather than on the crossing (`market_tape/record.py:1201`). A block
+    is then bounded by one `status_interval_seconds` — 30 s on both recorders
+    — plus a walk, instead of 300 s. It reverses the rationale `1d8fad9a`
+    wrote in ("while blocked nothing is written, so a repeated pass has
+    nothing new to delete"), which is false on a shared filesystem: the tape
+    is not growing, but free space moves under it, and that is the whole
+    incident.
+  - **What it does not cost.** Not tape: a pass deletes down to `free_target`
+    and no further, so against a foreign writer consuming at rate `R` the tape
+    gives up about `R` per unit time at either cadence — 30-second passes
+    unlink ~`30R` each where 300-second passes unlink ~`300R`. What changes is
+    only how long the writer is gated. The added cost is one `rglob` walk per
+    status tick while blocked, on the pruner thread that exists so a walk
+    never touches the heartbeat; the largest pass of this incident, 410
+    unlinks, took 0.17 s.
+  - **Tests.**
+    `tests/market_tape/test_record.py::test_a_blocked_tick_runs_the_pass_the_credited_burst_stopped_short_of`
+    drives the real pruner thread over 20 files with a statvfs that never
+    moves: the credited burst ends after 2 passes with 17 files left and the
+    gate shut, then one `_maintenance()` tick produces the next burst — 4
+    passes, 14 files. `test_a_disk_under_the_free_floor_prunes_now_instead_of_waiting_out_the_interval`
+    now asserts a still-blocked tick wakes the pruner, replacing the assertion
+    that it must not. Reverting the two-line arming change fails both. Full
+    `scripts/dev.sh check` with `zstd` and `rsync` installed in the container:
+    1465 passed, ruff and mypy clean, `cargo clippy` and every engine suite
+    green; ShellCheck is not installed here and CI runs it.
+  - **The one action that ends this needs no runner**, from a workstation
+    holding the SSH key:
+
+    ```sh
+    EXPECTED_COMMIT=1702d14d1380d7bbe26eb0425b7811a3eeeeb2b8 scripts/ops.sh deploy
+    ```
+
+    `1702d14d` carries all six recorder fixes. **Do not deploy `06e17d4a`**
+    (uncredited retry, deletes the tape roots in this host's state) and do not
+    deploy `3c1ebd22` on its own (the burst ends with the gate shut and the
+    block still runs 300 s). Either way the deploy **hands over both realms
+    and restarts the funded engine**, because the fingerprint hashes the whole
+    `engine` tree and the chain already carries `697341e4` and `10ed1bd2`.
+    That is the owner's call, which is why the recipe is written for a human
+    and not dispatched from here.
+
 - **2026-09-05 03:00 UTC — The ninth page from the same free-space floor, and
   the first one that finds a fifth defect. It is not on the host: it is in
   `06e17d4a`, the fix eight entries have been telling the owner to deploy. The
