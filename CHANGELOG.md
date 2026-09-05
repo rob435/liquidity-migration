@@ -76,13 +76,22 @@ edit STATE.md to match.
     the same point and stops at those; the `ruff format --check` diffs are
     pre-existing lines under this box's ruff 0.16.6 against the pinned build,
     none of them lines this change adds. The engine is Rust and untouched.
+  - **Deploy receipt: refused again, same signature, sixth in a row.** Run
+    `33932188757`, dispatched `deploy` on `main@d275885a` at 00:12:15 UTC,
+    failed 5 s later at 00:12:20: `ci`, `rust` and `Deploy artifact` each died
+    in 3 s with their log downloads returning HTTP 404, and `vps`, `diagnose`,
+    `disarm` and the release-test job were all skipped. No job ever started.
+    Identical to `33931474693`, `33928248402`, `33922197522`, `33921858031`
+    and `33911912004`; it is the account's failed payments, not this commit.
+    Deployed commit stays `65ee75a7`, so the recorders keep oscillating across
+    the floor until the owner runs the SSH path below.
   - Host actions, in order, and only the owner can run them. Installing this
     commit carries `1d8fad9a` with it; `capture_fingerprint`
     (`scripts/deploy_vps_live.sh:523-535`) hashes every `market_tape/*.py`, so
     `start_independent_units` restarts both recorders on the new code and no
     hand restart is needed:
     ```bash
-    EXPECTED_COMMIT=<this commit> scripts/ops.sh deploy
+    EXPECTED_COMMIT=d275885a638e702ebea75bb14f19f1fee5810f89 scripts/ops.sh deploy
     scripts/ops.sh status
     ```
     Then the reading that is still open from 22:54 — whether the tape or
