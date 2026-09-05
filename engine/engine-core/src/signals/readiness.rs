@@ -196,7 +196,7 @@ async fn exchange(
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn readiness_acknowledges_only_the_selected_version_when_a_seal_races_delivery() {
         let (sender, receiver) = tokio::sync::watch::channel(None);
         let mut exchange = ReadinessExchange {

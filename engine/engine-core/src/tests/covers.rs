@@ -130,7 +130,7 @@ fn close(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-9
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_send_is_covered_at_its_quantized_size_until_the_reading_shows_it() {
     // The probe asks for 0.0105; the venue's step is 0.001, so 0.010 is what
     // actually goes out — and 0.010, not the ask, is what must be covered.
@@ -160,7 +160,7 @@ async fn a_send_is_covered_at_its_quantized_size_until_the_reading_shows_it() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder() {
     // 0.010 went out; the next account reading shows 0.004 of it. The cover
     // must come down to exactly the 0.006 the reading has not shown —
@@ -219,7 +219,7 @@ async fn the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_entry_frees_the_symbol_and_leaves_older_covers_alone() {
     // Two halves of one fact: a refused entry was never booked, so it holds
     // no phantom cover (a follower is free to retry the entry at once), and
@@ -244,7 +244,7 @@ async fn a_refused_entry_frees_the_symbol_and_leaves_older_covers_alone() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_exit_drops_every_cover_for_its_symbol() {
     // The engine refusing an exit means the covers and the account reading
     // disagree about what is held, and the reading is the fact. Anything
@@ -273,7 +273,7 @@ async fn a_refused_exit_drops_every_cover_for_its_symbol() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_cancel_releases_only_the_unfilled_remainder() {
     // A worked order was pulled after filling 0.004 of its 0.010: the 0.006
     // that never happened is freed, the filled 0.004 stays covered until the
@@ -332,7 +332,7 @@ async fn a_cancel_releases_only_the_unfilled_remainder() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_reject_releases_the_whole_send() {
     // Rejected at the venue: it never worked and nothing of it filled, so
     // nothing of it can ever show in the reading. The whole cover goes.

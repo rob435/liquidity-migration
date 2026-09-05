@@ -1226,7 +1226,7 @@ mod tests {
         assert!(require_derivative_flat(&inventory, "test").is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn new_then_cancelled_and_two_flat_scans_pass() {
         let plan = plan();
         let before_ms = engine_types::clock::wall_ms();
@@ -1266,7 +1266,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn lost_cancel_reply_is_resolved_by_private_cancelled() {
         let plan = plan();
         let mut gateway = FakeGateway {
@@ -1296,7 +1296,7 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_accidental_fill_is_closed_and_reported_as_failure() {
         let plan = plan();
         let mut exposed = flat();
@@ -1357,7 +1357,7 @@ mod tests {
         assert_eq!(close.side, Side::Sell);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_ambiguous_create_is_cancelled_until_its_late_status_is_terminal() {
         let plan = plan();
         let mut gateway = FakeGateway {
@@ -1402,7 +1402,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_cancel_reply_without_any_terminal_evidence_fails_closed() {
         let plan = plan();
         let mut gateway = FakeGateway {
@@ -1433,7 +1433,7 @@ mod tests {
         assert!(gateway.cancel_ids.len() >= 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_fill_seen_after_cancelled_is_still_closed() {
         let plan = plan();
         let mut exposed = flat();
@@ -1488,7 +1488,7 @@ mod tests {
         assert!(gateway.sends[1].reduce_only && gateway.sends[1].close_position);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_ambiguous_recovery_close_is_never_submitted_twice() {
         let plan = plan();
         let mut exposed = flat();
@@ -1543,7 +1543,7 @@ mod tests {
         assert_eq!(gateway.sends[1].client_order_id, plan.close_id);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn unrelated_order_state_does_not_skip_our_teardown() {
         let plan = plan();
         let own = AccountOrder {
@@ -1582,7 +1582,7 @@ mod tests {
         assert!(gateway.cancel_ids.contains(&plan.request.client_order_id));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_unrelated_short_does_not_prevent_closing_our_long() {
         let plan = plan();
         let mut mixed = flat();
@@ -1629,7 +1629,7 @@ mod tests {
         assert_eq!(gateway.sends.len(), 2);
         assert!(gateway.sends[1].reduce_only && gateway.sends[1].close_position);
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_missing_recovery_receipt_cannot_count_as_a_clean_scan_or_resubmit() {
         let plan = plan();
         let mut exposed = flat();
@@ -1677,7 +1677,7 @@ mod tests {
         assert!(gateway.inventories.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stale_inventory_breaks_consecutive_clean_observation() {
         let plan = plan();
         let mut stale = flat();

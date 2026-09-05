@@ -177,7 +177,7 @@ async fn owned_exit(
     .unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn catalog_outage_retains_one_exact_input_and_keeps_owned_exits_and_stops_live() {
     let (mut engine, records, sends) =
         crate::tests::symbol_admission_test_fixture(Box::new(Consumer)).await;
@@ -222,7 +222,7 @@ async fn catalog_outage_retains_one_exact_input_and_keeps_owned_exits_and_stops_
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exhausted_symbol_ids_refuse_new_inputs_without_recycling_existing_exit_ids() {
     use engine_types::identity::{InstrumentBinding, InstrumentIdentity, DENSE_ID_CAPACITY};
     let (mut engine, _, sends) =
@@ -264,7 +264,7 @@ async fn exhausted_symbol_ids_refuse_new_inputs_without_recycling_existing_exit_
     owned_exit(&mut engine, &sends).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn symbol_identity_is_durable_before_installation_and_replays_a_crash_before_names() {
     let (mut engine, records, _) =
         crate::tests::symbol_admission_test_fixture(Box::new(Consumer)).await;
@@ -311,7 +311,7 @@ async fn symbol_identity_is_durable_before_installation_and_replays_a_crash_befo
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn symbol_identity_barrier_failure_never_installs_or_acknowledges_the_input() {
     let (mut engine, _, _) = crate::tests::symbol_admission_test_fixture(Box::new(Consumer)).await;
     engine
@@ -359,7 +359,7 @@ impl InstrumentCatalogClient for RecoveringCatalog {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn catalog_outage_restart_restores_native_metadata_for_exits_and_holds_growth_until_refresh()
 {
     let client = Arc::new(RecoveringCatalog {
@@ -468,7 +468,7 @@ impl InstrumentCatalogClient for DelistedCatalog {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn refreshed_catalog_retains_omitted_native_exit_metadata_without_reopening_growth() {
     let (mut engine, records, sends) = crate::tests::catalog_restart_test_fixture(
         Box::new(Consumer),
@@ -539,12 +539,12 @@ async fn refreshed_catalog_retains_omitted_native_exit_metadata_without_reopenin
     owned_exit(&mut engine, &sends).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn catalog_durability_stall_retains_metadata_without_holding_existing_protection() {
     stalled_metadata_durability(true).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn identity_durability_stall_retains_input_without_holding_existing_protection() {
     stalled_metadata_durability(false).await;
 }

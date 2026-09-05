@@ -39,7 +39,7 @@ fn exact_hash_covers_subscriptions_and_payload() {
     assert!(validate(&changed).unwrap_err().contains("content hash"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn bounded_sender_never_waits() {
     let (sender, _receiver) = signal_channel();
     for _ in 0..SIGNAL_CHANNEL_CAPACITY {
@@ -51,7 +51,7 @@ async fn bounded_sender_never_waits() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn spool_retires_only_the_previously_returned_file() {
     let directory = crate::testpath::temp_path("signal-spool");
     std::fs::create_dir(directory.path()).unwrap();
@@ -87,7 +87,7 @@ async fn spool_retires_only_the_previously_returned_file() {
     std::fs::remove_dir(directory.path()).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn invalid_spool_row_is_never_retired() {
     let directory = crate::testpath::temp_path("bad-signal-spool");
     std::fs::create_dir(directory.path()).unwrap();
@@ -105,7 +105,7 @@ async fn invalid_spool_row_is_never_retired() {
     std::fs::remove_dir(directory.path()).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_file_deleted_between_scan_and_read_is_skipped() {
     let directory = crate::testpath::temp_path("signal-spool-delete-race");
     std::fs::create_dir(directory.path()).unwrap();
@@ -131,7 +131,7 @@ async fn a_file_deleted_between_scan_and_read_is_skipped() {
     std::fs::remove_dir(directory.path()).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn each_pop_merges_new_lower_sequences_from_an_independent_lane() {
     let directory = crate::testpath::temp_path("signal-spool-independent-lanes");
     std::fs::create_dir(directory.path()).unwrap();
@@ -259,7 +259,7 @@ fn short_test_dir(tag: &str) -> PathBuf {
     dir
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn unix_signal_feed_streams_observations() {
     use std::io::Write;
     use std::os::unix::net::UnixStream;
@@ -291,7 +291,7 @@ async fn unix_signal_feed_streams_observations() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn hybrid_signal_feed_drains_spool_then_receives_socket() {
     use std::io::Write;
     use std::os::unix::net::UnixStream;
@@ -337,7 +337,7 @@ async fn hybrid_signal_feed_drains_spool_then_receives_socket() {
 /// The core's `select!` drops the feed future whenever another branch
 /// wins. A frame whose length prefix was read before that and whose body
 /// arrives after it is one frame, not a length followed by `{"sc`.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_frame_split_by_a_dropped_future_is_still_one_frame() {
     use std::io::Write;
     use std::os::unix::net::UnixStream;
@@ -421,7 +421,7 @@ async fn a_client_that_dies_mid_frame_costs_only_its_own_frame() {
 /// with a lower sequence than an arriving frame was written before it and
 /// goes first; the frame's own row is retired after the barrier like any
 /// other returned envelope.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_frame_waits_for_the_row_written_before_it_and_retires_its_own() {
     use std::io::Write;
     use std::os::unix::net::UnixStream;
@@ -525,7 +525,7 @@ fn a_row_whose_read_the_core_dropped_is_still_delivered_first() {
 
 /// A frame the engine cannot take is dropped with its stream; the row
 /// is on disk, so the feed keeps running and the next client is heard.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_oversize_frame_length_costs_its_stream_and_nothing_else() {
     use std::io::Write;
     use std::os::unix::net::UnixStream;

@@ -106,7 +106,7 @@ fn two_quotes() -> ScriptFeed {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn runtime_entry_override_is_owner_scoped_and_survives_rotation() {
     let pause = request(
         1,
@@ -236,7 +236,7 @@ impl Strategy for PermissionActor {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn live_pause_is_barriered_before_apply_and_core_still_allows_exit() {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let (done, stopped) = tokio::sync::oneshot::channel();
@@ -303,7 +303,7 @@ async fn live_pause_is_barriered_before_apply_and_core_still_allows_exit() {
         )));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn stale_control_request_is_rejected_without_stopping_the_engine() {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let (done, stopped) = tokio::sync::oneshot::channel();
@@ -368,7 +368,7 @@ async fn stale_control_request_is_rejected_without_stopping_the_engine() {
     assert_eq!(accepted, vec!["pause-1".to_string()]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn durable_stale_request_cannot_wedge_engine_boot() {
     let spool = temp_path("engine-stale-control-spool");
     std::fs::create_dir(spool.path()).unwrap();
@@ -448,7 +448,7 @@ impl Strategy for FlattenActor {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn flatten_replays_after_crash_and_rotation_until_strategy_acknowledges() {
     let pause = request(
         0,

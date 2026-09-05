@@ -972,7 +972,7 @@ mod tests {
 #[cfg(test)]
 mod recovery_client_tests {
     use super::*;
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn independent_bench_recovery_uses_another_http_socket() {
         use std::sync::{
             atomic::{AtomicUsize, Ordering},

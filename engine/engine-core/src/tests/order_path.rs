@@ -104,7 +104,7 @@ async fn until_both(crossing: Arc<Mutex<Vec<&'static str>>>) {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn every_order_waits_for_durable_dispatch_before_the_wire_and_its_news() {
     // Delay both dispatch phases so a send racing either barrier is visible.
     let tape = tape();
@@ -148,7 +148,7 @@ async fn every_order_waits_for_durable_dispatch_before_the_wire_and_its_news() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_slow_venue_cannot_stop_the_market_loop() {
     let seen = Arc::new(AtomicUsize::new(0));
     let probe = NonBlockingProbe { seen: seen.clone() };
@@ -189,7 +189,7 @@ async fn a_slow_venue_cannot_stop_the_market_loop() {
         .expect("the run shuts down cleanly");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn quote_updates_waiting_on_a_slow_venue_collapse_to_the_newest() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());
@@ -224,7 +224,7 @@ async fn quote_updates_waiting_on_a_slow_venue_collapse_to_the_newest() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_dead_private_feed_stops_for_supervised_recovery() {
     // The engine's symbol table is built from strategy subscriptions, not
     // from the mock venue's rule inventory. No market event is delivered in
@@ -243,7 +243,7 @@ async fn a_dead_private_feed_stops_for_supervised_recovery() {
     assert_eq!(outcome.stopped_by, StopReason::FeedClosed);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
@@ -298,7 +298,7 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
     assert_eq!(h.risk_saw.lock().unwrap().len(), 1, "risk hears the reply");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_verdict_record_names_the_order_it_approved() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
@@ -328,7 +328,7 @@ async fn the_verdict_record_names_the_order_it_approved() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refusal_stops_before_the_order_is_written() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let deny = RiskVerdict::Deny {
@@ -360,7 +360,7 @@ async fn a_refusal_stops_before_the_order_is_written() {
     assert!(engine.in_flight_ids().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
     // 0.0004 rounds down to nothing at a step of 0.001.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.0004);
@@ -396,7 +396,7 @@ async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
     assert!(note.contains("smallest tradable size"), "{note}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_doomed_order_re_proposed_on_every_quote_is_recorded_once() {
     // The same refusal, quote after quote, is what a stuck position produces
     // live: the strategy keeps asking, the engine keeps saying no. Refusing
@@ -424,7 +424,7 @@ async fn a_doomed_order_re_proposed_on_every_quote_is_recorded_once() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn retired_control_anchors_are_ignored_and_cannot_halt_entries() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let replayed = vec![
@@ -469,7 +469,7 @@ async fn retired_control_anchors_are_ignored_and_cannot_halt_entries() {
     assert_eq!(sends.lock().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
     // After a restart the partition would otherwise believe every share is
     // free while last boot's orders are still working at the venue.
@@ -519,7 +519,7 @@ async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
     let id = "eng-1700000000000-5";
     let replayed = vec![
@@ -599,7 +599,7 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
     assert_eq!(*registered.lock().unwrap(), vec![(id.to_string(), 1.0)]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn symbol_ids_survive_a_restart_in_the_log_order() {
     // Ids are interning positions, and every join boot makes against the
     // replayed records — whose fills are whose, what exposure the log
@@ -626,7 +626,7 @@ async fn symbol_ids_survive_a_restart_in_the_log_order() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_order_the_venue_is_not_working_is_reaped_at_boot() {
     // It ended while the engine was down, and no update for it will ever
     // arrive — the private stream does not replay history. Left "in flight"
@@ -703,7 +703,7 @@ fn minting_skips_an_id_the_log_already_knows() {
     assert_eq!(n, 3);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_clean_shutdown_forces_its_tail_to_disk() {
     // Power loss right after a graceful stop must not lose the closing
     // updates and ledger line: completed orders reading back as in flight
@@ -873,7 +873,7 @@ impl Strategy for BurstEmitter {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn sibling_orders_share_both_dispatch_barriers_before_the_first_send() {
     let burst = BurstEmitter {
         symbol: "BTCUSDT".into(),
@@ -1006,7 +1006,7 @@ impl Strategy for StopSequence {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_same_side_sibling_cannot_loosen_the_whole_position_stop() {
     let strategy = StopSequence {
         symbol: "BTCUSDT".into(),
@@ -1030,7 +1030,7 @@ async fn a_same_side_sibling_cannot_loosen_the_whole_position_stop() {
     assert!(note_saying(&h.records, "would loosen").contains("whole Buy position"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn same_side_siblings_may_tighten_the_whole_position_stop() {
     let strategy = StopSequence {
         symbol: "BTCUSDT".into(),
@@ -1054,7 +1054,7 @@ async fn same_side_siblings_may_tighten_the_whole_position_stop() {
     assert_eq!(sends[1].stop, Some(StopSpec { trigger_px: 95.0 }));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_prior_wakes_unfilled_order_also_prevents_stop_loosening() {
     let strategy = StopPerWake {
         symbol: "BTCUSDT".into(),
@@ -1077,7 +1077,7 @@ async fn a_prior_wakes_unfilled_order_also_prevents_stop_loosening() {
     assert!(note_saying(&h.records, "would loosen").contains("whole Buy position"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_fresh_account_view_repairs_a_loosened_whole_position_stop() {
     let id = "eng-protected-1";
     let fill_ms = clock::wall_ms();
@@ -1169,7 +1169,7 @@ async fn a_fresh_account_view_repairs_a_loosened_whole_position_stop() {
     )));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn oversized_sibling_bursts_are_revalidated_after_each_bounded_send() {
     let burst = BurstEmitter {
         symbol: "BTCUSDT".into(),
@@ -1230,7 +1230,7 @@ async fn oversized_sibling_bursts_are_revalidated_after_each_bounded_send() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn private_updates_are_polled_between_bounded_sibling_sends() {
     let burst = BurstEmitter {
         symbol: "BTCUSDT".into(),
@@ -1271,7 +1271,7 @@ async fn private_updates_are_polled_between_bounded_sibling_sends() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn private_updates_are_polled_between_bounded_cancel_groups() {
     let burst = CancelBurst {
         symbol: "BTCUSDT".into(),
@@ -1324,7 +1324,7 @@ async fn private_updates_are_polled_between_bounded_cancel_groups() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn due_account_refresh_is_polled_between_bounded_sibling_sends() {
     let burst = BurstEmitter {
         symbol: "BTCUSDT".into(),
@@ -1377,7 +1377,7 @@ async fn due_account_refresh_is_polled_between_bounded_sibling_sends() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn shutdown_after_a_batch_does_not_abandon_a_trailing_exit() {
     let burst = BurstEmitter {
         symbol: "BTCUSDT".into(),
@@ -1479,7 +1479,7 @@ impl Strategy for ConflictingLeverageSiblings {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn same_symbol_siblings_with_conflicting_leverage_are_refused_before_mutation() {
     let strategy = ConflictingLeverageSiblings {
         symbol: "BTCUSDT".into(),
@@ -1531,7 +1531,7 @@ async fn same_symbol_siblings_with_conflicting_leverage_are_refused_before_mutat
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_flooded_wake_drops_entries_but_never_exits() {
     // The cap exists so a runaway strategy cannot wedge the loop — but a
     // de-risking order queued behind the flood must still get out, or the
@@ -1612,7 +1612,7 @@ impl Strategy for SloppyExiter {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_exit_sheds_its_stop_before_the_log_and_the_wire() {
     // The venue rejects a reduce-only order carrying stop fields, and the
     // log must record what was actually sent — so the stop comes off at
@@ -1746,7 +1746,7 @@ fn raised_minimum_rule() -> InstrumentRule {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_whole_position_below_the_minimum_uses_the_venue_close_path() {
     let exiter = SloppyExiter {
         symbol: "BTCUSDT".into(),
@@ -1776,7 +1776,7 @@ async fn a_whole_position_below_the_minimum_uses_the_venue_close_path() {
     assert!(sends[0].close_position);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_whole_position_below_one_step_keeps_its_real_accounting_quantity() {
     let exiter = SloppyExiter {
         symbol: "BTCUSDT".into(),
@@ -1806,7 +1806,7 @@ async fn a_whole_position_below_one_step_keeps_its_real_accounting_quantity() {
     assert!(sends[0].close_position);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_partial_position_below_the_minimum_is_still_refused() {
     let exiter = SloppyExiter {
         symbol: "BTCUSDT".into(),
@@ -1838,7 +1838,7 @@ async fn a_partial_position_below_the_minimum_is_still_refused() {
     assert!(note.contains("smallest tradable size"), "{note}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_intent_with_an_unreal_number_never_reaches_the_log() {
     // serde_json writes a non-finite float as null, which cannot be read
     // back into f64 — so a NaN quantity appended to the log would make that
@@ -2330,7 +2330,7 @@ fn amend_verdict_quantity_must_match_exactly() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_order_under_the_minimum_value_is_refused() {
     // 0.001 of a 30k coin is 30 dollars; ask for a minimum of 5 and it passes,
     // so raise the size floor by asking for a tiny quantity of a cheap symbol.
@@ -2366,7 +2366,7 @@ async fn an_order_under_the_minimum_value_is_refused() {
     assert!(note.contains("smallest order value"), "{note}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_send_with_no_answer_leaves_the_order_in_flight() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let tape = tape();
@@ -2408,7 +2408,7 @@ async fn a_send_with_no_answer_leaves_the_order_in_flight() {
     assert!(note_saying(&records, "no answer").contains(&sends.lock().unwrap()[0].client_order_id));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_rejected_order_is_over() {
     let (buyer, heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let tape = tape();
@@ -2454,7 +2454,7 @@ async fn a_rejected_order_is_over() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_order_left_in_flight_by_the_last_run_comes_back_and_is_not_resent() {
     let stale = OrderRequest {
         client_order_id: "eng-1700000000000-4".into(),
@@ -2626,7 +2626,7 @@ async fn timers_fire_for_the_strategy_that_armed_them() {
     assert_eq!(*fired_two.lock().unwrap(), vec![TimerId(22)]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_market_message_only_reaches_the_strategies_that_asked_for_it() {
     let (btc_buyer, btc_heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (eth_buyer, eth_heard) = Buyer::new("ETHUSDT", 1, 0.01);
@@ -2660,7 +2660,7 @@ async fn a_market_message_only_reaches_the_strategies_that_asked_for_it() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_group_flush_tick_pushes_the_log_out() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
     let tape = tape();
@@ -2731,7 +2731,7 @@ async fn the_account_reading_is_refreshed_before_it_goes_stale() {
     assert!(reads >= 3, "one at boot and more as it ages, saw {reads}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn boot_reads_the_rules_and_the_account_before_anything_else() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (_engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
@@ -2783,7 +2783,7 @@ async fn the_bench_runs_the_real_loop_and_fills_the_histograms() {
     assert!(result.as_json().contains("\"orders\":30"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_flooded_sleeve_cannot_discard_another_sleeves_exit() {
     let burst = BurstEmitter {
         symbol: "BTCUSDT".into(),
@@ -2828,7 +2828,7 @@ async fn a_flooded_sleeve_cannot_discard_another_sleeves_exit() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_catalog_applies_market_lot_instead_of_limit_lot() {
     use engine_types::numeric::{AssetId, Exact, ExactInstrumentSpec, PricePrecision};
     let requested = 0.29;

@@ -92,7 +92,7 @@ fn journaled_updates(records: &Rc<RefCell<Vec<WalRecord>>>) -> Vec<OrderUpdate> 
         .collect()
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn late_partial_fills_keep_exact_delivery_order_and_dedup_after_rotation() {
     let (buyer, heard) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
     let (mut engine, h) = build_with_venue_orders(
@@ -206,7 +206,7 @@ impl Wal for FailingUpdateWal {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_failed_fill_append_cannot_change_books_risk_delivery_or_dedup() {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
@@ -267,7 +267,7 @@ async fn a_failed_fill_append_cannot_change_books_risk_delivery_or_dedup() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn contradictory_portfolio_snapshot_cannot_erase_legacy_quantity_projection() {
     let (buyer, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
     let (engine, _) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;

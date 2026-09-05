@@ -659,7 +659,7 @@ impl VenueGateway for HistoryVenue {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn fixed_state_soak_and_recovery_sweep_cover_the_declared_work() {
         let result = run(&Options {
             operations: 96,
@@ -690,7 +690,7 @@ mod tests {
         assert!(result.cold_recovery[1].p50_ns_per_row.is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn workload_bounds_are_rejected_before_measurement() {
         let result = run(&Options {
             operations: 2,
@@ -729,7 +729,7 @@ mod tests {
 #[cfg(test)]
 mod recovery_client_tests {
     use super::*;
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn independent_history_bench_recovery_preserves_bootstrap_once() {
         let mut venue = HistoryVenue {
             executions: std::sync::Arc::new(std::sync::Mutex::new(history(2, clock::wall_ms()))),

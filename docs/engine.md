@@ -398,6 +398,7 @@ The engine keeps real-clock deadlines beside its virtual-clock waits (`MUTATION_
 * **Must**: the engine's own state be ordered maps only. Anything the engine iterates can reach the log, and two runs of one input write one log; a hash seed must never decide the order of two records. `engine sim --twice` is the gate.
 * **Must**: a simulator fault wrapper decide before it awaits and park anything it took from the inner feed, so a lost `select!` branch loses nothing.
 * **Must Never**: the simulator soften a failing check. A real engine defect is reported with its seed; a simulator gap is fixed in the simulator.
+* **Must**: an `engine-core` tokio test start with the clock paused (`#[tokio::test(start_paused = true)]`), so a stop future resolves when the engine is idle and one input gives one interleaving. The wall clock is for tests that drive a real socket or wait on an engine timer or deadline, which read `clock::now_ns`.
 
 - Must preserve one deterministic core as the account/order/risk/durability authority.
 - Must retain ordered strategy effects through overload, failure, rotation and restart.

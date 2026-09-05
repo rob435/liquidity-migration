@@ -82,7 +82,7 @@ fn observation(available_ms: i64) -> SignalObservation {
     observation
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn future_availability_custom_feed_cannot_advance_the_wal_or_invoke_a_strategy() {
     let delivered = Rc::new(RefCell::new(Vec::new()));
     let (mut engine, harness) = build(
@@ -146,7 +146,7 @@ impl MarketFeed for ClockRollbackMarket {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn future_availability_is_rechecked_after_symbol_admission() {
     let delivered = Rc::new(RefCell::new(Vec::new()));
     let (mut engine, harness) = build(
@@ -199,7 +199,7 @@ async fn future_availability_is_rechecked_after_symbol_admission() {
     assert_eq!(signals.deferred, Some(row));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn future_availability_preserves_source_prefixes_while_independent_destinations_flow() {
     let delivered = Rc::new(RefCell::new(Vec::new()));
     let (mut engine, harness) = build(

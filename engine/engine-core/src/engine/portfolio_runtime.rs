@@ -644,7 +644,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn emergency_quantity_preserves_canonical_units_and_respects_the_market_maximum() {
         for (quantity, max, expected) in [
             ("0.100000000000000001", None, "0.100000000000000001"),
@@ -695,7 +695,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_emergency_combines_sleeve_fragments_into_one_legal_physical_close() {
         let mut engine = crate::tests::shared_sleeves::fragmented_engine().await;
         engine.books.market.apply(&MarketEvent::Quote {
@@ -733,7 +733,7 @@ mod tests {
         assert!(orders[0].request.reduce_only);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn aggregate_close_allocates_actual_partial_fills_and_replays_each_owner_once() {
         use engine_types::numeric::{AssetAmount, ExactNumber, ExecutionAmounts};
         let mut engine = crate::tests::shared_sleeves::fragmented_engine().await;
@@ -954,7 +954,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn balanced_sleeves_settle_beside_a_trusted_manual_baseline_after_restart() {
         let mut engine = crate::tests::shared_sleeves::balanced_engine().await;
         engine.books.account.positions = crate::tests::shared_sleeves::physical_long(0.5);
@@ -1007,7 +1007,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_unpriced_exit_retains_ownership_without_flooding_the_journal() {
         let mut engine = crate::tests::shared_sleeves::fragmented_engine().await;
         engine
@@ -1029,7 +1029,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn internal_offsets_wait_for_private_recovery_even_when_the_old_account_is_flat() {
         let mut engine = crate::tests::shared_sleeves::balanced_engine().await;
         let mut state = PortfolioEmergency {
@@ -1066,7 +1066,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_refused_virtual_reduction_retains_an_engine_owned_exit() {
         let mut engine = crate::tests::shared_sleeves::balanced_engine().await;
         engine.books.market.apply(&MarketEvent::Quote {
@@ -1133,7 +1133,7 @@ mod tests {
         assert_eq!(orders[0].request.qty, 0.5);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_busy_emergency_does_not_starve_another_sleeves_exit() {
         let params = toml::from_str("symbol = 'BTCUSDT'\nevery_s = 60\nenabled = false").unwrap();
         let strategy = engine_strategies::build_strategy("probe", StrategyId(0), &params).unwrap();

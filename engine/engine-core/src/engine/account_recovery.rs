@@ -392,7 +392,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_query_started_before_a_physical_update_cannot_overwrite_the_account() {
         let (mut engine, _) = crate::tests::callback_test_fixture(Vec::new()).await;
         let client = Arc::new(ReadClient {
@@ -424,7 +424,7 @@ mod tests {
         assert!(engine.account_refresh_requested_after.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn failed_history_preserves_the_checkpoint_and_private_updates_until_retry() {
         let (mut engine, records) = crate::tests::callback_test_fixture(Vec::new()).await;
         engine.recovery = Recovery::new(Some(Box::new(SharedReadClient(Arc::new(ReadClient {
@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(engine.recovered_until_ms, before);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_slow_history_checkpoint_barrier_keeps_private_news_selectable() {
         let (mut engine, records) = crate::tests::callback_test_fixture(Vec::new()).await;
         engine

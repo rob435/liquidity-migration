@@ -1276,7 +1276,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 mod dispatch_budget_tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn deferred_stops_keep_each_owner_and_never_replace_a_tighter_target() {
         let (mut engine, _) = crate::tests::callback_test_fixture(Vec::new()).await;
         let symbol = SymbolId(0);
@@ -1329,7 +1329,7 @@ mod dispatch_budget_tests {
             )));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_durable_dispatch_wait_preserves_the_original_wake_budget() {
         let (mut engine, _) = crate::tests::callback_test_fixture(Vec::new()).await;
         let original = DrainProgress {

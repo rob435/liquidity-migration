@@ -45,7 +45,7 @@ impl Strategy for StrictBootCheckpoint {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn fresh_boot_barriers_canonical_initial_state_before_reading_the_venue() {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
@@ -79,7 +79,7 @@ async fn fresh_boot_barriers_canonical_initial_state_before_reading_the_venue() 
     )));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn bad_or_missing_native_state_fails_before_any_venue_read() {
     for replayed in [
         vec![WalRecord::Names {
@@ -173,7 +173,7 @@ impl Strategy for CheckpointThenBuyer {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn checkpoint_owner_and_barrier_precede_the_dependent_entry() {
     let strategy = CheckpointThenBuyer { fired: false };
     let (mut engine, h) = build(allow_all(), vec![Box::new(strategy)], &["BTCUSDT"], &[]).await;
@@ -225,7 +225,7 @@ async fn checkpoint_owner_and_barrier_precede_the_dependent_entry() {
     assert_eq!(saved, (StrategyId(0), SymbolId(0), checkpoint()));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn failure_between_checkpoint_and_intent_is_deliberately_fail_closed() {
     let tape = tape();
     let (mut wal, records) = MockWal::new(tape.clone());
@@ -306,7 +306,7 @@ impl Strategy for CheckpointReader {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_booted_strategy_reads_its_latest_checkpoint() {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let replayed = replay_with_history_boundary(&[
@@ -380,7 +380,7 @@ impl Strategy for BootGlobalCheckpointReader {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn restored_strategy_is_woken_with_its_global_checkpoint_before_market_news() {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let replayed = replay_with_history_boundary(&[
@@ -453,7 +453,7 @@ impl Strategy for GlobalCheckpointThenBuyer {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn global_checkpoint_owner_and_barrier_precede_the_dependent_entry() {
     let (mut engine, h) = build(
         allow_all(),
@@ -527,7 +527,7 @@ impl Strategy for GlobalCheckpointReader {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn global_checkpoint_is_visible_only_to_its_owner_after_restart() {
     let owner = Rc::new(RefCell::new(Vec::new()));
     let other = Rc::new(RefCell::new(Vec::new()));
@@ -625,7 +625,7 @@ impl Strategy for OrderThenCheckpoint {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_checkpoint_cannot_overtake_an_earlier_batched_order() {
     let (mut engine, h) = build(
         allow_all(),
@@ -715,7 +715,7 @@ async fn completed_exit_records() -> Vec<WalRecord> {
     replay
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn restart_after_checkpoint_retains_the_unsent_exit() {
     let records = completed_exit_records().await;
     let cut = records
@@ -742,7 +742,7 @@ async fn restart_after_checkpoint_retains_the_unsent_exit() {
     assert!(h.sends.lock().unwrap()[0].reduce_only);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn restart_after_send_before_effect_completion_does_not_duplicate_the_exit() {
     let records = completed_exit_records().await;
     let request = records
@@ -780,7 +780,7 @@ async fn restart_after_send_before_effect_completion_does_not_duplicate_the_exit
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn failed_checkpoint_write_does_not_publish_uncommitted_strategy_state() {
     for global in [false, true] {
         let tape = tape();
@@ -827,7 +827,7 @@ async fn failed_checkpoint_write_does_not_publish_uncommitted_strategy_state() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn restoring_a_stalled_venue_mutation_uses_the_existing_drain_deadline() {
     let records = completed_exit_records().await;
     let cut = records
@@ -884,7 +884,7 @@ impl Wal for FailingOrderBarrier {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn stateful_order_barrier_failure_never_reaches_the_venue() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());

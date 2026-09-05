@@ -64,7 +64,7 @@ fn update(id: &str, execution: &str, side: Side, quantity: &str) -> OrderUpdate 
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_physical_live_replay_rotation_restart_preserves_external_baseline() {
     let prior = vec![
         WalRecord::Names {

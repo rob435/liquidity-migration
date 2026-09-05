@@ -535,7 +535,7 @@ mod process_capacity_tests {
     use super::*;
     use engine_types::strategy_process::CallbackSnapshot;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn simultaneous_callbacks_share_a_fixed_process_pool() {
         let params = toml::from_str("symbol = 'BTCUSDT'\nevery_s = 60\nenabled = false").unwrap();
         let strategies: Vec<_> = (0..5)
@@ -655,7 +655,7 @@ mod admission_ownership_tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn callback_acceptance_barrier_owns_the_head_and_deduplicates_redelivery() {
         let params = toml::from_str("symbol='BTCUSDT'\nevery_s=60\nenabled=false").unwrap();
         let strategies =

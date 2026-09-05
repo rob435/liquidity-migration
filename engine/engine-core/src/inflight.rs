@@ -759,7 +759,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn exact_partial_fill_rotation_retains_frontier_and_refuses_corruption() {
         let (engine, _) = crate::tests::lifecycle_test_fixture(vec![]).await;
         let (sent, fill) = exact_order_and_fill("0.0000000001", "0.00000000004", false);

@@ -80,7 +80,7 @@ async fn recover_one_fill_with_fee(fee: Option<f64>) -> Recovered {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_recovered_fill_reaches_the_risk_kernel() {
     // The kernel reserved this order's size when it approved it, and only a
     // fill releases the reservation. A recovered fill that stopped at the log
@@ -111,7 +111,7 @@ async fn a_recovered_fill_reaches_the_risk_kernel() {
     assert_eq!(fills, vec![0.01], "the kernel was not told what filled");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
@@ -201,7 +201,7 @@ async fn a_recovered_blank_fill_is_not_laundered_into_the_only_sleeve() {
     assert_eq!(logged_exposure[0].signed_qty, 0.01);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_repeated_live_exec_id_mutates_the_engine_once() {
     // Symbols enter the engine table through subscriptions. This strategy is
     // passive because the scripted market feed below delivers no quotes.
@@ -268,7 +268,7 @@ async fn a_repeated_live_exec_id_mutates_the_engine_once() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_known_live_fill_with_the_wrong_side_is_durable_but_mutates_nothing() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
@@ -342,7 +342,7 @@ async fn a_known_live_fill_with_the_wrong_side_is_durable_but_mutates_nothing() 
     assert_eq!(open_orders[0].filled_qty, 0.0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_known_recovered_fill_with_the_wrong_symbol_preserves_the_order() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (other, _heard) = Buyer::new("ETHUSDT", u64::MAX, 0.01);
@@ -407,7 +407,7 @@ async fn a_known_recovered_fill_with_the_wrong_symbol_preserves_the_order() {
         .any(|update| matches!(update, OrderUpdate::Fill { .. })));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn execution_history_failure_after_a_gap_retains_private_progress_and_latches_entries() {
     let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
@@ -459,7 +459,7 @@ async fn execution_history_failure_after_a_gap_retains_private_progress_and_latc
     assert!(!may_open);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn failed_gap_account_refresh_denies_the_next_entry_immediately() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
@@ -485,7 +485,7 @@ async fn failed_gap_account_refresh_denies_the_next_entry_immediately() {
     )));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_unmapped_gap_execution_is_durable_and_latches_entries() {
     let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
@@ -529,7 +529,7 @@ async fn an_unmapped_gap_execution_is_durable_and_latches_entries() {
     assert!(!may_open);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn execution_history_failure_aborts_boot() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());
@@ -560,7 +560,7 @@ async fn execution_history_failure_aborts_boot() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_existing_log_without_a_proven_history_boundary_aborts_boot() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());
@@ -590,7 +590,7 @@ async fn an_existing_log_without_a_proven_history_boundary_aborts_boot() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_log_older_than_the_venue_history_window_aborts_boot() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());
@@ -621,7 +621,7 @@ async fn a_log_older_than_the_venue_history_window_aborts_boot() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_empty_successful_boot_scan_is_checkpointed_durably() {
     let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
     let (_engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
@@ -648,7 +648,7 @@ async fn an_empty_successful_boot_scan_is_checkpointed_durably() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_recent_checkpoint_keeps_a_quiet_old_log_restartable() {
     let now_ms = clock::wall_ms();
     let replayed = vec![
@@ -679,7 +679,7 @@ async fn a_recent_checkpoint_keeps_a_quiet_old_log_restartable() {
     )));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_later_reconciliation_stamp_does_not_replace_a_history_checkpoint() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());
@@ -722,7 +722,7 @@ async fn a_later_reconciliation_stamp_does_not_replace_a_history_checkpoint() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_quiet_running_engine_renews_an_empty_checkpoint() {
     let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
@@ -766,7 +766,7 @@ async fn a_quiet_running_engine_renews_an_empty_checkpoint() {
     assert_eq!(execution_history_through_ms, Some(newest));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_recovered_fill_is_in_what_the_trading_cost() {
     // It traded, so it cost something. Left out, the traded notional is short
     // by however much the stream missed and every mean taken over it is a
@@ -785,7 +785,7 @@ async fn a_recovered_fill_is_in_what_the_trading_cost() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_recovered_unstated_fee_stays_unknown_in_the_wal_and_costs() {
     let Recovered { records, costs, .. } = recover_one_fill_with_fee(None).await;
 
@@ -801,7 +801,7 @@ async fn a_recovered_unstated_fee_stays_unknown_in_the_wal_and_costs() {
     assert_eq!(costs.fee_coverage(), Some(0.0));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
     // The pass reaches back two minutes past this boot, and the venue hands
     // back everything in that window. A fill the previous run heard on its own

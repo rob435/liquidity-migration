@@ -5,7 +5,7 @@
 
 use super::*;
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_entry_asked_to_be_worked_rests_at_the_touch_instead_of_crossing() {
     let (buyer, _heard) = Buyer::working("BTCUSDT", 1, 0.01, WorkPolicy::default());
     let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
@@ -31,7 +31,7 @@ async fn an_entry_asked_to_be_worked_rests_at_the_touch_instead_of_crossing() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_spread_too_thin_to_pay_for_still_sends_the_market_order() {
     // The one-tick book. Below two ticks the taker cost is already near the
     // maker floor, so the order goes out exactly as it did before any of this
@@ -51,7 +51,7 @@ async fn a_spread_too_thin_to_pay_for_still_sends_the_market_order() {
     assert_eq!(h.sends.lock().unwrap()[0].kind, OrderKind::Market);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_exit_is_sent_as_written_even_when_it_asks_to_be_worked() {
     // A resting exit that does not fill is exposure nobody wanted, still on
     // the book.
@@ -178,7 +178,7 @@ async fn until_moved(amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>) {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_stated_price_is_where_the_supervisor_believes_the_order_is() {
     // The supervisor decides its next move from where it believes the order
     // is. An amend acknowledgement cannot tell it, because it does not name a

@@ -1184,7 +1184,7 @@ mod callback_recovery_tests {
     use crate::strategy_process::host::{CallbackExecution, CallbackHost};
     use engine_types::strategy_process::CallbackEvent;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn initial_recovery_sources_keep_actual_sequences_after_new_boot_frames() {
         let now = clock::wall_ms();
         let params = toml::from_str("symbol = 'BTCUSDT'\nevery_s = 60\nenabled = false").unwrap();

@@ -341,7 +341,7 @@ mod tests {
     use super::*;
     use crate::strategy_process::host::{CallbackExecution, CallbackHost};
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn history_batches_yield_to_private_fills_and_restart_an_uncheckpointed_prefix_once() {
         let (mut engine, records) = crate::tests::recovery_inventory_fixture().await;
         let now = clock::wall_ms();

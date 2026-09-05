@@ -46,7 +46,7 @@ fn quote(close_at_end: bool) -> ScriptFeed {
         admitted: Default::default(),
     }
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_weaker_native_stop_with_the_same_binary64_projection_is_repaired() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());
@@ -88,7 +88,7 @@ async fn a_weaker_native_stop_with_the_same_binary64_projection_is_repaired() {
         Exact::parse_decimal("90").unwrap()
     );
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_owned_virtual_stop_is_durable_when_opposing_sleeves_leave_the_venue_flat() {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
@@ -163,7 +163,7 @@ async fn an_owned_virtual_stop_is_durable_when_opposing_sleeves_leave_the_venue_
     let restored = crate::attribution::Attribution::try_from_records(&[rotated]).unwrap();
     assert_eq!(restored.snapshot().positions, snapshot.positions);
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_stop_move_uses_exact_native_terms_and_the_earliest_surviving_sleeve_stop() {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
@@ -321,7 +321,7 @@ async fn stop_disk_and_http_waits_leave_private_updates_live() {
     run.unwrap();
     assert_eq!(calls.lock().unwrap().len(), 1);
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_failed_stop_intent_barrier_prevents_the_native_mutation() {
     let tape = tape();
     let (mut wal, _) = MockWal::new(tape.clone());
@@ -365,7 +365,7 @@ async fn a_failed_stop_intent_barrier_prevents_the_native_mutation() {
     assert!(run.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn typed_boot_repairs_wait_for_current_market_reference_and_use_exact_wire() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());
@@ -413,7 +413,7 @@ async fn typed_boot_repairs_wait_for_current_market_reference_and_use_exact_wire
         "a successfully repaired stop must not invent a permanent reconciliation fault"
     );
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_standing_native_stop_needs_no_quote_and_does_not_set_a_reconciliation_latch() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());
@@ -460,7 +460,7 @@ async fn a_standing_native_stop_needs_no_quote_and_does_not_set_a_reconciliation
     assert!(exact.lock().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_failed_native_repair_preserves_the_missing_stop_and_records_an_emergency() {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
@@ -496,7 +496,7 @@ async fn a_failed_native_repair_preserves_the_missing_stop_and_records_an_emerge
     assert!(!may_open);
     assert!(records.lock().unwrap().iter().any(|r| matches!(r, WalRecord::PortfolioEmergencyChanged { state } if state.reason == engine_types::portfolio_control::PortfolioEmergencyReason::ProtectionUnavailable)), "failed physical protection must retain a durable engine-owned emergency");
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_successful_exact_repair_preserves_an_unrelated_reconciliation_latch() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());
@@ -542,7 +542,7 @@ async fn a_successful_exact_repair_preserves_an_unrelated_reconciliation_latch()
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_legacy_working_order_keeps_binary64_stop_authority_under_exact_metadata() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());

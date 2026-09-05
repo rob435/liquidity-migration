@@ -3,6 +3,12 @@
 //! The mocks all share one tape, so a test can assert not just that the log
 //! was written and the order sent, but that they happened in that order —
 //! which is the whole promise of the durability barrier.
+//!
+//! Tokio's clock starts paused (`start_paused = true`): a stop future of
+//! `sleep(40 ms)` resolves as soon as the engine has nothing left to do, and
+//! one input gives one interleaving. A test stays on the wall clock only when
+//! it drives a real socket, or when it waits on an engine timer or deadline,
+//! because those read `clock::now_ns`, which paused tokio time does not move.
 
 use std::collections::VecDeque;
 use std::sync::{Arc as Rc, Mutex as RefCell};
@@ -1767,7 +1773,7 @@ impl MockWal {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_stalled_order_lookup_cannot_hold_a_cancel_or_a_reduction() {
     let (mut venue, sends) = MockVenue::new(tape(), &["BTCUSDT"]);
     let started = Arc::new(tokio::sync::Notify::new());

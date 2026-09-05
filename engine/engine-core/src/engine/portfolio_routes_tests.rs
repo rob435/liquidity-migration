@@ -34,7 +34,7 @@ fn routes() -> Vec<Subscription> {
         .collect()
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn inactive_offset_inventory_retains_quote_depth_through_restart_settlement_and_pending_exit()
 {
     let (engine, _) = crate::tests::portfolio_route_test_fixture(None).await;

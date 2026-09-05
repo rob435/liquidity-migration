@@ -117,7 +117,7 @@ fn quote() -> ScriptFeed {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn same_ticker_sleeves_keep_separate_logical_stops_and_one_native_stop() {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
@@ -271,7 +271,7 @@ pub(crate) fn physical_long(qty: f64) -> Vec<engine_types::PositionView> {
         leverage: None,
     }]
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_opposing_sleeve_entry_reduces_native_net_and_retains_its_own_stop() {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
@@ -314,7 +314,7 @@ async fn an_opposing_sleeve_entry_reduces_native_net_and_retains_its_own_stop() 
         .validate_projection(&sends[0])
         .unwrap();
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn native_stop_closure_settles_offsets_without_inventing_venue_executions() {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());
@@ -425,7 +425,7 @@ pub(crate) async fn balanced_engine() -> Engine<MockWal, Kernel, MockVenue> {
     .unwrap()
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn native_offset_settlement_resumes_each_durable_crash_cut_without_repeating_a_fill() {
     let tape = tape();
     let (wal, records) = MockWal::new(tape.clone());

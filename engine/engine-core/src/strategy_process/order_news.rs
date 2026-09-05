@@ -334,12 +334,12 @@ mod tests {
     };
     use engine_types::{Side, SymbolId, Wal};
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_restart_between_slice_admissions_replays_only_the_other_durable_owner() {
         slice_restart(false).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn recovered_parent_restarts_before_either_slice_and_between_slice_admissions() {
         slice_restart(true).await;
     }
@@ -511,7 +511,7 @@ mod paging_tests {
     };
     use engine_types::Wal;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn unread_inactive_sources_survive_rotation_without_stalling_active_order_news() {
         let path = crate::testpath::temp_path("inactive-callback-source-rotation");
         let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();

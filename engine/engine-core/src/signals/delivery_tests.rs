@@ -39,7 +39,7 @@ fn available_at(mut observation: SignalObservation, wall_ms: i64) -> SignalObser
     observation
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn future_availability_channel_keeps_the_row_and_serves_ready_destinations() {
     let _clock = engine_types::clock::install_virtual(1_000_000_000, 0).unwrap();
     let (sender, mut feed) = signal_channel();
@@ -70,7 +70,7 @@ async fn future_availability_channel_keeps_the_row_and_serves_ready_destinations
     assert_eq!(feed.0.lock().ordinary_rows, 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn future_availability_spool_prefix_wait_is_cancel_safe_and_does_not_block_ready_rows() {
     let _clock = engine_types::clock::install_virtual(1_000_000_000, 0).unwrap();
     let directory = crate::testpath::temp_path("signal-future-prefix");
@@ -105,7 +105,7 @@ async fn future_availability_spool_prefix_wait_is_cancel_safe_and_does_not_block
     assert!(future_path.exists());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn future_availability_spool_wakes_at_the_earliest_eligible_timestamp() {
     let _clock = engine_types::clock::install_virtual(1_000_000_000, 0).unwrap();
     let directory = crate::testpath::temp_path("signal-availability-deadline");
@@ -133,7 +133,7 @@ async fn future_availability_spool_wakes_at_the_earliest_eligible_timestamp() {
     assert!(feed.path_for(&later).exists());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn future_availability_channel_wakes_without_another_send() {
     let _clock = engine_types::clock::install_virtual(1_000_000_000, 0).unwrap();
     let (sender, mut feed) = signal_channel();
@@ -155,7 +155,7 @@ async fn future_availability_channel_wakes_without_another_send() {
     assert!(delivered_ms >= received.available_wall_ts_ms);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn future_availability_channel_rechecks_wall_time_after_its_timer_fires() {
     let mut clock = Some(engine_types::clock::install_virtual(1_000_000_000, 0).unwrap());
     let (sender, mut feed) = signal_channel();
@@ -176,7 +176,7 @@ async fn future_availability_channel_rechecks_wall_time_after_its_timer_fires() 
     assert_eq!(feed.next_observation().await.unwrap(), expected);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn future_availability_cannot_reserve_the_only_channel_recovery_slot() {
     let _clock = engine_types::clock::install_virtual(1_000_000_000, 0).unwrap();
     let (sender, mut feed) = signal_channel();
@@ -209,7 +209,7 @@ async fn future_availability_cannot_reserve_the_only_channel_recovery_slot() {
     assert_eq!(feed.0.lock().ordinary_rows, SIGNAL_CHANNEL_CAPACITY);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn future_availability_cancelled_scan_rechecks_a_backward_clock_correction() {
     let directory = crate::testpath::temp_path("signal-availability-clock-rollback");
     std::fs::create_dir(directory.path()).unwrap();
@@ -241,7 +241,7 @@ async fn future_availability_cancelled_scan_rechecks_a_backward_clock_correction
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn only_explicit_acknowledgement_can_retire_a_spool_row() {
     let directory = crate::testpath::temp_path("signal-explicit-ack");
     std::fs::create_dir(directory.path()).unwrap();
@@ -266,7 +266,7 @@ async fn only_explicit_acknowledgement_can_retire_a_spool_row() {
     assert!(path.exists());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn gap_catchup_precedes_new_generations_while_independent_destinations_flow() {
     let directory = crate::testpath::temp_path("signal-catchup");
     std::fs::create_dir(directory.path()).unwrap();
@@ -368,7 +368,7 @@ fn bounded_spool_pages_find_catchup_beyond_a_saturated_metadata_cache() {
     assert!(scanner.deferred.len() <= SPOOL_METADATA_CAPACITY);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_full_channel_retains_rows_and_has_one_prefix_recovery_slot() {
     let (sender, mut feed) = signal_channel();
     for sequence in 2..=(SIGNAL_CHANNEL_CAPACITY as u64 + 1) {
@@ -412,7 +412,7 @@ async fn a_full_channel_retains_rows_and_has_one_prefix_recovery_slot() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn channel_byte_capacity_includes_outstanding_and_reserved_payloads() {
     fn large(sequence: u64) -> SignalObservation {
         let mut row = row("source", sequence);
@@ -449,7 +449,7 @@ async fn channel_byte_capacity_includes_outstanding_and_reserved_payloads() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_full_new_generation_queue_cannot_block_old_generation_catchup() {
     let (sender, mut feed) = signal_channel();
     for sequence in 1..=SIGNAL_CHANNEL_CAPACITY as u64 {
@@ -477,7 +477,7 @@ async fn a_full_new_generation_queue_cannot_block_old_generation_catchup() {
     assert_eq!(feed.0.lock().ordinary_bytes, 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancelled_channel_poll_and_sender_close_do_not_discard_pending_rows() {
     let (sender, mut feed) = signal_channel();
     feed.set_gap_requests(&[request("source", 1)], &[]).unwrap();
@@ -588,7 +588,7 @@ fn physical_file_limit_is_checked_before_allocating_the_envelope() {
     assert!(path.exists());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_doorbell_during_an_empty_scan_cannot_be_overwritten_by_its_result() {
     let directory = crate::testpath::temp_path("signal-scan-doorbell");
     std::fs::create_dir(directory.path()).unwrap();
@@ -610,7 +610,7 @@ async fn a_doorbell_during_an_empty_scan_cannot_be_overwritten_by_its_result() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_socket_frame_is_only_a_prompt_to_read_the_durable_spool() {
     use tokio::io::AsyncWriteExt;
     let directory = PathBuf::from(format!("/tmp/lm-doorbell-{}", std::process::id()));
@@ -681,7 +681,7 @@ async fn wait_readiness_request(
     .expect("readiness request is atomically published")
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn producer_readiness_ignores_stale_nonce_and_survives_cancelled_polls() {
     use engine_types::{SignalFeedEvent, SignalReadinessResponse, SignalSourceFrontier};
     let directory = crate::testpath::temp_path("producer-readiness");
@@ -733,7 +733,7 @@ async fn producer_readiness_ignores_stale_nonce_and_survives_cancelled_polls() {
     assert_ne!(request.boot_nonce, fresh.boot_nonce);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn readiness_response_failure_is_a_control_event_not_a_signal_feed_failure() {
     let directory = crate::testpath::temp_path("producer-readiness-malformed");
     std::fs::create_dir_all(directory.path()).unwrap();
@@ -753,7 +753,7 @@ async fn readiness_response_failure_is_a_control_event_not_a_signal_feed_failure
     assert!(format!("{result:?}").contains("ReadinessUnavailable"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn lifecycle_readiness_observes_a_later_seal_without_restarting_or_duplicate_events() {
     use engine_types::{
         SignalFeedEvent, SignalLifecycleRequest, SignalLifecycleResponse, SignalProducerReport,

@@ -413,7 +413,7 @@ mod tests {
         assert!(std::mem::size_of::<CallbackQueueSlot>() <= 128);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn inactive_callback_pages_leave_the_resident_budget_for_active_sleeves() {
         let path = crate::testpath::temp_path("inactive-callback-pages");
         let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(state.committed[&StrategyId(1)].last_callback_id, 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn callback_pages_keep_preparation_and_completion_across_two_rotations() {
         let path = crate::testpath::temp_path("callback-page-preparation");
         let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();

@@ -5,7 +5,7 @@
 
 use super::*;
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_quiet_account_leaves_the_engine_free_to_trade() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
@@ -28,7 +28,7 @@ async fn a_quiet_account_leaves_the_engine_free_to_trade() {
     assert!(!latched, "there was nothing to latch on");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_order_this_engine_never_placed_stops_it_opening() {
     // Another writer on the account makes every number the kernel works from
     // measure somebody else's trading as well as its own.
@@ -80,7 +80,7 @@ async fn an_order_this_engine_never_placed_stops_it_opening() {
     )));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_hand_trade_in_a_symbol_nobody_here_trades_does_not_stop_it() {
     // The owner trades this account by hand. Stopping for an order in a
     // symbol no strategy can even address would mean stopping most days.
@@ -109,7 +109,7 @@ async fn a_hand_trade_in_a_symbol_nobody_here_trades_does_not_stop_it() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_operators_clear_resets_the_latch() {
     // "It will reduce only until somebody looks at the log" — this is
     // somebody having looked. The clear record resets the memory, and on a
@@ -145,7 +145,7 @@ async fn an_operators_clear_resets_the_latch() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_clear_resets_the_memory_not_the_check() {
     // The same clear, but the venue still has a second writer's order in a
     // symbol a strategy here trades: boot's own comparison latches again.
@@ -223,7 +223,7 @@ impl Strategy for ForeignProbe {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
     // A previous run's log: the first sleeve bought ZEC, and the close never
     // made the log — a venue stop fired inside a stream gap, say. The venue
@@ -312,7 +312,7 @@ async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
     // The wedge the durable record exists for: boot drops the stale claim
     // against a flat venue, the second sleeve enters the name, and the next
@@ -465,7 +465,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_latch_from_an_earlier_boot_survives_the_restart() {
     // The whole point of writing it down. A restart that cleared the latch
     // would turn "stop and tell somebody" into "stop until the next crash",

@@ -114,7 +114,7 @@ impl engine_types::SignalFeed for LifecycleSignals {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn lifecycle_close_barrier_failure_retains_epoch_and_never_grants_a_successor() {
     use engine_types::{SignalLifecycleResponse, SignalProducerReport, SignalSourceFrontier};
     let (mut engine, records) = crate::tests::lifecycle_test_fixture(vec![
@@ -293,7 +293,7 @@ async fn lifecycle_close_barrier_failure_retains_epoch_and_never_grants_a_succes
     std::fs::remove_dir_all(directory.path()).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn accepted_signal_retries_a_full_callback_inbox_once_and_replays_after_restart() {
     use crate::strategy_process::{
         host::{CallbackExecution, CallbackHost},
@@ -426,7 +426,7 @@ async fn accepted_signal_retries_a_full_callback_inbox_once_and_replays_after_re
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn lifecycle_seal_cannot_omit_an_observation_waiting_for_symbol_admission() {
     use engine_types::{SignalLifecycleResponse, SignalProducerReport, SignalSourceFrontier};
     let (mut engine, _) = crate::tests::lifecycle_test_fixture(vec![
@@ -512,7 +512,7 @@ async fn lifecycle_seal_cannot_omit_an_observation_waiting_for_symbol_admission(
     assert!(engine.signals.cursors().next().is_none());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn signal_subscription_budget_suspends_only_its_destination_without_losing_the_row() {
     let (mut engine, records) = crate::tests::lifecycle_test_fixture(vec![
         Box::new(Consumer("long", false)),
@@ -617,7 +617,7 @@ impl MarketFeed for RetiringMarket {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn signal_route_release_waits_for_consumption_and_keeps_candidates_positions_and_orders() {
     use engine_types::{SignalLifecycleResponse, SignalProducerReport, SignalSourceFrontier};
     let needed = std::sync::Arc::new(std::sync::Mutex::new(vec![Subscription {
@@ -817,7 +817,7 @@ async fn signal_route_release_waits_for_consumption_and_keeps_candidates_positio
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn consumed_route_churn_crosses_the_old_lifetime_cap_without_releasing_live_ownership() {
     use engine_types::{
         Feed, InstrumentRule, SignalLifecycleResponse, SignalProducerReport, SignalSourceFrontier,
@@ -936,7 +936,7 @@ async fn consumed_route_churn_crosses_the_old_lifetime_cap_without_releasing_liv
         .all(|route| route.subscriptions.is_empty()));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn signal_route_budget_releases_obsolete_routes_while_a_replacement_row_waits_for_admission()
 {
     use engine_types::{
@@ -1102,7 +1102,7 @@ async fn signal_route_budget_releases_obsolete_routes_while_a_replacement_row_wa
     assert!(restored.observations().next().is_none());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn signal_route_budget_waits_for_the_entire_blocked_row_across_restart_without_wal_churn() {
     use engine_types::{
         Feed, InstrumentRule, SignalLifecycleResponse, SignalProducerReport, SignalSourceFrontier,
@@ -1267,7 +1267,7 @@ async fn signal_route_budget_waits_for_the_entire_blocked_row_across_restart_wit
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn named_source_bindings_precede_fresh_input_and_refuse_numeric_reassignment() {
     use engine_types::identity::{InstrumentScope, SignalSourceSleeve, SleeveKey};
     use engine_types::{SignalLifecycleResponse, SignalProducerReport, SignalSourceFrontier};
@@ -1408,7 +1408,7 @@ impl Strategy for CountSignalCallbacks {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn noop_signal_delivery_survives_rotation_restart_without_consumption_or_redelivery() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let calls = std::sync::Arc::new(AtomicUsize::new(0));
@@ -1471,7 +1471,7 @@ async fn noop_signal_delivery_survives_rotation_restart_without_consumption_or_r
     assert_eq!(twice.observations().collect::<Vec<_>>(), vec![&row]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn signal_callback_markers_refuse_wrong_identity_duplicate_markers_and_changed_input() {
     use engine_types::strategy_process::{
         CallbackEvent, CallbackPreparation, SignalCallbackDelivery, StrategyCallbackInput,

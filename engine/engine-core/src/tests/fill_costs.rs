@@ -5,7 +5,7 @@
 
 use super::*;
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_order_record_carries_the_midpoint_it_will_be_judged_against() {
     // Without this the log can say what we sent and what we got, and never
     // what the difference was worth: by the time a rested entry fills, the
@@ -35,7 +35,7 @@ async fn the_order_record_carries_the_midpoint_it_will_be_judged_against() {
     assert_eq!(anchor, 30_000.25, "the midpoint when the order left");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_fill_is_priced_against_its_own_orders_midpoint_across_a_restart() {
     // The anchor lives in the log, not in memory, so an order sent before a
     // restart is still priced correctly when its fill turns up after one.
@@ -108,7 +108,7 @@ async fn a_fill_is_priced_against_its_own_orders_midpoint_across_a_restart() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_fill_the_log_cannot_anchor_is_counted_but_not_priced() {
     // A fill for an order this log never sent — somebody hand-trading the
     // same account. It is not ours to score, and guessing a price for it
@@ -146,7 +146,7 @@ async fn a_fill_the_log_cannot_anchor_is_counted_but_not_priced() {
     assert_eq!(engine.fills().total().fills, 0, "not our trade to score");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn two_sleeves_running_one_plug_are_told_apart_by_their_config_names() {
     // Two sleeves can share one implementation. Their configured names keep
     // the log and heartbeat records distinct.
@@ -185,7 +185,7 @@ async fn two_sleeves_running_one_plug_are_told_apart_by_their_config_names() {
     assert_eq!(said, vec!["carry".to_string(), "long".to_string()]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_sleeve_with_no_name_of_its_own_keeps_the_plugs() {
     // The fallback, and the reason `boot` can stay a one-liner over `boot_as`.
     let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);

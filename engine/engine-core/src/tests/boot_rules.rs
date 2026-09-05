@@ -1,6 +1,6 @@
 use super::*;
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_configured_symbol_without_venue_rules_refuses_boot() {
     let tape = tape();
     let (wal, _) = MockWal::new(tape.clone());
@@ -25,7 +25,7 @@ async fn a_configured_symbol_without_venue_rules_refuses_boot() {
     assert!(message.contains("BTCUSDT"), "{message}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_historical_dynamic_symbol_without_rules_does_not_block_boot() {
     let replayed = vec![WalRecord::Names {
         strategies: vec!["buyer".to_string()],
@@ -35,7 +35,7 @@ async fn a_historical_dynamic_symbol_without_rules_does_not_block_boot() {
     let _ = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &replayed).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_appended_sleeve_preserves_existing_wal_strategy_ids() {
     let replayed = vec![WalRecord::Names {
         strategies: vec!["carry".to_string(), "long".to_string()],
@@ -68,7 +68,7 @@ async fn an_appended_sleeve_preserves_existing_wal_strategy_ids() {
     .expect("a suffix addition leaves every existing id unchanged");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn changing_an_existing_wal_strategy_id_still_refuses_boot() {
     let replayed = vec![WalRecord::Names {
         strategies: vec!["carry".to_string(), "long".to_string()],

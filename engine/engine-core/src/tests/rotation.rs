@@ -47,7 +47,7 @@ impl Strategy for StopMover {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_live_stop_move_is_validated_and_survives_rotation() {
     let mover = StopMover {
         symbol: "BTCUSDT".into(),
@@ -88,7 +88,7 @@ async fn a_live_stop_move_is_validated_and_survives_rotation() {
     assert_eq!(intended_stops[0].trigger_px, 90.0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_equal_remembered_stop_is_not_sent_again_before_the_account_view_catches_up() {
     let mover = StopMover {
         symbol: "BTCUSDT".into(),
@@ -136,7 +136,7 @@ async fn an_equal_remembered_stop_is_not_sent_again_before_the_account_view_catc
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_equal_stop_is_retried_after_the_first_venue_call_fails() {
     let mover = StopMover {
         symbol: "BTCUSDT".into(),
@@ -292,7 +292,7 @@ fn venue_holdings() -> Vec<PositionView> {
     ]
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
     let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
     let working = vec![still_working("eng-b", "ETHUSDT", 1.0)];
@@ -418,7 +418,7 @@ async fn replaying_the_restatement_recovers_the_same_engine_as_the_old_log() {
 /// The reason the restatement carries the per-symbol fill totals: a restart
 /// after a rotation must still be able to account for the position it is
 /// holding, or boot latches the engine against opening on its own position.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
     let held = vec![PositionView {
         exact_stop_px: None,
@@ -540,7 +540,7 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
 
 /// The boot entry the runner actually uses, over real files: a rotation cut
 /// off mid-restatement leaves `assembly::wal` replaying the old segment.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_torn_rotation_on_disk_boots_from_the_old_segment() {
     let dir = std::env::temp_dir().join(format!(
         "engine-core-rotation-{}-{}",

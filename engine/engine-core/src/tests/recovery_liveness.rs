@@ -118,12 +118,12 @@ async fn stalled_recovery(history: bool) {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn delayed_account_recovery_keeps_private_news_and_reductions_live() {
     stalled_recovery(false).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn delayed_execution_history_keeps_private_news_and_reductions_live() {
     stalled_recovery(true).await;
 }
@@ -151,7 +151,7 @@ impl Strategy for RecoveredObserver {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn recovered_fill_callback_observes_committed_inventory_once() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (mut engine, h) = super::order_path::build_exit_inventory(
@@ -187,7 +187,7 @@ async fn recovered_fill_callback_observes_committed_inventory_once() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn distinct_execution_ids_with_identical_partial_fill_fields_are_both_owned() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (mut engine, h) = super::order_path::build_exit_inventory(

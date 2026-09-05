@@ -195,7 +195,7 @@ async fn feed_the_stop(engine: &mut Engine<MockWal, MockRisk, MockVenue>, symbol
         .unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_priced_loss_reaches_the_kernel_with_no_trades_file_configured() {
     // The window counts what this engine did, not what somebody chose to
     // file: no `write_trades` here on purpose.
@@ -224,7 +224,7 @@ async fn a_priced_loss_reaches_the_kernel_with_no_trades_file_configured() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_close_the_log_cannot_price_is_not_counted() {
     // A position restated across a rotation: the fills that opened it are in
     // a segment this boot never reads, so the close carries no number.
@@ -272,7 +272,7 @@ async fn a_close_the_log_cannot_price_is_not_counted() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn boot_hands_the_kernel_what_the_log_already_closed_and_then_the_clock() {
     let before = clock::wall_ms();
     let log = vec![
@@ -303,7 +303,7 @@ async fn boot_hands_the_kernel_what_the_log_already_closed_and_then_the_clock() 
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn boot_restores_the_segments_window_before_the_segments_own_closes() {
     // Restore first, add second: the other order would either count the
     // restated trips twice or lose the one that tripped the limit.
@@ -368,7 +368,7 @@ async fn every_fresh_account_reading_ages_the_window() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_rotation_carries_the_kernels_window() {
     let (idle, _heard) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
     let (engine, h) = build(allow_all(), vec![Box::new(idle)], &["BTCUSDT"], &[]).await;
@@ -456,7 +456,7 @@ fn only_the_window_binds() -> engine_risk::KernelConfig {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_shipped_kernel_refuses_the_next_entry_and_still_lets_the_exit_out() {
     // The whole path, with the engine's own gate in place of the mock: a log
     // whose closed trips are past the limit, read back at boot.
@@ -662,7 +662,7 @@ fn exact_tiny_partial_reduction_does_not_report_a_closed_trip() {
     );
     assert_eq!(fills.lots().sole_holder("BTCUSDT"), Some(("buyer", 1e-10)));
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_tiny_round_trip_restores_the_actual_rolling_loss_at_boot() {
     let log = exact_tiny_log(2);
     let (idle, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
@@ -718,7 +718,7 @@ fn exact_tiny_position_survives_rotation_without_fabricating_an_entry_value() {
     assert_eq!(fills.lots().open(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_sub_ulp_remainder_reaches_live_rolling_loss_only_after_the_last_fill() {
     let mut prior = vec![names()];
     prior.extend(exact_tiny_record(

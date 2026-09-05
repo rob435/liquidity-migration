@@ -168,7 +168,7 @@ async fn one_quote(engine: &mut Engine<MockWal, MockRisk, MockVenue>) {
         .unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn one_batch_cannot_reserve_one_symbol_for_two_strategies() {
     for first_side in [Side::Buy, Side::Sell] {
         for second_side in [Side::Buy, Side::Sell] {
@@ -184,7 +184,7 @@ async fn one_batch_cannot_reserve_one_symbol_for_two_strategies() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn replayed_foreign_fills_block_both_entry_directions() {
     for owned_side in [Side::Buy, Side::Sell] {
         for proposed_side in [Side::Buy, Side::Sell] {
@@ -208,7 +208,7 @@ async fn replayed_foreign_fills_block_both_entry_directions() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn replayed_foreign_openings_block_before_any_fill() {
     for owned_side in [Side::Buy, Side::Sell] {
         for proposed_side in [Side::Buy, Side::Sell] {
@@ -234,7 +234,7 @@ async fn replayed_foreign_openings_block_before_any_fill() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn one_owner_may_keep_multiple_orders_and_reduce_its_holding() {
     for side in [Side::Buy, Side::Sell] {
         for reduce_only in [false, true] {
@@ -260,7 +260,7 @@ async fn one_owner_may_keep_multiple_orders_and_reduce_its_holding() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_cancel_releases_ownership_but_a_late_fill_restores_it_on_replay() {
     for late_fill in [false, true] {
         let mut prior = prior_order(0, Side::Buy);
@@ -384,7 +384,7 @@ async fn editor_engine(
     .await
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_opening_amend_cannot_bypass_foreign_ownership() {
     for foreign_filled in [false, true] {
         let (mut engine, h) = editor_engine(
@@ -414,7 +414,7 @@ async fn an_opening_amend_cannot_bypass_foreign_ownership() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn foreign_ownership_preserves_own_exit_orders_but_not_foreign_stop_control() {
     let (mut engine, h) = editor_engine(
         true,
@@ -465,7 +465,7 @@ impl Strategy for ForeignOrderEditor {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn callback_cannot_cancel_or_amend_another_sleeves_order() {
     let mut observed = Vec::new();
     for amend in [false, true] {

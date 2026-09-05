@@ -177,7 +177,7 @@ fn blockers_are_deduplicated_per_configured_strategy_and_symbol() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn strategy_faults_have_their_own_heartbeat_field() {
     let path = temp_path("heartbeat-strategy-error");
     let (mut engine, _h) = build_with(
@@ -215,7 +215,7 @@ async fn strategy_faults_have_their_own_heartbeat_field() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_running_engine_leaves_a_heartbeat_saying_how_it_is() {
     let path = temp_path("heartbeat-running");
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
@@ -266,7 +266,7 @@ async fn a_running_engine_leaves_a_heartbeat_saying_how_it_is() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_engine_latched_out_of_opening_says_so_in_its_heartbeat() {
     // The field the whole file is for. This engine is running, reading the
     // market, and refusing every entry; from the outside it is indistinguish-
@@ -305,7 +305,7 @@ async fn an_engine_latched_out_of_opening_says_so_in_its_heartbeat() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_heartbeat_that_cannot_be_written_does_not_stop_the_engine() {
     // Telemetry. The loop does not depend on it, and a full disk or a wrong
     // path must not be the reason an order does not go out.
@@ -353,7 +353,7 @@ async fn a_heartbeat_that_cannot_be_written_does_not_stop_the_engine() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn no_heartbeat_configured_writes_nothing_and_says_nothing() {
     // Silence has to be genuine silence. A warning every few seconds about a
     // file nobody asked for would be noise in every log the fleet keeps, and
@@ -403,7 +403,7 @@ fn no_configured_path_means_no_heartbeat_writer_at_all() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_beat_carries_the_kernels_rolling_loss_window() {
     let path = temp_path("heartbeat-rolling-loss");
     let (idle, _heard) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
@@ -446,7 +446,7 @@ async fn the_beat_carries_the_kernels_rolling_loss_window() {
 /// not go on reporting each sleeve's own switches as though entries still flow.
 /// Read the two fields together and an operator sees "entries enabled" on an
 /// account that is opening nothing.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_tripped_window_reports_no_sleeve_as_entering() {
     let path = temp_path("heartbeat-rolling-loss-entries");
     let (idle, _heard) = Buyer::new("BTCUSDT", u64::MAX, 0.01);

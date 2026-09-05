@@ -283,7 +283,7 @@ async fn single_writer(venue: &mut Venue) -> Result<Claim, Box<dyn Error>> {
 mod tests {
     use std::time::Duration;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_systemd_stop_reaches_the_shutdown_path() {
         // The handler is registered by the call below, before the raise:
         // an unregistered SIGTERM would kill this test binary outright.

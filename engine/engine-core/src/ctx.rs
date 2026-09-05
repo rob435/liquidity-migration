@@ -989,7 +989,7 @@ mod tests {
         books_over(MarketState::default(), orders, registry)
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn canonical_partial_remainder_survives_live_context_rotation_and_callback_json() {
         use engine_types::strategy_process::{CallbackSnapshot, SnapshotCtx};
         let (engine, _) = crate::tests::lifecycle_test_fixture(vec![]).await;

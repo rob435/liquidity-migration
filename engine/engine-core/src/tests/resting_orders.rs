@@ -115,7 +115,7 @@ impl Strategy for Amender {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_cancel_is_written_down_and_reaches_the_venue_without_an_fsync() {
     let (mut engine, h) = build_with_venue_orders(
         allow_all(),
@@ -219,7 +219,7 @@ impl Strategy for MixedBurst {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_flooded_wake_drops_entries_but_never_cancels() {
     // Same reason exits are spared: a strategy that cannot pull its resting
     // orders is stranded with a book it believes it has already cleared.
@@ -267,7 +267,7 @@ async fn a_flooded_wake_drops_entries_but_never_cancels() {
     assert!(note.contains("entries"), "the drop is named: {note}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_amend_is_refused_where_the_venue_cannot_move_a_resting_order() {
     // Cancel-and-replace is a different trade — a new order at the back of
     // the queue — so the engine says no rather than substituting one.
@@ -404,7 +404,7 @@ fn resolved_price(h: &Harness) -> Option<f64> {
         })
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_accepted_amend_waits_for_its_price_instead_of_pulling_the_order() {
     // The venue answers `order.amend` by saying it took the request, never by
     // saying what price it left the order at. Pulling the order to end that
@@ -443,7 +443,7 @@ async fn an_accepted_amend_waits_for_its_price_instead_of_pulling_the_order() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_venue_stating_the_price_settles_the_amend_and_keeps_the_order() {
     let _clock = engine_types::clock::install_virtual(clock::wall_ns(), clock::now_ns()).unwrap();
     // The private stream republishes a resting order whenever it changes
@@ -502,7 +502,7 @@ async fn a_price_the_venue_never_states_pulls_the_order() {
     assert_eq!(cancels[0].1, "eng-old-1");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_second_move_while_the_price_is_owed_waits_rather_than_pulling_the_order() {
     // The guard that refuses to move an order whose working price is unknown
     // is right — the next reservation would have to cover the range of a
@@ -570,7 +570,7 @@ async fn a_second_move_while_the_price_is_owed_waits_rather_than_pulling_the_ord
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_unrelated_stated_price_leaves_an_open_amend_alone() {
     // The venue republishes orders for reasons of its own. Only the order
     // whose amend is outstanding may be settled by one.
@@ -592,7 +592,7 @@ async fn an_unrelated_stated_price_leaves_an_open_amend_alone() {
     assert_eq!(resolved_price(&h), None, "settled by another order's news");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_nonfinite_amend_approval_never_reaches_the_venue() {
     let amender = Amender {
         symbol: "BTCUSDT".into(),
@@ -690,7 +690,7 @@ impl Strategy for Grower {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_quantity_amend_is_refused_until_risk_and_ledger_can_resize_together() {
     // Growing a resting order adds exposure, so it earns the same fsync a
     // send does: a crash in between must never leave the log describing a
@@ -730,7 +730,7 @@ async fn a_quantity_amend_is_refused_until_risk_and_ledger_can_resize_together()
         WalRecord::Note { text, .. } if text.contains("quantity changes are unsupported"))));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_entry_carrying_a_stop_is_refused_where_the_venue_keeps_none() {
     // The kernel demands a stop on an entry. A venue that cannot hold one
     // would leave that rule unenforced while the log still showed a stop, so
@@ -848,7 +848,7 @@ impl Strategy for Watcher {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn each_strategy_reads_only_its_own_working_orders() {
     // Two strategies, one book. A strategy that could see another's orders
     // could cancel them.
@@ -959,7 +959,7 @@ async fn each_strategy_reads_only_its_own_working_orders() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_order_this_strategy_placed_is_in_its_book_until_it_ends() {
     let (watcher, seen) = Watcher::buying("BTCUSDT", 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(watcher)], &["BTCUSDT"], &[]).await;
@@ -980,7 +980,7 @@ async fn an_order_this_strategy_placed_is_in_its_book_until_it_ends() {
     assert_eq!(seen.last().unwrap(), &vec![id], "acked and still working");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_order_the_log_has_ended_leaves_the_strategys_book() {
     // Ownership outlives the order — the engine still routes its news here —
     // so only the ending keeps a dead order out of the strategy's book. A
@@ -1066,7 +1066,7 @@ impl OrderFeed for NewsAfterAmend {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn slow_amend_durability_keeps_private_news_live_and_the_wire_waiting() {
     let (mut engine, h, symbol) = amend_fixture().await;
     engine.wal.defer_barriers();
@@ -1111,7 +1111,7 @@ async fn slow_amend_durability_keeps_private_news_live_and_the_wire_waiting() {
     assert_eq!(h.amends.lock().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancellation_during_amend_fsync_prevents_the_late_mutation() {
     let (mut engine, h, symbol) = amend_fixture().await;
     engine.wal.defer_barriers();
@@ -1137,7 +1137,7 @@ async fn cancellation_during_amend_fsync_prevents_the_late_mutation() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn contradictory_private_amend_never_enters_the_wal_or_settles_the_price() {
     let (mut engine, h, symbol) = amended_once().await;
     let number = engine_types::numeric::ExactNumber::venue_decimal("30001").unwrap();

@@ -66,7 +66,7 @@ impl Strategy for Consumer {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn publication_barrier_precedes_destination_delivery_and_consumption() {
     let received = Rc::new(RefCell::new(Vec::new()));
     let (mut engine, h) = build(
@@ -153,7 +153,7 @@ impl Strategy for VisibilityProbe {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn replayed_event_is_visible_to_source_and_destination_but_not_a_third_sleeve() {
     let event = StrategyEvent {
         source: StrategyId(0),

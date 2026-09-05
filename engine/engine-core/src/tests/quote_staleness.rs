@@ -145,7 +145,7 @@ fn stale_quote_denials(records: &Rc<RefCell<Vec<WalRecord>>>) -> Vec<(u64, u64)>
         .collect()
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_entry_against_a_fresh_quote_passes() {
     let (opener, refused) = Opener::new(&["BTCUSDT"], "BTCUSDT", false);
     let (mut engine, h) = build(allow_all(), vec![Box::new(opener)], &["BTCUSDT"], &[]).await;
@@ -163,7 +163,7 @@ async fn an_entry_against_a_fresh_quote_passes() {
     assert!(stale_quote_denials(&h.records).is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_entry_against_a_quote_past_the_bound_is_refused_and_the_strategy_hears_it() {
     age_the_clock();
     let (opener, refused) = Opener::new(&["BTCUSDT"], "BTCUSDT", false);
@@ -207,7 +207,7 @@ async fn an_entry_against_a_quote_past_the_bound_is_refused_and_the_strategy_hea
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_exit_under_the_same_staleness_flows() {
     age_the_clock();
     let (opener, refused) = Opener::new(&["BTCUSDT"], "BTCUSDT", true);
@@ -242,7 +242,7 @@ async fn an_exit_under_the_same_staleness_flows() {
     assert!(stale_quote_denials(&h.records).is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_symbol_that_never_quoted_is_refused_for_entries() {
     // BTC quotes, ETH never has. The entry aimed at ETH is refused even
     // though every quote on the tape is fresh: the absence of a price is the

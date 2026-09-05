@@ -569,7 +569,7 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_allocating_callback_cannot_hold_private_updates_or_a_committed_reduction() {
         let (mut engine, records) = fixture().await;
         let prepared = prepared_order(&mut engine, "independent-exit");
@@ -618,7 +618,7 @@ mod tests {
         assert!(records.lock().unwrap().iter().any(|record| matches!(record, WalRecord::OrderUpdate { update: OrderUpdate::Ack(ack), .. } if ack.client_order_id == "independent-private")));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_order_sent_record_also_owns_its_unsent_dispatch_at_the_crash_cut() {
         let (mut engine, records) = fixture().await;
         let intent = Intent {
@@ -664,7 +664,7 @@ mod tests {
         assert!(engine.dispatches.orders.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_failed_order_dispatch_barrier_never_reaches_the_venue() {
         let (mut engine, _) = fixture().await;
         let prepared = prepared_order(&mut engine, "queued-fail");
@@ -677,7 +677,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn slow_order_fsync_does_not_block_cancels_and_an_unsent_order_can_be_cancelled() {
         let (mut engine, records) = fixture().await;
         let first = prepared_order(&mut engine, "queued-slow");
@@ -712,7 +712,7 @@ mod tests {
         assert!(!records.lock().unwrap().iter().any(|record| matches!(record, WalRecord::OrderDispatchAttempted { client_order_id } if client_order_id == "queued-slow")));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_lost_send_reply_blocks_growth_before_the_first_lookup_returns() {
         let (mut engine, _) = fixture().await;
         let prepared = prepared_order(&mut engine, "lost-send-reply");
@@ -752,7 +752,7 @@ mod tests {
         assert!(engine.dispatches.unresolved.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn queued_restart_sends_once_but_attempted_unknown_restart_never_resends() {
         let (mut engine, records) = fixture().await;
         let prepared = prepared_order(&mut engine, "queued-restart");
@@ -857,7 +857,7 @@ mod portfolio_tests {
             .unwrap()
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn queued_shared_exit_rechecks_surviving_stop_and_excludes_its_own_reservation() {
         let mut engine = fixture().await;
         let order = exit(&mut engine).await;
@@ -892,7 +892,7 @@ mod portfolio_tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn queued_virtual_exit_cannot_create_physical_growth_after_private_gap() {
         let mut engine = fixture().await;
         let order = exit(&mut engine).await;

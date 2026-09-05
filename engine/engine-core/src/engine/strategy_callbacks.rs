@@ -872,7 +872,7 @@ mod tests {
         (engine, records)
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_full_callback_inbox_retains_private_fill_and_boot_until_delivery() {
         use engine_types::strategy_process::CallbackEvent;
         let (mut engine, records) = full_inbox().await;
@@ -1038,7 +1038,7 @@ mod tests {
         engine.host.callbacks.stop().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_refusal_retries_from_its_durable_source_before_the_latest_market_wake() {
         use engine_types::strategy_process::CallbackEvent;
         let (mut engine, records) = full_inbox().await;
@@ -1137,7 +1137,7 @@ mod tests {
         engine.host.callbacks.stop().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_refusal_source_is_a_replayable_disposition_before_effect_completion() {
         use engine_types::strategy_process::CallbackEvent;
         let (mut engine, records, input_id) = prepared().await;
@@ -1229,7 +1229,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_inactive_sleeve_preserves_uncommitted_callbacks_and_reactivates_the_same_tail() {
         struct Paused;
         impl Strategy for Paused {
@@ -1317,7 +1317,7 @@ mod tests {
         assert_eq!(engine.host.callbacks.state.committed, committed);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn successive_callbacks_cannot_grow_committed_timers_without_a_bound() {
         let (mut engine, records, mut input_id) = prepared().await;
         for batch in 0..32_u32 {
@@ -1400,7 +1400,7 @@ mod tests {
         panic!("fixture did not cross the complete-state byte bound");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_invalid_durable_effect_aborts_before_private_state_commit() {
         let (mut engine, records, input_id) = prepared().await;
         let mut completion = proposal_completion(&mut engine, input_id);
@@ -1430,7 +1430,7 @@ mod tests {
             .any(|record| matches!(record, WalRecord::StrategyProcessTransitionQueued { .. })));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_second_queued_callback_uses_facts_after_the_first_opening_is_materialized() {
         let (mut engine, _, input_id) = prepared().await;
         engine.books.market.apply(&MarketEvent::Quote {
@@ -1493,7 +1493,7 @@ mod tests {
         engine.host.callbacks.stop().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn callback_commit_barrier_failure_publishes_neither_state_timers_nor_effects() {
         let (mut engine, _, input_id) = prepared().await;
         engine.wal.fail_barrier_after = Some("strategy_process_transition_queued");
@@ -1506,7 +1506,7 @@ mod tests {
         assert!(engine.host.effects.transitions.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn callback_state_timer_and_effect_suffix_replay_at_the_same_commit_cut() {
         let (mut engine, records, input_id) = prepared().await;
         let completion = proposal_completion(&mut engine, input_id);
@@ -1544,7 +1544,7 @@ mod tests {
         engine.host.callbacks.stop().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn fired_timer_is_owned_by_queued_input_until_no_rearm_commit() {
         let (mut engine, _, input_id) = prepared().await;
         let completion = proposal_completion(&mut engine, input_id);
@@ -1588,7 +1588,7 @@ mod tests {
         assert!(engine.host.callbacks.state.inputs.is_empty());
         engine.host.callbacks.stop().await;
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn delayed_callback_fsync_keeps_market_turns_live_and_state_unpublished() {
         let (mut engine, _, input_id) = prepared().await;
         engine

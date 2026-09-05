@@ -381,7 +381,7 @@ mod tests {
         request
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn spool_retires_only_after_the_next_poll() {
         let directory = crate::testpath::temp_path("runtime-control-spool");
         std::fs::create_dir(directory.path()).unwrap();
@@ -403,7 +403,7 @@ mod tests {
         std::fs::remove_dir(directory.path()).unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn unreadable_spool_files_are_quarantined_not_fatal() {
         let directory = crate::testpath::temp_path("runtime-control-poison");
         std::fs::create_dir(directory.path()).unwrap();
@@ -441,7 +441,7 @@ mod tests {
         std::fs::remove_dir(directory.path()).unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn rejected_request_is_quarantined_and_unblocks_the_spool() {
         let directory = crate::testpath::temp_path("runtime-control-reject");
         std::fs::create_dir(directory.path()).unwrap();
@@ -466,7 +466,7 @@ mod tests {
         std::fs::remove_dir(directory.path()).unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn submit_and_wait_reports_a_rejected_request() {
         let directory = crate::testpath::temp_path("runtime-control-wait-reject");
         std::fs::create_dir(directory.path()).unwrap();

@@ -149,7 +149,7 @@ fn observation_from(
     observation
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_new_worker_generation_starts_at_sequence_one_after_an_old_cursor() {
     let old_source = "directional-public.g11111111111111111111111111111111.carry";
     let new_source = "directional-public.g22222222222222222222222222222222.carry";
@@ -229,7 +229,7 @@ async fn a_new_worker_generation_starts_at_sequence_one_after_an_old_cursor() {
     )));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_gap_retains_the_last_contiguous_cursor_without_delivering_the_later_row() {
     let source = "directional-public.g11111111111111111111111111111111.carry";
     let old = observation_from(source, 9, Vec::new());
@@ -316,7 +316,7 @@ async fn a_gap_retains_the_last_contiguous_cursor_without_delivering_the_later_r
     )));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn signal_admits_quote_and_ticker_everywhere_before_durable_delivery() {
     let signal_ids = Rc::new(RefCell::new(Vec::new()));
     let market_names = Rc::new(RefCell::new(Vec::new()));
@@ -418,7 +418,7 @@ async fn signal_admits_quote_and_ticker_everywhere_before_durable_delivery() {
     assert!(observed < barrier && barrier < consumed);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn consumed_and_rotated_universe_keeps_held_name_routed_after_restart() {
     let first = observation(
         1,
@@ -577,7 +577,7 @@ fn consumed_row(row: SignalObservation) -> Vec<WalRecord> {
     ]
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn missing_prefix_is_delivered_before_deferred_rows_without_blocking_an_independent_source() {
     let delivered = Rc::new(RefCell::new(Vec::new()));
     let strategies: Vec<Box<dyn Strategy>> = vec![
@@ -744,7 +744,7 @@ fn gap_history() -> Vec<WalRecord> {
     records
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn source_gap_blocks_dependent_openings_across_restart_rotation_and_generation_change() {
     let prior = gap_history();
     let (engine, _) = build(
@@ -858,7 +858,7 @@ fn working_order(owner: u16, symbol: u16, reduce_only: bool) -> (WalRecord, Venu
     (record, working)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_source_gap_cancels_only_affected_openings_and_keeps_exit_edits_live() {
     let mut prior = gap_history();
     let mut working = Vec::new();
@@ -987,7 +987,7 @@ async fn a_source_gap_cancels_only_affected_openings_and_keeps_exit_edits_live()
         .contains("signal_sequence_gap"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_source_gap_preserves_attributed_reduce_only_placements() {
     let mut prior = gap_history();
     let (record, _) = working_order(2, 2, false);
@@ -1052,7 +1052,7 @@ async fn a_source_gap_preserves_attributed_reduce_only_placements() {
     assert_eq!(sends[0].qty, 0.01);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn disk_spool_recovers_a_missing_prefix_after_engine_restart_and_rotation() {
     let directory = temp_path("signal-gap-restart");
     std::fs::create_dir_all(directory.path()).unwrap();
@@ -1147,7 +1147,7 @@ async fn disk_spool_recovers_a_missing_prefix_after_engine_restart_and_rotation(
     assert_eq!(signal_cursors[0].sequence, 11);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn signal_acceptance_and_gap_barrier_failures_never_acknowledge_the_spool_row() {
     use engine_types::SignalFeed;
     for (sequence, failed_kind) in [(1, "signal_observation"), (3, "signal_gap_recorded")] {
@@ -1211,7 +1211,7 @@ async fn signal_acceptance_and_gap_barrier_failures_never_acknowledge_the_spool_
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn newer_generations_wait_for_older_gaps_before_reducer_delivery() {
     let delivered = Rc::new(RefCell::new(Vec::new()));
     let mut prior = consumed_row(source_row("worker.g1", 9, 0));
@@ -1266,7 +1266,7 @@ async fn newer_generations_wait_for_older_gaps_before_reducer_delivery() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn runtime_entry_permission_also_cancels_and_refuses_amends_only_for_its_owner() {
     let mut pause = engine_types::RuntimeControlRequest {
         schema_version: engine_types::STRATEGY_ENTRY_PERMISSION_SCHEMA_VERSION,
@@ -1352,7 +1352,7 @@ async fn runtime_entry_permission_also_cancels_and_refuses_amends_only_for_its_o
         .contains("runtime_entries_disabled"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_noop_consumer_backpressures_its_next_row_and_preserves_an_independent_consumer() {
     let delivered = Rc::new(RefCell::new(Vec::new()));
     let (mut engine, harness) = build(
@@ -1434,7 +1434,7 @@ impl Strategy for RequiredProducerBuyer {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn startup_frontier_absence_blocks_restored_openings() {
     let strategies = vec![Box::new(RequiredProducerBuyer(ScopedSignalBuyer {
         name: "restored",
@@ -1458,7 +1458,7 @@ async fn startup_frontier_absence_blocks_restored_openings() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_absent_producer_does_not_strand_attributed_reductions_or_protective_stops() {
     let mut prior = consumed_row(source_row("producer.g1", 9, 0));
     let (record, _) = working_order(0, 0, false);
@@ -1541,7 +1541,7 @@ impl Strategy for RejectingSignalConsumer {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn rejection_barrier_failure_retains_accepted_input_for_restart() {
     let tape = tape();
     let (mut wal, records) = MockWal::new(tape.clone());
@@ -1610,7 +1610,7 @@ async fn rejection_barrier_failure_retains_accepted_input_for_restart() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn rejecting_consumers_release_capacity_and_terminal_outcomes_survive_rotation() {
     let (mut engine, harness) = build(
         allow_all(),
@@ -1736,7 +1736,7 @@ impl Strategy for RequiredConsumingBuyer {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn declared_producer_frontier_requires_all_missing_rows_before_restored_growth() {
     let strategies = vec![Box::new(RequiredConsumingBuyer(RequiredProducerBuyer(
         ScopedSignalBuyer {
@@ -1817,7 +1817,7 @@ impl Strategy for RequiredQuiet {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn startup_unready_cancels_existing_growth_but_keeps_reduction_orders() {
     let mut prior = consumed_row(source_row("producer.g1", 9, 0));
     let mut working = Vec::new();
@@ -1850,7 +1850,7 @@ async fn startup_unready_cancels_existing_growth_but_keeps_reduction_orders() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn rewound_producer_refusal_keeps_the_engine_running_and_growth_blocked() {
     let strategies = vec![Box::new(RequiredProducerBuyer(ScopedSignalBuyer {
         name: "restored",

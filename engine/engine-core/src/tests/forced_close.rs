@@ -138,7 +138,7 @@ fn trades_at(path: &std::path::Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_venue_stop_closes_the_sleeves_position_and_prices_the_trip() {
     let file = temp_path("forced-close-trades");
     let (idle, _heard) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
@@ -222,7 +222,7 @@ async fn a_venue_stop_closes_the_sleeves_position_and_prices_the_trip() {
 
 /// The same fill with no reason from the venue is a hand close, and stays a
 /// stranger's.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_blank_fill_with_no_venue_reason_still_stops_the_engine_opening() {
     let file = temp_path("hand-close-trades");
     let (idle, _heard) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
@@ -262,7 +262,7 @@ async fn a_blank_fill_with_no_venue_reason_still_stops_the_engine_opening() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_forced_close_in_a_symbol_no_sleeve_holds_stays_a_strangers() {
     let file = temp_path("unheld-forced-close-trades");
     let (idle, _heard) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
@@ -303,7 +303,7 @@ async fn a_forced_close_in_a_symbol_no_sleeve_holds_stays_a_strangers() {
     assert!(trades_at(file.path()).is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_forced_close_that_would_grow_the_claim_stays_a_strangers() {
     let file = temp_path("growing-forced-close-trades");
     let (idle, _heard) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
@@ -374,7 +374,7 @@ fn two_sleeves_held() -> Vec<WalRecord> {
     records
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn shared_forced_fill_allocates_once_and_replays_exactly_after_rotation() {
     let prior = two_sleeves_held();
     let mut positions = still_held();
@@ -496,7 +496,7 @@ fn portfolio_of(base: &WalRecord) -> engine_types::portfolio::PortfolioState {
     state.clone()
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn failed_shared_fill_append_keeps_every_sleeve_and_fee_unchanged_until_retry() {
     use std::sync::atomic::{AtomicBool, Ordering};
     let prior = two_sleeves_held();
@@ -587,7 +587,7 @@ async fn failed_shared_fill_append_keeps_every_sleeve_and_fee_unchanged_until_re
     assert!((replayed.for_strategy("probe").fee_usdt.unwrap() - 0.15).abs() < 1e-12);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn boot_history_allocates_shared_emergency_fill_before_account_reconciliation() {
     let prior = two_sleeves_held();
     let tape = tape();
@@ -657,7 +657,7 @@ async fn boot_history_allocates_shared_emergency_fill_before_account_reconciliat
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_shared_close_after_rotation_keeps_reconciliation_in_step_with_inventory() {
     use engine_types::execution_allocation::{
         AllocationPolicy, ExecutionAllocation, ExecutionSlice,

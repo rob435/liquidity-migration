@@ -76,7 +76,7 @@ async fn observe_before_private_close(
     result
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn zero_delay_rearming_returns_to_private_input_before_firing_again() {
     assert_eq!(
         observe_before_private_close(1, 1000, false).await,
@@ -84,7 +84,7 @@ async fn zero_delay_rearming_returns_to_private_input_before_firing_again() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_large_due_timer_set_yields_before_exhausting_the_set() {
     let fired = observe_before_private_close(200, 0, false).await;
     assert_eq!(
@@ -95,7 +95,7 @@ async fn a_large_due_timer_set_yields_before_exhausting_the_set() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_earlier_callback_can_replace_another_snapshotted_timer() {
     assert_eq!(observe_before_private_close(2, 0, true).await, [TimerId(0)]);
 }
@@ -132,7 +132,7 @@ impl OrderFeed for PrivateCloseFromTask {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn immediate_timers_let_the_private_feed_task_run() {
     let fired = Rc::new(RefCell::new(Vec::new()));
     let repeat_limit = 1000;
@@ -202,7 +202,7 @@ impl Strategy for DurableFlood {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn durable_effect_flood_yields_to_private_input_and_restarts_its_suffix() {
     let (mut engine, h) = build(allow_all(), vec![Box::new(DurableFlood)], &[], &[]).await;
     let records = h.records.clone();
