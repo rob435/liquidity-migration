@@ -24,7 +24,7 @@
 //! requires authoritative venue disposition. Callback state commits with its
 //! ordered effects, whose suffix remains owned until every disposition commits.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::time::Duration;
 
@@ -308,14 +308,17 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     pub risk: R,
     venue: VenueClient,
     venue_completions: tokio::sync::mpsc::Receiver<MutationCompletion>,
-    pending_mutations: HashMap<u64, PendingMutation>,
-    busy_symbols: HashMap<SymbolId, usize>,
+    // Ordered maps throughout: anything the engine iterates can reach the
+    // log, and two runs of one input must write one log. A hash seed must
+    // never decide the order of two records.
+    pending_mutations: BTreeMap<u64, PendingMutation>,
+    busy_symbols: BTreeMap<SymbolId, usize>,
     /// The last refusal recorded for each strategy, symbol and tag. A
     /// strategy that re-proposes a doomed order on every quote refuses just
     /// the same; only the record of it is collapsed, so one stuck position
     /// cannot bury the log the fill and latency reports read.
-    refusals: HashMap<(StrategyId, SymbolId, String), Refusal>,
-    deferred_actions: HashMap<SymbolId, VecDeque<(PendingAction, u64)>>,
+    refusals: BTreeMap<(StrategyId, SymbolId, String), Refusal>,
+    deferred_actions: BTreeMap<SymbolId, VecDeque<(PendingAction, u64)>>,
     /// Actions released by a completed symbol mutation, retaining the market
     /// wake that produced each one. The per-wake flood budget and latency
     /// origin therefore survive a slow venue round trip.
@@ -354,8 +357,8 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// opening halt. A successful REST acknowledgement is asynchronous, so the order
     /// remains in the ledger until the private stream ends it; this set keeps
     /// each refresh tick from submitting the same cancel again meanwhile.
-    halt_cancels: std::collections::HashMap<String, HaltCancelState>,
-    amends_awaiting_price: HashMap<String, AwaitingAmend>,
+    halt_cancels: BTreeMap<String, HaltCancelState>,
+    amends_awaiting_price: BTreeMap<String, AwaitingAmend>,
     /// Since boot: amends whose price the venue stated, and amends pulled
     /// because it never did. The pair is the health of the confirmation —
     /// pulls climbing against confirmations is the venue not republishing,
@@ -398,7 +401,7 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// leverage is instead read back off the venue's own position rows — a
     /// mismatch alarms and evicts the trust, so the next entry confirms
     /// inline again.
-    leverage_at: std::collections::HashMap<SymbolId, f64>,
+    leverage_at: BTreeMap<SymbolId, f64>,
     leverage_authority: crate::config::LeverageAuthority,
     ledger: LatencyLedger,
     /// What the fills cost. The latency ledger beside it measures our own side

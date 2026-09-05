@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use engine_types::ids::SymbolId;
 
@@ -28,7 +28,9 @@ struct Retired {
 /// predate that event, so these holds end at a later account query's start.
 #[derive(Debug, Default)]
 pub(crate) struct MarginBook {
-    active: HashMap<String, Reservation>,
+    // Ordered, because `required` sums these and the sum reaches the log:
+    // hash order would make the verdict depend on the hash seed.
+    active: BTreeMap<String, Reservation>,
     retired: BTreeMap<SymbolId, Retired>,
     frontier_ns: u64,
 }

@@ -292,7 +292,7 @@ pub(crate) fn named_strategy_errors(
 /// A symbol still open keeps its entry: its leverage cannot be changed at the
 /// venue while a position is on it.
 pub(crate) fn forget_leverage_where_flat(
-    leverage_at: &mut std::collections::HashMap<SymbolId, f64>,
+    leverage_at: &mut BTreeMap<SymbolId, f64>,
     positions: &[engine_types::risk::PositionView],
 ) {
     leverage_at.retain(|symbol, _| positions.iter().any(|p| p.symbol == *symbol));

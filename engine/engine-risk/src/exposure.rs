@@ -2,7 +2,7 @@
 //! flight, and fills newer than the reading being judged against. The venue's
 //! view is the truth about everything older.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use engine_types::ids::{StrategyId, SymbolId};
 use engine_types::orders::Side;
@@ -42,7 +42,9 @@ fn pending_px(pending: &Pending, price: &impl Fn(SymbolId) -> Option<f64>) -> Op
 #[derive(Debug, Default)]
 pub(crate) struct Book {
     px: HashMap<u16, f64>,
-    pending: HashMap<String, Pending>,
+    /// Ordered by client order id: the envelope sums these, and a sum in
+    /// hash order would make the kernel's verdict depend on the hash seed.
+    pending: BTreeMap<String, Pending>,
     /// Every fill with when it arrived. A fill newer than the account view
     /// is in neither the view nor the reservations, and the envelope must
     /// still see it; entries the view has caught up with are pruned.
@@ -185,9 +187,9 @@ impl Book {
     /// Per-symbol net quantity of fills newer than the account view, pruning
     /// what the view has caught up with. The envelope adds these to the
     /// view's positions so a just-filled order is never counted nowhere.
-    pub(crate) fn fills_after(&mut self, observed_ns: u64) -> HashMap<u16, RecentExposure> {
+    pub(crate) fn fills_after(&mut self, observed_ns: u64) -> BTreeMap<u16, RecentExposure> {
         self.prune_through(observed_ns);
-        let mut net: HashMap<u16, RecentExposure> = HashMap::new();
+        let mut net: BTreeMap<u16, RecentExposure> = BTreeMap::new();
         for (_, symbol, qty, stop_fraction) in &self.recent_fills {
             let row = net.entry(*symbol).or_insert(RecentExposure {
                 signed_qty: 0.0,
@@ -247,6 +249,30 @@ mod tests {
             px: 10.0,
             stop_fraction: Some(0.1),
         }
+    }
+
+    /// The envelope sums what these return. Floating-point addition is not
+    /// associative, so the order must be the keys', never the hash seed's.
+    #[test]
+    fn risk_rows_and_recent_fills_come_back_in_key_order() {
+        let mut book = Book::default();
+        for id in ["z-9", "a-1", "m-5", "b-2"] {
+            book.register(id, entry(7, 1.0));
+        }
+        let symbols: Vec<u16> = book
+            .pending_risk_rows(|_| Some(10.0))
+            .unwrap()
+            .into_iter()
+            .map(|(symbol, _, _)| symbol)
+            .collect();
+        assert_eq!(symbols.len(), 4);
+        let ids: Vec<&String> = book.pending.keys().collect();
+        assert_eq!(ids, ["a-1", "b-2", "m-5", "z-9"]);
+        for symbol in [9u16, 2, 5, 1] {
+            book.on_fill("unreserved", SymbolId(symbol), 1.0, 100);
+        }
+        let order: Vec<u16> = book.fills_after(0).keys().copied().collect();
+        assert_eq!(order, [1, 2, 5, 9]);
     }
 
     #[test]

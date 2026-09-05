@@ -564,15 +564,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let recovery_reads = account_recovery::Recovery::new(venue.account_recovery_client());
         let (venue, venue_completions) = VenueClient::spawn(venue);
         let mut engine = Engine {
-            refusals: HashMap::new(),
+            refusals: BTreeMap::new(),
             wal,
             risk,
             venue,
             venue_completions,
             recovery: recovery_reads,
-            pending_mutations: HashMap::new(),
-            busy_symbols: HashMap::new(),
-            deferred_actions: HashMap::new(),
+            pending_mutations: BTreeMap::new(),
+            busy_symbols: BTreeMap::new(),
+            deferred_actions: BTreeMap::new(),
             ready_actions: VecDeque::new(),
             _venue: std::marker::PhantomData,
             host: StrategyHost {
@@ -618,8 +618,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // for — so a recovered order is left alone rather than worked
             // from a made-up deadline.
             working: WorkingOrders::default(),
-            halt_cancels: std::collections::HashMap::new(),
-            amends_awaiting_price: HashMap::new(),
+            halt_cancels: BTreeMap::new(),
+            amends_awaiting_price: BTreeMap::new(),
             amends_confirmed: 0,
             amends_pulled_unconfirmed: 0,
             stream_resets: 0,
@@ -637,7 +637,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 catalog_checkpoint,
                 catalog_refresh_required,
             ),
-            leverage_at: std::collections::HashMap::new(),
+            leverage_at: BTreeMap::new(),
             may_open,
             private_stream_ready: true,
             logged_exposure,

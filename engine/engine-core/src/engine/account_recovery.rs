@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::*;
 use engine_types::orders::AccountRecoveryClient;
 use std::sync::Arc;

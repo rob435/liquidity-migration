@@ -803,6 +803,8 @@ mod tests {
 
 #[cfg(test)]
 mod portfolio_tests {
+    use std::collections::HashMap;
+
     use super::*;
     use engine_types::Quote;
 

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::*;
 use engine_types::numeric::{AssetId, Exact};
 use engine_types::portfolio_control::*;
