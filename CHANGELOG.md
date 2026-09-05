@@ -508,17 +508,25 @@ edit STATE.md to match.
     line is **1 124.3 frames/s** on that unit alone. Bybit has no journal in
     this payload, so the pair total is not this entry's to give; the 03:51
     entry carries it.
-  - **Deploy refused a twenty-second time, same signature.** Recorded below.
+  - **Deploy refused a twenty-second time, same signature.** Run
+    `33943636740`, `deploy main@2c751c92`, dispatched 04:05:53 UTC and failed
+    04:05:58 — 5 s. `ci` and `rust` created 04:05:54 and dead 04:05:57,
+    `Deploy artifact` 04:05:55 → 04:05:57, each of their log downloads
+    returning `failed to download logs: HTTP 404`; `disarm`, `diagnose`, the
+    release-test job and `vps` skipped. No job ever started, so nothing
+    reached the host: deployed commit stays `65ee75a7` and all eight recorder
+    fixes stay merged and undeployed. The cause is outside the repository —
+    the account's payments failed, so GitHub assigns no runner.
   - **The one action that ends this needs no runner**, from a workstation
     holding the SSH key:
 
     ```sh
-    EXPECTED_COMMIT=<this entry's commit> scripts/ops.sh deploy
+    EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db scripts/ops.sh deploy
     scripts/ops.sh status
     scripts/ops.sh curve mainnet 240
     ```
 
-    This session's commit carries all eight recorder fixes. **Do not deploy
+    `2c751c92` carries all eight recorder fixes. **Do not deploy
     `06e17d4a`** (uncredited retry, deletes the tape roots in this host's
     state) and **do not deploy `3c1ebd22` on its own** (the credited burst
     ends with the gate shut and the block still runs 300 s). Either way the
