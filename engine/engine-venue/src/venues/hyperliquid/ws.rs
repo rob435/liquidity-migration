@@ -66,7 +66,7 @@ impl HyperliquidOrderFeed {
     /// has armed `REAL_MONEY`.
     pub fn new(realm: HyperliquidRealm, symbols: Vec<Symbol>) -> Result<Self, VenueError> {
         let creds = realm.credentials()?;
-        Self::build(realm.websocket(), &creds, symbols)
+        Self::build(realm.websocket(), &creds, &symbols)
     }
 
     /// Point the feed at a local server. Tests and the mock venue only.
@@ -75,15 +75,15 @@ impl HyperliquidOrderFeed {
         creds: &Credentials,
         symbols: Vec<Symbol>,
     ) -> Result<Self, VenueError> {
-        Self::build(url, creds, symbols)
+        Self::build(url, creds, &symbols)
     }
 
-    fn build(url: &str, creds: &Credentials, symbols: Vec<Symbol>) -> Result<Self, VenueError> {
+    fn build(url: &str, creds: &Credentials, symbols: &[Symbol]) -> Result<Self, VenueError> {
         // Read rather than trusted: the subscription is addressed by this
         // string, and a malformed one would subscribe to nothing and look
         // exactly like a quiet account.
         let account = address_text(parse_address(creds.key())?);
-        let ids = engine_public::symbols::indexed_names(&symbols);
+        let ids = engine_public::symbols::indexed_names(symbols);
         Ok(Self {
             url: url.to_string(),
             account,

@@ -34,7 +34,7 @@ fn spool_path(directory: &Path, observation: &SignalObservation) -> PathBuf {
 fn exact_hash_covers_subscriptions_and_payload() {
     let observation = observation();
     validate(&observation).unwrap();
-    let mut changed = observation.clone();
+    let mut changed = observation;
     changed.payload.push(b' ');
     assert!(validate(&changed).unwrap_err().contains("content hash"));
 }

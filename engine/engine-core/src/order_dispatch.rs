@@ -257,7 +257,7 @@ mod tests {
             stop: StopSpec { trigger_px: 100.0 },
         });
         cases.push(("sleeve effect", changed));
-        let mut changed = valid.clone();
+        let mut changed = valid;
         changed.request.exact_terms = Some(Box::new(engine_types::order_terms::ExactOrderTerms {
             quantity: engine_types::numeric::Exact::parse_decimal("0.7").unwrap(),
             limit_price: None,

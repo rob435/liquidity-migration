@@ -1383,7 +1383,7 @@ mod tests {
             .clone();
         state = first.next_state;
         state.refused_entries.insert(refused_symbol.clone());
-        let mut refused_input = input.clone();
+        let mut refused_input = input;
         refused_input
             .entry_blockers
             .insert(refused_symbol.clone(), "entry_refused".into());
@@ -2155,7 +2155,7 @@ mod tests {
 
         let first = reduce_lifecycle(input.clone(), state, &config()).expect("first orphan exit");
         assert_only_orphan_exit(&first);
-        let repeated = reduce_lifecycle(input.clone(), first.next_state.clone(), &config())
+        let repeated = reduce_lifecycle(input.clone(), first.next_state, &config())
             .expect("repeated orphan exit");
         assert_only_orphan_exit(&repeated);
         let boot = reduce_lifecycle_with_mode(

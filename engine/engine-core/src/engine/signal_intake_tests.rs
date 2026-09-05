@@ -390,9 +390,7 @@ async fn accepted_signal_retries_a_full_callback_inbox_once_and_replays_after_re
     assert_eq!(engine.host.callbacks.unwritten.len(), 1);
     assert_eq!(
         engine.host.callbacks.unwritten.front().unwrap().event,
-        CallbackEvent::Signal {
-            observation: input.clone()
-        }
+        CallbackEvent::Signal { observation: input }
     );
     engine.deliver_pending_signal_callbacks();
     assert_eq!(
@@ -562,7 +560,7 @@ async fn signal_subscription_budget_suspends_only_its_destination_without_losing
     assert_eq!(
         engine.signals.suspensions().next().unwrap().reason,
         engine_types::SignalAdmissionSuspensionReason::SubscriptionBudget {
-            subscriptions: row.subscriptions.clone()
+            subscriptions: row.subscriptions
         }
     );
     let suspended = records.lock().unwrap().last().cloned().unwrap();

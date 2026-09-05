@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -165,7 +166,9 @@ pub fn percent_encode(raw: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(byte as char)
             }
-            other => out.push_str(&format!("%{other:02X}")),
+            other => {
+                let _ = write!(out, "%{other:02X}");
+            }
         }
     }
     out

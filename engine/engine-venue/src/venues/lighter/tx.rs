@@ -313,7 +313,7 @@ mod tests {
         let mut m = base.clone();
         m.trigger_price = 1;
         changed.push(("trigger_price", m.hash(304)));
-        let mut m = base.clone();
+        let mut m = base;
         m.order_expiry += 1;
         changed.push(("order_expiry", m.hash(304)));
 

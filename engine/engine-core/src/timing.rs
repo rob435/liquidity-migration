@@ -16,6 +16,7 @@
 //! tell them apart.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use engine_types::WalRecord;
 
@@ -196,11 +197,11 @@ pub fn report(timings: &Timings) -> String {
             .get(&Step::Total)
             .map(Samples::count)
             .unwrap_or_default();
-        out.push_str(&format!("\n  {operation} — {sent} command(s)\n\n    "));
-        out.push_str(&format!("{:<STEP_WIDTH$}", "step"));
-        out.push_str(&format!("{:>8}", "count"));
+        let _ = write!(out, "\n  {operation} — {sent} command(s)\n\n    ");
+        let _ = write!(out, "{:<STEP_WIDTH$}", "step");
+        let _ = write!(out, "{:>8}", "count");
         for head in ["p50", "p90", "p99", "p99.9", "worst"] {
-            out.push_str(&format!("{head:>CELL_WIDTH$}"));
+            let _ = write!(out, "{head:>CELL_WIDTH$}");
         }
         out.push('\n');
 
@@ -209,30 +210,30 @@ pub fn report(timings: &Timings) -> String {
                 continue;
             };
             let (count, marks, worst) = samples.summary();
-            out.push_str(&format!("    {:<STEP_WIDTH$}", step.plain_name()));
-            out.push_str(&format!("{count:>8}"));
+            let _ = write!(out, "    {:<STEP_WIDTH$}", step.plain_name());
+            let _ = write!(out, "{count:>8}");
             for mark in marks {
-                out.push_str(&format!("{:>CELL_WIDTH$}", pretty(mark)));
+                let _ = write!(out, "{:>CELL_WIDTH$}", pretty(mark));
             }
-            out.push_str(&format!("{:>CELL_WIDTH$}\n", pretty(worst)));
+            let _ = writeln!(out, "{:>CELL_WIDTH$}", pretty(worst));
         }
 
         let unstamped = timings.unstamped(operation);
         if unstamped > 0 {
-            out.push_str(&format!(
+            let _ = writeln!(out,
                 "\n    {unstamped} of these carry no transport stamps, so their venue round trip\n    \
-                 is inside `all of it` and not on its own line.\n"
-            ));
+                 is inside `all of it` and not on its own line."
+            );
         }
         let thin = steps
             .get(&Step::Total)
             .map(Samples::count)
             .unwrap_or_default();
         if thin < 1_000 {
-            out.push_str(&format!(
+            let _ = writeln!(out,
                 "\n    p99.9 of {thin} samples is the worst one or two. Read it as the tail's\n    \
-                 shape, not as a number.\n"
-            ));
+                 shape, not as a number."
+            );
         }
     }
     out.push_str(

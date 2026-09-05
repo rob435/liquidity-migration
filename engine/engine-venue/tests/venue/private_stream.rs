@@ -201,7 +201,7 @@ async fn next_json(socket: &mut ServerSocket) -> Option<Value> {
 /// `frames` at the client.
 async fn start(frames: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
     let server = serve(move |_| Conn::serving(frames.clone())).await;
-    (server.url.clone(), server.seen.clone())
+    (server.url.clone(), server.seen)
 }
 
 fn feed(url: &str) -> BybitOrderFeed {

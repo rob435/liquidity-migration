@@ -687,8 +687,7 @@ fn next_generation(
                     generation,
                     lane,
                 }
-                .encode()?
-                .to_owned(),
+                .encode()?,
                 destination: row.destination,
                 published_through: 0,
             })

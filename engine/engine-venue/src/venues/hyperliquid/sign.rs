@@ -270,7 +270,7 @@ mod tests {
         // test_phantom_agent_creation_matches_production. An ETH IOC buy of
         // 0.0147 at 1670.1, asset 4, nonce 1677777606040.
         let action = order_action(
-            vec![OrderWire {
+            &[OrderWire {
                 asset: 4,
                 is_buy: true,
                 px: "1670.1".to_string(),
@@ -325,7 +325,7 @@ mod tests {
     fn an_order_action_signs_to_the_published_signature() {
         // test_l1_action_signing_order_matches: asset 1, buy 100 at 100, GTC.
         let action = order_action(
-            vec![OrderWire {
+            &[OrderWire {
                 asset: 1,
                 is_buy: true,
                 px: "100".to_string(),

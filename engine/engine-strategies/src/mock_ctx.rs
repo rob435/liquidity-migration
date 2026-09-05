@@ -452,13 +452,13 @@ impl Harness {
         Self { ctx, strategy }
     }
 
-    fn deliver(&mut self, event: EngineEvent) {
-        self.strategy.on_event(&event, &mut self.ctx);
+    fn deliver(&mut self, event: &EngineEvent) {
+        self.strategy.on_event(event, &mut self.ctx);
     }
 
     /// Deliver the same post-restore wake that engine boot delivers.
     pub fn boot(&mut self) {
-        self.deliver(EngineEvent::Boot);
+        self.deliver(&EngineEvent::Boot);
     }
 
     /// A new best bid/ask. The market picture is updated first, then the
@@ -477,7 +477,7 @@ impl Harness {
         if quote.supersedes(&self.ctx.quotes[id.0 as usize]) {
             self.ctx.quotes[id.0 as usize] = quote;
         }
-        self.deliver(EngineEvent::Market(MarketEvent::Quote {
+        self.deliver(&EngineEvent::Market(MarketEvent::Quote {
             symbol: id,
             quote,
         }));
@@ -508,7 +508,7 @@ impl Harness {
         if touch.supersedes(&self.ctx.quotes[id.0 as usize]) {
             self.ctx.quotes[id.0 as usize] = touch;
         }
-        self.deliver(EngineEvent::Market(MarketEvent::Depth {
+        self.deliver(&EngineEvent::Market(MarketEvent::Depth {
             symbol: id,
             depth,
         }));
@@ -526,7 +526,7 @@ impl Harness {
             recv_ns: self.ctx.now_ns,
         };
         self.ctx.trades[id.0 as usize] = trades;
-        self.deliver(EngineEvent::Market(MarketEvent::Trades {
+        self.deliver(&EngineEvent::Market(MarketEvent::Trades {
             symbol: id,
             trades,
         }));
@@ -534,7 +534,7 @@ impl Harness {
 
     pub fn feed_reset(&mut self) {
         let recv_ns = self.ctx.now_ns;
-        self.deliver(EngineEvent::Market(MarketEvent::FeedReset { recv_ns }));
+        self.deliver(&EngineEvent::Market(MarketEvent::FeedReset { recv_ns }));
     }
 
     /// A fill where we were the resting side. Only a strategy that quotes
@@ -560,7 +560,7 @@ impl Harness {
         px: f64,
     ) {
         let id = self.ctx.id_of(symbol);
-        self.deliver(EngineEvent::Order(OrderUpdate::FastFill {
+        self.deliver(&EngineEvent::Order(OrderUpdate::FastFill {
             exec_id: exec_id.to_string(),
             client_order_id: client_order_id.to_string(),
             venue_order_id: format!("v-{client_order_id}"),
@@ -585,7 +585,7 @@ impl Harness {
     ) {
         let id = self.ctx.id_of(symbol);
         self.ctx.charge_fill(id, side, qty);
-        self.deliver(EngineEvent::Order(OrderUpdate::Fill {
+        self.deliver(&EngineEvent::Order(OrderUpdate::Fill {
             allocation: None,
             amounts: None,
             exec_id: exec_id.to_string(),
@@ -616,7 +616,7 @@ impl Harness {
         // attribution before it wakes anybody: a plug that reads its own
         // position inside the fill callback must already see the fill.
         self.ctx.charge_fill(id, side, qty);
-        self.deliver(EngineEvent::Order(OrderUpdate::Fill {
+        self.deliver(&EngineEvent::Order(OrderUpdate::Fill {
             allocation: None,
             amounts: None,
             exec_id: String::new(),

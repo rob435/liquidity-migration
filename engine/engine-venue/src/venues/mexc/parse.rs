@@ -457,7 +457,7 @@ mod tests {
             "id": 1, "symbol": "BTC_USDT", "side": 1, "vol": 1,
             "price": 1.0, "timestamp": 1
         });
-        assert!(parse_deals(&json!([base.clone()]), &contracts()).is_err());
+        assert!(parse_deals(&json!([base]), &contracts()).is_err());
         let mut legacy = base;
         legacy["isTaker"] = json!(false);
         assert!(
@@ -472,7 +472,7 @@ mod tests {
             "id": 1, "symbol": "BTC_USDT", "side": 1, "vol": 1,
             "price": 1.0, "taker": true, "timestamp": 1
         });
-        let (without, _) = parse_deals(&json!([base.clone()]), &contracts()).unwrap();
+        let (without, _) = parse_deals(&json!([base]), &contracts()).unwrap();
         assert_eq!(without[0].fee, None);
 
         let mut zero = base;

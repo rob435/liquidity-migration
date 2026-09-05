@@ -3,6 +3,7 @@ use engine_types::execution_allocation::{AllocationPolicy, ExecutionAllocation, 
 use engine_types::numeric::{AssetAmount, Exact, ExactNumber};
 use engine_types::{Side, StrategyId, SymbolId};
 
+#[derive(Clone, Copy)]
 pub(crate) struct AllocationInput<'a> {
     pub symbol: SymbolId,
     pub side: Side,

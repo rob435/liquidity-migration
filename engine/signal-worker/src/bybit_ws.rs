@@ -143,7 +143,7 @@ impl BybitPublicStream {
             next_quarantine_reprobe_at: Instant::now() + options.quarantine_reprobe_interval,
         };
         Ok(Self {
-            symbols: symbols.clone(),
+            symbols,
             events,
             control,
             shared,

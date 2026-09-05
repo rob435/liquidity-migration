@@ -403,7 +403,7 @@ pub fn reduce(
                 },
             ),
     );
-    let mut cancel_symbols = due.clone();
+    let mut cancel_symbols = due;
     if mismatch {
         cancel_symbols.extend(input.owned_opening_order_ids.keys().cloned());
     }

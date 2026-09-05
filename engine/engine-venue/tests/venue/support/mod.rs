@@ -73,7 +73,7 @@ impl TestServer {
         let connections = Arc::new(AtomicUsize::new(0));
         let counted = connections.clone();
         let in_flight = Arc::new(AtomicUsize::new(0));
-        let active = in_flight.clone();
+        let active = in_flight;
         let peak_in_flight = Arc::new(AtomicUsize::new(0));
         let peak = peak_in_flight.clone();
         tokio::spawn(async move {

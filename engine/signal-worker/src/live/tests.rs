@@ -1515,8 +1515,8 @@ fn durable_carry_catchup_crosses_delivery_without_post_delivery_refetch() {
         .save(&state)
         .unwrap();
     let options = super::LiveRunOptions {
-        state_dir: state_dir.clone(),
-        spool_dir: spool_dir.clone(),
+        state_dir,
+        spool_dir,
         heartbeat: root.join("heartbeat.json"),
     };
     let mut runner =

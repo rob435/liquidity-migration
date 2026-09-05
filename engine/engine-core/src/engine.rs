@@ -994,7 +994,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.accept_signal_lifecycle(response, signal_feed)
             }
             Ok(engine_types::SignalFeedEvent::ReadinessUnavailable { reason }) => {
-                self.refuse_signal_readiness(reason, signal_feed)
+                self.refuse_signal_readiness(&reason, signal_feed)
             }
             Err(SignalError::Closed) => {
                 *signals_open = false;

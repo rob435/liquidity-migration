@@ -6,6 +6,7 @@
 //! wrong reading.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use engine_types::WalRecord;
 
@@ -93,8 +94,9 @@ fn quote_features(records: &[WalRecord]) -> String {
         return out;
     }
     for ((sleeve, symbol), row) in rows {
-        out.push_str(&format!(
-            "  {:<14}{:<14}{:>6}{:>6}{:>7}{:>8}{:>12}{:>10}{:>8}{:>11}\n",
+        let _ = writeln!(
+            out,
+            "  {:<14}{:<14}{:>6}{:>6}{:>7}{:>8}{:>12}{:>10}{:>8}{:>11}",
             clipped(&sleeve, 13),
             clipped(&symbol, 13),
             row.fills,
@@ -105,7 +107,7 @@ fn quote_features(records: &[WalRecord]) -> String {
             row.spread.text(10),
             row.volatility.text(8),
             row.queue.text(11),
-        ));
+        );
     }
     out.push_str(
         "\n  flow is positive for buyer aggression and negative for seller aggression.\n  depth and queue are the same-side public book visible when the fill arrived.\n",
@@ -179,9 +181,9 @@ pub fn table(fills: &Fills) -> String {
     for (index, column) in COLUMNS.iter().enumerate() {
         // The two name columns read left, every number reads right.
         if index < 2 {
-            out.push_str(&format!("{:<width$}", column.head, width = column.width));
+            let _ = write!(out, "{:<width$}", column.head, width = column.width);
         } else {
-            out.push_str(&format!("{:>width$}", column.head, width = column.width));
+            let _ = write!(out, "{:>width$}", column.head, width = column.width);
         }
     }
     out.push('\n');
@@ -197,7 +199,7 @@ pub fn table(fills: &Fills) -> String {
     }
 
     let total = fills.total();
-    out.push_str(&format!("  {}\n", "-".repeat(width_of_all() - 2)));
+    let _ = writeln!(out, "  {}", "-".repeat(width_of_all() - 2));
     out.push_str(&row("everything", "", &total));
     out.push_str(&footer(&total, fills));
     out
@@ -266,7 +268,7 @@ pub fn trips(fills: &Fills) -> String {
     for sleeve in sleeves {
         out.push_str(&trip_row(sleeve, fills, |trade| trade.sleeve == sleeve));
     }
-    out.push_str(&format!("  {}\n", "-".repeat(74)));
+    let _ = writeln!(out, "  {}", "-".repeat(74));
     out.push_str(&trip_row("everything", fills, |_| true));
     out.push_str(&trip_list(fills));
     out.push_str(
@@ -280,9 +282,10 @@ pub fn trips(fills: &Fills) -> String {
         .filter(|trade| trade.gross_usdt.is_none())
         .count();
     if unpriced > 0 {
-        out.push_str(&format!(
-            "  {unpriced} close(s) are left out: this log does not hold what opened them.\n"
-        ));
+        let _ = writeln!(
+            out,
+            "  {unpriced} close(s) are left out: this log does not hold what opened them."
+        );
     }
     let unknown_fees = fills
         .closed()
@@ -290,9 +293,9 @@ pub fn trips(fills: &Fills) -> String {
         .filter(|trade| trade.gross_usdt.is_some() && trade.fees_usdt.is_none())
         .count();
     if unknown_fees > 0 {
-        out.push_str(&format!(
-            "  {unknown_fees} close(s) have gross money but no net: at least one venue fee was not stated.\n"
-        ));
+        let _ = writeln!(out,
+            "  {unknown_fees} close(s) have gross money but no net: at least one venue fee was not stated."
+        );
     }
     out
 }
@@ -308,8 +311,9 @@ fn trip_list(fills: &Fills) -> String {
     );
     for trade in closed.iter().skip(skipped) {
         let rt = trade.round_trip.as_ref();
-        out.push_str(&format!(
-            "  {:<14}{:<15}{:<7}{:>9}{:>11}{:>11}{:>11}{:>11}\n",
+        let _ = writeln!(
+            out,
+            "  {:<14}{:<15}{:<7}{:>9}{:>11}{:>11}{:>11}{:>11}",
             clipped(&trade.sleeve, 13),
             clipped(&trade.symbol, 14),
             trade.side,
@@ -321,12 +325,13 @@ fn trip_list(fills: &Fills) -> String {
                 .unwrap_or_else(|| NOTHING.into()),
             rt.map(|rt| format!("{:+.2}", rt.net_usdt))
                 .unwrap_or_else(|| NOTHING.into()),
-        ));
+        );
     }
     if skipped > 0 {
-        out.push_str(&format!(
-            "  ...and {skipped} older trip(s), counted above but not listed.\n"
-        ));
+        let _ = writeln!(
+            out,
+            "  ...and {skipped} older trip(s), counted above but not listed."
+        );
     }
     out
 }
@@ -409,65 +414,77 @@ fn footer(total: &Costs, fills: &Fills) -> String {
     match total.arrival_coverage() {
         // Said only when it is not the whole thing. A line claiming full
         // coverage on every report would stop being read.
-        Some(share) if share < 0.999 => out.push_str(&format!(
+        Some(share) if share < 0.999 => {
+            let _ =
+                writeln!(out,
             "  the arrival columns cover {:.0}% of what traded; the rest filled against a\n  \
-             book the engine could not read when the order left.\n",
+             book the engine could not read when the order left.",
             share * 100.0
-        )),
+        );
+        }
         _ => {}
     }
     match total.fee_coverage() {
-        Some(share) if share < 0.999 => out.push_str(&format!(
+        Some(share) if share < 0.999 => {
+            let _ =
+                writeln!(out,
             "  the fee and all-in columns cover {:.0}% of what traded; the venue did not\n  \
-             state a fee for the rest. Unknown fees are not counted as zero.\n",
+             state a fee for the rest. Unknown fees are not counted as zero.",
             share * 100.0
-        )),
+        );
+        }
         _ => {}
     }
     if total.marks_unmeasurable > 0 {
-        out.push_str(&format!(
+        let _ = writeln!(
+            out,
             "  {} markout(s) had no readable book inside the lateness bound and were\n  \
-             never measured.\n",
+             never measured.",
             total.marks_unmeasurable
-        ));
+        );
     }
     if total.marks_late > 0 {
-        out.push_str(&format!(
+        let _ = writeln!(
+            out,
             "  {} markout(s) were read too long after their horizon to be that horizon,\n  \
-             and were thrown away rather than averaged in.\n",
+             and were thrown away rather than averaged in.",
             total.marks_late
-        ));
+        );
     }
     // Deliberately not reported off a log: a replay owes nothing a future
     // mark and drops nothing, so both counters are always zero there. They
     // belong to a running engine, and this footer is written for both.
     if fills.dropped > 0 {
-        out.push_str(&format!(
+        let _ = writeln!(
+            out,
             "  {} fill(s) were dropped from the markout queue: too many were waiting at\n  \
-             once.\n",
+             once.",
             fills.dropped
-        ));
+        );
     }
     if fills.pending() > 0 {
-        out.push_str(&format!(
-            "  {} fill(s) are still waiting for a horizon to come round.\n",
+        let _ = writeln!(
+            out,
+            "  {} fill(s) are still waiting for a horizon to come round.",
             fills.pending()
-        ));
+        );
     }
     if fills.stream_gaps > 0 {
-        out.push_str(&format!(
+        let _ =
+            writeln!(out,
             "  the private stream reconnected {} time(s), and delivered nothing while it was\n  \
-             down.\n",
+             down.",
             fills.stream_gaps
-        ));
+        );
     }
     if fills.recovered > 0 {
-        out.push_str(&format!(
+        let _ = writeln!(
+            out,
             "  {} fill(s) reached this account only through the venue's own execution\n  \
              history, and are counted here. One of them has a markout only where its\n  \
-             horizon had not already passed by the time it was found.\n",
+             horizon had not already passed by the time it was found.",
             fills.recovered
-        ));
+        );
     } else if fills.stream_gaps > 0 {
         out.push_str(
             "  nothing was read back off the venue, so a fill inside one of those gaps is\n  \

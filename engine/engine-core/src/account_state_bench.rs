@@ -8,6 +8,7 @@
 
 use std::cell::Cell;
 use std::fmt;
+use std::fmt::Write as _;
 use std::hint::black_box;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -85,14 +86,15 @@ impl ResultSet {
             self.steady_state.sample_ops,
         );
         for phase in &self.steady_state.phases {
-            out.push_str(&format!(
-                "{:<12} {:>7} {:>15} {:>15} {:>15}\n",
+            let _ = writeln!(
+                out,
+                "{:<12} {:>7} {:>15} {:>15} {:>15}",
                 phase.name,
                 phase.windows,
                 phase.p50_window_mean_ns_per_op,
                 phase.p99_window_mean_ns_per_op,
                 phase.max_window_mean_ns_per_op
-            ));
+            );
         }
         out.push_str(
             "\ncold boot from already-decoded venue execution history; counting log\n\
@@ -103,14 +105,15 @@ impl ResultSet {
                 .p50_ns_per_row
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "n/a".to_string());
-            out.push_str(&format!(
-                "{:>12} {:>8} {:>15.3} {:>15.3} {:>16}\n",
+            let _ = writeln!(
+                out,
+                "{:>12} {:>8} {:>15.3} {:>15.3} {:>16}",
                 tier.history_rows,
                 tier.repeats,
                 tier.p50_ns as f64 / 1_000_000.0,
                 tier.p99_ns as f64 / 1_000_000.0,
                 per_row,
-            ));
+            );
         }
         out
     }

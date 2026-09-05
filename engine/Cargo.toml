@@ -60,6 +60,12 @@ rc_buffer = "deny"
 unnecessary_self_imports = "deny"
 rest_pat_in_fully_bound_structs = "deny"
 empty_structs_with_brackets = "deny"
+# Allocation and copy hygiene on the order path: build the default lazily,
+# clone once, write into the string, pass a large value by reference.
+or_fun_call = "deny"
+redundant_clone = "deny"
+format_push_string = "deny"
+large_types_passed_by_value = "deny"
 
 [workspace.package]
 edition = "2021"

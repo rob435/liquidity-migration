@@ -587,7 +587,7 @@ disaster_stop_fraction = 0.35
         let mut block = profile_risk("operational.json");
         block.insert("leverage".into(), toml::Value::Float(2.0));
         let err = refusal(risk(&block), "a stray cap beside a profile was accepted");
-        assert!(err.to_string().contains("leverage"), "{err}");
+        assert!(err.contains("leverage"), "{err}");
     }
 
     #[test]
@@ -618,7 +618,7 @@ disaster_stop_fraction = 0.35
             risk(&profile_risk("operational.does-not-exist.json")),
             "a missing profile was accepted",
         );
-        assert!(err.to_string().contains("does-not-exist"), "{err}");
+        assert!(err.contains("does-not-exist"), "{err}");
     }
 
     #[test]

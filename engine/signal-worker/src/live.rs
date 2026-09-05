@@ -1833,7 +1833,7 @@ impl LiveRunner {
             .worker()
             .state()
             .last_carry_scorer_ts_ms
-            .or(self.durable.worker().state().last_carry_decision_ts_ms)
+            .or_else(|| self.durable.worker().state().last_carry_decision_ts_ms)
         {
             let catchup_through_ms = source_through_ms.min(latest_decision_ms - DAY_MS);
             if catchup_through_ms > last {
@@ -1857,7 +1857,7 @@ impl LiveRunner {
             .worker()
             .state()
             .last_carry_scorer_ts_ms
-            .or(self.durable.worker().state().last_carry_decision_ts_ms)
+            .or_else(|| self.durable.worker().state().last_carry_decision_ts_ms)
             .is_some_and(|last| last < latest_decision_ms.saturating_sub(DAY_MS));
         if catchup_pending {
             self.durable.refresh_spool_backpressure()?;
@@ -2144,7 +2144,7 @@ impl LiveRunner {
             .worker()
             .state()
             .last_carry_scorer_ts_ms
-            .or(self.durable.worker().state().last_carry_decision_ts_ms)
+            .or_else(|| self.durable.worker().state().last_carry_decision_ts_ms)
             .map(|last| {
                 last.saturating_add(CARRY_CATCHUP_CHUNK_DAYS.saturating_mul(DAY_MS))
                     .min(latest_decision_ms)

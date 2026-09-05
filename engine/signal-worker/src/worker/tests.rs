@@ -659,7 +659,7 @@ fn funding_replacement_without_frontier_retains_coverage() {
 fn disjoint_kline_windows_survive_restart_without_claiming_the_gap() {
     let config = test_config();
     let universe = test_universe();
-    let mut worker = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
+    let mut worker = SignalWorker::with_universe(config.clone(), universe).unwrap();
     for (sequence, checked_from_ms) in [(1, 10 * DAY_MS), (2, 100 * DAY_MS)] {
         worker
             .apply(WireEvent::BybitKlineBatch {
@@ -692,7 +692,7 @@ fn disjoint_kline_windows_survive_restart_without_claiming_the_gap() {
 fn fragmented_source_coverage_survives_and_repeated_fetch_converges() {
     let config = test_config();
     let universe = test_universe();
-    let mut worker = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
+    let mut worker = SignalWorker::with_universe(config.clone(), universe).unwrap();
     let base = 10 * DAY_MS;
     let available_at_ms = 11 * DAY_MS;
     let mut sequence = 1;
@@ -828,7 +828,7 @@ fn fragmented_source_coverage_survives_and_repeated_fetch_converges() {
 fn prune_splits_source_coverage_and_restart_cannot_overclaim_the_gap() {
     let config = test_config();
     let universe = test_universe();
-    let mut worker = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
+    let mut worker = SignalWorker::with_universe(config.clone(), universe).unwrap();
     worker.state.last_carry_decision_ts_ms = Some(10 * DAY_MS);
     let broad = vec![CoverageInterval {
         checked_from_ms: DAY_MS,
@@ -942,7 +942,7 @@ fn source_ingestion_stays_bounded_when_no_watermark_can_complete() {
     universe.symbols = vec!["AAAUSDT".into(), "BTCUSDT".into()];
     universe.long_symbols = vec!["AAAUSDT".into()];
     universe.carry_symbols = vec!["AAAUSDT".into()];
-    let mut worker = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
+    let mut worker = SignalWorker::with_universe(config.clone(), universe).unwrap();
     let mut sequence = 1_u64;
     for day in 1..=180_i64 {
         let start = day * DAY_MS;
@@ -1044,10 +1044,9 @@ fn source_ingestion_stays_bounded_when_no_watermark_can_complete() {
 fn restore_rejects_noncanonical_source_coverage_intervals() {
     let config = test_config();
     let universe = test_universe();
-    let mut state = SignalWorker::with_universe(config.clone(), universe.clone())
+    let mut state = SignalWorker::with_universe(config.clone(), universe)
         .unwrap()
-        .state
-        .clone();
+        .state;
     state.funding_coverage_intervals.insert(
         "BTCUSDT".into(),
         vec![
@@ -1454,7 +1453,7 @@ fn deleting_the_oldest_class_file_immediately_releases_backpressure() {
     let inventory = durable.spool.inventory().unwrap();
     let lifecycle = inventory.classes["lifecycle"].clone();
     let oldest = lifecycle.oldest_path.clone().unwrap();
-    let newest = lifecycle.newest_path.clone().unwrap();
+    let newest = lifecycle.newest_path.unwrap();
     assert_ne!(oldest, newest);
     durable.spool_files = inventory.files;
     durable.spool_bytes = inventory.bytes;
@@ -2294,7 +2293,7 @@ fn carry_catchup_uses_instrument_status_at_each_historical_decision() {
 fn missing_then_recovered_instrument_preserves_the_unknown_historical_gap() {
     let config = compact_feature_config();
     let universe = test_universe();
-    let mut worker = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
+    let mut worker = SignalWorker::with_universe(config.clone(), universe).unwrap();
     worker
         .apply(WireEvent::BybitInstrumentSnapshot {
             schema_version: SCHEMA_VERSION,
@@ -2375,7 +2374,7 @@ fn missing_then_recovered_instrument_preserves_the_unknown_historical_gap() {
 fn repeated_instrument_omission_recovery_survives_past_the_old_cap_and_restart() {
     let config = compact_feature_config();
     let universe = test_universe();
-    let mut worker = SignalWorker::with_universe(config.clone(), universe.clone()).unwrap();
+    let mut worker = SignalWorker::with_universe(config.clone(), universe).unwrap();
     let base = 10 * DAY_MS;
     worker
         .apply(WireEvent::BybitInstrumentSnapshot {
@@ -2459,10 +2458,9 @@ fn repeated_instrument_omission_recovery_survives_past_the_old_cap_and_restart()
 fn restore_preserves_history_across_operational_changes_and_resets_only_changed_physics() {
     let config = test_config();
     let universe = test_universe();
-    let mut state = SignalWorker::with_universe(config.clone(), universe.clone())
+    let mut state = SignalWorker::with_universe(config.clone(), universe)
         .unwrap()
-        .state
-        .clone();
+        .state;
     state.last_input_sequence = 17;
     state.long_output_sequence = 3;
     state.carry_output_sequence = 5;
@@ -2877,8 +2875,7 @@ fn checkpoint_without_a_generation_adopts_a_new_output_namespace() {
     let checkpoint = AtomicJsonStore::new(state_dir.join("checkpoint.json"));
     let mut state = SignalWorker::with_universe(config.clone(), universe.clone())
         .unwrap()
-        .state
-        .clone();
+        .state;
     state.last_input_sequence = 17;
     state.long_output_sequence = 3;
     state.carry_output_sequence = 5;
@@ -3069,7 +3066,7 @@ fn a_universe_with_new_membership_replaces_the_old_one_and_drops_its_symbols() {
     // The same membership with a newer clock is installed without pruning
     // work, and a checkpoint from it restores under a config that names no
     // universe at all.
-    let mut third = second.clone();
+    let mut third = second;
     third.snapshot_ts_ms = DAY_MS + 4;
     third.available_at_ms = DAY_MS + 4;
     worker
@@ -3894,8 +3891,7 @@ fn named_destinations_refuse_a_checkpoint_that_aliases_both_directional_owners()
     let config = test_config();
     let mut state = SignalWorker::with_universe(config.clone(), test_universe())
         .unwrap()
-        .state
-        .clone();
+        .state;
     state.long_destination = state.carry_destination;
     let error = SignalWorker::restore(config, state)
         .err()

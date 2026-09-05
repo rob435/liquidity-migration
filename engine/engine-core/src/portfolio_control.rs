@@ -433,10 +433,8 @@ mod tests {
         state.phase = PortfolioEmergencyPhase::CloseNet;
         state.attempt = 1;
         state.order_id = Some(request.client_order_id.clone());
-        book.apply(&WalRecord::PortfolioEmergencyChanged {
-            state: state.clone(),
-        })
-        .unwrap();
+        book.apply(&WalRecord::PortfolioEmergencyChanged { state })
+            .unwrap();
         book.apply(&sent(request.clone())).unwrap();
         request.reduce_only = false;
         assert!(

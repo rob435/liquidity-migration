@@ -156,7 +156,7 @@ impl HyperliquidGateway {
             )?,
         };
         let data = self
-            .exchange(order_action(vec![stop], GROUPING_POSITION_TPSL))
+            .exchange(order_action(&[stop], GROUPING_POSITION_TPSL))
             .await?;
         first_status(&data)?;
 
@@ -605,7 +605,7 @@ impl VenueGateway for HyperliquidGateway {
             _ => (vec![entry], GROUPING_NONE),
         };
 
-        let data = self.exchange(order_action(orders, grouping)).await?;
+        let data = self.exchange(order_action(&orders, grouping)).await?;
         let ack_ns = mono_ns();
         // Every status, not just the first: an entry accepted with its stop
         // refused would otherwise be recorded as a protected position.
@@ -754,7 +754,7 @@ impl VenueGateway for HyperliquidGateway {
             kind: OrderKindWire::Limit { tif },
             cloid: Some(wanted.clone()),
         };
-        let data = self.exchange(modify_action(&wanted, order)).await?;
+        let data = self.exchange(modify_action(&wanted, &order)).await?;
         first_status(&data)?;
         Ok(())
     }

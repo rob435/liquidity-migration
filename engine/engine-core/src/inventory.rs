@@ -278,7 +278,7 @@ impl Inventory {
                     )
                 } else {
                     let value = px.as_ref().map(|price| (&qty - &prior_qty) * price);
-                    (value, stop, settlement_asset.clone(), amount)
+                    (value, stop, settlement_asset, amount)
                 }
             };
             (

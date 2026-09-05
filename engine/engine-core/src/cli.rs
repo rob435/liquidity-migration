@@ -36,7 +36,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
     runtime()?.block_on(runner::run(&config))
 }
 
@@ -77,8 +77,12 @@ fn bench(args: &[String]) -> Result<(), Box<dyn Error>> {
 
 fn wal_cost(args: &[String]) -> Result<(), Box<dyn Error>> {
     let path = PathBuf::from(value(args, "--wal").ok_or("wal-cost needs --wal PATH")?);
-    let appends: usize = value(args, "--appends").unwrap_or("20000".into()).parse()?;
-    let barriers: usize = value(args, "--barriers").unwrap_or("200".into()).parse()?;
+    let appends: usize = value(args, "--appends")
+        .unwrap_or_else(|| "20000".into())
+        .parse()?;
+    let barriers: usize = value(args, "--barriers")
+        .unwrap_or_else(|| "200".into())
+        .parse()?;
     let costs = engine_wal::measure(&path, appends, barriers)?;
     println!("wal-cost path={}", path.display());
     println!("{costs}");
@@ -88,7 +92,7 @@ fn wal_cost(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn venue_key(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let path = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+    let path = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
     let loaded = engine_core::config::load(&path)?;
     let chosen = engine_core::assembly::venue_name(&loaded.config.engine.venue)?;
     // No symbols: nothing here sends anything, and the table is only
@@ -138,7 +142,7 @@ fn attest_flat(args: &[String]) -> Result<(), Box<dyn Error>> {
     let config = PathBuf::from(
         value(args, "--config")
             .or_else(|| std::env::var("ENGINE_CONFIG_FILE").ok())
-            .unwrap_or("engine.toml".into()),
+            .unwrap_or_else(|| "engine.toml".into()),
     );
     runtime()?.block_on(engine_core::flatness::run(&config))
 }
@@ -147,13 +151,13 @@ fn verify_account_identity(args: &[String]) -> Result<(), Box<dyn Error>> {
     let config = PathBuf::from(
         value(args, "--config")
             .or_else(|| std::env::var("ENGINE_CONFIG_FILE").ok())
-            .unwrap_or("engine.toml".into()),
+            .unwrap_or_else(|| "engine.toml".into()),
     );
     runtime()?.block_on(engine_core::flatness::verify_account_identity(&config))
 }
 
 fn canary_order(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
     let symbol = value(args, "--symbol").ok_or("canary-order needs --symbol SYMBOL")?;
     let expected_user_id =
         value(args, "--expected-user-id").ok_or("canary-order needs --expected-user-id USER_ID")?;
@@ -243,14 +247,14 @@ fn latency(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn reconcile_clear(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
-    let note = value(args, "--note").unwrap_or("operator reconcile-clear".into());
+    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
+    let note = value(args, "--note").unwrap_or_else(|| "operator reconcile-clear".into());
     let execute = args.iter().any(|a| a == "--execute");
     runtime()?.block_on(engine_core::clear::run(&config, &note, execute))
 }
 
 fn import_strategy_state(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
     let strategy =
         value(args, "--strategy").ok_or("import-strategy-state needs --strategy SLEEVE")?;
     let source_format = value(args, "--source-format")
@@ -282,19 +286,19 @@ fn import_strategy_state(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn initialize_native_strategy_state(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
     runtime()?.block_on(engine_core::takeover::initialize_native_strategy_state(
         &config,
     ))
 }
 
 fn verify_native_strategy_state(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
     engine_core::takeover::verify_native_strategy_state(&config)
 }
 
 fn set_strategy_entry_permission(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
     let strategy =
         value(args, "--strategy").ok_or("set-strategy-entry-permission needs --strategy SLEEVE")?;
     let enabled = match value(args, "--entries-enabled").as_deref() {
@@ -305,7 +309,7 @@ fn set_strategy_entry_permission(args: &[String]) -> Result<(), Box<dyn Error>> 
     let request_id =
         value(args, "--request-id").ok_or("set-strategy-entry-permission needs --request-id ID")?;
     let wait_ms = value(args, "--wait-ms")
-        .unwrap_or("30000".into())
+        .unwrap_or_else(|| "30000".into())
         .parse::<u64>()?;
     runtime()?.block_on(submit_runtime_control(
         &config,
@@ -319,11 +323,11 @@ fn set_strategy_entry_permission(args: &[String]) -> Result<(), Box<dyn Error>> 
 }
 
 fn flatten_strategy(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or("engine.toml".into()));
+    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
     let strategy = value(args, "--strategy").ok_or("flatten-strategy needs --strategy SLEEVE")?;
     let request_id = value(args, "--request-id").ok_or("flatten-strategy needs --request-id ID")?;
     let wait_ms = value(args, "--wait-ms")
-        .unwrap_or("30000".into())
+        .unwrap_or_else(|| "30000".into())
         .parse::<u64>()?;
     runtime()?.block_on(submit_runtime_control(
         &config,
@@ -379,7 +383,9 @@ pub(super) fn parse_sim_options(
     let dir = value(args, "--out")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join(format!("engine-sim-{}", std::process::id())));
-    let seed: u64 = value(args, "--seed").unwrap_or("1".into()).parse()?;
+    let seed: u64 = value(args, "--seed")
+        .unwrap_or_else(|| "1".into())
+        .parse()?;
     let mut base = engine_core::sim::SimOptions::new(seed, dir);
     if let Some(v) = value(args, "--seconds") {
         base.seconds = v.parse()?;
@@ -395,7 +401,9 @@ pub(super) fn parse_sim_options(
             .ok_or_else(|| format!("--faults takes none, light or heavy, not {v:?}"))?;
     }
     base.keep = args.iter().any(|a| a == "--keep");
-    let seeds: u64 = value(args, "--seeds").unwrap_or("1".into()).parse()?;
+    let seeds: u64 = value(args, "--seeds")
+        .unwrap_or_else(|| "1".into())
+        .parse()?;
     let twice = args.iter().any(|a| a == "--twice");
     let report = value(args, "--report").map(PathBuf::from);
     Ok((

@@ -91,7 +91,7 @@ impl Attribution {
                 slice.settlement_asset.clone(),
             );
             let prior = self.internal.0.get(&key).cloned();
-            let mut next = prior.clone().unwrap_or(InternalSettlementTotals {
+            let mut next = prior.clone().unwrap_or_else(|| InternalSettlementTotals {
                 strategy: slice.strategy,
                 symbol: settlement.symbol,
                 asset: slice.settlement_asset.clone(),

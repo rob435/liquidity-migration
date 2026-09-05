@@ -389,7 +389,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         error: String,
     ) -> Result<(), EngineError> {
         let changed = self.host.callbacks.faults.get(&strategy) != Some(&error);
-        self.host.callbacks.failed(strategy, error.clone());
         if changed {
             tracing::error!(
                 strategy = strategy.0,
@@ -404,6 +403,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 ),
             })?;
         }
+        self.host.callbacks.failed(strategy, error);
         Ok(())
     }
 

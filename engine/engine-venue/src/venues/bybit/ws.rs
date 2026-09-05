@@ -81,14 +81,14 @@ impl BybitOrderFeed {
         Ok(Self::build(
             realm.private_ws(),
             creds,
-            symbols,
+            &symbols,
             realm.fast_execution(),
         ))
     }
 
     /// Point the feed at a local server. Tests and the mock venue only.
     pub fn for_test(url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
-        Self::build(url, creds, symbols, true)
+        Self::build(url, creds, &symbols, true)
     }
 
     /// Exercise a realm's exact subscription shape against a local server.
@@ -98,11 +98,11 @@ impl BybitOrderFeed {
         symbols: Vec<Symbol>,
         realm: VenueRealm,
     ) -> Self {
-        Self::build(url, creds, symbols, realm.fast_execution())
+        Self::build(url, creds, &symbols, realm.fast_execution())
     }
 
-    fn build(url: &str, creds: Credentials, symbols: Vec<Symbol>, fast_execution: bool) -> Self {
-        let ids = engine_public::symbols::indexed_names(&symbols);
+    fn build(url: &str, creds: Credentials, symbols: &[Symbol], fast_execution: bool) -> Self {
+        let ids = engine_public::symbols::indexed_names(symbols);
         Self {
             url: url.to_string(),
             creds,

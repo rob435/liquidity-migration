@@ -33,7 +33,7 @@ impl Check {
         }
     }
 
-    fn judge(name: &'static str, problems: Vec<String>, when_clean: impl Into<String>) -> Self {
+    fn judge(name: &'static str, problems: &[String], when_clean: impl Into<String>) -> Self {
         if problems.is_empty() {
             Check::pass(name, when_clean)
         } else {
@@ -122,7 +122,7 @@ fn positions_agree(e: &Evidence<'_>) -> Check {
     }
     Check::judge(
         "positions_agree",
-        problems,
+        &problems,
         format!("{} symbols compared", symbols.len()),
     )
 }
@@ -182,7 +182,7 @@ fn every_fill_journaled(e: &Evidence<'_>) -> Check {
     }
     Check::judge(
         "every_fill_journaled",
-        problems,
+        &problems,
         format!("{} executions, all in the log", venue.len()),
     )
 }
@@ -217,7 +217,7 @@ fn no_orphan_orders(e: &Evidence<'_>) -> Check {
     };
     Check::judge(
         "no_orphan_orders",
-        problems,
+        &problems,
         format!(
             "{} working at the venue, {} in flight in the engine",
             e.venue_orders.len(),
@@ -387,5 +387,5 @@ fn numbers_finite(e: &Evidence<'_>) -> Check {
             }
         }
     }
-    Check::judge("numbers_finite", problems, "every figure is finite")
+    Check::judge("numbers_finite", &problems, "every figure is finite")
 }

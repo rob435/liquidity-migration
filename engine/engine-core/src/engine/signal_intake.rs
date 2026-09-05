@@ -41,13 +41,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     ) -> Result<(), EngineError> {
         if self.identities.scope.is_some() && self.signals.readiness_required() {
             return self.refuse_signal_readiness(
-                "named source destinations require lifecycle readiness".into(),
+                "named source destinations require lifecycle readiness",
                 feed,
             );
         }
         if self.signals.producers().next().is_some() {
             return self.refuse_signal_readiness(
-                "managed producer cannot downgrade to readiness schema one".into(),
+                "managed producer cannot downgrade to readiness schema one",
                 feed,
             );
         }
@@ -56,7 +56,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .frontier_gaps(&frontiers, self.host.strategies.len())
         {
             Ok(gaps) => gaps,
-            Err(reason) => return self.refuse_signal_readiness(reason, feed),
+            Err(reason) => return self.refuse_signal_readiness(&reason, feed),
         };
         for gap in gaps {
             if self.signals.gap_changed(&gap) {
@@ -76,7 +76,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     pub(super) fn refuse_signal_readiness<F: SignalFeed>(
         &mut self,
-        reason: String,
+        reason: &str,
         feed: &mut F,
     ) -> Result<(), EngineError> {
         self.signals.begin_readiness_request();
@@ -116,8 +116,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         feed: &mut F,
     ) -> Result<(), EngineError> {
         if response.schema_version != engine_types::SIGNAL_LIFECYCLE_SCHEMA_VERSION {
-            return self
-                .refuse_signal_readiness("unsupported producer lifecycle schema".into(), feed);
+            return self.refuse_signal_readiness("unsupported producer lifecycle schema", feed);
         }
         if self.identities.scope.is_some() {
             let valid = response.source_sleeves.len() == response.producer.sources.len()
@@ -133,7 +132,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 });
             if !valid {
                 return self.refuse_signal_readiness(
-                    "producer source destinations do not match the durable sleeve registry".into(),
+                    "producer source destinations do not match the durable sleeve registry",
                     feed,
                 );
             }
@@ -146,7 +145,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             })
         {
             return self.refuse_signal_readiness(
-                "producer seal omits an input already waiting for symbol admission".into(),
+                "producer seal omits an input already waiting for symbol admission",
                 feed,
             );
         }
@@ -155,11 +154,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .plan_producer_report(&response.producer, self.host.strategies.len())
         {
             Ok(state) => state,
-            Err(reason) => return self.refuse_signal_readiness(reason, feed),
+            Err(reason) => return self.refuse_signal_readiness(&reason, feed),
         };
         let gaps = match self.signals.lifecycle_gaps(&state) {
             Ok(gaps) => gaps,
-            Err(reason) => return self.refuse_signal_readiness(reason, feed),
+            Err(reason) => return self.refuse_signal_readiness(&reason, feed),
         };
         if self
             .signals
@@ -193,7 +192,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .frontier_gaps(&frontiers, self.host.strategies.len())
             {
                 Ok(gaps) => gaps,
-                Err(reason) => return self.refuse_signal_readiness(reason, feed),
+                Err(reason) => return self.refuse_signal_readiness(&reason, feed),
             };
             for gap in gaps {
                 if self.signals.gap_changed(&gap) {

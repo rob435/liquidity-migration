@@ -76,7 +76,7 @@ impl BinanceOrderFeed {
             realm.rest_base(),
             realm.websocket(),
             creds,
-            symbols,
+            &symbols,
         ))
     }
 
@@ -87,11 +87,11 @@ impl BinanceOrderFeed {
         creds: Credentials,
         symbols: Vec<Symbol>,
     ) -> Self {
-        Self::build(rest_url, ws_url, creds, symbols)
+        Self::build(rest_url, ws_url, creds, &symbols)
     }
 
-    fn build(rest_base: &str, ws_base: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
-        let ids = engine_public::symbols::indexed_names(&symbols);
+    fn build(rest_base: &str, ws_base: &str, creds: Credentials, symbols: &[Symbol]) -> Self {
+        let ids = engine_public::symbols::indexed_names(symbols);
         Self {
             rest_base: rest_base.to_string(),
             ws_base: ws_base.to_string(),

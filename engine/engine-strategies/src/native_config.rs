@@ -24,6 +24,7 @@ pub const MAKER_RULE_BEGIN: &str =
     "# BEGIN GENERATED MAKER CANARY RULE -- engine render-native-config";
 pub const MAKER_RULE_END: &str = "# END GENERATED MAKER CANARY RULE";
 
+#[derive(Clone, Copy)]
 pub struct NativeConfigSources<'a> {
     pub realm: &'a str,
     pub signal_config: &'a [u8],

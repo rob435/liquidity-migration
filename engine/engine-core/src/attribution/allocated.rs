@@ -11,6 +11,7 @@ pub(crate) struct PreparedPortfolioFill {
     legacy: bool,
 }
 
+#[derive(Clone, Copy)]
 struct ExecutionRef<'a> {
     client_order_id: &'a str,
     symbol: SymbolId,

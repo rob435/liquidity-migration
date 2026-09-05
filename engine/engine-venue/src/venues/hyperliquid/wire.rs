@@ -106,7 +106,7 @@ fn order_wire(order: &OrderWire) -> Mp {
 /// `na` for independent orders, `normalTpsl` for a parent order with the
 /// stop that arms when it fills, `positionTpsl` for a stop against the whole
 /// position.
-pub(crate) fn order_action(orders: Vec<OrderWire>, grouping: &'static str) -> Mp {
+pub(crate) fn order_action(orders: &[OrderWire], grouping: &'static str) -> Mp {
     Mp::Map(vec![
         ("type", Mp::str("order")),
         ("orders", Mp::Arr(orders.iter().map(order_wire).collect())),
@@ -152,14 +152,14 @@ pub(crate) fn cancel_action(asset: u32, oid: i64) -> Mp {
 
 /// Reprice or resize in place. The order is named by its client id, which the
 /// venue accepts wherever it accepts an order number.
-pub(crate) fn modify_action(cloid: &str, order: OrderWire) -> Mp {
+pub(crate) fn modify_action(cloid: &str, order: &OrderWire) -> Mp {
     Mp::Map(vec![
         ("type", Mp::str("batchModify")),
         (
             "modifies",
             Mp::Arr(vec![Mp::Map(vec![
                 ("oid", Mp::str(cloid)),
-                ("order", order_wire(&order)),
+                ("order", order_wire(order)),
             ])]),
         ),
     ])
@@ -245,8 +245,8 @@ mod tests {
         // Counted off the map header rather than searched for in the bytes:
         // "Ioc" carries a c of its own, and a substring search would pass
         // whatever the encoder did.
-        let with = encode(&order_action(vec![limit(Some("0xab"))], GROUPING_NONE));
-        let without = encode(&order_action(vec![limit(None)], GROUPING_NONE));
+        let with = encode(&order_action(&[limit(Some("0xab"))], GROUPING_NONE));
+        let without = encode(&order_action(&[limit(None)], GROUPING_NONE));
         assert_eq!(order_map_header(&with), 0x80 | 7);
         assert_eq!(order_map_header(&without), 0x80 | 6);
         assert!(with.len() > without.len());
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn the_json_body_says_the_same_thing_as_the_hashed_bytes() {
-        let action = order_action(vec![limit(Some("0xabc"))], GROUPING_ORDER_TPSL);
+        let action = order_action(&[limit(Some("0xabc"))], GROUPING_ORDER_TPSL);
         let json = to_json(&action);
         assert_eq!(json["type"], "order");
         assert_eq!(json["grouping"], "normalTpsl");
@@ -282,7 +282,7 @@ mod tests {
             },
             cloid: None,
         };
-        let json = to_json(&order_action(vec![stop], GROUPING_POSITION_TPSL));
+        let json = to_json(&order_action(&[stop], GROUPING_POSITION_TPSL));
         let trigger = &json["orders"][0]["t"]["trigger"];
         assert_eq!(trigger["isMarket"], true);
         assert_eq!(trigger["triggerPx"], "90000");
@@ -306,7 +306,7 @@ mod tests {
             3
         );
         assert_eq!(
-            to_json(&modify_action("0x1", limit(None)))["type"],
+            to_json(&modify_action("0x1", &limit(None)))["type"],
             "batchModify"
         );
         let lev = to_json(&update_leverage_action(2, true, 5));

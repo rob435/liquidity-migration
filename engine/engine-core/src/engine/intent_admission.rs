@@ -134,10 +134,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// private stream, then the boot latch. Exits flow past all of them.
     pub(super) fn opening_refusal(&self, strategy: StrategyId) -> Option<OpeningRefusal> {
         self.opening_permission_reason(strategy)
-            .or((!self.dispatches.unresolved.is_empty())
-                .then_some(OpeningRefusal::OrderDispatchUnresolved))
-            .or((!self.private_stream_ready).then_some(OpeningRefusal::PrivateStreamUnready))
-            .or((!self.may_open).then_some(OpeningRefusal::EngineLatched))
+            .or_else(|| {
+                (!self.dispatches.unresolved.is_empty())
+                    .then_some(OpeningRefusal::OrderDispatchUnresolved)
+            })
+            .or_else(|| {
+                (!self.private_stream_ready).then_some(OpeningRefusal::PrivateStreamUnready)
+            })
+            .or_else(|| (!self.may_open).then_some(OpeningRefusal::EngineLatched))
     }
 
     pub(super) fn symbol_owned_by_another(&self, strategy: StrategyId, symbol: SymbolId) -> bool {

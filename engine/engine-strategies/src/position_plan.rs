@@ -293,8 +293,8 @@ pub fn plan(
                     });
                     continue;
                 }
-                let size =
-                    exact_target_qty.map_or(target.notional_usdt.abs(), |qty| qty.abs() * px);
+                let size = exact_target_qty
+                    .map_or_else(|| target.notional_usdt.abs(), |qty| qty.abs() * px);
                 if size < rules.entry_floor_usdt {
                     skipped.push(Skipped::BelowEntryFloor {
                         symbol: symbol.to_string(),
@@ -382,9 +382,10 @@ pub fn plan(
                     });
                     continue;
                 }
-                let raw_qty = delta_qty.map_or(delta_usdt.abs() / px, |qty| {
-                    round_clean(qty.abs(), rule.qty_step)
-                });
+                let raw_qty = delta_qty.map_or_else(
+                    || delta_usdt.abs() / px,
+                    |qty| round_clean(qty.abs(), rule.qty_step),
+                );
                 let Some(qty) = quantize_qty(raw_qty, &rule) else {
                     skipped.push(Skipped::BelowVenueMinimum {
                         symbol: symbol.to_string(),

@@ -16,6 +16,7 @@
 //! is about 175 ms and no rebuild changes that.
 
 use std::cell::Cell;
+use std::fmt::Write as _;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -94,8 +95,9 @@ impl BenchResult {
             "  what happened            count   typical(p50)  slow 1 in 10  slow 1 in 100         p99.9      worst\n",
         );
         for (segment, q) in &self.segments {
-            out.push_str(&format!(
-                "  {:<22} {:>7}  {:>12}  {:>12}  {:>13}  {:>12}  {:>9}\n",
+            let _ = writeln!(
+                out,
+                "  {:<22} {:>7}  {:>12}  {:>12}  {:>13}  {:>12}  {:>9}",
                 segment.plain_name(),
                 q.count,
                 pretty(q.p50_ns),
@@ -107,7 +109,7 @@ impl BenchResult {
                     "unavailable".into()
                 },
                 pretty(q.max_ns)
-            ));
+            );
         }
         out
     }

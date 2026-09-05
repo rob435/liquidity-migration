@@ -70,6 +70,7 @@ impl UniverseRules {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct UniverseInputs<'a> {
     pub environment: &'a str,
     pub endpoint: &'a str,

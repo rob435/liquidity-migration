@@ -626,7 +626,7 @@ impl SignalWorker {
                 rows,
                 ..
             } => {
-                self.apply_instruments(observed_ts_ms, available_at_ms, rows)?;
+                self.apply_instruments(observed_ts_ms, available_at_ms, &rows)?;
             }
             WireEvent::BybitTickerSnapshot {
                 observed_ts_ms,
@@ -642,7 +642,7 @@ impl SignalWorker {
                 rows,
                 ..
             } => {
-                self.apply_whales(available_at_ms, coverage, rows)?;
+                self.apply_whales(available_at_ms, coverage, &rows)?;
             }
             WireEvent::UniverseSnapshot { universe, .. } => {
                 self.apply_universe(universe)?;
@@ -862,10 +862,10 @@ impl SignalWorker {
         &mut self,
         observed_ts_ms: i64,
         available_at_ms: i64,
-        rows: Vec<crate::model::BybitInstrumentWire>,
+        rows: &[crate::model::BybitInstrumentWire],
     ) -> Result<(), WorkerError> {
         let allowed = self.owned_market_symbols();
-        let next = normalize_instruments(observed_ts_ms, available_at_ms, &rows)?
+        let next = normalize_instruments(observed_ts_ms, available_at_ms, rows)?
             .into_iter()
             .filter(|row| allowed.contains(&row.symbol))
             .map(|row| (row.symbol.clone(), row))
@@ -987,9 +987,9 @@ impl SignalWorker {
         &mut self,
         available_at_ms: i64,
         coverage: Vec<crate::model::SourceCoverage>,
-        rows: Vec<crate::model::BinanceWhaleWire>,
+        rows: &[crate::model::BinanceWhaleWire],
     ) -> Result<(), WorkerError> {
-        for row in normalize_whales(available_at_ms, &rows)? {
+        for row in normalize_whales(available_at_ms, rows)? {
             merge_row(
                 self.state.whales.entry(row.symbol.clone()).or_default(),
                 row,
@@ -2577,7 +2577,7 @@ impl DurableSignalWorker {
         if !checkpoint.path().exists() {
             let initial = SignalWorker::new_with_source_generation(
                 config.clone(),
-                universe.clone(),
+                universe,
                 random_source_generation()?,
             )?;
             checkpoint.save(initial.state())?;

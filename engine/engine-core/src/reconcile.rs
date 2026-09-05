@@ -1325,7 +1325,7 @@ mod tests {
             without.must_not_open(),
             "the gap fill is unaccounted until recovered"
         );
-        let mut with = log.clone();
+        let mut with = log;
         with.push(recovered("2f6e", "eng-1", 3, Side::Buy, 1.0));
         let out = run(&with, &[], &account(vec![held(3, Side::Buy, 3.0, true)]));
         // The order itself still reads as vanished (its remainder ended in

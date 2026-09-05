@@ -353,13 +353,13 @@ fn acquire_at_with(
             // Being refused is the normal answer, not a fault: somebody else
             // has the account. Read their note before letting go of the file.
             return Err(LeaseError::AlreadyHeld {
-                path: lease.path.clone(),
+                path: lease.path,
                 holder: read_note(fd),
             });
         }
         Err(source) => {
             return Err(LeaseError::Io {
-                path: lease.path.clone(),
+                path: lease.path,
                 doing: "lock",
                 source,
             })
@@ -372,9 +372,7 @@ fn acquire_at_with(
     // process opens the new file, is granted its own lock, and two writers
     // are live with nothing anywhere reporting an error.
     if !descriptor_is_the_file_at(fd, path) {
-        return Err(LeaseError::Replaced {
-            path: lease.path.clone(),
-        });
+        return Err(LeaseError::Replaced { path: lease.path });
     }
 
     write_note(fd, &note(venue, realm, role, user_id)).map_err(|source| LeaseError::Io {
@@ -499,7 +497,8 @@ pub fn account_key_text(raw: &str) -> Option<String> {
 /// Working on digits rather than parsing into a fixed-width integer means an
 /// account id longer than 64 bits is normalized rather than refused.
 pub fn account_id_text(raw: &str) -> Option<String> {
-    let digits = raw.trim().strip_prefix('+').unwrap_or(raw.trim());
+    let trimmed = raw.trim();
+    let digits = trimmed.strip_prefix('+').unwrap_or(trimmed);
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }

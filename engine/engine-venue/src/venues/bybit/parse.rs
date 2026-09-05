@@ -1696,10 +1696,10 @@ mod tests {
                         {"orderLinkId": "eng-1"}
                     ]
                 }),
-                valid_ext.clone(),
+                valid_ext,
             ),
             (
-                valid_result.clone(),
+                valid_result,
                 json!({
                     "list": [
                         {"code": 0, "msg": "OK"},

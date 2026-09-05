@@ -4,6 +4,7 @@
 //! tape ends.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -594,35 +595,36 @@ impl SweepReport {
             out.push_str(&run.line());
             out.push('\n');
             for check in run.failures() {
-                out.push_str(&format!("    {}: {}\n", check.name, check.detail));
+                let _ = writeln!(out, "    {}: {}", check.name, check.detail);
             }
             for reason in &run.restart_reasons {
-                out.push_str(&format!("    restarted: {reason}\n"));
+                let _ = writeln!(out, "    restarted: {reason}");
             }
             for note in &run.notes {
-                out.push_str(&format!("    note: {note}\n"));
+                let _ = writeln!(out, "    note: {note}");
             }
             if !run.faults.is_empty() {
                 let faults: Vec<String> =
                     run.faults.iter().map(|(k, v)| format!("{k}={v}")).collect();
-                out.push_str(&format!("    injected: {}\n", faults.join(" ")));
+                let _ = writeln!(out, "    injected: {}", faults.join(" "));
             }
         }
         for replay in &self.replays {
             if replay.identical {
-                out.push_str(&format!("seed {:>6}  replay identical\n", replay.seed));
+                let _ = writeln!(out, "seed {:>6}  replay identical", replay.seed);
             } else {
-                out.push_str(&format!(
-                    "seed {:>6}  REPLAY DIFFERS  {} vs {}\n",
+                let _ = writeln!(
+                    out,
+                    "seed {:>6}  REPLAY DIFFERS  {} vs {}",
                     replay.seed,
                     &replay.first_wal_sha256[..12],
                     &replay.second_wal_sha256[..12]
-                ));
+                );
             }
         }
         let failed = self.runs.iter().filter(|r| !r.passed()).count()
             + self.replays.iter().filter(|r| !r.identical).count();
-        out.push_str(&format!("{} seeds, {} failed\n", self.runs.len(), failed));
+        let _ = writeln!(out, "{} seeds, {} failed", self.runs.len(), failed);
         out
     }
 }

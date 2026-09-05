@@ -649,21 +649,22 @@ impl FeedWorker {
         candidates
     }
 
-    fn quarantine(&mut self, topic: String, reason: &str) {
+    fn quarantine(&mut self, topic: &str, reason: &str) {
         let retry_epoch = self.epochs.saturating_add(QUARANTINE_REPROBE_EPOCHS);
         let retry_at = Instant::now() + self.timing.quarantine_reprobe_interval;
         let first = self
             .quarantined_topics
-            .insert(topic.clone(), retry_epoch)
+            .insert(topic.to_string(), retry_epoch)
             .is_none();
-        self.quarantine_reprobe_at.insert(topic.clone(), retry_at);
-        self.active_topics.remove(&topic);
-        self.active_quote_last_event_at.remove(&topic);
+        self.quarantine_reprobe_at
+            .insert(topic.to_string(), retry_at);
+        self.active_topics.remove(topic);
+        self.active_quote_last_event_at.remove(topic);
         self.topic_status
             .lock()
             .expect("market topic status lock is poisoned")
             .quarantined
-            .entry(topic.clone())
+            .entry(topic.to_string())
             .or_insert_with(Instant::now);
         if first {
             warn!(%topic, %reason, retry_epoch, "market topic quarantined; other topics remain live");
@@ -709,7 +710,7 @@ impl FeedWorker {
                     match subscription_refusal_kind(refusal.code, &refusal.message) {
                         SubscriptionRefusalKind::Topic => {
                             if group.len() == 1 {
-                                self.quarantine(group[0].clone(), &refusal.message);
+                                self.quarantine(&group[0], &refusal.message);
                             } else {
                                 let right = group[group.len() / 2..].to_vec();
                                 let left = group[..group.len() / 2].to_vec();
@@ -944,7 +945,7 @@ impl FeedWorker {
             Err(FeedError::BadMessage(error)) => Err(FeedError::BadMessage(error)),
             Err(FeedError::Closed) => Err(FeedError::Closed),
             Err(error) => {
-                self.quarantine(topic.clone(), &error.to_string());
+                self.quarantine(&topic, &error.to_string());
                 warn!(%topic, %error, "stale quote resubscribe failed; scheduled another retry");
                 Ok(())
             }
@@ -1001,7 +1002,7 @@ impl FeedWorker {
                 }
                 Err(FeedError::Closed) => return Err(FeedError::Closed),
                 Err(error) => {
-                    self.quarantine(topic.clone(), &error.to_string());
+                    self.quarantine(&topic, &error.to_string());
                     warn!(%topic, %error, "market topic re-probe failed; preserving healthy topics");
                 }
             }
@@ -1456,7 +1457,9 @@ fn subscription_ack(message: &Message) -> Option<SubscriptionAck> {
 
 fn operation_ack(message: &Message, operation: &str) -> Option<SubscriptionAck> {
     let envelope = control_envelope(message)?;
-    let success = envelope.success.unwrap_or(envelope.ret_code == Some(0))
+    let success = envelope
+        .success
+        .unwrap_or_else(|| envelope.ret_code == Some(0))
         && envelope.ret_code.is_none_or(|code| code == 0);
     (envelope.op == Some(operation)).then(|| SubscriptionAck {
         request_id: envelope.req_id.unwrap_or("").to_owned(),

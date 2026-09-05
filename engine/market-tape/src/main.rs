@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "record" => {
             let path = config_path.ok_or("missing --config <path>")?;
             let config = CaptureConfig::load_from_file(&path)?;
-            let root = root_override.unwrap_or(config.storage.root.clone());
+            let root = root_override.unwrap_or_else(|| config.storage.root.clone());
             let max_bytes = config.storage.segment_max_mb.saturating_mul(1024 * 1024);
 
             run_recorder(config, root, max_bytes).await
