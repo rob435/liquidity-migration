@@ -9,9 +9,11 @@ edit STATE.md to match.
 
 - **2026-09-05 22:41 UTC — Incident `mainnet-4117d27a32d02421`: both engines
   were stopped four minutes after the deploy of `80dc5c69`, and the funded
-  engine is down with `REAL_MONEY` armed. The engines wrote about 7 GB in the
-  five minutes they ran; the paged isolated-callback path puts a full
-  all-symbol market snapshot in the log for every callback. No code changed.**
+  engine was down with `REAL_MONEY` armed for 7 min 14 s. The owner rolled the
+  host back to `cece1d9f` and both engines are running again. The engines wrote
+  about 7 GB in the five minutes they ran on `80dc5c69`; the paged
+  isolated-callback path puts a full all-symbol market snapshot in the log for
+  every callback. No code changed.**
   - Deploy run `33996136208` (`deploy` at `80dc5c69`, dispatched 22:31:11 UTC):
     `deploy-ok commit=80dc5c69…` at 22:37:10, every mainnet precondition
     `[PASS]`, `real-money armed`, `native-state-ok realm=mainnet
@@ -44,12 +46,14 @@ edit STATE.md to match.
     (heartbeats 56 s and 59 s), 0 failed units, `/` at `58G used, 55G avail,
     52%`.
   - Free space fell 62 GB → 55 GB in the 5 min 3 s between the two readings,
-    about 7 GB, against 44% used at 22:17:54 and 45% at 22:37:11. Attribution
-    to the engine logs is arithmetic, not a direct measurement — the recorders
-    also write to `/` — and `du -sh /var/lib/liquidity-migration-engine{,-mainnet}`
-    would settle it. Spread over the ~4.2 minutes both engines ran it is about
-    14 MB/s per engine, against the pre-paging demo rate of one 268 MB segment
-    every 2.6 h (0.03 MB/s) recorded in the 22:20 UTC entry below.
+    about 7 GB, against 44% used at 22:17:54 and 45% at 22:37:11. The baseline
+    is not zero: on the rolled-back host, with both engines running on
+    `cece1d9f`, `/` went 58G → 59G used between 22:48:33 and 22:55:03, about
+    1 GB in 6 min 30 s. So the paged run added roughly 5.5 GB over baseline in
+    five minutes — about 18 MB/s, 9 MB/s per engine, seven times the current
+    whole-host rate. Attribution to the engine logs is arithmetic, not a direct
+    measurement: `du -sh /var/lib/liquidity-migration-engine{,-mainnet}` and the
+    segment mtimes settle it.
   - What writes it: `Engine::service_strategy_callbacks`
     (`engine/engine-core/src/engine/strategy_callbacks.rs:111`) appends
     `WalRecord::StrategyCallbackPrepared { input }` and a barrier for every
@@ -68,24 +72,35 @@ edit STATE.md to match.
     backtest` boot through `Engine::boot_as` — `CallbackExecution::Embedded` —
     so neither harness exercises the paged path that `engine run` uses in
     production; only `engine-core/tests/integration/strategy_process.rs` does.
-  - Rollback is not available. Since 22:37 both engine logs hold
-    `strategy_callback_source`, `strategy_callback_queued`,
-    `strategy_callback_prepared` and `identity_state` frames; none of those
-    four variants exists in `cece1d9f`'s `WalRecord`, which is
-    `#[serde(tag = "kind")]` with no unknown-variant fallback. `mode=rollback`
-    would fail on `unknown variant` the way the demo rollback failed at 22:14.
-  - No code changed and no deploy was dispatched. The fleet is stopped, so
-    nothing is burning disk now; restarting it is the owner's call, because the
-    stop looks deliberate and a `deploy` dispatch would restart both engines.
-    Taking the snapshot out of the log, or narrowing it to the symbols a
-    callback concerns, changes the funded engine's recovery contract and what
-    the isolated worker is shown — a strategy change, not a refactor — so it is
-    proposed here rather than pushed at speed onto a funded account.
-  - Owner action: (1) say whether the 22:41 stop was yours; (2) take
-    `journalctl -S 22:40 -U 22:42` and `du -sh` on the two engine state
-    directories if not; (3) decide between narrowing the prepared snapshot and
-    reverting the paged callback path before the funded engine runs on
-    `80dc5c69` again.
+  - Resolved by the owner, not by this routine: `rollback` run `33996764691`,
+    dispatched 22:44:26 UTC, `deploy-ok commit=cece1d9f…` at 22:48:32. Both
+    realms handed over with every mainnet precondition `[PASS]` and
+    `real-money armed`; the funded engine's log verified under the `cece1d9f`
+    binary (`native strategy state verified`, `native-state-ok realm=mainnet
+    result=already-complete`) and `heartbeat-ok
+    unit=liquidity-migration-engine-mainnet.service age=6s`. The funded engine
+    was inactive 22:41:18 → 22:48:32, 7 min 14 s. Contrary to what this entry
+    first said, `cece1d9f` reads a log written by `80dc5c69` without
+    complaint — the demo rollback's `unknown variant identity_state` at 22:14
+    did not repeat, and the reason it did not is not established here.
+  - `diagnose` run `33997230259` at 22:55:03 UTC: deployed `cece1d9f`,
+    rollback target `80dc5c69`, `real-money armed`, both engines `active` with
+    heartbeats 4 s (demo) and 1 s (mainnet), both signal workers active, 0
+    failed units, `/` at 53%. Two more incident routines fired at 22:49:34 on
+    `is activating` during the handover; those are the same matter and get no
+    entry.
+  - No code changed and this routine dispatched nothing but `diagnose`.
+    `80dc5c69` remains the rollback target on the host, so a `deploy` of `main`
+    puts the paged path back on the funded account. Taking the snapshot out of
+    the log, or narrowing it to the symbols a callback concerns, changes the
+    funded engine's recovery contract and what the isolated worker is shown — a
+    strategy change, not a refactor — so it is proposed here rather than pushed
+    at speed onto a funded account.
+  - Owner action: (1) confirm the 22:41 stop was yours, or take `journalctl -S
+    22:40 -U 22:42` on the host; (2) `du -sh
+    /var/lib/liquidity-migration-engine{,-mainnet}` to pin the 7 GB on the
+    logs; (3) decide between narrowing the prepared snapshot and reverting the
+    paged callback path before `main` is deployed to the funded account again.
 
 - **2026-09-05 22:20 UTC — Incident `demo-b161102514734dd5`: the deploy of
   `60bb0abb` took the demo realm down for 949 s. The takeover's verify replayed the whole 6.6 GB
