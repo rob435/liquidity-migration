@@ -6,7 +6,118 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
-- **2026-09-05 01:32 UTC — The fifth page from the same free-space floor, and
+- **2026-09-05 01:53 UTC — The sixth page from the same free-space floor, and
+  it measures a fourth defect the three merged fixes do not reach: when a
+  retention pass deletes and the gate is still shut, nothing runs another
+  pass for a full `RETENTION_INTERVAL_SECONDS`. Bybit's 01:40:59 pass removed
+  16 tape files, the gate stayed shut, and its own pruner did not walk again
+  for 306.2 s — the block ended 180 s later on the *other* recorder's pass.
+  Fixed in `market_tape/record.py:1128-1174`, tested, pushed to `main`.**
+  - Incident `host-ecbac293ecc90d5e`, scope `host`, host `ip-208-84-103-4`,
+    new critical refs `capture-disk` and `capture-disk:forward-market-binance`
+    — the same incident id, refs and alert text as the 22:54, 23:50, 00:01,
+    00:36, 00:57 and 01:32 pages. Exact alert text: `CRITICAL recorder storage
+    is blocked; frames are counted but not written` and `CRITICAL recorder
+    forward-market-binance storage is blocked; frames are counted but not
+    written`. Level-triggered on `disk_blocked is True`
+    (`scripts/runtime/check_fleet_liveness.py:431`).
+  - **The funded engine is not implicated and the host has not moved.** No
+    engine, worker or timer is named; both units are `market_tape` recorders,
+    research tape outside the order path. Pids are unchanged across all six
+    pages — 2259813 (Bybit), 2263691 (Binance) — so neither recorder has
+    restarted and the host still runs `65ee75a7`. The 25 GiB floor is the
+    reservation held for mainnet's WAL and it held.
+  - **The host is still on the un-fixed code, and the payload proves it.**
+    Retention passes in the window are on the bare 300-second clock, nothing
+    woken by a crossing: Bybit at 01:40:59.718, 01:46:05.918 and 01:51:11.497
+    (306.200 s and 305.579 s apart), Binance at 01:39:02.053, 01:44:04.750 and
+    01:49:07.376 (302.697 s and 302.626 s). `1d8fad9a`, `d275885a` and
+    `fd604613` are all still merged and undeployed.
+  - **The new defect, and where it is.** `_retention_loop` made one pass and
+    then waited on `prune_now` for `RETENTION_INTERVAL_SECONDS`
+    (`record.py:1128-1132` before this change). While the writer is blocked
+    nothing sets that event again: `_maintenance` arms it on the crossing
+    only — `if blocked and not self.disk_blocked` (`record.py:1189`) — and
+    `_write_loop` never reaches an append to fail on, because it returns at
+    the `if self.disk_blocked` gate before trying (`record.py:1088-1090`). So
+    a pass that deletes and leaves the gate shut is the end of the matter for
+    five minutes, and the one thread that can free room is asleep for all of
+    it.
+  - **Measured on this payload, on the Bybit unit, to the millisecond.**
+
+    | Line (UTC) | `disk_blocked` | `disk_dropped` | `rows` |
+    | :--- | :--- | ---: | ---: |
+    | 01:40:35.664 | `True` | 7 826 376 | 51 600 612 |
+    | 01:40:59.718 | *`retention removed 16 tape files`* | | |
+    | 01:41:05.685 | `True` | 7 904 389 | 51 600 612 |
+    | 01:41:35.706 | `True` | 7 986 818 | 51 600 612 |
+    | 01:42:05.722 | `True` | 8 067 039 | 51 600 612 |
+    | 01:42:35.739 | `True` | 8 151 042 | 51 600 612 |
+    | 01:43:05.771 | `True` | 8 237 030 | 51 600 612 |
+    | 01:43:35.791 | `True` | 8 320 865 | 51 600 612 |
+    | 01:44:04.750 | *Binance's pass: `retention removed 10 tape files`* | | |
+    | 01:44:05.809 | `False` | 8 404 264 | 51 600 642 |
+    | 01:44:35.826 | `True` | 8 404 297 | 51 676 000 |
+
+    Its own pass deleted 16 files at 01:40:59.718 and the gate was still shut
+    5.97 s later. Over the next 180.1 s the unit discarded 499 875 frames
+    (2 776/s) and wrote 30 rows. The gate then opened 1.06 s after *Binance's*
+    01:44:04.750 pass — the shared filesystem — and in the very next interval
+    the unit wrote 75 358 rows (2 512/s). At that rate the 180.1 s carried
+    about 452 000 rows and instead carried 30. Bybit's own pruner did not walk
+    again until 01:46:05.918, 306.2 s after the pass that fell short.
+  - **What the payload cannot separate, and why the fix does not need it to.**
+    Two things can leave a pass short of the gate. The deployed pruner stops
+    deleting on the exact floor `writable()` unblocks on, so the neighbouring
+    recorder can re-cross it in seconds — that is `d275885a`. And `prune`
+    decides by free space counted from the sizes it unlinked while
+    `writable()` reads the kernel's, so the two disagree while the filesystem
+    is still releasing blocks (`storage.py:362-365` says as much). At 6-second
+    resolution this payload cannot say which one ended the 01:40:59 pass
+    short. It does not have to: either way the pass fell short, and the defect
+    is that nothing then ran a second one. The fix removes the five-minute
+    sleep, so the cause of a short pass costs a walk instead of a window.
+  - **The fix.** `_retention_pass` now returns whether it is owed a successor
+    — it deleted, and the writer is still blocked — and `_retention_loop`
+    keeps passing while it is (`record.py:1128-1174`). The pruner owns the
+    walk, so the pass that fell short is what runs the next one. The retry
+    ends on the pass that deletes nothing, so a disk filled by something other
+    than tape is walked once and not spun on, and the file set is finite, so
+    the loop terminates. A pass that cannot delete (`OSError`) and a pass on
+    an unblocked disk both return `False` and change nothing.
+  - **The test.**
+    `tests/market_tape/test_record.py::test_a_pass_that_deletes_and_leaves_the_gate_shut_passes_again_at_once`
+    pins `RETENTION_INTERVAL_SECONDS` to 3600 s so a second pass can only come
+    from the first, blocks the gate, and lets two passes delete while the
+    kernel still refuses before the third reaches the floor. It asserts the
+    gate opens, then asserts a pass that deletes nothing returns `False` so
+    the retry is bounded. Without the fix it fails on the first assertion:
+    `AssertionError: the pruner slept with the gate shut after 1 pass(es)`.
+  - Loss, cumulative and never reset. Both windows are cut by the 40-line
+    payload, so every figure is a lower bound.
+
+    | Unit | First line in payload | Last line | Added since the 01:32 entry |
+    | :--- | ---: | ---: | ---: |
+    | Bybit `forward-capture` | 7 658 360 (01:39:05) | 9 513 202 (01:53:06) | 2 941 861 |
+    | Binance `forward-capture-binance` | 2 503 562 (01:36:31) | 3 341 057 (01:53:02) | 1 094 418 |
+    | **Pair** | | **12 854 259** | **4 036 279** |
+
+    Over the 1 291 s since the 01:32 entry's last line that is 3 127 frames a
+    second — back to the 00:36–00:57 window's 3 260/s. The 01:32 entry
+    recorded the interval between crossings lengthening; it has closed again,
+    and the pair has now discarded more tape in the 21 minutes since that
+    entry than in the 34 minutes before it.
+  - Checks run: `pytest tests/market_tape tests/scripts` (504 passed),
+    `scripts/dev.sh check` (1459 passed), `ruff`, `mypy`, and `cargo test`
+    (all green). Three failures are this container, not this change, which
+    touches only `market_tape/record.py`: two in
+    `tests/scripts/test_observability_hygiene.py` are the missing `rsync`
+    binary — `backup_state.sh` exits 2 with `backup: rsync is not installed`
+    before reaching either assertion — and
+    `tests/repo/test_dev_tooling.py::test_repository_doctor_emits_machine_readable_state`
+    reads `drift` where it wants `matched`, because this container had no
+    `.venv` and the one built for these checks resolved off the lock.
+    ShellCheck is not installed here; CI runs it. The fifth page from the same free-space floor, and
   the first one that measures a third defect the two merged fixes do not
   reach: the pruner frees room but cannot open the writer's gate, so the
   recorder keeps discarding frames onto a disk that already has space until

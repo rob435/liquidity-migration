@@ -1127,29 +1127,51 @@ class Recorder:
 
     def _retention_loop(self) -> None:
         while not self.stop.is_set():
-            self._retention_pass()
+            # A pass that deleted and left the gate shut is owed a successor
+            # now, not in `RETENTION_INTERVAL_SECONDS`: while the writer is
+            # blocked nothing wakes this thread again — `_maintenance` arms
+            # `prune_now` on the crossing only, and `_write_loop` never
+            # reaches an append to fail on. The retry ends on the pass that
+            # deletes nothing, so a disk filled by something other than tape
+            # is walked once rather than spun on.
+            owed = True
+            while owed and not self.stop.is_set():
+                owed = self._retention_pass()
             self.prune_now.wait(RETENTION_INTERVAL_SECONDS)
             self.prune_now.clear()
 
-    def _retention_pass(self) -> None:
+    def _retention_pass(self) -> bool:
         """One retention pass, on its own thread. A failed pass is the next
-        pass's problem: this thread must outlive an unlinkable file."""
+        pass's problem: this thread must outlive an unlinkable file.
+
+        Returns whether this pass is owed a successor: it deleted, and the
+        writer is still blocked.
+        """
 
         try:
             deleted = self.retention.prune()
         except OSError as exc:
             logging.error("tape retention pass failed: %s", exc)
-            return
+            return False
         if not deleted:
-            return
+            return False
         logging.info("retention removed %d tape files", len(deleted))
+        if not self.disk_blocked:
+            return False
         # `disk_blocked` gates every frame in `_write_loop`, and the pass that
         # frees room is the only thing that can end the block, so it is what
         # opens the gate. Leaving that to `_maintenance` costs a full
         # `status_interval_seconds` of tape on a disk that already has space.
-        if self.disk_blocked and self.retention.writable():
-            self.disk_blocked = False
-            logging.info("capture storage unblocked; writing resumed")
+        #
+        # `prune` stops on free space counted from the sizes it unlinked;
+        # `writable()` reads the kernel's. The two disagree while the
+        # filesystem is still releasing blocks, so a pass can delete, believe
+        # it reached the floor, and still leave the gate shut.
+        if not self.retention.writable():
+            return True
+        self.disk_blocked = False
+        logging.info("capture storage unblocked; writing resumed")
+        return False
 
     def _maintenance_loop(self) -> None:
         while not self.stop.is_set():

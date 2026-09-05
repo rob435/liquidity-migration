@@ -1139,6 +1139,63 @@ def test_a_pass_that_frees_room_opens_the_writer_gate_instead_of_the_next_status
     assert recorder.disk_dropped_frames == 0
 
 
+def test_a_pass_that_deletes_and_leaves_the_gate_shut_passes_again_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`prune` stops on the free space it counts from the sizes it unlinked;
+    `writable()` reads the kernel's. While the filesystem is still releasing
+    blocks the two disagree, so a pass can delete, believe it reached the
+    floor, and leave the gate shut. Nothing else wakes the pruner then —
+    `_maintenance` arms `prune_now` on the crossing only, and `_write_loop`
+    never reaches an append to fail on — so the pass that fell short must be
+    what runs the next one. Sleeping out `RETENTION_INTERVAL_SECONDS` instead
+    throws away the tape the pass already made room for."""
+
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+    # Long enough that a second pass inside it can only come from the first.
+    monkeypatch.setattr(record, "RETENTION_INTERVAL_SECONDS", 3600.0)
+    # What a crossing leaves behind, and the developer box's own free space
+    # pinned under the floor so `writable()` reads the code under test.
+    recorder.disk_blocked = True
+    recorder.retention.min_free_bytes = 1 << 62
+
+    passes: list[int] = []
+    third = threading.Event()
+
+    def short(now: float | None = None) -> list[Path]:
+        passes.append(len(passes))
+        # Two passes the kernel does not yet agree with, then one it does.
+        if len(passes) == 3:
+            recorder.retention.min_free_bytes = 1
+            third.set()
+        return [Path(f"2027-01-15/10/BTCUSDT/segment-{len(passes):06d}.jsonl.zst")]
+
+    monkeypatch.setattr(recorder.retention, "prune", short)
+    # A daemon thread, so a failed assertion below reports itself rather than
+    # the teardown that a missing pass would trip over.
+    pruner = threading.Thread(target=recorder._retention_loop, name="test-retention", daemon=True)
+    pruner.start()
+
+    assert third.wait(5.0), f"the pruner slept with the gate shut after {len(passes)} pass(es)"
+    deadline = time.monotonic() + 5.0
+    while recorder.disk_blocked and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert recorder.disk_blocked is False, "the pass that reached the floor did not open the gate"
+
+    # The retry ends where it must: a pass that deletes nothing does not walk
+    # the tape again, so a full disk holding no tape is not spun on.
+    assert recorder._retention_pass() is False
+    monkeypatch.setattr(recorder.retention, "prune", lambda now=None: [])
+    recorder.disk_blocked = True
+    recorder.retention.min_free_bytes = 1 << 62
+    assert recorder._retention_pass() is False
+
+    recorder.stop.set()
+    recorder.prune_now.set()
+    pruner.join(5.0)
+    assert not pruner.is_alive()
+
+
 def test_a_retention_pass_that_cannot_delete_leaves_the_pruner_thread_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
