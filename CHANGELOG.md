@@ -7,6 +7,37 @@ incident, or a check that changed nothing gets no entry. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 22:48 UTC — The rollback printed `deploy-ok` over a crash-looping
+  fleet, and the workers that replaced their quarantined state started their
+  sequences at 0. Two faults left by `mainnet-4117d27a32d02421` below, neither
+  yet addressed in code.**
+  - `wait_fresh_heartbeat` (`scripts/deploy_vps_live.sh:242`) samples
+    `systemctl is-active` and the heartbeat mtime once per attempt. A unit on
+    `Restart=always` is `active` for the moments it lives and rewrites its
+    heartbeat on each boot, so a crash loop satisfies both tests. Rollback run
+    `33996764691` logged `heartbeat-ok
+    unit=liquidity-migration-signal-worker-mainnet.service age=5s` at 22:48:19
+    and `deploy-ok commit=cece1d9f…` at 22:48:32, while its own fleet summary in
+    the same second printed `signal-worker-demo activating heartbeat 1s` and
+    `signal-worker-mainnet activating heartbeat 2s`. The gate cannot tell a
+    running unit from a restarting one, so a deploy or rollback reports success
+    over either.
+  - The workers that started clean at 22:54 started their sequences at 0.
+    `WorkerState::new` sets `last_input_sequence`, `long_output_sequence` and
+    `carry_output_sequence` to 0 (`engine/signal-worker/src/worker.rs:318`), and
+    the boot path reconciles only against `SpoolWriter::inventory`, which
+    carries files, bytes and classes but no sequence
+    (`engine/signal-worker/src/store.rs:280`). The engine tracks a frontier per
+    source, so a worker republishing from 0 emits sequences the engine has no
+    reason to accept, and every unit still reads healthy — the same shape of
+    silence as the gate above. "Runs without error" is not evidence the funded
+    engine is taking its signals. The reading that settles it is the mainnet
+    worker's `long_output_sequence` and `carry_output_sequence` against the
+    engine's frontier for that source, or simply whether a signal observation
+    has reached the mainnet WAL since 22:54.
+  - Neither fix is written: one is a deploy gate and one is a boot-time
+    reconciliation, both guards, so both are the owner's call.
+
 - **2026-09-05 22:50 UTC — Incident `mainnet-4117d27a32d02421`: the deploy of
   `80dc5c69` reached both
   realms and the new binary's isolated strategy processes wrote the WAL at
