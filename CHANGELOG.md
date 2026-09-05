@@ -78,6 +78,12 @@ edit STATE.md to match.
     therefore the only evidence, and it does not name the symbol or say which
     field differed. If the rate itself moved rather than the interval, the
     line will come back after the deploy, now naming the symbol.
+  - **The deploy of the fix was refused too — the thirty-seventh.** Run
+    `33961817264`, `deploy` on `main@7e6fcb93`, created 10:52:45 and dead
+    10:52:50 UTC: `ci`, `rust` and `Deploy artifact` all created 10:52:47 and
+    failed 10:52:49, none alive the ~2 s needed to check out the repository,
+    `diagnose`, `disarm`, the release-test job and `vps` all skipped, `vps`
+    never scheduled against a runner.
   - **Owner action, in order.** Make the repository public again (or register
     a private runner), then
     `gh workflow run vps-deploy.yml --ref main -f mode=deploy`, then
