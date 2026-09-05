@@ -7,6 +7,73 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 08:40 UTC — The local tape becomes a sliding window: the
+  uploader deletes each hour it has shipped once the hour is 24 h old.**
+  Owner-directed ("auto delete the oldest data after it's been sent to the
+  drive like a sliding window"). Root cause of the whole `capture-disk`
+  incident is that nothing ever removed tape the Drive already held: the
+  recorders kept every hour until `retention_days` = 30 or `max_disk_gb`
+  (18 + 60 GB) or the 25 GiB `min_free_disk_gb` floor forced it, so the
+  filesystem lived at the floor and every other writer on it (the uploader's
+  staging, the WAL, the journal) pushed the recorders into discarding frames.
+  - **Where.** `market_tape pack` (`market_tape/pack.py`), the hourly
+    `liquidity-migration-market-tape-upload.service` run, after its uploads
+    and inside `upload.lock`. It is the process that holds the proof: a ledger
+    row in `<state-dir>/uploaded-tapes.jsonl` exists only after the Drive's
+    size and MD5 matched the upload.
+
+    | Rule | Value |
+    | :--- | :--- |
+    | Flag | `--keep-hours` (float, ≥ 0, default 24). The unit passes `--keep-hours 24`. |
+    | Licence | `f"{remote}/{candidate.remote_name}" in ledger` — nothing else. |
+    | When | `now >= candidate_end + keep_hours * 3600` (`candidate_end`: hour end, or day end for a legacy day). |
+    | Goes | Every `*.zst` under the hour except `_meta/`; empty directories after. |
+    | Stays | `_meta/` (daily snapshot cadence; the recorder prunes it by age), unledgered hours, hours inside the window. |
+    | Receipt | `segment_deleted` / `reason=shipped` / `remote_path` per file, appended to the recorder's `manifest.jsonl` when it exists. |
+    | Stamp | `keep_hours`, `pruned_hours`, `pruned_bytes` in `market-tape-upload.last-success`. |
+    | `--dry-run` | Lists `would prune <tape> <hour>` alongside `would pack`. |
+
+  - **Unit.** `deploy/systemd/liquidity-migration-market-tape-upload.service`:
+    `--keep-hours 24` on `ExecStart`, and both tape roots added to
+    `ReadWritePaths` (`ProtectSystem=strict` made them read-only). The run is
+    `root`, so no ownership change is needed.
+  - **Recorder.** `Retention.prune` (`market_tape/storage.py:408-415`) now
+    treats a `FileNotFoundError` on unlink as a file the uploader took first:
+    it drops it from `total`, does not credit `free`, and goes on. Before, one
+    such file raised out of the pass, `_retention_pass` logged `tape retention
+    pass failed` and the pass's remaining deletions never happened.
+  - **Steady state.** The host holds ≤ 24 h of tape per recorder plus the
+    hour in flight. The recorders' `retention_days`, `max_disk_gb` and
+    `min_free_disk_gb` are unchanged and remain the backstop for a tape the
+    Drive is not taking (rclone failure, Drive full): an hour the Drive did not
+    confirm is never deleted by this change.
+  - **First run on the host.** Every ledgered hour older than 24 h that is
+    still on disk goes in one run — up to 30 days of both tapes — as one
+    `pruned shipped <hour> files=N bytes=B` line each. Preview it first:
+
+    ```bash
+    sudo /opt/liquidity-migration/.venv/bin/python -m market_tape pack \
+        --tape bybit-linear=/var/lib/liquidity-migration/forward-market \
+        --tape binance-usdm=/var/lib/liquidity-migration/forward-market-binance \
+        --remote-base gdrive:LiquidityMigration/market-tape \
+        --state-dir /var/lib/liquidity-migration/market-tape-upload \
+        --stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success \
+        --keep-hours 24 --dry-run
+    ```
+  - **Tests** (`tests/market_tape/test_pack.py`, `test_tape_storage.py`), all
+    four failing on the previous source and passing on this one:
+    `test_a_shipped_hour_leaves_the_disk_once_it_is_older_than_the_window`
+    (ships hours 08 and 10 at 11:10 with `--keep-hours 1`; 08's segments go in
+    the same run with `_meta` kept and receipts written, 10 stays, and goes on
+    the 12:20 run with no re-upload),
+    `test_the_window_only_deletes_what_the_ledger_says_the_drive_holds` (a
+    month-old unledgered hour is untouched at `keep_hours=0`),
+    `test_a_negative_window_is_refused`,
+    `test_a_dry_run_names_the_shipped_hours_the_window_would_take`, and
+    `test_a_pass_survives_a_file_another_process_unlinked_first`.
+  - Docs: `market_tape/README.md` §Local Sliding Window,
+    `docs/operations.md` unit table and §7.
+
 - **2026-09-05 08:09 UTC — The thirty-sixth refused deploy.** Run
   `33954490246`, `deploy` on `main@38b3c047`, created 08:09:24 UTC and dead at
   08:09:30. `ci` 08:09:26 → 08:09:28, `rust` 08:09:26 → 08:09:29 and `Deploy

@@ -405,7 +405,14 @@ class Retention:
             if not expired and not (pressured and not snapshot):
                 continue
             relative = path.relative_to(self.root)
-            path.unlink()
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                # `market_tape pack` deletes shipped hours from its own process;
+                # a file it took between this pass's stat and this unlink is
+                # not this pass's room, and it must not end the pass.
+                total -= size
+                continue
             total -= size
             free += size
             self.last_freed_bytes += size

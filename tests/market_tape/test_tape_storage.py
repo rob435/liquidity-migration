@@ -456,3 +456,36 @@ def test_a_daily_cadence_waits_for_the_day_and_an_hourly_one_for_the_hour(tmp_pa
     assert not daily.due(HOUR_10 + HOUR)
     assert daily.due(HOUR_10 + 24 * HOUR)
     assert hourly.due(HOUR_10 + HOUR)
+
+
+def test_a_pass_survives_a_file_another_process_unlinked_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`market_tape pack` deletes shipped hours from its own process. A file it
+    takes between this pass's stat and unlink must cost the pass nothing but
+    that file: the pass goes on, and the receipt is not written twice."""
+
+    manifest = Manifest(tmp_path)
+    directory = tmp_path / "2027-01-15" / "10" / "AGIUSDT"
+    directory.mkdir(parents=True)
+    taken = directory / "segment-000000.jsonl.zst"
+    ours = directory / "segment-000001.jsonl.zst"
+    taken.write_bytes(b"gone-first")
+    ours.write_bytes(b"ours")
+    os.utime(taken, (1_000_000, 1_000_000))
+    os.utime(ours, (1_000_001, 1_000_001))
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == taken:
+            real_unlink(self)  # the other process gets there first
+            raise FileNotFoundError(str(self))
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    retention = Retention(tmp_path, manifest, retention_days=36_500, max_bytes=0, min_free_bytes=1)
+    deleted = retention.prune(1_000_100.0)
+
+    assert deleted == [ours.relative_to(tmp_path)]
+    assert not taken.exists() and not ours.exists()
+    receipts = [json.loads(line) for line in (tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [receipt["path"] for receipt in receipts] == [str(ours.relative_to(tmp_path))]

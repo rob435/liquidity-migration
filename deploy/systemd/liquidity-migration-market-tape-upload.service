@@ -13,12 +13,16 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=RCLONE_CONFIG=/var/lib/liquidity-migration/market-tape-upload/rclone.conf
 Environment=RCLONE_CONFIG_SEED=/etc/liquidity-migration/rclone.conf
 # One run ships every tape; a tape whose recorder has not started yet is skipped.
+# --keep-hours is the local sliding window: a shipped hour's segments are
+# deleted from the recorder's root once it has been over this long. An hour
+# not in the ledger is never deleted here.
 ExecStart=/opt/liquidity-migration/.venv/bin/python -m market_tape pack \
     --tape bybit-linear=/var/lib/liquidity-migration/forward-market \
     --tape binance-usdm=/var/lib/liquidity-migration/forward-market-binance \
     --remote-base gdrive:LiquidityMigration/market-tape \
     --state-dir /var/lib/liquidity-migration/market-tape-upload \
-    --stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success
+    --stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success \
+    --keep-hours 24
 KillMode=control-group
 # A legacy day repack can be several gigabytes; still bounded under the hourly
 # cadence so a hung run cannot stack.
@@ -26,7 +30,8 @@ TimeoutStartSec=3000
 
 StateDirectory=liquidity-migration/market-tape-upload
 StateDirectoryMode=0700
-ReadWritePaths=/var/lib/liquidity-migration/market-tape-upload /var/lib/liquidity-migration/receipts
+# The tape roots are writable so the run can delete the hours it has shipped.
+ReadWritePaths=/var/lib/liquidity-migration/market-tape-upload /var/lib/liquidity-migration/receipts /var/lib/liquidity-migration/forward-market /var/lib/liquidity-migration/forward-market-binance
 UMask=0027
 NoNewPrivileges=true
 PrivateTmp=true
