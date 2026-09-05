@@ -7,6 +7,22 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 04:26 UTC — The twenty-third refused deploy. Dispatched as the
+  probe the routine can actually run: a refusal costs 7 s and no billed
+  job-minutes, and a success would have installed nine merged fixes, so the
+  dispatch is worth more than the duplicate log line it costs.** Run
+  `33944567443`, `deploy` on `main@1cf19492`, created 04:26:41 UTC and failed
+  04:26:48 with the identical account-payment signature as the twenty-two
+  before it: `rust` dead 04:26:44 → 04:26:46, `ci` and `Deploy artifact`
+  04:26:44 → 04:26:47, and `disarm`, `diagnose`, the release-test job and
+  `vps` all skipped. Every failed job's log download returns HTTP 404, so no
+  job started and nothing reached the host. **Twenty-three consecutive
+  refusals since 19:17 UTC on 2026-09-04.** Deployed commit stays `65ee75a7`;
+  eight recorder fixes and the uploader's leak fix remain merged and
+  undeployed. The SSH path needs no runner:
+  `EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db scripts/ops.sh
+  deploy`.
+
 - **2026-09-05 04:19 UTC — The thirteenth page from the same free-space floor.
   No code change and no ninth defect: every mechanism in this payload is the
   deployed behaviour of the eight merged, undeployed fixes. Two things are new
