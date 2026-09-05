@@ -7,6 +7,53 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 08:36 UTC — Deployed: `cece1d9f` on the host, the first deploy
+  to reach it since `65ee75a7`.** Run `33955442044`, `deploy` on
+  `main@cece1d9f`, created 08:30:19 UTC, `vps` 08:33:28 → 08:36:52, every job
+  green. The thirty-six refusals since 19:17 UTC on 2026-09-04 ended when the
+  owner made the repository public: GitHub Actions is free for public
+  repositories, so the account-payment block no longer applied.
+
+    | Step (vps job) | Time | Result |
+    | :--- | :--- | :--- |
+    | Pre-built release binaries | 08:33:51 | verified, host compilation skipped |
+    | `forward-capture` (Bybit recorder) | 08:34:52 | `restarted`, pid 2383127 |
+    | `forward-capture-binance` | 08:35:35 | `restarted`, pid 2387253 |
+    | Demo realm native state | 08:36:08 | `already-complete`; engine + worker heartbeats ok |
+    | Mainnet preconditions | 08:36:16 | every `[PASS]`; `REAL_MONEY: armed by the owner` |
+    | Mainnet handover | 08:36:17 → 08:36:49 | atomic swap; native state `already-complete`; engine + worker heartbeats ok |
+    | `deploy-ok` | 08:36:50 | `commit=cece1d9fc45ca3f6c8bc0765c4a612d313792a7c` |
+    | Rollback target | | `93ab5cda4b3d7138922664682e9f8c1bdfb3a791` |
+    | Disk at deploy end | | `/dev/sda2 118G 86G 27G 77%` |
+
+  - What is now live on the host: the eight recorder fixes (`1d8fad9a`,
+    `d275885a`, `fd604613`, `06e17d4a`, `3c1ebd22`, `1702d14d`, `2c751c92`,
+    plus `697341e4` and `10ed1bd2`), the uploader's staging-leak fix
+    `7fe4fe0c`, and the sliding window `cece1d9f` with its unit change
+    (`--keep-hours 24`, tape roots in `ReadWritePaths`).
+  - Both recorders restarted, so the incident's pids 2259813 and 2263691 are
+    gone and `disk_dropped` starts from zero on each.
+  - **What to expect next.** The upload timer fires at 09:10 UTC. That run
+    ships the backlog and then prunes every ledgered hour older than 24 h on
+    both tapes in one pass — the first such deletion — logging one
+    `pruned shipped <hour> files=N bytes=B` line each and
+    `pruned_hours` / `pruned_bytes` in the stamp. Free space should step up
+    from 27 GB then and stay well above the 25 GiB floor. If a `capture-disk`
+    page fires after 09:15 UTC, read the uploader's journal first:
+
+    ```bash
+    journalctl -u liquidity-migration-market-tape-upload.service --since '2026-09-05 09:00'
+    cat /var/lib/liquidity-migration/receipts/market-tape-upload.last-success
+    df -h /var/lib
+    ```
+  - Branches: the twelve `claude/laughing-bardeen-*` session branches were
+    reconciled onto `main`. Eleven were already contained; `j7t3rz` carried
+    the 06:24 page and its refused-deploy receipt, landed as `1cfbce5f`
+    (the `main` ruleset forbids merge commits). Nine branches deleted; three
+    (`0ytvpn`, `6hr91e`, `ldkmuf`) are refused with HTTP 403 by the session's
+    git proxy and need deleting from GitHub's Branches page. Work is on
+    `main` only from here.
+
 - **2026-09-05 08:40 UTC — The local tape becomes a sliding window: the
   uploader deletes each hour it has shipped once the hour is 24 h old.**
   Owner-directed ("auto delete the oldest data after it's been sent to the
