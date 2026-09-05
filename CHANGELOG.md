@@ -7,6 +7,132 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 08:02 UTC — The twenty-sixth page: the pruner's per-pass
+  deficit grows 31× in fifteen minutes while the tape writes almost nothing,
+  and the pair sets a new discard record of 5 005.1 frames/s. No ninth defect
+  and no code change.**
+  - Incident `host-681737fd16e1f806`, scope `host`, host `ip-208-84-103-4`,
+    `new_critical_refs=capture-disk` — one ref this fire, so the id is
+    `sha256("host\ncapture-disk")[:16]`, re-derived exactly: `681737fd16e1f806`
+    (`scripts/runtime/check_fleet_liveness.py:805-807`). Exact alert text,
+    raised at `scripts/runtime/check_fleet_liveness.py:431-433`: `CRITICAL
+    recorder storage is blocked; frames are counted but not written`.
+  - **The funded engine is not implicated.** No engine, worker or timer is
+    named. Both units are `market_tape` recorders — research tape outside the
+    order path — and the 25 GiB floor is the reservation held for mainnet's
+    WAL, which `writable()` blocks the recorder *above*
+    (`market_tape/storage.py:426-433`); no `ENOSPC` reached an append, because
+    `_write_loop`'s first-blocked `logging.error` (`market_tape/record.py:1133`)
+    appears nowhere in either window. Pids unchanged across all twenty-six
+    pages — 2259813 (Bybit), 2263691 (Binance) — so neither recorder has
+    restarted and the host still runs `65ee75a7`.
+  - **The window.** Binance 07:46:44.514 → 08:01:45.037 (900.523 s); Bybit
+    07:45:09.652 → 08:01:42.010 (992.358 s). Both excerpts are exactly 40
+    lines, the `journalctl -n 40` cap
+    (`scripts/runtime/check_fleet_liveness.py:747-750`).
+
+    | Quantity | Binance | Bybit |
+    | :--- | ---: | ---: |
+    | Frames | 1 097 613 (1 218.9/s) | 3 302 741 (3 328.3/s) |
+    | Rows kept | 72 892 | 325 038 |
+    | Frames discarded | 1 024 721 | 3 002 689 |
+    | Discarded per row kept | **14.058** | **9.238** |
+    | Ticks reading `disk_blocked=True` | 29 of 31 | 30 of 33 |
+    | Longest zero-row block | ≥ 300.172 s | 360.378 s |
+    | Cumulative discarded | 17 496 694 | 47 835 311 |
+
+    Cumulative pair **65 332 005**, up 9 027 440 since the 07:25 page —
+    **4 062.8 frames/s** across the 2 222 s between page ends, the worst
+    inter-page rate of the incident (previous 3 854.3/s, 06:54 page). The
+    episodic lull the 07:25 page measured at 0.135 and 0.081 discarded per row
+    kept is over: 14.058 is the worst Binance ratio recorded here.
+  - **New record: 5 005.1 frames/s discarded with both units gated.** Over
+    Binance 07:59:14.593 → 08:01:45.037 (150.444 s) and Bybit 07:59:10.413 →
+    08:01:42.010 (151.597 s), both `rows` counters are frozen — 28 389 657 and
+    82 226 203 — and Binance's `disk_dropped` rises by exactly its frame delta,
+    194 558, so every received frame was thrown away. Rates 1 293.2/s and
+    3 711.9/s. Prior high was 4 350.4/s (07:00 page).
+  - **The page's finding: the deficit each pass must clear is growing, fast.**
+    Binance's four retention passes, with the interval to the previous one:
+
+    | Pass | Files unlinked | Δ previous |
+    | :--- | ---: | ---: |
+    | 07:46:51.685 | 14 | — |
+    | 07:51:54.291 | 24 | 302.606 s |
+    | 07:56:56.959 | 79 | 302.668 s |
+    | 08:01:59.810 | **440** | 302.851 s |
+
+    Three consecutive intervals of 302.6–302.9 s: `RETENTION_INTERVAL_SECONDS`
+    = 300.0 (`market_tape/record.py:99`) plus the walk, on a pruner that on the
+    deployed commit has only the timer. Bybit unlinked 1 file at 07:47:02.783
+    and 2 at 07:57:12.726 — 609.943 s apart, so its intervening pass found no
+    deficit at all. On `65ee75a7` `prune` frees to exactly `min_free_bytes`
+    (the headroom `d275885a` adds is undeployed), so a pass's file count is the
+    room consumed since the previous pass. Binance runs ~11 s ahead of Bybit
+    each cycle and therefore pays the whole shared deficit; that asymmetry is
+    tick phase, not a unit property. The **growth** is the new fact: 31× in
+    three cycles, ~15 minutes, while Binance wrote 72 892 rows and Bybit
+    325 038 in the whole window. **The tape cannot have consumed what the tape
+    is being deleted to repay.** Sixth independent pointer at a non-tape
+    writer on the filesystem the floor guards — the uploader staging leak
+    `7fe4fe0c` fixes (`market_tape/pack.py:234`,
+    `/var/lib/liquidity-migration/market-tape-upload/staging`), merged and
+    undeployed.
+  - **Every mechanism in this page is `65ee75a7` behaving as written**, and
+    each one is already fixed and waiting on a deploy:
+
+    | Observed | Deployed behaviour | Merged fix |
+    | :--- | :--- | :--- |
+    | Passes exactly 302.7 s apart, never on a crossing | `_retention_loop` is one pass then a 300 s wait; nothing wakes it | `1d8fad9a`, `1702d14d` |
+    | One 30 s writing burst per 302.7 s cycle | `prune` stops on the floor `writable()` unblocks on, so a pass leaves one file's overshoot | `d275885a` |
+    | Gate opens 20.4 s and 17.9 s *after* the pass (07:52:14.701, 07:57:14.870) | Only `_maintenance` assigns `disk_blocked`, once per `status_interval_seconds` = 30 | `fd604613` |
+    | `projected_gb` falls on every blocked tick and rises only on the two that wrote rows (360.3→360.5, 358.3→358.6; Bybit 1105.5→1106.2, 1097.5→1098.2) | `_write_loop` counts a blocked frame and `continue`s before it meters | `2c751c92` |
+
+    The eighth defect is confirmed **69 ticks out of 69**, twelve pages. Every
+    `projected_gb` figure in this entry understates true inbound by the share
+    of the trailing day spent blocked.
+  - **Recurring consequence, still unbuilt (owner's call).** Bybit re-anchored
+    40, 47, 43 and 40 book topics for `2026-09-05T08` on four consecutive ticks
+    from 08:00:10.809, every one of them into a shut gate. That is
+    `_reanchor_books` spreading ~170 topics at `REANCHOR_TOPICS_PER_TICK` = 40
+    (`market_tape/record.py:89`, `:1231-1257`) working exactly as written — not
+    a defect — but the 08:00 hour of Bybit tape opens without those snapshots,
+    because the cursor advances on send and the rows are discarded by the gate.
+    First recorded on the 05:48 page; not fixed, by policy.
+  - **What the payload cannot settle, and the host readings that would.** The
+    payload carries no `df`, no uploader journal, and no manifest. In
+    descending order of value:
+
+    ```bash
+    # 1. Is staging holding the missing gigabytes? (settles the sixth pointer)
+    du -sh /var/lib/liquidity-migration/market-tape-upload/staging
+    ls -la /var/lib/liquidity-migration/market-tape-upload/staging
+    df -h /var/lib
+
+    # 2. Why were 440 files deleted — disk_limit or age?
+    journalctl -u liquidity-migration-market-tape-upload.service --since '2026-09-05 06:00'
+
+    # 3. What the account was worth through the incident, and which
+    #    minutes had no heartbeat at all (docs/observability.md)
+    scripts/ops.sh curve mainnet
+    ```
+  - **The fix is a deploy, and the deploy is the blocker.** Nothing in this
+    page is a repository defect. Eight recorder fixes and the uploader's leak
+    fix are merged and undeployed because every GitHub Actions run since 19:17
+    UTC on 2026-09-04 fails within seconds on the account-payment signature.
+    The SSH path needs no runner and installs all nine:
+
+    ```bash
+    EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db scripts/ops.sh deploy
+    ```
+
+    It restarts the funded engine: `2c751c92`'s `engine` tree differs from the
+    deployed `65ee75a7`, so the fingerprint hands over both realms. Every
+    commit since touches only `CHANGELOG.md`, `STATE.md`, `market_tape/` and
+    its tests, so the current tip installs the identical `engine` tree.
+  - Docs-only change. No test is added because no code changed; no Python,
+    Rust, config or test file is touched.
+
 - **2026-09-05 07:33 UTC — The thirty-fifth refused deploy.** Run
   `33952870432`, `deploy` on `main@e2391040`, created 07:33:03 UTC and dead at
   07:33:09. `rust` 07:33:04 → 07:33:07, `Deploy artifact` 07:33:05 → 07:33:08
