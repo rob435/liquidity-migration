@@ -7,6 +7,23 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 06:13 UTC — The thirty-first refused deploy, identical
+  signature.** Run `33949210864`, `deploy` on `main@d734cbde`, created
+  06:13:02 UTC and dead at 06:13:07. `rust` 06:13:03 → 06:13:06, `ci`
+  06:13:04 → 06:13:06, `Deploy artifact` 06:13:04 → 06:13:07 — three, two and
+  three seconds, none of them alive long enough to check out the repository.
+  `diagnose`, `disarm`, `Engine release tests, soak and benchmarks` and `vps`
+  all skipped; `vps` was never scheduled against a runner. The failed jobs'
+  log downloads return the same error verbatim, re-read this run: `failed to
+  download logs: HTTP 404`. No job started and nothing reached the host.
+  **Thirty-one consecutive refusals since 19:17 UTC on 2026-09-04**, every one
+  with the account-payment signature. Deployed commit stays `65ee75a7`; the
+  eight recorder fixes and the uploader's leak fix remain merged and
+  undeployed, and the recorders have now thrown away 46 454 544 frames. The
+  SSH path needs no runner:
+  `EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db scripts/ops.sh
+  deploy`.
+
 - **2026-09-05 06:02 UTC — The thirtieth refused deploy, identical
   signature.** Run `33948754422`, `deploy` on `main@cdb7b9c8`, created
   06:02:42 UTC and dead at 06:02:47. `ci` and `Deploy artifact` were created
