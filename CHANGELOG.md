@@ -98,9 +98,11 @@ edit STATE.md to match.
     job `101220659870`'s log download returns HTTP 404, so no job started.
     Identical to `33933927629`, `33933636343`, `33932188757`, `33931474693`,
     `33928248402`, `33922197522`, `33921858031` and `33911912004`; it is the
-    account's failed payments, not any commit. Deployed commit stays
-    `65ee75a7` and the recorders keep crossing the floor until the owner runs
-    the SSH path.
+    account's failed payments, not any commit. This entry's own commit
+    `b7bdbe17` was then dispatched at 01:03:22 UTC as run `33934970737` and
+    refused identically 6 s later — the tenth in a row since 19:35 UTC on
+    2026-09-04. Deployed commit stays `65ee75a7` and the recorders keep
+    crossing the floor until the owner runs the SSH path.
   - Host actions, in order, and only the owner can run them. `bb5d5ec4` and
     every commit after it carry both recorder fixes; `capture_fingerprint`
     (`scripts/deploy_vps_live.sh:524-534`) hashes every `market_tape/*.py`, so
