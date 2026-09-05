@@ -1135,12 +1135,20 @@ class Recorder:
             # deletes nothing, so a disk filled by something other than tape
             # is walked once rather than spun on.
             owed = True
+            # What this burst has already unlinked. `prune` reads free space
+            # from the kernel, and a successor is owed precisely because the
+            # kernel disagreed with what the previous pass unlinked, so an
+            # uncredited retry re-derives the same deficit and deletes it
+            # again — every few hundred milliseconds, until a floor held by
+            # something other than tape has cost the whole tape.
+            credit = 0
             while owed and not self.stop.is_set():
-                owed = self._retention_pass()
+                owed = self._retention_pass(free_credit=credit)
+                credit += self.retention.last_freed_bytes
             self.prune_now.wait(RETENTION_INTERVAL_SECONDS)
             self.prune_now.clear()
 
-    def _retention_pass(self) -> bool:
+    def _retention_pass(self, free_credit: int = 0) -> bool:
         """One retention pass, on its own thread. A failed pass is the next
         pass's problem: this thread must outlive an unlinkable file.
 
@@ -1149,7 +1157,7 @@ class Recorder:
         """
 
         try:
-            deleted = self.retention.prune()
+            deleted = self.retention.prune(free_credit=free_credit)
         except OSError as exc:
             logging.error("tape retention pass failed: %s", exc)
             return False

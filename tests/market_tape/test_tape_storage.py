@@ -370,6 +370,42 @@ def test_disk_pressure_leaves_the_writer_room_above_the_floor(tmp_path: Path, mo
     assert len(deleted) == 3
 
 
+def test_a_successor_pass_credits_what_the_burst_already_unlinked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pass is owed a successor when the kernel's free space still reads
+    under the floor after the pass unlinked its way past it. The statvfs is
+    the number that was wrong, so a successor that trusts it derives the same
+    deficit again and deletes it again. Credited, the successor sees the room
+    the burst already made and deletes nothing."""
+
+    manifest = Manifest(tmp_path)
+    directory = tmp_path / "2027-01-15" / "10" / "AGIUSDT"
+    directory.mkdir(parents=True)
+    for index in range(20):
+        path = directory / f"segment-{index:06d}.jsonl.zst"
+        path.write_bytes(b"x" * 100)
+        os.utime(path, (1_000_000 + index, 1_000_000 + index))
+
+    # A filesystem that has not released a single unlinked block: free space
+    # reads the same under the floor however much the pass deletes.
+    monkeypatch.setattr(
+        "market_tape.storage.shutil.disk_usage",
+        lambda path: SimpleNamespace(total=10_000, used=9_800, free=200),
+    )
+
+    retention = Retention(tmp_path, manifest, retention_days=36_500, max_bytes=10**12, min_free_bytes=400)
+    first = retention.prune(1_000_100.0)
+
+    assert len(first) == 3
+    assert retention.last_freed_bytes == 300
+    assert retention.writable() is False
+
+    assert retention.prune(1_000_100.0, free_credit=retention.last_freed_bytes) == []
+    assert retention.last_freed_bytes == 0
+    assert len(list(directory.glob("*.zst"))) == 17
+
+
 @needs_zstd
 def test_snapshots_write_the_venue_tables_with_their_own_payload(tmp_path: Path) -> None:
     manifest = Manifest(tmp_path)

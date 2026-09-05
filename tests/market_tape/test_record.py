@@ -10,6 +10,7 @@ import threading
 import time
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1052,7 +1053,7 @@ def test_a_disk_under_the_free_floor_prunes_now_instead_of_waiting_out_the_inter
     woken = threading.Event()
     passes: list[int] = []
 
-    def counted(now: float | None = None) -> list[Path]:
+    def counted(now: float | None = None, *, free_credit: int = 0) -> list[Path]:
         passes.append(len(passes))
         (started if len(passes) == 1 else woken).set()
         return []
@@ -1162,7 +1163,7 @@ def test_a_pass_that_deletes_and_leaves_the_gate_shut_passes_again_at_once(
     passes: list[int] = []
     third = threading.Event()
 
-    def short(now: float | None = None) -> list[Path]:
+    def short(now: float | None = None, *, free_credit: int = 0) -> list[Path]:
         passes.append(len(passes))
         # Two passes the kernel does not yet agree with, then one it does.
         if len(passes) == 3:
@@ -1185,10 +1186,70 @@ def test_a_pass_that_deletes_and_leaves_the_gate_shut_passes_again_at_once(
     # The retry ends where it must: a pass that deletes nothing does not walk
     # the tape again, so a full disk holding no tape is not spun on.
     assert recorder._retention_pass() is False
-    monkeypatch.setattr(recorder.retention, "prune", lambda now=None: [])
+    monkeypatch.setattr(recorder.retention, "prune", lambda now=None, *, free_credit=0: [])
     recorder.disk_blocked = True
     recorder.retention.min_free_bytes = 1 << 62
     assert recorder._retention_pass() is False
+
+    recorder.stop.set()
+    recorder.prune_now.set()
+    pruner.join(5.0)
+    assert not pruner.is_alive()
+
+
+def test_a_burst_of_owed_passes_deletes_the_deficit_once_not_the_whole_tape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successor is owed because the kernel's free space disagreed with what
+    the pass unlinked, and the retries run back to back with nothing between
+    them. So a successor that re-reads that same number derives the whole
+    deficit again and deletes it again, pass after pass, until the tape has no
+    file left: a floor held by something other than tape costs every hour of
+    history the recorder holds. Each pass must credit what the burst already
+    unlinked and stop where the first one did."""
+
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+    # Long enough that every pass inside the burst comes from the burst itself.
+    monkeypatch.setattr(record, "RETENTION_INTERVAL_SECONDS", 3600.0)
+    recorder.retention.retention_days = 36_500
+    recorder.retention.max_bytes = 10**12
+    recorder.retention.min_free_bytes = 400
+    directory = tmp_path / "2027-01-15" / "10" / "BTCUSDT"
+    directory.mkdir(parents=True)
+    for index in range(20):
+        (directory / f"segment-{index:06d}.jsonl.zst").write_bytes(b"x" * 100)
+
+    # A filesystem that has not released a single unlinked block: free space
+    # reads the same under the floor however much the burst deletes, so every
+    # pass is owed a successor and `writable()` never opens the gate.
+    monkeypatch.setattr(
+        "market_tape.storage.shutil.disk_usage",
+        lambda path: SimpleNamespace(total=10_000, used=9_800, free=200),
+    )
+    # What a crossing leaves behind.
+    recorder.disk_blocked = True
+
+    real_prune = recorder.retention.prune
+    passes: list[int] = []
+    settled = threading.Event()
+
+    def counted(now: float | None = None, *, free_credit: int = 0) -> list[Path]:
+        passes.append(len(passes))
+        deleted = real_prune(now, free_credit=free_credit)
+        if not deleted:
+            settled.set()
+        return deleted
+
+    monkeypatch.setattr(recorder.retention, "prune", counted)
+    # A daemon thread, so a failed assertion below reports itself rather than
+    # the teardown that a runaway burst would wait on.
+    pruner = threading.Thread(target=recorder._retention_loop, name="test-retention", daemon=True)
+    pruner.start()
+
+    assert settled.wait(5.0), f"the burst never ended after {len(passes)} pass(es)"
+    assert len(passes) == 2, "the successor deleted a second deficit instead of crediting the first"
+    assert len(list(directory.glob("*.zst"))) == 17
+    assert recorder.disk_blocked is True
 
     recorder.stop.set()
     recorder.prune_now.set()
@@ -1201,7 +1262,7 @@ def test_a_retention_pass_that_cannot_delete_leaves_the_pruner_thread_running(
 ) -> None:
     recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
 
-    def refuse(now: float | None = None) -> list[Path]:
+    def refuse(now: float | None = None, *, free_credit: int = 0) -> list[Path]:
         raise OSError("read-only file system")
 
     monkeypatch.setattr(recorder.retention, "prune", refuse)

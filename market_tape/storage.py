@@ -351,8 +351,11 @@ class Retention:
         self.retention_days = retention_days
         self.max_bytes = max_bytes
         self.min_free_bytes = min_free_bytes
+        #: Bytes the last pass unlinked. A successor pass credits them: the
+        #: kernel's statvfs need not show a deleted file's blocks yet.
+        self.last_freed_bytes = 0
 
-    def prune(self, now: float | None = None) -> list[Path]:
+    def prune(self, now: float | None = None, *, free_credit: int = 0) -> list[Path]:
         """Delete what is expired, then what the disk has no room for.
 
         A pass walks the whole tape, so it stats each file once and reads the
@@ -367,11 +370,18 @@ class Retention:
         A pass that deletes for room frees past the floor by
         `FREE_HEADROOM_FRACTION`, so the writer it unblocks has somewhere to
         write; deleting for `max_bytes` or for age stops where it always did.
+
+        `free_credit` is what earlier passes in the same burst unlinked and the
+        statvfs below has not shown yet. A retry runs precisely because those
+        two numbers disagreed, so a successor that trusts the statvfs alone
+        derives the whole deficit a second time and deletes it a second time,
+        once per retry and with no delay between them.
         """
 
         now = time.time() if now is None else now
         # The floor is what `writable()` blocks on; this is what a pass frees to.
         free_target = self.min_free_bytes + int(self.min_free_bytes * FREE_HEADROOM_FRACTION)
+        self.last_freed_bytes = 0
         found: list[tuple[int, str, Path, int, float]] = []
         for path in self.root.rglob("*.zst"):
             if path.name.endswith(".tmp"):
@@ -383,7 +393,7 @@ class Retention:
             found.append((stat.st_mtime_ns, str(path), path, stat.st_size, stat.st_mtime))
         files = sorted(found, key=lambda item: (item[0], item[1]))
         total = sum(item[3] for item in files)
-        free = shutil.disk_usage(self.root).free
+        free = shutil.disk_usage(self.root).free + free_credit
         cutoff = now - self.retention_days * 86_400
         deleted: list[Path] = []
         for _, _, path, size, mtime in files:
@@ -398,6 +408,7 @@ class Retention:
             path.unlink()
             total -= size
             free += size
+            self.last_freed_bytes += size
             deleted.append(relative)
             self.manifest.append(
                 {
