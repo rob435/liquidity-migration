@@ -8,15 +8,14 @@
 //! otherwise-successful reply is read as a refusal.
 
 use engine_venue::RealmCredentials;
-mod support;
 
+use crate::support::{Recorded, TestServer};
 use engine_types::{
     AmendSpec, OrderKind, OrderRequest, Side, StopSpec, StrategyId, SymbolId, TimeInForce,
     VenueError, VenueGateway,
 };
 use engine_venue::{HyperliquidGateway, HyperliquidRealm};
 use serde_json::Value;
-use support::{Recorded, TestServer};
 
 /// The published test key from the venue's own SDK, and an address that is
 /// plainly not a real account.

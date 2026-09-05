@@ -1,4 +1,4 @@
-mod support;
+use crate::support::TestServer;
 use engine_types::numeric::Exact;
 use engine_types::order_terms::ExactStopTerms;
 use engine_types::{Side, SymbolId, VenueGateway};
@@ -6,7 +6,6 @@ use engine_venue::{
     BinanceGateway, BinanceRealm, BybitGateway, HyperliquidGateway, HyperliquidRealm,
     LighterGateway, LighterRealm, MexcGateway, MexcRealm, RealmCredentials, VenueRealm,
 };
-use support::TestServer;
 const HL_KEY: &str = "0x0123456789012345678901234567890123456789012345678901234567890123";
 const HL_ACCOUNT: &str = "0x0000000000000000000000000000000000000001";
 const LIGHTER_KEY: &str =

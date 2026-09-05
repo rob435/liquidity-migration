@@ -1,11 +1,10 @@
-mod support;
+use crate::support::TestServer;
 use engine_types::numeric::Exact;
 use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
 use engine_types::{
     OrderKind, OrderRequest, Side, StopSpec, StrategyId, SymbolId, TimeInForce, VenueGateway,
 };
 use engine_venue::{MexcGateway, MexcRealm, RealmCredentials};
-use support::TestServer;
 
 #[tokio::test]
 async fn exact_contracts_and_prices_reach_wire_and_fractional_contracts_are_refused() {

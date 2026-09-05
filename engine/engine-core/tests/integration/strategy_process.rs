@@ -272,7 +272,7 @@ async fn allocation_flood_is_stopped_by_the_os_while_the_core_keeps_running() {
     let mut command = Command::new("python3");
     command
         .arg("-c")
-        .arg(include_str!("fixtures/strategy-allocation-flood.py"));
+        .arg(include_str!("../fixtures/strategy-allocation-flood.py"));
     let process = StrategyProcess::spawn_command(command).unwrap();
     let progress = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = progress.clone();

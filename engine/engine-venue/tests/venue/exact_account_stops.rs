@@ -1,11 +1,10 @@
-mod support;
+use crate::support::TestServer;
 use engine_types::numeric::Exact;
 use engine_types::{AccountView, VenueGateway};
 use engine_venue::{
     BinanceGateway, BinanceRealm, BybitGateway, HyperliquidGateway, HyperliquidRealm,
     LighterGateway, LighterRealm, MexcGateway, MexcRealm, RealmCredentials, VenueRealm,
 };
-use support::TestServer;
 
 const PRICE: &str = "89.99999999999999999999";
 fn assert_exact(view: AccountView) {

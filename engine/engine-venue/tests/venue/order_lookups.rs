@@ -1,13 +1,12 @@
-//! Independent lookup clients retain the same identity and failure contracts as direct reads.
-mod support;
+//! Real HTTP lookup paths with fake credentials and bounded, typed replies.
+use crate::support::TestServer;
 use engine_types::numeric::{Exact, NumericProvenance};
 use engine_types::orders::{OrderLookup, TerminalOrderStatus};
-use engine_types::VenueGateway;
+use engine_types::{SymbolId, VenueGateway};
 use engine_venue::{
     BinanceGateway, BinanceRealm, BybitGateway, HyperliquidGateway, HyperliquidRealm,
     LighterGateway, LighterRealm, MexcGateway, MexcRealm, RealmCredentials, VenueRealm,
 };
-use support::TestServer;
 
 const ID: &str = "eng-1700000000000-1";
 const HL_KEY: &str = "0x0123456789012345678901234567890123456789012345678901234567890123";
@@ -41,26 +40,18 @@ async fn bybit_lookup_falls_back_to_history_and_empty_history_remains_unknown() 
         let list=if request.path=="/v5/order/history" && count==0 {format!(r#"[{{"symbol":"BTCUSDT","orderLinkId":"{ID}","orderId":"7","orderStatus":"Cancelled","cumExecQty":0.12345678901234567890123456789}}]"#)}else{"[]".into()};
         (200,format!(r#"{{"retCode":0,"retMsg":"OK","result":{{"category":"linear","list":{list},"nextPageCursor":""}}}}"#))
     }).await;
-    let gw = BybitGateway::for_test(
+    let mut gw = BybitGateway::for_test(
         &server.base_url(),
         VenueRealm::Demo,
         VenueRealm::Demo.credentials_for_test("key", "secret"),
         symbols(),
     );
     cancelled(
-        gw.order_lookup_client()
-            .expect("independent read client")
-            .lookup("BTCUSDT", ID)
-            .await
-            .unwrap(),
+        gw.order_status(SymbolId(0), ID).await.unwrap(),
         "0.12345678901234567890123456789",
     );
     assert!(matches!(
-        gw.order_lookup_client()
-            .expect("independent read client")
-            .lookup("BTCUSDT", ID)
-            .await
-            .unwrap(),
+        gw.order_status(SymbolId(0), ID).await.unwrap(),
         OrderLookup::Unknown { .. }
     ));
     assert_eq!(
@@ -90,34 +81,21 @@ async fn binance_absence_is_not_never_accepted_and_503_does_not_become_absence()
             _=>(503,r#"{"code":-1000,"msg":"overloaded"}"#.into()),
         }
     }).await;
-    let gw = BinanceGateway::for_test(
+    let mut gw = BinanceGateway::for_test(
         &server.base_url(),
         BinanceRealm::Testnet,
         BinanceRealm::Testnet.credentials_for_test("key", "secret"),
         symbols(),
     );
     cancelled(
-        gw.order_lookup_client()
-            .expect("independent read client")
-            .lookup("BTCUSDT", ID)
-            .await
-            .unwrap(),
+        gw.order_status(SymbolId(0), ID).await.unwrap(),
         "0.000000000000000000123",
     );
     assert!(matches!(
-        gw.order_lookup_client()
-            .expect("independent read client")
-            .lookup("BTCUSDT", ID)
-            .await
-            .unwrap(),
+        gw.order_status(SymbolId(0), ID).await.unwrap(),
         OrderLookup::Unknown { .. }
     ));
-    assert!(gw
-        .order_lookup_client()
-        .expect("independent read client")
-        .lookup("BTCUSDT", ID)
-        .await
-        .is_err());
+    assert!(gw.order_status(SymbolId(0), ID).await.is_err());
     assert_eq!(server.requests().len(), 3);
 }
 
@@ -130,26 +108,15 @@ async fn mexc_lookup_converts_contracts_exactly_and_does_not_guess_missing_order
         let data=if count==0 {format!(r#"{{"symbol":"BTC_USDT","externalOid":"{ID}","orderId":"7","state":4,"dealVol":3}}"#)}else{"null".into()};
         (200,format!(r#"{{"success":true,"code":0,"data":{data}}}"#))
     }).await;
-    let gw = MexcGateway::for_test(
+    let mut gw = MexcGateway::for_test(
         &server.base_url(),
         MexcRealm::Mainnet,
         MexcRealm::Mainnet.credentials_for_test("key", "secret"),
         symbols(),
     );
-    cancelled(
-        gw.order_lookup_client()
-            .expect("independent read client")
-            .lookup("BTCUSDT", ID)
-            .await
-            .unwrap(),
-        "0.0003",
-    );
+    cancelled(gw.order_status(SymbolId(0), ID).await.unwrap(), "0.0003");
     assert!(matches!(
-        gw.order_lookup_client()
-            .expect("independent read client")
-            .lookup("BTCUSDT", ID)
-            .await
-            .unwrap(),
+        gw.order_status(SymbolId(0), ID).await.unwrap(),
         OrderLookup::Unknown { .. }
     ));
     assert!(server.requests().iter().all(|r| r.method == "GET"));
@@ -164,27 +131,16 @@ async fn hyperliquid_lookup_uses_packed_cloid_and_keeps_unknown_oid_unresolved()
         if count>0 {return (200,r#"{"status":"unknownOid"}"#.into());}
         (200,format!(r#"{{"status":"order","order":{{"status":"canceled","order":{{"coin":"BTC","cloid":"{cloid}","oid":7,"origSz":"0.0007","sz":"0.0004"}}}}}}"#))
     }).await;
-    let gw = HyperliquidGateway::for_test(
+    let mut gw = HyperliquidGateway::for_test(
         &server.base_url(),
         HyperliquidRealm::Testnet,
         HyperliquidRealm::Testnet.credentials_for_test(HL_ACCOUNT, HL_KEY),
         symbols(),
     )
     .unwrap();
-    cancelled(
-        gw.order_lookup_client()
-            .expect("independent read client")
-            .lookup("BTCUSDT", ID)
-            .await
-            .unwrap(),
-        "0.0003",
-    );
+    cancelled(gw.order_status(SymbolId(0), ID).await.unwrap(), "0.0003");
     assert!(matches!(
-        gw.order_lookup_client()
-            .expect("independent read client")
-            .lookup("BTCUSDT", ID)
-            .await
-            .unwrap(),
+        gw.order_status(SymbolId(0), ID).await.unwrap(),
         OrderLookup::Unknown { .. }
     ));
     assert_eq!(server.requests().len(), 2);
@@ -200,7 +156,7 @@ async fn lighter_lookup_checks_account_market_and_client_index_and_keeps_absence
         let orders=if count==0 {format!(r#"[{{"order_id":"7","client_order_index":{index},"market_index":0,"owner_account_index":42,"filled_base_amount":0.0001234567890123456789,"status":"canceled"}}]"#)}else{"[]".into()};
         (200,format!(r#"{{"code":200,"orders":{orders}}}"#))
     }).await;
-    let gw = LighterGateway::for_test(
+    let mut gw = LighterGateway::for_test(
         &server.base_url(),
         LighterRealm::Testnet,
         LighterRealm::Testnet.credentials_for_test("42:3", LIGHTER_KEY),
@@ -208,19 +164,11 @@ async fn lighter_lookup_checks_account_market_and_client_index_and_keeps_absence
     )
     .unwrap();
     cancelled(
-        gw.order_lookup_client()
-            .expect("independent read client")
-            .lookup("BTCUSDT", ID)
-            .await
-            .unwrap(),
+        gw.order_status(SymbolId(0), ID).await.unwrap(),
         "0.0001234567890123456789",
     );
     assert!(matches!(
-        gw.order_lookup_client()
-            .expect("independent read client")
-            .lookup("BTCUSDT", ID)
-            .await
-            .unwrap(),
+        gw.order_status(SymbolId(0), ID).await.unwrap(),
         OrderLookup::Unknown { .. }
     ));
     assert!(server.requests().iter().all(|r| r.method == "GET"));
@@ -232,50 +180,30 @@ async fn unknown_status_wrong_identity_and_malformed_qty_cannot_claim_known_orde
         let (symbol,status,qty)=match count {0=>("BTCUSDT","NEW_VENUE_STATE","0"),1=>("ETHUSDT","NEW","0"),_=>("BTCUSDT","FILLED","null")};
         (200,format!(r#"{{"symbol":"{symbol}","clientOrderId":"{ID}","orderId":7,"status":"{status}","executedQty":{qty}}}"#))
     }).await;
-    let gw = BinanceGateway::for_test(
+    let mut gw = BinanceGateway::for_test(
         &server.base_url(),
         BinanceRealm::Testnet,
         BinanceRealm::Testnet.credentials_for_test("key", "secret"),
         symbols(),
     );
     assert!(matches!(
-        gw.order_lookup_client()
-            .expect("independent read client")
-            .lookup("BTCUSDT", ID)
-            .await
-            .unwrap(),
+        gw.order_status(SymbolId(0), ID).await.unwrap(),
         OrderLookup::Unknown { .. }
     ));
-    assert!(gw
-        .order_lookup_client()
-        .expect("independent read client")
-        .lookup("BTCUSDT", ID)
-        .await
-        .is_err());
-    assert!(gw
-        .order_lookup_client()
-        .expect("independent read client")
-        .lookup("BTCUSDT", ID)
-        .await
-        .is_err());
+    assert!(gw.order_status(SymbolId(0), ID).await.is_err());
+    assert!(gw.order_status(SymbolId(0), ID).await.is_err());
 }
 
 #[tokio::test]
 async fn working_order_with_zero_fills_is_distinct_from_absence_and_survives_escaped_identity() {
     let server=TestServer::start(|_,_|(200,r#"{"symbol":"BTCUSDT","clientOrderId":"eng-1700000000000-\u0031","orderId":"7","status":"PARTIALLY_FILLED","executedQty":"0"}"#.to_string())).await;
-    let gw = BinanceGateway::for_test(
+    let mut gw = BinanceGateway::for_test(
         &server.base_url(),
         BinanceRealm::Testnet,
         BinanceRealm::Testnet.credentials_for_test("key", "secret"),
         symbols(),
     );
-    let OrderLookup::Working(row) = gw
-        .order_lookup_client()
-        .expect("independent read client")
-        .lookup("BTCUSDT", ID)
-        .await
-        .unwrap()
-    else {
+    let OrderLookup::Working(row) = gw.order_status(SymbolId(0), ID).await.unwrap() else {
         panic!("working zero-fill order disappeared")
     };
     assert!(row.filled_qty.value.is_zero());

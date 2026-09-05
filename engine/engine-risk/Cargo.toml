@@ -12,6 +12,9 @@ workspace = true
 engine-types = { workspace = true }
 serde_json = { workspace = true }
 
+# `autotests = false` above: the contract suite is one binary, and only this
+# entry says so, so a part file under tests/contracts/ is never a second one.
 [[test]]
 name = "contracts"
-path = "tests/contracts.rs"
+path = "tests/contracts/main.rs"
+

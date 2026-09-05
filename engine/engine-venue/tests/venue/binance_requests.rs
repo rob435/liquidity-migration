@@ -2,14 +2,13 @@
 //! and no external network.
 
 use engine_venue::RealmCredentials;
-mod support;
 
+use crate::support::{Recorded, TestServer};
 use engine_types::{
     OrderKind, OrderRequest, Side, StopSpec, StrategyId, SymbolId, TimeInForce, VenueError,
     VenueGateway,
 };
 use engine_venue::{BinanceGateway, BinanceRealm};
-use support::{Recorded, TestServer};
 
 const BTC_EXCHANGE_INFO: &str = r#"{"symbols":[{
     "symbol":"BTCUSDT","status":"TRADING","contractType":"PERPETUAL",

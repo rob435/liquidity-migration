@@ -2,10 +2,10 @@
 //! server. No network, no credentials.
 
 use engine_venue::RealmCredentials;
-mod support;
 
 use std::time::Duration;
 
+use crate::support::{Recorded, TestServer};
 use engine_types::{
     AmendSpec, OrderKind, OrderRequest, Side, StopSpec, StrategyId, SymbolId, TimeInForce,
     VenueError, VenueGateway,
@@ -13,7 +13,6 @@ use engine_types::{
 use engine_venue::{BybitGateway, Venue, VenueRealm};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
-use support::{Recorded, TestServer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 

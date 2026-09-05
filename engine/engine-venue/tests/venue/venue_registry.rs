@@ -6,13 +6,12 @@
 //! the adapter's own tests use. No network, no credentials.
 
 use engine_venue::RealmCredentials;
-mod support;
 
+use crate::support::TestServer;
 use engine_types::{
     AmendSpec, OrderKind, OrderRequest, Side, StopSpec, StrategyId, SymbolId, VenueGateway,
 };
 use engine_venue::{BybitGateway, Venue, VenueRealm, BYBIT_DEMO};
-use support::TestServer;
 
 fn adapter(server: &TestServer) -> BybitGateway {
     BybitGateway::for_test(
