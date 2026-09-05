@@ -1057,3 +1057,41 @@ async fn live_public_stream_accepts_btc_topics_and_delivers_a_ticker() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+#[test]
+fn a_replacement_stream_continues_the_epoch_and_the_gap_clock() {
+    // A universe refresh replaces the stream object, and the health record
+    // lives in it. A successor that starts fresh reuses epoch numbers a
+    // repair lane spawned for the outgoing stream still carries, and dates
+    // the gap from the refresh instead of from the outage.
+    let symbols = BTreeSet::from(["BTCUSDT".to_owned(), "ETHUSDT".to_owned()]);
+    let outgoing = StreamHealth {
+        connected: true,
+        epoch: 3,
+        gap_open: true,
+        gap_open_since_ms: Some(1_788_538_993_000),
+        reconnect_count: 2,
+        fault_count: 5,
+        ..StreamHealth::default()
+    };
+
+    let restarted = SharedState::continuing(&symbols, StreamContinuity::default());
+    assert_eq!(restarted.health.epoch, 0);
+    assert_eq!(restarted.health.gap_open_since_ms, None);
+
+    let mut successor = SharedState::continuing(&symbols, StreamContinuity::from(&outgoing));
+    assert_eq!(successor.health.reconnect_count, 2);
+    assert_eq!(successor.health.fault_count, 5);
+    assert!(successor.health.gap_open);
+    successor.prepare_epoch(successor.health.epoch + 1, 1_788_546_193_000);
+
+    assert_eq!(
+        successor.health.epoch, 4,
+        "the successor's first epoch is above every epoch an in-flight repair still holds"
+    );
+    assert_eq!(
+        successor.health.gap_open_since_ms,
+        Some(1_788_538_993_000),
+        "the gap is as old as the transport's, not as old as the rebuild"
+    );
+}

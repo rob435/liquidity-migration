@@ -10,7 +10,8 @@ use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 
 use crate::bybit_ws::{
-    ticker_wire, BybitPublicStream, ConfirmedKline, StreamEvent, StreamHealth, TickerSample,
+    ticker_wire, BybitPublicStream, ConfirmedKline, StreamContinuity, StreamEvent, StreamHealth,
+    TickerSample,
 };
 use crate::config::SignalWorkerConfig;
 use crate::http::{percent_encode, wall_ms, PublicHttpClient};
@@ -353,25 +354,25 @@ fn validate_funding_source_against_state(
                 .get(&row.symbol)
                 .and_then(|history| history.get(&row.settlement_ts_ms))
             {
+                // The interval is stamped from the current instrument, not read
+                // back from the venue, so it is not part of the settled
+                // identity. See `SettledFunding`'s `HistoryRow::same_value`.
                 if existing.symbol != row.symbol
                     || existing.settlement_ts_ms != row.settlement_ts_ms
                     || existing.rate != row.rate
-                    || existing.funding_interval_min != row.funding_interval_min
                 {
                     return Err(WorkerError::input(format!(
-                        "funding history rewrote timestamp {}",
-                        row.settlement_ts_ms
+                        "funding history rewrote {} at timestamp {}",
+                        row.symbol, row.settlement_ts_ms
                     )));
                 }
             }
             let key = (row.symbol.clone(), row.settlement_ts_ms);
             if let Some(existing) = seen.insert(key, row.clone()) {
-                if existing.rate != row.rate
-                    || existing.funding_interval_min != row.funding_interval_min
-                {
+                if existing.rate != row.rate {
                     return Err(WorkerError::input(format!(
-                        "funding fetch rewrote timestamp {}",
-                        row.settlement_ts_ms
+                        "funding fetch rewrote {} at timestamp {}",
+                        row.symbol, row.settlement_ts_ms
                     )));
                 }
             }
@@ -1090,7 +1091,6 @@ impl LiveRunner {
                     Some(old) => {
                         old.symbol != row.symbol
                             || old.rate != row.rate
-                            || old.funding_interval_min != row.funding_interval_min
                             || row.available_at_ms < old.available_at_ms
                     }
                 }
@@ -2016,15 +2016,31 @@ impl LiveRunner {
         critical.into_iter().collect()
     }
 
-    fn reconfigure_stream(&self, stream: &mut BybitPublicStream) -> Result<(), WorkerError> {
+    /// The symbol set a universe refresh moved to, with the transport history
+    /// the replacement stream must carry over. `None` when the set is unchanged.
+    fn stream_reconfiguration(
+        &self,
+        stream: &BybitPublicStream,
+    ) -> Option<(Vec<String>, StreamContinuity)> {
         let desired = self.stream_symbols().into_iter().collect::<BTreeSet<_>>();
         if &desired == stream.symbols() {
-            return Ok(());
+            return None;
         }
-        *stream = BybitPublicStream::spawn(
+        Some((
             desired.into_iter().collect(),
+            StreamContinuity::from(&stream.health()),
+        ))
+    }
+
+    fn reconfigure_stream(&self, stream: &mut BybitPublicStream) -> Result<(), WorkerError> {
+        let Some((desired, continuity)) = self.stream_reconfiguration(stream) else {
+            return Ok(());
+        };
+        *stream = BybitPublicStream::spawn_continuing(
+            desired,
             self.config.live.request_timeout_ms,
             self.config.live.retry_base_ms,
+            continuity,
         )?;
         Ok(())
     }

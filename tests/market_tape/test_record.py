@@ -10,6 +10,7 @@ import threading
 import time
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -809,6 +810,74 @@ def test_frames_are_metered_by_tier_and_feed_class(tmp_path: Path) -> None:
     assert status["by_feed_24h"] == {"deep:book:50": 800, "deep:trades": 120, "wide:control": 40}
 
 
+def test_a_frame_the_disk_gate_drops_still_counts_against_the_inbound_allowance(tmp_path: Path) -> None:
+    """`budget.monthly_gb` is an inbound allowance and `budget.shed` gives up
+    subscriptions to stay under it, so the meter must count what the venue
+    sent. Metering behind `disk_blocked` measures what the disk kept instead,
+    which collapses the projection precisely while a recorder is discarding
+    the most and can restore shed feeds — more inbound — during a storage
+    incident."""
+
+    recorder = build(tmp_path, Tier("wide", (Feed("ticker"),), Universe("listed", quote="USDT")))
+    frame = json.dumps(
+        {
+            "topic": "tickers.AGIUSDT",
+            "type": "delta",
+            "ts": 1_800_000_000_000,
+            "data": {"symbol": "AGIUSDT", "fundingRate": "-0.0015"},
+        }
+    )
+    # What a crossing leaves behind: the gate is shut and the venue keeps sending.
+    recorder.disk_blocked = True
+    recorder.frames.put(("frame", frame, BASE_NS, "wide"))
+    recorder.frames.put(None)
+
+    recorder._write_loop()
+
+    assert recorder.written_rows == 0
+    assert recorder.disk_dropped_frames == 1
+    assert recorder.meter.last_day("all", BASE_NS + 1) == len(frame)
+    assert recorder.meter.last_day("tier:wide", BASE_NS + 1) == len(frame)
+    # The per-feed split needs the normalized rows, which the gate never produced.
+    assert recorder.meter.keys("feed:") == []
+
+
+def test_a_blocked_recorder_projects_the_bytes_it_discards_not_the_bytes_it_keeps(tmp_path: Path) -> None:
+    """The number the budget acts on, end to end: one hour of frames the disk
+    refused must project the same allowance as one hour it wrote."""
+
+    settings = BudgetSettings(monthly_gb=400.0)
+    recorder = build(
+        tmp_path, Tier("wide", (Feed("ticker"),), Universe("listed", quote="USDT")), budget=settings
+    )
+    frame = json.dumps(
+        {
+            "topic": "tickers.AGIUSDT",
+            "type": "delta",
+            "ts": 1_800_000_000_000,
+            "data": {"symbol": "AGIUSDT", "fundingRate": "-0.0015"},
+        }
+    )
+    for at_ns in (BASE_NS, BASE_NS + HOUR_NS):
+        recorder.frames.put(("frame", frame, at_ns, "wide"))
+    recorder.frames.put(None)
+    recorder.disk_blocked = True
+
+    recorder._write_loop()
+
+    recorder.budget.step(BASE_NS + HOUR_NS)
+    blocked = recorder.budget.projected_gb
+    assert blocked is not None
+    # The same two frames, metered by the unblocked path over the same window.
+    reference = ByteMeter(recorder.meter.started_ns)
+    reference.add("all", len(frame), BASE_NS)
+    reference.add("all", len(frame), BASE_NS + HOUR_NS)
+    assert blocked == pytest.approx(
+        BudgetController(settings, reference).projection_gb(BASE_NS + HOUR_NS)
+    )
+    assert recorder.disk_dropped_frames == 2
+
+
 def _metered_hour(meter: ByteMeter, at_ns: int, wide_book: int, movers_book: int, rest: int) -> None:
     meter.add("all", wide_book + movers_book + rest, at_ns)
     meter.add("feed:wide:book:1", wide_book, at_ns)
@@ -1029,12 +1098,315 @@ def test_the_maintenance_tick_writes_the_heartbeat_without_walking_the_tape(
     assert not expired.exists()
 
 
+def test_a_disk_under_the_free_floor_prunes_now_instead_of_waiting_out_the_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`min_free_disk_gb` is free space on the whole filesystem, so anything
+    sharing it can put the recorder under the floor, and under the floor every
+    frame is counted and thrown away. The tick that sees it must start the only
+    thing that frees room rather than leave the pruner asleep for the rest of
+    `RETENTION_INTERVAL_SECONDS`."""
+
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+
+    def refuse() -> dict[str, list[dict[str, Any]]]:
+        raise RuntimeError("venue refused")
+
+    recorder.adapter.fetch_tables = refuse  # type: ignore[method-assign]
+    monkeypatch.setattr(recorder, "_reconcile_tier", lambda name, topics: None)
+    # Long enough that a pass inside it can only come from the wake, never the clock.
+    monkeypatch.setattr(record, "RETENTION_INTERVAL_SECONDS", 3600.0)
+
+    started = threading.Event()
+    woken = threading.Event()
+    passes: list[int] = []
+
+    def counted(now: float | None = None, *, free_credit: int = 0) -> list[Path]:
+        passes.append(len(passes))
+        (started if len(passes) == 1 else woken).set()
+        return []
+
+    monkeypatch.setattr(recorder.retention, "prune", counted)
+    # A daemon thread, so a failed assertion below reports itself rather than
+    # the teardown that a missing wake would trip over.
+    pruner = threading.Thread(target=recorder._retention_loop, name="test-retention", daemon=True)
+    pruner.start()
+    assert started.wait(5.0), "the pruner never made its first pass"
+
+    # A writable disk leaves the pruner on its routine interval.
+    recorder.retention.min_free_bytes = 1
+    recorder._maintenance()
+    assert recorder.disk_blocked is False
+    assert not woken.wait(0.5)
+
+    # Now nothing on this filesystem is enough.
+    recorder.retention.min_free_bytes = 1 << 62
+    recorder._maintenance()
+    assert recorder.disk_blocked is True
+    assert woken.wait(5.0), "the pruner slept out its interval while the disk was blocked"
+
+    # The level, not only the crossing: a burst ends on the pass that finds no
+    # deficit left and that leaves the gate shut, so the still-blocked tick is
+    # where the next pass has to come from.
+    woken.clear()
+    recorder._maintenance()
+    assert recorder.disk_blocked is True
+    assert woken.wait(5.0), "a blocked tick left the pruner asleep"
+
+    # A stop wakes the pruner: shutdown never waits out a retention interval.
+    recorder.stop.set()
+    recorder.prune_now.set()
+    pruner.join(5.0)
+    assert not pruner.is_alive()
+
+
+def test_a_pass_that_frees_room_opens_the_writer_gate_instead_of_the_next_status_tick(
+    tmp_path: Path,
+) -> None:
+    """`disk_blocked` gates every frame in `_write_loop`, and only a retention
+    pass frees room, so the pass that frees it is what must open the gate.
+    Leaving that to `_maintenance` throws away a whole
+    `status_interval_seconds` of tape onto a disk that already has space."""
+
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+    directory = tmp_path / "2027-01-15" / "10" / "BTCUSDT"
+
+    def expired(name: str) -> Path:
+        # A pass that empties an hour removes the directory too, so each file
+        # remakes its own.
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        path.write_bytes(b"long past retention")
+        os.utime(path, (1_000_000, 1_000_000))
+        return path
+
+    first = expired("segment-000000.jsonl.zst")
+    # What a crossing leaves behind: the free-space tick, or the append that
+    # failed first, has closed the gate.
+    recorder.disk_blocked = True
+
+    # A pass that deletes but leaves the disk under the floor changes nothing:
+    # the floor is the developer box's, not the host's, so pin it.
+    recorder.retention.min_free_bytes = 1 << 62
+    recorder._retention_pass()
+
+    assert not first.exists()
+    assert recorder.disk_blocked is True
+
+    # Room is back, so the frame after this pass is tape, not a dropped count.
+    expired("segment-000001.jsonl.zst")
+    recorder.retention.min_free_bytes = 1
+    recorder._retention_pass()
+
+    assert recorder.disk_blocked is False
+
+    row = {"kind": "ticker", "symbol": "BTCUSDT", "values": {}, "local_receive_ts_ns": BASE_NS}
+    recorder.frames.put(("rows", [row], BASE_NS, "deep"))
+    recorder.frames.put(None)
+    recorder._write_loop()
+
+    assert recorder.written_rows == 1
+    assert recorder.disk_dropped_frames == 0
+
+
+def test_a_pass_that_deletes_and_leaves_the_gate_shut_passes_again_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`prune` stops on the free space it counts from the sizes it unlinked;
+    `writable()` reads the kernel's. While the filesystem is still releasing
+    blocks the two disagree, so a pass can delete, believe it reached the
+    floor, and leave the gate shut. Nothing else wakes the pruner then —
+    `_maintenance` arms `prune_now` on the crossing only, and `_write_loop`
+    never reaches an append to fail on — so the pass that fell short must be
+    what runs the next one. Sleeping out `RETENTION_INTERVAL_SECONDS` instead
+    throws away the tape the pass already made room for."""
+
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+    # Long enough that a second pass inside it can only come from the first.
+    monkeypatch.setattr(record, "RETENTION_INTERVAL_SECONDS", 3600.0)
+    # What a crossing leaves behind, and the developer box's own free space
+    # pinned under the floor so `writable()` reads the code under test.
+    recorder.disk_blocked = True
+    recorder.retention.min_free_bytes = 1 << 62
+
+    passes: list[int] = []
+    third = threading.Event()
+
+    def short(now: float | None = None, *, free_credit: int = 0) -> list[Path]:
+        passes.append(len(passes))
+        # Two passes the kernel does not yet agree with, then one it does.
+        if len(passes) == 3:
+            recorder.retention.min_free_bytes = 1
+            third.set()
+        return [Path(f"2027-01-15/10/BTCUSDT/segment-{len(passes):06d}.jsonl.zst")]
+
+    monkeypatch.setattr(recorder.retention, "prune", short)
+    # A daemon thread, so a failed assertion below reports itself rather than
+    # the teardown that a missing pass would trip over.
+    pruner = threading.Thread(target=recorder._retention_loop, name="test-retention", daemon=True)
+    pruner.start()
+
+    assert third.wait(5.0), f"the pruner slept with the gate shut after {len(passes)} pass(es)"
+    deadline = time.monotonic() + 5.0
+    while recorder.disk_blocked and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert recorder.disk_blocked is False, "the pass that reached the floor did not open the gate"
+
+    # The retry ends where it must: a pass that deletes nothing does not walk
+    # the tape again, so a full disk holding no tape is not spun on.
+    assert recorder._retention_pass() is False
+    monkeypatch.setattr(recorder.retention, "prune", lambda now=None, *, free_credit=0: [])
+    recorder.disk_blocked = True
+    recorder.retention.min_free_bytes = 1 << 62
+    assert recorder._retention_pass() is False
+
+    recorder.stop.set()
+    recorder.prune_now.set()
+    pruner.join(5.0)
+    assert not pruner.is_alive()
+
+
+def test_a_burst_of_owed_passes_deletes_the_deficit_once_not_the_whole_tape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successor is owed because the kernel's free space disagreed with what
+    the pass unlinked, and the retries run back to back with nothing between
+    them. So a successor that re-reads that same number derives the whole
+    deficit again and deletes it again, pass after pass, until the tape has no
+    file left: a floor held by something other than tape costs every hour of
+    history the recorder holds. Each pass must credit what the burst already
+    unlinked and stop where the first one did."""
+
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+    # Long enough that every pass inside the burst comes from the burst itself.
+    monkeypatch.setattr(record, "RETENTION_INTERVAL_SECONDS", 3600.0)
+    recorder.retention.retention_days = 36_500
+    recorder.retention.max_bytes = 10**12
+    recorder.retention.min_free_bytes = 400
+    directory = tmp_path / "2027-01-15" / "10" / "BTCUSDT"
+    directory.mkdir(parents=True)
+    for index in range(20):
+        (directory / f"segment-{index:06d}.jsonl.zst").write_bytes(b"x" * 100)
+
+    # A filesystem that has not released a single unlinked block: free space
+    # reads the same under the floor however much the burst deletes, so every
+    # pass is owed a successor and `writable()` never opens the gate.
+    monkeypatch.setattr(
+        "market_tape.storage.shutil.disk_usage",
+        lambda path: SimpleNamespace(total=10_000, used=9_800, free=200),
+    )
+    # What a crossing leaves behind.
+    recorder.disk_blocked = True
+
+    real_prune = recorder.retention.prune
+    passes: list[int] = []
+    settled = threading.Event()
+
+    def counted(now: float | None = None, *, free_credit: int = 0) -> list[Path]:
+        passes.append(len(passes))
+        deleted = real_prune(now, free_credit=free_credit)
+        if not deleted:
+            settled.set()
+        return deleted
+
+    monkeypatch.setattr(recorder.retention, "prune", counted)
+    # A daemon thread, so a failed assertion below reports itself rather than
+    # the teardown that a runaway burst would wait on.
+    pruner = threading.Thread(target=recorder._retention_loop, name="test-retention", daemon=True)
+    pruner.start()
+
+    assert settled.wait(5.0), f"the burst never ended after {len(passes)} pass(es)"
+    assert len(passes) == 2, "the successor deleted a second deficit instead of crediting the first"
+    assert len(list(directory.glob("*.zst"))) == 17
+    assert recorder.disk_blocked is True
+
+    recorder.stop.set()
+    recorder.prune_now.set()
+    pruner.join(5.0)
+    assert not pruner.is_alive()
+
+
+def test_a_blocked_tick_runs_the_pass_the_credited_burst_stopped_short_of(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A credited burst ends on the pass that finds no deficit left, and it
+    ends with the gate still shut whenever the kernel released the unlinked
+    blocks and another writer on the filesystem took them — which is what two
+    recorders sharing one disk do to each other. The tape still holds hours
+    nobody needs and every frame is being counted and dropped, so the next
+    blocked status tick is what must run the next pass. Arming `prune_now` on
+    the crossing alone leaves the pruner asleep for a whole
+    `RETENTION_INTERVAL_SECONDS` there."""
+
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+
+    def refuse() -> dict[str, list[dict[str, Any]]]:
+        raise RuntimeError("venue refused")
+
+    recorder.adapter.fetch_tables = refuse  # type: ignore[method-assign]
+    monkeypatch.setattr(recorder, "_reconcile_tier", lambda name, topics: None)
+    # Long enough that a pass inside it can only come from a wake, never the clock.
+    monkeypatch.setattr(record, "RETENTION_INTERVAL_SECONDS", 3600.0)
+    recorder.retention.retention_days = 36_500
+    recorder.retention.max_bytes = 10**12
+    recorder.retention.min_free_bytes = 400
+    directory = tmp_path / "2027-01-15" / "10" / "BTCUSDT"
+    directory.mkdir(parents=True)
+    for index in range(20):
+        (directory / f"segment-{index:06d}.jsonl.zst").write_bytes(b"x" * 100)
+
+    # A filesystem whose free space never moves however much the burst
+    # unlinks: the neighbour recorder takes each freed block as it is
+    # released. The credit is then an overstatement, so the successor finds no
+    # deficit and the burst stops with the disk still under the floor.
+    monkeypatch.setattr(
+        "market_tape.storage.shutil.disk_usage",
+        lambda path: SimpleNamespace(total=10_000, used=9_800, free=200),
+    )
+    # What a crossing leaves behind.
+    recorder.disk_blocked = True
+
+    real_prune = recorder.retention.prune
+    passes: list[int] = []
+    settled = threading.Event()
+
+    def counted(now: float | None = None, *, free_credit: int = 0) -> list[Path]:
+        passes.append(len(passes))
+        deleted = real_prune(now, free_credit=free_credit)
+        if not deleted:
+            settled.set()
+        return deleted
+
+    monkeypatch.setattr(recorder.retention, "prune", counted)
+    # A daemon thread, so a failed assertion below reports itself rather than
+    # the teardown that a missing pass would wait on.
+    pruner = threading.Thread(target=recorder._retention_loop, name="test-retention", daemon=True)
+    pruner.start()
+
+    assert settled.wait(5.0), f"the burst never ended after {len(passes)} pass(es)"
+    assert len(passes) == 2
+    assert len(list(directory.glob("*.zst"))) == 17
+    assert recorder.disk_blocked is True
+
+    settled.clear()
+    recorder._maintenance()
+
+    assert settled.wait(5.0), "a blocked tick left the pruner asleep on a tape it could still trim"
+    assert len(passes) == 4
+    assert len(list(directory.glob("*.zst"))) == 14
+
+    recorder.stop.set()
+    recorder.prune_now.set()
+    pruner.join(5.0)
+    assert not pruner.is_alive()
+
+
 def test_a_retention_pass_that_cannot_delete_leaves_the_pruner_thread_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
 
-    def refuse(now: float | None = None) -> list[Path]:
+    def refuse(now: float | None = None, *, free_credit: int = 0) -> list[Path]:
         raise OSError("read-only file system")
 
     monkeypatch.setattr(recorder.retention, "prune", refuse)
@@ -1066,6 +1438,40 @@ def test_a_row_handed_in_by_a_side_lane_reaches_the_writer_queue(tmp_path: Path)
     assert tier == "lanes"
     assert recorder.received_frames == 1
     assert recorder.last_receive_ns == BASE_NS
+
+
+def test_a_failed_append_blocks_the_disk_and_asks_for_a_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The append is the first detector of a full disk — it fails milliseconds
+    in, where the free-space tick is a status interval behind — so it is also
+    what starts the pass that frees room."""
+
+    recorder = build(tmp_path, Tier("wide", (Feed("ticker"),), Universe("listed", quote="USDT")))
+
+    def no_space(row: Any) -> list[Any]:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(recorder.writer, "append", no_space)
+    frame = json.dumps(
+        {
+            "topic": "tickers.AGIUSDT",
+            "type": "delta",
+            "ts": 1_800_000_000_000,
+            "data": {"symbol": "AGIUSDT", "fundingRate": "-0.0015"},
+        }
+    )
+    recorder.frames.put(("frame", frame, BASE_NS, "wide"))
+    recorder.frames.put(None)
+
+    with caplog.at_level(logging.ERROR):
+        recorder._write_loop()
+
+    assert recorder.disk_blocked is True
+    assert recorder.written_rows == 0
+    assert recorder.disk_dropped_frames == 1
+    assert "No space left on device" in caplog.text
+    assert recorder.prune_now.is_set(), "a full disk left the pruner asleep"
 
 
 @needs_zstd

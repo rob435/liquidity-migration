@@ -3901,3 +3901,41 @@ fn named_destinations_refuse_a_checkpoint_that_aliases_both_directional_owners()
         "state: checkpoint directional destinations share one durable id"
     );
 }
+
+/// The durable half of the same fault: the apply path merged the re-stamped
+/// row and returned the rewrite error, which would have failed the funding
+/// lane's commit even with the fetch gate open.
+#[test]
+fn a_refetched_settlement_keeps_the_interval_it_was_first_observed_with() {
+    let settlement = 100 * DAY_MS;
+    let mut worker = SignalWorker::with_universe(test_config(), test_universe()).unwrap();
+    let batch = |sequence: u64, rate: &str, hours: i64| WireEvent::BybitFundingBatch {
+        schema_version: SCHEMA_VERSION,
+        sequence,
+        symbol: "BTCUSDT".into(),
+        available_at_ms: settlement + 5,
+        checked_from_ms: Some(settlement - HOUR_MS),
+        checked_through_ms: Some(settlement),
+        replace_coverage: false,
+        emit_lifecycle: false,
+        rows: vec![BybitFundingWire {
+            funding_rate_timestamp: Value::from(settlement),
+            funding_rate: Value::from(rate),
+            funding_interval_hour: Some(Value::from(hours)),
+        }],
+    };
+    worker
+        .apply(batch(1, "-0.001", 8))
+        .expect("the first observation of a settlement");
+    worker
+        .apply(batch(2, "-0.001", 4))
+        .expect("the same settlement under the venue's new funding interval");
+    assert_eq!(
+        worker.state.funding["BTCUSDT"][&settlement].funding_interval_min, 480,
+        "the interval in force when the settlement was recorded is kept"
+    );
+    let error = worker
+        .apply(batch(3, "-0.002", 8))
+        .expect_err("a settled rate that moved is still a rewrite");
+    assert!(error.to_string().contains("BTCUSDT"), "{error}");
+}

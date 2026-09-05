@@ -67,7 +67,7 @@ python scripts/research/reconcile_venue_wal.py \
 | `liquidity-migration-forward-capture-binance.service`| Global | `liquidity-capture:liquidity-migration` | `independent` (boot) | Continuous Binance tick & L2 capture. |
 | `liquidity-migration-telegram-controls.service` | Global | `liquidity-controls:liquidity-controls` | `multi-user.target` | Interactive Telegram operator bot. |
 | `liquidity-migration-trade-notify.timer` | Global | `liquidity-observer:liquidity-migration` | Timer (every 1m) | Fills and closed-trade alert dispatcher. |
-| `liquidity-migration-market-tape-upload.timer` | Global | `root:root` | Timer (hourly at :10) | Ships finished tape archives to Google Drive. |
+| `liquidity-migration-market-tape-upload.timer` | Global | `root:root` | Timer (hourly at :10) | Ships finished tape archives to Google Drive, then deletes shipped hours older than `--keep-hours 24` from both tape roots. |
 | `liquidity-migration-backup.timer` | Global | `root:root` | Timer (every 6h) | Ships engine state & WAL to Google Drive. |
 
 * **Independent Units**: `forward-capture`, `forward-capture-binance`, `market-tape-upload`, `backup`, and `host-liveness` are never stopped by fleet deploys or safety stops.
@@ -190,7 +190,7 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | Data Payload | Schedule | Destination on Google Drive | Retention |
 | :--- | :--- | :--- | :--- |
 | **Engine State & WAL** | Every 6h (`backup.timer`) | `LiquidityMigration/engine-state/latest/` | 60 days in `history/` |
-| **Market Tape Hours** | Hourly at :10 (`upload.timer`)| `LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/` | Permanent archive |
+| **Market Tape Hours** | Hourly at :10 (`upload.timer`)| `LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/` | Permanent archive; the host keeps a 24 h sliding window of shipped hours ([market_tape/README.md](../market_tape/README.md) §Local Sliding Window) |
 * **Security Invariant**: Backup scripts explicitly reject `*.env` files to prevent credentials from ever leaving the host.
 
 ---

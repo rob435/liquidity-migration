@@ -3,20 +3,14 @@
 //! the engine the fleet runs.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use engine_core::sim::{run_seed, FaultRates, SimOptions};
+use tokio::sync::Mutex;
 
 /// One simulation at a time. The engine's dispatch and drain deadlines read
 /// the wall clock, so two seeds sharing the machine can take different paths
 /// and a replay check would then measure load, not determinism.
-static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-
-fn alone() -> MutexGuard<'static, ()> {
-    ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
+static ONE_AT_A_TIME: Mutex<()> = Mutex::const_new(());
 
 fn scratch(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("engine-sim-{}-{tag}", std::process::id()))
@@ -31,7 +25,7 @@ fn options(seed: u64, tag: &str) -> SimOptions {
 
 #[tokio::test]
 async fn without_faults_the_simulation_keeps_the_backtest_promise() {
-    let _alone = alone();
+    let _alone = ONE_AT_A_TIME.lock().await;
     let mut opts = options(1, "clean");
     opts.crashes = 0;
     opts.faults = FaultRates::NONE;
@@ -48,7 +42,7 @@ async fn without_faults_the_simulation_keeps_the_backtest_promise() {
 
 #[tokio::test]
 async fn faults_and_a_death_leave_the_log_and_the_venue_agreeing() {
-    let _alone = alone();
+    let _alone = ONE_AT_A_TIME.lock().await;
     let mut injected = std::collections::BTreeSet::new();
     for seed in 1..=6u64 {
         let mut opts = options(seed, "faulty");
@@ -81,7 +75,7 @@ async fn faults_and_a_death_leave_the_log_and_the_venue_agreeing() {
 
 #[tokio::test]
 async fn one_seed_replays_byte_for_byte_under_heavy_faults() {
-    let _alone = alone();
+    let _alone = ONE_AT_A_TIME.lock().await;
     let mut opts = options(7, "heavy");
     opts.crashes = 2;
     opts.faults = FaultRates::HEAVY;

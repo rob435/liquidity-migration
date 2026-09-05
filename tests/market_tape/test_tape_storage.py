@@ -336,6 +336,76 @@ def test_disk_pressure_stops_once_the_unlinked_bytes_clear_the_free_floor(tmp_pa
     assert (directory / "segment-000002.jsonl.zst").exists()
 
 
+def test_disk_pressure_leaves_the_writer_room_above_the_floor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pass that stops exactly on `min_free_bytes` unblocks the writer onto
+    no room at all: `writable()` returns True, the next segments cross the
+    floor again, and the recorder blocks for another interval with every frame
+    in between discarded. The pass must free past the floor."""
+
+    manifest = Manifest(tmp_path)
+    directory = tmp_path / "2027-01-15" / "10" / "AGIUSDT"
+    directory.mkdir(parents=True)
+    for index in range(20):
+        path = directory / f"segment-{index:06d}.jsonl.zst"
+        path.write_bytes(b"x" * 50)
+        os.utime(path, (1_000_000 + index, 1_000_000 + index))
+
+    # Free space is what the tape does not hold: deleting a file returns its
+    # bytes, writing one takes them, exactly as the filesystem behaves.
+    def usage(path: Any) -> Any:
+        held = sum(item.stat().st_size for item in tmp_path.rglob("*.zst"))
+        return SimpleNamespace(total=3_000, used=1_100 + held, free=1_900 - held)
+
+    monkeypatch.setattr("market_tape.storage.shutil.disk_usage", usage)
+
+    retention = Retention(tmp_path, manifest, retention_days=36_500, max_bytes=10**12, min_free_bytes=1_000)
+    assert retention.writable() is False
+
+    deleted = retention.prune(1_000_100.0)
+
+    assert retention.writable() is True
+    # One more rolled segment must not put the recorder back under the floor.
+    (directory / "segment-000099.jsonl.zst").write_bytes(b"x" * 50)
+    assert retention.writable() is True
+    assert len(deleted) == 3
+
+
+def test_a_successor_pass_credits_what_the_burst_already_unlinked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pass is owed a successor when the kernel's free space still reads
+    under the floor after the pass unlinked its way past it. The statvfs is
+    the number that was wrong, so a successor that trusts it derives the same
+    deficit again and deletes it again. Credited, the successor sees the room
+    the burst already made and deletes nothing."""
+
+    manifest = Manifest(tmp_path)
+    directory = tmp_path / "2027-01-15" / "10" / "AGIUSDT"
+    directory.mkdir(parents=True)
+    for index in range(20):
+        path = directory / f"segment-{index:06d}.jsonl.zst"
+        path.write_bytes(b"x" * 100)
+        os.utime(path, (1_000_000 + index, 1_000_000 + index))
+
+    # A filesystem that has not released a single unlinked block: free space
+    # reads the same under the floor however much the pass deletes.
+    monkeypatch.setattr(
+        "market_tape.storage.shutil.disk_usage",
+        lambda path: SimpleNamespace(total=10_000, used=9_800, free=200),
+    )
+
+    retention = Retention(tmp_path, manifest, retention_days=36_500, max_bytes=10**12, min_free_bytes=400)
+    first = retention.prune(1_000_100.0)
+
+    assert len(first) == 3
+    assert retention.last_freed_bytes == 300
+    assert retention.writable() is False
+
+    assert retention.prune(1_000_100.0, free_credit=retention.last_freed_bytes) == []
+    assert retention.last_freed_bytes == 0
+    assert len(list(directory.glob("*.zst"))) == 17
+
+
 @needs_zstd
 def test_snapshots_write_the_venue_tables_with_their_own_payload(tmp_path: Path) -> None:
     manifest = Manifest(tmp_path)
@@ -386,3 +456,36 @@ def test_a_daily_cadence_waits_for_the_day_and_an_hourly_one_for_the_hour(tmp_pa
     assert not daily.due(HOUR_10 + HOUR)
     assert daily.due(HOUR_10 + 24 * HOUR)
     assert hourly.due(HOUR_10 + HOUR)
+
+
+def test_a_pass_survives_a_file_another_process_unlinked_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`market_tape pack` deletes shipped hours from its own process. A file it
+    takes between this pass's stat and unlink must cost the pass nothing but
+    that file: the pass goes on, and the receipt is not written twice."""
+
+    manifest = Manifest(tmp_path)
+    directory = tmp_path / "2027-01-15" / "10" / "AGIUSDT"
+    directory.mkdir(parents=True)
+    taken = directory / "segment-000000.jsonl.zst"
+    ours = directory / "segment-000001.jsonl.zst"
+    taken.write_bytes(b"gone-first")
+    ours.write_bytes(b"ours")
+    os.utime(taken, (1_000_000, 1_000_000))
+    os.utime(ours, (1_000_001, 1_000_001))
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == taken:
+            real_unlink(self)  # the other process gets there first
+            raise FileNotFoundError(str(self))
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    retention = Retention(tmp_path, manifest, retention_days=36_500, max_bytes=0, min_free_bytes=1)
+    deleted = retention.prune(1_000_100.0)
+
+    assert deleted == [ours.relative_to(tmp_path)]
+    assert not taken.exists() and not ours.exists()
+    receipts = [json.loads(line) for line in (tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [receipt["path"] for receipt in receipts] == [str(ours.relative_to(tmp_path))]

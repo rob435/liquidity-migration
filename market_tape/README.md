@@ -14,7 +14,8 @@ python -m market_tape record --config deploy/capture/bybit-linear.toml --root /v
 # Google Drive Packing
 python -m market_tape pack --tape bybit-linear=/var/lib/liquidity-migration/forward-market \
                            --tape binance-usdm=/var/lib/liquidity-migration/forward-market-binance \
-                           --remote-base gdrive:LiquidityMigration/market-tape
+                           --remote-base gdrive:LiquidityMigration/market-tape \
+                           --keep-hours 24
 
 # Data Inspection & Analytics
 python -m market_tape hours  SOURCE
@@ -101,3 +102,19 @@ Uploaded hourly at :10 past the hour:
 ```text
 LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/<YYYY-MM-DD>T<HH>Z.tar
 ```
+
+### Local Sliding Window (`market_tape pack --keep-hours`)
+
+The Drive is the archive; the host holds the last `--keep-hours` of tape plus whatever has not shipped yet. The same `pack` run that uploads also deletes, after its uploads, in `prune_shipped`.
+
+| Rule | Value |
+| :--- | :--- |
+| Licence to delete | The hour's `remote_path` is in `<state-dir>/uploaded-tapes.jsonl`, which is written only after the Drive's size and MD5 matched the upload. |
+| When | `now >= hour_end + keep_hours * 3600`. The deployed unit passes `--keep-hours 24`. |
+| What goes | Every `*.zst` under the hour directory except `_meta/`; empty directories after it. |
+| What stays | `_meta/` snapshots (the day's point-in-time tables; the recorder prunes them by `retention_days`), any hour not in the ledger, any hour inside the window. |
+| Receipt | One `segment_deleted` row per file in the recorder's `manifest.jsonl`, `reason=shipped`, with the `remote_path`. |
+| Stamp | `keep_hours`, `pruned_hours`, `pruned_bytes` in `market-tape-upload.last-success`. |
+
+* An hour the Drive did not confirm is **never** deleted here, whatever its age. The recorder's `retention_days`, `max_disk_gb` and `min_free_disk_gb` remain the backstop for a tape the Drive is not taking.
+* `Retention.prune` on the recorder and `prune_shipped` in the uploader may unlink concurrently; each treats a file the other took first as not its own.

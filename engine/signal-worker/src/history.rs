@@ -20,6 +20,8 @@ pub(crate) trait HistoryRow {
     const LABEL: &'static str;
     /// The timestamp the row is keyed on.
     fn key(&self) -> i64;
+    /// The symbol the row belongs to, for error text.
+    fn symbol(&self) -> &str;
     fn available_at_ms(&self) -> i64;
     fn set_available_at_ms(&mut self, at_ms: i64);
     /// Every field except `available_at_ms`. A source may restate a row; it
@@ -37,8 +39,9 @@ pub(crate) fn merge_row<R: HistoryRow>(
     if let Some(existing) = rows.get_mut(&key) {
         if !existing.same_value(&row) {
             return Err(WorkerError::input(format!(
-                "{} history rewrote timestamp {key}",
-                R::LABEL
+                "{} history rewrote {} at timestamp {key}",
+                R::LABEL,
+                row.symbol()
             )));
         }
         existing.set_available_at_ms(existing.available_at_ms().min(row.available_at_ms()));
@@ -53,6 +56,10 @@ impl HistoryRow for HourlyKline {
 
     fn key(&self) -> i64 {
         self.open_ts_ms
+    }
+
+    fn symbol(&self) -> &str {
+        &self.symbol
     }
 
     fn available_at_ms(&self) -> i64 {
@@ -82,6 +89,10 @@ impl HistoryRow for SettledFunding {
         self.settlement_ts_ms
     }
 
+    fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
     fn available_at_ms(&self) -> i64 {
         self.available_at_ms
     }
@@ -90,11 +101,16 @@ impl HistoryRow for SettledFunding {
         self.available_at_ms = at_ms;
     }
 
+    /// `funding_interval_min` is not venue history: `/v5/market/funding/history`
+    /// carries no interval, so every row is stamped with the instrument's current
+    /// `fundingInterval` at fetch time. Bybit changes that field, so a settlement
+    /// already held is re-observed under the new interval. The settled identity is
+    /// (symbol, settlement, rate); the interval stays as first observed, which is
+    /// what keeps the cadence checks in `features` refusing to mix two eras.
     fn same_value(&self, other: &Self) -> bool {
         self.symbol == other.symbol
             && self.settlement_ts_ms == other.settlement_ts_ms
             && self.rate == other.rate
-            && self.funding_interval_min == other.funding_interval_min
     }
 }
 
@@ -103,6 +119,10 @@ impl HistoryRow for BinanceWhaleObservation {
 
     fn key(&self) -> i64 {
         self.day_end_ms
+    }
+
+    fn symbol(&self) -> &str {
+        &self.symbol
     }
 
     fn available_at_ms(&self) -> i64 {

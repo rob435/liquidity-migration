@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -203,7 +204,7 @@ def test_an_hour_ships_as_one_archive_with_a_manifest_and_is_ledgered(tmp_path: 
     assert "file_count=3" in stamp
     assert f"remote_free_bytes={4 * 1024**4}" in stamp
     assert f"destination={REMOTE}" in stamp
-    # The staged tar is gone; the local segments stay for the recorder's retention.
+    # The staged tar is gone; the hour is inside the default 24 h window, so its segments stay.
     assert not list((tmp_path / "state" / "staging").glob("*.tar"))
     assert (root / "2026-09-02" / "10" / "BTCUSDT" / "segment-000000.jsonl.zst").exists()
     # A second run ships nothing new and does not re-upload.
@@ -383,3 +384,156 @@ def test_the_stamp_sums_the_last_thirty_days_of_uploads() -> None:
     since = datetime(2026, 8, 3, tzinfo=timezone.utc).timestamp()
     assert pack.bytes_uploaded_since(ledger, since) == 105
     assert pack.bytes_uploaded_since({}, since) == 0
+
+
+def test_a_failed_archive_build_leaves_no_partial_archive_in_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial `.tar.tmp` is disk no retention pass can see: staging is outside
+    both tape roots, on the filesystem the recorders' free-space floor guards."""
+
+    root = tmp_path / "tape"
+    _segment(root, "2026-09-02", "10", "BTCUSDT", 0)
+    staging = tmp_path / "state" / "staging"
+    candidate = pack.Candidate("2026-09-02T10Z", "2026-09-02", "10", (root / "2026-09-02" / "10",))
+    added = 0
+    real_addfile = tarfile.TarFile.addfile
+
+    def full_disk(self, tarinfo, fileobj=None):  # noqa: ANN001, ANN202 - test double
+        nonlocal added
+        added += 1
+        if added > 1:  # the manifest lands, then the disk fills
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_addfile(self, tarinfo, fileobj)
+
+    monkeypatch.setattr(tarfile.TarFile, "addfile", full_disk)
+
+    with pytest.raises(OSError):
+        pack.build_archive(candidate, root, staging, {})
+
+    assert list(staging.iterdir()) == []
+
+
+def test_a_run_reclaims_the_staging_a_killed_run_left_behind(tmp_path: Path) -> None:
+    _segment(tmp_path / "tape", "2026-09-02", "10", "BTCUSDT", 0)
+    staging = tmp_path / "state" / "staging"
+    staging.mkdir(parents=True)
+    orphans = (staging / "2026-09-02T09Z.tar", staging / ".2026-09-02T08Z.tar.tmp")
+    for orphan in orphans:
+        orphan.write_bytes(b"x" * 1024)
+    keep = staging / "notes.txt"
+    keep.write_bytes(b"not an archive")
+
+    result = _run(tmp_path, *_single_tape(tmp_path), now="2026-09-02T11:20:00")
+
+    assert result.returncode == 0, result.stderr
+    assert "removed stale staging archive 2026-09-02T09Z.tar bytes=1024" in result.stdout
+    assert "removed stale staging archive .2026-09-02T08Z.tar.tmp bytes=1024" in result.stdout
+    for orphan in orphans:
+        assert not orphan.exists()
+    assert keep.exists()
+    # The run still ships its own hour.
+    assert [row["name"] for row in _ledger(tmp_path)] == ["2026-09-02T10Z"]
+
+
+def test_a_shipped_hour_leaves_the_disk_once_it_is_older_than_the_window(tmp_path: Path) -> None:
+    """The local tape is a sliding window over what the Drive already holds:
+    a ledgered hour's segments go once the hour has been over `--keep-hours`,
+    its `_meta` snapshots stay, and an hour inside the window is untouched."""
+
+    root = tmp_path / "tape"
+    old_segment = _segment(root, "2026-09-02", "08", "BTCUSDT", 0, b"btc-08")
+    _segment(root, "2026-09-02", "08", "ETHUSDT", 0, b"eth-08")
+    meta = root / "2026-09-02" / "08" / "_meta" / "instruments-20260902T080000Z.json.zst"
+    meta.parent.mkdir()
+    meta.write_bytes(b"tables")
+    recent_segment = _segment(root, "2026-09-02", "10", "BTCUSDT", 0, b"btc-10")
+    (root / "manifest.jsonl").write_text("", encoding="utf-8")
+
+    # 11:10: hour 08 has been over for 2h10m, hour 10 for 10 minutes.
+    result = _run(tmp_path, *_single_tape(tmp_path), "--keep-hours", "1", now="2026-09-02T11:10:00")
+
+    assert result.returncode == 0, result.stderr
+    assert [row["name"] for row in _ledger(tmp_path)] == ["2026-09-02T08Z", "2026-09-02T10Z"]
+    assert "pruned shipped 2026-09-02T08Z files=2 bytes=12" in result.stdout
+    assert not old_segment.exists()
+    assert not (root / "2026-09-02" / "08" / "ETHUSDT").exists()
+    assert meta.exists()
+    assert recent_segment.exists()
+    receipts = [json.loads(line) for line in (root / "manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert {(row["kind"], row["reason"]) for row in receipts} == {("segment_deleted", "shipped")}
+    assert {row["path"] for row in receipts} == {
+        "2026-09-02/08/BTCUSDT/segment-000000.jsonl.zst",
+        "2026-09-02/08/ETHUSDT/segment-000000.jsonl.zst",
+    }
+    assert all(row["remote_path"] == f"{REMOTE}/2026/09/02/2026-09-02T08Z.tar" for row in receipts)
+    stamp = (tmp_path / "receipts" / "market-tape-upload.last-success").read_text()
+    assert "keep_hours=1.0" in stamp
+    assert "pruned_hours=1" in stamp
+    assert "pruned_bytes=12" in stamp
+
+    # 12:20: hour 10 has now been over for 1h20m. It goes without a re-upload,
+    # and the hour that only holds `_meta` is not pruned twice.
+    copies_before = (tmp_path / "rclone.log").read_text().count("copyto")
+    again = _run(tmp_path, *_single_tape(tmp_path), "--keep-hours", "1", now="2026-09-02T12:20:00")
+
+    assert again.returncode == 0, again.stderr
+    assert (tmp_path / "rclone.log").read_text().count("copyto") == copies_before
+    assert "pruned shipped 2026-09-02T10Z files=1 bytes=6" in again.stdout
+    assert "pruned shipped 2026-09-02T08Z" not in again.stdout
+    assert not recent_segment.exists()
+    assert not (root / "2026-09-02" / "10").exists()
+    assert meta.exists()
+
+
+def test_the_window_only_deletes_what_the_ledger_says_the_drive_holds(tmp_path: Path) -> None:
+    root = tmp_path / "tape"
+    unshipped = _segment(root, "2026-08-01", "00", "BTCUSDT", 0)
+    shipped = _segment(root, "2026-08-01", "01", "BTCUSDT", 0)
+    ledger = {f"{REMOTE}/2026/08/01/2026-08-01T01Z.tar": {"name": "2026-08-01T01Z"}}
+    now = _epoch("2026-09-02T12:00:00")
+
+    # A month old and never ledgered: the recorder's retention decides, not this.
+    pruned = pack.prune_shipped(root, {}, remote=REMOTE, now=now, keep_hours=0, grace_seconds=300)
+    assert pruned == []
+    assert unshipped.exists() and shipped.exists()
+
+    # Ledgered but still inside the window: untouched.
+    pruned = pack.prune_shipped(root, ledger, remote=REMOTE, now=now, keep_hours=24 * 40, grace_seconds=300)
+    assert pruned == []
+    assert shipped.exists()
+
+    # Ledgered and past the window: only that hour goes.
+    pruned = pack.prune_shipped(root, ledger, remote=REMOTE, now=now, keep_hours=24, grace_seconds=300)
+    assert [(row["name"], row["file_count"]) for row in pruned] == [("2026-08-01T01Z", 1)]
+    assert unshipped.exists()
+    assert not shipped.exists()
+    assert not (root / "2026-08-01" / "01").exists()
+    assert (root / "2026-08-01").exists()
+
+
+def test_a_negative_window_is_refused(tmp_path: Path) -> None:
+    _segment(tmp_path / "tape", "2026-09-02", "10", "BTCUSDT", 0)
+    result = _run(tmp_path, *_single_tape(tmp_path), "--keep-hours", "-1", now="2026-09-02T11:20:00")
+    assert result.returncode == 2
+    assert "--keep-hours must be zero or more" in result.stderr
+
+
+def test_a_dry_run_names_the_shipped_hours_the_window_would_take(tmp_path: Path) -> None:
+    root = tmp_path / "tape"
+    _segment(root, "2026-09-02", "08", "BTCUSDT", 0)
+    _segment(root, "2026-09-02", "10", "BTCUSDT", 0)
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "uploaded-tapes.jsonl").write_text(
+        json.dumps({"name": "2026-09-02T08Z", "remote_path": f"{REMOTE}/2026/09/02/2026-09-02T08Z.tar"}) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _run(tmp_path, *_single_tape(tmp_path), "--keep-hours", "1", "--dry-run", now="2026-09-02T11:10:00")
+
+    assert result.returncode == 0, result.stderr
+    assert "would pack bybit-linear 2026-09-02T10Z" in result.stdout
+    assert "would prune bybit-linear 2026-09-02T08Z (shipped, over 1h ago)" in result.stdout
+    assert "1 pending, 1 already shipped, 1 shipped hours past the window" in result.stdout
+    assert (root / "2026-09-02" / "08" / "BTCUSDT" / "segment-000000.jsonl.zst").exists()

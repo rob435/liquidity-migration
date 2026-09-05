@@ -90,10 +90,12 @@ REANCHOR_TOPICS_PER_TICK = 40
 #: Topics dropped and re-taken together. One venue message carries ten, so a
 #: chunk is one message each way and a symbol's gap is one round trip.
 REANCHOR_CHUNK = 10
-#: Seconds between retention passes, on the pruner thread. The tape gains a
-#: few hundred megabytes in that time against a `min_free_disk_gb` measured in
-#: tens of gigabytes, so the disk cannot run out inside one interval, and the
-#: walk costs a tenth of what it did at the status cadence.
+#: Seconds between routine retention passes, on the pruner thread. This is the
+#: housekeeping cadence only: `min_free_disk_gb` is free space on the whole
+#: filesystem, which anything sharing it can cross, and every second the
+#: recorder is under that floor is thrown-away tape. So a maintenance tick that
+#: finds the disk unwritable sets `prune_now` and the pruner runs at once
+#: instead of sleeping out the rest of this interval.
 RETENTION_INTERVAL_SECONDS = 300.0
 LANES = "lanes"
 QueueItem = tuple[str, Any, int, str]
@@ -631,6 +633,9 @@ class Recorder:
         )
         self.frames: queue.Queue[QueueItem | None] = queue.Queue(storage.queue_frames)
         self.stop = threading.Event()
+        # Set to run a retention pass before the next routine interval, and on
+        # shutdown so the pruner's wait is not what a stop waits out.
+        self.prune_now = threading.Event()
         self.static_symbols: dict[str, tuple[str, ...]] = {}
         for tier in config.tiers:
             if tier.universe.kind == "symbols":
@@ -685,6 +690,7 @@ class Recorder:
             self.stop.wait()
         finally:
             self.stop.set()
+            self.prune_now.set()
             self.lane_stop.set()
             for shard in self._all_shards():
                 shard.close()
@@ -1065,9 +1071,20 @@ class Recorder:
         return "other"
 
     def _meter(self, tier: str, rows: list[dict[str, Any]], count: int, now_ns: int) -> None:
+        self._meter_inbound(tier, count, now_ns)
+        self.meter.add(f"feed:{tier}:{self.feed_class(rows)}", count, now_ns)
+
+    def _meter_inbound(self, tier: str, count: int, now_ns: int) -> None:
+        """The allowance a frame spent on the wire, which the disk gate cannot refund.
+
+        `budget.monthly_gb` is an inbound allowance and `budget.shed` gives up
+        subscriptions to stay under it, so what the venue already sent counts
+        whether or not the disk took it. The per-feed split is not here: it
+        needs the normalized rows.
+        """
+
         self.meter.add("all", count, now_ns)
         self.meter.add(f"tier:{tier}", count, now_ns)
-        self.meter.add(f"feed:{tier}:{self.feed_class(rows)}", count, now_ns)
 
     def _write_loop(self) -> None:
         while True:
@@ -1080,6 +1097,13 @@ class Recorder:
                 return
             kind, payload, received_ns, tier = item
             if self.disk_blocked:
+                if kind == "frame":
+                    # Metering behind this gate makes the budget measure what
+                    # the disk kept, not what the venue sent, so a blocked
+                    # recorder reports itself under an allowance it is still
+                    # spending in full. Side-lane rows are not wire bytes and
+                    # stay out of it.
+                    self._meter_inbound(tier, len(payload), received_ns)
                 self.disk_dropped_frames += 1
                 continue
             try:
@@ -1102,6 +1126,10 @@ class Recorder:
                 self.disk_blocked = True
                 self.disk_dropped_frames += 1
                 if first:
+                    # This is the first detector of a full disk: the next append
+                    # fails milliseconds in, where the free-space tick is up to
+                    # `status_interval_seconds` behind it.
+                    self.prune_now.set()
                     logging.error("capture storage blocked; frames will be counted but not written: %s", exc)
             except Exception:  # noqa: BLE001 - one malformed frame cannot stop the tape
                 logging.exception("failed to record one public frame")
@@ -1117,20 +1145,59 @@ class Recorder:
 
     def _retention_loop(self) -> None:
         while not self.stop.is_set():
-            self._retention_pass()
-            self.stop.wait(RETENTION_INTERVAL_SECONDS)
+            # A pass that deleted and left the gate shut is owed a successor
+            # now, not at the next wake: `_maintenance` arms `prune_now` on a
+            # blocked tick, which is a whole `status_interval_seconds` of
+            # thrown-away tape, and `_write_loop` never reaches an append to
+            # fail on. The retry ends on the pass that deletes nothing, so a
+            # disk filled by something other than tape is walked once rather
+            # than spun on.
+            owed = True
+            # What this burst has already unlinked. `prune` reads free space
+            # from the kernel, and a successor is owed precisely because the
+            # kernel disagreed with what the previous pass unlinked, so an
+            # uncredited retry re-derives the same deficit and deletes it
+            # again — every few hundred milliseconds, until a floor held by
+            # something other than tape has cost the whole tape.
+            credit = 0
+            while owed and not self.stop.is_set():
+                owed = self._retention_pass(free_credit=credit)
+                credit += self.retention.last_freed_bytes
+            self.prune_now.wait(RETENTION_INTERVAL_SECONDS)
+            self.prune_now.clear()
 
-    def _retention_pass(self) -> None:
+    def _retention_pass(self, free_credit: int = 0) -> bool:
         """One retention pass, on its own thread. A failed pass is the next
-        pass's problem: this thread must outlive an unlinkable file."""
+        pass's problem: this thread must outlive an unlinkable file.
+
+        Returns whether this pass is owed a successor: it deleted, and the
+        writer is still blocked.
+        """
 
         try:
-            deleted = self.retention.prune()
+            deleted = self.retention.prune(free_credit=free_credit)
         except OSError as exc:
             logging.error("tape retention pass failed: %s", exc)
-            return
-        if deleted:
-            logging.info("retention removed %d tape files", len(deleted))
+            return False
+        if not deleted:
+            return False
+        logging.info("retention removed %d tape files", len(deleted))
+        if not self.disk_blocked:
+            return False
+        # `disk_blocked` gates every frame in `_write_loop`, and the pass that
+        # frees room is the only thing that can end the block, so it is what
+        # opens the gate. Leaving that to `_maintenance` costs a full
+        # `status_interval_seconds` of tape on a disk that already has space.
+        #
+        # `prune` stops on free space counted from the sizes it unlinked;
+        # `writable()` reads the kernel's. The two disagree while the
+        # filesystem is still releasing blocks, so a pass can delete, believe
+        # it reached the floor, and still leave the gate shut.
+        if not self.retention.writable():
+            return True
+        self.disk_blocked = False
+        logging.info("capture storage unblocked; writing resumed")
+        return False
 
     def _maintenance_loop(self) -> None:
         while not self.stop.is_set():
@@ -1138,7 +1205,20 @@ class Recorder:
             self.stop.wait(self.config.storage.status_interval_seconds)
 
     def _maintenance(self) -> None:
-        self.disk_blocked = not self.retention.writable()
+        blocked = not self.retention.writable()
+        # Under the free floor every frame is counted and thrown away, so the
+        # only thing that frees room runs on every blocked tick, not just the
+        # crossing. A credited burst ends on the pass that finds no deficit
+        # left, which is the ordinary exit whenever the kernel released the
+        # unlinked blocks and another writer on the filesystem took them: the
+        # gate is still shut, the tape still holds hours nobody needs, and
+        # nothing else wakes the pruner for a whole
+        # `RETENTION_INTERVAL_SECONDS`. A pass while blocked is not a repeat
+        # of the last one — the tape is not growing, but free space moves
+        # under it. The tick itself stays O(1); the pruner owns the walk.
+        if blocked:
+            self.prune_now.set()
+        self.disk_blocked = blocked
         now_ns = time.time_ns()
         if self.stop.is_set():
             return

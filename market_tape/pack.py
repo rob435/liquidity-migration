@@ -16,8 +16,15 @@ Several tapes ship in one run: `--tape NAME=ROOT` repeated, each landing under
 `--remote-base/NAME`. The single-tape form `--root ROOT --remote REMOTE` is the
 same thing with one tape.
 
-The local files stay for the recorder's own retention window; the archive on
-the Drive is the copy that lasts.
+The archive on the Drive is the copy that lasts. The local tape is a sliding
+window: once an hour is in the ledger and has been over for `--keep-hours`, the
+same run deletes its segments from the recorder's root, so the disk holds the
+last `--keep-hours` of tape plus whatever has not shipped yet. An hour that is
+not in the ledger is never deleted here, whatever its age; the recorder's own
+`retention_days` / `max_disk_gb` / `min_free_disk_gb` are the backstop for a
+tape the Drive is not taking. The `_meta` table snapshots stay: with a daily
+cadence the day's first hour holds the snapshot every later local hour reads
+against, and the recorder prunes them by age.
 """
 
 from __future__ import annotations
@@ -219,23 +226,57 @@ def build_archive(
     output = staging / f"{candidate.name}.tar"
     temporary = staging / f".{candidate.name}.tar.tmp"
     manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n"
-    with tarfile.open(temporary, "w", format=tarfile.PAX_FORMAT) as archive:
-        info = tarfile.TarInfo("MANIFEST.json")
-        info.size = len(manifest_bytes)
-        info.mtime = int(time.time())
-        info.mode = 0o644
-        archive.addfile(info, fileobj=_Bytes(manifest_bytes))
-        for path, arcname in members:
-            info = archive.gettarinfo(str(path), arcname=arcname)
-            info.uid = info.gid = 0
-            info.uname = info.gname = ""
+    try:
+        with tarfile.open(temporary, "w", format=tarfile.PAX_FORMAT) as archive:
+            info = tarfile.TarInfo("MANIFEST.json")
+            info.size = len(manifest_bytes)
+            info.mtime = int(time.time())
             info.mode = 0o644
-            with path.open("rb") as handle:
-                archive.addfile(info, fileobj=handle)
-    with temporary.open("rb") as handle:
-        os.fsync(handle.fileno())
+            archive.addfile(info, fileobj=_Bytes(manifest_bytes))
+            for path, arcname in members:
+                info = archive.gettarinfo(str(path), arcname=arcname)
+                info.uid = info.gid = 0
+                info.uname = info.gname = ""
+                info.mode = 0o644
+                with path.open("rb") as handle:
+                    archive.addfile(info, fileobj=handle)
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+    except BaseException:
+        # Staging is on the filesystem the recorders' `min_free_disk_gb` floor
+        # guards and outside both tape roots, so `Retention.prune` — which
+        # walks `<tape root>/**/*.zst` — can neither see a partial archive nor
+        # delete it. Left behind, it is disk the recorders pay for forever.
+        temporary.unlink(missing_ok=True)
+        raise
     os.replace(temporary, output)
     return output, manifest
+
+
+def sweep_staging(staging: Path) -> int:
+    """Delete archives an earlier run left behind; return the bytes reclaimed.
+
+    Staging holds one archive at a time and nothing reads it across runs, so
+    anything here when a run starts is the remains of a run that was killed
+    before its `finally` (`TimeoutStartSec`, `MemoryMax`, reboot). The caller
+    holds the exclusive upload lock, so no live run owns these bytes.
+    """
+
+    if not staging.is_dir():
+        return 0
+    reclaimed = 0
+    for path in sorted(staging.iterdir()):
+        if not path.is_file() or not (path.name.endswith(".tar") or path.name.endswith(".tar.tmp")):
+            continue
+        try:
+            size = path.stat().st_size
+            path.unlink()
+        except OSError as exc:
+            print(f"market tape: could not remove stale staging archive {path.name}: {exc}", file=sys.stderr)
+            continue
+        reclaimed += size
+        print(f"market tape: removed stale staging archive {path.name} bytes={size}")
+    return reclaimed
 
 
 class _Bytes:
@@ -363,6 +404,108 @@ def ship(
     return shipped
 
 
+def candidate_end(candidate: Candidate) -> float:
+    """Unix seconds at which the candidate's hour (or legacy day) was over."""
+
+    start = datetime.fromisoformat(candidate.day).replace(tzinfo=timezone.utc)
+    span = timedelta(hours=int(candidate.hour) + 1) if candidate.hour is not None else timedelta(days=1)
+    return (start + span).timestamp()
+
+
+def _segments_under(directory: Path) -> list[Path]:
+    """The hour's segment files: every `.zst` under it that is not a `_meta` snapshot."""
+
+    return sorted(p for p in directory.rglob("*.zst") if p.is_file() and p.parent.name != "_meta")
+
+
+def shipped_to_prune(
+    root: Path,
+    ledger: Mapping[str, Mapping[str, Any]],
+    *,
+    remote: str,
+    now: float,
+    keep_hours: float,
+    grace_seconds: float,
+) -> list[Candidate]:
+    """Ledgered hours that ended more than `keep_hours` ago and still hold segments locally."""
+
+    return [
+        candidate
+        for candidate in finished_candidates(root, now=now, grace_seconds=grace_seconds)
+        if f"{remote}/{candidate.remote_name}" in ledger
+        and now >= candidate_end(candidate) + keep_hours * 3600.0
+        and any(_segments_under(directory) for directory in candidate.directories)
+    ]
+
+
+def prune_shipped(
+    root: Path,
+    ledger: Mapping[str, Mapping[str, Any]],
+    *,
+    remote: str,
+    now: float,
+    keep_hours: float,
+    grace_seconds: float,
+) -> list[dict[str, Any]]:
+    """Delete the local segments of every ledgered hour that ended more than
+    `keep_hours` ago; return one row per hour pruned.
+
+    Membership in the ledger is the only licence to delete: a row is written
+    after the Drive's own size and MD5 matched the upload, so an hour missing
+    from it — never shipped, or shipped and rejected — stays on disk for the
+    recorder's retention to judge. `_meta` snapshots are left in place and the
+    hour directory with them; an hour whose segments are already gone is a
+    no-op, so a run over an old window is idempotent.
+
+    The recorder's `Retention.prune` may be unlinking on its own thread; a file
+    gone between the listing and the unlink is counted as not ours.
+    """
+
+    pruned: list[dict[str, Any]] = []
+    manifest_path = root / "manifest.jsonl"
+    for candidate in shipped_to_prune(root, ledger, remote=remote, now=now, keep_hours=keep_hours, grace_seconds=grace_seconds):
+        remote_path = f"{remote}/{candidate.remote_name}"
+        files = 0
+        size_total = 0
+        for directory in candidate.directories:
+            for path in _segments_under(directory):
+                try:
+                    size = path.stat().st_size
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                files += 1
+                size_total += size
+                if manifest_path.exists():
+                    # The recorder's manifest is the tape's receipt trail; a
+                    # deletion made from this process belongs in it too.
+                    append_ledger(
+                        manifest_path,
+                        {
+                            "kind": "segment_deleted",
+                            "recorded_at_ns": time.time_ns(),
+                            "path": str(path.relative_to(root)),
+                            "compressed_bytes": size,
+                            "reason": "shipped",
+                            "remote_path": remote_path,
+                        },
+                    )
+            for empty, _, _ in os.walk(directory, topdown=False):
+                try:
+                    Path(empty).rmdir()
+                except OSError:
+                    pass
+        if not files:
+            continue
+        try:
+            (root / candidate.day).rmdir()
+        except OSError:
+            pass
+        pruned.append({"name": candidate.name, "remote_path": remote_path, "file_count": files, "bytes": size_total})
+        print(f"market tape: pruned shipped {candidate.name} files={files} bytes={size_total}")
+    return pruned
+
+
 def _usage_error(message: str) -> SystemExit:
     print(f"market tape: {message}", file=sys.stderr)
     return SystemExit(2)
@@ -398,6 +541,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--state-dir", type=Path, required=True, help="ledger, lock, staging, and the rclone config copy")
     parser.add_argument("--stamp-file", type=Path, required=True, help="receipt written after a fully successful run")
     parser.add_argument("--grace-seconds", type=float, default=300.0, help="how long after an hour ends before it is packed")
+    parser.add_argument(
+        "--keep-hours",
+        type=float,
+        default=24.0,
+        help="local sliding window: a shipped hour's segments are deleted once it has been over this long",
+    )
     parser.add_argument("--rclone", default=os.environ.get("RCLONE_BIN") or "/usr/bin/rclone")
     parser.add_argument("--config", type=Path, default=Path(os.environ.get("RCLONE_CONFIG") or "/etc/liquidity-migration/rclone.conf"))
     parser.add_argument(
@@ -412,6 +561,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.keep_hours < 0:
+        raise _usage_error(f"--keep-hours must be zero or more, got {args.keep_hours}")
     tapes = parse_tapes(args)
     present = [tape for tape in tapes if tape.root.is_dir()]
     for tape in tapes:
@@ -433,7 +584,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         for tape, candidate in pending:
             print(f"would pack {tape.name} {candidate.name} -> {tape.remote}/{candidate.remote_name}")
-        print(f"market tape: {len(pending)} pending, {len(ledger)} already shipped")
+        stale = 0
+        for tape in present:
+            for candidate in shipped_to_prune(
+                tape.root, ledger, remote=tape.remote, now=now, keep_hours=args.keep_hours, grace_seconds=args.grace_seconds
+            ):
+                stale += 1
+                print(f"would prune {tape.name} {candidate.name} (shipped, over {args.keep_hours:g}h ago)")
+        print(f"market tape: {len(pending)} pending, {len(ledger)} already shipped, {stale} shipped hours past the window")
         return 0
     with (args.state_dir / "upload.lock").open("w") as lock:
         try:
@@ -441,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
         except OSError:
             print("market tape: another run owns the upload lock")
             return 0
+        sweep_staging(args.state_dir / "staging")
         if not shutil.which(args.rclone) and not os.access(args.rclone, os.X_OK):
             print(f"market tape: rclone is not executable: {args.rclone}", file=sys.stderr)
             return 2
@@ -459,6 +618,22 @@ def main(argv: list[str] | None = None) -> int:
                     tape=tape.name,
                 )
             )
+        # The window is judged against the ledger as it stands after this run's
+        # uploads, so an hour shipped a moment ago and already older than the
+        # window goes in the same run.
+        ledger = load_ledger(ledger_path)
+        pruned: list[dict[str, Any]] = []
+        for tape in present:
+            pruned.extend(
+                prune_shipped(
+                    tape.root,
+                    ledger,
+                    remote=tape.remote,
+                    now=now,
+                    keep_hours=args.keep_hours,
+                    grace_seconds=args.grace_seconds,
+                )
+            )
         destination = args.remote_base.rstrip("/") if args.remote_base else present[0].remote
         free = rclone.free_bytes(destination)
         write_stamp(
@@ -468,13 +643,19 @@ def main(argv: list[str] | None = None) -> int:
                 "archives": ",".join(f"{row['tape']}/{row['name']}" if row.get("tape") else row["name"] for row in shipped) or "none",
                 "file_count": sum(int(row["file_count"]) for row in shipped),
                 "bytes": sum(int(row["bytes"]) for row in shipped),
-                "bytes_30d": bytes_uploaded_since(load_ledger(ledger_path), now - 30 * 86_400),
+                "bytes_30d": bytes_uploaded_since(ledger, now - 30 * 86_400),
                 "destination": destination,
                 "tapes": ",".join(tape.name for tape in present),
                 "remote_free_bytes": free,
+                "keep_hours": args.keep_hours,
+                "pruned_hours": len(pruned),
+                "pruned_bytes": sum(int(row["bytes"]) for row in pruned),
             },
         )
-    print(f"market tape: shipped {len(shipped)} archives to {destination}; {len(pending) - len(shipped)} left")
+    print(
+        f"market tape: shipped {len(shipped)} archives to {destination}; {len(pending) - len(shipped)} left; "
+        f"pruned {len(pruned)} shipped hours older than {args.keep_hours:g}h"
+    )
     return 0
 
 

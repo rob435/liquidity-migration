@@ -4,15 +4,16 @@ use super::{
     complete_funding_coverage, complete_whale_coverage, funding_job_chunks, heartbeat_status,
     kline_job_chunks, runtime_status, send_repair_chunk_and_wait, send_whale_chunk_and_wait,
     source_grid_slots, startup_runtime_status, stream_transport_healthy, trading_intervals_contain,
-    transient_recovery_acceptable, validate_instrument_source_against_state,
-    validate_source_grid_timestamp, validate_source_page_rows, whale_fetch_bounds,
-    whale_job_chunks, FetchedFunding, FetchedFundingBatch, FetchedInstruments, FetchedKlineBatch,
-    FetchedKlineJobs, FetchedTickers, FetchedUniverseInputs, FetchedWhales, LaneCompletion,
-    LaneState, LiveRunOptions, LiveRunner, StreamEvent, StreamHealth, TickerSample,
-    FUNDING_FETCH_CHUNK_SIZE, KLINE_FETCH_CHUNK_SIZE, LANE_COMPLETION_QUEUE_CAPACITY,
-    STARTUP_MAX_MS, TRANSIENT_RECOVERY_MAX_MS, WHALE_FETCH_CHUNK_SIZE,
+    transient_recovery_acceptable, validate_funding_source_against_state,
+    validate_instrument_source_against_state, validate_source_grid_timestamp,
+    validate_source_page_rows, whale_fetch_bounds, whale_job_chunks, FetchedFunding,
+    FetchedFundingBatch, FetchedInstruments, FetchedKlineBatch, FetchedKlineJobs, FetchedTickers,
+    FetchedUniverseInputs, FetchedWhales, LaneCompletion, LaneState, LiveRunOptions, LiveRunner,
+    StreamEvent, StreamHealth, TickerSample, FUNDING_FETCH_CHUNK_SIZE, KLINE_FETCH_CHUNK_SIZE,
+    LANE_COMPLETION_QUEUE_CAPACITY, STARTUP_MAX_MS, TRANSIENT_RECOVERY_MAX_MS,
+    WHALE_FETCH_CHUNK_SIZE,
 };
-use crate::bybit_ws::BybitPublicStream;
+use crate::bybit_ws::{BybitPublicStream, StreamContinuity};
 use crate::config::SignalWorkerConfig;
 use crate::history::{coverage_repair_start, CoverageRef};
 use crate::model::{
@@ -1940,4 +1941,93 @@ async fn live_startup_waits_for_named_destinations_and_the_durable_successor_gra
         (0, 0, 0)
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn a_universe_refresh_hands_the_replacement_stream_the_old_transport_history() {
+    // The hourly instrument lane replaces the stream whenever membership
+    // moves. The gap stamp and the fault clocks belong to the process, not
+    // to the stream object, so a page read seconds after a refresh reported
+    // a seconds-old gap over an outage that had been open for hours.
+    let root = temporary_root("reconfigure-keeps-transport-history");
+    let _ = std::fs::remove_dir_all(&root);
+    let options = LiveRunOptions {
+        state_dir: root.join("state"),
+        spool_dir: root.join("spool"),
+        heartbeat: root.join("heartbeat.json"),
+    };
+    let runner =
+        LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
+    let outgoing = BybitPublicStream::inert_for_test(vec!["BTCUSDT".into()]).unwrap();
+    let gap_opened_at_ms = 100 * DAY_MS;
+    outgoing.mark_source_fault(gap_opened_at_ms);
+
+    let (symbols, continuity) = runner
+        .stream_reconfiguration(&outgoing)
+        .expect("a moved symbol set rebuilds the stream");
+
+    assert!(symbols.contains(&"ETHUSDT".to_owned()));
+    assert_eq!(
+        continuity,
+        StreamContinuity::from(&outgoing.health()),
+        "the replacement continues the outgoing stream, it does not start a new one"
+    );
+    assert_eq!(continuity.gap_open_since_ms, Some(gap_opened_at_ms));
+    assert!(continuity.gap_open);
+    assert_eq!(continuity.fault_count, 1);
+    assert_ne!(
+        continuity,
+        StreamContinuity::default(),
+        "a fresh history is what reset the on-call page's gap clock"
+    );
+
+    drop(outgoing);
+    drop(runner);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Bybit moved a carry symbol's `fundingInterval`, so the next pass stamped
+/// every settlement already held with the new one and this gate read it as
+/// rewritten venue history. The lane aborted on its first chunk every
+/// minute and the carry cycle never completed again.
+#[test]
+fn a_changed_funding_interval_is_not_a_rewritten_settlement() {
+    let settlement = 100 * DAY_MS;
+    let mut state = SignalWorker::with_universe(checked_demo_config(), test_universe())
+        .unwrap()
+        .state()
+        .clone();
+    state.funding.entry("BTCUSDT".into()).or_default().insert(
+        settlement,
+        SettledFunding {
+            symbol: "BTCUSDT".into(),
+            settlement_ts_ms: settlement,
+            available_at_ms: settlement,
+            rate: -0.001,
+            funding_interval_min: 480,
+        },
+    );
+    let refetched = |rate: &str, hours: i64| FetchedFunding {
+        batches: vec![(
+            "BTCUSDT".to_owned(),
+            FetchedFundingBatch {
+                rows: vec![BybitFundingWire {
+                    funding_rate_timestamp: Value::from(settlement),
+                    funding_rate: Value::from(rate),
+                    funding_interval_hour: Some(Value::from(hours)),
+                }],
+                available_at_ms: settlement + 5,
+                checked_from_ms: Some(settlement),
+                checked_through_ms: Some(settlement + 5),
+                emit_lifecycle: false,
+            },
+        )],
+        failures: Vec::new(),
+    };
+
+    validate_funding_source_against_state(&state, &refetched("-0.001", 4))
+        .expect("a new instrument interval does not rewrite a settled rate");
+    let error = validate_funding_source_against_state(&state, &refetched("-0.002", 8))
+        .expect_err("a settled rate that moved is still a rewrite");
+    assert!(error.to_string().contains("BTCUSDT"), "{error}");
 }
