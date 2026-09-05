@@ -7,6 +7,24 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 07:33 UTC — The thirty-fifth refused deploy.** Run
+  `33952870432`, `deploy` on `main@e2391040`, created 07:33:03 UTC and dead at
+  07:33:09. `rust` 07:33:04 → 07:33:07, `Deploy artifact` 07:33:05 → 07:33:08
+  and `ci` 07:33:05 → 07:33:08 — three seconds each, none alive long enough to
+  check out the repository — and every failed job's log download returns the
+  same error verbatim, re-read on this run: `failed to download logs: HTTP
+  404`. `diagnose` and `disarm` skipped at 07:33:05; `Engine release tests,
+  soak and benchmarks` created 07:33:08 and skipped; `vps` created 07:33:09
+  and skipped, never scheduled against a runner. No job started and nothing
+  reached the host. **Thirty-five consecutive refusals since 19:17 UTC on
+  2026-09-04**, every one with the account-payment signature — twelve and a
+  quarter hours in which no repository change can reach the fleet through
+  GitHub. Deployed commit stays `65ee75a7`; the eight recorder fixes and the
+  uploader's leak fix remain merged and undeployed, and the recorders have now
+  thrown away 56 304 565 frames. The SSH path needs no runner:
+  `EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db scripts/ops.sh
+  deploy`.
+
 - **2026-09-05 07:25 UTC — The twenty-fifth page: the pair recovers for
   twelve clean minutes and then both recorders cross the floor within five
   seconds of each other, and the deployed pruner cannot answer a crossing at
