@@ -5,7 +5,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use engine_types::wal::AnchorState;
-use engine_wal::{open_current, replay, replay_chain, segments, Wal, WalRecord, WalWriter};
+use engine_wal::{
+    open_current, replay, replay_chain, replay_current, segments, Wal, WalRecord, WalWriter,
+};
 use tempfile::TempDir;
 
 fn log_path(dir: &TempDir) -> PathBuf {
@@ -146,6 +148,27 @@ fn open_current_picks_the_newest_trusted_segment_and_appends_there() {
         ["one", "two", "three"],
         "the archive never moves again"
     );
+}
+
+#[test]
+fn replay_current_reads_only_what_boot_would_replay() {
+    let dir = TempDir::new().unwrap();
+    let family = rotated_family(&dir);
+    let (records, damaged) = replay_current(&family).unwrap();
+    assert!(!damaged);
+    assert!(
+        matches!(records.first(), Some((_, WalRecord::SegmentBase { .. }))),
+        "the newest trusted segment, restatement first"
+    );
+    assert_eq!(texts(&records), ["four", "five"]);
+    let (_, replayed) = open_current(&family).unwrap();
+    assert_eq!(
+        texts(&records),
+        texts(&replayed),
+        "read-only, and the same records boot gets"
+    );
+    let (chained, _) = replay_chain(&family).unwrap();
+    assert_eq!(texts(&chained), ["one", "two", "three", "four", "five"]);
 }
 
 #[test]

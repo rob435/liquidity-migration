@@ -310,41 +310,53 @@ fn append_import<W: Wal>(
     checkpoint: StrategyCheckpoint,
     mut provenance: CheckpointProvenance,
     events: &[StrategyEvent],
+    identity: Option<WalRecord>,
 ) -> Result<ImportOutcome, Box<dyn Error>> {
     let same_bundle = |existing: &CheckpointProvenance| {
         existing.source_format == provenance.source_format
             && existing.source_sha256 == provenance.source_sha256
             && existing.bundle_sha256 == provenance.bundle_sha256
     };
-    if let Some(existing) = latest_checkpoint(replayed, strategy) {
-        let Some(existing_provenance) = existing.provenance.as_ref() else {
-            return Err(format!(
-                "strategy {} already has live whole-sleeve state",
-                strategy.0
-            )
-            .into());
-        };
-        if existing.checkpoint != checkpoint || !same_bundle(existing_provenance) {
-            return Err(format!(
-                "strategy {} already has different whole-sleeve state or import provenance",
-                strategy.0
-            )
-            .into());
+    let resuming = match latest_checkpoint(replayed, strategy) {
+        Some(existing) => {
+            let Some(existing_provenance) = existing.provenance.as_ref() else {
+                return Err(format!(
+                    "strategy {} already has live whole-sleeve state",
+                    strategy.0
+                )
+                .into());
+            };
+            if existing.checkpoint != checkpoint || !same_bundle(existing_provenance) {
+                return Err(format!(
+                    "strategy {} already has different whole-sleeve state or import provenance",
+                    strategy.0
+                )
+                .into());
+            }
+            if existing_provenance.import_complete {
+                return Ok(ImportOutcome::AlreadyPresent);
+            }
+            true
         }
-        if existing_provenance.import_complete {
-            return Ok(ImportOutcome::AlreadyPresent);
+        None => false,
+    };
+    // Admitted. Nothing above this line writes: a refusal leaves the log as
+    // the incumbent binary can read it, new record kinds included.
+    if let Some(record) = identity {
+        wal.append(&record)?;
+    }
+    if !resuming {
+        if events.is_empty() {
+            provenance.import_complete = true;
+            wal.append(&WalRecord::StrategyGlobalCheckpoint {
+                wall_ts_ms: clock::wall_ms(),
+                strategy,
+                checkpoint,
+                provenance: Some(provenance),
+            })?;
+            wal.barrier()?;
+            return Ok(ImportOutcome::Imported);
         }
-    } else if events.is_empty() {
-        provenance.import_complete = true;
-        wal.append(&WalRecord::StrategyGlobalCheckpoint {
-            wall_ts_ms: clock::wall_ms(),
-            strategy,
-            checkpoint,
-            provenance: Some(provenance),
-        })?;
-        wal.barrier()?;
-        return Ok(ImportOutcome::Imported);
-    } else {
         provenance.import_complete = false;
         wal.append(&WalRecord::StrategyGlobalCheckpoint {
             wall_ts_ms: clock::wall_ms(),
@@ -790,7 +802,9 @@ pub fn verify_native_strategy_state(config_path: &Path) -> Result<(), Box<dyn Er
     let loaded = config::load(config_path)?;
     let settings = &loaded.config.engine;
     let _log_claim = engine_wal::lock(&settings.wal_path)?;
-    let (records, torn) = engine_wal::replay_chain(&settings.wal_path)?;
+    // The newest trusted segment, as boot replays it. The whole chain is
+    // unbounded: on the host it is gigabytes and does not fit in memory.
+    let (records, torn) = engine_wal::replay_current(&settings.wal_path)?;
     if torn {
         return Err("WAL has a torn tail; native strategy state is not verified".into());
     }
@@ -884,15 +898,12 @@ pub async fn run(
             )
         })?;
     initialize_or_verify_names(&mut wal, &configured, &mut replayed)?;
-    if plan.changed {
-        let record = WalRecord::IdentityState {
-            wall_ts_ms: clock::wall_ms(),
-            state: plan.state,
-        };
-        wal.append(&record)?;
-        wal.barrier()?;
-        replayed.push(record);
-    }
+    // Written inside the import, after admission: a refused import must leave
+    // the log exactly as the running binary can read it.
+    let identity_record = plan.changed.then(|| WalRecord::IdentityState {
+        wall_ts_ms: clock::wall_ms(),
+        state: plan.state,
+    });
 
     let sources = read_sources(source_paths)?;
     let context = StrategyImportContext {
@@ -921,6 +932,7 @@ pub async fn run(
         checkpoint,
         provenance,
         &events,
+        identity_record,
     )?;
     println!("log       {}", settings.wal_path.display());
     println!("strategy  {} ({})", strategy_name, strategy_id.0);
@@ -1187,7 +1199,8 @@ mod tests {
                 StrategyId(1),
                 checkpoint(b"state"),
                 provenance("aa"),
-                &[]
+                &[],
+                None
             )
             .unwrap(),
             ImportOutcome::Imported
@@ -1201,7 +1214,8 @@ mod tests {
                 StrategyId(1),
                 checkpoint(b"state"),
                 provenance("aa"),
-                &[]
+                &[],
+                None
             )
             .unwrap(),
             ImportOutcome::AlreadyPresent
@@ -1228,6 +1242,7 @@ mod tests {
                 checkpoint(b"state"),
                 provenance("aa"),
                 std::slice::from_ref(&event),
+                None
             )
             .unwrap(),
             ImportOutcome::Imported
@@ -1266,12 +1281,84 @@ mod tests {
                 checkpoint(b"state"),
                 provenance("aa"),
                 &[event],
+                None
             )
             .unwrap(),
             ImportOutcome::AlreadyPresent
         );
         assert_eq!(wal.records.len(), 3);
         assert_eq!(wal.barriers, 3);
+    }
+
+    #[test]
+    fn a_refused_import_writes_nothing_and_an_admitted_one_pins_identity_first() {
+        let identity = || WalRecord::IdentityState {
+            wall_ts_ms: 3,
+            state: Default::default(),
+        };
+        // Live native state without import provenance is refused, and the log
+        // is untouched: the incumbent binary must still read it on rollback.
+        let live = vec![WalRecord::StrategyGlobalCheckpoint {
+            wall_ts_ms: 1,
+            strategy: StrategyId(1),
+            checkpoint: checkpoint(b"live"),
+            provenance: None,
+        }];
+        let mut wal = MemoryWal::default();
+        let refused = append_import(
+            &mut wal,
+            &live,
+            StrategyId(1),
+            checkpoint(b"import"),
+            provenance("aa"),
+            &[],
+            Some(identity()),
+        )
+        .unwrap_err();
+        assert!(refused
+            .to_string()
+            .contains("already has live whole-sleeve state"));
+        assert!(wal.records.is_empty());
+        assert_eq!(wal.barriers, 0);
+
+        let mut wal = MemoryWal::default();
+        assert_eq!(
+            append_import(
+                &mut wal,
+                &[],
+                StrategyId(1),
+                checkpoint(b"import"),
+                provenance("aa"),
+                &[],
+                Some(identity()),
+            )
+            .unwrap(),
+            ImportOutcome::Imported
+        );
+        assert!(matches!(
+            wal.records.as_slice(),
+            [
+                WalRecord::IdentityState { .. },
+                WalRecord::StrategyGlobalCheckpoint { .. }
+            ]
+        ));
+
+        let replayed = wal.records.clone();
+        let mut wal = MemoryWal::default();
+        assert_eq!(
+            append_import(
+                &mut wal,
+                &replayed,
+                StrategyId(1),
+                checkpoint(b"import"),
+                provenance("aa"),
+                &[],
+                Some(identity()),
+            )
+            .unwrap(),
+            ImportOutcome::AlreadyPresent
+        );
+        assert!(wal.records.is_empty());
     }
 
     #[test]
@@ -1294,7 +1381,8 @@ mod tests {
                 StrategyId(0),
                 checkpoint(state),
                 provenance(proof),
-                &[]
+                &[],
+                None
             )
             .unwrap_err()
             .to_string()

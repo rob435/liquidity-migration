@@ -274,7 +274,17 @@ When performing rollouts or cold starts, state is seeded or verified while units
 | :--- | :--- | :--- |
 | `initialize-native-strategy-state` | Initializes canonical empty checkpoints in a fresh WAL. | Empty WAL file only. |
 | `import-strategy-state` | Ingests verified historical strategy bundles into the WAL. | Requires WAL lock and account match. |
-| `verify-native-strategy-state` | Verifies WAL checkpoint identity, frame CRC, and state provenance. | Run before restarting units on deploy. |
+| `verify-native-strategy-state` | Verifies WAL checkpoint identity, frame CRC, and state provenance from the newest trusted segment, the records boot replays (`engine_wal::replay_current`). | Run before restarting units on deploy. |
+
+#### Handover Invariants
+
+* **Must**: every takeover command reads the newest trusted segment only. A
+  live family is gigabytes and the host has 8 GB; `engine_wal::replay_chain`
+  is for offline readers on a copy.
+* **Must Never**: write a record kind the incumbent binary cannot read before
+  the handover has succeeded. A refused or already-complete import appends
+  nothing (`takeover::append_import`); the incumbent must still boot on the log
+  if the deploy rolls back.
 
 #### Strategy Table Invariants
 

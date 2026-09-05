@@ -1087,6 +1087,22 @@ pub fn open_current(
     WalWriter::open_segment(family, family, true)
 }
 
+/// Replay the newest segment boot can trust without opening it for writing:
+/// the records [`open_current`] would hand the engine, read-only. The flag
+/// says whether that segment ends in a torn tail. One segment of memory,
+/// where [`replay_chain`] needs the whole family's.
+pub fn replay_current(family: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>, bool), WalError> {
+    let family = family.as_ref();
+    let mut chain = segments(family)?;
+    while let Some((index, path)) = chain.pop() {
+        let (records, damaged) = scan_candidate(index, &path)?;
+        if trusted(index, &records) {
+            return Ok((records, damaged));
+        }
+    }
+    Ok((Vec::new(), false))
+}
+
 /// Replay a whole family in order, for the offline readers: every good record
 /// of every segment, renumbered consecutively. The flag says whether the
 /// NEWEST trusted segment ends in a torn tail — the crash point a writer
