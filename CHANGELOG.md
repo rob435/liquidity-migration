@@ -6,6 +6,133 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 02:30 UTC — The seventh page from the same free-space floor.
+  No new defect, and no code changed: this one measures the *first* defect
+  alone, with nothing to rescue it. The 02:28:10 crossing woke no retention
+  pass, and 120.1 s later the Bybit writer was still gated with `rows`
+  frozen at the value it held on the crossing — where the six pages before it
+  measured a 30-second oscillation, because a neighbouring pass happened to
+  free room. A blocked writer's cost is bounded by the pruner's 300-second
+  clock, not the 30-second status tick. All four recorder fixes stay merged
+  and undeployed: the thirteenth dispatched deploy was refused 7 s in.**
+  - Incident `host-681737fd16e1f806`, scope `host`, host `ip-208-84-103-4`,
+    `new_critical_refs=capture-disk` — the same incident id and alert text as
+    the 22:54, 23:50, 00:01, 00:36, 00:57, 01:32 and 01:53 pages, and for the
+    first time in the run only the Bybit ref is new. Exact alert text:
+    `CRITICAL recorder storage is blocked; frames are counted but not
+    written`, with `WARNING recorder dropped 345496 frames since the last
+    check (storage was blocked)` and the same warning for
+    `forward-market-binance` at 119 723. Level-triggered on `disk_blocked is
+    True` (`scripts/runtime/check_fleet_liveness.py:431`).
+  - **The funded engine is not implicated and the host has not moved.** No
+    engine, worker or timer is named; the unit is a `market_tape` recorder,
+    research tape outside the order path. Pid 2259813 is unchanged across all
+    seven pages, so the recorder has not restarted and the host still runs
+    `65ee75a7`. The 25 GiB floor is the reservation held for mainnet's WAL
+    and it held.
+  - **Measured on this payload, on the Bybit unit.**
+
+    | Line (UTC) | `disk_blocked` | `disk_dropped` | `rows` |
+    | :--- | :--- | ---: | ---: |
+    | 02:27:10.207 | `False` | 10 580 038 | 57 377 372 |
+    | 02:27:40.231 | `False` | 10 580 038 | 57 471 818 |
+    | 02:28:10.252 | `True` | 10 580 094 | 57 611 732 |
+    | 02:28:40.278 | `True` | 10 664 393 | 57 611 732 |
+    | 02:29:10.298 | `True` | 10 749 725 | 57 611 732 |
+    | 02:29:40.324 | `True` | 10 838 702 | 57 611 732 |
+    | 02:30:10.359 | `True` | 10 925 563 | 57 611 732 |
+
+    The 691 s before the crossing carried no disk drop at all — `disk_dropped`
+    is flat at 10 580 038 from the payload's first line, 02:16:09.645. The
+    interval that ended at 02:27:40.231 wrote 94 446 rows in 30.024 s, 3 146
+    rows/s. The 120.107 s from 02:28:10.252 to the last line wrote **0** rows
+    and discarded 345 469 frames, 2 876 frames/s; at the rate of the interval
+    before it that window carried about 378 000 rows.
+  - **Which thread saw it, to the millisecond.** No `capture storage blocked;
+    frames will be counted but not written` line appears anywhere in the
+    excerpt, so `_write_loop` never reached an append that failed
+    (`record.py:1106-1115` on `main`). `_maintenance` is what saw it, on its
+    02:28:10 tick: the 56 frames between 10 580 038 and 10 580 094 are what
+    the writer gated between the assignment and `_write_status` — 19 ms at
+    that line's own drop rate.
+  - **The diagnosis, on the code the host runs (`65ee75a7`).**
+
+    | Deployed line | What it does | Fixed on `main` by |
+    | :--- | :--- | :--- |
+    | `market_tape/record.py:1141` | `_maintenance` is `self.disk_blocked = not self.retention.writable()`. Nothing arms a pass on the crossing. | `1d8fad9a` |
+    | `market_tape/record.py:1118-1121` | `_retention_loop` makes one pass, then `self.stop.wait(RETENTION_INTERVAL_SECONDS)`. Only a shutdown shortens that wait. | `1d8fad9a`, `fd604613`, `06e17d4a` |
+    | `market_tape/storage.py:362`, `:390` | `prune`'s `pressured` test and `writable()` share `min_free_bytes`, so a pass driven by free space stops on the exact threshold the writer unblocks on. | `d275885a` |
+
+    Together those two `record.py` lines set how long a crossing lasts: up to
+    a full `RETENTION_INTERVAL_SECONDS`. On this unit that is 300 s × 2 876
+    frames/s ≈ 863 000 frames per unrescued crossing, an order of magnitude
+    above the ~90 000 a 30-second rescued one costs.
+  - **What is new, and it is a correction of scale, not of cause.** The
+    earlier pages read the 30-second period as the defect's cost, and that
+    period is the status tick — it only appears when the *other* recorder's
+    scheduled pass frees room on the shared filesystem and the next
+    `_maintenance` tick notices. This window holds no `retention removed`
+    line from either unit across all 840.7 s of it, against a 300-second
+    clock, so at least two scheduled passes fell inside it and deleted
+    nothing: before the crossing the tape was under `max_disk_gb` and free
+    space was over the floor, which is `pressured` returning `False`
+    correctly. With no pass to rescue it the block was still open at the last
+    journal line. The six earlier pages understated the per-crossing loss.
+  - Loss, cumulative since each process started and never reset. Both windows
+    are cut by the 40-line payload, so every figure is a lower bound.
+
+    | Unit | First line in payload | Last line | Added since the 01:53 entry |
+    | :--- | ---: | ---: | ---: |
+    | Bybit `forward-capture` | 10 580 038 (02:16:09) | 10 925 563 (02:30:10) | 1 412 361 |
+    | Binance `forward-capture-binance` | journal not in this payload | — | 119 723 since the watchdog's previous check |
+
+    Bybit's 1 412 361 over the 2 224 s since the 01:53 entry's last line
+    averages 635/s, but the average hides the shape: 691 s of the excerpt
+    dropped nothing and the last 150.1 s dropped 345 525.
+  - **The deploy receipt: refused, the thirteenth in a row.** Run
+    `33939474310`, `deploy` on `main@0af3fc29`, dispatched 02:34:52 UTC and
+    failed at 02:34:59. `ci` dead in 3 s, `Deploy artifact` in 4 s, `rust` in
+    5 s; `diagnose`, `disarm`, `vps` and the release-test job all skipped.
+    Every failed job's log download returns HTTP 404, so no runner ever
+    started — the same failed-account-payment signature as the twelve before
+    it, unbroken since 18:03 UTC on 2026-09-04. Nothing reached the host;
+    deployed commit stays `65ee75a7`.
+  - **What the owner has to run.** The SSH path needs no hosted runner and
+    installs all four recorder fixes ([docs/operations.md](docs/operations.md)
+    §4):
+
+    ```bash
+    EXPECTED_COMMIT=06e17d4a82f9a5a19e00f1cd0928b4a0da96e315 scripts/ops.sh deploy
+    ```
+
+    It hands over both realms — the fingerprint hashes the whole `engine`
+    tree — so the funded engine restarts. Nothing else ends these crossings.
+  - **The open host reading, unchanged from the 00:36 page.** Whether the room
+    is going to tape or to something else on `/var/lib` is not decidable from
+    a recorder journal. On the host:
+
+    ```bash
+    scripts/ops.sh curve mainnet
+    df -h /var/lib && du -sh /var/lib/liquidity-migration/*
+    ```
+
+    `curve` also shows what the account was worth through the incident and
+    which minutes had no heartbeat ([docs/observability.md](docs/observability.md)).
+  - **One property of `06e17d4a` the owner should know about before it
+    deploys, offered and not built.** The new retry loop ends on the pass that
+    deletes nothing (`record.py:1138-1139`). If the disk is being filled
+    faster than a pass frees it by something that is *not* tape, every
+    successive pass still deletes, so the loop keeps walking and can delete
+    far more tape than one crossing needs. Nothing observed tonight does that
+    — the crossings are the tape reaching its own operating point — and a
+    bound on it would be new machinery, so this is a note for the owner, not a
+    change.
+  - No code changed: `git diff --stat` is `CHANGELOG.md` and `STATE.md` only.
+    Checks run: `pytest tests/repo/test_docs_links.py` (3 passed) on a
+    throwaway venv, which is the gate this change can fail. The rest of
+    `scripts/dev.sh check` is not runnable in this container — no `.venv`, no
+    `ruff`, `mypy`, `shellcheck` or `cargo` — and no code path is touched.
+
 - **2026-09-05 01:53 UTC — The sixth page from the same free-space floor, and
   it measures a fourth defect the three merged fixes do not reach: when a
   retention pass deletes and the gate is still shut, nothing runs another
