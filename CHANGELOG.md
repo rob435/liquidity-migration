@@ -314,10 +314,13 @@ edit STATE.md to match.
     routine on its own. Reading the stamp by hand is the check.
   - **Deploy.** This fix does not touch the `engine` tree, so it adds no
     handover of its own; the six merged recorder fixes already differ from the
-    deployed `65ee75a7`, so a deploy still restarts the funded engine. Twenty
-    dispatches of `vps-deploy.yml` have now been refused since 19:17 UTC on
-    2026-09-04, every one dead within seconds with HTTP 404 log downloads and
-    `vps` skipped, because the account's payments failed. The SSH path
+    deployed `65ee75a7`, so a deploy still restarts the funded engine.
+    Dispatched on `ce5f5a0a` at 04:00:04 UTC as run `33943362290` and refused
+    at 04:00:10 for a **twenty-first** consecutive time since 19:17 UTC on
+    2026-09-04: `rust` and `Deploy artifact` created and dead 04:00:05 →
+    04:00:08, `ci` at 04:00:09, `diagnose`, `disarm`, the release-test job and
+    `vps` all skipped, and every failed job's log download HTTP 404 — the
+    account's payments failed, so no runner is ever assigned. The SSH path
     `EXPECTED_COMMIT=7fe4fe0c1e115f8889eb73dc818726de82421d82 scripts/ops.sh deploy` needs no runner and
     installs all seven fixes.
 
