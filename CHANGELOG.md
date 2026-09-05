@@ -6,6 +6,162 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 02:33 UTC — The seventh page from the same free-space floor.
+  No new defect: the host still runs the un-fixed code and all four merged
+  fixes are still undeployed. What this payload adds is the measurement that
+  settles `d275885a` on its own terms — a 187-file pass and a 4-file pass
+  bought exactly the same thing, one status tick, because both stop on the
+  number `writable()` unblocks on, and the neighbouring recorder on the same
+  filesystem never saw the disk unblock at all. No code changed. Deploy
+  refused a thirteenth time.**
+  - Incident `host-16171e3c5e186136`, scope `host`, host `ip-208-84-103-4`,
+    `new_critical_refs=capture-disk:forward-market-binance` — one new ref, and
+    a *different incident id* from the 02:30 entry above, which carried
+    `host-681737fd16e1f806` with `new_critical_refs=capture-disk`. The two
+    pages are the same 02:28 crossing split across the two recorders' refs and
+    fired three minutes apart; neither is a new event. Exact alert text:
+    `CRITICAL recorder
+    forward-market-binance storage is blocked; frames are counted but not
+    written`. Level-triggered on `disk_blocked is True`
+    (`scripts/runtime/check_fleet_liveness.py:431`, raised at `:433`).
+  - **The funded engine is not implicated and the host has not moved.** No
+    engine, worker or timer is named; both units are `market_tape` recorders,
+    research tape outside the order path. Pids are unchanged across all seven
+    pages — 2259813 (Bybit), 2263691 (Binance) — so neither recorder has
+    restarted and the host still runs `65ee75a7`. The 25 GiB floor is the
+    reservation held for mainnet's WAL: `writable()` blocks the recorder
+    *above* it (`storage.py:415-422`), so the reservation is intact by
+    construction and stayed intact.
+  - **The host is still on the un-fixed code, and the pass cadence proves
+    it.** Bybit's last recorded pass was 01:51:11.497 and its next is
+    02:31:48.655 — 2437.158 s, eight intervals of 304.6 s. Binance's were
+    01:49:07.376 and 02:29:23.499 — 2416.123 s, eight of 302.0 s. That is the
+    bare `RETENTION_INTERVAL_SECONDS` clock plus each pass's walk, with
+    nothing woken by a crossing: Bybit crossed at ~02:28:08 and waited 220 s
+    for a pass, Binance crossed at ~02:28:00 and waited 83 s. `1d8fad9a`,
+    `d275885a`, `fd604613` and `06e17d4a` are all still merged and
+    undeployed.
+  - **The new measurement: pass size does not matter when the pass stops on
+    the floor.** Both recorders write to `/var/lib` (`--root
+    /var/lib/liquidity-migration/forward-market` and `…-binance`), one
+    filesystem, and both carry `min_free_disk_gb = 25`
+    (`deploy/capture/bybit-linear.toml:28`,
+    `deploy/capture/binance-usdm.toml:32`).
+
+    | Time (UTC) | Event | Bybit `disk_blocked` | Binance `disk_blocked` |
+    | :--- | :--- | :--- | :--- |
+    | 02:28:03.286 | | | `True` (first) |
+    | 02:28:10.252 | | `True` (first) | |
+    | 02:29:23.499 | *Binance: `retention removed 187 tape files`* | | |
+    | 02:30:03.351 | Binance's gate opens, `rows` +5 | | `False` |
+    | 02:30:10.359 | **still blocked, 46.9 s after that pass** | `True` | |
+    | 02:30:33.364 | Binance re-blocked, `rows` +29 393 | | `True` |
+    | 02:31:48.655 | *Bybit: `retention removed 4 tape files`* | | |
+    | 02:32:03.411 | Binance's gate opens, `rows` +24 | | `False` |
+    | 02:32:10.440 | Bybit's gate opens, `rows` +59 | `False` | |
+    | 02:32:33.427 | Binance re-blocked, `rows` +31 158 | | `True` |
+    | 02:32:40.463 | Bybit re-blocked, `rows` +92 478 | `True` | |
+
+    Binance unlinked 187 files and Bybit unlinked 4, and the two passes bought
+    the identical thing: one 30-second status tick for the recorder that ran
+    the pass. Binance's 187-file pass did not open Bybit's gate at all — 46.9 s
+    later Bybit still read the disk as full, because Binance had resumed
+    writing 7 s earlier and `prune` had left it exactly zero margin. That is
+    `prune`'s `pressured` test and `writable()` sharing one threshold
+    (`storage.py:394` and `storage.py:422`), which is what `d275885a` fixes,
+    and it is now measured on a pass 47× larger than the one that reproduced
+    it at 00:55.
+  - **The other half is the shared filesystem, and it cuts both ways.**
+    Binance's 02:32:03 unblock followed no pass of its own — its last was
+    02:29:23. It came 14.8 s after *Bybit's* 02:31:48 pass. Each recorder's
+    pruner is the other's only source of room between its own 300-second
+    walks, and with no headroom in either pass, a recorder that resumes first
+    takes the whole of what the other freed.
+  - **What that block cost, on the Bybit unit, and it closes the 02:30
+    entry's projection.** The 02:30 page's payload was cut at 02:30:10 with
+    the Bybit block still open and no retention line anywhere in it, so that
+    entry could only bound the cost by the pruner's clock: "300 s, about
+    863 000 frames on this unit". This payload runs three minutes further and
+    holds the end of that same block. Bybit was blocked 02:28:10 → 02:32:10 —
+    **240.2 s, not 300**, ended by its own 02:31:48 pass plus the 22 s to the
+    next status tick — and discarded **691 512 frames**, not 863 000, at
+    2 559/s. `rows` were frozen at 57 611 732 for the whole of it and then
+    moved 59. The interval that followed, with the gate open for essentially
+    all of it, carried 92 478 rows (3 082/s) and dropped 43 frames; at that
+    rate the 240.2 s would have carried about 740 000 rows. The 02:30 entry's
+    reading of the shape is right and its arithmetic was an upper bound: an
+    unrescued crossing ends on the crossing recorder's *own* next scheduled
+    pass, so `RETENTION_INTERVAL_SECONDS` is the ceiling and the expected cost
+    is half of it. Its two `retention removed` lines are also the correction
+    to that entry's "at least two scheduled passes fell inside it and deleted
+    nothing" — the passes were not inside its window, they were 3 min 13 s and
+    5 min 38 s past its last line, and both deleted.
+  - **No fifth defect, and what would change that.** Everything in this
+    payload is the deployed behaviour of `65ee75a7`: the 300-second clock
+    (`1d8fad9a`), the pass that stops on the floor (`d275885a`), the gate that
+    only `_maintenance` opens (`fd604613`, visible as the 40.1 s between
+    Binance's pass and its own unblock), and the pass that falls short with no
+    successor (`06e17d4a`, visible as Bybit's 220 s wait). A crossing that
+    survives all four on the deployed tip — a retention pass that deletes and
+    the disk still full within one interval — would be a fifth, and this
+    payload contains no such thing because none of the four is on the host.
+  - Loss, cumulative and never reset. Both windows are cut by the 40-line
+    payload, so every figure is a lower bound.
+
+    | Unit | First line in payload | Last line | Added since the 01:53 entry |
+    | :--- | ---: | ---: | ---: |
+    | Bybit `forward-capture` | 10 580 038 (02:18:39) | 11 348 986 (02:33:10) | 1 835 784 |
+    | Binance `forward-capture-binance` | 3 783 086 (02:16:32) | 4 025 840 (02:33:03) | 684 783 |
+    | **Pair** | | **15 374 826** | **2 520 567** |
+
+    Over the 2 404 s since the 01:53 entry's last line that averages 1 048
+    frames a second, a third of the 3 127/s that entry recorded — but the
+    average hides the shape. Binance dropped nothing from 02:16:32 to
+    02:27:33 and Bybit nothing from 02:18:39 to 02:27:40, at least nine clean
+    minutes, and then both crossed within 7.0 s of each other. Inside the
+    oscillation that followed the pair ran at **3 372 frames a second**
+    (Bybit 2 563/s over 02:28:10–02:33:10, Binance 809/s over
+    02:28:03–02:33:03) — the worst rate of any window in this incident.
+  - Checks run: none needed. This entry changes `CHANGELOG.md` and `STATE.md`
+    only; no Python, Rust, config or unit file is touched.
+  - **Deploy receipt: refused a thirteenth time.** Run `33939474310`,
+    `deploy` on `main@0af3fc29`, dispatched 02:34:52 UTC and failed at
+    02:34:59. `ci` dead 3 s in at 02:34:56, `Deploy artifact` 4 s in at
+    02:34:57, `rust` 5 s in at 02:34:58; `diagnose` and `disarm` skipped at
+    02:34:53, `vps` and the release-test job skipped at 02:34:58. Nothing
+    reached the host. Same no-job-ever-started signature as `33938359607`,
+    `33937280978`, `33934970737`, `33934851698`, `33933927629`,
+    `33933636343`, `33932188757`, `33931474693`, `33928248402`,
+    `33922197522`, `33921858031` and `33911912004`. It is the account's
+    failed payments, not any commit. Deployed commit stays `65ee75a7`; all
+    four recorder fixes are merged and undeployed, and the recorders keep
+    crossing the floor until the owner runs the SSH path below.
+  - Host action, and only the owner can run it. `06e17d4a` carries all four
+    recorder fixes and this entry's tip carries no code, so either installs
+    them; `capture_fingerprint` (`scripts/deploy_vps_live.sh:524-534`) hashes
+    every `market_tape/*.py`, so `start_independent_units` restarts both
+    recorders on the new code and no hand restart is needed. It also hands
+    over both realms — the engine fingerprint hashes the whole `engine` tree
+    — so the funded engine restarts:
+    ```bash
+    EXPECTED_COMMIT=<this entry's commit> scripts/ops.sh deploy
+    scripts/ops.sh status
+    ```
+    Then the reading still open since 22:54 — whether tape or non-tape files
+    hold the room, which decides whether the caps in `deploy/capture/*.toml`
+    also want revisiting once the recorders stop blocking — and the equity and
+    heartbeat record through the incident:
+    ```bash
+    df -h /var/lib
+    du -sh /var/lib/liquidity-migration/forward-market \
+           /var/lib/liquidity-migration/forward-market-binance
+    du -sh --exclude=forward-market --exclude=forward-market-binance \
+           /var/lib/liquidity-migration
+    scripts/ops.sh curve mainnet 60
+    ```
+    The billing block is the root cause of the deploy half of this and is not
+    fixable from here: GitHub has refused every Actions run since 18:03 UTC on
+    2026-09-04.
 - **2026-09-05 02:30 UTC — The seventh page from the same free-space floor.
   No new defect, and no code changed: this one measures the *first* defect
   alone, with nothing to rescue it. The 02:28:10 crossing woke no retention
