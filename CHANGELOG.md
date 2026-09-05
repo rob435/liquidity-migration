@@ -7,6 +7,22 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 05:46 UTC — The twenty-eighth refused deploy, identical
+  signature.** Run `33948078558`, `deploy` on `main@c5963221`, created
+  05:46:31 UTC and dead at 05:46:37. `ci`, `rust` and `Deploy artifact` were
+  all created 05:46:33 and completed `failure` at 05:46:36 — three seconds
+  each, none alive long enough to check out the repository. `disarm`,
+  `diagnose`, `Engine release tests, soak and benchmarks` and `vps` all
+  skipped; `vps` was never scheduled against a runner. All three failed jobs'
+  log downloads return the same error verbatim: `failed to download logs: HTTP
+  404`. No job started and nothing reached the host. **Twenty-eight
+  consecutive refusals since 19:17 UTC on 2026-09-04**, every one with the
+  account-payment signature. Deployed commit stays `65ee75a7`; the eight
+  recorder fixes and the uploader's leak fix remain merged and undeployed, and
+  the recorders have now thrown away 42 340 901 frames. The SSH path needs no
+  runner: `EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db
+  scripts/ops.sh deploy`.
+
 - **2026-09-05 05:39 UTC — The eighteenth page: the longest zero-row block of
   the incident, and 504 unlinks that bought the neighbour everything. No code
   change and no ninth defect: every mechanism here is the deployed behaviour of
