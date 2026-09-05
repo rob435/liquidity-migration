@@ -7,6 +7,80 @@ incident, or a check that changed nothing gets no entry. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 21:58 UTC — Incident `demo-b161102514734dd5`: a killed
+  `verify-native-strategy-state` sent the deploy down the legacy-import path,
+  the candidate's `identity_state` WAL frame made the rollback unreadable to
+  the incumbent, and the demo engine was left stopped for 949 s. No code
+  change; the initiating SIGKILL is a host reading the owner still owes.**
+  - The outage. `liquidity-migration-engine.service` (demo) stopped
+    21:58:45 and did not run again until 22:14:34 — 949 s, against a 60 s
+    heartbeat limit. Mainnet was never stopped: the deploy provisions demo
+    first and never reached the mainnet realm. Page `demo-b161102514734dd5`,
+    ref `heartbeat:liquidity-migration-engine.service`,
+    `heartbeat is 953s old (limit 60s)`.
+  - The chain, from run `33994308295` (`deploy`, `60bb0abb`, `vps` job step
+    `Run VPS mode` 21:58:32 → 21:59:48, conclusion `failure`):
+
+    | UTC | Event |
+    | :--- | :--- |
+    | 21:58:41 | host repo fast-forwarded `1cfbce5f` → `60bb0abb` |
+    | 21:58:45 | demo engine stopped, `RunOutcome { stopped_by: Shutdown, market_events: 40437715, orders_sent: 55 }` |
+    | 21:59:40 | `main: line 649: 2505875 Killed` — the `run_engine_takeover_command` subshell, killed by a signal after ~55 s |
+    | 21:59:42 | `engine: strategy 1 already has live whole-sleeve state` → `deploy failed: cannot import exact LONG state for demo` |
+    | 21:59:42 | `deploy failed: demo did not come up on 60bb0abb; rolling back to cece1d9f` |
+    | 21:59:47 | `engine: wal frame corrupt at offset 175203496: frame passed its checksum but is not a readable record: unknown variant 'identity_state'` |
+    | 21:59:48 | `deploy failed: demo did not come up on the rolled-back commit cece1d9f either; the fleet is stopped` |
+
+  - Cause, three links, each verified against source on this tree.
+    `import_native_strategy_state` short-circuits on
+    `verify-native-strategy-state` (`scripts/deploy_vps_live.sh:892-895`), and
+    the `if` reads a signal death exactly as it reads a clean "not native"
+    verdict; no `native-state-ok` line appears in the run, so the killed
+    process was that verification and the deploy fell through to the legacy
+    import. The import then refused correctly: the live engine writes
+    `StrategyGlobalCheckpoint` with `provenance: None`
+    (`engine/engine-core/src/engine/scheduling.rs:229-241`), and `append_import`
+    refuses a bundle over a provenance-free checkpoint
+    (`engine/engine-core/src/takeover.rs:319-324`) — the demo LONG state is
+    already native, which is what the killed verification would have said.
+    Third link, the one that made a refused deploy an outage:
+    `import_strategy_state` appends `WalRecord::IdentityState` and barriers it
+    (`engine/engine-core/src/takeover.rs:887-894`) before the import can
+    refuse, and `identity_state` entered the record enum in `c082dc8`
+    (15:42 UTC), which is **not** an ancestor of the rollback target
+    `cece1d9f` (`git merge-base --is-ancestor c082dc8 cece1d9f` → false). The
+    incumbent binary therefore reads its own WAL as corrupt and the automatic
+    rollback cannot start the engine either.
+  - The page was late by the deploy's own stop. `liquidity-migration-demo-liveness`
+    ran 21:56:11 and then not again until 22:14:34, so the 60 s limit was
+    breached unpaged for 14 minutes; only the host watchdog saw it, as
+    `CRITICAL watchdog:demo: demo watchdog timer is inactive (enabled)` at
+    22:10:01 and 22:13:07. The demo units came back at 22:14:34 by an actor
+    the available evidence does not name, and the watchdog paged the accrued
+    953 s at 22:14:37.
+  - Post-incident state, `diagnose` run `33995494327` at 22:17:54: host on
+    `cece1d9f`, `real-money armed`, `liquidity-migration-engine.service active
+    heartbeat 0s`, `liquidity-migration-engine-mainnet.service active heartbeat
+    2s`, `0 loaded units listed` for `systemctl --failed`, `/dev/sda2 118G 49G
+    64G 44% /`, both recorders active (heartbeat 7 s and 14 s),
+    `ok scope=demo units-and-heartbeats-healthy` 22:15:39 and
+    `ok scope=host units-and-heartbeats-healthy` 22:16:22.
+  - No code changed, deliberately. What sent SIGKILL to pid 2505875 is not in
+    any log this routine can read, and the two candidate repository fixes —
+    making the deploy distinguish a killed verification from a "not native"
+    verdict, and giving the WAL a rollback-compatible reader or deferring the
+    `identity_state` append until an import commits — both change the funded
+    engine's state-recovery contract. They are proposed, not built.
+  - **Owner actions.** Do not re-dispatch `mode=deploy` until the kill is
+    understood: demo is provisioned before mainnet, so the same path runs next
+    against the funded engine and a larger WAL. The one reading that settles
+    it is the host kernel log for the window,
+    `journalctl -k -S 21:58 -U 22:00` (an OOM kill of pid 2505875 is the
+    leading candidate on an 8 GB box replaying a 175 MB WAL), with
+    `journalctl -S 21:58 -U 22:00` for the same span if the kernel log is
+    silent. `7e6fcb93`'s CARRY funding-lane fix stays undeployed and both
+    signal workers stay `degraded` until a deploy can land.
+
 - **2026-09-05 21:20 UTC — The incumbent-qualification deploy gate is removed,
   the changelog drops its refused-deploy and re-fire entries, and AGENTS.md
   gains the no-spam rule.**
