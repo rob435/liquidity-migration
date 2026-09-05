@@ -7,6 +7,27 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 07:12 UTC — The thirty-fourth refused deploy, and the first
+  since 04:45 in which a job waited for a runner.** Run `33951915472`,
+  `deploy` on `main@0dc502f7`, created 07:12:38 UTC and dead at 07:13:19.
+  `ci` 07:12:40 → 07:12:43 and `Deploy artifact` 07:12:40 → 07:12:44 — three
+  and four seconds, neither alive long enough to check out the repository —
+  and both log downloads return the same error verbatim, re-read this run:
+  `failed to download logs: HTTP 404`. `rust` was created 07:12:40 and sat
+  **38 seconds in `queued` with no runner assigned** before failing at
+  07:13:18, the signature run `33937280978` showed at 01:49 and the only
+  variation in thirty-four refusals. `disarm` and `diagnose` skipped at
+  07:12:40; `vps` and `Engine release tests, soak and benchmarks` were created
+  07:13:19 and skipped, so `vps` was never scheduled against a runner. No job
+  started and nothing reached the host. **Thirty-four consecutive refusals
+  since 19:17 UTC on 2026-09-04**, every one with the account-payment
+  signature — twelve hours in which no repository change can reach the fleet
+  through GitHub. Deployed commit stays `65ee75a7`; the eight recorder fixes
+  and the uploader's leak fix remain merged and undeployed, and the recorders
+  have now thrown away 55 461 720 frames. The SSH path needs no runner:
+  `EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db scripts/ops.sh
+  deploy`.
+
 - **2026-09-05 07:00 UTC — The twenty-fourth page: the margin a pass leaves
   is the size of the last file it unlinked, which is why file counts have
   never ordered recovery; Bybit takes two status intervals for the first time;
