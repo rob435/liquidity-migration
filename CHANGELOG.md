@@ -7,6 +7,22 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 05:55 UTC — The twenty-ninth refused deploy, identical
+  signature.** Run `33948458421`, `deploy` on `db008c62`, created 05:55:40 UTC
+  and dead at 05:55:46. `ci` and `rust` were created 05:55:42 and completed
+  `failure` at 05:55:44 — two seconds each; `Deploy artifact` 05:55:42 →
+  05:55:45, three seconds. None was alive long enough to check out the
+  repository. `diagnose`, `disarm`, `Engine release tests, soak and benchmarks`
+  and `vps` all skipped; `vps` was never scheduled against a runner. The failed
+  jobs' log downloads return the same error verbatim: `failed to download logs:
+  HTTP 404`. No job started and nothing reached the host. **Twenty-nine
+  consecutive refusals since 19:17 UTC on 2026-09-04**, every one with the
+  account-payment signature. Deployed commit stays `65ee75a7`; the eight
+  recorder fixes and the uploader's leak fix remain merged and undeployed, and
+  the recorders have now thrown away 44 133 703 frames. The SSH path needs no
+  runner: `EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db
+  scripts/ops.sh deploy`.
+
 - **2026-09-05 05:48 UTC — The nineteenth page: a 630.356 s block in which
   504 unlinked files bought nothing and 11 ended it, and the tick-phase
   handicap inverts. No code change and no ninth defect in the write path;
