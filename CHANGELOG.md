@@ -7,6 +7,24 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 06:41 UTC — The thirty-second refused deploy, identical
+  signature.** Run `33950499842`, `deploy` on `main@cb190c86`, created
+  06:41:20 UTC and dead at 06:41:26. `ci`, `rust` and `Deploy artifact` were
+  all created 06:41:22 and completed `failure` at 06:41:25 — three seconds
+  each, none of them alive long enough to check out the repository.
+  `diagnose`, `disarm`, `Engine release tests, soak and benchmarks` and `vps`
+  all skipped; `vps` was never scheduled against a runner. All three failed
+  jobs' log downloads return the same error verbatim, re-read this run:
+  `failed to download logs: HTTP 404`. No job started and nothing reached the
+  host. **Thirty-two consecutive refusals since 19:17 UTC on 2026-09-04**,
+  every one with the account-payment signature — eleven and a half hours in
+  which no repository change can reach the fleet through GitHub. Deployed
+  commit stays `65ee75a7`; the eight recorder fixes and the uploader's leak
+  fix remain merged and undeployed, and the recorders have now thrown away
+  49 499 660 frames. The SSH path needs no runner:
+  `EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db scripts/ops.sh
+  deploy`.
+
 - **2026-09-05 06:34 UTC — The twenty-second page: a gate opens 1.5 s
   *before* the only nearby deletion, 93 unlinked files buy nothing while 10
   buy two openings, and the pair's gated inbound rate holds to 0.005 %. No
