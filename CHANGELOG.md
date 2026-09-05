@@ -252,6 +252,16 @@ edit STATE.md to match.
     `scripts/dev.sh check` with `zstd` and `rsync` installed in the container:
     1465 passed, ruff and mypy clean, `cargo clippy` and every engine suite
     green; ShellCheck is not installed here and CI runs it.
+  - **Deploy refused a nineteenth time, same signature.** Run `33942475801`,
+    `deploy main@95798f18`, dispatched 03:39:54 UTC and failed 03:40:00 — 6 s.
+    `ci` and `Deploy artifact` dead 3 s in, `rust` 4 s in, each of their log
+    downloads returning `failed to download logs: HTTP 404`; `diagnose`,
+    `disarm`, `vps` and the release-test job skipped. The run before it,
+    `33942452158` on `10cb6aeb` at 03:39:20, was refused identically for an
+    eighteenth. No job ever started, so nothing reached the host: deployed
+    commit stays `65ee75a7` and all six recorder fixes stay merged and
+    undeployed. The cause is outside the repository — the account's payments
+    failed, so GitHub assigns no runner.
   - **The one action that ends this needs no runner**, from a workstation
     holding the SSH key:
 
