@@ -8,8 +8,13 @@ edit STATE.md to match.
 
 
 - **2026-09-05 03:51 UTC — The twelfth page from the same free-space floor. No
-  code change here and no seventh defect: every mechanism in this payload is
-  the deployed behaviour of the six merged, undeployed recorder fixes. One
+  code change here, and no seventh defect *in the recorder*: every mechanism
+  in this payload is the deployed behaviour of the six merged, undeployed
+  recorder fixes. A seventh defect was found concurrently from the 03:42
+  payload and it is outside the recorder — `build_archive` leaks a partial
+  archive into the uploader's staging directory on `/var/lib`, where no
+  retention pass can see or delete it (`7fe4fe0c`, entry below). It explains
+  the free space this entry's fourth bullet could not. One
   measurement is new and it is the sharpest the incident has of why the
   margin must be lifted off the floor: **a pass opened the neighbour's gate
   and not its own.** Bybit's 03:48:01.724 pass unlinked 6 files, Binance's
@@ -74,8 +79,10 @@ edit STATE.md to match.
     03:39:15.892 closed with no `retention removed` line from either unit
     before it in the payload; Binance's 03:39:56.969 pass is 41.1 s *after*
     it. Same shape as the 03:33 entry's 03:30:45 → 03:32:45 case. Free space
-    on `/var/lib` is being moved by something the pruner does not control,
-    which stays the open host reading.
+    on `/var/lib` is being moved by something the pruner does not control —
+    and the 03:42 entry below names it: the uploader's staging directory,
+    outside both tape roots and invisible to `Retention.prune`, which walks
+    `<tape root>/**/*.zst` and reads free space for the whole filesystem.
   - **The other three fixes are confirmed undeployed, again.** Pass cadence is
     the bare 300-second clock — Binance 302.5 s and 302.8 s between its own
     passes, Bybit 305.5 s — so `1d8fad9a` is undeployed. Every gate in the
@@ -100,25 +107,32 @@ edit STATE.md to match.
     **28 020 904**, of which 3 646 624 came in the 1 081.3 s since the 03:33
     page — **3 372/s**, below that entry's 3 444/s. The escalation the 03:33
     entry recorded has flattened, not reversed.
-  - **Deploy refused a twentieth time, same signature.** Recorded below with
-    the run id after dispatch; the cause is outside the repository — the
-    account's payments failed, so GitHub assigns no runner, and nothing has
-    reached the host since 18:03 UTC on 2026-09-04.
+  - **Deploy refused a twentieth time, same signature.** Run `33943296814`,
+    `deploy main@aa4dde54`, dispatched 03:58:24 UTC and dead by 03:58:29 —
+    5 s. `ci`, `rust` and `Deploy artifact` all created 03:58:26 and failed
+    03:58:29, each of their log downloads returning `failed to download logs:
+    HTTP 404`; `diagnose`, `disarm`, `vps` and the release-test job skipped.
+    No job started, so nothing reached the host: deployed commit stays
+    `65ee75a7` and every recorder fix stays merged and undeployed. The cause
+    is outside the repository — the account's payments failed, so GitHub
+    assigns no runner, and nothing has reached the host since 18:03 UTC on
+    2026-09-04.
   - **The one action that ends this needs no runner**, from a workstation
     holding the SSH key:
 
     ```sh
-    EXPECTED_COMMIT=1702d14d1380d7bbe26eb0425b7811a3eeeeb2b8 scripts/ops.sh deploy
+    EXPECTED_COMMIT=7fe4fe0c1e115f8889eb73dc818726de82421d82 scripts/ops.sh deploy
     scripts/ops.sh status
     scripts/ops.sh curve mainnet 240
     ```
 
-    It restarts the funded engine — `1702d14d` carries `697341e4` and
+    It restarts the funded engine — `7fe4fe0c` carries `697341e4` and
     `10ed1bd2`, so its `engine` tree differs from the deployed `65ee75a7` and
     the fingerprint hands over both realms. Do **not** install `06e17d4a` or
     `3c1ebd22` on their own; `1702d14d` is the commit that carries all six
-    recorder fixes. Every commit since is `CHANGELOG.md` and `STATE.md` only,
-    so the current tip installs the identical `engine` tree.
+    recorder fixes and `7fe4fe0c` adds the uploader's leak fix on top of it.
+    Every commit since is `CHANGELOG.md` and `STATE.md` only, so the current
+    tip installs the identical `engine` tree.
   - **One unproven risk to watch after the deploy, stated because it is not
     hidden.** `_retention_loop` resets `credit = 0` at the top of every burst
     (`market_tape/record.py:1144`), so `3c1ebd22`'s credit does not survive
@@ -134,13 +148,15 @@ edit STATE.md to match.
     whether the room was released late or taken by the neighbour, and this
     payload shows both happening. Watch `retention removed` counts and the
     two tape roots' size after the deploy.
-  - The open host reading is unchanged:
+  - The host reading now has a named suspect — the uploader's staging
+    directory, per the 03:42 entry — so `du` it with the rest:
 
     ```sh
     scripts/ops.sh status
     scripts/ops.sh curve mainnet 240
     df -h /var/lib
-    du -sh /var/lib/liquidity-migration/forward-market \
+    du -sh /var/lib/liquidity-migration/market-tape-upload/staging \
+           /var/lib/liquidity-migration/forward-market \
            /var/lib/liquidity-migration/forward-market-binance \
            /var/lib/liquidity-migration-engine-mainnet /var/log/journal
     ```
