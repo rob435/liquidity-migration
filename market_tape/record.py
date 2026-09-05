@@ -1140,8 +1140,16 @@ class Recorder:
         except OSError as exc:
             logging.error("tape retention pass failed: %s", exc)
             return
-        if deleted:
-            logging.info("retention removed %d tape files", len(deleted))
+        if not deleted:
+            return
+        logging.info("retention removed %d tape files", len(deleted))
+        # `disk_blocked` gates every frame in `_write_loop`, and the pass that
+        # frees room is the only thing that can end the block, so it is what
+        # opens the gate. Leaving that to `_maintenance` costs a full
+        # `status_interval_seconds` of tape on a disk that already has space.
+        if self.disk_blocked and self.retention.writable():
+            self.disk_blocked = False
+            logging.info("capture storage unblocked; writing resumed")
 
     def _maintenance_loop(self) -> None:
         while not self.stop.is_set():

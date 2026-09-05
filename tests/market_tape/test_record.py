@@ -1090,6 +1090,55 @@ def test_a_disk_under_the_free_floor_prunes_now_instead_of_waiting_out_the_inter
     assert not pruner.is_alive()
 
 
+def test_a_pass_that_frees_room_opens_the_writer_gate_instead_of_the_next_status_tick(
+    tmp_path: Path,
+) -> None:
+    """`disk_blocked` gates every frame in `_write_loop`, and only a retention
+    pass frees room, so the pass that frees it is what must open the gate.
+    Leaving that to `_maintenance` throws away a whole
+    `status_interval_seconds` of tape onto a disk that already has space."""
+
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+    directory = tmp_path / "2027-01-15" / "10" / "BTCUSDT"
+
+    def expired(name: str) -> Path:
+        # A pass that empties an hour removes the directory too, so each file
+        # remakes its own.
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        path.write_bytes(b"long past retention")
+        os.utime(path, (1_000_000, 1_000_000))
+        return path
+
+    first = expired("segment-000000.jsonl.zst")
+    # What a crossing leaves behind: the free-space tick, or the append that
+    # failed first, has closed the gate.
+    recorder.disk_blocked = True
+
+    # A pass that deletes but leaves the disk under the floor changes nothing:
+    # the floor is the developer box's, not the host's, so pin it.
+    recorder.retention.min_free_bytes = 1 << 62
+    recorder._retention_pass()
+
+    assert not first.exists()
+    assert recorder.disk_blocked is True
+
+    # Room is back, so the frame after this pass is tape, not a dropped count.
+    expired("segment-000001.jsonl.zst")
+    recorder.retention.min_free_bytes = 1
+    recorder._retention_pass()
+
+    assert recorder.disk_blocked is False
+
+    row = {"kind": "ticker", "symbol": "BTCUSDT", "values": {}, "local_receive_ts_ns": BASE_NS}
+    recorder.frames.put(("rows", [row], BASE_NS, "deep"))
+    recorder.frames.put(None)
+    recorder._write_loop()
+
+    assert recorder.written_rows == 1
+    assert recorder.disk_dropped_frames == 0
+
+
 def test_a_retention_pass_that_cannot_delete_leaves_the_pruner_thread_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

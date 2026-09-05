@@ -6,6 +6,122 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 01:32 UTC — The fifth page from the same free-space floor, and
+  the first one that measures a third defect the two merged fixes do not
+  reach: the pruner frees room but cannot open the writer's gate, so the
+  recorder keeps discarding frames onto a disk that already has space until
+  the next status tick. Bybit's 01:30:50 pass freed room; the writer stayed
+  shut for 15.06 s and wrote 54 rows where it should have written ~48 000.
+  Fixed in `market_tape/record.py:1146-1152`, tested, pushed to `main`.**
+  - Incident `host-ecbac293ecc90d5e`, scope `host`, host `ip-208-84-103-4`,
+    new critical refs `capture-disk` and `capture-disk:forward-market-binance`.
+    Exact alert text: `CRITICAL recorder storage is blocked; frames are
+    counted but not written` and `CRITICAL recorder forward-market-binance
+    storage is blocked; frames are counted but not written`, with
+    `WARNING recorder dropped 183163 frames since the last check (storage was
+    blocked)` and `WARNING recorder forward-market-binance dropped 65227
+    frames since the last check (storage was blocked)`. Level-triggered on
+    `disk_blocked is True` (`scripts/runtime/check_fleet_liveness.py:431`).
+  - **The funded engine is not implicated and the host has not moved.** No
+    engine, worker or timer is named; both units are `market_tape` recorders,
+    research tape outside the order path. Pids are unchanged from the 22:54,
+    23:50, 00:01, 00:36 and 00:57 pages — 2259813 (Bybit), 2263691 (Binance) —
+    so neither recorder has restarted and the host still runs `65ee75a7`. The
+    25 GiB floor is the reservation held for mainnet's WAL and it held.
+  - **The new defect, and where it is.** `disk_blocked` is the gate every
+    frame passes: `_write_loop` counts and discards while it is `True`
+    (`market_tape/record.py:1088-1090`). Only `_maintenance` ever cleared it
+    (`record.py:1169`), and `_maintenance` runs on
+    `status_interval_seconds` — 30 s on both recorders
+    (`deploy/capture/bybit-linear.toml:29`,
+    `deploy/capture/binance-usdm.toml:33`). The pruner is the only thing that
+    frees room, and it could not say so. Every crossing therefore cost a full
+    status interval of tape after the room was already back, and the 30-second
+    period of the oscillation recorded since 00:01 is that interval, not the
+    disk.
+  - **Measured on this payload, on the Bybit unit, to the millisecond.**
+
+    | Line (UTC) | `disk_blocked` | `disk_dropped` | `rows` |
+    | :--- | :--- | ---: | ---: |
+    | 01:30:05.178 | `True` | 6 388 188 | 51 236 846 |
+    | 01:30:35.198 | `True` | 6 484 881 | 51 236 846 |
+    | 01:30:50.164 | *`retention removed 2 tape files`* | | |
+    | 01:31:05.221 | `False` | 6 571 285 | 51 236 900 |
+    | 01:31:35.248 | `True` | 6 571 341 | 51 332 557 |
+
+    The pass ended at 01:30:50.164 and the gate opened at the 01:31:05.221
+    tick, 15.057 s later. Over that 30 s interval the unit discarded 86 404
+    frames (2 878/s) and wrote 54 rows; the interval after it, unblocked, it
+    wrote 95 657 rows (3 186/s). So the writer was shut, not starved: at the
+    rate it managed once the gate opened, the 15.057 s carried about 48 000
+    rows and instead carried 54, and about 43 300 frames were discarded onto a
+    disk that had room. Binance shows the same shape one tick later — blocked
+    01:30:01 and 01:30:31, `False` at 01:31:01 with `rows` up by 2, blocked
+    again at 01:31:31 — which is the shared filesystem: Bybit's pass freed the
+    space both units then waited a tick to use.
+  - **This is not what `1d8fad9a` and `d275885a` fix, and it survives them.**
+    `1d8fad9a` wakes the pruner on the crossing instead of the 300-second
+    clock, so the room comes back in milliseconds rather than up to five
+    minutes; `d275885a` frees past the floor by `FREE_HEADROOM_FRACTION` so a
+    pass hands the writer 1.25 GiB instead of nothing. Neither touches the
+    gate. On `main` before this entry a crossing would free room at once and
+    then still discard every frame for up to `status_interval_seconds`. The
+    stale gate is also what `status.json` publishes (`record.py:1258`), so it
+    held the CRITICAL up for the extra tick as well.
+  - **The fix.** `_retention_pass` clears `disk_blocked` when a pass that
+    deleted something leaves `writable()` true (`record.py:1146-1152`). The
+    pruner is what frees the room, so it is what says the room is back;
+    recovery is now the pruner's walk, not the status interval. A pass that
+    deletes nothing, a pass that cannot delete (`OSError`, already returning
+    early), and a pass that deletes but stays under the floor all leave the
+    gate shut, so a genuinely full or read-only filesystem still blocks.
+  - **The test.**
+    `tests/market_tape/test_record.py::test_a_pass_that_frees_room_opens_the_writer_gate_instead_of_the_next_status_tick`
+    blocks the gate, runs a pass that deletes while still under the floor and
+    asserts the gate stays shut, then runs a pass that deletes with room back
+    and asserts the gate opens and the next frame is written rather than
+    counted. Without the fix it fails on `assert recorder.disk_blocked is
+    False` → `assert True is False`; with it, it passes.
+  - Loss, cumulative and never reset. Both windows are cut by the 40-line
+    payload, so every figure is a lower bound.
+
+    | Unit | First line in payload | Last line | Added since the 00:57 entry |
+    | :--- | ---: | ---: | ---: |
+    | Bybit `forward-capture` | 6 388 138 (01:17:34) | 6 571 341 (01:31:35) | 511 898 |
+    | Binance `forward-capture-binance` | 2 181 387 (01:15:30) | 2 246 639 (01:31:31) | 206 649 |
+    | **Pair** | | **8 817 980** | **718 547** |
+
+    The rate is down an order of magnitude from the 00:36–00:57 window's
+    3 260 frames a second, because this window holds one crossing rather than
+    a continuous oscillation: Binance was clean for 14 minutes before 01:30:01
+    and Bybit for 12.5 minutes before 01:30:05. The floor is still crossed;
+    the interval between crossings has lengthened.
+  - Checks run: `pytest tests/market_tape tests/scripts` (503 passed),
+    `scripts/dev.sh check` (1459 passed), `ruff`, `mypy market_tape`, and
+    `cargo test` (all green). Two failures in
+    `tests/scripts/test_observability_hygiene.py` are this container's missing
+    `rsync` binary — `backup_state.sh` exits 2 with `backup: rsync is not
+    installed` before reaching either assertion — not this change, which
+    touches no shell script. ShellCheck is not installed here; CI runs it.
+  - **Deploy receipt:** see the entry above this line's dispatch record.
+  - Host action, and only the owner can run it. The tip carries all three
+    recorder fixes; `capture_fingerprint` (`scripts/deploy_vps_live.sh:524-534`)
+    hashes every `market_tape/*.py`, so `start_independent_units` restarts both
+    recorders on the new code and no hand restart is needed:
+    ```bash
+    EXPECTED_COMMIT=<this entry's commit> scripts/ops.sh deploy
+    scripts/ops.sh status
+    ```
+    Then the reading still open since 22:54 — whether tape or non-tape files
+    hold the room, which decides whether the caps in `deploy/capture/*.toml`
+    also want revisiting once the recorders stop blocking:
+    ```bash
+    df -h /var/lib
+    du -sh /var/lib/liquidity-migration/forward-market \
+           /var/lib/liquidity-migration/forward-market-binance
+    scripts/ops.sh curve mainnet 120
+    ```
+
 - **2026-09-05 00:57 UTC — The fourth page from the same free-space floor, and
   the first payload that catches the pruner in the act: six retention passes
   inside the window, all on the 300-second clock, and every one of them buying
