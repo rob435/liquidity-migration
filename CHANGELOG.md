@@ -7,6 +7,135 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 04:19 UTC — The thirteenth page from the same free-space floor.
+  No code change and no ninth defect: every mechanism in this payload is the
+  deployed behaviour of the eight merged, undeployed fixes. Two things are new
+  and the first **withdraws the 03:33 entry's generalisation**. That entry
+  said "no clean stretch survives" and priced the incident at 3 444 frames/s;
+  this payload holds **750.7 s (Bybit) and 960.6 s (Binance) with
+  `disk_dropped` frozen and `disk_blocked=False` on every tick**, the pair
+  keeping 3 636 779 rows and discarding **78 frames** — 0.079 frames/s across
+  the union window against 3 372/s at the 03:51 page, a factor of ~43 000. The
+  incident is episodic again. Second: the crossing that ends the stretch lands
+  **500.4–547.2 s after the hourly tape-upload timer fired**, which is a
+  second, independent line of support for the uploader defect `7fe4fe0c`
+  already fixed on `main`. Cumulative tape discarded **29 965 507** frames.**
+  - Incident `host-ecbac293ecc90d5e`, scope `host`, host `ip-208-84-103-4`,
+    `new_critical_refs=capture-disk,capture-disk:forward-market-binance` —
+    both refs newly due in one run. Id re-derived exactly:
+    `sha256("host\ncapture-disk\ncapture-disk:forward-market-binance")[:16]`
+    = `ecbac293ecc90d5e` (`scripts/runtime/check_fleet_liveness.py:805-807`).
+    Per the 03:21 entry the id names whose cooldown cleared first, not a
+    distinct fault; this is the same incident as the twelve pages before it.
+    Exact alert text: `CRITICAL recorder storage is blocked; frames are
+    counted but not written`, raised at
+    `scripts/runtime/check_fleet_liveness.py:433`; the two `WARNING recorder
+    dropped N frames since the last check (storage was blocked)` lines come
+    from `:449-450`.
+  - **The funded engine is not implicated.** No engine, worker or timer is
+    named. Both units are `market_tape` recorders — research tape outside the
+    order path — and the 25 GiB floor is the reservation held for mainnet's
+    WAL, which `writable()` blocks the recorder *above*
+    (`market_tape/storage.py:426-433`). Pids unchanged across all thirteen
+    pages — 2259813 (Bybit), 2263691 (Binance) — so neither recorder has
+    restarted and the host still runs `65ee75a7`.
+  - **The window, measured.** `liquidity-migration-forward-capture.service`
+    (Bybit) 04:05:49.735 → 04:18:50.431; the Binance unit 04:02:36.604 →
+    04:19:07.186.
+
+    | Quantity | Bybit | Binance |
+    | :--- | ---: | ---: |
+    | Window | 780.696 s | 990.582 s |
+    | Clean prefix, `disk_dropped` frozen | 750.664 s | 960.560 s |
+    | Frames | 2 232 913 (2 860.2/s) | 1 200 165 (1 211.6/s) |
+    | Rows kept | 2 436 628 (3 121.1/s) | 1 200 151 |
+    | Frames discarded | 71 | 7 |
+    | `retention removed` lines | 0 | 0 |
+    | `projected_gb` | 1223.2 → 1239.8 | 395.4 → 404.3 |
+
+    Both units discard their whole loss on the single final tick, so the
+    stretch before it is loss-free rather than lightly lossy. The pair's
+    ratio is **0.0000214 frames discarded per row kept**, against 3.27 at the
+    03:33 page and 8.14 at 03:42. Of the 1 944 603 frames lost since the
+    03:51 entry's 28 020 904, **all of it accrued before 04:02:36** — in the
+    gap this payload does not cover.
+  - **Neither pruner deleted anything, and that is correct here.** No
+    `retention removed` line appears on either unit across 780.7 s and
+    990.6 s, with two and three passes due on the deployed 300-second clock.
+    A pass logs whenever it deletes (`market_tape/record.py:1184`), and it
+    deletes only under `total > self.max_bytes or free < free_target`
+    (`market_tape/storage.py:404`) — the deployed `65ee75a7` form of that line
+    reads `min_free_bytes` where `main` now reads `free_target`, which is the
+    whole of `d275885a`. Free space was above the floor for the whole clean
+    stretch, so under either form a pass had nothing to do.
+    This re-confirms the 03:21 entry from a third window: neither tape is at
+    its `max_disk_gb` cap (60 GB Bybit, 18 GB Binance,
+    `deploy/capture/*.toml:27,31`) and `min_free_disk_gb = 25` is what binds.
+  - **The crossing tracks the uploader's clock.**
+    `liquidity-migration-market-tape-upload.timer` is `OnCalendar=*-*-*
+    *:10:00 UTC`, and one run ships both tapes in sequence. Against the
+    04:10:00 fire:
+
+    | Unit | Last tick above the floor | First tick below |
+    | :--- | ---: | ---: |
+    | Bybit | +500.4 s | +530.4 s |
+    | Binance | +517.2 s | +547.2 s |
+
+    The mechanism is in the repository and needs no host reading to name:
+    `build_archive` writes a whole hour of tape as `<staging>/.{name}.tar.tmp`
+    (`market_tape/pack.py:219-220`) into
+    `/var/lib/liquidity-migration/market-tape-upload/staging`, which is on the
+    filesystem the 25 GiB floor guards and outside both tape roots, so
+    `Retention.prune` — walking `self.root.rglob("*.zst")`
+    (`market_tape/storage.py:386`) — can neither count it nor delete it. The
+    build is not gated on free space. **This is correlation from one page, not
+    proof**: the payload carries no uploader journal and the recorder logs
+    nothing at an hour roll, so it cannot separate the archive from the hour's
+    own segment turnover. It is the second independent pointer at the same
+    defect, after the 03:39 page's pruner-deficit-growing-while-its-own-tape-
+    shrinks reading.
+  - **What the two fixes do to that, once deployed.** The *transient* archive
+    is already covered: `d275885a` frees to `min_free_bytes × 1.05`
+    (`FREE_HEADROOM_FRACTION = 0.05`, `market_tape/storage.py:47,383`) =
+    **1.25 GiB of margin**, which is more than one hour archive, so a build in
+    flight no longer crosses the floor. The *permanent* drain is `7fe4fe0c`:
+    without it every failed run leaves an orphan of roughly an hour of tape in
+    staging forever, and nothing in the repository ever swept that directory.
+    Neither is on the host.
+  - **The host readings that would settle it**, none of which this routine can
+    run. In order of value:
+
+    ```sh
+    ls -l --block-size=M /var/lib/liquidity-migration/market-tape-upload/staging
+    journalctl -u liquidity-migration-market-tape-upload.service --since '2026-09-05 03:00' --no-pager
+    df -h /var/lib
+    du -sh /var/lib/liquidity-migration/forward-market \
+           /var/lib/liquidity-migration/forward-market-binance \
+           /var/lib/liquidity-migration/market-tape-upload
+    scripts/ops.sh curve mainnet 240
+    ```
+
+    The first is decisive: orphaned `*.tar` or `.*.tar.tmp` files there are
+    the leak, measured in bytes. If the tape roots sum well under their 60 +
+    18 GB caps while `df` shows the floor, the caps are not the dial to turn
+    ([docs/observability.md](docs/observability.md),
+    [docs/operations.md](docs/operations.md)).
+  - **The fault is now the undeployed deploy.** Eight recorder fixes and the
+    uploader's leak fix have been merged and undeployed for over ten hours
+    while GitHub Actions refuses every run within seconds because the
+    account's payments failed. The SSH path needs no runner and installs all
+    nine:
+
+    ```sh
+    EXPECTED_COMMIT=2c751c92e20f9924f11652f76989eede2b16d6db scripts/ops.sh deploy
+    ```
+
+    It restarts the funded engine: `2c751c92` carries `697341e4` and
+    `10ed1bd2`, so its `engine` tree differs from the deployed `65ee75a7` and
+    the fingerprint hands over both realms. Every commit after it touches only
+    `CHANGELOG.md`, `STATE.md`, `market_tape/` and tests, so the current tip
+    installs the identical `engine` tree.
+
 - **2026-09-05 03:48 UTC — The Bybit-ref page of the same crossing. No code
   change and no new defect: every measurement in this payload is already in the
   03:42 and 03:51 entries, and the one defect it points at was found from the
