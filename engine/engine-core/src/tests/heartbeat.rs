@@ -102,6 +102,24 @@ fn heartbeat_at(path: &std::path::Path) -> serde_json::Map<String, serde_json::V
         .clone()
 }
 
+/// Resolves once the heartbeat on disk counts `sent` orders, or after five
+/// seconds. The beat lags the loop by up to one tick, and on the paused
+/// clock a fixed stop fires the moment the loop idles, which can be the
+/// instant after a send and before the tick that would have written it.
+async fn until_beat_counts(path: &std::path::Path, sent: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let counted = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|fields| fields["orders_sent"].as_u64());
+        if counted == Some(sent) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
 struct BlockedStrategy {
     rows: Vec<(String, String)>,
 }
@@ -234,7 +252,7 @@ async fn a_running_engine_leaves_a_heartbeat_saying_how_it_is() {
         .run(
             &mut ScriptFeed::quotes(symbol, 2, false),
             &mut ScriptOrderFeed::empty(),
-            tokio::time::sleep(Duration::from_millis(40)),
+            until_beat_counts(path.path(), 2),
         )
         .await
         .unwrap();

@@ -6,6 +6,30 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 20:25 UTC — The release qualification of `a26e297d` failed
+  on one heartbeat test that races on the paused clock; the test now ends
+  when the beat has caught up.**
+  - Run `33988617900` (`deploy` at `a26e297d`, dispatched 19:56 UTC after
+    the push): the Python gate and the Rust debug gate passed on the hosted
+    runners; `Qualified release artifact` failed at 20:16 UTC in `cargo test
+    --workspace --all-targets --release --locked` on
+    `tests::heartbeat::a_running_engine_leaves_a_heartbeat_saying_how_it_is`
+    (`orders_sent` read 1, two went out); the `vps` job was skipped and
+    nothing reached the host. Reproduced here in release: two failures in
+    three runs of the same binary, none in debug.
+  - Cause. The test stopped the run on a fixed 40 ms sleep. Under
+    `start_paused` that sleep fires the moment the loop idles, which can be
+    the instant after the second send and before the tick that writes the
+    heartbeat; the beat lags the loop by up to one tick, and which side of
+    it the send lands on is scheduling. Not a fault in the engine or in the
+    heartbeat: the file said what the last beat knew.
+  - Fix, `engine/engine-core/src/tests/heartbeat.rs`: the run ends when the
+    heartbeat on disk counts both orders (`until_beat_counts`, capped at five
+    seconds, so an engine that never sent the second order still fails).
+    Release, five runs of the test binary: all pass; debug passes. The rest
+    of the release suite is being run locally and the deploy is dispatched
+    again at this commit; its outcome is the next entry.
+
 - **2026-09-05 19:55 UTC — The heavy-seed crash loop is fixed: a halt
   cancel the venue refuses, loses or never confirms is settled by a status
   read; the simulator's clock no longer leaps past the loop; the heavy-seed
