@@ -126,8 +126,69 @@ async fn until_woken_by(seen: Wakes, tag: &'static str) {
     }
 }
 
+/// Stop the loop once a wake of this kind has read this number, or give up
+/// so a failure reads as an assertion and not a hung test.
+async fn until_read_at(seen: Wakes, tag: &'static str, value: f64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(t, v)| *t == tag && close(*v, value))
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
 fn close(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-9
+}
+
+/// Quotes forever, one every two milliseconds of the test clock. Each is a
+/// wake the probe samples `ctx.in_flight` at, so a test can watch a number
+/// change instead of guessing which turn changes it.
+struct PacedQuotes {
+    symbol: SymbolId,
+    seq: u64,
+    symbols: Vec<String>,
+}
+
+impl PacedQuotes {
+    fn new(symbol: SymbolId) -> Self {
+        PacedQuotes {
+            symbol,
+            seq: 0,
+            symbols: vec!["BTCUSDT".into()],
+        }
+    }
+}
+
+impl MarketFeed for PacedQuotes {
+    fn admit(&mut self, symbol: &str, _feed: Feed) -> Option<SymbolId> {
+        if let Some(index) = self.symbols.iter().position(|name| name == symbol) {
+            return Some(SymbolId(u16::try_from(index).unwrap()));
+        }
+        self.symbols.push(symbol.to_string());
+        Some(SymbolId(u16::try_from(self.symbols.len() - 1).unwrap()))
+    }
+
+    async fn next_event(&mut self) -> Result<MarketEvent, FeedError> {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        self.seq += 1;
+        Ok(MarketEvent::Quote {
+            symbol: self.symbol,
+            quote: Quote {
+                bid_px: 30_000.0,
+                bid_qty: 1.0,
+                ask_px: 30_000.5,
+                ask_qty: 1.0,
+                venue_ts_ms: 1,
+                recv_ns: clock::now_ns(),
+                seq: self.seq,
+            },
+        })
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -181,8 +242,12 @@ async fn the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder() {
     assert!(close(read_at(&seen, "ack"), 0.010));
 
     // Then: a stream reset forces a fresh reading, which reports 0.004. The
-    // stop-attach news right behind it is just a wake the probe can sample
-    // the post-reading number at.
+    // read is its own task and lands on a later turn, after the history
+    // batch and its durable barrier, so the probe is woken by a quote every
+    // two milliseconds and the run stops at the first wake that reads the
+    // remainder. Until then the whole send stays covered; the cover never
+    // reads anything else on the way — dropping the record was the old
+    // double-entry window.
     h.account_readings
         .lock()
         .unwrap()
@@ -196,26 +261,31 @@ async fn the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder() {
             stop_px: 0.0,
             leverage: None,
         }]);
+    let before = seen.lock().unwrap().len();
     engine
         .run(
-            &mut ScriptFeed::quotes(symbol, 0, false),
-            &mut ScriptOrderFeed::playing(vec![
-                OrderUpdate::StreamReset { recv_ns: 1 },
-                OrderUpdate::StopAttached {
-                    symbol,
-                    trigger_px: 29_000.0,
-                    recv_ns: 2,
-                },
-            ]),
-            until_woken_by(seen.clone(), "stop"),
+            &mut PacedQuotes::new(symbol),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::StreamReset { recv_ns: 1 }]),
+            until_read_at(seen.clone(), "quote", 0.006),
         )
         .await
         .unwrap();
 
-    let after = read_at(&seen, "stop");
+    let after = read_at(&seen, "quote");
     assert!(
         close(after, 0.006),
         "the shown 0.004 is absorbed and the unseen 0.006 stays covered, got {after}"
+    );
+    let quotes: Vec<f64> = seen.lock().unwrap()[before..]
+        .iter()
+        .filter(|(tag, _)| *tag == "quote")
+        .map(|(_, value)| *value)
+        .collect();
+    assert!(
+        quotes
+            .iter()
+            .all(|value| close(*value, 0.010) || close(*value, 0.006)),
+        "the cover reads the whole send until the reading lands, then exactly the remainder: {quotes:?}"
     );
 }
 

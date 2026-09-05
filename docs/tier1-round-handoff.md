@@ -46,7 +46,7 @@ The one document for the engine audit round: what is implemented on this tree, w
 | --- | --- | --- |
 | `cargo fmt --all -- --check` | clean | Rust 1.90.0 |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | clean | every crate, the deny table included |
-| `cargo test --workspace --all-targets --locked` | 27 binaries: 2,201 passed, 2 failed, 5 ignored | debug profile; the two failures are the first two open findings |
+| `cargo test --workspace --all-targets --locked` | 27 binaries: 2,202 passed, 0 failed, 6 ignored | debug profile; the sixth ignore is the heavy-seed simulator run in the open findings |
 | `cargo test --workspace --doc --locked` | no doctests in the workspace; every doctest target is empty | |
 | `scripts/dev.sh check`, Python half | doctor ready; Ruff, ShellCheck and mypy over 100 files clean; 1,517 pytest passed | repository `.venv` |
 | `engine sim`, faultless seed 1 and light seeds 1–6, `--twice` | every check holds and every replay is identical; seed 1 alone is 591 orders and 453 fills, the light seeds take one death each and up to three reconciliation restarts | release binary; 300 s tapes, 2 symbols |
@@ -56,8 +56,7 @@ The one document for the engine audit round: what is implemented on this tree, w
 
 | Finding | Reproduction | Decision needed |
 | --- | --- | --- |
-| The covers expectation | `tests::covers::the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder` expects a cover of 0.006 and gets 0.01. It fails on Codex's checkpoint alone | Whether the cover arithmetic or the test's expectation is the truth |
-| Crash loop under heavy faults | `engine sim --seed 7 --seconds 300 --symbols 2 --crashes 2 --faults heavy --twice` exits nine times with `venue reconciliation needed` and never finishes the tape; `sim::one_seed_replays_byte_for_byte_under_heavy_faults` is red. The replay is byte-identical, so the loop is deterministic | What reconciliation after a death under faults should settle instead of exiting again |
+| Crash loop under heavy faults | `engine sim --seed 7 --seconds 300 --symbols 2 --crashes 2 --faults heavy --twice` exits nine times with `venue reconciliation needed`: each exit is an opening-halt cancel the venue refused with 110001 (order not working) that the private stream never confirmed. The tape never finishes; the replay is byte-identical. `sim::one_seed_replays_byte_for_byte_under_heavy_faults` carries this finding as its `#[ignore]` reason | Whether a halt cancel refused as not working is confirmed through the order lookup lane instead of ending the run |
 | History checkpoint on an empty page | `history_recovery` advances the history checkpoint when the recovery client's `executions` page is empty for the window. The simulator's client serves the venue's history so the simulator no longer hides it; a live endpoint answering empty for a window loses the fill the same way | Whether an empty window may advance the checkpoint |
 | Deployment | Hosted CI runners are refused ([STATE.md](../STATE.md) CI / Deploy Gate); nothing on this tree has reached the host, the funding-identity fix included | Owner: repository visibility or a private runner, then `scripts/ops.sh deploy` |
 
@@ -81,7 +80,7 @@ The one document for the engine audit round: what is implemented on this tree, w
 
 | Order | Work | Completion evidence |
 | --- | --- | --- |
-| 1 | Decide the three code findings above; fix each in code and prove the fix fails without it | The named test or seed goes green on the same recipe |
+| 1 | Decide the two code findings above; fix each in code and prove the fix fails without it | The named seed or the empty-page case goes green on the same recipe, and the heavy-seed test loses its `#[ignore]` |
 | 2 | Release-profile suites and doctests on this tree | `cargo test --workspace --all-targets --release --locked` and `--doc --release` |
 | 3 | Linux resource/process and worker overload opt-in tests | Explicit workload results on a Linux host; ordinary-suite ignores preserved |
 | 4 | Aggregate-parent rejection, restart and failure cuts; exact target sizing for general sleeve exits | A failing mutation and the restored passing behaviour per fix |
@@ -120,7 +119,7 @@ cargo run --release --locked -- sim --seed 7 --seconds 300 --symbols 2 --crashes
 ```
 
 ```sh
-# The covers expectation, alone.
+# The parked heavy-seed test, alone.
 cd engine
-cargo test -p engine-core --lib --locked the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder
+cargo test -p engine-core --test integration --locked one_seed_replays_byte_for_byte_under_heavy_faults -- --ignored
 ```
