@@ -6,6 +6,82 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 16:50 UTC — Tier-1 items 2, 4, 5, 18 and 20 land; `claude/tier0` is rebased onto `c082dc84`; `engine sim` finds two faults in that commit and both are fixed here (eight local commits, nothing pushed).**
+  - Market events travel by reference through the engine turn
+    (`on_market_feed`, `on_market`): a `MarketEvent` is 1,648 bytes with its
+    inline book and was copied twice per update. The market-turn future goes
+    from 7,912 to 4,624 bytes (clippy `large_futures`). The one copy left is
+    into the strategies' `EngineEvent`.
+  - `EngineError` has exit classes: `TaskStopped { task, detail }` (the venue
+    task, a durability writer, or the strategy host), `TimedOut(what)`, and
+    `Reconcile(detail)` for the two halt-cancel exits, beside `Boot`, `State`,
+    `Wal`, `Venue`. Twenty-two sites move; message text changes at them and
+    nothing outside the engine matched on it. [docs/engine.md](docs/engine.md)
+    §3 has the class table.
+  - Every symbol lookup on a feed or private stream goes through
+    `engine_public::symbols::resolve`; twelve hand-unlocked copies are gone.
+    The Variational gateway holds a `SymbolCatalog` like the other four.
+  - `engine-core` tokio tests run on tokio's paused clock
+    (`start_paused = true`, tokio `test-util` as a dev-dependency): a stop
+    future of `sleep(40 ms)` resolves when the engine is idle and one input
+    gives one interleaving. 328 tests pause; 13 stay on the wall clock and
+    `tests.rs` says why: they drive a real socket (the bench venue, the signal
+    spool), or they wait on an engine timer or deadline, which read
+    `clock::now_ns` and do not move with tokio's clock. The backtest, sim and
+    strategy-subprocess tests (24) keep their own clocks. Lib suite, same tree
+    before and after on the pre-rebase base: parallel 12.5 s to 10.1 s, serial
+    47.6 s to 37.4 s.
+  - `or_fun_call`, `redundant_clone`, `format_push_string` and
+    `large_types_passed_by_value` are in the workspace deny table with every
+    flagged site fixed (40, 39, 29, 0). `needless_pass_by_value` stays at its
+    default by decision: twelve substantive sites are fixed (`route_order_update`
+    no longer clones every private update; venue wire lists, the quarantine
+    topic, the refusal reason, two views made `Copy`), the 27 left are error
+    converters used as function pointers, `impl Trait` arguments and public
+    constructors that own their symbol vector, and denying it would make those
+    worse.
+  - The branch is rebased onto Codex's `c082dc84` (246 files). Nine conflicts
+    resolved; Codex's five new standalone test files are folded into the
+    consolidated binaries (`engine-risk` runs with `autotests = false`, so an
+    unlisted `margin_frontier.rs` would have been silently dropped). Codex's
+    five new `VenueGateway` methods are forwarded by the sim's fault wrapper.
+  - Found by `engine sim` in `c082dc84` and fixed here. (1) Two runs of one
+    input wrote different logs again, without any fault injected: the new
+    margin book (`engine-risk/src/margin.rs`) summed its reservations in
+    `HashMap` order, so `AvailableMarginExhausted.additional_margin_usdt`
+    differed in its last digit (`5309.576` vs `5309.576000000001`, seed 1
+    faultless, and light seeds 5 and 6). `active` is a `BTreeMap`. (2) The
+    simulated venue's new `AccountRecoveryClient` returned an empty execution
+    history, so a fill dropped on the private stream was never recovered after
+    the stream reset and the engine stamped `execution_history_checkpoint`
+    past it: light seeds 2, 5 and 6 of 6 failed `every_fill_journaled` and
+    `positions_agree` by exactly that fill (seed 5: `sim-exec-42`, order
+    `eng-1700000196000-86`, then "110001 not working" on every amend and cancel
+    for the rest of the run). The client now serves `executions_between`. For
+    the owner: the engine advanced the checkpoint on an empty history page; a
+    live history endpoint that answers empty for a window would lose the fill
+    the same way.
+  - Findings in `c082dc84` not changed here. (3)
+    `covers::the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder`
+    fails on that commit alone (expected 0.006 covered, got 0.01). (4) Heavy
+    seed 7 (two deaths, 10% failing calls) now restart-loops: nine exits, each
+    "venue reconciliation needed: account-level halt left at least one opening
+    cancel unconfirmed", where the pre-rebase base finished the tape. A crash
+    loop is a fault, so `sim::one_seed_replays_byte_for_byte_under_heavy_faults`
+    fails on this branch until the restart policy resolves an unconfirmed halt
+    cancel with the order lookup instead of exiting; the check is not softened.
+    (5) The run's path depends on machine load: under a full-workspace parallel
+    run the same seed did not loop and instead wrote two different logs (the
+    real-clock deadlines of the 13:17 entry's finding 4). The sim tests now run
+    one at a time so a replay check measures determinism, not load.
+  - Receipts on the pinned Rust 1.90.0 toolchain: rustfmt clean; `clippy
+    --workspace --all-targets --locked -D warnings` clean; workspace debug tests
+    2,196 passed, 2 failed (findings 3 and 4), 5 ignored across 35 test
+    binaries (`c082dc84` alone: 2,191 passed, 1 failed, 5 ignored across 52);
+    `engine sim`: faultless seed 1 and light seeds 1–6 pass and replay
+    identical, heavy seed 7 replays identical and restart-loops. No push,
+    deploy, or production access.
+
 - **2026-09-05 — Pause local Tier-1 integration at the owner's request.**
   - Shared and opposing same-ticker sleeves retain separate inventory and
     logical stops. Engine-owned emergency parents combine sub-minimum sleeve
