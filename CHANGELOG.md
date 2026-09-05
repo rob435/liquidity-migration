@@ -90,10 +90,20 @@ edit STATE.md to match.
     are absent, so `tests/market_tape/test_record.py` does not import; the
     `ruff format --check` diff is this box carrying ruff 0.15.8 against the
     pinned 0.16.5.
+  - **Deploy receipt: refused again, same signature.** Run `33931474693`,
+    dispatched `deploy` on `main@9c53b12e` at 23:59:48 UTC, failed 7 s later:
+    `ci`, `rust` and `Deploy artifact` each died in 3–4 s with log downloads
+    returning HTTP 404, and `vps`, `diagnose`, `disarm` and the release-test
+    job were all skipped. No job ever started. That is the fifth consecutive
+    refusal since 19:17 UTC and it is account-wide, not this commit's:
+    `33928248402`, `33922197522`, `33921858031`, `33911912004` are identical.
+    Deployed commit stays `65ee75a7`, so the recorders keep dropping tape on
+    every crossing until the owner runs the SSH path or GitHub restores
+    hosted capacity.
   - Host actions, in order, and only the owner can run them. The deploy needs
-    no Actions runner:
+    no Actions runner, and installing `9c53b12e` carries `1d8fad9a` with it:
     ```bash
-    EXPECTED_COMMIT=<head of main> scripts/ops.sh deploy
+    EXPECTED_COMMIT=9c53b12e763d9c8aafef6420dcb37e7c3fd2d0e7 scripts/ops.sh deploy
     scripts/ops.sh status
     ```
     Then the reading that settles whether the tape or non-tape files hold the
