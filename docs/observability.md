@@ -87,6 +87,9 @@ noise, and the history is the point.
 * **Must Never**: Grafana be the only pager. It is a remote view fed by this
   host; Telegram, the incident routine, and the watchdog-plane dead-man are
   independent delivery paths defined in [notifications.md](notifications.md).
+* **Must**: the imported dashboard default to the fleet Prometheus datasource.
+  This stack also has ML and usage Prometheus sources; either one renders a
+  dashboard shell without the fleet series.
 
 ## 4. Reading the Curve on the Host
 
@@ -119,7 +122,7 @@ record and the dashboard is the view.
 | 2 | the stack's **Metrics** / Prometheus page | Copy the **Influx** write URL (ends `/api/v1/push/influx/write`) and the numeric instance ID beside it |
 | 3 | **Access Policies** → create token | Scope `metrics:write`, copy the token once |
 | 4 | the host | Put all three in `/etc/liquidity-migration/observability.env` (below) |
-| 5 | Dashboards → **New** → **Import** | Upload `deploy/grafana/liquidity-migration-fleet.json`, pick the stack's Prometheus datasource. Re-import after a change; the UID `liqmig-fleet` is stable, so it replaces in place |
+| 5 | Dashboards → **New** → **Import** | Upload `deploy/grafana/liquidity-migration-fleet.json`. This fleet defaults to `grafanacloud-proudtortoise1017-prom` (`grafanacloud-prom`); choose another Prometheus source only after a stack migration. Re-import after a change; the UID `liqmig-fleet` is stable, so it replaces in place |
 
 ```bash
 # On the host, as root. The template ships the same three keys with comments.

@@ -559,6 +559,16 @@ def test_the_dashboard_json_is_what_its_renderer_renders() -> None:
     assert module.render() == committed, "run deploy/grafana/render_dashboard.py and commit the JSON"
 
 
+def test_the_dashboard_defaults_to_the_fleet_prometheus_source() -> None:
+    dashboard = _dashboard()
+    metrics_source = dashboard["templating"]["list"][0]
+    assert metrics_source["name"] == "DS_METRICS"
+    assert metrics_source["current"] == {
+        "text": "grafanacloud-proudtortoise1017-prom",
+        "value": "grafanacloud-prom",
+    }
+
+
 def test_the_dashboard_charts_only_fields_the_sampler_actually_pushes(tmp_path: Path) -> None:
     import re
 

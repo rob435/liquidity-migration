@@ -6,6 +6,65 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 18:02 UTC — `main` is one line again: the on-call routine's
+  79 commits, Codex's checkpoint and Claude's tier-0 batch are merged; the
+  ruleset drops linear history; `docs/tier1-round-handoff.md` is the one audit
+  document.**
+  - The merge. Local `main` (Codex's squash commits through `c082dc84` and the
+    ten tier-0 commits through `c79b93b6`, 41 in all) and `origin/main` (77
+    on-call routine commits and two of the owner's through `31989882`, 79)
+    diverged at `e2345ca4`. They are joined by a merge commit made in a scratch
+    worktree and fast-forwarded into the main checkout. Four files conflicted.
+    `CHANGELOG.md`: both sides' entries interleaved newest first, 85 entries,
+    none lost; Codex's undated trailing section becomes the 15:42 entry below;
+    the on-call stash `codex/preserve-oncall-20260904` contributes its 17:45
+    entry of 4 September and its dashboard-default test and observability
+    invariant, and the branch is deleted. `engine/signal-worker/src/bybit_ws.rs`,
+    `live.rs`, `worker.rs`: Codex's restructured sources, with the routine's two
+    fixes ported onto them. `7e6fcb93` (a settled funding row is (symbol,
+    settlement, rate); the interval is instrument metadata) lands in
+    `history.rs` as `SettledFunding`'s `HistoryRow::same_value`, in
+    `validate_funding_source_against_state` and in `commit_funding_batches`;
+    `merge_row`'s rewrite error names the symbol for klines, funding and whales
+    alike. `10ed1bd2` (`StreamContinuity`: a universe refresh's replacement
+    stream keeps the epoch, gap stamp and counters) lands in `bybit_ws.rs` and
+    as `stream_reconfiguration` in `live.rs`. The routine's three tests live in
+    Codex's `bybit_ws/tests.rs`, `live/tests.rs` and `worker/tests.rs`.
+  - Two fixes the merged gate demanded. `engine-core/tests/integration/sim.rs`
+    serialises its seeds on a `tokio::sync::Mutex`: the std guard across an
+    await is `await_holding_lock`, denied under `-D warnings`. `docs/engine.md`
+    names the five venue tests at their consolidated `tests/venue/` paths;
+    `tests/repo/test_docs_links.py` had caught the old paths.
+  - The ruleset. `required_linear_history` is removed from ruleset 22048243 on
+    `main` at the owner's instruction ("I never meant to make that rule
+    anyway", "you can change the ruleset"). `deletion` and `non_fast_forward`
+    stay; the ruleset is now "main: no force push, no deletion". Before and
+    after JSON: `ruleset-before.json`, `ruleset-after.json` in the session
+    scratchpad.
+  - One audit document. `docs/tier1-round-handoff.md` is rewritten against this
+    tree in the four-part skeleton: Implemented (Codex's nine areas plus the
+    tier-0 rows and the routine's two fixes), Verification on this tree, Open
+    findings, Remaining boundaries, Resume order, recipes on the pinned
+    toolchain. Deleted: `docs/tier1-audit.md`, the ten `docs/tier1-*.json`
+    indexes, `liquidity-migration-tier1-agent-handoff.md` and the `docs/evidence/`
+    tree (144 files, 30 MB); the parent commits keep them. `CLAUDE.md` links the
+    handoff under "The engine audit round".
+  - Receipts on the merged tree, Rust 1.90.0: rustfmt clean; clippy
+    `--workspace --all-targets --locked -D warnings` clean with the deny table
+    applied to every crate; `cargo test --workspace --all-targets --locked
+    --no-fail-fast`: 27 binaries, 2,201 passed, 2 failed, 5 ignored; the workspace has no doctests.
+    Python, repository `.venv`: doctor `ready`; Ruff, ShellCheck and mypy over
+    100 files clean; 1,517 pytest passed. `engine sim`, release
+    binary: faultless seed 1 (591 orders, 453 fills) and light seeds 1–6 (one death each, 40–66 injected faults, up to three reconciliation restarts) pass every check and replay byte for byte.
+  - Still red, unchanged, in the handoff's open findings:
+    `tests::covers::the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder`
+    (expects 0.006, gets 0.01; fails on `c082dc84` alone) and
+    `sim::one_seed_replays_byte_for_byte_under_heavy_faults` (seed 7 with two
+    deaths exits nine times on `venue reconciliation needed`). The engine
+    advancing the history checkpoint on an empty history page stays a decision
+    for the owner. Nothing here is deployed: hosted runners are refused
+    (STATE.md, CI / Deploy Gate).
+
 - **2026-09-05 16:50 UTC — Tier-1 items 2, 4, 5, 18 and 20 land; `claude/tier0` is rebased onto `c082dc84`; `engine sim` finds two faults in that commit and both are fixed here (eight local commits, nothing pushed).**
   - Market events travel by reference through the engine turn
     (`on_market_feed`, `on_market`): a `MarketEvent` is 1,648 bytes with its

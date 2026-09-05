@@ -87,7 +87,7 @@ The engine workspace is under `engine/`:
 `engine.toml` names one venue; `VenueName::parse` turns that name into the one
 adapter triple (gateway, private stream, public feed) so a config cannot
 half-switch. Every host an adapter can reach is declared in that venue's
-public realm module — `engine/engine-venue/tests/venue_fence.rs`
+public realm module — `engine/engine-venue/tests/venue/venue_fence.rs`
 checks both public and private crate sources for undeclared hosts.
 
 #### Selectable Realms
@@ -112,14 +112,14 @@ credential, or socket is opened.
 #### Invariants
 
 * **Must**: every realm in `VenueName::ALL` be either traded or dormant in
-  `engine/engine-venue/tests/dormant_venues.rs`. That test pins which realms
+  `engine/engine-venue/tests/venue/dormant_venues.rs`. That test pins which realms
   are dormant, what dormancy means at boot per readiness class, and that every
   dormant gateway, private stream, and realm table is still linked — deleting
   an adapter fails to compile there rather than at somebody's order.
 * **Must**: offline request-shape conformance stay green where it exists —
-  `engine/engine-venue/tests/hyperliquid_requests.rs`,
-  `engine/engine-venue/tests/lighter_requests.rs`, and
-  `engine/engine-venue/tests/binance_requests.rs`. MEXC and Variational have
+  `engine/engine-venue/tests/venue/hyperliquid_requests.rs`,
+  `engine/engine-venue/tests/venue/lighter_requests.rs`, and
+  `engine/engine-venue/tests/venue/binance_requests.rs`. MEXC and Variational have
   in-module tests only, and no request-shape suite of their own.
 * **Must Never**: a realm move to `live-proven` without reviewed live evidence
   from that exact realm — the smallest permitted order, and its cancel or fill.
