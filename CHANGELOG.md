@@ -7,6 +7,53 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 10:36 UTC — Incident `demo-0922e9f30da3bf98`: the demo realm
+  paged on the same funding-lane defect, one minute before mainnet. Both
+  realms, one root cause, already fixed by `7e6fcb93` below.** Scope `demo`,
+  host `ip-208-84-103-4`, ref
+  `worker-status:liquidity-migration-signal-worker-demo.service`:
+
+  ```
+  CRITICAL liquidity-migration-signal-worker-demo.service reports 'degraded':
+  Bybit WebSocket repair gap open for 7295s; carry cycle has not completed
+  ```
+
+  Its journal carries the identical line — `signal-worker: funding lane chunk:
+  input: funding history rewrote timestamp 1785758400000` — once per ~60 s,
+  10:02:31 → 10:37:31, on every line of the 40-line excerpt but four. Same
+  settlement, same symbol-less message, same producer
+  (`engine/signal-worker/src/live.rs`, `validate_funding_source_against_state`,
+  logged by `lane_source_failure` at `:1065`), same chain to the alert's second
+  clause (`live.rs:1094` `funding_ready = false` → `live.rs:2887-2889`
+  `carry_required_lanes_pending` → `scripts/runtime/check_fleet_liveness.py:287`).
+  Two independent routine sessions reached this diagnosis and the same three-line
+  fix from the two pages; `7e6fcb93` is the one that landed, and it also closes
+  the in-fetch `seen` check. Recorded here because the entry below reads as a
+  mainnet-only fault: **one Bybit interval change wedged both realms**, and the
+  demo worker's CARRY lane has been dead since pid 2387815 started at ~08:35 UTC
+  inside the 08:33 → 08:36 deploy.
+
+  - **Not explained, and not fixed:** the page's first clause, a boot repair gap
+    open 7295 s — i.e. open since that same ~08:35 UTC start. The excerpt holds
+    no kline-repair failure, so this is either a cold kline fill still running
+    after two hours or a second fault. One mechanism links it to the first: the
+    funding lane re-fetched a month of history for the offending chunk every
+    60 s and threw it away, spending the public-API quota the kline repair lane
+    needs, so the fix above may close it on its own. The reading that settles
+    it is the worker heartbeat's `bybit_ws_gap_open_since_wall_ts_ms` against
+    the remaining `kline_repair_jobs` — `mode=diagnose`, which is refused.
+    Check it on the first diagnostic after Actions is restored.
+  - The direct confirmation that the interval, not the rate, is the field that
+    moved needs the worker's stored row against the current instrument table.
+    Both routes are shut: the host, because `diagnose` is refused; and Bybit's
+    own API, because this container's egress policy denies `api.bybit.com`
+    (`CONNECT tunnel failed, response 403`). The argument in the entry below
+    stands on the source instead — a settlement 33 days inside covered ground
+    is only re-fetched because the required grid was rebuilt
+    (`live.rs:1633-1646` against `live.rs:1594-1599`), and the instrument-table
+    change that rebuilds the grid is the same one that re-stamps the row. A
+    revised rate would not have created the job at all.
+
 - **2026-09-05 10:37 UTC — Incident `mainnet-014ec4a90a2fde5f`: the mainnet
   CARRY lane has been dead since the 08:36 handover, because a funding
   interval Bybit changed is compared as if it were settled venue history.**
