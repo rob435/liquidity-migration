@@ -354,25 +354,25 @@ fn validate_funding_source_against_state(
                 .get(&row.symbol)
                 .and_then(|history| history.get(&row.settlement_ts_ms))
             {
+                // The interval is stamped from the current instrument, not read
+                // back from the venue, so it is not part of the settled
+                // identity. See `merge_funding`.
                 if existing.symbol != row.symbol
                     || existing.settlement_ts_ms != row.settlement_ts_ms
                     || existing.rate != row.rate
-                    || existing.funding_interval_min != row.funding_interval_min
                 {
                     return Err(WorkerError::input(format!(
-                        "funding history rewrote timestamp {}",
-                        row.settlement_ts_ms
+                        "funding history rewrote {} at timestamp {}",
+                        row.symbol, row.settlement_ts_ms
                     )));
                 }
             }
             let key = (row.symbol.clone(), row.settlement_ts_ms);
             if let Some(existing) = seen.insert(key, row.clone()) {
-                if existing.rate != row.rate
-                    || existing.funding_interval_min != row.funding_interval_min
-                {
+                if existing.rate != row.rate {
                     return Err(WorkerError::input(format!(
-                        "funding fetch rewrote timestamp {}",
-                        row.settlement_ts_ms
+                        "funding fetch rewrote {} at timestamp {}",
+                        row.symbol, row.settlement_ts_ms
                     )));
                 }
             }
@@ -1332,7 +1332,6 @@ impl LiveRunner {
                     Some(old) => {
                         old.symbol != row.symbol
                             || old.rate != row.rate
-                            || old.funding_interval_min != row.funding_interval_min
                             || row.available_at_ms < old.available_at_ms
                     }
                 }
@@ -4226,13 +4225,14 @@ mod tests {
         send_repair_chunk_and_wait, send_whale_chunk_and_wait, source_coverage_contains,
         source_grid_slots, startup_runtime_status, stream_transport_healthy,
         trading_intervals_contain, transient_recovery_acceptable,
-        validate_instrument_source_against_state, validate_source_grid_timestamp,
-        validate_source_page_rows, whale_fetch_bounds, whale_job_chunks, FetchedFunding,
-        FetchedFundingBatch, FetchedInstruments, FetchedKlineBatch, FetchedKlineJobs,
-        FetchedTickers, FetchedUniverseInputs, FetchedWhales, LaneCompletion, LaneState,
-        LiveRunOptions, LiveRunner, StreamEvent, StreamHealth, TickerSample,
-        FUNDING_FETCH_CHUNK_SIZE, KLINE_FETCH_CHUNK_SIZE, LANE_COMPLETION_QUEUE_CAPACITY,
-        STARTUP_MAX_MS, TRANSIENT_RECOVERY_MAX_MS, WHALE_FETCH_CHUNK_SIZE,
+        validate_funding_source_against_state, validate_instrument_source_against_state,
+        validate_source_grid_timestamp, validate_source_page_rows, whale_fetch_bounds,
+        whale_job_chunks, FetchedFunding, FetchedFundingBatch, FetchedInstruments,
+        FetchedKlineBatch, FetchedKlineJobs, FetchedTickers, FetchedUniverseInputs, FetchedWhales,
+        LaneCompletion, LaneState, LiveRunOptions, LiveRunner, StreamEvent, StreamHealth,
+        TickerSample, FUNDING_FETCH_CHUNK_SIZE, KLINE_FETCH_CHUNK_SIZE,
+        LANE_COMPLETION_QUEUE_CAPACITY, STARTUP_MAX_MS, TRANSIENT_RECOVERY_MAX_MS,
+        WHALE_FETCH_CHUNK_SIZE,
     };
     use crate::bybit_ws::{BybitPublicStream, StreamContinuity};
     use crate::config::SignalWorkerConfig;
@@ -5926,6 +5926,52 @@ mod tests {
         };
         validate_instrument_source_against_state(worker.state(), &fetched)
             .expect("the venue's own list is valid input");
+    }
+
+    /// Bybit moved a carry symbol's `fundingInterval`, so the next pass stamped
+    /// every settlement already held with the new one and this gate read it as
+    /// rewritten venue history. The lane aborted on its first chunk every
+    /// minute and the carry cycle never completed again.
+    #[test]
+    fn a_changed_funding_interval_is_not_a_rewritten_settlement() {
+        let settlement = 100 * DAY_MS;
+        let mut state = SignalWorker::with_universe(checked_demo_config(), test_universe())
+            .unwrap()
+            .state()
+            .clone();
+        state.funding.entry("BTCUSDT".into()).or_default().insert(
+            settlement,
+            SettledFunding {
+                symbol: "BTCUSDT".into(),
+                settlement_ts_ms: settlement,
+                available_at_ms: settlement,
+                rate: -0.001,
+                funding_interval_min: 480,
+            },
+        );
+        let refetched = |rate: &str, hours: i64| FetchedFunding {
+            batches: vec![(
+                "BTCUSDT".to_owned(),
+                FetchedFundingBatch {
+                    rows: vec![BybitFundingWire {
+                        funding_rate_timestamp: Value::from(settlement),
+                        funding_rate: Value::from(rate),
+                        funding_interval_hour: Some(Value::from(hours)),
+                    }],
+                    available_at_ms: settlement + 5,
+                    checked_from_ms: Some(settlement),
+                    checked_through_ms: Some(settlement + 5),
+                    emit_lifecycle: false,
+                },
+            )],
+            failures: Vec::new(),
+        };
+
+        validate_funding_source_against_state(&state, &refetched("-0.001", 4))
+            .expect("a new instrument interval does not rewrite a settled rate");
+        let error = validate_funding_source_against_state(&state, &refetched("-0.002", 8))
+            .expect_err("a settled rate that moved is still a rewrite");
+        assert!(error.to_string().contains("BTCUSDT"), "{error}");
     }
 
     /// The venue's own lists, when `LM_BYBIT_INSTRUMENTS_JSON` names them

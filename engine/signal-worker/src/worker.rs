@@ -1893,6 +1893,12 @@ fn merge_kline(rows: &mut BTreeMap<i64, HourlyKline>, row: HourlyKline) -> Resul
     Ok(())
 }
 
+/// `funding_interval_min` is not venue history: `/v5/market/funding/history`
+/// carries no interval, so every row is stamped with the instrument's current
+/// `fundingInterval` at fetch time. Bybit changes that field, so a settlement
+/// already held is re-observed under the new interval. The settled identity is
+/// (symbol, settlement, rate); the interval stays as first observed, which is
+/// what keeps the cadence checks in `features` refusing to mix two eras.
 fn merge_funding(
     rows: &mut BTreeMap<i64, SettledFunding>,
     row: SettledFunding,
@@ -1901,11 +1907,11 @@ fn merge_funding(
     if let Some(existing) = rows.get_mut(&key) {
         let same = existing.symbol == row.symbol
             && existing.settlement_ts_ms == row.settlement_ts_ms
-            && existing.rate == row.rate
-            && existing.funding_interval_min == row.funding_interval_min;
+            && existing.rate == row.rate;
         if !same {
             return Err(WorkerError::input(format!(
-                "funding history rewrote timestamp {key}"
+                "funding history rewrote {} at timestamp {key}",
+                row.symbol
             )));
         }
         existing.available_at_ms = existing.available_at_ms.min(row.available_at_ms);
@@ -4368,6 +4374,44 @@ mod tests {
                 rows: Vec::new(),
             },
         );
+    }
+
+    /// The durable half of the same fault: the apply path merged the re-stamped
+    /// row and returned the rewrite error, which would have failed the funding
+    /// lane's commit even with the fetch gate open.
+    #[test]
+    fn a_refetched_settlement_keeps_the_interval_it_was_first_observed_with() {
+        let settlement = 100 * DAY_MS;
+        let mut worker = SignalWorker::with_universe(test_config(), test_universe()).unwrap();
+        let batch = |sequence: u64, rate: &str, hours: i64| WireEvent::BybitFundingBatch {
+            schema_version: SCHEMA_VERSION,
+            sequence,
+            symbol: "BTCUSDT".into(),
+            available_at_ms: settlement + 5,
+            checked_from_ms: Some(settlement - HOUR_MS),
+            checked_through_ms: Some(settlement),
+            replace_coverage: false,
+            emit_lifecycle: false,
+            rows: vec![BybitFundingWire {
+                funding_rate_timestamp: Value::from(settlement),
+                funding_rate: Value::from(rate),
+                funding_interval_hour: Some(Value::from(hours)),
+            }],
+        };
+        worker
+            .apply(batch(1, "-0.001", 8))
+            .expect("the first observation of a settlement");
+        worker
+            .apply(batch(2, "-0.001", 4))
+            .expect("the same settlement under the venue's new funding interval");
+        assert_eq!(
+            worker.state.funding["BTCUSDT"][&settlement].funding_interval_min, 480,
+            "the interval in force when the settlement was recorded is kept"
+        );
+        let error = worker
+            .apply(batch(3, "-0.002", 8))
+            .expect_err("a settled rate that moved is still a rewrite");
+        assert!(error.to_string().contains("BTCUSDT"), "{error}");
     }
 
     #[test]

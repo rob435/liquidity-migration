@@ -7,6 +7,84 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 10:37 UTC — Incident `mainnet-014ec4a90a2fde5f`: the mainnet
+  CARRY lane has been dead since the 08:36 handover, because a funding
+  interval Bybit changed is compared as if it were settled venue history.**
+  Scope `mainnet`, host `ip-208-84-103-4`, one new ref
+  `worker-status:liquidity-migration-signal-worker-mainnet.service`. Fixed in
+  code; **not deployed** — see the owner action at the end.
+
+    | Item | Value |
+    | :--- | :--- |
+    | Alert | `CRITICAL … reports 'degraded': Bybit WebSocket repair gap open for 7256s; carry cycle has not completed` |
+    | Gap opened | ≈08:36 UTC, the mainnet handover of run `33955442044` (worker restarted 08:36:17 → 08:36:49) |
+    | Journal line, ×36 in a 40-line excerpt, 10:01:30 → 10:37:17 | `signal-worker: funding lane chunk: input: funding history rewrote timestamp 1785758400000` |
+    | That timestamp | 2026-08-03 12:00:00 UTC — a settlement a month old, re-requested every pass |
+    | Producer | `engine/signal-worker/src/live.rs` `validate_funding_source_against_state`, printed by `lane_source_failure("funding lane chunk", …)` in the `LaneCompletion::FundingChunk` arm |
+
+  - **Why one rejected row kills the lane.** The validator returns
+    `WorkerError::input`, the arm answers `resume.send(false)`, and the lane
+    task's `resume_rx` arm sets `succeeded = false` and `break`s the whole
+    job list. `FundingFinished { succeeded: false }` leaves
+    `lanes.funding_ready = false`, `carry_required_lanes_pending` stays true,
+    `try_carry_watermark` never advances, and
+    `last_carry_cycle_completed_wall_ts_ms` stays `None` — which is the
+    watchdog's `carry cycle has not completed`
+    (`scripts/runtime/check_fleet_liveness.py:288`). Retried once a minute,
+    it fails on the same chunk forever: a funded account with no CARRY signal
+    for 2 h 1 min at the page.
+  - **Cause.** `/v5/market/funding/history` returns no interval.
+    `fetch_funding` stamps every row it returns with `interval_hours` read
+    from the *current* instrument's `fundingInterval`, and
+    `normalize_funding_rows` falls back to 8 h when that is missing. So
+    `SettledFunding.funding_interval_min` is mutable instrument metadata, not
+    venue history — and four sites compared it as part of the settled row's
+    identity. Bybit moving a carry symbol's interval (or the instrument row
+    dropping out of the snapshot) re-stamps every settlement already held, and
+    the lane rejects its own history permanently. The same change shifts the
+    grid `instrument_source_ranges` builds, which is why a 2026-08-03
+    settlement sits in a 2026-09-05 fetch at all.
+  - **Fix.** A settled row's identity is (symbol, settlement, rate). The
+    interval is kept as first observed and never overwritten: the cadence
+    checks in `features::crowd_persistence` and `features::trail_funding_at`
+    then go on refusing to mix two eras, which overwriting would break — a
+    4 h → 8 h move would sum 4 h settlements as 8 h and understate trailing
+    funding. Four sites: `worker::merge_funding`,
+    `live::validate_funding_source_against_state`, its in-fetch `seen` check,
+    and `changes_state` in `live::commit_funding_batches`. Both rewrite errors
+    now name the symbol, which this page could not.
+  - **Proof.** `live::tests::a_changed_funding_interval_is_not_a_rewritten_settlement`
+    and `worker::tests::a_refetched_settlement_keeps_the_interval_it_was_first_observed_with`,
+    both failing on the previous source with
+    `funding history rewrote BTCUSDT at timestamp 8640000000` and passing on
+    this one. `cargo fmt --check`, `cargo clippy --workspace --all-targets
+    --locked -- -D warnings` and `cargo test --workspace --all-targets
+    --locked` are green. `scripts/dev.sh check`'s Python half cannot run in
+    this container (no project venv: ruff, mypy and pytest are absent); no
+    Python file is touched.
+  - **No state surgery is needed.** The durable checkpoint keeps the interval
+    it already holds; after the deploy the re-stamped refetch validates,
+    `changes_state` reads interval-only as no change, coverage advances, and
+    the lane finishes.
+  - **What is unproven.** No host reading backs this. `mode=diagnose` was
+    dispatched three times (`33961267596`, `33961304356`, `33961354167`,
+    10:39:57 → 10:42:11 UTC) and each `diagnose` job died in 4–8 s with every
+    other job skipped and its log download returning
+    `failed to download logs: HTTP 404` — the pre-08:30 refusal signature.
+    Cause: **the repository is private again** (`private: true`,
+    `updated_at 2026-09-05T08:47:59Z`), so the account-payment block that
+    caused the thirty-six refusals is back; the 08:30 deploy succeeded only
+    in the ~17 minutes the repository was public. The payload's journal is
+    therefore the only evidence, and it does not name the symbol or say which
+    field differed. If the rate itself moved rather than the interval, the
+    line will come back after the deploy, now naming the symbol.
+  - **Owner action, in order.** Make the repository public again (or register
+    a private runner), then
+    `gh workflow run vps-deploy.yml --ref main -f mode=deploy`, then
+    `-f mode=diagnose` and require the mainnet worker's carry cycle to be
+    fresh. Until then the funded account trades LONG and EXODUS only; CARRY
+    is producing nothing.
+
 - **2026-09-05 08:36 UTC — Deployed: `cece1d9f` on the host, the first deploy
   to reach it since `65ee75a7`.** Run `33955442044`, `deploy` on
   `main@cece1d9f`, created 08:30:19 UTC, `vps` 08:33:28 → 08:36:52, every job
