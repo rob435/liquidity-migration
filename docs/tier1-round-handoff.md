@@ -58,6 +58,7 @@ The one document for the engine audit round: what is implemented on this tree, w
 
 | Finding | Reproduction | Decision needed |
 | --- | --- | --- |
+| Isolated strategy processes on the fleet | Deploy `80dc5c69` (run `33996136208`): both engines wrote `strategy_callback_queued`, `strategy_callback_prepared` and `strategy_process_transition_queued` for every quote, ~180 KB each, 15 MB/s per realm, and logged `strategy callback has a prior durable input` at ERROR 40 times a second; demo reached its 2 GiB memory cap in four minutes. Rolled back to `cece1d9f` ([CHANGELOG.md](../CHANGELOG.md) 2026-09-05 22:50 UTC) | Owner: boot production embedded (`Engine::boot_as`) until the isolated path coalesces quotes and stops persisting the runtime per callback, or rework the isolated path first. No engine deploy from this tree until then |
 | History checkpoint on an empty page | `history_recovery` advances the history checkpoint when the recovery client's `executions` page is empty for the window. The simulator's client serves the venue's history so the simulator no longer hides it; a live endpoint answering empty for a window loses the fill the same way | Whether an empty window may advance the checkpoint |
 
 ### Remaining boundaries
@@ -85,7 +86,7 @@ The one document for the engine audit round: what is implemented on this tree, w
 | 3 | Linux resource/process and worker overload opt-in tests | Explicit workload results on a Linux host; ordinary-suite ignores preserved |
 | 4 | Aggregate-parent rejection, restart and failure cuts; exact target sizing for general sleeve exits | A failing mutation and the restored passing behaviour per fix |
 | 5 | Global recovery-response memory and remaining projected account and risk arithmetic | Tested root-cause changes or an exact remaining boundary |
-| 6 | Dispatch `deploy` once the gate removal is on `main`; verify on the host with `scripts/ops.sh status` | [operations.md](operations.md) recipe, [STATE.md](../STATE.md) change point |
+| 6 | Decide the isolated-strategy-process finding above; until then the fleet stays on `cece1d9f` | [operations.md](operations.md) recipe, [STATE.md](../STATE.md) change point |
 
 ## Invariants
 

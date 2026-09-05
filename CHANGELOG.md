@@ -7,100 +7,90 @@ incident, or a check that changed nothing gets no entry. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
-- **2026-09-05 22:41 UTC — Incident `mainnet-4117d27a32d02421`: both engines
-  were stopped four minutes after the deploy of `80dc5c69`, and the funded
-  engine was down with `REAL_MONEY` armed for 7 min 14 s. The owner rolled the
-  host back to `cece1d9f` and both engines are running again. The engines wrote
-  about 7 GB in the five minutes they ran on `80dc5c69`; the paged
-  isolated-callback path puts a full all-symbol market snapshot in the log for
-  every callback. No code changed.**
-  - Deploy run `33996136208` (`deploy` at `80dc5c69`, dispatched 22:31:11 UTC):
-    `deploy-ok commit=80dc5c69…` at 22:37:10, every mainnet precondition
-    `[PASS]`, `real-money armed`, `native-state-ok realm=mainnet
-    result=already-complete`. At 22:37:11 both engines were `active` with
-    heartbeats 3 s (demo) and 1 s (mainnet) and `/` read `51G used, 62G avail,
-    45%`. Both watchdogs logged `units-and-heartbeats-healthy` at 22:38:21.
-  - From the handover to the stop the funded engine logged, several times a
-    second for strategy 0 (`carry_native`) and strategy 1 (`long_native`):
-    `ERROR strategy callback not accepted; source must retain delivery
-    strategy=0 error="strategy callback has a prior durable input"`. It ended
-    at 22:41:18.878 with `RunOutcome { stopped_by: Shutdown, market_events:
-    35420, orders_sent: 0 }` and `Consumed 3min 4.365s CPU time, 1.5G memory
-    peak, 0B memory swap peak` — about 73% of a core for 4.2 minutes, and no
-    order decided in the whole run.
-  - `systemd[1]: Stopping …` was logged for both engine units in the same
-    second, 22:41:15–18; both `Deactivated successfully`. Every timer, both
-    signal workers, both recorders and the controls unit were left running,
-    and `REAL_MONEY` was left armed. That is a stop job someone enqueued, not a
-    crash: `Restart=always` does not restart a stopped unit, the deploy had
-    finished at 22:37:11, the liveness watchdogs only read (`systemctl
-    is-active`/`is-enabled`/`show`), the chaos drill is Sunday 09:13 UTC and
-    demo-only, and `disarm-mainnet` would have cleared `REAL_MONEY`. **Who
-    issued it is not established from anything this routine can read.** The one
-    settling reading is `journalctl -S 22:40 -U 22:42 -o short-iso` on the
-    host, system-wide.
-  - Both watchdogs paged at 22:41:24, `CRITICAL
-    unit:liquidity-migration-engine-mainnet.service … is inactive` and the same
-    for the demo unit. `diagnose` run `33996658896` at 22:42:14 confirms:
-    deployed `80dc5c69`, `real-money armed`, both engines `inactive`
-    (heartbeats 56 s and 59 s), 0 failed units, `/` at `58G used, 55G avail,
-    52%`.
-  - Free space fell 62 GB → 55 GB in the 5 min 3 s between the two readings,
-    about 7 GB, against 44% used at 22:17:54 and 45% at 22:37:11. The baseline
-    is not zero: on the rolled-back host, with both engines running on
-    `cece1d9f`, `/` went 58G → 59G used between 22:48:33 and 22:55:03, about
-    1 GB in 6 min 30 s. So the paged run added roughly 5.5 GB over baseline in
-    five minutes — about 18 MB/s, 9 MB/s per engine, seven times the current
-    whole-host rate. Attribution to the engine logs is arithmetic, not a direct
-    measurement: `du -sh /var/lib/liquidity-migration-engine{,-mainnet}` and the
-    segment mtimes settle it.
-  - What writes it: `Engine::service_strategy_callbacks`
-    (`engine/engine-core/src/engine/strategy_callbacks.rs:111`) appends
-    `WalRecord::StrategyCallbackPrepared { input }` and a barrier for every
-    callback whose input has no snapshot yet — that is every callback,
-    market wakes included. The snapshot is `Ctx::callback_snapshot`
-    (`engine/engine-core/src/strategy_process/snapshot.rs:21`), which builds one
-    `SymbolSnapshot` for **every** symbol in the market table: name, quote, a
-    50-level `DepthSnapshot` (`BOOK_DEPTH = 50`), trades, ticker, instrument
-    rule, three position views, facts and checkpoint. The funded universe is
-    `universe_top_n = 100` for carry plus the LONG sleeve's subscriptions. The
-    only cap is `MAX_PROCESS_PROPOSAL_BYTES = 64 MiB` per snapshot.
-  - `80dc5c69` is the first host binary carrying this path: neither `efb658b`
-    (`StrategyCallbackPrepared`) nor `c082dc8` (paging, and the
-    `strategy callback has a prior durable input` refusal) is an ancestor of
-    `cece1d9f`, the commit the host ran until 22:37. `engine sim` and `engine
-    backtest` boot through `Engine::boot_as` — `CallbackExecution::Embedded` —
-    so neither harness exercises the paged path that `engine run` uses in
-    production; only `engine-core/tests/integration/strategy_process.rs` does.
-  - Resolved by the owner, not by this routine: `rollback` run `33996764691`,
-    dispatched 22:44:26 UTC, `deploy-ok commit=cece1d9f…` at 22:48:32. Both
-    realms handed over with every mainnet precondition `[PASS]` and
-    `real-money armed`; the funded engine's log verified under the `cece1d9f`
-    binary (`native strategy state verified`, `native-state-ok realm=mainnet
-    result=already-complete`) and `heartbeat-ok
-    unit=liquidity-migration-engine-mainnet.service age=6s`. The funded engine
-    was inactive 22:41:18 → 22:48:32, 7 min 14 s. Contrary to what this entry
-    first said, `cece1d9f` reads a log written by `80dc5c69` without
-    complaint — the demo rollback's `unknown variant identity_state` at 22:14
-    did not repeat, and the reason it did not is not established here.
-  - `diagnose` run `33997230259` at 22:55:03 UTC: deployed `cece1d9f`,
-    rollback target `80dc5c69`, `real-money armed`, both engines `active` with
-    heartbeats 4 s (demo) and 1 s (mainnet), both signal workers active, 0
-    failed units, `/` at 53%. Two more incident routines fired at 22:49:34 on
-    `is activating` during the handover; those are the same matter and get no
-    entry.
-  - No code changed and this routine dispatched nothing but `diagnose`.
-    `80dc5c69` remains the rollback target on the host, so a `deploy` of `main`
-    puts the paged path back on the funded account. Taking the snapshot out of
-    the log, or narrowing it to the symbols a callback concerns, changes the
-    funded engine's recovery contract and what the isolated worker is shown — a
-    strategy change, not a refactor — so it is proposed here rather than pushed
-    at speed onto a funded account.
-  - Owner action: (1) confirm the 22:41 stop was yours, or take `journalctl -S
-    22:40 -U 22:42` on the host; (2) `du -sh
-    /var/lib/liquidity-migration-engine{,-mainnet}` to pin the 7 GB on the
-    logs; (3) decide between narrowing the prepared snapshot and reverting the
-    paged callback path before `main` is deployed to the funded account again.
+- **2026-09-05 22:50 UTC — Incident `mainnet-4117d27a32d02421`: the deploy of
+  `80dc5c69` reached both
+  realms and the new binary's isolated strategy processes wrote the WAL at
+  15 MB/s per realm, logged 40 refusals a second and ran the demo engine to
+  its memory cap. Both engines stopped by hand at 22:41:18, both logs cut back
+  to the incumbent's last frame, fleet rolled back to `cece1d9f`. The tree at
+  `80dc5c69` is not deployable.**
+  - Run `33996136208` (`deploy` at `80dc5c69`, 22:31:11 UTC): `ci` 1:49,
+    `rust` 5:06, `Release artifact` 4:03, `vps` 48 s, `deploy-ok` 22:37:13.
+    Both realms answered `native-state-ok result=already-complete`: the
+    one-segment verify below works. Demo engine up 22:36:56, mainnet 22:37:05,
+    leases taken, private streams up, stops restored, market feeds connected.
+  - Then, on both engines, every ~25 ms: `ERROR strategy callback not
+    accepted; source must retain delivery strategy=N error="strategy callback
+    has a prior durable input"` — 4 713 lines on demo and 4 719 on mainnet in
+    22:37–22:38; `INFO log rotated: a fresh segment restates the engine's
+    state` every ~18 s; `latency, last 60s: … 0 orders decided`. Memory:
+    demo 2 058 MB of its 2 147 MB `MemoryMax`, mainnet 1 663 MB (430 MB
+    before the handover). Disk: 65 GB free at 22:00, 55 GB at 22:41 — 7.6 GB
+    of new segments in four minutes (demo `engine.wal.000026`–`000039`,
+    mainnet `000025`–`000038`).
+  - Mechanism, read from the new binary's own segments. Production boots
+    isolated (`runner.rs`: `Engine::boot_as_isolated(current_exe)`): every
+    quote event becomes a durable callback — `strategy_callback_queued`, then
+    `strategy_callback_prepared` carrying a book snapshot, then
+    `strategy_process_transition_queued` carrying the strategy's entire runtime
+    (`carry_native` payload) — about 180 KB per quote, 333 triples in the first
+    60 MB of demo segment 26; the child runs under `RLIMIT_AS` 512 MB, CPU
+    20 s and a seccomp filter. A quote arriving while one callback is in
+    flight is refused with the line above, per event, at ERROR. This is the
+    tree's design since the tier-1 merge, not a host fault.
+  - Holding action 22:41:18 UTC: `systemctl stop` of both engines. Open at the
+    time — demo: NEARUSDT 233.2, LTCUSDT 22.5, CAPUSDT 11 690, BNBUSDT 2.16,
+    ZECUSDT 0.33, LITUSDT 73.8, all long; mainnet: NEARUSDT 18.4, LTCUSDT 1.7,
+    CAPUSDT 930, LITUSDT 6.1, ZECUSDT 0.02, BNBUSDT 0.17, all long. Venue
+    stops on the venue for the positions the 22:37 reconciliation named.
+    Signal workers and recorders kept running.
+  - Log surgery 22:42–22:43 UTC, so the incumbent can boot. Mainnet: segment
+    24 (268 473 255 bytes) was already past the rotation size, so the new
+    binary never wrote into it; segments 25–38 moved to
+    `/var/lib/liquidity-migration-wal-quarantine/mainnet-20260905T224219Z/`.
+    Demo: segment 25 first cut at 175 205 844 — an incumbent `note` whose JSON
+    does not lead with `kind` — then the incumbent's 1 702 frames from
+    22:14–22:36 (37 912 878 bytes: 2 `intent`, 2 `verdict`, 2 `order_sent`,
+    6 `order_update`, 2 `cancel_sent`, 306 signal observations, 45
+    checkpoints, notes) appended back byte for byte from the saved tail;
+    final size 213 118 722, ending on the incumbent's last frame before the
+    new binary's `identity_state` of 22:37:01; 9 511 frames, every kind one
+    the incumbent reads. Segments 26–39 quarantined beside mainnet's. The
+    removed bytes are in `/root/wal-rollback-20260905T224219Z/`.
+  - Rollback: run `33996764691` (`rollback`, dispatched 22:44:26 UTC, `vps`
+    only, no build) unpacked `cece1d9f`'s checksum-only archive through the
+    21:20 change, answered `native-state-ok result=already-complete` for both
+    realms with the incumbent's own verify, and printed `deploy-ok
+    commit=cece1d9f…` at 22:48:32. Both engines then crash-looped on the
+    incumbent — demo restart counter 25, mainnet 14 — each start ending in
+    `engine: state: signal source: signal file input-readiness-request.json
+    sequence must be 20 decimal digits`, exit 1. The new tree's worker–engine
+    readiness handshake had left `input-readiness-request.json` (written by
+    the new engine 22:37) and `input-readiness-response.json` (written by the
+    new worker 22:45/22:47) in `/var/lib/liquidity-migration/signals/{demo,
+    mainnet}`, and the incumbent reads every spool file as a signal. The four
+    files were moved to `/var/lib/liquidity-migration-wal-quarantine/spool-20260905T224219Z/`
+    at 22:50:2x; the next automatic restarts connected the market feeds at
+    22:50:50 (mainnet) and 22:50:52 (demo). Funded engine without a running
+    process: 22:41:18–22:48:19 stopped by hand, then looping until 22:50:50.
+    Venue-side stops stayed on the venue throughout; the new binary had
+    decided no orders. Both watchdogs paged the stop at 22:41:24
+    (`mainnet-4117d27a32d02421`); the on-call routine's pages are folded here.
+  - Then both signal workers crash-looped on the incumbent — demo restart
+    counter 89, mainnet 67 — each start ending in `signal-worker: json: parse
+    durable state: unknown field `destination_sleeves``, exit 2: the new
+    worker had rewritten `checkpoint.json` (76 MB) in its own shape at 22:37.
+    Both files moved to
+    `/var/lib/liquidity-migration-wal-quarantine/worker-state-20260905T224219Z/`
+    at 22:54; the incumbent workers started clean at 22:54, rebuilt a fresh
+    `checkpoint.json` and `hot-input-journal.jsonl`, and have run without
+    error since. Sleeves were without signals 22:37–22:54.
+  - Decision for the owner: no engine deploy from this tree until the
+    isolated callback path stops persisting the runtime per quote and stops
+    refusing at ERROR per event — or production boots embedded
+    (`Engine::boot_as`, the path `engine sim` and the tests use), which writes
+    none of these records. The takeover and WAL fixes of 22:20 stand and were
+    exercised by this deploy.
 
 - **2026-09-05 22:20 UTC — Incident `demo-b161102514734dd5`: the deploy of
   `60bb0abb` took the demo realm down for 949 s. The takeover's verify replayed the whole 6.6 GB
