@@ -1128,12 +1128,12 @@ class Recorder:
     def _retention_loop(self) -> None:
         while not self.stop.is_set():
             # A pass that deleted and left the gate shut is owed a successor
-            # now, not in `RETENTION_INTERVAL_SECONDS`: while the writer is
-            # blocked nothing wakes this thread again — `_maintenance` arms
-            # `prune_now` on the crossing only, and `_write_loop` never
-            # reaches an append to fail on. The retry ends on the pass that
-            # deletes nothing, so a disk filled by something other than tape
-            # is walked once rather than spun on.
+            # now, not at the next wake: `_maintenance` arms `prune_now` on a
+            # blocked tick, which is a whole `status_interval_seconds` of
+            # thrown-away tape, and `_write_loop` never reaches an append to
+            # fail on. The retry ends on the pass that deletes nothing, so a
+            # disk filled by something other than tape is walked once rather
+            # than spun on.
             owed = True
             # What this burst has already unlinked. `prune` reads free space
             # from the kernel, and a successor is owed precisely because the
@@ -1188,13 +1188,17 @@ class Recorder:
 
     def _maintenance(self) -> None:
         blocked = not self.retention.writable()
-        # Crossing the free floor drops every frame from here on, so the only
-        # thing that frees room runs now rather than at the next interval. On
-        # the crossing, not on every blocked tick: while blocked nothing is
-        # written, so a repeated pass has nothing new to delete and would only
-        # walk the tape every status tick. The tick itself stays O(1) — the
-        # pruner owns the walk.
-        if blocked and not self.disk_blocked:
+        # Under the free floor every frame is counted and thrown away, so the
+        # only thing that frees room runs on every blocked tick, not just the
+        # crossing. A credited burst ends on the pass that finds no deficit
+        # left, which is the ordinary exit whenever the kernel released the
+        # unlinked blocks and another writer on the filesystem took them: the
+        # gate is still shut, the tape still holds hours nobody needs, and
+        # nothing else wakes the pruner for a whole
+        # `RETENTION_INTERVAL_SECONDS`. A pass while blocked is not a repeat
+        # of the last one — the tape is not growing, but free space moves
+        # under it. The tick itself stays O(1); the pruner owns the walk.
+        if blocked:
             self.prune_now.set()
         self.disk_blocked = blocked
         now_ns = time.time_ns()

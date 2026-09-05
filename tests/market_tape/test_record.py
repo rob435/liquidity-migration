@@ -1077,12 +1077,13 @@ def test_a_disk_under_the_free_floor_prunes_now_instead_of_waiting_out_the_inter
     assert recorder.disk_blocked is True
     assert woken.wait(5.0), "the pruner slept out its interval while the disk was blocked"
 
-    # The wake is the crossing, not the level: a block that a pass cannot clear
-    # must not walk the tape again on every status tick.
-    recorder.prune_now.clear()
+    # The level, not only the crossing: a burst ends on the pass that finds no
+    # deficit left and that leaves the gate shut, so the still-blocked tick is
+    # where the next pass has to come from.
+    woken.clear()
     recorder._maintenance()
     assert recorder.disk_blocked is True
-    assert not recorder.prune_now.is_set()
+    assert woken.wait(5.0), "a blocked tick left the pruner asleep"
 
     # A stop wakes the pruner: shutdown never waits out a retention interval.
     recorder.stop.set()
@@ -1250,6 +1251,81 @@ def test_a_burst_of_owed_passes_deletes_the_deficit_once_not_the_whole_tape(
     assert len(passes) == 2, "the successor deleted a second deficit instead of crediting the first"
     assert len(list(directory.glob("*.zst"))) == 17
     assert recorder.disk_blocked is True
+
+    recorder.stop.set()
+    recorder.prune_now.set()
+    pruner.join(5.0)
+    assert not pruner.is_alive()
+
+
+def test_a_blocked_tick_runs_the_pass_the_credited_burst_stopped_short_of(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A credited burst ends on the pass that finds no deficit left, and it
+    ends with the gate still shut whenever the kernel released the unlinked
+    blocks and another writer on the filesystem took them — which is what two
+    recorders sharing one disk do to each other. The tape still holds hours
+    nobody needs and every frame is being counted and dropped, so the next
+    blocked status tick is what must run the next pass. Arming `prune_now` on
+    the crossing alone leaves the pruner asleep for a whole
+    `RETENTION_INTERVAL_SECONDS` there."""
+
+    recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
+
+    def refuse() -> dict[str, list[dict[str, Any]]]:
+        raise RuntimeError("venue refused")
+
+    recorder.adapter.fetch_tables = refuse  # type: ignore[method-assign]
+    monkeypatch.setattr(recorder, "_reconcile_tier", lambda name, topics: None)
+    # Long enough that a pass inside it can only come from a wake, never the clock.
+    monkeypatch.setattr(record, "RETENTION_INTERVAL_SECONDS", 3600.0)
+    recorder.retention.retention_days = 36_500
+    recorder.retention.max_bytes = 10**12
+    recorder.retention.min_free_bytes = 400
+    directory = tmp_path / "2027-01-15" / "10" / "BTCUSDT"
+    directory.mkdir(parents=True)
+    for index in range(20):
+        (directory / f"segment-{index:06d}.jsonl.zst").write_bytes(b"x" * 100)
+
+    # A filesystem whose free space never moves however much the burst
+    # unlinks: the neighbour recorder takes each freed block as it is
+    # released. The credit is then an overstatement, so the successor finds no
+    # deficit and the burst stops with the disk still under the floor.
+    monkeypatch.setattr(
+        "market_tape.storage.shutil.disk_usage",
+        lambda path: SimpleNamespace(total=10_000, used=9_800, free=200),
+    )
+    # What a crossing leaves behind.
+    recorder.disk_blocked = True
+
+    real_prune = recorder.retention.prune
+    passes: list[int] = []
+    settled = threading.Event()
+
+    def counted(now: float | None = None, *, free_credit: int = 0) -> list[Path]:
+        passes.append(len(passes))
+        deleted = real_prune(now, free_credit=free_credit)
+        if not deleted:
+            settled.set()
+        return deleted
+
+    monkeypatch.setattr(recorder.retention, "prune", counted)
+    # A daemon thread, so a failed assertion below reports itself rather than
+    # the teardown that a missing pass would wait on.
+    pruner = threading.Thread(target=recorder._retention_loop, name="test-retention", daemon=True)
+    pruner.start()
+
+    assert settled.wait(5.0), f"the burst never ended after {len(passes)} pass(es)"
+    assert len(passes) == 2
+    assert len(list(directory.glob("*.zst"))) == 17
+    assert recorder.disk_blocked is True
+
+    settled.clear()
+    recorder._maintenance()
+
+    assert settled.wait(5.0), "a blocked tick left the pruner asleep on a tape it could still trim"
+    assert len(passes) == 4
+    assert len(list(directory.glob("*.zst"))) == 14
 
     recorder.stop.set()
     recorder.prune_now.set()
