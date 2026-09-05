@@ -1,4 +1,5 @@
 use super::*;
+use engine_types::orders::{OrderLookup, TerminalOrderStatus};
 
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) fn wake_restored_strategies(&mut self) -> Result<(), EngineError> {
@@ -609,16 +610,34 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.enqueue_halt_cancel(symbol, client_order_id);
         }
 
+        // An order that ended by any route — its private update, a recovered
+        // fill, a status read — is out of the halt with it.
+        let ended: Vec<String> = self
+            .halt_cancels
+            .keys()
+            .filter(|id| !self.is_live_halt_order(id))
+            .cloned()
+            .collect();
+        for id in &ended {
+            self.halt_cancels.remove(id);
+        }
+
         let now_ns = clock::now_ns();
-        if let Some((client_order_id, _)) = self.halt_cancels.iter().find(|(id, state)| {
-            matches!(
-                state,
+        if let Some((client_order_id, state)) =
+            self.halt_cancels.iter().find(|(_, state)| match state {
+                HaltCancelState::Submitting { .. } => false,
                 HaltCancelState::AwaitingPrivate { deadline_ns }
-                    if now_ns >= *deadline_ns && self.is_live_halt_order(id)
-            )
-        }) {
+                | HaltCancelState::Resolving { deadline_ns, .. } => now_ns >= *deadline_ns,
+            })
+        {
+            let what = match state {
+                HaltCancelState::Resolving { .. } => {
+                    "was refused or unanswered and the venue did not settle the order"
+                }
+                _ => "was accepted but not confirmed by the private stream",
+            };
             return Err(EngineError::Reconcile(format!(
-                "opening-halt cancellation for {client_order_id} was accepted but not confirmed by the private stream within {} ms",
+                "opening-halt cancellation for {client_order_id} {what} within {} ms",
                 HALT_CANCEL_CONFIRM_NS / 1_000_000
             )));
         }
@@ -629,8 +648,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if self.halt_cancels.contains_key(&client_order_id) {
             return;
         }
-        self.halt_cancels
-            .insert(client_order_id.clone(), HaltCancelState::Submitting);
+        self.halt_cancels.insert(
+            client_order_id.clone(),
+            HaltCancelState::Submitting { deadline_ns: None },
+        );
         self.halt_cancel_queue.push_back((symbol, client_order_id));
     }
 
@@ -644,7 +665,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             if live
                 && matches!(
                     self.halt_cancels.get(&client_order_id),
-                    Some(HaltCancelState::Submitting)
+                    Some(HaltCancelState::Submitting { .. })
                 )
             {
                 requests.push((symbol, client_order_id));
@@ -653,6 +674,224 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
         self.process_cancels(requests).await.map(|_| ())
+    }
+
+    /// The next halt cancel whose status read is due, while the lookup lane
+    /// — one read at a time, shared with ambiguous sends — is free. Due: a
+    /// refused or unanswered cancel past its retry instant, or an accepted
+    /// one the private stream has left unconfirmed for half the window; the
+    /// venue publishes an ending in milliseconds, so half the window of
+    /// silence is a dropped update. Other commands in flight on the symbol
+    /// do not hold the read: it asks about one order whose own cancel has
+    /// already been answered, and a sleeve working the symbol would
+    /// otherwise starve it for the whole window.
+    fn due_halt_lookup(&self, now_ns: u64) -> Option<(String, SymbolId)> {
+        if !self.dispatches.lookup_pending.is_empty() {
+            return None;
+        }
+        self.halt_cancels.iter().find_map(|(id, state)| {
+            let due = match state {
+                HaltCancelState::Submitting { .. } => false,
+                HaltCancelState::Resolving { retry_after_ns, .. } => *retry_after_ns <= now_ns,
+                HaltCancelState::AwaitingPrivate { deadline_ns } => {
+                    now_ns >= deadline_ns.saturating_sub(HALT_CANCEL_CONFIRM_NS / 2)
+                }
+            };
+            if !due {
+                return None;
+            }
+            let order = self.books.orders.orders.get(id)?;
+            Some((id.clone(), order.request.symbol))
+        })
+    }
+
+    pub(super) fn halt_lookup_due(&self, now_ns: u64) -> bool {
+        self.due_halt_lookup(now_ns).is_some()
+    }
+
+    /// The next instant the halt needs the loop awake for: a status read
+    /// coming due, or a window closing. A read already due but not started
+    /// (the lane or the symbol is busy) is not a reason to wake again; the
+    /// window's close is.
+    pub(super) fn next_halt_wake_ns(&self, now_ns: u64) -> Option<u64> {
+        self.halt_cancels
+            .values()
+            .filter_map(|state| match *state {
+                HaltCancelState::Submitting { .. } => None,
+                HaltCancelState::AwaitingPrivate { deadline_ns } => {
+                    let read_at = deadline_ns.saturating_sub(HALT_CANCEL_CONFIRM_NS / 2);
+                    Some(if read_at > now_ns {
+                        read_at
+                    } else {
+                        deadline_ns
+                    })
+                }
+                HaltCancelState::Resolving {
+                    deadline_ns,
+                    retry_after_ns,
+                } => Some(if retry_after_ns > now_ns {
+                    retry_after_ns.min(deadline_ns)
+                } else {
+                    deadline_ns
+                }),
+            })
+            .min()
+    }
+
+    pub(super) fn start_halt_lookup(&mut self, now_ns: u64) -> Result<(), EngineError> {
+        let Some((id, symbol)) = self.due_halt_lookup(now_ns) else {
+            return Ok(());
+        };
+        if let Some(HaltCancelState::AwaitingPrivate { deadline_ns }) =
+            self.halt_cancels.get(&id).copied()
+        {
+            self.wal.append(&WalRecord::Note {
+                source: "engine".into(),
+                text: format!(
+                    "the private stream has not confirmed the accepted halt cancel of {id}; reading the order's status at the venue"
+                ),
+            })?;
+            self.halt_cancels.insert(
+                id.clone(),
+                HaltCancelState::Resolving {
+                    deadline_ns,
+                    retry_after_ns: now_ns,
+                },
+            );
+        }
+        if let Err(error) = self.start_order_lookup(id.clone(), symbol) {
+            tracing::warn!(id, error = %error, "halt cancel status read not started");
+            self.wal.append(&WalRecord::Note {
+                source: "engine".into(),
+                text: format!("status read for {id} not started ({error}); asking again"),
+            })?;
+            self.retry_halt_lookup(&id, now_ns);
+        }
+        Ok(())
+    }
+
+    fn retry_halt_lookup(&mut self, id: &str, now_ns: u64) {
+        if let Some(HaltCancelState::Resolving { retry_after_ns, .. }) =
+            self.halt_cancels.get_mut(id)
+        {
+            *retry_after_ns = now_ns.saturating_add(HALT_LOOKUP_RETRY_NS);
+        }
+    }
+
+    /// The venue's answer about an order whose halt cancel came back refused
+    /// or unanswered. Working: cancel it again. Ended with every fill already
+    /// in the log: record the ending, which takes the order out of the halt.
+    /// Ended with fills the log has not seen: recover execution history first
+    /// and read again. Anything else: read again after `HALT_LOOKUP_RETRY_NS`,
+    /// until the deadline set by the first cancel reply ends the run.
+    pub(super) async fn apply_halt_lookup(
+        &mut self,
+        id: &str,
+        result: Result<OrderLookup, String>,
+    ) -> Result<(), EngineError> {
+        let Some(HaltCancelState::Resolving { deadline_ns, .. }) =
+            self.halt_cancels.get(id).copied()
+        else {
+            return Ok(());
+        };
+        let Some((symbol, known_filled)) = self
+            .books
+            .orders
+            .orders
+            .get(id)
+            .filter(|order| order.in_flight())
+            .map(|order| (order.request.symbol, order.filled_qty))
+        else {
+            self.halt_cancels.remove(id);
+            return Ok(());
+        };
+        let name = self.books.market.table.name(symbol).to_string();
+        let now_ns = clock::now_ns();
+        let identity = |row: &engine_types::orders::OrderLookupRow| {
+            row.client_order_id == id && row.symbol == name
+        };
+        let again = HaltCancelState::Resolving {
+            deadline_ns,
+            retry_after_ns: now_ns.saturating_add(HALT_LOOKUP_RETRY_NS),
+        };
+        let (next, text) = match result {
+            Ok(OrderLookup::Working(row)) if identity(&row) => {
+                self.halt_cancel_queue.push_back((symbol, id.to_string()));
+                (
+                    HaltCancelState::Submitting {
+                        deadline_ns: Some(deadline_ns),
+                    },
+                    format!("{id} is still working at the venue; cancelling it again"),
+                )
+            }
+            Ok(OrderLookup::Terminal { status, row }) if identity(&row) => {
+                let venue_filled = row
+                    .filled_qty
+                    .value
+                    .to_f64()
+                    .map_err(|error| EngineError::State(error.to_string()))?;
+                if venue_filled > known_filled + 1e-12 {
+                    self.recovery.history_requested = true;
+                    (
+                        again,
+                        format!(
+                            "{id} ended at the venue ({status:?}) with fills this log has not seen; recovering execution history"
+                        ),
+                    )
+                } else {
+                    self.wal.append(&WalRecord::Note {
+                        source: "engine".into(),
+                        text: format!(
+                            "{id} ended at the venue ({status:?}); recording the ending the status read proved"
+                        ),
+                    })?;
+                    let update = match status {
+                        TerminalOrderStatus::Rejected => OrderUpdate::Reject {
+                            client_order_id: id.into(),
+                            code: 0,
+                            reason: "venue terminal order lookup: rejected".into(),
+                        },
+                        TerminalOrderStatus::Filled | TerminalOrderStatus::Cancelled => {
+                            OrderUpdate::Cancelled {
+                                client_order_id: id.into(),
+                                recv_ns: now_ns,
+                            }
+                        }
+                    };
+                    // Ending the order removes its halt entry.
+                    self.take_update(update).await?;
+                    return Ok(());
+                }
+            }
+            Ok(OrderLookup::Working(_)) | Ok(OrderLookup::Terminal { .. }) => (
+                again,
+                format!(
+                    "the venue answered a status read for {id} with another order; asking again"
+                ),
+            ),
+            Ok(OrderLookup::NeverAccepted) => (
+                again,
+                format!("the venue has no record of {id}; asking again"),
+            ),
+            Ok(OrderLookup::Unknown { reason }) => (
+                again,
+                format!("the venue could not settle {id} ({reason}); asking again"),
+            ),
+            Ok(OrderLookup::Unavailable) => (
+                again,
+                format!("the venue cannot look up {id} by client order id; asking again"),
+            ),
+            Err(error) => (
+                again,
+                format!("status read for {id} failed ({error}); asking again"),
+            ),
+        };
+        self.wal.append(&WalRecord::Note {
+            source: "engine".into(),
+            text,
+        })?;
+        self.halt_cancels.insert(id.to_string(), next);
+        Ok(())
     }
 
     pub(super) async fn on_tick(&mut self) -> Result<(), EngineError> {

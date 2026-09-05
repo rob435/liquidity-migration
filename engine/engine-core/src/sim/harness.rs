@@ -425,7 +425,7 @@ async fn death_at_instant(scheduler: Scheduler, at: Option<u64>) {
     while !scheduler.is_pumped() {
         YieldNow::new().await;
     }
-    scheduler.sleep_until(at, WaiterKind::Timer).await;
+    scheduler.sleep_until(at, WaiterKind::World).await;
 }
 
 fn sha256_of(path: &Path) -> Result<String, EngineError> {

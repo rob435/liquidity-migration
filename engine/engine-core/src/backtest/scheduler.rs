@@ -36,6 +36,12 @@ pub enum WaiterKind {
     Private,
     /// A durable signal waiting for its availability instant.
     Signal,
+    /// The world outside the loop: the simulator's seeded process death.
+    /// Fires when the clock passes it, but never draws the idle pump: a
+    /// loop turn that is busy in a `select!` branch ahead of the market feed
+    /// leaves the feed unpolled with its tick unregistered, and a leap to a
+    /// death seconds away would move the world by that much unobserved.
+    World,
 }
 
 #[derive(Default)]

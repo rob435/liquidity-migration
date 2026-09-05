@@ -32,7 +32,9 @@ pub(crate) struct OrderDispatches {
     pub unresolved: BTreeMap<String, String>,
     pub recovered: BTreeSet<String>,
     pub lookup_pending: BTreeSet<String>,
-    pub lookup_after: BTreeMap<String, std::time::Instant>,
+    /// Engine-clock instant before which an order is not looked up again.
+    /// The engine's clock, not the wall's: the answer reaches the log.
+    pub lookup_after: BTreeMap<String, u64>,
     pub lookups: tokio::sync::mpsc::Receiver<(
         String,
         Result<engine_types::orders::OrderLookup, engine_types::VenueError>,

@@ -13,12 +13,17 @@
 //!   sometimes waits on a venue reply outside its `select!` — the account
 //!   refresh on a tick, a stop or leverage change — and while it does, the
 //!   feed is not polled and the clock has no pump. On a single-threaded
-//!   runtime that is detectable exactly: the feed was not polled between two
-//!   of the pump's own turns. Then the pump applies to the venue every row
-//!   the venue would have seen before the earliest waiter, moves the clock
-//!   to that waiter, and stops. The rows it applied reach the engine
-//!   afterwards, with their own earlier stamps — which is what a live engine
-//!   sees when it returns from a venue call to a buffered socket.
+//!   runtime the evidence is that the feed was not polled between two of
+//!   the pump's own turns. Then the pump applies to the venue every row the
+//!   venue would have seen before the earliest waiter the loop or its tasks
+//!   hold, moves the clock to that waiter, and stops. A turn busy in a
+//!   `select!` branch ahead of the feed leaves the same evidence with its
+//!   tick unregistered, which is why the world's own waiter — the
+//!   simulator's seeded death, [`WaiterKind::World`] — never draws the pump:
+//!   it fires when the clock passes it for another reason. The rows applied
+//!   reach the engine afterwards, with their own earlier stamps — which is
+//!   what a live engine sees when it returns from a venue call to a buffered
+//!   socket.
 //!
 //! So a fill queued for `t + hop`, a tick due at `t + 250 ms`, and a row
 //! received at `t + 300 ms` reach the loop in exactly that order, whatever
@@ -36,11 +41,20 @@ use super::scheduler::{Scheduler, WaiterKind, YieldNow};
 use super::tape::{BookBuilder, TapeError, TapeReader, TapeRow, TapeStats};
 use super::venue::SimulatedVenue;
 
-const ALL_KINDS: [WaiterKind; 4] = [
+/// What the loop or its tasks wait for. The idle pump leaps to these only.
+const PUMP_KINDS: [WaiterKind; 4] = [
     WaiterKind::Timer,
     WaiterKind::Venue,
     WaiterKind::Private,
     WaiterKind::Signal,
+];
+
+const ALL_KINDS: [WaiterKind; 5] = [
+    WaiterKind::Timer,
+    WaiterKind::Venue,
+    WaiterKind::Private,
+    WaiterKind::Signal,
+    WaiterKind::World,
 ];
 /// What the tape's end still waits for: replies in flight and updates on
 /// their hop. Never a periodic tick, which would run forever.
@@ -369,7 +383,9 @@ pub async fn pump(cursor: SharedCursor, scheduler: Scheduler) {
         if !idle || scheduler.has_fired_unconsumed() {
             continue;
         }
-        let Some(due) = scheduler.earliest_pending(&ALL_KINDS) else {
+        // Only what the loop or its tasks are waiting for; see
+        // `WaiterKind::World`.
+        let Some(due) = scheduler.earliest_pending(&PUMP_KINDS) else {
             continue;
         };
         // The venue sees every row that arrived before the waiter's instant.

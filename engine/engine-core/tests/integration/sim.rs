@@ -74,7 +74,6 @@ async fn faults_and_a_death_leave_the_log_and_the_venue_agreeing() {
 }
 
 #[tokio::test]
-#[ignore = "open finding: seed 7 with two deaths under heavy faults restart-loops on `venue reconciliation needed` (a halt cancel refused with 110001 is never confirmed); the replay is byte-identical. Reproduce: engine sim --seed 7 --seconds 300 --symbols 2 --crashes 2 --faults heavy --twice"]
 async fn one_seed_replays_byte_for_byte_under_heavy_faults() {
     let _alone = ONE_AT_A_TIME.lock().await;
     let mut opts = options(7, "heavy");
@@ -83,6 +82,17 @@ async fn one_seed_replays_byte_for_byte_under_heavy_faults() {
     let first = run_seed(opts.clone()).await.expect("the world runs");
     assert!(first.passed(), "{:#?}", first.failures());
     assert_eq!(first.crashes_injected, 2);
+    // Every halt cancel the venue refused, never answered or never confirmed
+    // was settled by a status read. A boot whose account read fails still
+    // exits for its supervisor; a reconciliation exit is that lane failing.
+    assert!(
+        first
+            .restart_reasons
+            .iter()
+            .all(|reason| !reason.contains("venue reconciliation needed")),
+        "{:?}",
+        first.restart_reasons
+    );
     let second = run_seed(opts).await.expect("the world runs again");
     assert_eq!(first.wal_sha256, second.wal_sha256);
     assert_eq!(first.faults, second.faults);

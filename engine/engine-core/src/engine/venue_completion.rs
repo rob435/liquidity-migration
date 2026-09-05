@@ -438,8 +438,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .record(Segment::Ack, mark.ack_ns.saturating_sub(mark.sent_ns));
         }
         let mut replies = replies.into_iter();
-        let mut halt_failure = None;
-        let accepted_deadline = clock::now_ns().saturating_add(HALT_CANCEL_CONFIRM_NS);
+        let first_deadline = clock::now_ns().saturating_add(HALT_CANCEL_CONFIRM_NS);
         for (_, client_order_id) in requests {
             self.journal_venue_timing(
                 &clocks,
@@ -461,9 +460,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         source: "engine".into(),
                         text: format!("cancel of {client_order_id} never sent: {detail}"),
                     })?;
-                    if self.halt_cancels.contains_key(&client_order_id) {
-                        halt_failure = Some(format!("{client_order_id}: {detail}"));
-                    }
                     false
                 }
                 Err(VenueError::Rejected { code, message }) => {
@@ -474,9 +470,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             "cancel of {client_order_id} rejected ({code}: {message}); the order is still counted as working"
                         ),
                     })?;
-                    if self.halt_cancels.contains_key(&client_order_id) {
-                        halt_failure = Some(format!("{client_order_id}: {code}: {message}"));
-                    }
                     false
                 }
                 Err(other) => {
@@ -487,27 +480,40 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             "cancel of {client_order_id} sent with no answer ({other}); the order is still counted as working"
                         ),
                     })?;
-                    if self.halt_cancels.contains_key(&client_order_id) {
-                        halt_failure = Some(format!("{client_order_id}: {other}"));
-                    }
                     false
                 }
             };
             self.working.cancelled(&client_order_id, taken);
-            if taken {
-                if let Some(state) = self.halt_cancels.get_mut(&client_order_id) {
-                    *state = HaltCancelState::AwaitingPrivate {
-                        deadline_ns: accepted_deadline,
-                    };
+            let Some(state) = self.halt_cancels.get(&client_order_id).copied() else {
+                continue;
+            };
+            let deadline_ns = match state {
+                HaltCancelState::Submitting { deadline_ns } => {
+                    deadline_ns.unwrap_or(first_deadline)
                 }
-            }
+                HaltCancelState::AwaitingPrivate { deadline_ns }
+                | HaltCancelState::Resolving { deadline_ns, .. } => deadline_ns,
+            };
+            let next = if taken {
+                HaltCancelState::AwaitingPrivate { deadline_ns }
+            } else {
+                // A refusal or a lost reply says nothing about what the order
+                // is now. The venue is asked; `apply_halt_lookup` acts on the
+                // answer, and the deadline set here bounds the whole exchange.
+                self.wal.append(&WalRecord::Note {
+                    source: "engine".into(),
+                    text: format!(
+                        "halt cancel of {client_order_id} is unconfirmed; reading the order's status at the venue"
+                    ),
+                })?;
+                HaltCancelState::Resolving {
+                    deadline_ns,
+                    retry_after_ns: 0,
+                }
+            };
+            self.halt_cancels.insert(client_order_id, next);
         }
         self.release_symbols(symbols);
-        if let Some(detail) = halt_failure {
-            return Err(EngineError::Reconcile(format!(
-                "account-level halt left at least one opening cancel unconfirmed ({detail})"
-            )));
-        }
         Ok(())
     }
 

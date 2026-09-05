@@ -298,9 +298,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             account,
             through_ms,
         };
-        tokio::task::spawn_blocking(move || {
-            let _ = send.blocking_send(Completion::Durable(barrier.wait()));
-        });
+        // A settled barrier completes on this thread. A thread hop for a
+        // barrier that has nothing left to wait for is a race against the
+        // simulator's idle clock, and two runs of one seed then disagree.
+        if barrier.outstanding() {
+            tokio::task::spawn_blocking(move || {
+                let _ = send.blocking_send(Completion::Durable(barrier.wait()));
+            });
+        } else if let Err(unsent) = send.try_send(Completion::Durable(barrier.wait())) {
+            let completion = unsent.into_inner();
+            tokio::task::spawn_blocking(move || {
+                let _ = send.blocking_send(completion);
+            });
+        }
         Ok(())
     }
 

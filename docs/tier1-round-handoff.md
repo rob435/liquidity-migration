@@ -39,6 +39,8 @@ The one document for the engine audit round: what is implemented on this tree, w
 | One test binary per crate | Integration tests compile as `tests/<name>/main.rs` per crate; a new test file is a `mod` line there. `engine-risk` sets `autotests = false` and silently drops a stray file | `engine/engine-core/tests/integration/main.rs`, `engine/engine-risk/tests/contracts/main.rs`, `engine/engine-venue/tests/venue/main.rs`, `engine/engine-wal/tests/wal/main.rs` |
 | Settled funding identity | A settled funding row is (symbol, settlement, rate); `funding_interval_min` is instrument metadata stamped at fetch time, kept as first observed, never part of the rewrite check. Rewrite errors name the symbol | `engine/signal-worker/src/history.rs`, `engine/signal-worker/src/live.rs` |
 | Stream continuity | A universe refresh's replacement stream carries the outgoing stream's epoch, gap flag and stamp, reconnect and fault counts through `StreamContinuity` | `engine/signal-worker/src/bybit_ws.rs`, `engine/signal-worker/src/live.rs` |
+| Halt cancel settlement | An opening order an account-level halt pulls has 5 s from the first cancel reply to end. A cancel refused or unanswered, or accepted and unconfirmed by the private stream for half that window, is followed by a status read on the shared order-lookup lane: a working order is cancelled again, an ended one with every fill in the log is recorded as ended, one with unseen fills triggers execution-history recovery first. The run ends with `Reconcile` only when the window closes on a live order | `engine/engine-core/src/engine/scheduling.rs` (`HaltCancelState`, `apply_halt_lookup`), `engine/engine-core/src/engine/venue_completion.rs`, `engine/engine-core/src/tests/halt_cancels.rs` |
+| Simulator clock steps | The idle pump moves the clock one tape row or one waiter at a time; a loop turn that is busy in a `select!` branch ahead of the market feed can no longer be mistaken for an idle loop and carried whole seconds forward. The hiccup pause after a feed error is on the loop's timer, so it is virtual under the simulator | `engine/engine-core/src/backtest/feed.rs`, `engine/engine-core/src/engine.rs` (`HICCUP_PAUSE`) |
 
 ### Verification on this tree
 
@@ -46,17 +48,16 @@ The one document for the engine audit round: what is implemented on this tree, w
 | --- | --- | --- |
 | `cargo fmt --all -- --check` | clean | Rust 1.90.0 |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | clean | every crate, the deny table included |
-| `cargo test --workspace --all-targets --locked` | 27 binaries: 2,202 passed, 0 failed, 6 ignored | debug profile; the sixth ignore is the heavy-seed simulator run in the open findings |
+| `cargo test --workspace --all-targets --locked --no-fail-fast` | 27 binaries: 2,207 passed, 0 failed, 5 ignored | debug profile after `cargo clean`; the ignores are live-socket feed tests and the Linux opt-ins of resume item 3 |
 | `cargo test --workspace --doc --locked` | no doctests in the workspace; every doctest target is empty | |
 | `scripts/dev.sh check`, Python half | doctor ready; Ruff, ShellCheck and mypy over 100 files clean; 1,517 pytest passed | repository `.venv` |
-| `engine sim`, faultless seed 1 and light seeds 1–6, `--twice` | every check holds and every replay is identical; seed 1 alone is 591 orders and 453 fills, the light seeds take one death each and up to three reconciliation restarts | release binary; 300 s tapes, 2 symbols |
+| `engine sim`, faultless seed 1, light seeds 1–6, heavy seed 7 and heavy seeds 1–40, all `--twice` | every check holds and every replay is identical; seed 7 heavy has no reconciliation exit (nine before this tree); the heavy sweep has none on any of its 40 seeds, and its 19 restarts on 15 seeds are all boots whose simulated account read failed | debug binary; 300 s tapes, 2 symbols, two deaths per heavy seed |
 | Release-profile suites and Linux resource/process opt-in tests | not run on this tree | resume items 2 and 3 |
 
 ### Open findings
 
 | Finding | Reproduction | Decision needed |
 | --- | --- | --- |
-| Crash loop under heavy faults | `engine sim --seed 7 --seconds 300 --symbols 2 --crashes 2 --faults heavy --twice` exits nine times with `venue reconciliation needed`: each exit is an opening-halt cancel the venue refused with 110001 (order not working) that the private stream never confirmed. The tape never finishes; the replay is byte-identical. `sim::one_seed_replays_byte_for_byte_under_heavy_faults` carries this finding as its `#[ignore]` reason | Whether a halt cancel refused as not working is confirmed through the order lookup lane instead of ending the run |
 | History checkpoint on an empty page | `history_recovery` advances the history checkpoint when the recovery client's `executions` page is empty for the window. The simulator's client serves the venue's history so the simulator no longer hides it; a live endpoint answering empty for a window loses the fill the same way | Whether an empty window may advance the checkpoint |
 | Deployment | Hosted CI runners are refused ([STATE.md](../STATE.md) CI / Deploy Gate); nothing on this tree has reached the host, the funding-identity fix included | Owner: repository visibility or a private runner, then `scripts/ops.sh deploy` |
 
@@ -80,7 +81,7 @@ The one document for the engine audit round: what is implemented on this tree, w
 
 | Order | Work | Completion evidence |
 | --- | --- | --- |
-| 1 | Decide the two code findings above; fix each in code and prove the fix fails without it | The named seed or the empty-page case goes green on the same recipe, and the heavy-seed test loses its `#[ignore]` |
+| 1 | Decide the empty-page finding above; fix it in code and prove the fix fails without it | The empty-page case goes green on the same recipe |
 | 2 | Release-profile suites and doctests on this tree | `cargo test --workspace --all-targets --release --locked` and `--doc --release` |
 | 3 | Linux resource/process and worker overload opt-in tests | Explicit workload results on a Linux host; ordinary-suite ignores preserved |
 | 4 | Aggregate-parent rejection, restart and failure cuts; exact target sizing for general sleeve exits | A failing mutation and the restored passing behaviour per fix |
@@ -111,15 +112,17 @@ scripts/dev.sh check
 ```
 
 ```sh
-# Determinism and faults: a faultless seed, the light sweep, and the heavy seed that loops.
+# Determinism and faults: a faultless seed, the light sweep, the heavy seed, and a heavy sweep.
 cd engine
 cargo run --release --locked -- sim --seed 1 --seconds 300 --symbols 2 --crashes 0 --faults none --twice
 cargo run --release --locked -- sim --seed 1 --seeds 6 --seconds 300 --symbols 2 --twice
-cargo run --release --locked -- sim --seed 7 --seconds 300 --symbols 2 --crashes 2 --faults heavy --twice --keep --out /tmp/sim-seed7
+cargo run --release --locked -- sim --seed 7 --seconds 300 --symbols 2 --crashes 2 --faults heavy --twice
+cargo run --release --locked -- sim --seed 1 --seeds 40 --seconds 300 --symbols 2 --crashes 2 --faults heavy --keep --out /tmp/sim-heavy
 ```
 
 ```sh
-# The parked heavy-seed test, alone.
+# The heavy-seed test and the halt-cancel tests, alone.
 cd engine
-cargo test -p engine-core --test integration --locked one_seed_replays_byte_for_byte_under_heavy_faults -- --ignored
+cargo test -p engine-core --test integration --locked one_seed_replays_byte_for_byte_under_heavy_faults
+cargo test -p engine-core --lib --locked halt_cancels
 ```

@@ -522,6 +522,13 @@ pub(crate) struct MockVenue {
     leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
     /// What the venue's execution history reports. `None` makes the read fail.
     executions: Rc<RefCell<Option<Vec<VenueExecution>>>>,
+    /// What each cancel is answered with, in order; an exhausted script
+    /// accepts every cancel.
+    cancel_replies: Rc<RefCell<VecDeque<Result<(), VenueError>>>>,
+    /// Whether the venue offers a status lookup at all, and what it answers,
+    /// in order; an exhausted script answers `Unknown`.
+    lookup_scripted: bool,
+    lookups: Rc<RefCell<VecDeque<engine_types::orders::OrderLookup>>>,
 }
 
 impl MockVenue {
@@ -574,6 +581,9 @@ impl MockVenue {
                 account_view_fails: Rc::new(RefCell::new(false)),
                 leverages: Rc::new(RefCell::new(Vec::new())),
                 executions: Rc::new(RefCell::new(Some(Vec::new()))),
+                cancel_replies: Rc::new(RefCell::new(VecDeque::new())),
+                lookup_scripted: false,
+                lookups: Rc::new(RefCell::new(VecDeque::new())),
             },
             sends,
         )
@@ -648,8 +658,11 @@ impl VenueGateway for MockVenue {
     }
 
     fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
-        self.lookup_started.as_ref().map(|started| {
-            Box::new(StalledLookup(started.clone()))
+        if let Some(started) = &self.lookup_started {
+            return Some(Box::new(StalledLookup(started.clone())));
+        }
+        self.lookup_scripted.then(|| {
+            Box::new(ScriptedLookup(self.lookups.clone()))
                 as Box<dyn engine_types::orders::OrderLookupClient>
         })
     }
@@ -724,7 +737,11 @@ impl VenueGateway for MockVenue {
     async fn cancel_order(&mut self, symbol: SymbolId, id: &str) -> Result<(), VenueError> {
         self.tape.lock().unwrap().push(Step::Cancel(id.to_string()));
         self.cancels.lock().unwrap().push((symbol, id.to_string()));
-        Ok(())
+        self.cancel_replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(Ok(()))
     }
 
     async fn amend_order(
@@ -1363,6 +1380,9 @@ struct Harness {
     account_view_fails: Rc<RefCell<bool>>,
     /// The venue's execution history; see `MockVenue::executions`.
     executions: Rc<RefCell<Option<Vec<VenueExecution>>>>,
+    /// Scripted cancel replies and status-read answers; see `MockVenue`.
+    cancel_replies: Rc<RefCell<VecDeque<Result<(), VenueError>>>>,
+    lookups: Rc<RefCell<VecDeque<engine_types::orders::OrderLookup>>>,
 }
 
 async fn build(
@@ -1423,6 +1443,7 @@ async fn build_with_amend_verdict(
         working,
         BuildOptions {
             amend_verdict: Some(amend_verdict),
+            ..BuildOptions::default()
         },
     )
     .await
@@ -1493,6 +1514,8 @@ async fn build_holding(
     let account_readings = venue.account_readings.clone();
     let account_view_fails = venue.account_view_fails.clone();
     let executions = venue.executions.clone();
+    let cancel_replies = venue.cancel_replies.clone();
+    let lookups = venue.lookups.clone();
     let (risk, risk_saw) = MockRisk::with(verdict);
     let risk_rolling = risk.rolling.clone();
     let (strategies, sleeves, replayed) = assemble_fixture_names(strategies, symbols, replayed);
@@ -1525,6 +1548,8 @@ async fn build_holding(
             account_readings,
             account_view_fails,
             executions,
+            cancel_replies,
+            lookups,
         },
     )
 }
@@ -1532,6 +1557,29 @@ async fn build_holding(
 #[derive(Default)]
 struct BuildOptions {
     amend_verdict: Option<RiskVerdict>,
+    /// The venue answers status reads from `Harness::lookups`.
+    lookups: bool,
+}
+
+/// A venue that answers status reads from a script, for the orders whose
+/// cancel reply is not the confirmation.
+async fn build_with_lookups(
+    strategies: Vec<Box<dyn Strategy>>,
+    symbols: &[&str],
+) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
+    build_inner(
+        &settings(),
+        allow_all(),
+        strategies,
+        symbols,
+        &[],
+        Vec::new(),
+        BuildOptions {
+            lookups: true,
+            ..BuildOptions::default()
+        },
+    )
+    .await
 }
 
 async fn build_inner(
@@ -1547,6 +1595,7 @@ async fn build_inner(
     let (wal, records) = MockWal::new(tape.clone());
     let (mut venue, sends) = MockVenue::new(tape.clone(), symbols);
     venue.working = working;
+    venue.lookup_scripted = options.lookups;
     let cancels = venue.cancels.clone();
     let amends = venue.amends.clone();
     let stops = venue.stops.clone();
@@ -1556,6 +1605,8 @@ async fn build_inner(
     let account_readings = venue.account_readings.clone();
     let account_view_fails = venue.account_view_fails.clone();
     let executions = venue.executions.clone();
+    let cancel_replies = venue.cancel_replies.clone();
+    let lookups = venue.lookups.clone();
     let (mut risk, risk_saw) = MockRisk::with(verdict);
     risk.amend_verdict = options.amend_verdict;
     let risk_rolling = risk.rolling.clone();
@@ -1589,6 +1640,8 @@ async fn build_inner(
             account_readings,
             account_view_fails,
             executions,
+            cancel_replies,
+            lookups,
         },
     )
 }
@@ -1722,6 +1775,7 @@ mod durable_signals;
 mod fill_costs;
 mod forced_close;
 mod gap_recovery;
+mod halt_cancels;
 mod heartbeat;
 mod order_path;
 mod ownership;
@@ -1831,6 +1885,24 @@ impl engine_types::orders::OrderLookupClient for StalledLookup {
     ) -> Result<engine_types::orders::OrderLookup, VenueError> {
         self.0.notify_one();
         std::future::pending().await
+    }
+}
+
+/// Answers status reads in the scripted order; an exhausted script says the
+/// venue could not find the order.
+struct ScriptedLookup(Rc<RefCell<VecDeque<engine_types::orders::OrderLookup>>>);
+#[engine_types::async_trait]
+impl engine_types::orders::OrderLookupClient for ScriptedLookup {
+    async fn lookup(
+        &self,
+        _symbol: &str,
+        client_order_id: &str,
+    ) -> Result<engine_types::orders::OrderLookup, VenueError> {
+        Ok(self.0.lock().unwrap().pop_front().unwrap_or_else(|| {
+            engine_types::orders::OrderLookup::Unknown {
+                reason: format!("the mock venue has no answer for {client_order_id}"),
+            }
+        }))
     }
 }
 

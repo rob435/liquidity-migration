@@ -6,6 +6,82 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 19:55 UTC — The heavy-seed crash loop is fixed: a halt
+  cancel the venue refuses, loses or never confirms is settled by a status
+  read; the simulator's clock no longer leaps past the loop; the heavy-seed
+  test runs again.**
+  - The fault. An account-level halt (private stream reset, an unresolved
+    send, a latch) pulls every opening order. `complete_cancels` treated any
+    cancel reply other than acceptance as fatal and ended the run with
+    `venue reconciliation needed`, and an accepted cancel the private stream
+    did not confirm within 5 s ended it the same way. Under heavy faults a
+    cancel is refused with 110001 (the order already ended, its update
+    dropped), refused outright, or its reply is lost, several times a minute:
+    `engine sim --seed 7 --seconds 300 --symbols 2 --crashes 2 --faults heavy`
+    exited nine times in 300 s, never finishing the tape. Boot's
+    reconciliation then did exactly the status read the running engine had
+    refused to do.
+  - The fix, `engine/engine-core/src/engine/scheduling.rs` and
+    `venue_completion.rs`. `HaltCancelState` gains `Resolving`: a refused or
+    unanswered cancel, or an accepted one unconfirmed for half the 5 s
+    window, reads the order's status on the shared order-lookup lane
+    (`dispatch_order_status`, one read at a time with the ambiguous-send
+    lane). Working: cancel again. Ended with every fill in the log: record
+    the ending, which takes the order out of the halt. Ended with fills the
+    log has not seen: request execution-history recovery and read again.
+    Unknown or failed: read again after 500 ms. The deadline is set once by
+    the first cancel reply and kept through every later state, so the halt
+    still has exactly 5 s per order; `Reconcile` remains the exit when the
+    window closes on a live order, and its message now says which lane fell
+    short. The loop wakes itself for the next read or window close
+    (`next_halt_wake_ns`) instead of waiting for the flush tick. An order
+    that ends by any route leaves the halt set on the next pass. Halt status
+    reads are not held by other commands in flight on the symbol: a sleeve
+    working the symbol otherwise starved the read for the whole window.
+  - Proof: `engine/engine-core/src/tests/halt_cancels.rs`, four tests on a
+    mock venue with scripted cancel replies and status answers — refused as
+    not working then settled by a read; refused for a working order then
+    cancelled again; accepted but never confirmed then settled by a read;
+    never settled and still ending the run with `Reconcile`. Every one fails
+    on `aba3298d`. The two that wait for the window run on the wall clock,
+    because the window reads `clock::now_ns`.
+  - Three simulator and determinism faults found on the way, each fixed at
+    its source. (1) `backtest/feed.rs::pump` moved the clock to the
+    earliest waiter of any kind while the loop looked idle; a loop turn busy
+    in a `select!` branch ahead of the market feed looks idle with its tick
+    unregistered, and the earliest waiter was the seeded process death, 42
+    virtual seconds away: the world moved by that much unobserved and every
+    halt window in the loop expired inside the leap. The death is now
+    `WaiterKind::World`, which the pump never leaps to; it fires when the
+    clock passes it for another reason. (2) The loop's pause after a feed
+    hiccup was `tokio::time::sleep` on the wall clock; it is `timer.sleep`
+    (`HICCUP_PAUSE`), virtual under the simulator. (3) Two wall-clock reads
+    that reached the log: the ambiguous-send lookup backoff kept
+    `std::time::Instant` (`OrderDispatches::lookup_after` is engine-clock
+    nanoseconds now), and `publish_history` hopped to a blocking thread for
+    a barrier that was already settled, a race against the pump that made
+    the first run of a seed differ from the second; a settled barrier
+    completes on the loop's thread.
+  - Receipts, debug profile, pinned Rust 1.90.0. Seed 7 heavy: 0
+    reconciliation exits (was 9), replay identical across three separate
+    processes. Heavy sweep seeds 1–40 with `--twice`: 40 seeds pass every
+    check, 40 replays identical, 0 reconciliation exits (the sweep on
+    `aba3298d` had them on 3 of 40 seeds besides seed 7's loop). The 19
+    restarts left, on 15 seeds, are all boots whose account read the
+    simulator failed (`venue.account_view_fail`, 10 % under `heavy`); boot
+    exits on that read by design and the supervisor boots again. Faultless seed 1 and light seeds 1–6: every check holds, every
+    replay identical. `cargo test --workspace --all-targets --locked
+    --no-fail-fast` after `cargo clean`: 27 binaries, 2,207 passed, 0
+    failed, 5 ignored (live sockets and Linux opt-ins); no doctests in the
+    workspace. Clippy with the deny table and rustfmt clean. Python: doctor ready, Ruff, ShellCheck, mypy clean, 1,517 pytest.
+  - Docs: [docs/tier1-round-handoff.md](docs/tier1-round-handoff.md) loses
+    the crash-loop finding and gains the two implemented rows;
+    [docs/engine.md](docs/engine.md) §3 and §10 say what a halt cancel does
+    now. Deploy: `vps-deploy.yml` in `deploy` mode is dispatched at this
+    commit right after the push (the repository is public again at 19:50
+    UTC, so hosted runners take it); the run's outcome is the entry that
+    follows this one.
+
 - **2026-09-05 18:02 UTC — `main` is one line again: the on-call routine's
   79 commits, Codex's checkpoint and Claude's tier-0 batch are merged; the
   ruleset drops linear history; `docs/tier1-round-handoff.md` is the one audit

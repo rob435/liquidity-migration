@@ -68,7 +68,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.dispatches.begin(DispatchWrite::Queue(queued), barrier);
             }
         }
-        let now = std::time::Instant::now();
+        let now = clock::now_ns();
         let lookups: Vec<_> = self
             .dispatches
             .orders
@@ -87,43 +87,63 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .map(|(id, order)| (id.clone(), order.request.symbol))
             .collect();
         for (id, symbol) in lookups {
-            let receive = self
-                .venue
-                .dispatch_order_status(self.books.market.table.name(symbol), &id)?;
-            self.dispatches.lookup_pending.insert(id.clone());
-            let results = self.dispatches.lookup_results.clone();
-            tokio::spawn(async move {
-                let result = match tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, receive).await {
-                    Ok(Ok(result)) => result,
-                    Ok(Err(_)) => Err(VenueError::Transport("order lookup task stopped".into())),
-                    Err(_) => Err(VenueError::Transport("order lookup timed out".into())),
-                };
-                let _ = results.send((id, result)).await;
-            });
+            self.start_order_lookup(id, symbol)?;
         }
         Ok(())
     }
 
+    /// One status read of `id` at the venue, answered on `dispatches.lookups`.
+    /// The lane holds one read at a time; callers check `lookup_pending` first.
+    pub(super) fn start_order_lookup(
+        &mut self,
+        id: String,
+        symbol: SymbolId,
+    ) -> Result<(), VenueError> {
+        let receive = self
+            .venue
+            .dispatch_order_status(self.books.market.table.name(symbol), &id)?;
+        self.dispatches.lookup_pending.insert(id.clone());
+        let results = self.dispatches.lookup_results.clone();
+        tokio::spawn(async move {
+            let result = match tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, receive).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(VenueError::Transport("order lookup task stopped".into())),
+                Err(_) => Err(VenueError::Transport("order lookup timed out".into())),
+            };
+            let _ = results.send((id, result)).await;
+        });
+        Ok(())
+    }
+
+    /// A status read came back. An ambiguous send and a halt cancel can be
+    /// waiting on the same order; the send is settled first, and the halt
+    /// then sees whatever that left of the order.
     pub(super) async fn on_order_lookup(
         &mut self,
         id: String,
         result: Result<OrderLookup, VenueError>,
     ) -> Result<(), EngineError> {
         self.dispatches.lookup_pending.remove(&id);
-        self.dispatches.lookup_after.insert(
-            id.clone(),
-            std::time::Instant::now() + Duration::from_secs(1),
+        self.dispatches
+            .lookup_after
+            .insert(id.clone(), clock::now_ns().saturating_add(1_000_000_000));
+        let halted = matches!(
+            self.halt_cancels.get(&id),
+            Some(HaltCancelState::Resolving { .. })
         );
-        if !self.dispatches.orders.contains_key(&id) {
-            return Ok(());
-        }
-        match result {
-            Ok(lookup) => self.apply_order_lookup(&id, lookup).await,
-            Err(error) => {
-                self.dispatches.unresolved.insert(id, error.to_string());
-                Ok(())
+        let result = result.map_err(|error| error.to_string());
+        if self.dispatches.orders.contains_key(&id) {
+            match &result {
+                Ok(lookup) => self.apply_order_lookup(&id, lookup.clone()).await?,
+                Err(error) => {
+                    self.dispatches.unresolved.insert(id.clone(), error.clone());
+                }
             }
         }
+        if halted {
+            self.apply_halt_lookup(&id, result).await?;
+        }
+        Ok(())
     }
 
     pub(super) async fn on_order_dispatch_durable(

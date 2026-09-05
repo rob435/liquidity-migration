@@ -158,7 +158,7 @@ A run that ends without being asked returns one `EngineError`. The supervisor re
 | `Boot(_)` | `boot:` | This log, config, and venue cannot be started from. | Fails the same way until the input changes. |
 | `TaskStopped { task, .. }` | `<task> stopped` | The venue task, a durability writer, or the strategy host ended. `task` names which. | Fresh tasks; the log carries the rest. |
 | `TimedOut(_)` | `timed out waiting for` | A bounded wait on durability or a venue reply ran out (`MUTATION_DRAIN_TIMEOUT`, 10 s). | The wait is retried from the log. |
-| `Reconcile(_)` | `venue reconciliation needed:` | A halt cancel was not confirmed, so the venue's account and the engine's view may disagree. | Boot phase 6 settles it against the venue. |
+| `Reconcile(_)` | `venue reconciliation needed:` | An opening order an account-level halt pulled is still live 5 s after the first cancel reply: the private stream did not confirm the cancel and the venue's status reads did not settle the order either, so the venue's account and the engine's view may disagree. | Boot phase 6 settles it against the venue. |
 | `State(_)` | `state:` | An invariant on the engine's own state failed. | A defect. Report it with the log. |
 | `Wal(_)`, `Venue(_)` | `log:`, `venue:` | The log or the venue refused. | As that error says. |
 
@@ -371,7 +371,7 @@ The live loop on a seeded synthetic market against the backtest's simulated venu
 
 | Injected | Where | What the engine must do |
 | :--- | :--- | :--- |
-| venue refusal; request lost before the venue; reply lost after it; slow reply; account read failure | `FaultyGateway` | treat the ambiguous send as ambiguous; learn the order's fate before growing |
+| venue refusal; request lost before the venue; reply lost after it; slow reply; account read failure | `FaultyGateway` | treat the ambiguous send as ambiguous; learn the order's fate before growing; a halt cancel refused, unanswered or unconfirmed by the private stream is settled by reading the order's status, which cancels a working order again or records the ending |
 | private update dropped, duplicated or delayed; socket hiccup | `FaultyOrderFeed` | dedupe by execution id; recover a gap from the venue's fill history |
 | market feed hiccup; feed reset | `FaultyMarketFeed` | re-arm; never open against a stale quote |
 | process death; engine exit with an error | `harness` | boot from the log; a supervisor restart is modelled by booting again, and more than 8 restarts in one run is a crash loop |

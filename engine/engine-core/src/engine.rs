@@ -65,6 +65,9 @@ pub(crate) const MAX_TIMER_CALLBACKS_PER_TURN: usize = 64;
 
 const MUTATION_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long the loop stands off a feed that erred without closing.
+const HICCUP_PAUSE: Duration = Duration::from_millis(1);
+
 /// Largest set of placements that may share one risk reservation, WAL
 /// barrier, and concurrent venue submission. It matches Bybit's conservative
 /// per-UID create-order window. A larger strategy burst is re-evaluated in
@@ -80,6 +83,13 @@ pub const MAX_CANCELS_PER_BATCH: usize = 10;
 const HALT_CANCEL_CONFIRM_NS: u64 = 5_000_000_000;
 #[cfg(test)]
 const HALT_CANCEL_CONFIRM_NS: u64 = 25_000_000;
+
+/// How long a refused or unanswered halt cancel waits between two reads of
+/// the order's status at the venue.
+#[cfg(not(test))]
+const HALT_LOOKUP_RETRY_NS: u64 = 500_000_000;
+#[cfg(test)]
+const HALT_LOOKUP_RETRY_NS: u64 = 5_000_000;
 
 /// How long an accepted amend may go unexplained before the order is pulled.
 ///
@@ -308,10 +318,25 @@ struct WantedSymbol {
     listeners: Vec<(StrategyId, Feed)>,
 }
 
+/// One opening order an account-level halt is pulling. The deadline is set by
+/// the first cancel reply and kept through every later state: the halt has
+/// `HALT_CANCEL_CONFIRM_NS` from that reply to see the order end, however many
+/// cancels and status reads that takes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum HaltCancelState {
-    Submitting,
-    AwaitingPrivate { deadline_ns: u64 },
+    Submitting {
+        deadline_ns: Option<u64>,
+    },
+    AwaitingPrivate {
+        deadline_ns: u64,
+    },
+    /// The cancel came back refused or unanswered, which is the venue not
+    /// saying what the order is now. Its status is read instead: a working
+    /// order is cancelled again, an ended one is closed from the answer.
+    Resolving {
+        deadline_ns: u64,
+        retry_after_ns: u64,
+    },
 }
 
 /// An amend the venue took, held until the private stream says what price it
@@ -400,7 +425,8 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// Opening orders already handed to cancellation after any durable
     /// opening halt. A successful REST acknowledgement is asynchronous, so the order
     /// remains in the ledger until the private stream ends it; this set keeps
-    /// each refresh tick from submitting the same cancel again meanwhile.
+    /// each refresh tick from submitting the same cancel again meanwhile. An
+    /// order that ends by any route leaves the set on the next halt pass.
     halt_cancels: BTreeMap<String, HaltCancelState>,
     amends_awaiting_price: BTreeMap<String, AwaitingAmend>,
     /// Since boot: amends whose price the venue stated, and amends pulled
@@ -702,10 +728,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .next_deadline()
                 .map(|deadline| Duration::from_nanos(deadline.saturating_sub(clock::now_ns())));
 
-            let halt_confirmation_pending = self
-                .halt_cancels
-                .values()
-                .any(|state| matches!(state, HaltCancelState::AwaitingPrivate { .. }));
+            let halt_confirmation_pending = self.halt_cancels.values().any(|state| {
+                matches!(
+                    state,
+                    HaltCancelState::AwaitingPrivate { .. } | HaltCancelState::Resolving { .. }
+                )
+            });
+            let halt_wake = self
+                .next_halt_wake_ns(clock::now_ns())
+                .map(|at| Duration::from_nanos(at.saturating_sub(clock::now_ns())));
             if !self.halt_cancel_queue.is_empty() || halt_confirmation_pending {
                 // During a halt, consume every already-ready private update
                 // before the next cancel group or a confirmation-deadline
@@ -716,7 +747,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     biased;
                     _ = &mut shutdown, if self.drain_progress.is_none() => break StopReason::Shutdown,
                     update = order_feed.next_update() => {
-                        if let Turn::Stop(reason) = self.on_order_feed(update, true).await? {
+                        if let Turn::Stop(reason) = self.on_order_feed(update, true, &timer).await? {
                             break reason;
                         }
                     }
@@ -752,11 +783,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     _ = std::future::ready(()), if !self.halt_cancel_queue.is_empty() => {
                         self.dispatch_halt_cancel_group().await?;
                     }
+                    _ = std::future::ready(()), if self.halt_lookup_due(clock::now_ns()) => {
+                        self.start_halt_lookup(clock::now_ns())?;
+                    }
+                    _ = timer.sleep(halt_wake.unwrap_or(Duration::MAX)), if halt_wake.is_some() => {
+                        self.queue_halted_entry_cancels()?;
+                    }
                     _ = std::future::ready(()), if self.drain_progress.is_some() => {
                         self.drain(clock::now_ns()).await?;
                     }
                     event = market_feed.next_event() => {
-                        if let Turn::Stop(reason) = self.on_market_feed(&event, order_feed).await? {
+                        if let Turn::Stop(reason) = self.on_market_feed(&event, order_feed, &timer).await? {
                             break reason;
                         }
                     }
@@ -814,7 +851,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     _ = std::future::ready(()) => None,
                 };
                 if let Some(update) = private_update {
-                    match self.on_order_feed(update, false).await? {
+                    match self.on_order_feed(update, false, &timer).await? {
                         Turn::Stop(reason) => break reason,
                         Turn::Hiccup => {
                             self.after_turn(market_feed, order_feed, signal_feed)
@@ -850,7 +887,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 biased;
                 _ = &mut shutdown => break StopReason::Shutdown,
                 update = order_feed.next_update() => {
-                    if let Turn::Stop(reason) = self.on_order_feed(update, true).await? {
+                    if let Turn::Stop(reason) = self.on_order_feed(update, true, &timer).await? {
                         break reason;
                     }
                 }
@@ -880,7 +917,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     self.on_completion(completion, order_feed).await?;
                 }
                 event = market_feed.next_event() => {
-                    if let Turn::Stop(reason) = self.on_market_feed(&event, order_feed).await? {
+                    if let Turn::Stop(reason) = self.on_market_feed(&event, order_feed, &timer).await? {
                         break reason;
                     }
                 }
@@ -911,10 +948,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// One private-stream result. `drain_after` says whether the actions the
     /// update released are drained at once or left for the caller's own
     /// drain step.
-    async fn on_order_feed(
+    /// One private-feed result. The pause after a hiccup is on the loop's
+    /// timer, not the wall clock: under a virtual clock a wall-clock pause is
+    /// a hole the simulated world runs through unobserved.
+    async fn on_order_feed<T: LoopTimer>(
         &mut self,
         update: Result<OrderUpdate, FeedError>,
         drain_after: bool,
+        timer: &T,
     ) -> Result<Turn, EngineError> {
         match update {
             Ok(update) => {
@@ -932,7 +973,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             Err(e) => {
                 self.invalidate_private_stream()?;
                 tracing::warn!(error = %e, "order feed hiccup");
-                tokio::time::sleep(Duration::from_millis(1)).await;
+                timer.sleep(HICCUP_PAUSE).await;
                 Ok(Turn::Hiccup)
             }
         }
@@ -941,10 +982,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// One public-feed result. A feed that errors without closing is
     /// expected to be reconnecting inside; the pause keeps a broken one from
     /// spinning the loop.
-    async fn on_market_feed<O: OrderFeed>(
+    async fn on_market_feed<O: OrderFeed, T: LoopTimer>(
         &mut self,
         event: &Result<MarketEvent, FeedError>,
         order_feed: &mut O,
+        timer: &T,
     ) -> Result<Turn, EngineError> {
         match event {
             Ok(event) => {
@@ -957,7 +999,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "market feed hiccup");
-                tokio::time::sleep(Duration::from_millis(1)).await;
+                timer.sleep(HICCUP_PAUSE).await;
                 Ok(Turn::Continue)
             }
         }
