@@ -160,7 +160,14 @@ edit STATE.md to match.
     the worst rate of the incident. Across this payload's own window the pair
     threw away **9.38 frames for every row it kept** (Bybit 9.51, Binance
     9.06). At the last line both recorders are inside an open block.
-  - **The deploy, dispatched on the fix.** Recorded below.
+  - **Deploy refused a sixteenth time, same signature.** Run `33941368676`,
+    `deploy main@02062266`, dispatched 03:15:54 UTC and failed 03:16:00 — 6 s.
+    `Deploy artifact` dead 2 s in, `ci` and `rust` 3 s in, each of their log
+    downloads returning `failed to download logs: HTTP 404`; `diagnose`,
+    `disarm`, `vps` and the release-test job skipped. No job ever started, so
+    nothing reached the host: deployed commit stays `65ee75a7` and all five
+    recorder fixes stay merged and undeployed. The cause is outside the
+    repository — the account's payments failed, so GitHub assigns no runner.
   - **The one action that ends this tonight needs no runner**, from a
     workstation holding the SSH key:
 
