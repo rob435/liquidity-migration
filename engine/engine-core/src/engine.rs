@@ -120,12 +120,52 @@ struct RecoveryOutcome {
     through_ms: i64,
 }
 
+/// Why a run ended without being asked to. The supervisor restarts the
+/// unit on any of these; the class says what a restart can settle.
 #[derive(Debug)]
 pub enum EngineError {
     Wal(WalError),
     Venue(VenueError),
+    /// Boot cannot continue from this log, config, and venue. A restart
+    /// into the same state fails the same way.
     Boot(String),
+    /// A task the engine cannot run without has ended.
+    TaskStopped {
+        task: EngineTask,
+        detail: &'static str,
+    },
+    /// A bounded wait ran out; the string is what did not arrive.
+    TimedOut(String),
+    /// The venue's account and the engine's view disagree in a way only a
+    /// fresh boot's reconciliation settles.
+    Reconcile(String),
+    /// An invariant on the engine's own state failed.
     State(String),
+}
+
+/// A task the engine depends on. Which one died is the difference between
+/// a venue outage and a fault in the log writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineTask {
+    /// Sends, cancels, amends, and account reads.
+    Venue,
+    /// Makes order dispatches durable before they leave.
+    DispatchDurability,
+    /// Makes strategy callback results durable before they apply.
+    CallbackDurability,
+    /// Runs strategy callbacks and returns their completions.
+    StrategyHost,
+}
+
+impl std::fmt::Display for EngineTask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            EngineTask::Venue => "venue task",
+            EngineTask::DispatchDurability => "dispatch durability task",
+            EngineTask::CallbackDurability => "callback durability task",
+            EngineTask::StrategyHost => "strategy host",
+        })
+    }
 }
 
 impl std::fmt::Display for EngineError {
@@ -134,6 +174,10 @@ impl std::fmt::Display for EngineError {
             EngineError::Wal(e) => write!(f, "log: {e}"),
             EngineError::Venue(e) => write!(f, "venue: {e}"),
             EngineError::Boot(m) => write!(f, "boot: {m}"),
+            EngineError::TaskStopped { task, detail: "" } => write!(f, "{task} stopped"),
+            EngineError::TaskStopped { task, detail } => write!(f, "{task} stopped {detail}"),
+            EngineError::TimedOut(waiting_for) => write!(f, "timed out waiting for {waiting_for}"),
+            EngineError::Reconcile(m) => write!(f, "venue reconciliation needed: {m}"),
             EngineError::State(m) => write!(f, "state: {m}"),
         }
     }
@@ -754,7 +798,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         self.on_strategy_callback(callback)?;
                     }
                     completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
-                        let completion = completion.ok_or_else(|| EngineError::State("venue task stopped with mutations outstanding".into()))?;
+                        let completion = completion.ok_or(EngineError::TaskStopped { task: EngineTask::Venue, detail: "with mutations outstanding" })?;
                         self.take_venue_completion(completion).await?;
                     }
                     _ = std::future::ready(()) => {}
@@ -926,8 +970,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         completion: Option<MutationCompletion>,
         order_feed: &mut O,
     ) -> Result<(), EngineError> {
-        let completion = completion.ok_or_else(|| {
-            EngineError::State("venue task stopped with mutations still outstanding".to_string())
+        let completion = completion.ok_or(EngineError::TaskStopped {
+            task: EngineTask::Venue,
+            detail: "with mutations still outstanding",
         })?;
         self.take_completion_turn(completion, order_feed).await
     }
@@ -1066,9 +1111,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.host.callbacks.durable.recv())
                     .await
                     .map_err(|_| {
-                        EngineError::State(
-                            "graceful stop timed out settling callback durability".into(),
-                        )
+                        EngineError::TimedOut("callback durability during graceful stop".into())
                     })?;
             self.on_callback_durable(result)?;
         }
@@ -1082,8 +1125,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.dispatches.durable.recv())
                         .await
                         .map_err(|_| {
-                            EngineError::State(
-                                "graceful stop timed out settling order dispatch durability".into(),
+                            EngineError::TimedOut(
+                                "order dispatch durability during graceful stop".into(),
                             )
                         })?;
                 self.on_order_dispatch_durable(result).await?;
@@ -1098,15 +1141,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.venue_completions.recv())
                     .await
                     .map_err(|_| {
-                        EngineError::State(format!(
-                            "graceful stop timed out with {} venue mutations outstanding",
+                        EngineError::TimedOut(format!(
+                            "{} venue mutations during graceful stop",
                             self.pending_mutations.len()
                         ))
                     })?
-                    .ok_or_else(|| {
-                        EngineError::State(
-                            "venue task stopped during graceful mutation drain".to_string(),
-                        )
+                    .ok_or(EngineError::TaskStopped {
+                        task: EngineTask::Venue,
+                        detail: "during graceful mutation drain",
                     })?;
             self.take_venue_completion(completion).await?;
             self.drain(clock::now_ns()).await?;

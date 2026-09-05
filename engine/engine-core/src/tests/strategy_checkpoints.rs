@@ -858,7 +858,7 @@ async fn restoring_a_stalled_venue_mutation_uses_the_existing_drain_deadline() {
     .await
     .expect("restoring effects hung past the existing ten-second mutation drain deadline");
     assert!(
-        matches!(result, Err(EngineError::Boot(ref message)) if message.contains("timed out")),
+        matches!(result, Err(EngineError::TimedOut(_))),
         "stalled recovery must fail explicitly"
     );
 }

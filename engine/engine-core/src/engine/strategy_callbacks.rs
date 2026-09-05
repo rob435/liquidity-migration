@@ -20,9 +20,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 Ok(result) => self.on_callback_durable(Some(result))?,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return Ok(()),
                 Err(_) => {
-                    return Err(EngineError::State(
-                        "callback durability channel closed".into(),
-                    ))
+                    return Err(EngineError::TaskStopped {
+                        task: EngineTask::CallbackDurability,
+                        detail: "",
+                    })
                 }
             }
         }
@@ -410,8 +411,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         &mut self,
         completion: Option<CallbackCompletion>,
     ) -> Result<(), EngineError> {
-        let completion = completion
-            .ok_or_else(|| EngineError::State("strategy completion channel closed".into()))?;
+        let completion = completion.ok_or(EngineError::TaskStopped {
+            task: EngineTask::StrategyHost,
+            detail: "",
+        })?;
         self.host
             .callbacks
             .completed(completion.strategy, completion.input_id)
@@ -606,7 +609,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         &mut self,
         result: Option<Result<(), WalError>>,
     ) -> Result<(), EngineError> {
-        result.ok_or_else(|| EngineError::State("callback durability task stopped".into()))??;
+        result.ok_or(EngineError::TaskStopped {
+            task: EngineTask::CallbackDurability,
+            detail: "",
+        })??;
         let write =
             self.host.callbacks.write.take().ok_or_else(|| {
                 EngineError::State("callback durability result has no owner".into())
@@ -741,12 +747,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.venue_completions.recv())
                         .await
                         .map_err(|_| {
-                            EngineError::Boot("timed out restoring callback effect mutation".into())
-                        })?
-                        .ok_or_else(|| {
-                            EngineError::Boot(
-                                "venue task stopped restoring callback effects".into(),
+                            EngineError::TimedOut(
+                                "callback effect mutation during boot restore".into(),
                             )
+                        })?
+                        .ok_or(EngineError::TaskStopped {
+                            task: EngineTask::Venue,
+                            detail: "restoring callback effects",
                         })?;
                 self.take_venue_completion(completion).await?;
                 continue;

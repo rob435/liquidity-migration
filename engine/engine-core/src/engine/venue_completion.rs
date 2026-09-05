@@ -504,8 +504,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         self.release_symbols(symbols);
         if let Some(detail) = halt_failure {
-            return Err(EngineError::State(format!(
-                "account-level halt left at least one opening cancel unconfirmed ({detail}); restarting for venue reconciliation"
+            return Err(EngineError::Reconcile(format!(
+                "account-level halt left at least one opening cancel unconfirmed ({detail})"
             )));
         }
         Ok(())

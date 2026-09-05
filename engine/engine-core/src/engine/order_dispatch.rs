@@ -44,9 +44,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 Ok(result) => self.on_order_dispatch_durable(Some(result)).await?,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
                 Err(_) => {
-                    return Err(EngineError::State(
-                        "dispatch durability channel closed".into(),
-                    ))
+                    return Err(EngineError::TaskStopped {
+                        task: EngineTask::DispatchDurability,
+                        detail: "",
+                    })
                 }
             }
         }
@@ -129,7 +130,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         &mut self,
         result: Option<Result<(), WalError>>,
     ) -> Result<(), EngineError> {
-        result.ok_or_else(|| EngineError::State("dispatch durability task stopped".into()))??;
+        result.ok_or(EngineError::TaskStopped {
+            task: EngineTask::DispatchDurability,
+            detail: "",
+        })??;
         self.ledger.record(
             Segment::BarrierWait,
             clock::now_ns().saturating_sub(self.dispatches.barrier_started_ns),

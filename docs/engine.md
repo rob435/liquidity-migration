@@ -149,6 +149,19 @@ rather than a quarter of work.
 | **8. Effects / Re-plan** | Ordered recovery | Drains unfinished durable strategy effects before boot callbacks and durable input redelivery. | Callbacks can queue effects and timers; admission blocks unready growth. |
 | **9. Inputs** | Feeds Live | Starts market data, signal IPC and control spool; begins producer nonce exchange. | Required producer frontiers suspend growth until established and caught up; boot itself does not wait for participation. |
 
+#### Exit classes
+
+A run that ends without being asked returns one `EngineError`. The supervisor restarts the unit on every class; the class says what the restart settles. The log line starts with the prefix.
+
+| Class | Log prefix | Means | After the restart |
+| --- | --- | --- | --- |
+| `Boot(_)` | `boot:` | This log, config, and venue cannot be started from. | Fails the same way until the input changes. |
+| `TaskStopped { task, .. }` | `<task> stopped` | The venue task, a durability writer, or the strategy host ended. `task` names which. | Fresh tasks; the log carries the rest. |
+| `TimedOut(_)` | `timed out waiting for` | A bounded wait on durability or a venue reply ran out (`MUTATION_DRAIN_TIMEOUT`, 10 s). | The wait is retried from the log. |
+| `Reconcile(_)` | `venue reconciliation needed:` | A halt cancel was not confirmed, so the venue's account and the engine's view may disagree. | Boot phase 6 settles it against the venue. |
+| `State(_)` | `state:` | An invariant on the engine's own state failed. | A defect. Report it with the log. |
+| `Wal(_)`, `Venue(_)` | `log:`, `venue:` | The log or the venue refused. | As that error says. |
+
 #### Durable state and producer protocol
 
 | Boundary | Implemented contract |

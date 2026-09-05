@@ -466,8 +466,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.dispatches.durable.recv())
                         .await
                         .map_err(|_| {
-                            EngineError::State(
-                                "market close timed out settling order dispatch durability".into(),
+                            EngineError::TimedOut(
+                                "order dispatch durability after market close".into(),
                             )
                         })?;
                 self.on_order_dispatch_durable(result).await?;
@@ -478,16 +478,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.venue_completions.recv())
                     .await
                     .map_err(|_| {
-                        EngineError::State(format!(
-                            "market feed closed with {} venue mutations still outstanding",
+                        EngineError::TimedOut(format!(
+                            "{} venue mutations after market close",
                             self.pending_mutations.len()
                         ))
                     })?
-                    .ok_or_else(|| {
-                        EngineError::State(
-                            "venue task stopped while the market-close tail was draining"
-                                .to_string(),
-                        )
+                    .ok_or(EngineError::TaskStopped {
+                        task: EngineTask::Venue,
+                        detail: "while the market-close tail was draining",
                     })?;
             self.take_completion_turn(completion, order_feed).await?;
         }
@@ -619,8 +617,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     if now_ns >= *deadline_ns && self.is_live_halt_order(id)
             )
         }) {
-            return Err(EngineError::State(format!(
-                "opening-halt cancellation for {client_order_id} was accepted but not confirmed by the private stream within {} ms; restarting for venue reconciliation",
+            return Err(EngineError::Reconcile(format!(
+                "opening-halt cancellation for {client_order_id} was accepted but not confirmed by the private stream within {} ms",
                 HALT_CANCEL_CONFIRM_NS / 1_000_000
             )));
         }

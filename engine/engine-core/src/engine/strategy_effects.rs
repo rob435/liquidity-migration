@@ -176,14 +176,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         {
             tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.drain(clock::now_ns()))
                 .await
-                .map_err(|_| EngineError::Boot("timed out restoring strategy effects".into()))??;
+                .map_err(|_| {
+                    EngineError::TimedOut("strategy effects during boot restore".into())
+                })??;
             if self.dispatches.write.is_some() {
                 let result =
                     tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.dispatches.durable.recv())
                         .await
                         .map_err(|_| {
-                            EngineError::Boot(
-                                "timed out restoring order dispatch durability".into(),
+                            EngineError::TimedOut(
+                                "order dispatch durability during boot restore".into(),
                             )
                         })?;
                 self.on_order_dispatch_durable(result).await?;
@@ -194,12 +196,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.venue_completions.recv())
                         .await
                         .map_err(|_| {
-                            EngineError::Boot("timed out restoring strategy effect mutation".into())
-                        })?
-                        .ok_or_else(|| {
-                            EngineError::Boot(
-                                "venue task stopped while restoring strategy effects".into(),
+                            EngineError::TimedOut(
+                                "strategy effect mutation during boot restore".into(),
                             )
+                        })?
+                        .ok_or(EngineError::TaskStopped {
+                            task: EngineTask::Venue,
+                            detail: "while restoring strategy effects",
                         })?;
                 self.take_venue_completion(completion).await?;
             }
