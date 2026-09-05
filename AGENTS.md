@@ -35,6 +35,11 @@ tight context windows. Every document must be **dense, structured, and present-t
 - **Durable Receipts**: History — what changed, when, what it replaced — lives in
   [`CHANGELOG.md`](CHANGELOG.md). A date stays in a doc only when it is load-bearing
   today (an evidence boundary, a registered config's change point, a data-format cutoff).
+- **No Spam**: `CHANGELOG.md` gets one entry per change or per first report of
+  a fault, updated in place when the same matter moves on. A refused deploy, a
+  re-fire of a known incident, the second realm's page for one root cause, or a
+  check that changed nothing gets no entry and no commit. Docs, memories and
+  Telegram follow the same rule: say a thing once, where it lives.
 
 ## Ask Questions, Propose Ideas, Then Decide
 
@@ -125,8 +130,8 @@ is an outage, and outages get fixed, not filed.
   it, with the positions that are open.
 - A crash loop is itself a fault. So is a lane that logs the same failure
   every hour.
-- Write the incident down in CHANGELOG.md with times, the exact error text,
-  and what changed.
+- Write the incident down once in CHANGELOG.md with times, the exact error
+  text, and what changed. A re-fire updates that entry; it does not add one.
 
 ## Do Not Build Safety Machinery
 

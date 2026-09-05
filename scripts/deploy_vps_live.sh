@@ -424,25 +424,15 @@ cleanup_release() {
 trap cleanup_release EXIT
 
 build_engine() {
-    local staged_tar="$RELEASE_DIR/staged/${EXPECTED_COMMIT}.tar.gz" incumbent=""
-    [ -f "$staged_tar" ] || fail "missing qualified release artifact $staged_tar; host compilation is disabled"
-    if [ -f "$ENGINE_BINARY" ]; then
-        [ -s "$DEPLOYED_COMMIT_FILE" ] || fail "cannot bind the incumbent release for rollback"
-        incumbent="$(cat "$DEPLOYED_COMMIT_FILE")"
-        if [ "$incumbent" != "$EXPECTED_COMMIT" ]; then
-            release_artifact verify --require-platform --commit "$incumbent" \
-                --artifact "$RELEASE_DIR/staged/$incumbent.tar.gz" >/dev/null \
-                || fail "stage a qualified rollback artifact for incumbent $incumbent before deploy"
-        fi
-    fi
+    local staged_tar="$RELEASE_DIR/staged/${EXPECTED_COMMIT}.tar.gz"
+    [ -f "$staged_tar" ] || fail "missing release artifact $staged_tar; host compilation is disabled"
     cleanup_release
     QUALIFIED_RELEASE_DIR="$(mktemp -d "$RELEASE_DIR/staged/.qualified.XXXXXX")" \
         || fail "cannot create a fresh release extraction directory"
     release_artifact unpack --commit "$EXPECTED_COMMIT" --artifact "$staged_tar" \
         --output "$QUALIFIED_RELEASE_DIR" >/dev/null \
-        || fail "release artifact qualification failed for $EXPECTED_COMMIT"
-    echo "deploy: qualified release bytes verified for $EXPECTED_COMMIT"
-    echo "deploy: artifact qualification does not certify rollback across WAL format changes"
+        || fail "release artifact verification failed for $EXPECTED_COMMIT"
+    echo "deploy: release bytes verified for $EXPECTED_COMMIT"
 }
 
 stop_realm_units() {

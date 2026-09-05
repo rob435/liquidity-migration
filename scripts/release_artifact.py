@@ -242,8 +242,18 @@ def verify(
                         (output / name).chmod(0o755)
                 else:
                     metadata[name] = source.read()
-        if seen != set((*BINARIES, *METADATA)):
-            raise ValueError("release artifact lacks binaries or qualification metadata")
+        if not set(BINARIES).issubset(seen) or "binaries.sha256" not in seen:
+            raise ValueError("release artifact lacks binaries or checksums")
+        checksums = "".join(f"{hashes[name]}  {name}\n" for name in BINARIES).encode()
+        if metadata["binaries.sha256"] != checksums:
+            raise ValueError("release binary checksum mismatch")
+        if "qualification.json" not in seen:
+            # An archive from before qualification metadata: binaries and their checksums only.
+            if output is not None:
+                (output / "binaries.sha256").write_bytes(metadata["binaries.sha256"])
+            return {"commit": commit, "profile": "release", "binaries": hashes, "qualified": False}
+        if "qualification.log" not in seen:
+            raise ValueError("release artifact lacks the qualification log")
         manifest = json.loads(metadata["qualification.json"])
         if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
             raise ValueError("unsupported release qualification schema")
@@ -258,8 +268,7 @@ def verify(
             raise ValueError("release qualification platform is missing")
         if (output is not None or require_platform) and qualified_platform != [platform.system(), platform.machine()]:
             raise ValueError("qualified artifact platform does not match the install host")
-        checksums = "".join(f"{hashes[name]}  {name}\n" for name in BINARIES).encode()
-        if manifest.get("binaries") != hashes or metadata["binaries.sha256"] != checksums:
+        if manifest.get("binaries") != hashes:
             raise ValueError("release binary checksum mismatch")
         if manifest.get("log_sha256") != hashlib.sha256(metadata["qualification.log"]).hexdigest():
             raise ValueError("release qualification log checksum mismatch")

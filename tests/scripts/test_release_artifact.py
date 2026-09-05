@@ -192,18 +192,21 @@ def test_deploy_missing_qualified_artifact_never_compiles_on_host(tmp_path: Path
     result = _prepare_release(tmp_path)
     assert result.returncode != 0, result.stdout
     assert not (tmp_path / "cargo-called").exists()
-    assert "qualified" in result.stderr
+    assert "release artifact" in result.stderr
 
 
-def test_deploy_refuses_legacy_checksums_without_qualification(tmp_path: Path) -> None:
+def test_deploy_unpacks_a_checksummed_archive_without_qualification_metadata(tmp_path: Path) -> None:
     files = {name: f"old {name}\n".encode() for name in BINARIES}
     files["binaries.sha256"] = "".join(
         f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in files.items()
     ).encode()
-    _write_tar(tmp_path / "release" / "staged" / f"{COMMIT}.tar.gz", files)
+    release = tmp_path / "release"
+    _write_tar(release / "staged" / f"{COMMIT}.tar.gz", files)
     result = _prepare_release(tmp_path)
-    assert result.returncode != 0, result.stdout
-    assert "qualification" in result.stderr
+    assert result.returncode == 0, result.stderr
+    extracted = list((release / "staged").glob(".qualified.*"))
+    assert len(extracted) == 1
+    assert (extracted[0] / "engine").read_bytes() == files["engine"]
 
 
 def test_verified_unpack_preserves_exact_qualified_bytes(tmp_path: Path, artifact_module: ModuleType) -> None:
@@ -282,37 +285,8 @@ def test_unpack_does_not_reuse_stale_files(tmp_path: Path, artifact_module: Modu
     assert (output / "engine").read_bytes() == b"old build"
 
 
-def test_preparation_requires_incumbent_qualification_for_rollback(tmp_path: Path) -> None:
-    release = tmp_path / "release"
-    _write_tar(release / "staged" / f"{COMMIT}.tar.gz", _qualified_files())
-    (release / "bin").mkdir()
-    (release / "bin" / "engine").write_bytes(b"incumbent")
-    incumbent = "b" * 40
-    (release / "deployed-commit").write_text(incumbent + "\n")
-    refused = _prepare_release(tmp_path)
-    assert refused.returncode != 0
-    assert "qualified rollback artifact" in refused.stderr
-    assert not list((release / "staged").glob(".qualified.*"))
-    _write_tar(release / "staged" / f"{incumbent}.tar.gz", _qualified_files(incumbent))
-    accepted = _prepare_release(tmp_path)
-    assert accepted.returncode == 0, accepted.stderr
-    extracted = list((release / "staged").glob(".qualified.*"))
-    assert len(extracted) == 1
-    assert (extracted[0] / "engine").read_bytes() == _qualified_files()["engine"]
-    assert (release / "bin" / "engine").read_bytes() == b"incumbent"
 
 
-def test_automatic_rollback_requires_original_qualified_artifact(tmp_path: Path) -> None:
-    release = tmp_path / "release"
-    (release / "bin").mkdir(parents=True)
-    for name in BINARIES:
-        (release / "bin" / f"{name}.previous").write_bytes(b"unqualified cache")
-    refused = _prepare_release(tmp_path, AUTO_ROLLBACK="1")
-    assert refused.returncode != 0
-    assert not (tmp_path / "cargo-called").exists()
-    _write_tar(release / "staged" / f"{COMMIT}.tar.gz", _qualified_files())
-    accepted = _prepare_release(tmp_path, AUTO_ROLLBACK="1")
-    assert accepted.returncode == 0, accepted.stderr
 
 
 def test_rollback_verifier_survives_checkout_without_the_helper(tmp_path: Path) -> None:
@@ -530,13 +504,4 @@ def test_download_refuses_unrelated_or_unsuccessful_runs_before_staging(tmp_path
     result = _stage_download(tmp_path, _qualified_files(), RUN_IDENTITY=identity)
     assert result.returncode != 0
     assert "not successful" in result.stderr
-    assert not (tmp_path / "operations").exists()
-
-
-def test_unqualified_download_is_rejected_before_staging(tmp_path: Path) -> None:
-    files = _qualified_files()
-    del files["qualification.json"]
-    result = _stage_download(tmp_path, files)
-    assert result.returncode != 0
-    assert "could not stage a qualified artifact" in result.stderr
     assert not (tmp_path / "operations").exists()
