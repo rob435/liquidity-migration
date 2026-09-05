@@ -126,7 +126,7 @@ fn availability_wait(available_ms: i64, wall_ms: i64) -> Duration {
         .min(Duration::from_secs(1))
 }
 
-fn retained_bytes(observation: &SignalObservation) -> usize {
+pub(crate) fn retained_bytes(observation: &SignalObservation) -> usize {
     std::mem::size_of::<SignalObservation>()
         .saturating_add(observation.payload.capacity())
         .saturating_add(observation.source.capacity())
@@ -337,6 +337,7 @@ impl SignalFeed for NoSignals {
 }
 
 mod channel;
+mod readiness;
 mod spool;
 mod unix;
 

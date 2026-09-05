@@ -18,15 +18,19 @@
 //! reconnect raises [`OrderUpdate::StreamReset`], and the engine refreshes its
 //! account view and reads the venue's own history.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::stream::{hand_over, until_closed, AckMemory, Gone, Handover, ReconnectBackoff};
+use crate::RealmCredentials;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::wire::{self, Field};
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::market::{FeedError, OrderFeed};
 use engine_types::orders::{OrderAck, OrderUpdate};
 use engine_types::VenueError;
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -43,17 +47,11 @@ use crate::mono_ns;
 
 /// The venue drops a socket that has said nothing for 60 seconds.
 const PING_EVERY: Duration = Duration::from_secs(30);
-const BACKOFF_START: Duration = Duration::from_millis(250);
-const BACKOFF_CAP: Duration = Duration::from_secs(30);
-/// A socket that lasted this long was a real connection, so the wait between
-/// dials starts over.
-const HEALTHY_AFTER: Duration = Duration::from_secs(30);
 /// How many client order ids to remember so one order acks once.
 const ACK_MEMORY: usize = 8192;
 const CHANNEL_DEPTH: usize = 1024;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
-type Handover = Result<OrderUpdate, FeedError>;
 
 pub struct HyperliquidOrderFeed {
     url: String,
@@ -85,11 +83,7 @@ impl HyperliquidOrderFeed {
         // string, and a malformed one would subscribe to nothing and look
         // exactly like a quiet account.
         let account = address_text(parse_address(creds.key())?);
-        let ids = symbols
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), SymbolId(i as u16)))
-            .collect();
+        let ids = engine_public::symbols::indexed_names(&symbols);
         Ok(Self {
             url: url.to_string(),
             account,
@@ -101,8 +95,7 @@ impl HyperliquidOrderFeed {
     /// Teach the decoder what id a symbol has. Idempotent, and a name already
     /// known keeps the id it had.
     pub fn learn(&mut self, symbol: &str, id: SymbolId) {
-        let mut ids = self.ids.write().expect("the symbol map lock is poisoned");
-        ids.entry(symbol.to_string()).or_insert(id);
+        engine_public::symbols::learn(&self.ids, symbol, id);
     }
 
     fn start(&mut self) {
@@ -111,7 +104,7 @@ impl HyperliquidOrderFeed {
             url: self.url.clone(),
             account: self.account.clone(),
             decoder: Decoder::new(self.ids.clone()),
-            backoff: Duration::ZERO,
+            backoff: ReconnectBackoff::default(),
         };
         tokio::spawn(worker.run(tx));
         self.updates = Some(rx);
@@ -139,20 +132,12 @@ struct Worker {
     url: String,
     account: String,
     decoder: Decoder,
-    backoff: Duration,
+    backoff: ReconnectBackoff,
 }
-
-/// The engine dropped the feed: there is nobody left to hand updates to.
-struct Gone;
 
 impl Worker {
     async fn run(mut self, tx: mpsc::Sender<Handover>) {
-        let dropped = tx.closed();
-        tokio::pin!(dropped);
-        tokio::select! {
-            _ = &mut dropped => (),
-            _ = self.reconnect_forever(&tx) => (),
-        }
+        until_closed(&tx, self.reconnect_forever(&tx)).await;
         tracing::info!("private stream task finished; the engine let the feed go");
     }
 
@@ -173,9 +158,7 @@ impl Worker {
                     if self.pump(socket, tx).await.is_err() {
                         return Gone;
                     }
-                    if opened.elapsed() >= HEALTHY_AFTER {
-                        self.backoff = Duration::ZERO;
-                    }
+                    self.backoff.completed_session(opened.elapsed());
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "private stream did not come up; trying again");
@@ -189,14 +172,7 @@ impl Worker {
     }
 
     async fn wait_before_redialling(&mut self) {
-        if !self.backoff.is_zero() {
-            tokio::time::sleep(self.backoff).await;
-        }
-        self.backoff = if self.backoff.is_zero() {
-            BACKOFF_START
-        } else {
-            (self.backoff * 2).min(BACKOFF_CAP)
-        };
+        self.backoff.wait().await;
     }
 
     async fn connect(&self) -> Result<Socket, FeedError> {
@@ -297,16 +273,19 @@ async fn send(socket: &mut Socket, text: String) -> Result<(), FeedError> {
         .map_err(|e| FeedError::Transport(e.to_string()))
 }
 
-async fn hand_over(tx: &mpsc::Sender<Handover>, item: Handover) -> Result<(), Gone> {
-    tx.send(item).await.map_err(|_| Gone)
+/// Frames in, updates out. No socket and no clock but the receive stamp.
+#[derive(Default, Deserialize)]
+struct PrivateEnvelope {
+    #[serde(default)]
+    channel: Field<String>,
+    #[serde(default)]
+    data: Field<Value>,
 }
 
-/// Frames in, updates out. No socket and no clock but the receive stamp.
 pub(crate) struct Decoder {
     ids: Arc<RwLock<HashMap<Symbol, SymbolId>>>,
     pub(crate) pending: VecDeque<OrderUpdate>,
-    acked: HashSet<String>,
-    acked_order: VecDeque<String>,
+    acknowledgements: AckMemory,
     /// The next `userFills` message is the subscription snapshot.
     pub(crate) awaiting_snapshot: bool,
 }
@@ -316,8 +295,7 @@ impl Decoder {
         Self {
             ids,
             pending: VecDeque::new(),
-            acked: HashSet::new(),
-            acked_order: VecDeque::new(),
+            acknowledgements: AckMemory::new(ACK_MEMORY),
             awaiting_snapshot: true,
         }
     }
@@ -325,15 +303,22 @@ impl Decoder {
     pub(crate) fn ingest(&mut self, text: &str) -> Result<(), FeedError> {
         let frame: Value = serde_json::from_str(text)
             .map_err(|e| FeedError::BadMessage(format!("{e}: {}", first_chars(text))))?;
-        let Some(channel) = frame.get("channel").and_then(Value::as_str) else {
+        let frame: PrivateEnvelope = wire::object(&frame);
+        let Some(channel) = frame.channel.0.as_deref() else {
             return Ok(());
         };
         match channel {
-            "orderUpdates" => self.order_updates(&frame),
-            "userFills" => self.user_fills(&frame),
+            "orderUpdates" => self.order_updates(frame.data.0.as_ref().unwrap_or(&Value::Null)),
+            "userFills" => {
+                self.user_fills(frame.data.0.as_ref().ok_or_else(|| {
+                    FeedError::BadMessage("userFills carries no data".to_string())
+                })?)
+            }
             "error" => {
                 let why = frame
-                    .get("data")
+                    .data
+                    .0
+                    .as_ref()
                     .and_then(Value::as_str)
                     .unwrap_or("no reason");
                 Err(FeedError::Transport(format!(
@@ -346,10 +331,9 @@ impl Decoder {
         }
     }
 
-    fn order_updates(&mut self, frame: &Value) -> Result<(), FeedError> {
-        let rows = frame
-            .get("data")
-            .and_then(Value::as_array)
+    fn order_updates(&mut self, data: &Value) -> Result<(), FeedError> {
+        let rows = data
+            .as_array()
             .ok_or_else(|| FeedError::BadMessage("orderUpdates carries no list".to_string()))?;
         for row in rows {
             let Some(order) = row.get("order") else {
@@ -424,10 +408,7 @@ impl Decoder {
         Ok(())
     }
 
-    fn user_fills(&mut self, frame: &Value) -> Result<(), FeedError> {
-        let data = frame
-            .get("data")
-            .ok_or_else(|| FeedError::BadMessage("userFills carries no data".to_string()))?;
+    fn user_fills(&mut self, data: &Value) -> Result<(), FeedError> {
         let is_snapshot = data
             .get("isSnapshot")
             .and_then(Value::as_bool)
@@ -480,16 +461,7 @@ impl Decoder {
     /// True the first time this id acks. Bounded, so a long run's memory
     /// stays flat.
     fn remember_ack(&mut self, client_order_id: &str) -> bool {
-        if !self.acked.insert(client_order_id.to_string()) {
-            return false;
-        }
-        self.acked_order.push_back(client_order_id.to_string());
-        if self.acked_order.len() > ACK_MEMORY {
-            if let Some(oldest) = self.acked_order.pop_front() {
-                self.acked.remove(&oldest);
-            }
-        }
-        true
+        self.acknowledgements.remember(client_order_id)
     }
 }
 
@@ -785,7 +757,6 @@ mod tests {
         for n in 0..(ACK_MEMORY + 100) {
             assert!(d.remember_ack(&format!("eng-1-{n}")));
         }
-        assert_eq!(d.acked.len(), ACK_MEMORY);
-        assert_eq!(d.acked_order.len(), ACK_MEMORY);
+        assert_eq!(d.acknowledgements.lengths(), (ACK_MEMORY, ACK_MEMORY));
     }
 }

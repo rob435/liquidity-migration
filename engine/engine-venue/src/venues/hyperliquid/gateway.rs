@@ -20,7 +20,7 @@
 //! - **Assets are numbered by position** in the venue's own list, so the list
 //!   is read before the first order and re-read when a symbol is not in it.
 
-use std::collections::HashMap;
+use crate::RealmCredentials;
 
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
@@ -69,8 +69,7 @@ pub struct HyperliquidGateway {
     account: [u8; 20],
     /// The API wallet the account approved. It signs and cannot withdraw.
     signer: SigningKey,
-    names: Vec<Symbol>,
-    ids: HashMap<Symbol, SymbolId>,
+    symbols: engine_public::symbols::SymbolCatalog,
     assets: Assets,
     /// Nonces must climb. Wall milliseconds do, except when two orders leave
     /// inside one millisecond, so the last one used is remembered.
@@ -117,18 +116,12 @@ impl HyperliquidGateway {
     ) -> Result<Self, VenueError> {
         let account = parse_address(creds.key())?;
         let signer = parse_key(creds.secret())?;
-        let ids = symbols
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), SymbolId(i as u16)))
-            .collect();
         Ok(Self {
             realm,
             http: HttpClient::new(base_url),
             account,
             signer,
-            names: symbols,
-            ids,
+            symbols: engine_public::symbols::SymbolCatalog::from_names(symbols),
             assets: Assets::default(),
             last_nonce: 0,
         })
@@ -145,21 +138,16 @@ impl HyperliquidGateway {
     }
 
     pub fn add_symbol(&mut self, name: &str) -> SymbolId {
-        if let Some(id) = self.ids.get(name) {
-            return *id;
-        }
-        let id = SymbolId(u16::try_from(self.names.len()).expect("more than 65535 symbols"));
-        self.names.push(name.to_string());
-        self.ids.insert(name.to_string(), id);
-        id
+        self.symbols.intern(name).expect("more than 65535 symbols")
     }
 
     pub fn symbols(&self) -> &[Symbol] {
-        &self.names
+        self.symbols.names()
     }
 
     fn name_of(&self, id: SymbolId) -> Result<&str, VenueError> {
-        self.names
+        self.symbols
+            .names()
             .get(id.0 as usize)
             .map(String::as_str)
             .ok_or_else(|| {
@@ -614,7 +602,7 @@ impl VenueGateway for HyperliquidGateway {
 
         let (equity_usdt, available_usdt) = parse_margin(&state)?;
         let stops = stops_by_coin(&orders)?;
-        let ids = &self.ids;
+        let ids = self.symbols.ids();
         let resolve = |name: &str| ids.get(name).copied();
         let positions = parse_positions(&state, &stops, &resolve)?;
 

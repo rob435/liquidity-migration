@@ -8,6 +8,7 @@
 //! fields carry the market's own integers rather than decimals, and that a
 //! reply saying `code` anything but 200 is read as a refusal.
 
+use engine_venue::RealmCredentials;
 mod support;
 
 use engine_types::{

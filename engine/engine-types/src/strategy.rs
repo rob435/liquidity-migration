@@ -241,11 +241,55 @@ pub struct SignalGapRequest {
     pub next_sequence: u64,
 }
 
+pub const SIGNAL_READINESS_SCHEMA_VERSION: u16 = 1;
+pub const SIGNAL_READINESS_REQUEST_FILE: &str = "input-readiness-request.json";
+pub const SIGNAL_READINESS_RESPONSE_FILE: &str = "input-readiness-response.json";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalReadinessRequest {
+    pub schema_version: u16,
+    pub boot_nonce: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalReadinessResponse {
+    pub schema_version: u16,
+    pub boot_nonce: String,
+    pub sources: Vec<SignalSourceFrontier>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalSourceFrontier {
+    pub source: String,
+    pub destination: StrategyId,
+    pub published_through: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignalFeedEvent {
+    Observation(SignalObservation),
+    Ready(Vec<SignalSourceFrontier>),
+    ReadinessUnavailable { reason: String },
+}
+
 /// A lossless source of normalized observations. A source blocks its own task;
 /// the core polls this future beside market, private-order, timer, and venue
 /// work and never waits synchronously for the signal worker.
 #[allow(async_fn_in_trait)]
 pub trait SignalFeed {
+    /// Begin a fresh producer participation handshake for this engine run.
+    fn request_readiness(&mut self) -> Result<(), SignalError> {
+        Ok(())
+    }
+
+    /// Readiness carries the producer's durable publication frontier. Feeds
+    /// without a handshake keep explicitly dependent strategies unready.
+    async fn next_event(&mut self) -> Result<SignalFeedEvent, SignalError> {
+        self.next_observation()
+            .await
+            .map(SignalFeedEvent::Observation)
+    }
+
     /// Prefer these exact source-generation prefixes. Later rows from a listed
     /// source remain with the feed. Other rows to blocked destinations wait
     /// until every required prefix is complete; unrelated destinations flow.
@@ -647,6 +691,11 @@ pub trait Strategy {
 
     /// Sleeve names whose inputs this strategy uses for opening decisions.
     /// The core resolves the transitive source dependencies once at boot.
+    /// Require a fresh producer frontier before this sleeve can grow.
+    fn requires_signal_readiness(&self) -> bool {
+        false
+    }
+
     fn input_dependencies(&self) -> Vec<String> {
         Vec::new()
     }

@@ -7,6 +7,7 @@
 //! stop travel in one signed request, and that a refusal buried in an
 //! otherwise-successful reply is read as a refusal.
 
+use engine_venue::RealmCredentials;
 mod support;
 
 use engine_types::{

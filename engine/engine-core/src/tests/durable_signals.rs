@@ -1332,3 +1332,543 @@ async fn runtime_entry_permission_also_cancels_and_refuses_amends_only_for_its_o
     assert!(note_saying(&harness.records, "eng-gap-1-false not amended")
         .contains("runtime_entries_disabled"));
 }
+
+#[tokio::test]
+async fn a_noop_consumer_backpressures_its_next_row_and_preserves_an_independent_consumer() {
+    let delivered = Rc::new(RefCell::new(Vec::new()));
+    let (mut engine, harness) = build(
+        allow_all(),
+        vec![
+            Box::new(QuietStrategy {
+                name: "noop",
+                symbol: "BTCUSDT",
+            }),
+            Box::new(SequenceRecorder {
+                name: "healthy",
+                delivered: delivered.clone(),
+            }),
+        ],
+        &["BTCUSDT"],
+        &[],
+    )
+    .await;
+    let (done, finished) = tokio::sync::oneshot::channel();
+    let mut signals = FinishedSignals {
+        rows: VecDeque::from([
+            source_row("noop.g1", 1, 0),
+            source_row("noop.g1", 2, 0),
+            source_row("healthy.g1", 1, 1),
+        ]),
+        done: Some(done),
+        gaps: Vec::new(),
+        blocked_destinations: Vec::new(),
+    };
+    engine
+        .run_with_signals(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::empty(),
+            &mut signals,
+            async {
+                let _ = finished.await;
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(delivered.lock().unwrap().len(), 1);
+    let records = harness.records.lock().unwrap();
+    let noop_accepted = records.iter().filter(|record| matches!(record,
+        WalRecord::SignalObservation { observation, .. } if observation.destination == StrategyId(0)
+    )).count();
+    assert_eq!(
+        noop_accepted, 1,
+        "an unfinished consumer owns only its current delivery"
+    );
+    assert_eq!(
+        signals.rows.len(),
+        1,
+        "unaccepted bytes remain with the producer"
+    );
+    let WalRecord::SegmentBase {
+        signal_observations,
+        ..
+    } = engine.rotation_base(recent_replay_ms())
+    else {
+        panic!()
+    };
+    assert_eq!(signal_observations.len(), 1);
+}
+
+struct RequiredProducerBuyer(ScopedSignalBuyer);
+
+impl Strategy for RequiredProducerBuyer {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn subscriptions(&self) -> Vec<Subscription> {
+        self.0.subscriptions()
+    }
+    fn requires_signal_readiness(&self) -> bool {
+        true
+    }
+    fn on_market(&mut self, event: &MarketEvent, ctx: &mut dyn StrategyCtx) {
+        self.0.on_market(event, ctx);
+    }
+}
+
+#[tokio::test]
+async fn startup_frontier_absence_blocks_restored_openings() {
+    let strategies = vec![Box::new(RequiredProducerBuyer(ScopedSignalBuyer {
+        name: "restored",
+        symbol: "BTCUSDT",
+        dependency: None,
+        reduce_only: false,
+    })) as Box<dyn Strategy>];
+    let prior = consumed_row(source_row("producer.g1", 9, 0));
+    let (mut engine, harness) = build(allow_all(), strategies, &["BTCUSDT"], &prior).await;
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        harness.sends.lock().unwrap().is_empty(),
+        "restored growth requires producer participation before unseen history can be ruled out"
+    );
+}
+
+#[tokio::test]
+async fn an_absent_producer_does_not_strand_attributed_reductions_or_protective_stops() {
+    let mut prior = consumed_row(source_row("producer.g1", 9, 0));
+    let (record, _) = working_order(0, 0, false);
+    prior.push(record);
+    prior.push(WalRecord::OrderUpdate {
+        update: OrderUpdate::Fill {
+            exec_id: "producer-outage-fill".into(),
+            client_order_id: "eng-gap-0-false".into(),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 0.01,
+            px: 30_000.0,
+            fee: Some(0.01),
+            is_maker: false,
+            forced_close: None,
+            venue_ts_ms: recent_replay_ms(),
+            recv_ns: 2,
+        },
+    });
+    let (mut engine, harness) = build_with_venue_state(
+        allow_all(),
+        vec![Box::new(RequiredProducerBuyer(ScopedSignalBuyer {
+            name: "restored",
+            symbol: "BTCUSDT",
+            dependency: None,
+            reduce_only: true,
+        }))],
+        &["BTCUSDT"],
+        &prior,
+        vec![],
+        vec![engine_types::PositionView {
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 0.01,
+            entry_px: 30_000.0,
+            stop_attached: true,
+            stop_px: 29_000.0,
+            leverage: None,
+        }],
+    )
+    .await;
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+    let sends = harness.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    assert!(sends[0].reduce_only);
+    assert_eq!(sends[0].qty, 0.01);
+    assert!(
+        harness.stops.lock().unwrap().is_empty(),
+        "recovery retains the venue's existing protective stop"
+    );
+}
+
+struct RejectingSignalConsumer;
+impl Strategy for RejectingSignalConsumer {
+    fn name(&self) -> &str {
+        "rejecting"
+    }
+    fn subscriptions(&self) -> Vec<Subscription> {
+        Vec::new()
+    }
+    fn on_signal(&mut self, row: &SignalObservation, ctx: &mut dyn StrategyCtx) {
+        ctx.emit(Action::RejectSignalObservation {
+            strategy: row.destination,
+            source: row.source.clone(),
+            sequence: row.sequence,
+            observation_id: row.observation_id.clone(),
+            reason: "invalid payload".into(),
+        });
+    }
+}
+
+#[tokio::test]
+async fn rejection_barrier_failure_retains_accepted_input_for_restart() {
+    let tape = tape();
+    let (mut wal, records) = MockWal::new(tape.clone());
+    wal.fail_barrier_after = Some("signal_observation_rejected");
+    let (risk, _) = MockRisk::with(allow_all());
+    let (venue, _) = MockVenue::new(tape, &[]);
+    let mut engine = Engine::boot(
+        &settings(),
+        "rejected-input",
+        wal,
+        risk,
+        venue,
+        vec![Box::new(RejectingSignalConsumer)],
+        &[],
+    )
+    .await
+    .unwrap();
+    let mut signals = FinishedSignals {
+        rows: VecDeque::from([source_row("reject.g1", 1, 0)]),
+        done: None,
+        gaps: Vec::new(),
+        blocked_destinations: Vec::new(),
+    };
+    let result = engine
+        .run_with_signals(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::empty(),
+            &mut signals,
+            std::future::pending(),
+        )
+        .await;
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("test barrier failure"));
+    let WalRecord::SegmentBase {
+        signal_observations,
+        ..
+    } = engine.rotation_base(recent_replay_ms())
+    else {
+        panic!()
+    };
+    assert_eq!(signal_observations.len(), 1);
+    let log = records.lock().unwrap();
+    assert!(!log
+        .iter()
+        .any(|row| matches!(row, WalRecord::SignalObservationConsumed { .. })));
+    let cut = log
+        .iter()
+        .position(|row| matches!(row, WalRecord::SignalObservationRejected { .. }))
+        .unwrap();
+    let prefix = &log[..cut];
+    assert_eq!(
+        crate::signal_state::SignalState::replay(prefix, 1)
+            .unwrap()
+            .observations()
+            .count(),
+        1
+    );
+    assert_eq!(
+        crate::signal_state::SignalState::replay(&log, 1)
+            .unwrap()
+            .observations()
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn rejecting_consumers_release_capacity_and_terminal_outcomes_survive_rotation() {
+    let (mut engine, harness) = build(
+        allow_all(),
+        vec![Box::new(RejectingSignalConsumer)],
+        &[],
+        &[],
+    )
+    .await;
+    let (done, finished) = tokio::sync::oneshot::channel();
+    let mut signals = FinishedSignals {
+        rows: (1..=300)
+            .map(|seq| source_row("reject.g1", seq, 0))
+            .collect(),
+        done: Some(done),
+        gaps: Vec::new(),
+        blocked_destinations: Vec::new(),
+    };
+    engine
+        .run_with_signals(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::empty(),
+            &mut signals,
+            async {
+                let _ = finished.await;
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        harness
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| matches!(row, WalRecord::SignalObservationRejected { .. }))
+            .count(),
+        300
+    );
+    let base = engine.rotation_base(recent_replay_ms());
+    let state = crate::signal_state::SignalState::replay(&[base], 1).unwrap();
+    assert_eq!(state.observations().count(), 0);
+    assert_eq!(state.cursors().next().unwrap().sequence, 300);
+    assert_eq!(
+        state.classify(&source_row("reject.g1", 300, 0)).unwrap(),
+        crate::signal_state::Admission::Duplicate
+    );
+}
+
+struct FrontierSignals {
+    inner: FinishedSignals,
+    frontiers: Option<Vec<engine_types::SignalSourceFrontier>>,
+}
+impl engine_types::SignalFeed for FrontierSignals {
+    fn set_gap_requests(
+        &mut self,
+        gaps: &[engine_types::SignalGapRequest],
+        blocked: &[StrategyId],
+    ) -> Result<(), engine_types::SignalError> {
+        self.inner.set_gap_requests(gaps, blocked)
+    }
+    fn acknowledge_last(&mut self) -> Result<(), engine_types::SignalError> {
+        self.inner.acknowledge_last()
+    }
+    fn defer_last(&mut self, row: SignalObservation) -> Result<(), engine_types::SignalError> {
+        self.inner.defer_last(row)
+    }
+    async fn next_observation(&mut self) -> Result<SignalObservation, engine_types::SignalError> {
+        match self.inner.next_observation().await {
+            Err(engine_types::SignalError::Closed) => std::future::pending().await,
+            result => result,
+        }
+    }
+    async fn next_event(
+        &mut self,
+    ) -> Result<engine_types::SignalFeedEvent, engine_types::SignalError> {
+        if let Some(frontiers) = self.frontiers.take() {
+            return Ok(engine_types::SignalFeedEvent::Ready(frontiers));
+        }
+        self.next_observation()
+            .await
+            .map(engine_types::SignalFeedEvent::Observation)
+    }
+}
+
+struct MarketAfterSignals {
+    ready: Option<tokio::sync::oneshot::Receiver<()>>,
+    feed: ScriptFeed,
+}
+impl MarketFeed for MarketAfterSignals {
+    fn admit(&mut self, symbol: &str, feed: Feed) -> Option<SymbolId> {
+        self.feed.admit(symbol, feed)
+    }
+    async fn next_event(&mut self) -> Result<MarketEvent, FeedError> {
+        if let Some(ready) = self.ready.as_mut() {
+            let _ = ready.await;
+        }
+        self.ready = None;
+        self.feed.next_event().await
+    }
+}
+
+struct RequiredConsumingBuyer(RequiredProducerBuyer);
+impl Strategy for RequiredConsumingBuyer {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn subscriptions(&self) -> Vec<Subscription> {
+        self.0.subscriptions()
+    }
+    fn requires_signal_readiness(&self) -> bool {
+        true
+    }
+    fn on_market(&mut self, event: &MarketEvent, ctx: &mut dyn StrategyCtx) {
+        self.0.on_market(event, ctx);
+    }
+    fn on_signal(&mut self, row: &SignalObservation, ctx: &mut dyn StrategyCtx) {
+        ctx.emit(Action::ConsumeSignalObservation {
+            strategy: row.destination,
+            source: row.source.clone(),
+            sequence: row.sequence,
+            observation_id: row.observation_id.clone(),
+        });
+    }
+}
+
+#[tokio::test]
+async fn declared_producer_frontier_requires_all_missing_rows_before_restored_growth() {
+    let strategies = vec![Box::new(RequiredConsumingBuyer(RequiredProducerBuyer(
+        ScopedSignalBuyer {
+            name: "restored",
+            symbol: "BTCUSDT",
+            dependency: None,
+            reduce_only: false,
+        },
+    ))) as Box<dyn Strategy>];
+    let (mut engine, harness) = build(
+        allow_all(),
+        strategies,
+        &["BTCUSDT"],
+        &consumed_row(source_row("producer.g1", 9, 0)),
+    )
+    .await;
+    let (done, ready) = tokio::sync::oneshot::channel();
+    let mut signals = FrontierSignals {
+        inner: FinishedSignals {
+            rows: VecDeque::from([
+                source_row("producer.g1", 12, 0),
+                source_row("producer.g1", 10, 0),
+                source_row("producer.g1", 11, 0),
+            ]),
+            done: Some(done),
+            gaps: Vec::new(),
+            blocked_destinations: Vec::new(),
+        },
+        frontiers: Some(vec![engine_types::SignalSourceFrontier {
+            source: "producer.g1".into(),
+            destination: StrategyId(0),
+            published_through: 12,
+        }]),
+    };
+    engine
+        .run_with_signals(
+            &mut MarketAfterSignals {
+                ready: Some(ready),
+                feed: ScriptFeed::quotes(SymbolId(0), 1, true),
+            },
+            &mut ScriptOrderFeed::empty(),
+            &mut signals,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(harness.sends.lock().unwrap().len(), 1);
+    let records = harness.records.lock().unwrap();
+    let accepted = records
+        .iter()
+        .filter_map(|row| match row {
+            WalRecord::SignalObservation { observation, .. } => Some(observation.sequence),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(accepted, [10, 11, 12]);
+    let gap = records.iter().position(|row| matches!(row, WalRecord::SignalGapRecorded { gap, .. } if gap.next_sequence == 10 && gap.observed_sequence == 12)).unwrap();
+    let send = records
+        .iter()
+        .position(|row| matches!(row, WalRecord::OrderSent { .. }))
+        .unwrap();
+    assert!(gap < send);
+}
+
+struct RequiredQuiet;
+impl Strategy for RequiredQuiet {
+    fn name(&self) -> &str {
+        "required"
+    }
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: "BTCUSDT".into(),
+            feed: Feed::Quote,
+        }]
+    }
+    fn requires_signal_readiness(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn startup_unready_cancels_existing_growth_but_keeps_reduction_orders() {
+    let mut prior = consumed_row(source_row("producer.g1", 9, 0));
+    let mut working = Vec::new();
+    for reduce_only in [false, true] {
+        let (record, order) = working_order(0, 0, reduce_only);
+        prior.push(record);
+        working.push(order);
+    }
+    let (mut engine, harness) = build_with_venue_state(
+        allow_all(),
+        vec![Box::new(RequiredQuiet)],
+        &["BTCUSDT"],
+        &prior,
+        working,
+        vec![],
+    )
+    .await;
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        *harness.cancels.lock().unwrap(),
+        vec![(SymbolId(0), "eng-gap-0-false".into())],
+        "existing growth needs the same producer readiness as a new opening"
+    );
+}
+
+#[tokio::test]
+async fn rewound_producer_refusal_keeps_the_engine_running_and_growth_blocked() {
+    let strategies = vec![Box::new(RequiredProducerBuyer(ScopedSignalBuyer {
+        name: "restored",
+        symbol: "BTCUSDT",
+        dependency: None,
+        reduce_only: false,
+    })) as Box<dyn Strategy>];
+    let (mut engine, harness) = build(
+        allow_all(),
+        strategies,
+        &["BTCUSDT"],
+        &consumed_row(source_row("producer.g1", 9, 0)),
+    )
+    .await;
+    let (done, ready) = tokio::sync::oneshot::channel();
+    let mut signals = FrontierSignals {
+        inner: FinishedSignals {
+            rows: VecDeque::new(),
+            done: Some(done),
+            gaps: Vec::new(),
+            blocked_destinations: Vec::new(),
+        },
+        frontiers: Some(vec![engine_types::SignalSourceFrontier {
+            source: "producer.g1".into(),
+            destination: StrategyId(0),
+            published_through: 0,
+        }]),
+    };
+    engine
+        .run_with_signals(
+            &mut MarketAfterSignals {
+                ready: Some(ready),
+                feed: ScriptFeed::quotes(SymbolId(0), 1, true),
+            },
+            &mut ScriptOrderFeed::empty(),
+            &mut signals,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+    assert!(harness.sends.lock().unwrap().is_empty());
+    assert!(note_saying(&harness.records, "producer readiness refused")
+        .contains("rewound to 0 behind durable cursor 9"));
+}

@@ -26,9 +26,7 @@ use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
 use serde_json::Value;
 
 use super::realm::VariationalRealm;
-use crate::http::HttpClient;
-
-const PATH_STATS: &str = "/metadata/stats";
+use engine_public::venues::variational::public::StatsClient;
 
 /// What the venue's account is called in a lease file. There is no account
 /// number to use: nothing here authenticates, so the lease names the venue's
@@ -45,7 +43,7 @@ const NO_TRADING_API: &str =
 
 pub struct VariationalGateway {
     realm: VariationalRealm,
-    http: HttpClient,
+    http: StatsClient,
     names: Vec<Symbol>,
 }
 
@@ -71,7 +69,7 @@ impl VariationalGateway {
     fn build(realm: VariationalRealm, base_url: &str, symbols: Vec<Symbol>) -> Self {
         Self {
             realm,
-            http: HttpClient::new(base_url),
+            http: StatsClient::for_test(base_url),
             names: symbols,
         }
     }
@@ -92,7 +90,7 @@ impl VariationalGateway {
     /// The venue's market statistics. The whole of its public API, and what
     /// the market feed reads too.
     pub async fn stats(&self) -> Result<Value, VenueError> {
-        self.http.get(PATH_STATS, "", &[]).await
+        self.http.stats().await
     }
 
     fn refuse<T>(&self) -> Result<T, VenueError> {

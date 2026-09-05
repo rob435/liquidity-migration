@@ -4,9 +4,7 @@
 //! Baselines from tests/venue/test_venue_protection.py: reference price 10.0,
 //! fallback stop fraction 0.07, so a long stop sits at 9.3 and a short at 10.7.
 
-mod common;
-
-use common::*;
+use super::common::*;
 use engine_risk::Kernel;
 use engine_types::orders::{Side, StopSpec};
 use engine_types::risk::{DenyReason, RiskKernel, RiskVerdict};

@@ -176,3 +176,84 @@ async fn immediate_timers_let_the_private_feed_task_run() {
         "private task first ran after all {callbacks} callbacks"
     );
 }
+
+struct DurableFlood;
+impl Strategy for DurableFlood {
+    fn name(&self) -> &str {
+        "durable-flood"
+    }
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![]
+    }
+    fn on_boot(&mut self, ctx: &mut dyn StrategyCtx) {
+        if ctx.strategy_global_checkpoint().is_some() {
+            return;
+        }
+        for index in 0..1024_u64 {
+            ctx.emit(engine_types::Action::SetStrategyGlobalCheckpoint {
+                strategy: StrategyId(0),
+                checkpoint: StrategyCheckpoint {
+                    schema_version: 1,
+                    decision_fingerprint: "durable-flood".into(),
+                    payload: index.to_le_bytes().to_vec(),
+                },
+            });
+        }
+    }
+}
+
+#[tokio::test]
+async fn durable_effect_flood_yields_to_private_input_and_restarts_its_suffix() {
+    let (mut engine, h) = build(allow_all(), vec![Box::new(DurableFlood)], &[], &[]).await;
+    let records = h.records.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        loop {
+            if records
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|record| matches!(record, WalRecord::StrategyGlobalCheckpoint { .. }))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        tx.send(()).unwrap();
+    });
+    engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut PrivateCloseFromTask(rx),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    task.await.unwrap();
+    let records = h.records.lock().unwrap().clone();
+    let applied = records
+        .iter()
+        .filter(|record| matches!(record, WalRecord::StrategyGlobalCheckpoint { .. }))
+        .count();
+    assert!(
+        applied <= 256,
+        "durable effects starved the private input: {applied}"
+    );
+    for replayed in [records, vec![engine.rotation_base(recent_replay_ms())]] {
+        let (mut restarted, recovered) =
+            build(allow_all(), vec![Box::new(DurableFlood)], &[], &replayed).await;
+        restarted.finish().await.unwrap();
+        let remaining = recovered
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|record| matches!(record, WalRecord::StrategyGlobalCheckpoint { .. }))
+            .count();
+        assert_eq!(
+            applied + remaining,
+            1024,
+            "restart must execute each retained checkpoint exactly once"
+        );
+    }
+}

@@ -44,6 +44,7 @@ fn base(mark: &str) -> WalRecord {
         signal_cursors: Vec::new(),
         signal_subscriptions: Vec::new(),
         signal_gaps: Vec::new(),
+        strategy_effects: Default::default(),
         runtime_control_requests: Vec::new(),
         runtime_control_consumed: Vec::new(),
         open_orders: Vec::new(),
@@ -227,7 +228,7 @@ fn gap_record_and_rotation_keep_the_exact_missing_prefix() {
     assert_eq!(records[0].1, rotated);
     let bytes = fs::read(dir.path().join("engine.wal.000002")).unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&bytes[16..]).unwrap();
-    assert_eq!(payload["kind"], "segment_base_v2");
+    assert_eq!(payload["kind"], "segment_base_v3");
 }
 
 /// The crash test: a rotation cut off at ANY byte leaves boot replaying the
@@ -390,4 +391,102 @@ fn the_lock_on_the_family_path_survives_a_rotation() {
         "the family lock still refuses a second writer after rotation"
     );
     drop(held);
+}
+
+#[test]
+fn effect_rotation_requires_all_mandatory_state_without_truncating() {
+    for missing in ["strategy_effects", "signal_gaps"] {
+        let dir = TempDir::new().unwrap();
+        let path = log_path(&dir);
+        let mut value = serde_json::to_value(base("required-effects")).unwrap();
+        assert_eq!(value["kind"], "segment_base_v3");
+        value.as_object_mut().unwrap().remove(missing);
+        let bytes = write_raw_record(&path, &value);
+        assert!(
+            matches!(
+                WalWriter::open(&path),
+                Err(engine_wal::WalError::Corrupt { .. })
+            ),
+            "{missing}"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            bytes,
+            "{missing} must not be repaired as a torn tail"
+        );
+    }
+    for kind in ["segment_base", "segment_base_v2"] {
+        let dir = TempDir::new().unwrap();
+        let path = log_path(&dir);
+        let mut value = serde_json::to_value(base("legacy-effects")).unwrap();
+        value["kind"] = kind.into();
+        value.as_object_mut().unwrap().remove("strategy_effects");
+        let bytes = write_raw_record(&path, &value);
+        let (_, rows) = WalWriter::open(&path).unwrap();
+        assert!(
+            matches!(&rows[0].1, WalRecord::SegmentBase { strategy_effects, .. } if strategy_effects.transitions.is_empty())
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn durable_effect_identity_and_suffix_survive_rotation() {
+    use engine_types::{Action, StrategyEffectsState, StrategyId, StrategyTransitionState};
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let transition = StrategyTransitionState {
+        id: 17,
+        strategy: StrategyId(0),
+        effects: vec![Action::Cancel {
+            symbol: engine_types::SymbolId(0),
+            client_order_id: "order-a".into(),
+        }],
+        order_ids: vec![None],
+        completed: vec![],
+    };
+    let queued = WalRecord::StrategyTransitionQueued {
+        transition: transition.clone(),
+    };
+    let (mut wal, _) = WalWriter::open(&path).unwrap();
+    wal.append(&queued).unwrap();
+    wal.barrier().unwrap();
+    let mut rotated = base("pending-effect");
+    let WalRecord::SegmentBase {
+        strategy_effects, ..
+    } = &mut rotated
+    else {
+        unreachable!()
+    };
+    *strategy_effects = StrategyEffectsState {
+        next_transition_id: 18,
+        transitions: vec![transition.clone()],
+    };
+    wal.rotate(&rotated).unwrap();
+    wal.append(&WalRecord::StrategyEffectCompleted {
+        transition_id: 17,
+        effect_index: 0,
+    })
+    .unwrap();
+    wal.barrier().unwrap();
+    drop(wal);
+    let (_, current) = open_current(&path).unwrap();
+    let WalRecord::SegmentBase {
+        strategy_effects, ..
+    } = &current[0].1
+    else {
+        panic!("rotation missing")
+    };
+    assert_eq!(strategy_effects.next_transition_id, 18);
+    assert_eq!(strategy_effects.transitions, [transition]);
+    assert!(matches!(
+        &current[1].1,
+        WalRecord::StrategyEffectCompleted {
+            transition_id: 17,
+            effect_index: 0
+        }
+    ));
+    let (chain, damaged) = replay_chain(&path).unwrap();
+    assert!(!damaged);
+    assert!(chain.iter().any(|(_, record)| record == &queued));
 }

@@ -404,6 +404,13 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             names.symbol(*symbol),
             if *latched { "alone" } else { "eligible" }
         ),
+        WalRecord::StrategyTransitionQueued { transition } => format!(
+            "transition {} by {}: {} effects",
+            transition.id, names.strategy(transition.strategy), transition.effects.len()
+        ),
+        WalRecord::StrategyEffectCompleted { transition_id, effect_index } => format!(
+            "effect completed {transition_id} #{effect_index}"
+        ),
         WalRecord::StrategyCheckpoint {
             strategy,
             symbol,
@@ -476,6 +483,9 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             sequence,
             names.strategy(*strategy),
             observation_id
+        ),
+        WalRecord::SignalObservationRejected { strategy, source, sequence, observation_id, reason, .. } => format!(
+            "signal rejected {source} #{sequence} by {} {observation_id}: {reason}", names.strategy(*strategy)
         ),
         WalRecord::RuntimeControlAccepted { request, .. } => format!(
             "runtime    {} {} {:?}",

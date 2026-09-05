@@ -16,20 +16,20 @@ name = "engine"
 path = "src/main.rs"
 
 [dependencies]
-engine-types = { path = "../engine-types" }
-engine-wal = { path = "../engine-wal" }
-engine-marketdata = { path = "../engine-marketdata" }
-engine-venue = { path = "../engine-venue" }
-engine-risk = { path = "../engine-risk" }
-engine-strategies = { path = "../engine-strategies" }
-tokio = { version = "1.53.1", features = ["rt", "net", "time", "io-util", "macros", "sync", "signal"] }
-toml = "1.1.4"
-serde_json = "1.0.151"
-tracing = "0.1.44"
-hdrhistogram = "7.6.0"
-sha2 = "0.11.0"
-hex = "0.4.3"
-libc = "0.2"
-serde = { version = "1.0.229", features = ["derive"] }
-thiserror = "2.0.20"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+engine-types = { workspace = true }
+engine-wal = { workspace = true }
+engine-marketdata = { workspace = true }
+engine-venue = { workspace = true }
+engine-risk = { workspace = true }
+engine-strategies = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "macros", "sync", "signal"] }
+toml = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+tracing = { workspace = true }
+hdrhistogram = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

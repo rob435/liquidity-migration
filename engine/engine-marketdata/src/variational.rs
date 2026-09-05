@@ -22,9 +22,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use engine_public::venues::variational::parse::parse_stats;
+use engine_public::venues::variational::public::StatsClient;
+use engine_public::VariationalRealm;
 use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Subscription, SymbolId};
-use engine_venue::venues::variational::parse::parse_stats;
-use engine_venue::{VariationalGateway, VariationalRealm};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -103,19 +104,12 @@ impl VariationalPublicFeed {
     fn start(&mut self) {
         let (events, inbox) = mpsc::channel(QUEUE_DEPTH);
         let gateway = match &self.base_url {
-            Some(url) => Ok(VariationalGateway::for_test(url, self.realm, Vec::new())),
-            None => VariationalGateway::new(self.realm, Vec::new()),
+            Some(url) => StatsClient::for_test(url),
+            None => StatsClient::new(self.realm),
         };
         let ids = self.ids.clone();
         let poll = self.poll;
         let handle = tokio::spawn(async move {
-            let gateway = match gateway {
-                Ok(gateway) => gateway,
-                Err(e) => {
-                    let _ = events.send(Err(FeedError::Transport(e.to_string()))).await;
-                    return;
-                }
-            };
             poll_forever(gateway, ids, poll, events).await;
         });
         self.inbox = Some(Inbox {
@@ -151,7 +145,7 @@ impl MarketFeed for VariationalPublicFeed {
 }
 
 async fn poll_forever(
-    gateway: VariationalGateway,
+    gateway: StatsClient,
     ids: Arc<RwLock<HashMap<String, SymbolId>>>,
     poll: Duration,
     events: mpsc::Sender<Result<MarketEvent, FeedError>>,

@@ -1257,7 +1257,20 @@ async fn private_updates_are_polled_between_bounded_cancel_groups() {
         cancels: 11,
         fired: false,
     };
-    let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
+    let ids: Vec<String> = (0..11).map(|i| format!("eng-cancel-burst-{i}")).collect();
+    let replayed = super::resting_orders::owned_resting_replay("cancel-burst", &ids);
+    let working = ids
+        .iter()
+        .map(|id| still_working(id, "BTCUSDT", 0.01))
+        .collect();
+    let (mut engine, h) = build_with_venue_orders(
+        allow_all(),
+        vec![Box::new(burst)],
+        &["BTCUSDT"],
+        &replayed,
+        working,
+    )
+    .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     let mut order_feed = PrivateUpdateAfterFirstCancelBatch {
         cancels: h.cancels.clone(),
@@ -1490,30 +1503,32 @@ async fn a_flooded_wake_drops_entries_but_never_exits() {
     // The cap exists so a runaway strategy cannot wedge the loop — but a
     // de-risking order queued behind the flood must still get out, or the
     // strategy is stranded holding a position it believes it exited.
-    let burst = BurstEmitter {
-        symbol: "BTCUSDT".into(),
-        entries: 68,
-        exits: 2,
-        fired: false,
-    };
-    let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
-    let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    engine
-        .run(
-            &mut ScriptFeed::quotes(symbol, 1, true),
-            &mut ScriptOrderFeed::empty(),
-            std::future::pending::<()>(),
-        )
-        .await
-        .unwrap();
+    for opening_count in [68, 255, 256, 257, 1024] {
+        let burst = BurstEmitter {
+            symbol: "BTCUSDT".into(),
+            entries: opening_count,
+            exits: 2,
+            fired: false,
+        };
+        let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
+        let symbol = engine.market().table.get("BTCUSDT").unwrap();
+        engine
+            .run(
+                &mut ScriptFeed::quotes(symbol, 1, true),
+                &mut ScriptOrderFeed::empty(),
+                std::future::pending::<()>(),
+            )
+            .await
+            .unwrap();
 
-    let sends = h.sends.lock().unwrap();
-    let exits = sends.iter().filter(|s| s.reduce_only).count();
-    let entries = sends.iter().filter(|s| !s.reduce_only).count();
-    assert_eq!(exits, 2, "both exits reach the venue");
-    assert!(entries <= 64, "the flood of entries is capped: {entries}");
-    let note = note_saying(&h.records, "dropped");
-    assert!(note.contains("entries"), "the drop is named: {note}");
+        let sends = h.sends.lock().unwrap();
+        let exits = sends.iter().filter(|s| s.reduce_only).count();
+        let entries = sends.iter().filter(|s| !s.reduce_only).count();
+        assert_eq!(exits, 2, "both exits reach the venue");
+        assert!(entries <= 64, "the flood of entries is capped: {entries}");
+        let note = note_saying(&h.records, "dropped");
+        assert!(note.contains("entries"), "the drop is named: {note}");
+    }
 }
 
 /// Emits one reduce-only exit that (wrongly) still carries a stop.
@@ -2626,4 +2641,47 @@ async fn the_bench_runs_the_real_loop_and_fills_the_histograms() {
     assert!(!report.torn_tail);
     assert!(result.table().contains("write it down"));
     assert!(result.as_json().contains("\"orders\":30"));
+}
+
+#[tokio::test]
+async fn a_flooded_sleeve_cannot_discard_another_sleeves_exit() {
+    let burst = BurstEmitter {
+        symbol: "BTCUSDT".into(),
+        entries: 1024,
+        exits: 2,
+        fired: false,
+    };
+    let (mut other, _) = Buyer::new("BTCUSDT", 1, 0.01);
+    other.reduce_only = true;
+    let (mut engine, h) = build(
+        allow_all(),
+        vec![Box::new(burst), Box::new(other)],
+        &["BTCUSDT"],
+        &[],
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    let sends = h.sends.lock().unwrap();
+    assert_eq!(
+        [
+            sends
+                .iter()
+                .filter(|request| request.reduce_only && request.strategy == StrategyId(0))
+                .count(),
+            sends
+                .iter()
+                .filter(|request| request.reduce_only && request.strategy == StrategyId(1))
+                .count(),
+        ],
+        [2, 1],
+        "the flood must retain both sleeves' exits"
+    );
 }

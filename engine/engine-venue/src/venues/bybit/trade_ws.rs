@@ -1,5 +1,7 @@
 //! Persistent Bybit WebSocket order entry.
 
+#[cfg(test)]
+use crate::RealmCredentials;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 

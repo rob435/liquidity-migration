@@ -24,6 +24,7 @@
 //! When the login frame has been exercised against the venue, this becomes an
 //! ordinary socket feed and the rest of the adapter does not move.
 
+use crate::RealmCredentials;
 use std::time::Duration;
 
 use tokio::time::Instant;

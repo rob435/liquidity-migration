@@ -660,3 +660,95 @@ async fn a_socket_frame_is_only_a_prompt_to_read_the_durable_spool() {
     drop(socket);
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+async fn wait_readiness_request(
+    path: &Path,
+    previous: &str,
+) -> engine_types::SignalReadinessRequest {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Ok(bytes) = std::fs::read(path) {
+                let request: engine_types::SignalReadinessRequest =
+                    serde_json::from_slice(&bytes).unwrap();
+                if request.boot_nonce != previous {
+                    return request;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("readiness request is atomically published")
+}
+
+#[tokio::test]
+async fn producer_readiness_ignores_stale_nonce_and_survives_cancelled_polls() {
+    use engine_types::{SignalFeedEvent, SignalReadinessResponse, SignalSourceFrontier};
+    let directory = crate::testpath::temp_path("producer-readiness");
+    std::fs::create_dir_all(directory.path()).unwrap();
+    let response_path = directory
+        .path()
+        .join(engine_types::SIGNAL_READINESS_RESPONSE_FILE);
+    let stale = SignalReadinessResponse {
+        schema_version: 1,
+        boot_nonce: "old-boot".into(),
+        sources: vec![SignalSourceFrontier {
+            source: "worker.g1".into(),
+            destination: StrategyId(0),
+            published_through: 9,
+        }],
+    };
+    publish_test_row(&response_path, &serde_json::to_vec(&stale).unwrap());
+    let mut feed =
+        SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
+    feed.request_readiness().unwrap();
+    let request_path = directory
+        .path()
+        .join(engine_types::SIGNAL_READINESS_REQUEST_FILE);
+    let request = wait_readiness_request(&request_path, &stale.boot_nonce).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), feed.next_event())
+            .await
+            .is_err()
+    );
+    assert_ne!(request.boot_nonce, stale.boot_nonce);
+    let mut response = stale;
+    response.boot_nonce = request.boot_nonce.clone();
+    publish_test_row(&response_path, &serde_json::to_vec(&response).unwrap());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), feed.next_event())
+            .await
+            .unwrap()
+            .unwrap(),
+        SignalFeedEvent::Ready(response.sources)
+    );
+    feed.request_readiness().unwrap();
+    let fresh = wait_readiness_request(&request_path, &request.boot_nonce).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), feed.next_event())
+            .await
+            .is_err(),
+        "the previous boot response cannot ready another run"
+    );
+    assert_ne!(request.boot_nonce, fresh.boot_nonce);
+}
+
+#[tokio::test]
+async fn readiness_response_failure_is_a_control_event_not_a_signal_feed_failure() {
+    let directory = crate::testpath::temp_path("producer-readiness-malformed");
+    std::fs::create_dir_all(directory.path()).unwrap();
+    publish_test_row(
+        &directory
+            .path()
+            .join(engine_types::SIGNAL_READINESS_RESPONSE_FILE),
+        b"{ malformed",
+    );
+    let mut feed =
+        SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
+    feed.request_readiness().unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(1), feed.next_event())
+        .await
+        .unwrap();
+    assert!(result.is_ok(), "readiness failure must suspend growth without aborting account and exit service: {result:?}");
+    assert!(format!("{result:?}").contains("ReadinessUnavailable"));
+}

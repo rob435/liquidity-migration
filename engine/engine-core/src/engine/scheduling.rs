@@ -174,14 +174,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 })?;
                 let key = (strategy, symbol);
                 if self.host.checkpoints.get(&key) != Some(&checkpoint) {
-                    self.host.checkpoints.insert(key, checkpoint.clone());
                     self.wal.append(&WalRecord::StrategyCheckpoint {
                         wall_ts_ms: clock::wall_ms(),
                         strategy,
                         symbol,
-                        checkpoint,
+                        checkpoint: checkpoint.clone(),
                     })?;
                     self.wal.barrier()?;
+                    self.host.checkpoints.insert(key, checkpoint);
                 }
                 Ok(None)
             }
@@ -220,7 +220,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         checkpoint: checkpoint.clone(),
                         provenance: None,
                     };
-                    self.host.global_checkpoints.insert(strategy, state);
                     self.wal.append(&WalRecord::StrategyGlobalCheckpoint {
                         wall_ts_ms: clock::wall_ms(),
                         strategy,
@@ -228,6 +227,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         provenance: None,
                     })?;
                     self.wal.barrier()?;
+                    self.host.global_checkpoints.insert(strategy, state);
                 }
                 Ok(None)
             }
@@ -301,6 +301,32 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     source: source.clone(),
                     sequence,
                     observation_id,
+                })?;
+                self.wal.barrier()?;
+                self.signals.consume(&source, sequence);
+                Ok(None)
+            }
+            Action::RejectSignalObservation {
+                strategy,
+                source,
+                sequence,
+                observation_id,
+                reason,
+            } => {
+                if !self
+                    .signals
+                    .consumable(strategy, &source, sequence, &observation_id)
+                    .map_err(EngineError::State)?
+                {
+                    return Ok(None);
+                }
+                self.wal.append(&WalRecord::SignalObservationRejected {
+                    wall_ts_ms: clock::wall_ms(),
+                    strategy,
+                    source: source.clone(),
+                    sequence,
+                    observation_id,
+                    reason,
                 })?;
                 self.wal.barrier()?;
                 self.signals.consume(&source, sequence);
@@ -418,7 +444,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     ) -> Result<(), EngineError> {
         while !self.pending_mutations.is_empty() {
             let completion =
-                tokio::time::timeout(Duration::from_secs(10), self.venue_completions.recv())
+                tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.venue_completions.recv())
                     .await
                     .map_err(|_| {
                         EngineError::State(format!(
@@ -531,14 +557,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Foreign and reduce-only orders are left alone: cancelling another
     /// writer's order or a protective exit is not a safe guess.
     pub(super) fn queue_halted_entry_cancels(&mut self) -> Result<(), EngineError> {
-        if self.may_open
-            && self.private_stream_ready
-            && self.signals.gaps().next().is_none()
-            && self.host.entries_enabled.values().all(|enabled| *enabled)
-            && self.halt_cancels.is_empty()
-        {
-            return Ok(());
-        }
         let entries: Vec<(SymbolId, String)> = self
             .books
             .orders
@@ -613,6 +631,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // boot picks, and a crash anywhere leaves boot on the old segment
         // with nothing invented and nothing lost.
         if self.rotate_after_bytes > 0 && self.wal.segment_size() >= self.rotate_after_bytes {
+            let pending: Vec<_> = self.host.effects.transitions.keys().copied().collect();
+            for id in pending {
+                self.journal_transition(id)?;
+            }
             let base = self.rotation_base(clock::wall_ms());
             if self.wal.rotate(&base)? {
                 tracing::info!(
@@ -648,13 +670,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // before it is old by the time we get here.
         let now = clock::now_ns();
         if self.may_open && self.private_stream_ready {
+            let mut maintenance = VecDeque::new();
             self.working.pass(
                 now,
                 &self.books.market,
                 &self.books.rules,
                 &self.books.orders,
-                &mut self.host.pending,
+                &mut maintenance,
             );
+            self.host
+                .pending
+                .extend(maintenance.into_iter().map(Into::into));
         }
         // Through the ordinary queue, so the flood cap counts these too.
         self.drain(now).await
@@ -689,94 +715,128 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         });
         let mut placements = Vec::new();
         let mut cancellations = Vec::new();
-        let mut hard_cap_hit = false;
+        let mut handled_this_turn = 0;
         loop {
             if self.host.pending.is_empty() {
                 self.load_ready_wake(&mut progress);
             }
-            while let Some(action) = self.host.pending.pop_front() {
+            while let Some(pending) = self.host.pending.pop_front() {
+                if let Some((caller, callback_id)) = pending.caller.zip(pending.callback_id) {
+                    if self
+                        .host
+                        .effects
+                        .earliest(caller)
+                        .is_some_and(|earliest| earliest < callback_id)
+                    {
+                        self.host.pending.push_back(pending);
+                        handled_this_turn += 1;
+                        if handled_this_turn >= MAX_INTENTS_PER_WAKE * 4 {
+                            self.flush_placements(
+                                std::mem::take(&mut placements),
+                                progress.origin_ns,
+                            )
+                            .await?;
+                            self.flush_cancellations(std::mem::take(&mut cancellations))
+                                .await?;
+                            return self.pause_drain(progress).await;
+                        }
+                        continue;
+                    }
+                }
+                if let Some(key) = pending.effect {
+                    self.journal_transition(key.transition_id)?;
+                }
+                let action = &pending.action;
+                // Ordered effects cannot cross an unsent batch, including
+                // durable checkpoint/consume records that have no symbol.
+                if !matches!(action, Action::Place(_)) && !placements.is_empty() {
+                    let sent = self
+                        .flush_placements(std::mem::take(&mut placements), progress.origin_ns)
+                        .await?;
+                    if sent {
+                        self.host.pending.push_front(pending);
+                        return self.pause_drain(progress).await;
+                    }
+                }
+                if !matches!(action, Action::Cancel { .. }) && !cancellations.is_empty() {
+                    let sent = self
+                        .flush_cancellations(std::mem::take(&mut cancellations))
+                        .await?;
+                    if sent {
+                        self.host.pending.push_front(pending);
+                        return self.pause_drain(progress).await;
+                    }
+                }
+                if handled_this_turn >= MAX_INTENTS_PER_WAKE * 4 {
+                    self.host.pending.push_front(pending);
+                    self.flush_placements(std::mem::take(&mut placements), progress.origin_ns)
+                        .await?;
+                    self.flush_cancellations(std::mem::take(&mut cancellations))
+                        .await?;
+                    return self.pause_drain(progress).await;
+                }
+                handled_this_turn += 1;
+                if !self.admit_effect_caller(&pending)? {
+                    self.complete_effect(pending.effect)?;
+                    continue;
+                }
+                let PendingAction {
+                    caller,
+                    action,
+                    effect,
+                    callback_id,
+                } = pending;
                 let Some(action) = self.handle_durable_action(action)? else {
+                    self.complete_effect(effect)?;
                     continue;
                 };
                 progress.handled += 1;
-                // Past the cap, whatever adds risk is dropped but whatever sheds
-                // it still flows: an exit or a cancel queued behind a flood must
-                // get out, or its strategy is stranded holding a position — or an
-                // order — it believes it is rid of. An amend counts as adding: it
-                // can raise the size of a resting order. The hard cap bounds even
-                // the de-risking ones against a runaway loop.
                 if progress.handled > MAX_INTENTS_PER_WAKE && !action.is_risk_reducing() {
                     progress.adding_dropped += 1;
+                    if progress.adding_dropped == 1 {
+                        self.wal.append(&WalRecord::Note {
+                            source: "engine".into(),
+                            text: format!("dropped entries and amends: more than {MAX_INTENTS_PER_WAKE} actions in one wake; exits and cancels remain queued"),
+                        })?;
+                    }
+                    if let Action::Place(intent) = &action {
+                        self.wal.append(&WalRecord::Intent {
+                            intent: intent.clone(),
+                        })?;
+                        self.tell_refused(intent, "wake_action_limit");
+                    }
+                    self.complete_effect(effect)?;
                     continue;
-                }
-                if progress.handled > MAX_INTENTS_PER_WAKE * 4 {
-                    let dropped = self.host.pending.len() + 1;
-                    self.host.pending.clear();
-                    hard_cap_hit = true;
-                    tracing::error!(
-                        dropped,
-                        "far too many actions in one wake; the rest were dropped"
-                    );
-                    self.wal.append(&WalRecord::Note {
-                        source: "engine".into(),
-                        text: format!(
-                            "dropped {dropped} actions, exits included: more than {} in one wake",
-                            MAX_INTENTS_PER_WAKE * 4
-                        ),
-                    })?;
-                    break;
                 }
 
                 let symbol = action
                     .symbol()
                     .expect("durable control actions are handled before symbol dispatch");
                 if self.busy_symbols.contains_key(&symbol) {
-                    self.defer_action(action, progress.origin_ns);
+                    self.defer_action(
+                        PendingAction {
+                            caller,
+                            action,
+                            effect,
+                            callback_id,
+                        },
+                        progress.origin_ns,
+                    );
                     continue;
                 }
 
-                // Do not cross a placement boundary with the next verb
-                // already consumed. If a real send happened, put this action
-                // back at the front and let the run loop poll account-safety
-                // inputs before resuming the same FIFO wake.
-                if !matches!(&action, Action::Place(_)) && !placements.is_empty() {
-                    let sent = self
-                        .process_intents(std::mem::take(&mut placements), progress.origin_ns)
-                        .await?;
-                    if sent {
-                        progress.handled -= 1;
-                        self.host.pending.push_front(action);
-                        return self.pause_drain(progress);
-                    }
-                }
-
-                // Ordinary cancels share the same cooperative boundary. A
-                // run of cancels accumulates into one native-sized request;
-                // flush it before a different verb, then resume that verb on
-                // the next turn.
-                let accumulates_cancel = matches!(&action, Action::Cancel { .. });
-                if !accumulates_cancel && !cancellations.is_empty() {
-                    let sent = self
-                        .process_cancels(std::mem::take(&mut cancellations))
-                        .await?;
-                    if sent {
-                        progress.handled -= 1;
-                        self.host.pending.push_front(action);
-                        return self.pause_drain(progress);
-                    }
-                }
                 match action {
                     Action::Place(intent) => {
-                        placements.push(intent);
+                        placements.push((intent, effect));
                         if placements.len() == MAX_ORDERS_PER_BATCH {
                             let sent = self
-                                .process_intents(
+                                .flush_placements(
                                     std::mem::take(&mut placements),
                                     progress.origin_ns,
                                 )
                                 .await?;
                             if sent && !self.host.pending.is_empty() {
-                                return self.pause_drain(progress);
+                                return self.pause_drain(progress).await;
                             }
                         }
                     }
@@ -784,13 +844,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         symbol,
                         client_order_id,
                     } => {
-                        cancellations.push((symbol, client_order_id));
+                        cancellations.push((symbol, client_order_id, effect));
                         if cancellations.len() == MAX_CANCELS_PER_BATCH {
                             let sent = self
-                                .process_cancels(std::mem::take(&mut cancellations))
+                                .flush_cancellations(std::mem::take(&mut cancellations))
                                 .await?;
                             if sent && !self.host.pending.is_empty() {
-                                return self.pause_drain(progress);
+                                return self.pause_drain(progress).await;
                             }
                         }
                     }
@@ -804,14 +864,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             .await?;
                         self.working
                             .amended(&client_order_id, spec.px, taken, clock::now_ns());
+                        self.complete_effect(effect)?;
                         if !self.host.pending.is_empty() {
-                            return self.pause_drain(progress);
+                            return self.pause_drain(progress).await;
                         }
                     }
                     Action::SetStop { symbol, trigger_px } => {
                         self.process_set_stop(symbol, trigger_px).await?;
+                        self.complete_effect(effect)?;
                         if !self.host.pending.is_empty() {
-                            return self.pause_drain(progress);
+                            return self.pause_drain(progress).await;
                         }
                     }
                     Action::RecordQuoteFill { .. } => {
@@ -824,28 +886,29 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     | Action::PublishStrategyEvent { .. }
                     | Action::ConsumeStrategyEvent { .. }
                     | Action::ConsumeSignalObservation { .. }
+                    | Action::RejectSignalObservation { .. }
                     | Action::ConsumeRuntimeControl { .. } => {
                         unreachable!("strategy control state is journaled before venue actions")
                     }
                 }
             }
             let sent = self
-                .process_intents(std::mem::take(&mut placements), progress.origin_ns)
+                .flush_placements(std::mem::take(&mut placements), progress.origin_ns)
                 .await?;
-            if sent && !hard_cap_hit && !self.host.pending.is_empty() {
-                return self.pause_drain(progress);
+            if sent && !self.host.pending.is_empty() {
+                return self.pause_drain(progress).await;
             }
             let cancelled = self
-                .process_cancels(std::mem::take(&mut cancellations))
+                .flush_cancellations(std::mem::take(&mut cancellations))
                 .await?;
-            if cancelled && !hard_cap_hit && !self.host.pending.is_empty() {
-                return self.pause_drain(progress);
+            if cancelled && !self.host.pending.is_empty() {
+                return self.pause_drain(progress).await;
             }
-            if !hard_cap_hit && self.host.pending.is_empty() && !self.ready_actions.is_empty() {
+            if self.host.pending.is_empty() && !self.ready_actions.is_empty() {
                 self.load_ready_wake(&mut progress);
                 continue;
             }
-            if hard_cap_hit || self.host.pending.is_empty() {
+            if self.host.pending.is_empty() {
                 break;
             }
         }
@@ -865,47 +928,105 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 
+    fn admit_effect_caller(&mut self, pending: &PendingAction) -> Result<bool, EngineError> {
+        let Some(caller) = pending.caller else {
+            return Ok(true);
+        };
+        let allowed = match &pending.action {
+            Action::Cancel {
+                symbol,
+                client_order_id,
+            }
+            | Action::Amend {
+                symbol,
+                client_order_id,
+                ..
+            } => self
+                .books
+                .orders
+                .orders
+                .get(client_order_id)
+                .is_some_and(|order| {
+                    order.request.strategy == caller && order.request.symbol == *symbol
+                }),
+            Action::SetStop { symbol, .. } => {
+                self.books.attribution.sole_owner(*symbol) == Some(caller)
+            }
+            _ => true,
+        };
+        if !allowed {
+            self.wal.append(&WalRecord::Note {
+                source: "engine".into(),
+                text: format!(
+                    "strategy {} effect refused: foreign_or_unknown_effect_owner: {:?}",
+                    caller.0, pending.action
+                ),
+            })?;
+        }
+        Ok(allowed)
+    }
+
     /// End one venue-mutation turn without ending its strategy wake. The
     /// batch has completed its record/send/reply sequence (and, for entries,
     /// its durability barrier); this only keeps the flood counters and
     /// latency origin while the run loop polls account-safety inputs.
-    fn pause_drain(&mut self, progress: DrainProgress) -> Result<(), EngineError> {
+    async fn pause_drain(&mut self, progress: DrainProgress) -> Result<(), EngineError> {
         self.drain_progress = Some(progress);
+        tokio::task::yield_now().await;
         Ok(())
     }
 
-    fn defer_action(&mut self, action: Action, origin_ns: u64) {
+    fn defer_action(&mut self, pending: PendingAction, origin_ns: u64) {
+        let action = &pending.action;
         let symbol = action
             .symbol()
             .expect("only symbol-scoped venue actions can be deferred");
+        if let Some(key) = pending.effect {
+            let mut suffix = VecDeque::new();
+            self.host.pending.retain(|queued| {
+                if queued
+                    .effect
+                    .is_some_and(|other| other.transition_id == key.transition_id)
+                {
+                    suffix.push_back((queued.clone(), origin_ns));
+                    false
+                } else {
+                    true
+                }
+            });
+            let queue = self.deferred_actions.entry(symbol).or_default();
+            queue.push_back((pending, origin_ns));
+            queue.append(&mut suffix);
+            return;
+        }
         let queue = self.deferred_actions.entry(symbol).or_default();
         match &action {
             Action::Amend {
                 client_order_id, ..
             } => {
                 if queue.iter().any(|(queued, _)| {
-                    matches!(queued, Action::Cancel { client_order_id: queued_id, .. } if queued_id == client_order_id)
+                    matches!(&queued.action, Action::Cancel { client_order_id: queued_id, .. } if queued_id == client_order_id)
                 }) {
                     return;
                 }
                 queue.retain(|(queued, _)| {
-                    !matches!(queued, Action::Amend { client_order_id: queued_id, .. } if queued_id == client_order_id)
+                    !matches!(&queued.action, Action::Amend { client_order_id: queued_id, .. } if queued_id == client_order_id)
                 });
             }
             Action::Cancel {
                 client_order_id, ..
             } => {
                 if queue.iter().any(|(queued, _)| {
-                    matches!(queued, Action::Cancel { client_order_id: queued_id, .. } if queued_id == client_order_id)
+                    matches!(&queued.action, Action::Cancel { client_order_id: queued_id, .. } if queued_id == client_order_id)
                 }) {
                     return;
                 }
                 queue.retain(|(queued, _)| {
-                    !matches!(queued, Action::Amend { client_order_id: queued_id, .. } if queued_id == client_order_id)
+                    !matches!(&queued.action, Action::Amend { client_order_id: queued_id, .. } if queued_id == client_order_id)
                 });
             }
             Action::SetStop { .. } => {
-                queue.retain(|(queued, _)| !matches!(queued, Action::SetStop { .. }));
+                queue.retain(|(queued, _)| !matches!(&queued.action, Action::SetStop { .. }));
             }
             Action::Place(intent)
                 if !intent.reduce_only
@@ -920,7 +1041,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             {
                 queue.retain(|(queued, _)| {
                     !matches!(
-                        queued,
+                        &queued.action,
                         Action::Place(older)
                             if !older.reduce_only
                                 && older.strategy == intent.strategy
@@ -943,9 +1064,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             | Action::PublishStrategyEvent { .. }
             | Action::ConsumeStrategyEvent { .. }
             | Action::ConsumeSignalObservation { .. }
+            | Action::RejectSignalObservation { .. }
             | Action::ConsumeRuntimeControl { .. } => {}
         }
-        queue.push_back((action, origin_ns));
+        queue.push_back((pending, origin_ns));
     }
 
     fn load_ready_wake(&mut self, progress: &mut DrainProgress) {

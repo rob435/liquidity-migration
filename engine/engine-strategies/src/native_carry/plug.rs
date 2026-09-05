@@ -940,8 +940,19 @@ impl Strategy for NativeCarry {
         self.flatten_now(ctx);
     }
 
+    fn requires_signal_readiness(&self) -> bool {
+        true
+    }
+
     fn on_signal(&mut self, observation: &SignalObservation, ctx: &mut dyn StrategyCtx) {
         if let Err(error) = self.accept_signal(observation, ctx) {
+            ctx.emit(engine_types::Action::RejectSignalObservation {
+                strategy: observation.destination,
+                source: observation.source.clone(),
+                sequence: observation.sequence,
+                observation_id: observation.observation_id.clone(),
+                reason: error.clone(),
+            });
             self.core.last_error = Some(error);
         }
     }
@@ -1226,6 +1237,37 @@ mod tests {
             reason: "missing".to_owned(),
             first_missing_ts_ms: None,
         }
+    }
+
+    #[test]
+    fn malformed_input_emits_an_explicit_terminal_rejection() {
+        let config = config();
+        let mut strategy = NativeCarry::from_params(StrategyId(7), &params(&config)).unwrap();
+        let mut ctx = MockCtx::new();
+        ctx.set_wall_ms(NOW_MS);
+        let mut row = observation(&config, config.fingerprint(), 37);
+        row.destination = StrategyId(7);
+        row.payload = b"invalid JSON".to_vec();
+        strategy.on_signal(&row, &mut ctx);
+        assert_eq!(
+            strategy.core.last_error.as_deref(),
+            Some("expected value at line 1 column 1")
+        );
+        assert!(!ctx
+            .emitted
+            .iter()
+            .any(|action| matches!(action, Action::ConsumeSignalObservation { .. })));
+        assert_eq!(
+            ctx.emitted,
+            vec![Action::RejectSignalObservation {
+                strategy: StrategyId(7),
+                source: "signal.generation.carry".into(),
+                sequence: 37,
+                observation_id: "carry-37".into(),
+                reason: "expected value at line 1 column 1".into(),
+            }],
+            "malformed input must emit exactly one terminal rejection with its original identity"
+        );
     }
 
     #[test]

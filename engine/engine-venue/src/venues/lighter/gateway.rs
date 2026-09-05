@@ -24,6 +24,7 @@
 //! local server. Neither of those is the venue accepting an order; only
 //! sending one proves that, and the funded realm is the owner's to arm.
 
+use crate::RealmCredentials;
 use std::collections::HashMap;
 
 use engine_types::ids::{Symbol, SymbolId};
@@ -81,8 +82,7 @@ pub struct LighterGateway {
     http: HttpClient,
     account: AccountKey,
     secret: Scalar,
-    names: Vec<Symbol>,
-    ids: HashMap<Symbol, SymbolId>,
+    symbols: engine_public::symbols::SymbolCatalog,
     markets: Markets,
     /// The venue takes nonces strictly in order per API key. Read once, then
     /// counted here — asking before every order would be a round trip in
@@ -123,18 +123,12 @@ impl LighterGateway {
     ) -> Result<Self, VenueError> {
         let account = AccountKey::parse(creds.key())?;
         let secret = read_secret(creds.secret())?;
-        let ids = symbols
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), SymbolId(i as u16)))
-            .collect();
         Ok(Self {
             realm,
             http: HttpClient::new(base_url),
             account,
             secret,
-            names: symbols,
-            ids,
+            symbols: engine_public::symbols::SymbolCatalog::from_names(symbols),
             markets: Markets::default(),
             next_nonce: None,
         })
@@ -150,21 +144,16 @@ impl LighterGateway {
     }
 
     pub fn add_symbol(&mut self, name: &str) -> SymbolId {
-        if let Some(id) = self.ids.get(name) {
-            return *id;
-        }
-        let id = SymbolId(u16::try_from(self.names.len()).expect("more than 65535 symbols"));
-        self.names.push(name.to_string());
-        self.ids.insert(name.to_string(), id);
-        id
+        self.symbols.intern(name).expect("more than 65535 symbols")
     }
 
     pub fn symbols(&self) -> &[Symbol] {
-        &self.names
+        self.symbols.names()
     }
 
     fn name_of(&self, id: SymbolId) -> Result<&str, VenueError> {
-        self.names
+        self.symbols
+            .names()
             .get(id.0 as usize)
             .map(String::as_str)
             .ok_or_else(|| {
@@ -530,7 +519,7 @@ impl VenueGateway for LighterGateway {
                 &format!("by=index&value={}", self.account.account_index),
             )
             .await?;
-        let ids = &self.ids;
+        let ids = self.symbols.ids();
         let resolve = |name: &str| ids.get(name).copied();
         let held = parse_positions(&account, &self.markets, &HashMap::new(), &resolve)?;
         let position = held.iter().find(|p| p.symbol == symbol).ok_or_else(|| {
@@ -654,7 +643,7 @@ impl VenueGateway for LighterGateway {
 
         let (equity_usdt, available_usdt) = parse_margin(&account)?;
         let stops = stops_by_market(&orders)?;
-        let ids = &self.ids;
+        let ids = self.symbols.ids();
         let resolve = |name: &str| ids.get(name).copied();
         let positions = parse_positions(&account, &self.markets, &stops, &resolve)?;
 

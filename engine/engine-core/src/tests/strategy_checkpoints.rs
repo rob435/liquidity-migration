@@ -588,3 +588,318 @@ async fn global_checkpoint_is_visible_only_to_its_owner_after_restart() {
     assert_eq!(&*owner.lock().unwrap(), &[Some(checkpoint())]);
     assert_eq!(&*other.lock().unwrap(), &[None]);
 }
+
+struct OrderThenCheckpoint;
+
+impl Strategy for OrderThenCheckpoint {
+    fn name(&self) -> &str {
+        "order-then-checkpoint"
+    }
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: "BTCUSDT".into(),
+            feed: Feed::Quote,
+        }]
+    }
+    fn on_market(&mut self, event: &MarketEvent, ctx: &mut dyn StrategyCtx) {
+        let MarketEvent::Quote { symbol, .. } = event else {
+            return;
+        };
+        ctx.place(Intent {
+            strategy: StrategyId(0),
+            symbol: *symbol,
+            side: Side::Sell,
+            qty: 0.01,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: true,
+            tag: "before-checkpoint".into(),
+            decided_ns: ctx.now_ns(),
+            work: None,
+            leverage: None,
+        });
+        ctx.emit(engine_types::Action::SetStrategyGlobalCheckpoint {
+            strategy: StrategyId(0),
+            checkpoint: checkpoint(),
+        });
+    }
+}
+
+#[tokio::test]
+async fn a_checkpoint_cannot_overtake_an_earlier_batched_order() {
+    let (mut engine, h) = build(
+        allow_all(),
+        vec![Box::new(OrderThenCheckpoint)],
+        &["BTCUSDT"],
+        &[],
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    let sent = at(&h.tape, &Step::Append("order_sent".into())).expect("order retained");
+    let checkpoint = at(&h.tape, &Step::Append("strategy_global_checkpoint".into()))
+        .expect("checkpoint retained");
+    assert!(
+        sent < checkpoint,
+        "the committed checkpoint must not overtake its preceding effect"
+    );
+}
+
+struct CheckpointThenExit;
+impl Strategy for CheckpointThenExit {
+    fn name(&self) -> &str {
+        "checkpoint-exit"
+    }
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: "BTCUSDT".into(),
+            feed: Feed::Quote,
+        }]
+    }
+    fn on_market(&mut self, event: &MarketEvent, ctx: &mut dyn StrategyCtx) {
+        if ctx.strategy_global_checkpoint().is_some() {
+            return;
+        }
+        let MarketEvent::Quote { symbol, .. } = event else {
+            return;
+        };
+        ctx.emit(engine_types::Action::SetStrategyGlobalCheckpoint {
+            strategy: StrategyId(0),
+            checkpoint: checkpoint(),
+        });
+        ctx.place(Intent {
+            strategy: StrategyId(0),
+            symbol: *symbol,
+            side: Side::Sell,
+            qty: 0.01,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: true,
+            tag: "durable-exit".into(),
+            decided_ns: ctx.now_ns(),
+            work: None,
+            leverage: None,
+        });
+    }
+}
+
+async fn completed_exit_records() -> Vec<WalRecord> {
+    let (mut engine, h) = build(
+        allow_all(),
+        vec![Box::new(CheckpointThenExit)],
+        &["BTCUSDT"],
+        &[],
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(h.sends.lock().unwrap().len(), 1);
+    let records = h.records.lock().unwrap().clone();
+    records
+}
+
+#[tokio::test]
+async fn restart_after_checkpoint_retains_the_unsent_exit() {
+    let records = completed_exit_records().await;
+    let cut = records
+        .iter()
+        .position(|record| matches!(record, WalRecord::StrategyGlobalCheckpoint { .. }))
+        .unwrap()
+        + 1;
+    let (mut restarted, h) = build(
+        allow_all(),
+        vec![Box::new(CheckpointThenExit)],
+        &["BTCUSDT"],
+        &records[..cut],
+    )
+    .await;
+    restarted.finish().await.unwrap();
+    assert_eq!(
+        h.sends.lock().unwrap().len(),
+        1,
+        "checkpoint recovery lost its dependent exit"
+    );
+    assert!(h.sends.lock().unwrap()[0].reduce_only);
+}
+
+#[tokio::test]
+async fn restart_after_send_before_effect_completion_does_not_duplicate_the_exit() {
+    let records = completed_exit_records().await;
+    let cut = records
+        .iter()
+        .position(|record| matches!(record, WalRecord::OrderSent { .. }))
+        .unwrap()
+        + 1;
+    let WalRecord::OrderSent { request, .. } = &records[cut - 1] else {
+        unreachable!()
+    };
+    let venue_order = VenueOrder {
+        client_order_id: request.client_order_id.clone(),
+        symbol: "BTCUSDT".into(),
+        side: request.side,
+        qty: request.qty,
+        filled_qty: 0.0,
+        reduce_only: true,
+    };
+    let (mut restarted, h) = build_with_venue_orders(
+        allow_all(),
+        vec![Box::new(CheckpointThenExit)],
+        &["BTCUSDT"],
+        &records[..cut],
+        vec![venue_order],
+    )
+    .await;
+    restarted.finish().await.unwrap();
+    assert!(
+        h.sends.lock().unwrap().is_empty(),
+        "a reconciled OrderSent effect was submitted twice"
+    );
+}
+
+#[tokio::test]
+async fn failed_checkpoint_write_does_not_publish_uncommitted_strategy_state() {
+    for global in [false, true] {
+        let tape = tape();
+        let (mut wal, _) = MockWal::new(tape.clone());
+        wal.fail_on = Some(
+            if global {
+                "strategy_global_checkpoint"
+            } else {
+                "strategy_checkpoint"
+            }
+            .into(),
+        );
+        let (venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
+        let (risk, _) = MockRisk::with(allow_all());
+        let strategy: Box<dyn Strategy> = if global {
+            Box::new(GlobalCheckpointThenBuyer { fired: false })
+        } else {
+            Box::new(CheckpointThenBuyer { fired: false })
+        };
+        let mut engine = Engine::boot(&settings(), "0", wal, risk, venue, vec![strategy], &[])
+            .await
+            .unwrap();
+        let symbol = engine.market().table.get("BTCUSDT").unwrap();
+        assert!(engine
+            .run(
+                &mut ScriptFeed::quotes(symbol, 1, true),
+                &mut ScriptOrderFeed::empty(),
+                std::future::pending::<()>()
+            )
+            .await
+            .is_err());
+        let WalRecord::SegmentBase {
+            strategy_checkpoints,
+            strategy_global_checkpoints,
+            ..
+        } = engine.rotation_base(recent_replay_ms())
+        else {
+            unreachable!()
+        };
+        assert!(
+            strategy_checkpoints.is_empty() && strategy_global_checkpoints.is_empty(),
+            "failed checkpoint append published uncommitted state"
+        );
+    }
+}
+
+#[tokio::test]
+async fn restoring_a_stalled_venue_mutation_uses_the_existing_drain_deadline() {
+    let records = completed_exit_records().await;
+    let cut = records
+        .iter()
+        .position(|record| matches!(record, WalRecord::StrategyGlobalCheckpoint { .. }))
+        .unwrap()
+        + 1;
+    let replayed = replay_with_history_boundary(&records[..cut]);
+    let tape = tape();
+    let (wal, _) = MockWal::new(tape.clone());
+    let (mut venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
+    venue.send_delay = Duration::from_secs(60);
+    let (risk, _) = MockRisk::with(allow_all());
+    let result = tokio::time::timeout(
+        Duration::from_millis(10_500),
+        Engine::boot(
+            &settings(),
+            "0",
+            wal,
+            risk,
+            venue,
+            vec![Box::new(CheckpointThenExit)],
+            &replayed,
+        ),
+    )
+    .await
+    .expect("restoring effects hung past the existing ten-second mutation drain deadline");
+    assert!(
+        matches!(result, Err(EngineError::Boot(ref message)) if message.contains("timed out")),
+        "stalled recovery must fail explicitly"
+    );
+}
+
+struct FailingOrderBarrier(MockWal);
+impl Wal for FailingOrderBarrier {
+    fn append(&mut self, record: &WalRecord) -> Result<u64, WalError> {
+        self.0.append(record)
+    }
+    fn barrier(&mut self) -> Result<(), WalError> {
+        self.0.barrier()
+    }
+    fn barrier_begin(&mut self) -> Result<engine_types::wal::PendingBarrier, WalError> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Err(WalError::Io(std::io::Error::other(
+            "async order barrier failed",
+        ))))
+        .unwrap();
+        Ok(engine_types::wal::PendingBarrier::running(rx))
+    }
+    fn flush(&mut self) -> Result<(), WalError> {
+        self.0.flush()
+    }
+}
+
+#[tokio::test]
+async fn stateful_order_barrier_failure_never_reaches_the_venue() {
+    let tape = tape();
+    let (wal, _) = MockWal::new(tape.clone());
+    let (venue, sends) = MockVenue::new(tape, &["BTCUSDT"]);
+    let (risk, _) = MockRisk::with(allow_all());
+    let mut engine = Engine::boot(
+        &settings(),
+        "0",
+        FailingOrderBarrier(wal),
+        risk,
+        venue,
+        vec![Box::new(CheckpointThenExit)],
+        &[],
+    )
+    .await
+    .unwrap();
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let result = engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await;
+    assert!(matches!(result, Err(EngineError::Wal(_))));
+    assert!(
+        sends.lock().unwrap().is_empty(),
+        "stateful order escaped before its failing OrderSent barrier"
+    );
+}

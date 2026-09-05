@@ -23,6 +23,7 @@
 //! When the venue's account channel carries client order indices, this becomes
 //! an ordinary socket feed and the rest of the adapter does not move.
 
+use crate::RealmCredentials;
 use std::time::Duration;
 
 use tokio::time::Instant;

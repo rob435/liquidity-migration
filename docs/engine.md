@@ -1,10 +1,12 @@
 # Engine Runtime Specification
 
+## Purpose
+
 Architecture, boot order, risk admission, write-ahead log (WAL), and execution invariants for the native Rust trading engine (`engine`).
 
----
+## Spec Tables
 
-## 1. Workspace Crate Architecture
+### 1. Workspace Crate Architecture
 
 The engine workspace is under `engine/`:
 
@@ -13,6 +15,7 @@ The engine workspace is under `engine/`:
 | **`engine-types`** | Lib | Core domain contracts: market events, orders, strategies, signals, checkpoints, WAL types. |
 | **`engine-wal`** | Lib | Checksummed append-only frame storage, fsync barriers, replay, and segment rotation. |
 | **`engine-risk`** | Lib | Account-wide admission, gross/margin limits, quote freshness, and rolling-loss breaker. |
+| **`engine-public`** | Lib | Nonsecret realm/catalog facts, symbol interning, public REST clients and shared HTTP/TLS transport. |
 | **`engine-venue`** | Lib | Order gateways, private streams, and the venue registry for all six venues (§2); account lease locking. |
 | **`engine-marketdata`**| Lib | Public market feeds and book rebuild per venue: quotes, trades, level-50 books, funding. |
 | **`engine-strategies`**| Lib | Pure strategy reducers (`LONG`, `CARRY`, `EXODUS`, `MAKER`) and runtime plugs, plus the `PROBE` order-path plug ([trading_logic.md](trading_logic.md) §1). |
@@ -22,7 +25,7 @@ The engine workspace is under `engine/`:
 | **`market-tape`** | Binary (`bin`) | High-throughput market data capture engine and zstd segment writer. |
 
 
-### `engine-core` Module Map
+#### `engine-core` Module Map
 
 | Module (repository path) | Owns |
 | :--- | :--- |
@@ -35,12 +38,13 @@ The engine workspace is under `engine/`:
 | `engine/engine-core/src/engine/telemetry.rs` | Heartbeat and closed-trade rows |
 | `engine/engine-core/src/engine/free_helpers.rs` | Replay builders and pure helpers the modules above share |
 | `engine/engine-core/src/ctx.rs` | `Books` (what strategies read), `StrategyHost` (the plugs and what is held for them), `Ctx`, `Timers` |
+| `engine/engine-core/src/effects.rs`, `engine/engine-core/src/engine/strategy_effects.rs` | Ordered durable callback effects, placement identities, effect completion and recovery |
 | `engine/engine-core/src/inflight.rs` | The order ledger and registry: what the log says is still out there, and whose it is |
 | `engine/engine-core/src/covers.rs` | What each strategy has sent that the account reading has not yet absorbed |
 | `engine/engine-core/src/attribution.rs` | Which strategy's fills a venue position came from |
 | `engine/engine-core/src/working.rs` | Resting entries being worked at the venue |
 | `engine/engine-core/src/reconcile.rs` | The log's exposure and intended stops against the venue's positions |
-| `engine/engine-core/src/signal_state.rs` | Durable signal cursors, gaps and subscriptions per source |
+| `engine/engine-core/src/signal_state.rs` | Accepted input ownership, consumer backpressure, source cursors/gaps/subscriptions and current boot producer frontiers |
 | `engine/engine-core/src/signals/` | Signal feeds: validation, availability deadlines, in-process channel, spool, socket doorbell |
 | `engine/engine-core/src/venue_runtime.rs` | The venue task that owns blocking venue I/O |
 | `engine/engine-core/src/ledger.rs`, `engine/engine-core/src/timing.rs` | Latency segments live, and read back from the log |
@@ -49,17 +53,43 @@ The engine workspace is under `engine/`:
 | `engine/engine-core/src/replay.rs`, `engine/engine-core/src/takeover.rs`, `engine/engine-core/src/clear.rs`, `engine/engine-core/src/canary.rs`, `engine/engine-core/src/controls.rs` | Operator commands over a WAL or a live engine |
 | `engine/engine-core/src/backtest/` | The live loop on a recorded tape against a simulated venue |
 
+#### Worker ownership
+
+| Module (repository path) | Owns | State boundary |
+| --- | --- | --- |
+| `engine/signal-worker/src/worker.rs` | Sequenced public inputs, per-event transition handlers, observation creation, durable batch preparation/commit, producer readiness response | `WorkerState` checkpoint schema is unchanged; candidate state is installed after journal/checkpoint commit |
+| `engine/signal-worker/src/history.rs` | Row identity and causal coverage operations | Kline coverage replacement revokes an empty frontier; no inferred coverage |
+| `engine/signal-worker/src/live.rs` | Cadence, stream events, live publication and health | One runner commits accepted acquisition results |
+| `engine/signal-worker/src/live/lanes.rs` | Instrument, ticker, funding, whale, gate and repair completion handlers | `LaneContext` lends only current stream/pending/lane state; failed chunk acknowledgement retains existing retry behavior |
+| `engine/signal-worker/src/live/acquisition.rs` | Public requests, bounded source windows and response normalization | Returns fetched inputs; cannot mutate a `LiveRunner` |
+| `engine/signal-worker/src/store.rs` | Atomic checkpoints, input journal and spool publication | Readiness metadata is excluded from observation inventory |
+| `engine/signal-worker/src/worker.rs::WorkerErrorCategory` | Config/input/state/network/I/O/JSON classification | Only input/network failures are lane-local; display labels are stable |
+
+#### Venue and public ownership
+
+| Module (repository path) | Owns | State boundary |
+| --- | --- | --- |
+| `engine/engine-public/src/venues/*/realm.rs` | Realm names, hosts, endpoints and credential-variable names | No credential reads or signing |
+| `engine/engine-public/src/http.rs`, `engine/engine-public/src/tls.rs` | Common HTTP/TLS transport | No credential loading or signing; transports caller-supplied requests |
+| `engine/engine-public/src/symbols.rs` | Append-only ordered symbol catalog and shared map learning | Existing dense ID order, case and overflow behavior remain |
+| `engine/engine-public/src/` public catalog/client modules | Lighter/MEXC catalogs and Variational public statistics | `engine-marketdata` depends directly on public ownership |
+| `engine/engine-venue/src/realm_credentials.rs` | Explicit credential-read capability for private adapters | Reexported public realms do not expose secret reads without the venue trait |
+| `engine/engine-venue/src/wire.rs` | Shared optional-field and ID decoding | Missing/wrong-type optional fields, escaped strings and duplicate-key semantics stay compatible |
+| Venue `parse.rs` and `ws.rs` modules | Bybit/Binance acknowledgements and Bybit/Binance/Hyperliquid private-event envelopes | Inner account/order rows outside these envelopes remain dynamic |
+| `engine/engine-venue/src/signing.rs`, `engine/engine-venue/src/stream.rs` | HMAC, acknowledgement memory, cancellation and reconnect backoff | Venue authentication, subscriptions, resets and listen-key upkeep remain adapter-owned |
+| `engine/engine-venue/src/lease.rs` | Account lease and typed lease note | Kernel lock remains the authority; serializer preserves existing bytes |
+
 ---
 
-## 2. Venue Adapters & Readiness
+### 2. Venue Adapters & Readiness
 
 `engine.toml` names one venue; `VenueName::parse` turns that name into the one
 adapter triple (gateway, private stream, public feed) so a config cannot
-half-switch. Every host any adapter can reach is written in that venue's own
-`realm` module and nowhere else — `engine/engine-venue/tests/venue_fence.rs`
-reads the crate back and fails the suite if a host appears anywhere else.
+half-switch. Every host an adapter can reach is declared in that venue's
+public realm module — `engine/engine-venue/tests/venue_fence.rs`
+checks both public and private crate sources for undeclared hosts.
 
-### Selectable Realms
+#### Selectable Realms
 
 Readiness is declared in `VenueName::readiness` and enforced at boot by
 `require_engine_run_ready` (`engine/engine-core/src/runner.rs`), before a log,
@@ -78,7 +108,7 @@ credential, or socket is opened.
 | `binance_mainnet` | `production-blocked` | no | (same adapter) | **Dormant.** Refused at boot. Binance's public feed *is* live: the second tape recorder and the cross-venue panel read it. |
 | `variational_mainnet` | `read-only` | no | 867 | **Dormant.** No trading API in the adapter at all. |
 
-### Invariants
+#### Invariants
 
 * **Must**: every realm in `VenueName::ALL` be either traded or dormant in
   `engine/engine-venue/tests/dormant_venues.rs`. That test pins which realms
@@ -102,7 +132,7 @@ rather than a quarter of work.
 
 ---
 
-## 3. Boot & Recovery Sequence
+### 3. Boot & Recovery Sequence
 
 `engine run --config PATH` runs on a single-threaded Tokio runtime, establishing identity and state before admitting any order risk:
 
@@ -114,13 +144,27 @@ rather than a quarter of work.
 | **4. Lease** | Account Lock | Authenticates account and acquires writer lease. | Lock: `/run/lock/liquidity-migration/bybit-<realm>-*.lock`. |
 | **5. Private WS**| Stream Watermark| Connects private WebSocket and awaits ready state. | Blocks if auth fails or private queue is cold. |
 | **6. Reconcile**| State Audit | Compares WAL orders, positions, and stops against venue. | Unreconciled / stranger positions latch engine. |
-| **7. Checkpoint**| Restore State | Restores sleeve checkpoints, covers, loss window. | Rejects schema, fingerprint, or payload mismatches. |
-| **8. Re-plan** | Sleeve Wake | Wakes each reducer once to re-plan restored state. | Schedules timers without emitting premature orders. |
-| **9. Inputs** | Feeds Live | Starts market data, signal IPC, and control spool. | Consumes hybrid spool/socket feeds. |
+| **7. Checkpoint**| Restore State | Restores sleeve checkpoints and loss window; starts covers empty. | Rejects schema, fingerprint, or payload mismatches. |
+| **8. Effects / Re-plan** | Ordered recovery | Drains unfinished durable strategy effects before boot callbacks and durable input redelivery. | Callbacks can queue effects and timers; admission blocks unready growth. |
+| **9. Inputs** | Feeds Live | Starts market data, signal IPC and control spool; begins producer nonce exchange. | Required producer frontiers suspend growth until established and caught up; boot itself does not wait for participation. |
+
+#### Durable state and producer protocol
+
+| Boundary | Implemented contract |
+| --- | --- |
+| Stateful callbacks | `StrategyTransitionQueued` stores ordered effects and persisted placement IDs. `StrategyEffectCompleted` identifies completed indexes. Stateful order barriers settle before venue dispatch |
+| Ordinary callbacks | Order-only callbacks retain optimistic WAL submission; dependent completion waits for the barrier. Reconciliation handles orders missing from a machine-failure WAL |
+| Rotation | `segment_base_v3` requires `strategy_effects` and `signal_gaps`. Legacy/v2 records remain readable; v2 still requires gaps. Old readers refuse unknown required records without truncation |
+| Accepted inputs | Existing 256-row/64-MiB observation envelope plus one missing-prefix slot; one unfinished ordinary delivery per destination. Allocation estimate excludes collection overhead and historical identities |
+| Outcomes | Consumed, explicitly rejected and retained pending are distinct; terminal payload release follows its WAL barrier |
+| Readiness request | Schema 1, fresh `boot_nonce`; `input-readiness-request.json` in the signal spool |
+| Readiness response | Schema 1, matching nonce and generation-qualified source/destination/`published_through`; `input-readiness-response.json`. Both metadata files are excluded from observation inventory |
+| Failure | Missing, malformed or I/O-failed exchange keeps growth suspended and retries. Request-time accepted prefix distinguishes a rewind from observations arriving after the request. Reductions, protective stops and account recovery remain available |
+| Limits | Synchronous callbacks are trusted; output allocation and historical source identity are not globally bounded. A declared frontier cannot recover erased legacy history |
 
 ---
 
-## 4. Storage, Paths & Memory Budget
+### 4. Storage, Paths & Memory Budget
 
 | Resource | Demo Path | Mainnet Path | Quota / Budget |
 | :--- | :--- | :--- | :--- |
@@ -131,10 +175,10 @@ rather than a quarter of work.
 | **Heartbeat** | `/var/lib/liquidity-migration-engine/heartbeat.json`| `/var/lib/liquidity-migration-engine-mainnet/heartbeat.json` | Atomic 1-line JSON; max age 30s. |
 | **Trade Log** | `/var/lib/liquidity-migration-engine/trades.jsonl` | `/var/lib/liquidity-migration-engine-mainnet/trades.jsonl` | Append-only round-trip closed trades. |
 
-### Memory Scaling Invariant
+#### Memory Scaling Invariant
 The decoded in-memory WAL replay consumes approximately **$6\times$ the active segment size**. At the default 256 MB rotation size, replay holds ~1.5 GB in RAM. Systemd service units enforce `MemoryMax=2G`.
 
-### REST History Fetch Ceilings
+#### REST History Fetch Ceilings
 Bounded acquisition envelopes prevent runaway memory during cold starts:
 
 | History Lane | Maximum Window | Upper Row Ceiling | Notes |
@@ -147,14 +191,14 @@ Bounded acquisition envelopes prevent runaway memory during cold starts:
 
 ---
 
-## 5. Machine Configuration & Rendering
+### 5. Machine Configuration & Rendering
 
 The engine configuration file (`engine.toml` / `engine-mainnet.toml`) contains:
 * `[engine]`: WAL paths, group flush timing (`1-1000ms`), socket paths, heartbeat interval.
 * `[risk]`: Gross capital reference, max leverage, order size bounds, rolling-loss limit.
 * `[[strategy]]`: Ordered list of sleeves (`CARRY`, `LONG`, `EXODUS`, `MAKER`).
 
-### Config Rendering Recipe
+#### Config Rendering Recipe
 Configs are generated from registered rules and profiles:
 ```bash
 engine render-native-config \
@@ -174,7 +218,7 @@ engine render-native-config \
 
 ---
 
-## 6. Risk Kernel & Emergency Circuit Breakers
+### 6. Risk Kernel & Emergency Circuit Breakers
 
 The risk kernel (`engine-risk`) gates every order before it reaches the venue adapter:
 
@@ -186,7 +230,7 @@ The risk kernel (`engine-risk`) gates every order before it reaches the venue ad
 | **Single-Sleeve Symbol**| One sleeve owns symbol | `SymbolAlreadyOwned` | Refuses entry until symbol is flat. |
 | **Rolling-Loss Trip** | 24h closed net PnL $\le -\text{Loss Limit}$ | `RollingLossTripped` | **Emergency Halt**: All entries blocked. Exits pass. |
 
-### Rolling-Loss Circuit Breaker Invariant
+#### Rolling-Loss Circuit Breaker Invariant
 * **Calculation**: Sum of realized PnL minus venue fees over the last 24 hours across engine-closed round trips.
 * **Threshold**: $\text{Loss Limit} = \text{max\_rolling\_loss\_fraction} \times \text{capital\_reference}$.
 * **Trip Effect**: Blocks all entry and size-increasing orders. Exits and reduction-only orders are always permitted.
@@ -194,7 +238,7 @@ The risk kernel (`engine-risk`) gates every order before it reaches the venue ad
 
 ---
 
-## 7. Runtime Controls
+### 7. Runtime Controls
 
 Operator controls are dispatched by placing JSON command files into the realm control spool:
 
@@ -208,7 +252,7 @@ Operator controls are dispatched by placing JSON command files into the realm co
 
 ---
 
-## 8. Native State Takeover & State Audit
+### 8. Native State Takeover & State Audit
 
 When performing rollouts or cold starts, state is seeded or verified while units are stopped:
 
@@ -218,7 +262,7 @@ When performing rollouts or cold starts, state is seeded or verified while units
 | `import-strategy-state` | Ingests verified historical strategy bundles into the WAL. | Requires WAL lock and account match. |
 | `verify-native-strategy-state` | Verifies WAL checkpoint identity, frame CRC, and state provenance. | Run before restarting units on deploy. |
 
-### Strategy Table Invariants
+#### Strategy Table Invariants
 
 The WAL's `Names` table maps `StrategyId(i)` to `strategies[i]`, and every
 recorded fill is keyed on that id.
@@ -235,7 +279,7 @@ recorded fill is keyed on that id.
 * An appended sleeve needs no takeover source: it owns no earlier fill, and a
   block whose plug declares no checkpoint contract carries no state to import.
 
-### Takeover Source Roles
+#### Takeover Source Roles
 | Sleeve | Source Format | Named Source Roles |
 | :--- | :--- | :--- |
 | **LONG** | `long-book-state-v2` | `state` |
@@ -244,7 +288,7 @@ recorded fill is keyed on that id.
 
 ---
 
-## 9. Backtest Replay (`engine backtest`)
+### 9. Backtest Replay (`engine backtest`)
 
 The live loop — `Engine::boot_as`, the risk kernel, the strategy reducers, the working-order supervisor, the log — driven by a recorded `market_tape` in the tape's own time, on a simulated venue.
 
@@ -296,9 +340,22 @@ cd engine && cargo run --release -- backtest --config CONFIG --tape TAPE \
 
 ---
 
-## 10. Development Commands
+## Invariants
+
+- Must preserve one deterministic core as the account/order/risk/durability authority.
+- Must retain ordered strategy effects through overload, failure, rotation and restart.
+- Must keep required input readiness separate from account recovery, reductions and protective stops.
+- Must preserve durable dense strategy/symbol identity and venue reconciliation.
+- Must distinguish implemented local behavior from deployed behavior; local checks do not authorize funded changes.
+
+## Operational Recipes
 
 ```bash
+audit_rust_bin="$(dirname "$(rustup which --toolchain 1.90.0 rustc)")"
+export PATH="$audit_rust_bin:$PATH"
+export RUSTC="$audit_rust_bin/rustc"
+export RUSTDOC="$audit_rust_bin/rustdoc"
+
 # Style formatting check
 cargo fmt --manifest-path engine/Cargo.toml --all -- --check
 
@@ -306,5 +363,9 @@ cargo fmt --manifest-path engine/Cargo.toml --all -- --check
 cargo clippy --manifest-path engine/Cargo.toml --workspace --all-targets -- -D warnings
 
 # Full workspace unit and integration tests
-cargo test --manifest-path engine/Cargo.toml --workspace --all-targets
+cargo test --manifest-path engine/Cargo.toml --workspace --all-targets --locked
+cargo test --manifest-path engine/Cargo.toml --workspace --doc --locked
+cargo test --manifest-path engine/Cargo.toml --workspace --all-targets --release --locked
+cargo test --manifest-path engine/Cargo.toml --workspace --doc --release --locked
+scripts/dev.sh check
 ```

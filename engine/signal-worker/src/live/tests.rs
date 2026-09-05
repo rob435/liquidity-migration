@@ -1,3 +1,4 @@
+use super::LaneContext;
 use super::{
     bounded_instrument_source_ranges, carry_required_lanes_pending, closed_kline_end,
     complete_funding_coverage, complete_whale_coverage, funding_job_chunks, heartbeat_status,
@@ -297,10 +298,12 @@ async fn a_repair_restarted_without_an_epoch_keeps_the_live_one() {
                 end_ms: 100 * DAY_MS,
                 epoch: None,
             },
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .unwrap();
     assert_eq!(
@@ -734,10 +737,12 @@ async fn malformed_source_lanes_retry_without_stopping_long() {
                     rows: Vec::new(),
                 },
             })),
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .expect("malformed instrument input stays lane-local");
     assert!(!lanes.instruments, "instrument cadence can retry the lane");
@@ -750,10 +755,12 @@ async fn malformed_source_lanes_retry_without_stopping_long() {
                 available_at_ms,
                 rows: vec![ticker_wire_with_mark("not-a-number")],
             })),
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .expect("malformed ticker input stays lane-local");
     assert!(!lanes.tickers, "ticker fallback can retry the lane");
@@ -782,20 +789,24 @@ async fn malformed_source_lanes_retry_without_stopping_long() {
                 }),
                 resume: funding_resume,
             },
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .expect("malformed funding input stays lane-local");
     assert!(!funding_ack.await.expect("funding producer receives ack"));
     runner
         .handle_lane_completion(
             LaneCompletion::FundingFinished { succeeded: false },
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .unwrap();
     assert!(!lanes.funding);
@@ -816,20 +827,24 @@ async fn malformed_source_lanes_retry_without_stopping_long() {
                 }),
                 resume: whale_resume,
             },
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .expect("malformed optional whale input stays lane-local");
     assert!(whale_ack.await.expect("whale producer receives ack"));
     runner
         .handle_lane_completion(
             LaneCompletion::WhaleFinished,
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .unwrap();
     assert!(!lanes.whales);
@@ -860,10 +875,12 @@ async fn malformed_source_lanes_retry_without_stopping_long() {
                 }),
                 resume: repair_resume,
             },
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .expect("malformed repair input stays lane-local");
     assert!(!repair_ack.await.expect("repair producer receives ack"));
@@ -873,10 +890,12 @@ async fn malformed_source_lanes_retry_without_stopping_long() {
                 end_ms: available_at_ms,
                 epoch: None,
             },
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .unwrap();
     assert!(!lanes.repair, "kline cadence can retry the repair lane");
@@ -925,10 +944,12 @@ async fn an_instrument_refresh_held_off_by_funding_starts_when_that_pass_ends() 
     runner
         .handle_lane_completion(
             LaneCompletion::FundingFinished { succeeded: true },
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .unwrap();
     assert!(!lanes.funding);
@@ -1102,10 +1123,12 @@ async fn revised_source_history_is_rejected_before_durable_mutation() {
                 }),
                 resume: funding_resume,
             },
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .expect("revised funding stays lane-local");
     assert!(!funding_ack.await.unwrap());
@@ -1129,10 +1152,12 @@ async fn revised_source_history_is_rejected_before_durable_mutation() {
                 }),
                 resume: whale_resume,
             },
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .expect("revised optional whale history stays lane-local");
     assert!(whale_ack.await.unwrap());
@@ -1159,10 +1184,12 @@ async fn revised_source_history_is_rejected_before_durable_mutation() {
                 }),
                 resume: repair_resume,
             },
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .expect("revised repair history stays lane-local");
     assert!(!repair_ack.await.unwrap());
@@ -1181,7 +1208,7 @@ async fn revised_source_history_is_rejected_before_durable_mutation() {
         },
     );
     assert!(!runner
-        .flush_pending_klines_or_recover(&mut stream, &mut pending, &lane_tx, &mut lanes,)
+        .flush_pending_klines_or_recover(&mut stream, &mut pending, &lane_tx, &mut lanes)
         .expect("a durable-history WS rewrite stays source-local"));
     assert!(pending.is_empty());
     assert!(stream.health().gap_open);
@@ -1231,10 +1258,12 @@ async fn durable_lane_commit_error_still_terminates_the_shared_loop() {
                 available_at_ms: observed_ts_ms,
                 rows: vec![ticker_wire_with_mark("100")],
             })),
-            &mut stream,
-            &mut pending,
-            &lane_tx,
-            &mut lanes,
+            LaneContext {
+                stream: &mut stream,
+                pending: &mut pending,
+                lane_tx: &lane_tx,
+                lanes: &mut lanes,
+            },
         )
         .expect_err("durable journal errors remain process-fatal");
     assert!(error.to_string().starts_with("io:"), "{error}");

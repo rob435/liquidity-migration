@@ -5,6 +5,8 @@
 //! the host is derived from that realm rather than passed alongside it, so the
 //! two cannot disagree.
 
+use crate::realm_credentials::InventoryCredentials;
+use crate::RealmCredentials;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -85,8 +87,7 @@ pub struct BybitGateway {
     realm: VenueRealm,
     rest: RestClient,
     trade: Option<TradeClient>,
-    names: Vec<Symbol>,
-    ids: HashMap<Symbol, SymbolId>,
+    symbols: engine_public::symbols::SymbolCatalog,
     one_way_verified: Vec<bool>,
     clock_checked: bool,
     create_limiter: RollingRateLimiter,
@@ -361,17 +362,11 @@ impl BybitGateway {
         trade_url: Option<&str>,
     ) -> Self {
         let one_way_verified = vec![false; symbols.len()];
-        let ids = symbols
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), SymbolId(i as u16)))
-            .collect();
         Self {
             realm,
             rest: RestClient::new(base_url, creds.clone()),
             trade: trade_url.map(|url| TradeClient::new(url, creds)),
-            names: symbols,
-            ids,
+            symbols: engine_public::symbols::SymbolCatalog::from_names(symbols),
             one_way_verified,
             clock_checked: false,
             create_limiter: RollingRateLimiter::default(),
@@ -455,22 +450,19 @@ impl BybitGateway {
     /// Add a symbol the engine has since interned. Ids stay in step with the
     /// engine's own table only if it appends in the same order.
     pub fn add_symbol(&mut self, name: &str) -> SymbolId {
-        if let Some(id) = self.ids.get(name) {
-            return *id;
-        }
-        let id = SymbolId(u16::try_from(self.names.len()).expect("more than 65535 symbols"));
-        self.names.push(name.to_string());
-        self.one_way_verified.push(false);
-        self.ids.insert(name.to_string(), id);
+        let id = self.symbols.intern(name).expect("more than 65535 symbols");
+        self.one_way_verified
+            .resize(self.symbols.names().len(), false);
         id
     }
 
     pub fn symbols(&self) -> &[Symbol] {
-        &self.names
+        self.symbols.names()
     }
 
     fn name_of(&self, id: SymbolId) -> Result<&str, VenueError> {
-        self.names
+        self.symbols
+            .names()
             .get(id.0 as usize)
             .map(String::as_str)
             .ok_or_else(|| {
@@ -508,7 +500,8 @@ impl BybitGateway {
 
     async fn require_configured_symbols_one_way(&mut self) -> Result<(), VenueError> {
         let pending: Vec<(usize, String)> = self
-            .names
+            .symbols
+            .names()
             .iter()
             .enumerate()
             .filter(|(at, _)| !self.one_way_verified[*at])
@@ -1383,7 +1376,7 @@ impl VenueGateway for BybitGateway {
         let (wallet, positions) = futures_util::future::try_join(wallet, positions).await?;
         let (equity_usdt, available_usdt) = parse_wallet(&venue_result(wallet)?)?;
 
-        let ids = &self.ids;
+        let ids = self.symbols.ids();
         let resolve = |name: &str| ids.get(name).copied();
         let (mut open, mut cursor) = parse_positions(&venue_result(positions)?, &resolve)?;
         let mut pages = 1;

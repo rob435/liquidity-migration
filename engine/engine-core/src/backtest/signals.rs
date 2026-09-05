@@ -20,6 +20,8 @@ use crate::signals::{
 pub struct SignalReplayFeed {
     observations: Vec<Option<SignalObservation>>,
     outstanding: Option<usize>,
+    ready_observation: Option<SignalObservation>,
+    producer_frontiers: std::collections::BTreeMap<String, engine_types::SignalSourceFrontier>,
     gaps: Vec<SignalGapRequest>,
     blocked_destinations: Vec<StrategyId>,
     scheduler: Scheduler,
@@ -30,6 +32,8 @@ impl SignalReplayFeed {
         SignalReplayFeed {
             observations: Vec::new(),
             outstanding: None,
+            ready_observation: None,
+            producer_frontiers: std::collections::BTreeMap::new(),
             gaps: Vec::new(),
             blocked_destinations: Vec::new(),
             scheduler,
@@ -50,7 +54,15 @@ impl SignalReplayFeed {
             let path = entry
                 .map_err(|error| SignalError::Source(error.to_string()))?
                 .path();
-            if path.extension().is_some_and(|ext| ext == "json") {
+            if path.extension().is_some_and(|ext| ext == "json")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name != engine_types::SIGNAL_READINESS_REQUEST_FILE
+                            && name != engine_types::SIGNAL_READINESS_RESPONSE_FILE
+                    })
+            {
                 paths.push(path);
             }
         }
@@ -65,6 +77,8 @@ impl SignalReplayFeed {
         Ok(SignalReplayFeed {
             observations: observations.into_iter().map(Some).collect(),
             outstanding: None,
+            ready_observation: None,
+            producer_frontiers: std::collections::BTreeMap::new(),
             gaps: Vec::new(),
             blocked_destinations: Vec::new(),
             scheduler,
@@ -81,6 +95,30 @@ impl SignalReplayFeed {
 }
 
 impl SignalFeed for SignalReplayFeed {
+    async fn next_event(&mut self) -> Result<engine_types::SignalFeedEvent, SignalError> {
+        if let Some(observation) = self.ready_observation.take() {
+            return Ok(engine_types::SignalFeedEvent::Observation(observation));
+        }
+        let observation = self.next_observation().await?;
+        if self.producer_frontiers.contains_key(&observation.source) {
+            return Ok(engine_types::SignalFeedEvent::Observation(observation));
+        }
+        // Replay advertises only the row which has reached its availability
+        // clock. The rest of the tape cannot establish a present frontier.
+        self.producer_frontiers.insert(
+            observation.source.clone(),
+            engine_types::SignalSourceFrontier {
+                source: observation.source.clone(),
+                destination: observation.destination,
+                published_through: observation.sequence,
+            },
+        );
+        self.ready_observation = Some(observation);
+        Ok(engine_types::SignalFeedEvent::Ready(
+            self.producer_frontiers.values().cloned().collect(),
+        ))
+    }
+
     fn set_gap_requests(
         &mut self,
         gaps: &[SignalGapRequest],
@@ -203,6 +241,8 @@ mod tests {
         let mut replay = SignalReplayFeed {
             observations: vec![Some(ready.clone()), Some(missing.clone())],
             outstanding: None,
+            ready_observation: None,
+            producer_frontiers: std::collections::BTreeMap::new(),
             gaps: Vec::new(),
             blocked_destinations: Vec::new(),
             scheduler: scheduler.clone(),
@@ -255,6 +295,8 @@ mod tests {
                 Some(missing.clone()),
             ],
             outstanding: None,
+            ready_observation: None,
+            producer_frontiers: std::collections::BTreeMap::new(),
             gaps: Vec::new(),
             blocked_destinations: Vec::new(),
             scheduler: scheduler.clone(),
@@ -315,6 +357,8 @@ mod tests {
         let mut feed = SignalReplayFeed {
             observations: vec![Some(other.clone()), Some(missing.clone())],
             outstanding: None,
+            ready_observation: None,
+            producer_frontiers: std::collections::BTreeMap::new(),
             gaps: vec![SignalGapRequest {
                 source: "g1".into(),
                 next_sequence: 1,
@@ -343,6 +387,8 @@ mod tests {
                 Some(missing.clone()),
             ],
             outstanding: None,
+            ready_observation: None,
+            producer_frontiers: std::collections::BTreeMap::new(),
             gaps: Vec::new(),
             blocked_destinations: Vec::new(),
             scheduler,

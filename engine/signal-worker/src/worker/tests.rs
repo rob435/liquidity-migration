@@ -3221,3 +3221,171 @@ fn insert_exact<T: PartialEq>(
     rows.insert(key, value);
     Ok(())
 }
+
+#[test]
+fn rejected_durable_batch_keeps_memory_and_restart_at_same_input() {
+    let root = temporary_root("rejected-batch");
+    let state_dir = root.join("state");
+    let spool_dir = root.join("spool");
+    let config = test_config();
+    let universe = test_universe();
+    let mut durable = DurableSignalWorker::open_with_universe(
+        config.clone(),
+        universe.clone(),
+        &state_dir,
+        &spool_dir,
+    )
+    .unwrap();
+    let before = serde_json::to_vec(durable.worker().state()).unwrap();
+    let first = WireEvent::BybitKlineBatch {
+        schema_version: SCHEMA_VERSION,
+        sequence: 1,
+        symbol: "BTCUSDT".into(),
+        available_at_ms: 11 * DAY_MS,
+        checked_from_ms: Some(10 * DAY_MS),
+        checked_through_ms: Some(11 * DAY_MS),
+        replace_coverage: false,
+        rows: vec![],
+    };
+    let invalid = WireEvent::BybitKlineBatch {
+        schema_version: SCHEMA_VERSION + 1,
+        sequence: 2,
+        symbol: "BTCUSDT".into(),
+        available_at_ms: 11 * DAY_MS,
+        checked_from_ms: None,
+        checked_through_ms: None,
+        replace_coverage: false,
+        rows: vec![],
+    };
+    assert!(durable
+        .apply_many_and_commit([first.clone(), invalid])
+        .is_err());
+    assert_eq!(
+        serde_json::to_vec(durable.worker().state()).unwrap(),
+        before,
+        "rejected unjournaled batch must not advance memory or coverage"
+    );
+    drop(durable);
+    let mut reopened =
+        DurableSignalWorker::open_with_universe(config, universe, &state_dir, &spool_dir).unwrap();
+    assert_eq!(
+        serde_json::to_vec(reopened.worker().state()).unwrap(),
+        before
+    );
+    reopened.apply_and_commit(first).unwrap();
+    assert_eq!(reopened.worker().state().last_input_sequence, 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn worker_error_categories_preserve_recovery_and_display() {
+    let cases = [
+        (
+            WorkerError::config("bad"),
+            WorkerErrorCategory::Config,
+            "config: bad",
+            false,
+        ),
+        (
+            WorkerError::input("bad"),
+            WorkerErrorCategory::Input,
+            "input: bad",
+            true,
+        ),
+        (
+            WorkerError::state("bad"),
+            WorkerErrorCategory::State,
+            "state: bad",
+            false,
+        ),
+        (
+            WorkerError::network("bad"),
+            WorkerErrorCategory::Network,
+            "network: bad",
+            true,
+        ),
+    ];
+    for (error, category, text, lane_local) in cases {
+        assert_eq!(error.category(), category);
+        assert_eq!(error.to_string(), text);
+        assert_eq!(error.is_lane_local_source_failure(), lane_local);
+    }
+    let error = WorkerError::io("read", std::io::Error::other("bad"));
+    assert_eq!(error.category(), WorkerErrorCategory::Io);
+    assert_eq!(error.to_string(), "io: read: bad");
+    assert!(!error.is_lane_local_source_failure());
+    let parse_error = serde_json::from_str::<u64>("no").unwrap_err();
+    let error = WorkerError::json("decode", parse_error);
+    assert_eq!(error.category(), WorkerErrorCategory::Json);
+    assert!(error.to_string().starts_with("json: decode: "));
+    assert!(!error.is_lane_local_source_failure());
+}
+
+#[test]
+fn producer_readiness_echoes_each_boot_nonce_and_recovers_published_frontiers() {
+    use engine_types::{SignalReadinessRequest, SignalReadinessResponse};
+    let root = temporary_root("producer-readiness");
+    let state_dir = root.join("state");
+    let spool_dir = root.join("spool");
+    let config = test_config();
+    let universe = test_universe();
+    let durable = DurableSignalWorker::open_with_universe(
+        config.clone(),
+        universe.clone(),
+        &state_dir,
+        &spool_dir,
+    )
+    .unwrap();
+    let request = AtomicJsonStore::new(spool_dir.join("input-readiness-request.json"));
+    let response = AtomicJsonStore::new(spool_dir.join("input-readiness-response.json"));
+    durable.respond_to_readiness_request().unwrap();
+    assert!(response
+        .load::<SignalReadinessResponse>()
+        .unwrap()
+        .is_none());
+    request
+        .save(&SignalReadinessRequest {
+            schema_version: 1,
+            boot_nonce: "boot-one".into(),
+        })
+        .unwrap();
+    durable.respond_to_readiness_request().unwrap();
+    let first = response.load::<SignalReadinessResponse>().unwrap().unwrap();
+    assert_eq!(first.boot_nonce, "boot-one");
+    assert_eq!(first.sources.len(), 2);
+    assert_eq!(first.sources[0].published_through, 0);
+    assert_eq!(first.sources[1].published_through, 0);
+    assert!(first.sources[0].source.ends_with(".long"));
+    assert!(first.sources[1].source.ends_with(".carry"));
+    let initial_generation = durable.worker().state().source_generation.clone();
+    let mut committed_state = durable.worker().state().clone();
+    committed_state.long_output_sequence = 7;
+    committed_state.carry_output_sequence = 11;
+    durable.checkpoint.save(&committed_state).unwrap();
+    drop(durable);
+    let reopened =
+        DurableSignalWorker::open_with_universe(config, universe, &state_dir, &spool_dir).unwrap();
+    request
+        .save(&SignalReadinessRequest {
+            schema_version: 1,
+            boot_nonce: "boot-two".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        response
+            .load::<SignalReadinessResponse>()
+            .unwrap()
+            .unwrap()
+            .boot_nonce,
+        "boot-one"
+    );
+    reopened.respond_to_readiness_request().unwrap();
+    let second = response.load::<SignalReadinessResponse>().unwrap().unwrap();
+    assert_eq!(second.boot_nonce, "boot-two");
+    assert_eq!(second.sources[0].source, first.sources[0].source);
+    assert!(second.sources[0].source.contains(&initial_generation));
+    assert_eq!(second.sources[0].published_through, 7);
+    assert_eq!(second.sources[1].published_through, 11);
+    assert_eq!(reopened.spool.inventory().unwrap().files, 0);
+    std::fs::remove_dir_all(root).unwrap();
+}

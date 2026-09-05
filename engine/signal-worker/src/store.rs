@@ -304,6 +304,10 @@ impl SpoolWriter {
         })
     }
 
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
+    }
+
     fn try_send_socket(&self, bytes: &[u8]) -> std::io::Result<()> {
         use std::io::Write;
         use std::os::unix::net::UnixStream;
@@ -357,7 +361,12 @@ impl SpoolWriter {
         {
             let entry = entry.map_err(|error| WorkerError::io("read signal spool entry", error))?;
             let path = entry.path();
-            if path.extension().is_none_or(|extension| extension != "json") {
+            if path.extension().is_none_or(|extension| extension != "json")
+                || matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("input-readiness-request.json" | "input-readiness-response.json")
+                )
+            {
                 continue;
             }
             let metadata = match entry.metadata() {

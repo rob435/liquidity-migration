@@ -24,11 +24,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use engine_public::venues::mexc::public;
+use engine_public::MexcRealm;
 use engine_types::{
     Feed, FeedError, MarketEvent, MarketFeed, Quote, Subscription, SymbolId, Ticker,
 };
-use engine_venue::venues::mexc::public;
-use engine_venue::MexcRealm;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;

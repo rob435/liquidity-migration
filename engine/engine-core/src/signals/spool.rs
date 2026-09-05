@@ -8,6 +8,7 @@ use super::*;
 /// disk cannot stall private-order or market processing on the core thread.
 pub struct SpoolSignalFeed {
     directory: PathBuf,
+    readiness: Option<super::readiness::ReadinessExchange>,
     pub(super) returned: Option<(PathBuf, DeliveryIdentity)>,
     acknowledged: Option<PathBuf>,
     pub(super) retirement: Option<tokio::task::JoinHandle<Result<(), SignalError>>>,
@@ -68,6 +69,13 @@ impl SpoolScanner {
                 .map_err(|error| SignalError::Source(error.to_string()))?
                 .path();
             if path.extension().is_none_or(|extension| extension != "json")
+                || path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name == engine_types::SIGNAL_READINESS_REQUEST_FILE
+                            || name == engine_types::SIGNAL_READINESS_RESPONSE_FILE
+                    })
                 || after.is_some_and(|after| path.as_path() <= after)
             {
                 continue;
@@ -170,6 +178,7 @@ impl SpoolSignalFeed {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
+            readiness: None,
             returned: None,
             acknowledged: None,
             retirement: None,
@@ -309,6 +318,34 @@ impl SpoolSignalFeed {
 }
 
 impl SignalFeed for SpoolSignalFeed {
+    fn request_readiness(&mut self) -> Result<(), SignalError> {
+        self.readiness = Some(super::readiness::ReadinessExchange::start(
+            self.directory.clone(),
+            self.poll,
+        ));
+        Ok(())
+    }
+
+    async fn next_event(&mut self) -> Result<engine_types::SignalFeedEvent, SignalError> {
+        let Some(receiver) = self.readiness.as_ref().map(|exchange| exchange.receiver()) else {
+            return self
+                .next_observation()
+                .await
+                .map(engine_types::SignalFeedEvent::Observation);
+        };
+        tokio::select! {
+            biased;
+            frontiers = super::readiness::receive(receiver) => {
+                self.readiness = None;
+                Ok(match frontiers {
+                    Ok(frontiers) => engine_types::SignalFeedEvent::Ready(frontiers),
+                    Err(error) => engine_types::SignalFeedEvent::ReadinessUnavailable { reason: error.to_string() },
+                })
+            }
+            observation = self.next_observation() => observation.map(engine_types::SignalFeedEvent::Observation),
+        }
+    }
+
     fn set_gap_requests(
         &mut self,
         gaps: &[SignalGapRequest],

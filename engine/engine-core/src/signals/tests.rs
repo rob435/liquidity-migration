@@ -221,6 +221,7 @@ fn consumed_universe_changes_keep_earlier_subscriptions_through_rotation() {
         strategy_events: vec![],
         signal_observations: vec![],
         signal_gaps: vec![],
+        strategy_effects: Default::default(),
         signal_cursors: vec![engine_types::SignalCursor {
             source: second.source.clone(),
             sequence: 2,

@@ -78,7 +78,7 @@ struct Inbox {
 impl HyperliquidPublicFeed {
     /// Build the feed against the realm's socket. Nothing is dialled until the
     /// first `next_event`.
-    pub fn new(realm: engine_venue::HyperliquidRealm, subs: &[Subscription]) -> Self {
+    pub fn new(realm: engine_public::HyperliquidRealm, subs: &[Subscription]) -> Self {
         Self::with_url(realm.websocket(), subs)
     }
 

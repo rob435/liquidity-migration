@@ -31,6 +31,7 @@
 //! signed account proves a supported dust-close path, both realms remain
 //! production-blocked.
 
+use crate::RealmCredentials;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -183,8 +184,7 @@ async fn reserve(budget: &mut RollingBudget, cost: u32, capacity: u32) -> u64 {
 pub struct BinanceGateway {
     realm: BinanceRealm,
     rest: RestClient,
-    names: Vec<Symbol>,
-    ids: HashMap<Symbol, SymbolId>,
+    symbols: engine_public::symbols::SymbolCatalog,
     market_qty_rules: HashMap<Symbol, MarketQtyRule>,
     weight_budget: RollingBudget,
     order_ten_second_budget: RollingBudget,
@@ -236,16 +236,10 @@ impl BinanceGateway {
         creds: Credentials,
         symbols: Vec<Symbol>,
     ) -> Self {
-        let ids = symbols
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), SymbolId(i as u16)))
-            .collect();
         Self {
             realm,
             rest: RestClient::new(base_url, creds),
-            names: symbols,
-            ids,
+            symbols: engine_public::symbols::SymbolCatalog::from_names(symbols),
             market_qty_rules: HashMap::new(),
             weight_budget: RollingBudget::new(WEIGHT_WINDOW),
             order_ten_second_budget: RollingBudget::new(ORDER_WINDOW),
@@ -256,7 +250,8 @@ impl BinanceGateway {
     }
 
     fn name_of(&self, symbol: SymbolId) -> Result<&Symbol, VenueError> {
-        self.names
+        self.symbols
+            .names()
             .get(symbol.0 as usize)
             .ok_or_else(|| VenueError::BadRequest(format!("no symbol at id {}", symbol.0)))
     }
@@ -826,13 +821,7 @@ impl VenueGateway for BinanceGateway {
     }
 
     fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {
-        if let Some(id) = self.ids.get(symbol) {
-            return Some(*id);
-        }
-        let id = SymbolId(u16::try_from(self.names.len()).ok()?);
-        self.names.push(symbol.to_string());
-        self.ids.insert(symbol.to_string(), id);
-        Some(id)
+        self.symbols.intern(symbol)
     }
 
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
@@ -847,7 +836,7 @@ impl VenueGateway for BinanceGateway {
             // Without the join every position would report itself
             // unprotected, and the engine would act on that.
             let (equity, available, mut positions) =
-                parse_account(&account, &self.ids, &HashMap::new())?;
+                parse_account(&account, self.symbols.ids(), &HashMap::new())?;
             for position in &mut positions {
                 let name = self.name_of(position.symbol)?.clone();
                 let stops = parse_position_stops(&self.open_algo_orders_raw(&name).await?);

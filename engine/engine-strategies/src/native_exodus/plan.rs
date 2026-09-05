@@ -244,61 +244,7 @@ pub fn reduce(
         pending
     });
 
-    // Join the checkpoint to current attributed holdings and orders. A filled
-    // short closes the re-entry window. A record retires only after that
-    // window closed and both position and entry order are conclusively absent.
-    if input.account_healthy {
-        let symbols = state.open.keys().cloned().collect::<Vec<_>>();
-        for symbol in symbols {
-            let held = input.facts.held.get(&symbol);
-            if let Some(position) = held {
-                let record = &state.open[&symbol];
-                let target_reached = position.side == engine_types::Side::Sell
-                    && record
-                        .target_qty
-                        .is_none_or(|target| position.qty >= target * (1.0 - 1e-9));
-                if target_reached
-                    && !input.owned_working_symbols.contains(&symbol)
-                    && !state.entry_closed_ts_ms_by_symbol.contains_key(&symbol)
-                {
-                    state
-                        .entry_closed_ts_ms_by_symbol
-                        .insert(symbol.clone(), input.now_ms);
-                    summary.entry_closed_symbols.push(symbol.clone());
-                }
-            } else if state.entry_closed_ts_ms_by_symbol.contains_key(&symbol)
-                && !input.owned_working_symbols.contains(&symbol)
-            {
-                state.open.remove(&symbol);
-                state.entry_closed_ts_ms_by_symbol.remove(&symbol);
-                state.refused_entries.remove(&symbol);
-                state.entry_retry_after_ms.remove(&symbol);
-                summary.retired_symbols.push(symbol);
-            }
-        }
-    }
-
-    let mut due = BTreeSet::new();
-    for record in state.open.values() {
-        if input.now_ms >= record.cover_ts_ms(config) {
-            due.insert(record.symbol.clone());
-            summary.covered_symbols.push(record.symbol.clone());
-        }
-    }
-    if input.account_healthy {
-        for symbol in due.clone() {
-            if !input.facts.held.contains_key(&symbol)
-                && !input.owned_working_symbols.contains(&symbol)
-            {
-                state.open.remove(&symbol);
-                state.entry_closed_ts_ms_by_symbol.remove(&symbol);
-                state.refused_entries.remove(&symbol);
-                state.entry_retry_after_ms.remove(&symbol);
-                due.remove(&symbol);
-                summary.retired_symbols.push(symbol);
-            }
-        }
-    }
+    let due = reconcile_open_positions(&input, &mut state, config, &mut summary);
 
     let mut consumed_sources = Vec::<(String, String)>::new();
     for event in input.events {
@@ -310,68 +256,33 @@ pub fn reduce(
             consumed_sources.push((config.carry_sleeve_name.clone(), event.event_id));
             continue;
         }
-        let entry_deadline = event.settlement_ts_ms
-            + (config.rule.entry_valid_minutes_after_settlement - 15) * MIN_MS;
-        let blocked = if event.fired_ts_ms > input.now_ms {
-            Some("event_not_yet_available")
-        } else if event.environment != config.environment {
-            Some("environment_mismatch")
-        } else if event.source_profile != config.rule.accepted_source_profile
-            || event.source_config_id != config.rule.accepted_source_config_id
-        {
-            Some("incompatible_source")
-        } else {
-            None
-        };
-        if let Some(reason) = blocked {
-            summary
-                .blocked_events
-                .push((event.event_id.clone(), reason.to_owned()));
-            continue;
-        }
-        let terminal_reason = if input.now_ms >= entry_deadline {
-            Some("entry_deadline_passed")
-        } else if event.carry_side.as_deref() != Some("long")
-            || event.carry_qty.is_none()
-            || event.mark_px.is_none()
-        {
-            Some("no_exact_carry_long")
-        } else {
-            None
-        };
-        if let Some(reason) = terminal_reason {
-            state.consumed_event_ids.insert(event.event_id.clone());
-            consumed_sources.push((config.carry_sleeve_name.clone(), event.event_id.clone()));
-            summary
-                .blocked_events
-                .push((event.event_id.clone(), reason.to_owned()));
-            continue;
-        }
-        let transient_block = if !input.account_healthy {
-            Some("engine_account_health_unavailable")
-        } else if due.contains(&event.symbol) {
-            Some("symbol_cover_pending")
-        } else if state.open.contains_key(&event.symbol) {
-            Some("symbol_already_open")
-        } else {
-            None
-        };
-        if let Some(reason) = transient_block {
-            summary
-                .blocked_events
-                .push((event.event_id.clone(), reason.to_owned()));
-            continue;
-        }
-        if input.now_ms < entry_deadline && (!config.entries_enabled || mismatch) {
-            summary.blocked_events.push((
-                event.event_id.clone(),
-                if mismatch {
-                    "checkpoint_mismatch".to_owned()
-                } else {
-                    "entries_disabled".to_owned()
-                },
-            ));
-            continue;
+        let admission = classify_event(
+            &event,
+            config,
+            &EventAdmissionContext {
+                now_ms: input.now_ms,
+                account_healthy: input.account_healthy,
+                mismatch,
+                due: &due,
+                open: &state.open,
+            },
+        );
+        match admission {
+            EventAdmission::Pending(reason) => {
+                summary
+                    .blocked_events
+                    .push((event.event_id.clone(), reason.to_owned()));
+                continue;
+            }
+            EventAdmission::Terminal(reason) => {
+                state.consumed_event_ids.insert(event.event_id.clone());
+                consumed_sources.push((config.carry_sleeve_name.clone(), event.event_id.clone()));
+                summary
+                    .blocked_events
+                    .push((event.event_id.clone(), reason.to_owned()));
+                continue;
+            }
+            EventAdmission::Ready => {}
         }
         state.consumed_event_ids.insert(event.event_id.clone());
         consumed_sources.push((config.carry_sleeve_name.clone(), event.event_id.clone()));
@@ -526,6 +437,124 @@ pub fn reduce(
             skipped: planned.skipped,
         },
     })
+}
+
+fn reconcile_open_positions(
+    input: &ReducerInput,
+    state: &mut SleeveState,
+    config: &StrategyConfig,
+    summary: &mut Summary,
+) -> BTreeSet<String> {
+    // Join the checkpoint to current attributed holdings and orders. A filled
+    // short closes the re-entry window. A record retires only after that
+    // window closed and both position and entry order are conclusively absent.
+    if input.account_healthy {
+        let symbols = state.open.keys().cloned().collect::<Vec<_>>();
+        for symbol in symbols {
+            let held = input.facts.held.get(&symbol);
+            if let Some(position) = held {
+                let record = &state.open[&symbol];
+                let target_reached = position.side == engine_types::Side::Sell
+                    && record
+                        .target_qty
+                        .is_none_or(|target| position.qty >= target * (1.0 - 1e-9));
+                if target_reached
+                    && !input.owned_working_symbols.contains(&symbol)
+                    && !state.entry_closed_ts_ms_by_symbol.contains_key(&symbol)
+                {
+                    state
+                        .entry_closed_ts_ms_by_symbol
+                        .insert(symbol.clone(), input.now_ms);
+                    summary.entry_closed_symbols.push(symbol.clone());
+                }
+            } else if state.entry_closed_ts_ms_by_symbol.contains_key(&symbol)
+                && !input.owned_working_symbols.contains(&symbol)
+            {
+                state.open.remove(&symbol);
+                state.entry_closed_ts_ms_by_symbol.remove(&symbol);
+                state.refused_entries.remove(&symbol);
+                state.entry_retry_after_ms.remove(&symbol);
+                summary.retired_symbols.push(symbol);
+            }
+        }
+    }
+
+    let mut due = BTreeSet::new();
+    for record in state.open.values() {
+        if input.now_ms >= record.cover_ts_ms(config) {
+            due.insert(record.symbol.clone());
+            summary.covered_symbols.push(record.symbol.clone());
+        }
+    }
+    if input.account_healthy {
+        for symbol in due.clone() {
+            if !input.facts.held.contains_key(&symbol)
+                && !input.owned_working_symbols.contains(&symbol)
+            {
+                state.open.remove(&symbol);
+                state.entry_closed_ts_ms_by_symbol.remove(&symbol);
+                state.refused_entries.remove(&symbol);
+                state.entry_retry_after_ms.remove(&symbol);
+                due.remove(&symbol);
+                summary.retired_symbols.push(symbol);
+            }
+        }
+    }
+
+    due
+}
+
+enum EventAdmission {
+    Pending(&'static str),
+    Terminal(&'static str),
+    Ready,
+}
+
+struct EventAdmissionContext<'a> {
+    now_ms: i64,
+    account_healthy: bool,
+    mismatch: bool,
+    due: &'a BTreeSet<String>,
+    open: &'a BTreeMap<String, OpenRecord>,
+}
+
+fn classify_event(
+    event: &CarryPresettlementFire,
+    config: &StrategyConfig,
+    context: &EventAdmissionContext<'_>,
+) -> EventAdmission {
+    let entry_deadline =
+        event.settlement_ts_ms + (config.rule.entry_valid_minutes_after_settlement - 15) * MIN_MS;
+    if event.fired_ts_ms > context.now_ms {
+        EventAdmission::Pending("event_not_yet_available")
+    } else if event.environment != config.environment {
+        EventAdmission::Pending("environment_mismatch")
+    } else if event.source_profile != config.rule.accepted_source_profile
+        || event.source_config_id != config.rule.accepted_source_config_id
+    {
+        EventAdmission::Pending("incompatible_source")
+    } else if context.now_ms >= entry_deadline {
+        EventAdmission::Terminal("entry_deadline_passed")
+    } else if event.carry_side.as_deref() != Some("long")
+        || event.carry_qty.is_none()
+        || event.mark_px.is_none()
+    {
+        EventAdmission::Terminal("no_exact_carry_long")
+    } else if !context.account_healthy {
+        EventAdmission::Pending("engine_account_health_unavailable")
+    } else if context.due.contains(&event.symbol) {
+        EventAdmission::Pending("symbol_cover_pending")
+    } else if context.open.contains_key(&event.symbol) {
+        EventAdmission::Pending("symbol_already_open")
+    } else if context.now_ms < entry_deadline && (!config.entries_enabled || context.mismatch) {
+        EventAdmission::Pending(if context.mismatch {
+            "checkpoint_mismatch"
+        } else {
+            "entries_disabled"
+        })
+    } else {
+        EventAdmission::Ready
+    }
 }
 
 fn validate_event(event: &CarryPresettlementFire) -> Result<(), &'static str> {

@@ -393,34 +393,56 @@ fn acquire_at_with(
 /// It deliberately omits a credential fingerprint: handing secret-derived
 /// material to the lease module would add no exclusion. The path and `user_id`
 /// identify the account; `role` and `started_at_ns` identify the holder.
-fn note(venue: &str, realm: &str, role: &str, user_id: Option<&str>) -> String {
-    let mut fields: Vec<(&str, String)> = vec![
-        ("environment", quoted(realm)),
-        ("pid", std::process::id().to_string()),
-        ("role", quoted(role)),
-        ("started_at_ns", wall_ns().to_string()),
-    ];
-    if let Some(user_id) = user_id {
-        fields.push(("user_id", quoted(user_id)));
-    }
-    // Bybit demo and every non-Bybit realm name the venue. Funded Bybit keeps
-    // the compact note shape; its path already fixes venue and realm. The note
-    // is for people, not exclusion — the flock is what excludes.
-    if realm == REALM_DEMO || venue != VENUE_BYBIT {
-        fields.push(("venue", quoted(venue)));
-    }
-    fields.sort_by_key(|(key, _)| *key);
-    let body: Vec<String> = fields
-        .iter()
-        .map(|(key, value)| format!("{}: {value}", quoted(key)))
-        .collect();
-    format!("{{{}}}\n", body.join(", "))
+#[derive(serde::Serialize)]
+struct LeaseNote<'a> {
+    environment: &'a str,
+    pid: u32,
+    role: &'a str,
+    started_at_ns: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    venue: Option<&'a str>,
 }
 
-/// One JSON string. Every value in the note is a string or a number, so this
-/// and `to_string` on the numbers are the whole encoder.
-fn quoted(text: &str) -> String {
-    serde_json::to_string(text).expect("a string is always encodable as JSON")
+struct NoteFormatter;
+impl serde_json::ser::Formatter for NoteFormatter {
+    fn begin_object_key<W: io::Write + ?Sized>(
+        &mut self,
+        writer: &mut W,
+        first: bool,
+    ) -> io::Result<()> {
+        if first {
+            Ok(())
+        } else {
+            writer.write_all(b", ")
+        }
+    }
+    fn begin_object_value<W: io::Write + ?Sized>(&mut self, writer: &mut W) -> io::Result<()> {
+        writer.write_all(b": ")
+    }
+}
+
+impl LeaseNote<'_> {
+    fn render(&self) -> String {
+        let mut bytes = Vec::new();
+        let mut serializer = serde_json::Serializer::with_formatter(&mut bytes, NoteFormatter);
+        serde::Serialize::serialize(self, &mut serializer).expect("lease fields are JSON values");
+        bytes.push(b'\n');
+        String::from_utf8(bytes).expect("JSON is UTF-8")
+    }
+}
+
+fn note(venue: &str, realm: &str, role: &str, user_id: Option<&str>) -> String {
+    LeaseNote {
+        environment: realm,
+        pid: std::process::id(),
+        role,
+        started_at_ns: wall_ns(),
+        user_id,
+        venue: (realm == REALM_DEMO || venue != VENUE_BYBIT).then_some(venue),
+    }
+    .render()
 }
 
 fn wall_ns() -> u128 {
@@ -1023,5 +1045,31 @@ mod tests {
         let mut sorted = keys.clone();
         sorted.sort_unstable();
         assert_eq!(keys, sorted, "keys must read in order: {written}");
+    }
+}
+
+#[cfg(test)]
+mod note_wire_tests {
+    use super::*;
+    #[test]
+    fn typed_note_preserves_sorted_spacing_escaping_and_optional_shape() {
+        let note = LeaseNote {
+            environment: "demo",
+            pid: 7,
+            role: "engine\"\n\\",
+            started_at_ns: 123,
+            user_id: Some("42"),
+            venue: Some("bybit"),
+        };
+        assert_eq!(note.render(), "{\"environment\": \"demo\", \"pid\": 7, \"role\": \"engine\\\"\\n\\\\\", \"started_at_ns\": 123, \"user_id\": \"42\", \"venue\": \"bybit\"}\n");
+        let compact = LeaseNote {
+            environment: "mainnet",
+            pid: 7,
+            role: "engine",
+            started_at_ns: 123,
+            user_id: None,
+            venue: None,
+        };
+        assert_eq!(compact.render(), "{\"environment\": \"mainnet\", \"pid\": 7, \"role\": \"engine\", \"started_at_ns\": 123}\n");
     }
 }

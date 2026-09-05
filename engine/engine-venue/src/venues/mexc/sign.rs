@@ -12,8 +12,7 @@
 //! different string than the venue computes. Callers hand [`query_string`] the
 //! pairs and it does the sorting, so no call site has to remember.
 
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+use crate::signing::hmac_sha256_hex;
 
 pub(crate) const HEADER_KEY: &str = "ApiKey";
 pub(crate) const HEADER_TIMESTAMP: &str = "Request-Time";
@@ -27,13 +26,6 @@ pub(crate) const RECV_WINDOW_S: &str = "30";
 /// The string MEXC expects to be signed.
 pub(crate) fn sign_payload(api_key: &str, timestamp_ms: i64, body_or_query: &str) -> String {
     format!("{api_key}{timestamp_ms}{body_or_query}")
-}
-
-pub(crate) fn hmac_sha256_hex(secret: &str, message: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("HMAC-SHA256 takes a key of any length");
-    mac.update(message.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
 }
 
 /// Sign one REST request.

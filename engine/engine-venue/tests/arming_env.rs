@@ -16,6 +16,7 @@
 //! the network: every assertion is about a construction that fails, or about
 //! which variable was read.
 
+use engine_venue::RealmCredentials;
 use engine_venue::VenueRealm;
 
 /// Restore the environment on the way out however the test ends, so a failure

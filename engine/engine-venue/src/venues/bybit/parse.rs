@@ -5,6 +5,7 @@
 //! `BadReply` — never a zero, never a default. Guessing here would hand the
 //! risk kernel a picture of an account that does not exist.
 
+use crate::wire::{self, Field};
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
     AccountOrder, AccountPosition, ForcedClose, InstrumentRule, OrderAck, VenueExecution,
@@ -12,6 +13,7 @@ use engine_types::orders::{
 };
 use engine_types::risk::PositionView;
 use engine_types::{Side, VenueError};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::json::{int_field, kind_of, num_field, opt_num_field, str_field};
@@ -19,30 +21,43 @@ use crate::json::{int_field, kind_of, num_field, opt_num_field, str_field};
 const MAX_ASSET_SNAPSHOT_AGE_MS: i64 = 30_000;
 const MAX_ASSET_SNAPSHOT_FUTURE_SKEW_MS: i64 = 5_000;
 
-/// Unwrap the `retCode` envelope every v5 endpoint shares.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplyEnvelope {
+    #[serde(default)]
+    ret_code: Field<i64>,
+    #[serde(default)]
+    ret_msg: Field<String>,
+    #[serde(default)]
+    result: Value,
+}
+
+/// Unwrap the typed v5 transport envelope before endpoint-specific decoding.
 pub(crate) fn venue_result(envelope: Value) -> Result<Value, VenueError> {
-    let mut obj = match envelope {
-        Value::Object(o) => o,
-        other => {
-            return Err(VenueError::BadReply(format!(
-                "expected a JSON object, got {}",
-                kind_of(&other)
-            )));
-        }
-    };
-    let code = obj
-        .get("retCode")
-        .and_then(Value::as_i64)
+    if !envelope.is_object() {
+        return Err(VenueError::BadReply(format!(
+            "expected a JSON object, got {}",
+            kind_of(&envelope)
+        )));
+    }
+    let reply: ReplyEnvelope = wire::object(&envelope);
+    let code = reply
+        .ret_code
+        .0
         .ok_or_else(|| VenueError::BadReply("reply carries no retCode".to_string()))?;
     if code != 0 {
-        let message = obj
-            .get("retMsg")
-            .and_then(Value::as_str)
-            .unwrap_or("no retMsg")
-            .to_string();
-        return Err(VenueError::Rejected { code, message });
+        return Err(VenueError::Rejected {
+            code,
+            message: reply.ret_msg.0.unwrap_or_else(|| "no retMsg".into()),
+        });
     }
-    Ok(obj.remove("result").unwrap_or(Value::Null))
+    Ok(reply.result)
+}
+
+#[derive(Default, Deserialize)]
+struct AcceptedOrder {
+    #[serde(default, rename = "orderId")]
+    order_id: Field<String>,
 }
 
 /// Enforce the funded key's required identity and permission shape.
@@ -196,7 +211,11 @@ pub(crate) fn parse_order_ack(
     client_order_id: &str,
     ack_ns: u64,
 ) -> Result<OrderAck, VenueError> {
-    let venue_order_id = str_field(result, "orderId")?;
+    let accepted: AcceptedOrder = wire::object(result);
+    let venue_order_id = accepted
+        .order_id
+        .0
+        .ok_or_else(|| VenueError::BadReply("field orderId is missing or not a string".into()))?;
     if venue_order_id.is_empty() {
         return Err(VenueError::BadReply(
             "accepted order has a blank orderId".to_string(),
@@ -2166,6 +2185,56 @@ mod tests {
                 matches!(parse_executions(&malformed), Err(VenueError::BadReply(_))),
                 "accepted {malformed}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tier1_wire_contract {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn reply_and_ack_preserve_optional_error_and_escaped_wire_contracts() {
+        let reply = serde_json::from_str(
+            r#"{"retCode":7,"retMsg":"bad \"quoted\" \u00a3","unknown":{"a":[]}}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(venue_result(reply), Err(VenueError::Rejected {code:7,message}) if message == "bad \"quoted\" £")
+        );
+        assert_eq!(venue_result(json!({"retCode":0})).unwrap(), Value::Null);
+        for bad in [
+            json!({}),
+            json!({"retCode":"0"}),
+            json!({"retCode":null}),
+            json!([]),
+            json!(true),
+        ] {
+            assert!(matches!(venue_result(bad), Err(VenueError::BadReply(_))));
+        }
+        let duplicate = serde_json::from_str(
+            r#"{"retCode":7,"retCode":0,"result":{"orderId":"venue-\u00a3-\"1"}}"#,
+        )
+        .unwrap();
+        let result = venue_result(duplicate).unwrap();
+        let ack = parse_order_ack(&result, "client-1", 99).unwrap();
+        assert_eq!(ack.venue_order_id, "venue-£-\"1");
+        assert_eq!(
+            (ack.client_order_id.as_str(), ack.sent_ns, ack.ack_ns),
+            ("client-1", 0, 99)
+        );
+        for id in [
+            Value::Null,
+            json!(7),
+            json!(false),
+            json!([]),
+            json!({}),
+            json!(""),
+        ] {
+            assert!(matches!(
+                parse_order_ack(&json!({"orderId":id}), "client", 0),
+                Err(VenueError::BadReply(_))
+            ));
         }
     }
 }

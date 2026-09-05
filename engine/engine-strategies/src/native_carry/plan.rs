@@ -562,180 +562,18 @@ pub fn reduce_lifecycle_with_mode(
     state
         .fired_exits
         .retain(|_, fired_at| *fired_at == decision_ts);
-    let mut effective = input.decision.clone();
-    let threshold = -(config.exit_bp / 10_000.0);
-    let mut settled_fires = Vec::new();
-    if config.early_exit_enabled {
-        let mut latest = BTreeMap::<String, &SettledFundingObservation>::new();
-        for observation in &input.settled_funding {
-            if !valid_symbol(&observation.symbol)
-                || !observation.rate.is_finite()
-                || observation.settlement_ts_ms <= 0
-            {
-                return Err("CARRY settled-funding observation is invalid");
-            }
-            if effective.weights.contains_key(&observation.symbol)
-                && decision_ts < observation.settlement_ts_ms
-                && observation.settlement_ts_ms <= input.now_ms
-                && latest
-                    .get(&observation.symbol)
-                    .is_none_or(|old| observation.settlement_ts_ms > old.settlement_ts_ms)
-            {
-                latest.insert(observation.symbol.clone(), observation);
-            }
-        }
-        for (symbol, observation) in latest {
-            if !state.fired_exits.contains_key(&symbol) && observation.rate >= threshold {
-                state.fired_exits.insert(symbol.clone(), decision_ts);
-                settled_fires.push(symbol);
-            }
-        }
-    }
+    let ExitTransition {
+        effective,
+        settled_fires,
+        presettlement_fires,
+        drop_fires,
+    } = apply_funding_exits(&input, &mut state.fired_exits, config)?;
 
-    let mut presettlement_fires = Vec::new();
-    if config.early_exit_enabled && config.presettlement_exit_enabled {
-        let mut durable_fire_ids = BTreeSet::new();
-        for fire in &input.durable_fires {
-            validate_carry_fire(fire)?;
-            durable_fire_ids.insert(fire.event_id.clone());
-            if fire.environment == config.environment
-                && fire.source_profile == config.profile_name
-                && fire.source_config_id == config.rule.config_id
-                && fire.decision_ts_ms == decision_ts
-                && effective.weights.contains_key(&fire.symbol)
-            {
-                state.fired_exits.insert(fire.symbol.clone(), decision_ts);
-            }
-        }
-        let mut seen = BTreeSet::new();
-        for observation in &input.presettlement {
-            if !seen.insert(observation.symbol.clone()) {
-                return Err("CARRY pre-settlement observations contain duplicate symbols");
-            }
-            if !valid_symbol(&observation.symbol)
-                || !observation.running_rate.is_finite()
-                || observation.observed_ts_ms <= 0
-                || observation.settlement_ts_ms <= observation.observed_ts_ms
-                || observation
-                    .mark_px
-                    .is_some_and(|value| !value.is_finite() || value <= 0.0)
-            {
-                return Err("CARRY pre-settlement observation is invalid");
-            }
-            if !effective.weights.contains_key(&observation.symbol)
-                || state.fired_exits.contains_key(&observation.symbol)
-                || observation.observed_ts_ms < decision_ts
-                || observation.observed_ts_ms > input.now_ms
-                || observation.settlement_ts_ms - observation.observed_ts_ms
-                    > config.execution.presettlement_window_ms
-                || observation.running_rate < threshold
-            {
-                continue;
-            }
-            let event_id = carry_event_id(
-                &config.environment,
-                &config.rule.config_id,
-                decision_ts,
-                observation.settlement_ts_ms,
-                &observation.symbol,
-            );
-            state
-                .fired_exits
-                .insert(observation.symbol.clone(), decision_ts);
-            if !durable_fire_ids.contains(&event_id) {
-                let holding = input.facts.held.get(&observation.symbol);
-                let (carry_side, carry_qty) = holding.map_or((None, None), |held| {
-                    (
-                        Some(match held.side {
-                            Side::Buy => "long".to_owned(),
-                            Side::Sell => "short".to_owned(),
-                        }),
-                        Some(held.qty),
-                    )
-                });
-                presettlement_fires.push(CarryPresettlementFire {
-                    event_id,
-                    environment: config.environment.clone(),
-                    source_profile: config.profile_name.clone(),
-                    source_config_id: config.rule.config_id.clone(),
-                    decision_ts_ms: decision_ts,
-                    fired_ts_ms: observation.observed_ts_ms,
-                    settlement_ts_ms: observation.settlement_ts_ms,
-                    symbol: observation.symbol.clone(),
-                    mark_px: observation
-                        .mark_px
-                        .or_else(|| input.facts.prices.get(&observation.symbol).copied()),
-                    carry_side,
-                    carry_qty,
-                });
-            }
-        }
-    }
-
-    for symbol in state.fired_exits.keys() {
-        effective.weights.remove(symbol);
-    }
-    let mut drop_fires = Vec::new();
-    if let Some(upcoming) = &input.upcoming_decision {
-        if upcoming.decision_ts_ms == decision_ts + DAY_MS {
-            let dropped = effective
-                .weights
-                .keys()
-                .filter(|symbol| !upcoming.weights.contains_key(*symbol))
-                .cloned()
-                .collect::<Vec<_>>();
-            for symbol in &dropped {
-                effective.weights.remove(symbol);
-            }
-            drop_fires = dropped;
-        }
-    }
-    effective.gross = effective.weights.values().sum();
-
-    if input.account_healthy && input.equity_usdt > 0.0 {
-        state
-            .sizing_anchors
-            .entry(decision_ts)
-            .or_insert(input.equity_usdt);
-        while state.sizing_anchors.len() > 2 {
-            let oldest = *state
-                .sizing_anchors
-                .keys()
-                .next()
-                .expect("non-empty sizing anchors");
-            state.sizing_anchors.remove(&oldest);
-        }
-        if let (Some(upcoming), Some(equity)) = (
-            input.upcoming_decision.as_ref(),
-            input.upcoming_sizing_equity_usdt,
-        ) {
-            if equity.is_finite() && equity > 0.0 {
-                state
-                    .sizing_anchors
-                    .entry(upcoming.decision_ts_ms)
-                    .or_insert(equity);
-                while state.sizing_anchors.len() > 2 {
-                    let oldest = *state
-                        .sizing_anchors
-                        .keys()
-                        .next()
-                        .expect("non-empty sizing anchors");
-                    state.sizing_anchors.remove(&oldest);
-                }
-            }
-        }
-    }
-    let sizing_equity = state
-        .sizing_anchors
-        .get(&decision_ts)
-        .copied()
-        .map(|value| {
-            if config.capital_reference_usdt > 0.0 {
-                value.min(config.capital_reference_usdt)
-            } else {
-                value
-            }
-        });
+    let sizing_equity = refresh_sizing_anchors(
+        &input,
+        &mut state.sizing_anchors,
+        config.capital_reference_usdt,
+    );
 
     let standing = input
         .facts
@@ -1047,6 +885,191 @@ pub fn reduce_lifecycle_with_mode(
             skipped: planned.skipped,
         },
     })
+}
+
+struct ExitTransition {
+    effective: CarryDecision,
+    settled_fires: Vec<String>,
+    presettlement_fires: Vec<CarryPresettlementFire>,
+    drop_fires: Vec<String>,
+}
+
+fn apply_funding_exits(
+    input: &ReducerInput,
+    fired_exits: &mut BTreeMap<String, i64>,
+    config: &StrategyConfig,
+) -> Result<ExitTransition, &'static str> {
+    let decision_ts = input.decision.decision_ts_ms;
+    let mut effective = input.decision.clone();
+    let threshold = -(config.exit_bp / 10_000.0);
+    let mut settled_fires = Vec::new();
+    if config.early_exit_enabled {
+        let mut latest = BTreeMap::<String, &SettledFundingObservation>::new();
+        for observation in &input.settled_funding {
+            if !valid_symbol(&observation.symbol)
+                || !observation.rate.is_finite()
+                || observation.settlement_ts_ms <= 0
+            {
+                return Err("CARRY settled-funding observation is invalid");
+            }
+            if effective.weights.contains_key(&observation.symbol)
+                && decision_ts < observation.settlement_ts_ms
+                && observation.settlement_ts_ms <= input.now_ms
+                && latest
+                    .get(&observation.symbol)
+                    .is_none_or(|old| observation.settlement_ts_ms > old.settlement_ts_ms)
+            {
+                latest.insert(observation.symbol.clone(), observation);
+            }
+        }
+        for (symbol, observation) in latest {
+            if !fired_exits.contains_key(&symbol) && observation.rate >= threshold {
+                fired_exits.insert(symbol.clone(), decision_ts);
+                settled_fires.push(symbol);
+            }
+        }
+    }
+
+    let mut presettlement_fires = Vec::new();
+    if config.early_exit_enabled && config.presettlement_exit_enabled {
+        let mut durable_fire_ids = BTreeSet::new();
+        for fire in &input.durable_fires {
+            validate_carry_fire(fire)?;
+            durable_fire_ids.insert(fire.event_id.clone());
+            if fire.environment == config.environment
+                && fire.source_profile == config.profile_name
+                && fire.source_config_id == config.rule.config_id
+                && fire.decision_ts_ms == decision_ts
+                && effective.weights.contains_key(&fire.symbol)
+            {
+                fired_exits.insert(fire.symbol.clone(), decision_ts);
+            }
+        }
+        let mut seen = BTreeSet::new();
+        for observation in &input.presettlement {
+            if !seen.insert(observation.symbol.clone()) {
+                return Err("CARRY pre-settlement observations contain duplicate symbols");
+            }
+            if !valid_symbol(&observation.symbol)
+                || !observation.running_rate.is_finite()
+                || observation.observed_ts_ms <= 0
+                || observation.settlement_ts_ms <= observation.observed_ts_ms
+                || observation
+                    .mark_px
+                    .is_some_and(|value| !value.is_finite() || value <= 0.0)
+            {
+                return Err("CARRY pre-settlement observation is invalid");
+            }
+            if !effective.weights.contains_key(&observation.symbol)
+                || fired_exits.contains_key(&observation.symbol)
+                || observation.observed_ts_ms < decision_ts
+                || observation.observed_ts_ms > input.now_ms
+                || observation.settlement_ts_ms - observation.observed_ts_ms
+                    > config.execution.presettlement_window_ms
+                || observation.running_rate < threshold
+            {
+                continue;
+            }
+            let event_id = carry_event_id(
+                &config.environment,
+                &config.rule.config_id,
+                decision_ts,
+                observation.settlement_ts_ms,
+                &observation.symbol,
+            );
+            fired_exits.insert(observation.symbol.clone(), decision_ts);
+            if !durable_fire_ids.contains(&event_id) {
+                let holding = input.facts.held.get(&observation.symbol);
+                let (carry_side, carry_qty) = holding.map_or((None, None), |held| {
+                    (
+                        Some(match held.side {
+                            Side::Buy => "long".to_owned(),
+                            Side::Sell => "short".to_owned(),
+                        }),
+                        Some(held.qty),
+                    )
+                });
+                presettlement_fires.push(CarryPresettlementFire {
+                    event_id,
+                    environment: config.environment.clone(),
+                    source_profile: config.profile_name.clone(),
+                    source_config_id: config.rule.config_id.clone(),
+                    decision_ts_ms: decision_ts,
+                    fired_ts_ms: observation.observed_ts_ms,
+                    settlement_ts_ms: observation.settlement_ts_ms,
+                    symbol: observation.symbol.clone(),
+                    mark_px: observation
+                        .mark_px
+                        .or_else(|| input.facts.prices.get(&observation.symbol).copied()),
+                    carry_side,
+                    carry_qty,
+                });
+            }
+        }
+    }
+
+    for symbol in fired_exits.keys() {
+        effective.weights.remove(symbol);
+    }
+    let mut drop_fires = Vec::new();
+    if let Some(upcoming) = &input.upcoming_decision {
+        if upcoming.decision_ts_ms == decision_ts + DAY_MS {
+            let dropped = effective
+                .weights
+                .keys()
+                .filter(|symbol| !upcoming.weights.contains_key(*symbol))
+                .cloned()
+                .collect::<Vec<_>>();
+            for symbol in &dropped {
+                effective.weights.remove(symbol);
+            }
+            drop_fires = dropped;
+        }
+    }
+    effective.gross = effective.weights.values().sum();
+
+    Ok(ExitTransition {
+        effective,
+        settled_fires,
+        presettlement_fires,
+        drop_fires,
+    })
+}
+
+fn refresh_sizing_anchors(
+    input: &ReducerInput,
+    anchors: &mut BTreeMap<i64, f64>,
+    capital_reference_usdt: f64,
+) -> Option<f64> {
+    let decision_ts = input.decision.decision_ts_ms;
+    if input.account_healthy && input.equity_usdt > 0.0 {
+        anchors.entry(decision_ts).or_insert(input.equity_usdt);
+        while anchors.len() > 2 {
+            let oldest = *anchors.keys().next().expect("non-empty sizing anchors");
+            anchors.remove(&oldest);
+        }
+        if let (Some(upcoming), Some(equity)) = (
+            input.upcoming_decision.as_ref(),
+            input.upcoming_sizing_equity_usdt,
+        ) {
+            if equity.is_finite() && equity > 0.0 {
+                anchors.entry(upcoming.decision_ts_ms).or_insert(equity);
+                while anchors.len() > 2 {
+                    let oldest = *anchors.keys().next().expect("non-empty sizing anchors");
+                    anchors.remove(&oldest);
+                }
+            }
+        }
+    }
+    let sizing_equity = anchors.get(&decision_ts).copied().map(|value| {
+        if capital_reference_usdt > 0.0 {
+            value.min(capital_reference_usdt)
+        } else {
+            value
+        }
+    });
+
+    sizing_equity
 }
 
 fn validate_carry_fire(fire: &CarryPresettlementFire) -> Result<(), &'static str> {

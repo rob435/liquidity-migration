@@ -1,0 +1,19 @@
+[package]
+name = "engine-public"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine-types = { workspace = true }
+bytes = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-rustls = { workspace = true, features = ["webpki-roots", "http1", "ring"] }
+hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
+rustls = { workspace = true, features = ["ring", "std"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "macros", "sync"] }

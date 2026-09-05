@@ -2,9 +2,7 @@
 //! evaluated in the documented order, and that anything the kernel cannot
 //! positively classify refuses.
 
-mod common;
-
-use common::*;
+use super::common::*;
 use engine_risk::Kernel;
 use engine_types::orders::{OrderKind, OrderUpdate, Side, TimeInForce};
 use engine_types::risk::{AccountView, DenyReason, RiskKernel, RiskVerdict};

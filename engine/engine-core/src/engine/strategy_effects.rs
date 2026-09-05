@@ -1,0 +1,165 @@
+use super::*;
+use crate::effects::EffectKey;
+
+type PlacementEffect = (Intent, Option<EffectKey>);
+type CancellationEffect = (SymbolId, String, Option<EffectKey>);
+
+impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
+    pub(super) fn journal_transition(&mut self, id: u64) -> Result<(), EngineError> {
+        if self.host.effects.journaled.contains(&id) {
+            return Ok(());
+        }
+        let earlier: Vec<_> = self
+            .host
+            .effects
+            .transitions
+            .range(..id)
+            .filter(|(earlier, _)| !self.host.effects.journaled.contains(earlier))
+            .map(|(earlier, _)| *earlier)
+            .collect();
+        for earlier in earlier {
+            self.journal_transition(earlier)?;
+        }
+        let mut transition = self
+            .host
+            .effects
+            .transitions
+            .get(&id)
+            .ok_or_else(|| EngineError::State(format!("missing strategy transition {id}")))?
+            .clone();
+        for (action, order_id) in transition.effects.iter().zip(&mut transition.order_ids) {
+            if matches!(action, Action::Place(_)) {
+                let id = self.mint_id();
+                self.books.registry.own(&id, transition.strategy);
+                *order_id = Some(id);
+            }
+        }
+        let encoded = serde_json::to_vec(&transition)
+            .map_err(|error| EngineError::State(error.to_string()))?;
+        serde_json::from_slice::<engine_types::StrategyTransitionState>(&encoded).map_err(
+            |error| {
+                EngineError::State(format!(
+                    "strategy transition {id} cannot be replayed: {error}"
+                ))
+            },
+        )?;
+        self.wal.append(&WalRecord::StrategyTransitionQueued {
+            transition: transition.clone(),
+        })?;
+        self.wal.barrier()?;
+        self.host.effects.transitions.insert(id, transition);
+        self.host.effects.journaled.insert(id);
+        Ok(())
+    }
+
+    pub(super) fn complete_effect(&mut self, effect: Option<EffectKey>) -> Result<(), EngineError> {
+        let Some(key) = effect else {
+            return Ok(());
+        };
+        self.wal.append(&WalRecord::StrategyEffectCompleted {
+            transition_id: key.transition_id,
+            effect_index: key.index,
+        })?;
+        self.host.effects.complete(key).map_err(EngineError::State)
+    }
+
+    pub(super) async fn flush_placements(
+        &mut self,
+        pending: Vec<PlacementEffect>,
+        origin_ns: u64,
+    ) -> Result<bool, EngineError> {
+        if pending.is_empty() {
+            return Ok(false);
+        }
+        let mut intents = Vec::with_capacity(pending.len());
+        let mut completed = Vec::with_capacity(pending.len());
+        for (intent, effect) in pending {
+            let order_id = effect.and_then(|key| {
+                self.host
+                    .effects
+                    .transitions
+                    .get(&key.transition_id)
+                    .and_then(|transition| transition.order_ids.get(key.index))
+                    .cloned()
+                    .flatten()
+            });
+            if order_id
+                .as_ref()
+                .is_some_and(|id| self.books.orders.contains(id))
+            {
+                self.complete_effect(effect)?;
+                continue;
+            }
+            intents.push((intent, order_id));
+            completed.push(effect);
+        }
+        let sent = self.process_intents(intents, origin_ns).await?;
+        for effect in completed {
+            self.complete_effect(effect)?;
+        }
+        Ok(sent)
+    }
+
+    pub(super) async fn flush_cancellations(
+        &mut self,
+        pending: Vec<CancellationEffect>,
+    ) -> Result<bool, EngineError> {
+        if pending.is_empty() {
+            return Ok(false);
+        }
+        let requests = pending
+            .iter()
+            .map(|(symbol, id, _)| (*symbol, id.clone()))
+            .collect();
+        let sent = self.process_cancels(requests).await?;
+        for (_, _, effect) in pending {
+            self.complete_effect(effect)?;
+        }
+        Ok(sent)
+    }
+
+    pub(super) async fn restore_strategy_effects(&mut self) -> Result<(), EngineError> {
+        for transition in self.host.effects.transitions.values() {
+            for id in transition.order_ids.iter().flatten() {
+                self.books.registry.own(id, transition.strategy);
+            }
+            for (index, action) in transition.effects.iter().enumerate() {
+                if !transition.completed.contains(&index) {
+                    self.host.pending.push_back(PendingAction {
+                        caller: Some(transition.strategy),
+                        action: action.clone(),
+                        effect: Some(EffectKey {
+                            transition_id: transition.id,
+                            index,
+                        }),
+                        callback_id: Some(transition.id),
+                    });
+                }
+            }
+        }
+        while !self.host.pending.is_empty()
+            || !self.ready_actions.is_empty()
+            || !self.pending_mutations.is_empty()
+        {
+            tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.drain(clock::now_ns()))
+                .await
+                .map_err(|_| EngineError::Boot("timed out restoring strategy effects".into()))??;
+            if !self.pending_mutations.is_empty() {
+                let completion =
+                    tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.venue_completions.recv())
+                        .await
+                        .map_err(|_| {
+                            EngineError::Boot("timed out restoring strategy effect mutation".into())
+                        })?
+                        .ok_or_else(|| {
+                            EngineError::Boot(
+                                "venue task stopped while restoring strategy effects".into(),
+                            )
+                        })?;
+                self.take_venue_completion(completion).await?;
+            }
+        }
+        self.settle_barrier()?;
+        Ok(())
+    }
+}

@@ -247,6 +247,14 @@ pub enum Action {
         sequence: u64,
         observation_id: String,
     },
+    /// Terminal rejection is durable and distinct from successful consumption.
+    RejectSignalObservation {
+        strategy: StrategyId,
+        source: String,
+        sequence: u64,
+        observation_id: String,
+        reason: String,
+    },
     /// Acknowledge one replayable runtime control after the reducer's own
     /// checkpoint/effects have entered the FIFO. The context overwrites the
     /// strategy id.
@@ -273,6 +281,7 @@ impl Action {
             | Action::PublishStrategyEvent { .. }
             | Action::ConsumeStrategyEvent { .. }
             | Action::ConsumeSignalObservation { .. }
+            | Action::RejectSignalObservation { .. }
             | Action::ConsumeRuntimeControl { .. } => true,
         }
     }
@@ -289,6 +298,7 @@ impl Action {
             | Action::PublishStrategyEvent { .. }
             | Action::ConsumeStrategyEvent { .. }
             | Action::ConsumeSignalObservation { .. }
+            | Action::RejectSignalObservation { .. }
             | Action::ConsumeRuntimeControl { .. } => None,
         }
     }

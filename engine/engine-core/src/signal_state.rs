@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use engine_types::{
     SignalCursor, SignalGap, SignalObservation, SignalSubscriptionState, StrategyId, Subscription,
@@ -64,6 +64,9 @@ pub(crate) struct SignalState {
     cursors: BTreeMap<String, SignalCursor>,
     subscriptions: BTreeMap<(String, u16), SignalSubscriptionState>,
     gaps: BTreeMap<String, SignalGap>,
+    required_readiness: BTreeSet<StrategyId>,
+    producer_frontiers: BTreeMap<String, engine_types::SignalSourceFrontier>,
+    readiness_request_cursors: BTreeMap<String, u64>,
 }
 
 impl SignalState {
@@ -85,7 +88,14 @@ impl SignalState {
                     // migration boundary; erased input cannot be reconstructed.
                     state.accept(observation.clone());
                 }
-                WalRecord::SignalObservationConsumed {
+                WalRecord::SignalObservationRejected {
+                    strategy,
+                    source,
+                    sequence,
+                    observation_id,
+                    ..
+                }
+                | WalRecord::SignalObservationConsumed {
                     strategy,
                     source,
                     sequence,
@@ -196,6 +206,155 @@ impl SignalState {
             }
         }
         Ok(state)
+    }
+
+    pub fn require_readiness(&mut self, strategies: impl IntoIterator<Item = StrategyId>) {
+        self.required_readiness = strategies.into_iter().collect();
+        self.begin_readiness_request();
+    }
+
+    pub fn readiness_required(&self) -> bool {
+        !self.required_readiness.is_empty()
+    }
+
+    pub fn begin_readiness_request(&mut self) {
+        self.clear_readiness();
+        self.readiness_request_cursors = self
+            .cursors
+            .values()
+            .map(|cursor| (cursor.source.clone(), cursor.sequence))
+            .collect();
+    }
+
+    pub fn clear_readiness(&mut self) {
+        self.producer_frontiers.clear();
+    }
+
+    pub fn readiness_blocked(&self, destination: StrategyId) -> bool {
+        self.required_readiness.contains(&destination)
+            && (!self
+                .producer_frontiers
+                .values()
+                .any(|row| row.destination == destination)
+                || self
+                    .producer_frontiers
+                    .values()
+                    .filter(|row| row.destination == destination)
+                    .any(|row| {
+                        self.cursors
+                            .get(&row.source)
+                            .map_or(0, |cursor| cursor.sequence)
+                            < row.published_through
+                    }))
+    }
+
+    pub fn frontier_gaps(
+        &self,
+        frontiers: &[engine_types::SignalSourceFrontier],
+        strategies: usize,
+    ) -> Result<Vec<SignalGap>, String> {
+        if frontiers.len() > crate::signals::MAX_SIGNAL_GAP_REQUESTS {
+            return Err("producer readiness contains too many source frontiers".into());
+        }
+        let mut seen = BTreeSet::new();
+        let mut gaps = Vec::new();
+        for row in frontiers {
+            if row.source.is_empty()
+                || row.source.len() > 256
+                || row.destination.idx() >= strategies
+                || !seen.insert(&row.source)
+                || self
+                    .destination(&row.source)
+                    .is_some_and(|known| known != row.destination)
+            {
+                return Err("producer readiness contains an invalid source identity".into());
+            }
+            let accepted = self
+                .cursors
+                .get(&row.source)
+                .map_or(0, |cursor| cursor.sequence);
+            let requested = self
+                .readiness_request_cursors
+                .get(&row.source)
+                .copied()
+                .unwrap_or(0);
+            if row.published_through < requested {
+                return Err(format!(
+                    "producer {} rewound to {} behind durable cursor {} at readiness request",
+                    row.source, row.published_through, requested
+                ));
+            }
+            if row.published_through <= accepted {
+                continue;
+            }
+            let next = self.next_sequence(&row.source)?;
+            if row.published_through >= next {
+                gaps.push(SignalGap {
+                    source: row.source.clone(),
+                    destination: row.destination,
+                    next_sequence: next,
+                    observed_sequence: row.published_through.max(
+                        self.gaps
+                            .get(&row.source)
+                            .map_or(0, |gap| gap.observed_sequence),
+                    ),
+                });
+            }
+        }
+        Ok(gaps)
+    }
+
+    pub fn set_frontiers(&mut self, frontiers: Vec<engine_types::SignalSourceFrontier>) {
+        self.producer_frontiers = frontiers
+            .into_iter()
+            .map(|row| (row.source.clone(), row))
+            .collect();
+    }
+
+    pub fn consumer_pending(&self, destination: StrategyId) -> bool {
+        self.observations
+            .values()
+            .any(|row| row.destination == destination)
+    }
+
+    pub fn ordinary_capacity(&self) -> bool {
+        self.observations.len() < crate::signals::SIGNAL_CHANNEL_CAPACITY
+            && self.retained_bytes() < crate::signals::SIGNAL_CHANNEL_BYTES
+    }
+
+    pub fn prefix_capacity(&self, destination: StrategyId) -> bool {
+        (!self.consumer_pending(destination) && self.ordinary_capacity())
+            || self.recovery_capacity()
+    }
+
+    fn recovery_capacity(&self) -> bool {
+        let mut destinations = BTreeSet::new();
+        self.observations.len() <= crate::signals::SIGNAL_CHANNEL_CAPACITY
+            && self.retained_bytes() <= crate::signals::SIGNAL_CHANNEL_BYTES
+            && !self
+                .observations
+                .values()
+                .any(|row| !destinations.insert(row.destination))
+    }
+
+    pub fn can_accept(&self, observation: &SignalObservation) -> bool {
+        let bytes = crate::signals::retained_bytes(observation);
+        let retained = self.retained_bytes();
+        let ordinary = !self.consumer_pending(observation.destination)
+            && self.observations.len() < crate::signals::SIGNAL_CHANNEL_CAPACITY
+            && retained.saturating_add(bytes) <= crate::signals::SIGNAL_CHANNEL_BYTES;
+        let recovery = self
+            .gaps
+            .get(&observation.source)
+            .is_some_and(|gap| gap.next_sequence == observation.sequence)
+            && self.recovery_capacity();
+        bytes <= crate::signals::MAX_SIGNAL_RETAINED_BYTES && (ordinary || recovery)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.observations.values().fold(0usize, |bytes, row| {
+            bytes.saturating_add(crate::signals::retained_bytes(row))
+        })
     }
 
     pub fn classify(&self, observation: &SignalObservation) -> Result<Admission, String> {
@@ -638,6 +797,142 @@ mod tests {
         assert!(
             SignalState::replay(&[serde_json::from_value(missing_subscription).unwrap()], 1)
                 .is_err()
+        );
+    }
+    #[test]
+    fn retained_input_capacity_keeps_one_prefix_recovery_slot_across_replay() {
+        let mut records = (0..crate::signals::SIGNAL_CHANNEL_CAPACITY)
+            .map(|index| accepted(observation(&format!("source-{index}"), 1, index as u16)))
+            .collect::<Vec<_>>();
+        records.push(gap_record("source-0", 0, 2, 3));
+        let mut state = SignalState::replay(&records, 256).unwrap();
+        assert!(!state.can_accept(&observation("other", 1, 1)));
+        let missing = observation("source-0", 2, 0);
+        assert!(
+            state.can_accept(&missing),
+            "capacity must retain prefix recovery"
+        );
+        records.push(accepted(missing.clone()));
+        state.accept(missing);
+        assert!(
+            !state.can_accept(&observation("source-0", 3, 0)),
+            "one recovery delivery cannot grow without a consumer outcome"
+        );
+        let mut restored = SignalState::replay(&records, 256).unwrap();
+        assert!(!restored.can_accept(&observation("source-0", 3, 0)));
+        restored.consume("source-0", 2);
+        assert!(restored.can_accept(&observation("source-0", 3, 0)));
+    }
+
+    #[test]
+    fn explicit_rejection_replays_as_terminal_without_claiming_success() {
+        let row = observation("worker.g1", 1, 0);
+        let rejected = WalRecord::SignalObservationRejected {
+            wall_ts_ms: 3,
+            strategy: row.destination,
+            source: row.source.clone(),
+            sequence: row.sequence,
+            observation_id: row.observation_id.clone(),
+            reason: "malformed payload".into(),
+        };
+        let records = vec![accepted(row.clone()), rejected.clone()];
+        let decoded: WalRecord =
+            serde_json::from_str(&serde_json::to_string(&rejected).unwrap()).unwrap();
+        assert_eq!(decoded, rejected);
+        let state = SignalState::replay(&records, 1).unwrap();
+        assert_eq!(state.observations().count(), 0);
+        assert_eq!(state.classify(&row).unwrap(), Admission::Duplicate);
+        assert_eq!(
+            SignalState::replay(&records[..1], 1)
+                .unwrap()
+                .observations()
+                .count(),
+            1,
+            "an interrupted rejection keeps the durable accepted payload"
+        );
+    }
+
+    #[test]
+    fn producer_frontier_requires_catchup_without_waiving_old_generation_gaps() {
+        use engine_types::SignalSourceFrontier;
+        let mut state = SignalState::replay(
+            &[
+                accepted(observation("worker.g1", 9, 0)),
+                gap_record("worker.g1", 0, 10, 11),
+            ],
+            2,
+        )
+        .unwrap();
+        state.require_readiness([StrategyId(0)]);
+        assert!(state.readiness_blocked(StrategyId(0)));
+        assert!(!state.readiness_blocked(StrategyId(1)));
+        let ready = vec![SignalSourceFrontier {
+            source: "worker.g2".into(),
+            destination: StrategyId(0),
+            published_through: 0,
+        }];
+        assert!(state.frontier_gaps(&ready, 2).unwrap().is_empty());
+        state.set_frontiers(ready);
+        assert!(!state.readiness_blocked(StrategyId(0)));
+        assert!(
+            state.blocked(StrategyId(0)),
+            "new producer participation must retain the old missing history"
+        );
+        let ready = vec![SignalSourceFrontier {
+            source: "worker.g1".into(),
+            destination: StrategyId(0),
+            published_through: 12,
+        }];
+        let gaps = state.frontier_gaps(&ready, 2).unwrap();
+        assert_eq!(gaps[0].observed_sequence, 12);
+        for gap in gaps {
+            state.record_gap(gap);
+        }
+        state.set_frontiers(ready);
+        for seq in 10..=12 {
+            assert!(state.readiness_blocked(StrategyId(0)));
+            state.accept(observation("worker.g1", seq, 0));
+        }
+        assert!(!state.readiness_blocked(StrategyId(0)));
+        assert!(!state.blocked(StrategyId(0)));
+        state.clear_readiness();
+        assert!(
+            state.readiness_blocked(StrategyId(0)),
+            "readiness never survives a producer disconnect"
+        );
+    }
+
+    #[test]
+    fn a_rewound_producer_cannot_declare_its_generation_ready() {
+        let mut state =
+            SignalState::replay(&[accepted(observation("worker.g1", 100, 0))], 1).unwrap();
+        state.require_readiness([StrategyId(0)]);
+        let frontiers = [engine_types::SignalSourceFrontier {
+            source: "worker.g1".into(),
+            destination: StrategyId(0),
+            published_through: 0,
+        }];
+        assert!(
+            state.frontier_gaps(&frontiers, 1).is_err(),
+            "a same-generation producer behind the durable accepted cursor must not waive history"
+        );
+        assert!(state.readiness_blocked(StrategyId(0)));
+    }
+
+    #[test]
+    fn readiness_response_can_trail_rows_accepted_after_its_request() {
+        let mut state =
+            SignalState::replay(&[accepted(observation("worker.g1", 100, 0))], 1).unwrap();
+        state.require_readiness([StrategyId(0)]);
+        state.accept(observation("worker.g1", 101, 0));
+        let frontiers = [engine_types::SignalSourceFrontier {
+            source: "worker.g1".into(),
+            destination: StrategyId(0),
+            published_through: 100,
+        }];
+        assert!(
+            state.frontier_gaps(&frontiers, 1).is_ok(),
+            "readiness compares against the request cursor, not observations racing the response"
         );
     }
 }

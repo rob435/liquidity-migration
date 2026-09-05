@@ -248,6 +248,7 @@ mod tests {
             signal_cursors: Vec::new(),
             signal_subscriptions: Vec::new(),
             signal_gaps: Vec::new(),
+            strategy_effects: Default::default(),
             runtime_control_requests: Vec::new(),
             runtime_control_consumed: Vec::new(),
             open_orders: Vec::new(),

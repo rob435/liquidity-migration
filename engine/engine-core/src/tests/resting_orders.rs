@@ -5,6 +5,34 @@
 
 use super::*;
 
+pub(super) fn owned_resting_replay(strategy: &str, ids: &[String]) -> Vec<WalRecord> {
+    let mut records = vec![WalRecord::Names {
+        strategies: vec![strategy.into()],
+        symbols: vec!["BTCUSDT".into()],
+    }];
+    records.extend(ids.iter().map(|id| WalRecord::OrderSent {
+        request: OrderRequest {
+            client_order_id: id.clone(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 0.01,
+            kind: OrderKind::Limit {
+                px: 29_000.0,
+                tif: TimeInForce::Gtc,
+            },
+            stop: Some(StopSpec {
+                trigger_px: 28_000.0,
+            }),
+            reduce_only: false,
+            close_position: false,
+        },
+        wire_ns: 1,
+        arrival_mid: 29_500.0,
+    }));
+    records
+}
+
 /// Pulls one named order on its first quote, and nothing after.
 struct Canceller {
     symbol: String,
@@ -85,11 +113,12 @@ impl Strategy for Amender {
 
 #[tokio::test]
 async fn a_cancel_is_written_down_and_reaches_the_venue_without_an_fsync() {
-    let (mut engine, h) = build(
+    let (mut engine, h) = build_with_venue_orders(
         allow_all(),
         vec![Box::new(Canceller::new("BTCUSDT", "eng-old-1"))],
         &["BTCUSDT"],
-        &[],
+        &owned_resting_replay("canceller", &["eng-old-1".into()]),
+        vec![still_working("eng-old-1", "BTCUSDT", 0.01)],
     )
     .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
@@ -196,7 +225,20 @@ async fn a_flooded_wake_drops_entries_but_never_cancels() {
         cancels: 3,
         fired: false,
     };
-    let (mut engine, h) = build(allow_all(), vec![Box::new(burst)], &["BTCUSDT"], &[]).await;
+    let ids: Vec<String> = (0..3).map(|i| format!("eng-old-{i}")).collect();
+    let replayed = owned_resting_replay("mixed-burst", &ids);
+    let working = ids
+        .iter()
+        .map(|id| still_working(id, "BTCUSDT", 0.01))
+        .collect();
+    let (mut engine, h) = build_with_venue_orders(
+        allow_all(),
+        vec![Box::new(burst)],
+        &["BTCUSDT"],
+        &replayed,
+        working,
+    )
+    .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(
@@ -229,6 +271,9 @@ async fn an_amend_is_refused_where_the_venue_cannot_move_a_resting_order() {
     let (wal, records) = MockWal::new(tape.clone());
     let (mut venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
     venue.caps.amend_in_place = false;
+    venue.working = vec![still_working("eng-old-1", "BTCUSDT", 0.01)];
+    let replayed =
+        replay_with_history_boundary(&owned_resting_replay("amender", &["eng-old-1".into()]));
     let amends = venue.amends.clone();
     let cancels = venue.cancels.clone();
     let (risk, _seen) = MockRisk::with(allow_all());
@@ -245,7 +290,7 @@ async fn an_amend_is_refused_where_the_venue_cannot_move_a_resting_order() {
         risk,
         venue,
         vec![Box::new(amender)],
-        &[],
+        &replayed,
     )
     .await
     .unwrap();
@@ -641,7 +686,15 @@ async fn a_quantity_amend_is_refused_until_risk_and_ledger_can_resize_together()
         qty: 99.0,
         fired: false,
     };
-    let (mut engine, h) = build(allow_all(), vec![Box::new(grower)], &["BTCUSDT"], &[]).await;
+    let replayed = owned_resting_replay("grower", &["eng-old-1".into()]);
+    let (mut engine, h) = build_with_venue_orders(
+        allow_all(),
+        vec![Box::new(grower)],
+        &["BTCUSDT"],
+        &replayed,
+        vec![still_working("eng-old-1", "BTCUSDT", 0.01)],
+    )
+    .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
         .run(

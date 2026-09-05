@@ -20,15 +20,19 @@
 //! that later carries the fill. The decoder remembers that link so the fill
 //! arrives with the empty client id the engine reserves for a position stop.
 
+use crate::stream::{hand_over, until_closed, AckMemory, Gone, Handover, ReconnectBackoff};
+use crate::RealmCredentials;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::wire::{self, Field};
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::market::{FeedError, OrderFeed};
 use engine_types::orders::{OrderAck, OrderUpdate};
 use engine_types::VenueError;
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -47,18 +51,12 @@ const PATH_LISTEN_KEY: &str = "/fapi/v1/listenKey";
 /// A listen key lives 60 minutes past its last touch; touching it at half
 /// that tolerates one whole missed round before anything expires.
 const KEEPALIVE_EVERY: Duration = Duration::from_secs(30 * 60);
-const BACKOFF_START: Duration = Duration::from_millis(250);
-const BACKOFF_CAP: Duration = Duration::from_secs(30);
-/// A socket that lasted this long was a real connection, so the wait between
-/// dials starts over.
-const HEALTHY_AFTER: Duration = Duration::from_secs(30);
 /// How many client order ids to remember so one order acks once.
 const ACK_MEMORY: usize = 8192;
 const BOOKKEEPING_MEMORY: usize = 8192;
 const CHANNEL_DEPTH: usize = 1024;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
-type Handover = Result<OrderUpdate, FeedError>;
 
 pub struct BinanceOrderFeed {
     rest_base: String,
@@ -93,11 +91,7 @@ impl BinanceOrderFeed {
     }
 
     fn build(rest_base: &str, ws_base: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
-        let ids = symbols
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), SymbolId(i as u16)))
-            .collect();
+        let ids = engine_public::symbols::indexed_names(&symbols);
         Self {
             rest_base: rest_base.to_string(),
             ws_base: ws_base.to_string(),
@@ -113,7 +107,7 @@ impl BinanceOrderFeed {
             rest: RestClient::new(self.rest_base.clone(), self.creds.clone()),
             ws_base: self.ws_base.clone(),
             decoder: Decoder::new(self.ids.clone()),
-            backoff: Duration::ZERO,
+            backoff: ReconnectBackoff::default(),
         };
         tokio::spawn(worker.run(tx));
         self.updates = Some(rx);
@@ -122,8 +116,7 @@ impl BinanceOrderFeed {
 
 impl OrderFeed for BinanceOrderFeed {
     fn learn(&mut self, symbol: &str, id: SymbolId) {
-        let mut ids = self.ids.write().expect("the symbol map lock is poisoned");
-        ids.entry(symbol.to_string()).or_insert(id);
+        engine_public::symbols::learn(&self.ids, symbol, id);
     }
 
     async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
@@ -142,20 +135,12 @@ struct Worker {
     rest: RestClient,
     ws_base: String,
     decoder: Decoder,
-    backoff: Duration,
+    backoff: ReconnectBackoff,
 }
-
-/// The engine dropped the feed: there is nobody left to hand updates to.
-struct Gone;
 
 impl Worker {
     async fn run(mut self, tx: mpsc::Sender<Handover>) {
-        let dropped = tx.closed();
-        tokio::pin!(dropped);
-        tokio::select! {
-            _ = &mut dropped => (),
-            _ = self.reconnect_forever(&tx) => (),
-        }
+        until_closed(&tx, self.reconnect_forever(&tx)).await;
         tracing::info!("private stream task finished; the engine let the feed go");
     }
 
@@ -173,9 +158,7 @@ impl Worker {
                     if self.pump(socket, tx).await.is_err() {
                         return Gone;
                     }
-                    if opened.elapsed() >= HEALTHY_AFTER {
-                        self.backoff = Duration::ZERO;
-                    }
+                    self.backoff.completed_session(opened.elapsed());
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "private stream did not come up; trying again");
@@ -189,14 +172,7 @@ impl Worker {
     }
 
     async fn wait_before_redialling(&mut self) {
-        if !self.backoff.is_zero() {
-            tokio::time::sleep(self.backoff).await;
-        }
-        self.backoff = if self.backoff.is_zero() {
-            BACKOFF_START
-        } else {
-            (self.backoff * 2).min(BACKOFF_CAP)
-        };
+        self.backoff.wait().await;
     }
 
     async fn connect(&mut self) -> Result<Socket, FeedError> {
@@ -305,16 +281,21 @@ enum Step {
     Dropped(String),
 }
 
-async fn hand_over(tx: &mpsc::Sender<Handover>, item: Handover) -> Result<(), Gone> {
-    tx.send(item).await.map_err(|_| Gone)
+/// Frames in, updates out. No socket and no clock but the receive stamp.
+#[derive(Default, Deserialize)]
+struct PrivateEnvelope {
+    #[serde(default, rename = "e")]
+    event: Field<String>,
+    #[serde(default, rename = "o")]
+    order: Field<Value>,
+    #[serde(default, rename = "T")]
+    transaction_time: Field<i64>,
 }
 
-/// Frames in, updates out. No socket and no clock but the receive stamp.
 pub(crate) struct Decoder {
     ids: Arc<RwLock<HashMap<Symbol, SymbolId>>>,
     pub(crate) pending: VecDeque<OrderUpdate>,
-    acked: HashSet<String>,
-    acked_order: VecDeque<String>,
+    acknowledgements: AckMemory,
     bookkeeping_orders: HashSet<String>,
     bookkeeping_order: VecDeque<String>,
 }
@@ -324,8 +305,7 @@ impl Decoder {
         Self {
             ids,
             pending: VecDeque::new(),
-            acked: HashSet::new(),
-            acked_order: VecDeque::new(),
+            acknowledgements: AckMemory::new(ACK_MEMORY),
             bookkeeping_orders: HashSet::new(),
             bookkeeping_order: VecDeque::new(),
         }
@@ -334,7 +314,8 @@ impl Decoder {
     pub(crate) fn ingest(&mut self, text: &str) -> Result<(), FeedError> {
         let frame: Value = serde_json::from_str(text)
             .map_err(|e| FeedError::BadMessage(format!("{e}: {}", first_chars(text))))?;
-        match frame.get("e").and_then(Value::as_str) {
+        let frame: PrivateEnvelope = wire::object(&frame);
+        match frame.event.0.as_deref() {
             Some("ORDER_TRADE_UPDATE") => self.order_trade_update(&frame),
             Some("ALGO_UPDATE") => self.algo_update(&frame),
             // The key died under the socket; only a fresh dial gets a new
@@ -349,10 +330,11 @@ impl Decoder {
         }
     }
 
-    fn order_trade_update(&mut self, frame: &Value) -> Result<(), FeedError> {
-        let order = frame
-            .get("o")
-            .ok_or_else(|| FeedError::BadMessage("ORDER_TRADE_UPDATE carries no order".into()))?;
+    fn order_trade_update(&mut self, frame: &PrivateEnvelope) -> Result<(), FeedError> {
+        let order =
+            frame.order.0.as_ref().ok_or_else(|| {
+                FeedError::BadMessage("ORDER_TRADE_UPDATE carries no order".into())
+            })?;
         let client_order_id =
             str_field(order, "c").map_err(|e| FeedError::BadMessage(e.to_string()))?;
         let execution_type = order.get("x").and_then(Value::as_str).unwrap_or_default();
@@ -437,7 +419,7 @@ impl Decoder {
                     .ok_or_else(|| FeedError::BadMessage("a fill carried no symbol".into()))?;
                 let qty = num_field(order, "l").map_err(bad)?;
                 let px = num_field(order, "L").map_err(bad)?;
-                let venue_ts_ms = frame.get("T").and_then(Value::as_i64).unwrap_or(0);
+                let venue_ts_ms = frame.transaction_time.0.unwrap_or(0);
                 if qty <= 0.0 || px <= 0.0 || venue_ts_ms <= 0 {
                     return Err(FeedError::BadMessage(
                         "a fill has non-positive quantity, price, or transaction time".into(),
@@ -516,9 +498,11 @@ impl Decoder {
         Ok(())
     }
 
-    fn algo_update(&mut self, frame: &Value) -> Result<(), FeedError> {
+    fn algo_update(&mut self, frame: &PrivateEnvelope) -> Result<(), FeedError> {
         let order = frame
-            .get("o")
+            .order
+            .0
+            .as_ref()
             .ok_or_else(|| FeedError::BadMessage("ALGO_UPDATE carries no order".into()))?;
         let native_stop = order.get("at").and_then(Value::as_str) == Some("CONDITIONAL")
             && order.get("o").and_then(Value::as_str) == Some("STOP_MARKET")
@@ -573,16 +557,7 @@ impl Decoder {
     /// True the first time this id acks. Bounded, so a long run's memory
     /// stays flat.
     fn remember_ack(&mut self, client_order_id: &str) -> bool {
-        if !self.acked.insert(client_order_id.to_string()) {
-            return false;
-        }
-        self.acked_order.push_back(client_order_id.to_string());
-        if self.acked_order.len() > ACK_MEMORY {
-            if let Some(oldest) = self.acked_order.pop_front() {
-                self.acked.remove(&oldest);
-            }
-        }
-        true
+        self.acknowledgements.remember(client_order_id)
     }
 
     fn remember_bookkeeping_order(&mut self, venue_order_id: String) {
@@ -998,8 +973,7 @@ mod tests {
         for n in 0..(ACK_MEMORY + 100) {
             assert!(d.remember_ack(&format!("eng-1-{n}")));
         }
-        assert_eq!(d.acked.len(), ACK_MEMORY);
-        assert_eq!(d.acked_order.len(), ACK_MEMORY);
+        assert_eq!(d.acknowledgements.lengths(), (ACK_MEMORY, ACK_MEMORY));
 
         for n in 0..(BOOKKEEPING_MEMORY + 100) {
             d.remember_bookkeeping_order(n.to_string());

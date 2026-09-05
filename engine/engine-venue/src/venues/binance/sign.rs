@@ -13,8 +13,7 @@
 //! endpoints) signed unencoded would authenticate against a different string
 //! than the venue reads.
 
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+use crate::signing::hmac_sha256_hex;
 
 use crate::http::percent_encode;
 
@@ -33,13 +32,6 @@ pub(crate) fn query_string(pairs: &[(&str, String)]) -> String {
         .map(|(key, value)| format!("{key}={}", percent_encode(value)))
         .collect::<Vec<_>>()
         .join("&")
-}
-
-pub(crate) fn hmac_sha256_hex(secret: &str, message: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("HMAC-SHA256 takes a key of any length");
-    mac.update(message.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
 }
 
 /// The full query for one signed request: the given query with `signature`

@@ -163,8 +163,23 @@ fn every_dormant_adapter_is_still_linked() {
         std::any::type_name::<VariationalRealm>(),
     ];
     assert_eq!(parts.len(), 14);
-    for part in parts {
-        assert!(part.starts_with("engine_venue::"), "{part}");
+    for (part, owner) in parts.into_iter().zip([
+        "engine_venue",
+        "engine_venue",
+        "engine_public",
+        "engine_venue",
+        "engine_venue",
+        "engine_public",
+        "engine_venue",
+        "engine_venue",
+        "engine_public",
+        "engine_venue",
+        "engine_venue",
+        "engine_public",
+        "engine_venue",
+        "engine_public",
+    ]) {
+        assert!(part.starts_with(&format!("{owner}::")), "{part}");
     }
 }
 

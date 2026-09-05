@@ -1172,108 +1172,9 @@ pub fn reduce_batch_with_mode(
         }
         next.exit_pending.extend(recovery_symbols);
     } else {
-        // Reconcile durable requests with the attributed position and owned
-        // order books before considering a new signal generation.
-        let known_symbols = next.symbols.keys().cloned().collect::<Vec<_>>();
-        for symbol in known_symbols {
-            let mut remove = false;
-            if let Some(prior) = next.symbols.get_mut(&symbol) {
-                if let Some(holding) = input.facts.held.get(&symbol) {
-                    if !prior.filled {
-                        prior.filled = true;
-                        prior.entry_ts_ms = now_ms;
-                        prior.entry_price = holding.entry_px;
-                        prior.max_hold_deadline_ts_ms =
-                            now_ms.saturating_add(prior.max_hold_duration_ms);
-                    } else if holding.entry_px > 0.0 {
-                        prior.entry_price = holding.entry_px;
-                    }
-                } else if prior.filled && !input.owned_working_symbols.contains(&symbol) {
-                    remove = true;
-                    next.cooldown_until_ms.insert(
-                        symbol.clone(),
-                        now_ms.saturating_add(config.rule.cooldown_days * DAY_MS),
-                    );
-                    next.exit_pending.remove(&symbol);
-                }
-            }
-            if remove {
-                next.symbols.remove(&symbol);
-                next.pending_signals.remove(&symbol);
-            }
-        }
+        reconcile_attributed_positions(&mut next, &input, config);
 
-        // Newest generation per symbol, then the deployed ranking. This is
-        // where portfolio capacity and the per-cycle entry cap live; a plug
-        // cannot accidentally admit rows in delivery order.
-        let mut newest = BTreeMap::<String, DecisionInput>::new();
-        for decision in input.decisions.iter().cloned() {
-            let generation = if decision.signal_ts_ms == 0 {
-                decision.feature_row.as_ref().map_or(0, |row| row.ts_ms)
-            } else {
-                decision.signal_ts_ms
-            };
-            let replace = newest.get(&decision.symbol).is_none_or(|old| {
-                let old_generation = if old.signal_ts_ms == 0 {
-                    old.feature_row.as_ref().map_or(0, |row| row.ts_ms)
-                } else {
-                    old.signal_ts_ms
-                };
-                generation > old_generation
-            });
-            if replace {
-                newest.insert(decision.symbol.clone(), decision);
-            }
-        }
-        let mut decisions = newest.into_values().collect::<Vec<_>>();
-        decisions.sort_by(|left, right| {
-            let generation = |value: &DecisionInput| {
-                if value.signal_ts_ms == 0 {
-                    value.feature_row.as_ref().map_or(0, |row| row.ts_ms)
-                } else {
-                    value.signal_ts_ms
-                }
-            };
-            let score = |value: &DecisionInput| {
-                value
-                    .feature_row
-                    .as_ref()
-                    .and_then(|row| row.log_return)
-                    .filter(|number| number.is_finite())
-                    .unwrap_or(f64::NEG_INFINITY)
-            };
-            let rank = |value: &DecisionInput| {
-                value
-                    .feature_row
-                    .as_ref()
-                    .and_then(|row| row.today_volume_rank)
-                    .filter(|number| number.is_finite())
-                    .unwrap_or(f64::INFINITY)
-            };
-            let gate_score = |value: &DecisionInput| {
-                value
-                    .gate
-                    .as_ref()
-                    .map(|gate| gate.score)
-                    .filter(|number| number.is_finite())
-                    .unwrap_or(f64::NEG_INFINITY)
-            };
-            let gate_rank = |value: &DecisionInput| {
-                value
-                    .gate
-                    .as_ref()
-                    .and_then(|gate| gate.turnover_rank)
-                    .filter(|number| number.is_finite())
-                    .unwrap_or(f64::INFINITY)
-            };
-            generation(right)
-                .cmp(&generation(left))
-                .then_with(|| score(right).total_cmp(&score(left)))
-                .then_with(|| rank(left).total_cmp(&rank(right)))
-                .then_with(|| gate_score(right).total_cmp(&gate_score(left)))
-                .then_with(|| gate_rank(left).total_cmp(&gate_rank(right)))
-                .then_with(|| left.symbol.cmp(&right.symbol))
-        });
+        let decisions = latest_ranked_decisions(&input.decisions);
         let mut active = next
             .symbols
             .values()
@@ -1450,26 +1351,7 @@ pub fn reduce_batch_with_mode(
         }
     }
 
-    // An exit stays in the checkpoint until the venue is conclusively flat and
-    // no owned entry remains. Only that joined fact retires the symbol.
-    next.exit_pending.retain(|symbol| {
-        input.facts.held.contains_key(symbol) || input.owned_working_symbols.contains(symbol)
-    });
-    next.cooldown_until_ms.retain(|_, until| *until > now_ms);
-    let live_symbols = next.symbols.keys().cloned().collect::<BTreeSet<_>>();
-    let pending_symbols = next
-        .pending_signals
-        .keys()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let freshness_floor = now_ms.saturating_sub(config.signal_freshness_ms);
-    next.attempted_signal_ts_ms.retain(|symbol, attempted| {
-        *attempted >= freshness_floor
-            || live_symbols.contains(symbol)
-            || pending_symbols.contains(symbol)
-    });
-    next.refused_entries
-        .retain(|symbol| next.attempted_signal_ts_ms.contains_key(symbol));
+    retire_resolved_history(&mut next, &input, config);
     let held_symbols = input.facts.held_symbols();
     let raw_targets = targets
         .iter()
@@ -1565,6 +1447,143 @@ pub fn reduce_batch_with_mode(
             skipped: planned.skipped,
         },
     })
+}
+
+fn reconcile_attributed_positions(
+    state: &mut SleeveState,
+    input: &BatchInput,
+    config: &StrategyConfig,
+) {
+    // Reconcile durable requests with the attributed position and owned
+    // order books before considering a new signal generation.
+    let known_symbols = state.symbols.keys().cloned().collect::<Vec<_>>();
+    for symbol in known_symbols {
+        let mut remove = false;
+        if let Some(prior) = state.symbols.get_mut(&symbol) {
+            if let Some(holding) = input.facts.held.get(&symbol) {
+                if !prior.filled {
+                    prior.filled = true;
+                    prior.entry_ts_ms = input.now_ms;
+                    prior.entry_price = holding.entry_px;
+                    prior.max_hold_deadline_ts_ms =
+                        input.now_ms.saturating_add(prior.max_hold_duration_ms);
+                } else if holding.entry_px > 0.0 {
+                    prior.entry_price = holding.entry_px;
+                }
+            } else if prior.filled && !input.owned_working_symbols.contains(&symbol) {
+                remove = true;
+                state.cooldown_until_ms.insert(
+                    symbol.clone(),
+                    input
+                        .now_ms
+                        .saturating_add(config.rule.cooldown_days * DAY_MS),
+                );
+                state.exit_pending.remove(&symbol);
+            }
+        }
+        if remove {
+            state.symbols.remove(&symbol);
+            state.pending_signals.remove(&symbol);
+        }
+    }
+}
+
+fn latest_ranked_decisions(source: &[DecisionInput]) -> Vec<DecisionInput> {
+    let mut newest = BTreeMap::<String, DecisionInput>::new();
+    for decision in source.iter().cloned() {
+        let generation = if decision.signal_ts_ms == 0 {
+            decision.feature_row.as_ref().map_or(0, |row| row.ts_ms)
+        } else {
+            decision.signal_ts_ms
+        };
+        let replace = newest.get(&decision.symbol).is_none_or(|old| {
+            let old_generation = if old.signal_ts_ms == 0 {
+                old.feature_row.as_ref().map_or(0, |row| row.ts_ms)
+            } else {
+                old.signal_ts_ms
+            };
+            generation > old_generation
+        });
+        if replace {
+            newest.insert(decision.symbol.clone(), decision);
+        }
+    }
+    let mut decisions = newest.into_values().collect::<Vec<_>>();
+    decisions.sort_by(|left, right| {
+        let generation = |value: &DecisionInput| {
+            if value.signal_ts_ms == 0 {
+                value.feature_row.as_ref().map_or(0, |row| row.ts_ms)
+            } else {
+                value.signal_ts_ms
+            }
+        };
+        let score = |value: &DecisionInput| {
+            value
+                .feature_row
+                .as_ref()
+                .and_then(|row| row.log_return)
+                .filter(|number| number.is_finite())
+                .unwrap_or(f64::NEG_INFINITY)
+        };
+        let rank = |value: &DecisionInput| {
+            value
+                .feature_row
+                .as_ref()
+                .and_then(|row| row.today_volume_rank)
+                .filter(|number| number.is_finite())
+                .unwrap_or(f64::INFINITY)
+        };
+        let gate_score = |value: &DecisionInput| {
+            value
+                .gate
+                .as_ref()
+                .map(|gate| gate.score)
+                .filter(|number| number.is_finite())
+                .unwrap_or(f64::NEG_INFINITY)
+        };
+        let gate_rank = |value: &DecisionInput| {
+            value
+                .gate
+                .as_ref()
+                .and_then(|gate| gate.turnover_rank)
+                .filter(|number| number.is_finite())
+                .unwrap_or(f64::INFINITY)
+        };
+        generation(right)
+            .cmp(&generation(left))
+            .then_with(|| score(right).total_cmp(&score(left)))
+            .then_with(|| rank(left).total_cmp(&rank(right)))
+            .then_with(|| gate_score(right).total_cmp(&gate_score(left)))
+            .then_with(|| gate_rank(left).total_cmp(&gate_rank(right)))
+            .then_with(|| left.symbol.cmp(&right.symbol))
+    });
+    decisions
+}
+
+fn retire_resolved_history(state: &mut SleeveState, input: &BatchInput, config: &StrategyConfig) {
+    // An exit stays in the checkpoint until the venue is conclusively flat and
+    // no owned entry remains. Only that joined fact retires the symbol.
+    state.exit_pending.retain(|symbol| {
+        input.facts.held.contains_key(symbol) || input.owned_working_symbols.contains(symbol)
+    });
+    state
+        .cooldown_until_ms
+        .retain(|_, until| *until > input.now_ms);
+    let live_symbols = state.symbols.keys().cloned().collect::<BTreeSet<_>>();
+    let pending_symbols = state
+        .pending_signals
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let freshness_floor = input.now_ms.saturating_sub(config.signal_freshness_ms);
+    state.attempted_signal_ts_ms.retain(|symbol, attempted| {
+        *attempted >= freshness_floor
+            || live_symbols.contains(symbol)
+            || pending_symbols.contains(symbol)
+    });
+    state
+        .refused_entries
+        .retain(|symbol| state.attempted_signal_ts_ms.contains_key(symbol));
 }
 
 #[cfg(test)]

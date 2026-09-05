@@ -9,8 +9,7 @@ use std::path::PathBuf;
 
 use engine_risk::{kernel_config_from_profile, ProfileInputs};
 
-mod common;
-use common::{DISASTER_STOP_FRACTION, MAX_VIEW_AGE_NS};
+use super::common::{DISASTER_STOP_FRACTION, MAX_VIEW_AGE_NS};
 
 fn inputs() -> ProfileInputs {
     ProfileInputs {

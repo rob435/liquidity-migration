@@ -12,11 +12,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use engine_public::BinanceRealm;
 use engine_types::{
     BookLevel, Depth, Feed, FeedError, MarketEvent, MarketFeed, Quote, Subscription, SymbolId,
     Ticker, TradeFlow, BOOK_DEPTH,
 };
-use engine_venue::BinanceRealm;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;

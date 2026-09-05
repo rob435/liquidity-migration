@@ -5,9 +5,7 @@
 //! max_rolling_loss_fraction at 0.1, so every table here is against a 25_000
 //! limit.
 
-mod common;
-
-use common::*;
+use super::common::*;
 use engine_risk::{Kernel, KernelConfig, ROLLING_LOSS_WINDOW_MS};
 use engine_types::orders::Side;
 use engine_types::risk::{ClosedTradeRow, DenyReason, RiskKernel, RiskVerdict, RollingLossView};

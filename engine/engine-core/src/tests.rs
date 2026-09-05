@@ -83,12 +83,15 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::LatchCleared { .. } => "latch_cleared",
         WalRecord::ClaimsDropped { .. } => "claims_dropped",
         WalRecord::TargetBookLatch { .. } => "target_book_latch",
+        WalRecord::StrategyTransitionQueued { .. } => "strategy_transition_queued",
+        WalRecord::StrategyEffectCompleted { .. } => "strategy_effect_completed",
         WalRecord::StrategyCheckpoint { .. } => "strategy_checkpoint",
         WalRecord::StrategyGlobalCheckpoint { .. } => "strategy_global_checkpoint",
         WalRecord::StrategyEventPublished { .. } => "strategy_event_published",
         WalRecord::StrategyEventConsumed { .. } => "strategy_event_consumed",
         WalRecord::SignalObservation { .. } => "signal_observation",
         WalRecord::SignalObservationConsumed { .. } => "signal_observation_consumed",
+        WalRecord::SignalObservationRejected { .. } => "signal_observation_rejected",
         WalRecord::SignalGapRecorded { .. } => "signal_gap_recorded",
         WalRecord::RuntimeControlAccepted { .. } => "runtime_control_accepted",
         WalRecord::RuntimeControlConsumed { .. } => "runtime_control_consumed",
@@ -1266,4 +1269,5 @@ mod scheduler_fairness;
 mod signal_availability;
 mod strategy_checkpoints;
 mod strategy_events;
+mod update_contract;
 mod worked_entries;

@@ -1,8 +1,7 @@
 //! Fixtures shared by the risk tables. Each number's source is named where it
 //! is not obvious.
 //!
-//! Every test binary in this directory takes its own subset of these, so an
-//! unused-here helper is normal and the lint is off for the file.
+//! The contract modules share these values; individual scenarios use subsets.
 #![allow(dead_code)]
 
 use engine_risk::{EnvelopeConfig, KernelConfig};

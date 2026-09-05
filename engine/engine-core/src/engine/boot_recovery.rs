@@ -1,5 +1,12 @@
 use super::*;
 
+mod configuration;
+mod inputs;
+mod reservations;
+use configuration::{restore_configuration, ConfiguredStrategies};
+use inputs::{restore_strategy_inputs, RecoveredStrategyInputs};
+use reservations::restore_order_reservations;
+
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Come up: read the log back, say who we are in it, learn what the
     /// strategies want, then ask the venue for the instrument rules and the
@@ -57,160 +64,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // every accounting view the same way a delivered one would have.
 
         let boot_ms = clock::wall_ms();
-        let mut market = MarketState::default();
-        // Ids are interning positions, so the previous run's table is
-        // re-interned first, in its own order: every id the replayed records
-        // name then means the same symbol in this run. Attribution, the
-        // reconcile's exposure accounting, and in-flight recovery all join
-        // the OLD run's numbers against this table — a symbol a signal
-        // admitted at runtime last run would otherwise come back at a
-        // different position, or not at all. `assembly::symbol_order` seeds
-        // the gateway and the private stream with this same order.
-        for name in crate::replay::LogNames::of_log(replayed).symbols {
-            market.add_symbol(&name);
-        }
-        let mut routing = Routing::default();
-        let mut names = Vec::with_capacity(strategies.len());
-        let mut subscriptions = Vec::new();
-        for (index, strategy) in strategies.iter().enumerate() {
-            let sid = StrategyId(
-                u16::try_from(index)
-                    .map_err(|_| EngineError::Boot("more than 65535 strategies".to_string()))?,
-            );
-            names.push(match sleeves.get(index) {
-                Some(sleeve) if !sleeve.is_empty() => sleeve.clone(),
-                _ => strategy.name().to_string(),
-            });
-            for sub in strategy.subscriptions() {
-                let symbol = market.add_symbol(&sub.symbol);
-                routing.add(symbol, sub.feed, sid);
-                if !subscriptions.contains(&sub) {
-                    subscriptions.push(sub.clone());
-                }
-            }
-        }
-        let signal_dependencies = crate::signal_state::dependency_closure(
-            &names,
-            &strategies
-                .iter()
-                .map(|strategy| strategy.input_dependencies())
-                .collect::<Vec<_>>(),
-        )
-        .map_err(EngineError::Boot)?;
-        let prior_names = crate::replay::LogNames::of_log(replayed).strategies;
-        if !sleeves.is_empty()
-            && !prior_names.is_empty()
-            && !names.as_slice().starts_with(prior_names.as_slice())
-        {
-            return Err(EngineError::Boot(format!(
-                "configured strategy identity/order {:?} does not preserve the WAL prefix {:?}",
-                names, prior_names
-            )));
-        }
-        let mut distinct = std::collections::HashSet::new();
-        if !sleeves.is_empty()
-            && names
-                .iter()
-                .any(|name| name.is_empty() || !distinct.insert(name))
-        {
-            return Err(EngineError::Boot(
-                "strategy sleeve names must be non-empty and unique".to_string(),
-            ));
-        }
-        let restored_symbol_checkpoints = replay_strategy_checkpoints(replayed);
-        for ((owner, _), checkpoint) in &restored_symbol_checkpoints {
-            let strategy = strategies.get(owner.idx()).ok_or_else(|| {
-                EngineError::Boot(format!(
-                    "checkpoint names strategy {} outside the configured table",
-                    owner.0
-                ))
-            })?;
-            validate_strategy_checkpoint(strategy.as_ref(), checkpoint).map_err(|error| {
-                EngineError::Boot(format!(
-                    "strategy {} refused its restored checkpoint: {error}",
-                    names[owner.idx()]
-                ))
-            })?;
-        }
-        let restored_global_before_boot = replay_strategy_global_checkpoints(replayed);
-        for (owner, state) in &restored_global_before_boot {
-            let strategy = strategies.get(owner.idx()).ok_or_else(|| {
-                EngineError::Boot(format!(
-                    "global checkpoint names strategy {} outside the configured table",
-                    owner.0
-                ))
-            })?;
-            if state
-                .provenance
-                .as_ref()
-                .is_some_and(|provenance| !provenance.import_complete)
-            {
-                return Err(EngineError::Boot(format!(
-                    "strategy {} has an incomplete stopped-runtime import",
-                    names[owner.idx()]
-                )));
-            }
-            validate_strategy_checkpoint(strategy.as_ref(), &state.checkpoint).map_err(
-                |error| {
-                    EngineError::Boot(format!(
-                        "strategy {} refused its restored global checkpoint: {error}",
-                        names[owner.idx()]
-                    ))
-                },
-            )?;
-        }
-        let mut initial_global_checkpoints = std::collections::BTreeMap::new();
-        if replayed.is_empty() {
-            for (index, strategy) in strategies.iter().enumerate() {
-                let id =
-                    StrategyId(u16::try_from(index).map_err(|_| {
-                        EngineError::Boot("more than 65535 strategies".to_string())
-                    })?);
-                match strategy.initial_checkpoint() {
-                    Some(checkpoint) => {
-                        validate_strategy_checkpoint(strategy.as_ref(), &checkpoint).map_err(
-                            |error| {
-                                EngineError::Boot(format!(
-                                    "strategy {} refused its initial checkpoint: {error}",
-                                    names[index]
-                                ))
-                            },
-                        )?;
-                        initial_global_checkpoints.insert(
-                            id,
-                            StrategyGlobalCheckpointState {
-                                strategy: id,
-                                checkpoint,
-                                provenance: None,
-                            },
-                        );
-                    }
-                    None if strategy.checkpoint_identity().is_some() => {
-                        return Err(EngineError::Boot(format!(
-                            "strategy {} declares whole-sleeve state but no canonical initial checkpoint",
-                            names[index]
-                        )));
-                    }
-                    None => {}
-                }
-            }
-        } else {
-            for (index, strategy) in strategies.iter().enumerate() {
-                if strategy.checkpoint_identity().is_some()
-                    && !restored_global_before_boot.contains_key(&StrategyId(
-                        u16::try_from(index).map_err(|_| {
-                            EngineError::Boot("more than 65535 strategies".to_string())
-                        })?,
-                    ))
-                {
-                    return Err(EngineError::Boot(format!(
-                        "strategy {} has no whole-sleeve checkpoint in this nonempty WAL; import retired state while the engine is stopped",
-                        names[index]
-                    )));
-                }
-            }
-        }
-        routing.size_to(market.table.len());
+        let ConfiguredStrategies {
+            market,
+            mut routing,
+            names,
+            mut subscriptions,
+            signal_dependencies,
+            initial_global_checkpoints,
+        } = restore_configuration(&strategies, sleeves, replayed)?;
         wal.append(&WalRecord::Boot {
             version: ENGINE_VERSION.to_string(),
             config_sha256: config_sha256.to_string(),
@@ -318,60 +179,26 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // record and must say exactly what a replay would have said.
         let logged_exposure = crate::reconcile::logged_exposure(effective);
         let intended_stops = crate::reconcile::intended_stops(effective);
-        let mut strategy_checkpoints = replay_strategy_checkpoints(effective);
-        strategy_checkpoints.retain(|(strategy, symbol), _| {
-            strategy.idx() < strategies.len() && symbol.idx() < market.table.len()
-        });
-        let mut strategy_global_checkpoints = replay_strategy_global_checkpoints(effective);
-        strategy_global_checkpoints.extend(initial_global_checkpoints);
-        strategy_global_checkpoints.retain(|strategy, _| strategy.idx() < strategies.len());
-        let mut strategy_events = replay_strategy_events(effective);
-        strategy_events.retain(|_, event| {
-            (event.source.0 as usize) < strategies.len()
-                && (event.destination.0 as usize) < strategies.len()
-        });
-        let signals = crate::signal_state::SignalState::replay(effective, strategies.len())
-            .map_err(EngineError::Boot)?;
-        let ReplayedRuntimeControlState {
-            requests: runtime_control_requests,
-            consumed: runtime_control_consumed,
-            entries_enabled: runtime_entries_enabled,
-        } = replay_runtime_control_state(effective)?;
-        for request in &runtime_control_requests {
-            crate::controls::validate(request).map_err(EngineError::Boot)?;
-            let expected_name = names.get(request.strategy.0 as usize).ok_or_else(|| {
-                EngineError::Boot(format!(
-                    "runtime control request {:?} names strategy {} outside the configured table",
-                    request.request_id, request.strategy.0
-                ))
-            })?;
-            if expected_name != &request.strategy_name {
-                return Err(EngineError::Boot(format!(
-                    "runtime control request {:?} binds strategy {} to {:?}, expected {:?}",
-                    request.request_id, request.strategy.0, request.strategy_name, expected_name
-                )));
-            }
-        }
-        for row in signals.subscriptions() {
-            if row.subscriptions.len() > engine_types::MAX_DURABLE_SIGNAL_SUBSCRIPTIONS {
-                return Err(EngineError::Boot(format!(
-                    "durable signal source {} has {} subscriptions; maximum is {}",
-                    row.source,
-                    row.subscriptions.len(),
-                    engine_types::MAX_DURABLE_SIGNAL_SUBSCRIPTIONS
-                )));
-            }
-            for subscription in &row.subscriptions {
-                let Some(symbol) = market.table.get(&subscription.symbol) else {
-                    return Err(EngineError::Boot(format!(
-                        "durable signal source {} names {} outside the restored symbol table",
-                        row.source, subscription.symbol
-                    )));
-                };
-                routing.add(symbol, subscription.feed, row.destination);
-                if !subscriptions.contains(subscription) {
-                    subscriptions.push(subscription.clone());
-                }
+        let RecoveredStrategyInputs {
+            strategy_checkpoints,
+            strategy_global_checkpoints,
+            strategy_events,
+            signals,
+            runtime_control_requests,
+            runtime_control_consumed,
+            runtime_entries_enabled,
+            routes,
+        } = restore_strategy_inputs(
+            effective,
+            &strategies,
+            &names,
+            &market.table,
+            initial_global_checkpoints,
+        )?;
+        for (symbol, destination, subscription) in routes {
+            routing.add(symbol, subscription.feed, destination);
+            if !subscriptions.contains(&subscription) {
+                subscriptions.push(subscription);
             }
         }
         // A gap-recovery pass reaches back past this boot, and the venue hands
@@ -507,45 +334,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // Nothing is lost by the rounding `boot_prefix` does: the stamp only
         // separates one boot's ids from another's, and `mint_unused` already
         // refuses any id the replayed log has seen.
-        let mut registry = OrderRegistry::new(OrderRegistry::boot_prefix(boot_ms));
-        for order in orders.in_flight() {
-            registry.own(&order.request.client_order_id, order.request.strategy);
-            // The kernel's partition must keep charging last boot's working
-            // orders, or a restart hands every share out twice.
-            let request = &order.request;
-            let remaining_qty = request.qty - order.filled_qty;
-            if !remaining_qty.is_finite() || remaining_qty < -1e-9 {
-                return Err(EngineError::Boot(format!(
-                    "in-flight order {} has impossible remaining quantity: request {}, filled {}",
-                    request.client_order_id, request.qty, order.filled_qty
-                )));
-            }
-            if remaining_qty <= 1e-9 {
-                continue;
-            }
-            risk.register_order_price_range(
-                &request.client_order_id,
-                &Intent {
-                    strategy: request.strategy,
-                    symbol: request.symbol,
-                    side: request.side,
-                    qty: remaining_qty,
-                    kind: request.kind,
-                    stop: request.stop,
-                    reduce_only: request.reduce_only,
-                    tag: "recovered".to_string(),
-                    decided_ns: 0,
-                    // The order is already at the venue; there is nothing
-                    // left to decide about how it was placed, and its
-                    // leverage was set before it went.
-                    work: None,
-                    leverage: None,
-                },
-                remaining_qty,
-                order.reservation_low_px,
-                order.reservation_high_px,
-            );
-        }
+        let registry = restore_order_reservations(&mut risk, &orders, boot_ms)?;
         if recovered > 0 {
             tracing::warn!(
                 count = recovered,
@@ -568,6 +357,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             ready_actions: VecDeque::new(),
             _venue: std::marker::PhantomData,
             host: StrategyHost {
+                effects: crate::effects::Effects::replay(replayed, names.len())
+                    .map_err(EngineError::Boot)?,
                 strategies,
                 names,
                 timers: Timers::default(),
@@ -643,6 +434,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         engine
             .fills
             .learn(&names_record(&engine.host.names, &engine.books.market));
+        engine.restore_strategy_effects().await?;
         engine.wake_restored_strategies()?;
         engine.redeliver_durable_strategy_inputs();
         engine.queue_halted_entry_cancels()?;

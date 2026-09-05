@@ -125,8 +125,18 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
     let record = read_compatible_record(payload)?;
     if matches!(record, WalRecord::SegmentBase { .. }) {
         let value: serde_json::Value = serde_json::from_slice(payload)?;
-        if value.get("kind").and_then(serde_json::Value::as_str) == Some("segment_base_v2")
-            && value.get("signal_gaps").is_none()
+        if value.get("kind").and_then(serde_json::Value::as_str) == Some("segment_base_v3")
+            && value.get("strategy_effects").is_none()
+        {
+            return Err(serde_json::Error::io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "segment_base_v3 is missing required strategy_effects state",
+            )));
+        }
+        if matches!(
+            value.get("kind").and_then(serde_json::Value::as_str),
+            Some("segment_base_v2" | "segment_base_v3")
+        ) && value.get("signal_gaps").is_none()
         {
             return Err(serde_json::Error::io(io::Error::new(
                 io::ErrorKind::InvalidData,

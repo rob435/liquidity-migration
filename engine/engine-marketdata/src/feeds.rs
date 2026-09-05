@@ -10,10 +10,10 @@
 //! the segment the engine reports in nanoseconds — a different budget from the
 //! gateway, which is called once per order.
 
-use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Subscription, SymbolId};
-use engine_venue::{
+use engine_public::{
     BinanceRealm, HyperliquidRealm, LighterRealm, MexcRealm, VariationalRealm, VenueName,
 };
+use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Subscription, SymbolId};
 
 use crate::binance::BinancePublicFeed;
 use crate::bybit::feed::BybitPublicFeed;

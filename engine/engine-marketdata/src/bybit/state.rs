@@ -146,10 +146,15 @@ impl FeedState {
         if frame.snapshot {
             state.depth = Depth::default();
             if let Some(bids) = frame.bids {
-                replace_side(&mut state.depth.bids, &mut state.depth.bid_len, bids, true);
+                replace_side(&mut state.depth.bids, &mut state.depth.bid_len, &bids, true);
             }
             if let Some(asks) = frame.asks {
-                replace_side(&mut state.depth.asks, &mut state.depth.ask_len, asks, false);
+                replace_side(
+                    &mut state.depth.asks,
+                    &mut state.depth.ask_len,
+                    &asks,
+                    false,
+                );
             }
             state.has_snapshot = true;
         } else {
@@ -162,18 +167,28 @@ impl FeedState {
             if let Some(bids) = frame.bids {
                 if !bids.is_empty() {
                     if frame.depth == 1 {
-                        replace_side(&mut state.depth.bids, &mut state.depth.bid_len, bids, true);
+                        replace_side(&mut state.depth.bids, &mut state.depth.bid_len, &bids, true);
                     } else {
-                        apply_side(&mut state.depth.bids, &mut state.depth.bid_len, bids, true);
+                        apply_side(&mut state.depth.bids, &mut state.depth.bid_len, &bids, true);
                     }
                 }
             }
             if let Some(asks) = frame.asks {
                 if !asks.is_empty() {
                     if frame.depth == 1 {
-                        replace_side(&mut state.depth.asks, &mut state.depth.ask_len, asks, false);
+                        replace_side(
+                            &mut state.depth.asks,
+                            &mut state.depth.ask_len,
+                            &asks,
+                            false,
+                        );
                     } else {
-                        apply_side(&mut state.depth.asks, &mut state.depth.ask_len, asks, false);
+                        apply_side(
+                            &mut state.depth.asks,
+                            &mut state.depth.ask_len,
+                            &asks,
+                            false,
+                        );
                     }
                 }
             }
@@ -262,13 +277,13 @@ impl FeedState {
     }
 }
 
-fn replace_side(out: &mut [BookLevel; BOOK_DEPTH], len: &mut u8, levels: Levels, bids: bool) {
+fn replace_side(out: &mut [BookLevel; BOOK_DEPTH], len: &mut u8, levels: &Levels, bids: bool) {
     *out = [BookLevel::default(); BOOK_DEPTH];
     *len = 0;
     apply_side(out, len, levels, bids);
 }
 
-fn apply_side(out: &mut [BookLevel; BOOK_DEPTH], len: &mut u8, changes: Levels, bids: bool) {
+fn apply_side(out: &mut [BookLevel; BOOK_DEPTH], len: &mut u8, changes: &Levels, bids: bool) {
     for change in changes.iter() {
         let active = *len as usize;
         if let Some(index) = out[..active].iter().position(|level| level.px == change.px) {

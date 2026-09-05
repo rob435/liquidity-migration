@@ -1,6 +1,7 @@
 //! Binance request shapes against a local HTTP server. No venue credentials
 //! and no external network.
 
+use engine_venue::RealmCredentials;
 mod support;
 
 use engine_types::{
@@ -509,4 +510,103 @@ async fn execution_recovery_is_unavailable_and_never_reaches_the_wire() {
     assert!(error.to_string().contains("account-wide"), "{error}");
     assert!(error.to_string().contains("90 days"), "{error}");
     assert!(server.requests().is_empty());
+}
+
+#[tokio::test]
+async fn private_stream_retries_key_failure_resets_before_news_and_deduplicates_after_expiry() {
+    use engine_types::{FeedError, OrderFeed, OrderUpdate};
+    use engine_venue::BinanceOrderFeed;
+    use futures_util::{SinkExt, StreamExt};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let rest = TestServer::start(|request, count| {
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/fapi/v1/listenKey");
+        assert_eq!(request.header("x-mbx-apikey"), Some("test-key"));
+        if count == 0 {
+            (503, r#"{"msg":"unavailable"}"#.into())
+        } else {
+            (200, format!(r#"{{"listenKey":"key-{count}"}}"#))
+        }
+    })
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_url = format!("ws://{}", listener.local_addr().unwrap());
+    let paths = Arc::new(Mutex::new(Vec::new()));
+    let captured = paths.clone();
+    let (closed, observed_close) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let ack = |client: &str| {
+            serde_json::json!({"e":"ORDER_TRADE_UPDATE", "o":{
+                "c":client, "i":42, "s":"BTCUSDT", "x":"NEW", "X":"NEW"
+            }})
+            .to_string()
+        };
+        for connection in 1..=2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let paths = captured.clone();
+            let mut socket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                      response| {
+                    paths.lock().unwrap().push(request.uri().to_string());
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            socket
+                .send(Message::Text(ack("client-1").into()))
+                .await
+                .unwrap();
+            if connection == 1 {
+                socket
+                    .send(Message::Text(r#"{"e":"listenKeyExpired"}"#.into()))
+                    .await
+                    .unwrap();
+            } else {
+                socket
+                    .send(Message::Text(ack("client-2").into()))
+                    .await
+                    .unwrap();
+                while let Some(Ok(message)) = socket.next().await {
+                    if matches!(message, Message::Close(_)) {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = closed.send(());
+    });
+    let mut feed = BinanceOrderFeed::for_test(
+        &rest.base_url(),
+        &ws_url,
+        BinanceRealm::Testnet.credentials_for_test("test-key", "test-secret"),
+        vec!["BTCUSDT".into()],
+    );
+    let sequence = tokio::time::timeout(Duration::from_secs(3), async {
+        assert!(matches!(feed.next_update().await,Err(FeedError::Transport(_))));
+        assert!(matches!(feed.next_update().await,Ok(OrderUpdate::StreamReset{..})));
+        assert!(matches!(feed.next_update().await,Ok(OrderUpdate::Ack(ack)) if ack.client_order_id == "client-1"));
+        assert!(matches!(feed.next_update().await,Err(FeedError::Transport(message)) if message.contains("expired")));
+        assert!(matches!(feed.next_update().await,Ok(OrderUpdate::StreamReset{..})));
+        assert!(matches!(feed.next_update().await,Ok(OrderUpdate::Ack(ack)) if ack.client_order_id == "client-2"));
+    }).await;
+    sequence.expect("private stream must recover through both sessions");
+    assert_eq!(
+        *paths.lock().unwrap(),
+        vec![
+            "/private/ws?listenKey=key-1&events=ORDER_TRADE_UPDATE/ALGO_UPDATE",
+            "/private/ws?listenKey=key-2&events=ORDER_TRADE_UPDATE/ALGO_UPDATE",
+        ]
+    );
+    drop(feed);
+    tokio::time::timeout(Duration::from_secs(1), observed_close)
+        .await
+        .unwrap()
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(rest.to_path("/fapi/v1/listenKey").len(), 3);
 }

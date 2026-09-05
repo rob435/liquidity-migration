@@ -27,6 +27,13 @@ pub enum WalRecord {
         #[serde(default)]
         commit: String,
     },
+    StrategyTransitionQueued {
+        transition: StrategyTransitionState,
+    },
+    StrategyEffectCompleted {
+        transition_id: u64,
+        effect_index: usize,
+    },
     Intent {
         intent: Intent,
     },
@@ -382,6 +389,15 @@ pub enum WalRecord {
         sequence: u64,
         observation_id: String,
     },
+    /// A consumer explicitly rejected this input; no successful work is implied.
+    SignalObservationRejected {
+        wall_ts_ms: i64,
+        strategy: StrategyId,
+        source: String,
+        sequence: u64,
+        observation_id: String,
+        reason: String,
+    },
     /// A missing source prefix, durable before deferring its later spool row.
     SignalGapRecorded {
         wall_ts_ms: i64,
@@ -422,7 +438,11 @@ pub enum WalRecord {
     /// at that point in the stream it is exactly what the records before it
     /// already produced, which is what makes chain reads and single-segment
     /// reads agree.
-    #[serde(rename = "segment_base_v2", alias = "segment_base")]
+    #[serde(
+        rename = "segment_base_v3",
+        alias = "segment_base_v2",
+        alias = "segment_base"
+    )]
     SegmentBase {
         wall_ts_ms: i64,
         /// The id tables, same meaning as [`WalRecord::Names`].
@@ -480,6 +500,8 @@ pub enum WalRecord {
         /// Source prefixes that must recover before their destination opens.
         #[serde(default)]
         signal_gaps: Vec<SignalGap>,
+        #[serde(default)]
+        strategy_effects: StrategyEffectsState,
         /// Accepted runtime entry requests in append order. The whole history
         /// is retained so a retried old request id stays a no-op after
         /// rotation instead of changing the current gate again.
@@ -497,6 +519,21 @@ pub enum WalRecord {
         #[serde(default)]
         rolling_loss_rows: Vec<ClosedTradeRow>,
     },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct StrategyEffectsState {
+    pub next_transition_id: u64,
+    pub transitions: Vec<StrategyTransitionState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StrategyTransitionState {
+    pub id: u64,
+    pub strategy: StrategyId,
+    pub effects: Vec<crate::Action>,
+    pub order_ids: Vec<Option<String>>,
+    pub completed: Vec<usize>,
 }
 
 /// One control-state line inside [`WalRecord::SegmentBase`].
@@ -931,6 +968,7 @@ mod tests {
             signal_cursors: Vec::new(),
             signal_subscriptions: Vec::new(),
             signal_gaps: Vec::new(),
+            strategy_effects: Default::default(),
             runtime_control_requests: Vec::new(),
             runtime_control_consumed: Vec::new(),
             open_orders: Vec::new(),
@@ -940,7 +978,7 @@ mod tests {
             }],
         };
         let mut encoded = serde_json::to_value(&base).expect("serialize segment base");
-        assert_eq!(encoded["kind"], "segment_base_v2");
+        assert_eq!(encoded["kind"], "segment_base_v3");
         encoded["kind"] = serde_json::Value::String("segment_base".into());
         encoded
             .as_object_mut()
@@ -957,6 +995,7 @@ mod tests {
             "signal_cursors",
             "signal_subscriptions",
             "signal_gaps",
+            "strategy_effects",
             "runtime_control_requests",
             "runtime_control_consumed",
             "rolling_loss_rows",

@@ -118,7 +118,7 @@ fn the_feed_dials_the_realm_tables_public_stream_and_nothing_else() {
     // here would be one the fence never sees.
     assert_eq!(
         bybit_public_linear_url(),
-        engine_venue::VenueRealm::Demo.public_ws()
+        engine_public::VenueRealm::Demo.public_ws()
     );
     assert!(bybit_public_linear_url().starts_with("wss://"));
     assert!(bybit_public_linear_url().ends_with("/v5/public/linear"));

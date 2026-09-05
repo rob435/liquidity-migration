@@ -299,8 +299,8 @@ dependencies = [
 name = "engine-marketdata"
 version = "0.1.0"
 dependencies = [
+ "engine-public",
  "engine-types",
- "engine-venue",
  "futures-util",
  "rustls",
  "serde",
@@ -308,6 +308,21 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+]
+
+[[package]]
+name = "engine-public"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "engine-types",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "rustls",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -345,18 +360,14 @@ dependencies = [
 name = "engine-venue"
 version = "0.1.0"
 dependencies = [
- "bytes",
+ "engine-public",
  "engine-types",
  "futures-util",
  "hex",
  "hmac",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
  "k256",
  "libc",
- "rustls",
+ "serde",
  "serde_json",
  "sha2",
  "sha3",

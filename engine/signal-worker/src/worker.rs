@@ -89,42 +89,72 @@ const OTHER_SPOOL_BYTE_CAP: u64 = 768 * 1024 * 1024;
 const OTHER_SPOOL_BYTE_SOFT_THRESHOLD: u64 =
     OTHER_SPOOL_BYTE_CAP - MAX_SPOOL_OBSERVATION_FILE_BYTES;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkerErrorCategory {
+    Config,
+    Input,
+    State,
+    Network,
+    Io,
+    Json,
+}
+
+impl WorkerErrorCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Input => "input",
+            Self::State => "state",
+            Self::Network => "network",
+            Self::Io => "io",
+            Self::Json => "json",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct WorkerError {
-    category: &'static str,
+    category: WorkerErrorCategory,
     message: String,
 }
 
 impl WorkerError {
     pub fn config(message: impl Into<String>) -> Self {
-        Self::new("config", message)
+        Self::new(WorkerErrorCategory::Config, message)
     }
 
     pub fn input(message: impl Into<String>) -> Self {
-        Self::new("input", message)
+        Self::new(WorkerErrorCategory::Input, message)
     }
 
     pub fn state(message: impl Into<String>) -> Self {
-        Self::new("state", message)
+        Self::new(WorkerErrorCategory::State, message)
     }
 
     pub fn network(message: impl Into<String>) -> Self {
-        Self::new("network", message)
+        Self::new(WorkerErrorCategory::Network, message)
     }
 
     pub fn io(context: &'static str, error: std::io::Error) -> Self {
-        Self::new("io", format!("{context}: {error}"))
+        Self::new(WorkerErrorCategory::Io, format!("{context}: {error}"))
     }
 
     pub fn json(context: &'static str, error: serde_json::Error) -> Self {
-        Self::new("json", format!("{context}: {error}"))
+        Self::new(WorkerErrorCategory::Json, format!("{context}: {error}"))
+    }
+
+    pub fn category(&self) -> WorkerErrorCategory {
+        self.category
     }
 
     pub(crate) fn is_lane_local_source_failure(&self) -> bool {
-        matches!(self.category, "input" | "network")
+        matches!(
+            self.category,
+            WorkerErrorCategory::Input | WorkerErrorCategory::Network
+        )
     }
 
-    fn new(category: &'static str, message: impl Into<String>) -> Self {
+    fn new(category: WorkerErrorCategory, message: impl Into<String>) -> Self {
         Self {
             category,
             message: message.into(),
@@ -134,7 +164,7 @@ impl WorkerError {
 
 impl fmt::Display for WorkerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}: {}", self.category, self.message)
+        write!(formatter, "{}: {}", self.category.as_str(), self.message)
     }
 }
 
@@ -306,6 +336,15 @@ impl WorkerState {
             tickers: BTreeMap::new(),
         }
     }
+}
+
+struct HistoryBatch<R> {
+    symbol: String,
+    available_at_ms: i64,
+    checked_from_ms: Option<i64>,
+    checked_through_ms: Option<i64>,
+    replace_coverage: bool,
+    rows: R,
 }
 
 #[derive(Clone)]
@@ -534,30 +573,14 @@ impl SignalWorker {
                 rows,
                 ..
             } => {
-                let normalized = normalize_kline_rows(&symbol, available_at_ms, &rows)?;
-                for row in normalized {
-                    merge_row(
-                        self.state.klines.entry(row.symbol.clone()).or_default(),
-                        row,
-                    )?;
-                }
-                // Kline replacement revokes coverage even if its frontier is absent or invalid.
-                if replace_coverage {
-                    self.state.kline_checked_from_ms.remove(&symbol);
-                    self.state.kline_checked_through_ms.remove(&symbol);
-                    self.state.kline_coverage_intervals.remove(&symbol);
-                }
-                self.state.kline_coverage_mut().merge(
-                    &symbol,
+                self.apply_kline_batch(HistoryBatch {
+                    symbol,
+                    available_at_ms,
                     checked_from_ms,
                     checked_through_ms,
-                    available_at_ms,
                     replace_coverage,
-                )?;
-                self.state.last_observed_ts_ms =
-                    self.state.last_observed_ts_ms.max(available_at_ms);
-                let prune_clock_ms = self.state.last_observed_ts_ms;
-                self.prune(prune_clock_ms);
+                    rows,
+                })?;
             }
             WireEvent::BybitFundingBatch {
                 symbol,
@@ -569,56 +592,17 @@ impl SignalWorker {
                 rows,
                 ..
             } => {
-                let normalized = normalize_funding_rows(&symbol, available_at_ms, &rows)?;
-                let mut inserted = Vec::new();
-                for row in normalized {
-                    if merge_row(
-                        self.state.funding.entry(row.symbol.clone()).or_default(),
-                        row.clone(),
-                    )? {
-                        inserted.push(row);
-                    }
-                }
-                if emit_lifecycle
-                    && !inserted.is_empty()
-                    && self.state.last_carry_decision_ts_ms.is_some()
-                {
-                    let decision_ts_ms = self
-                        .state
-                        .last_carry_decision_ts_ms
-                        .expect("checked CARRY decision cursor");
-                    let lifecycle_rows = inserted
-                        .into_iter()
-                        .filter(|row| {
-                            row.settlement_ts_ms > decision_ts_ms
-                                && row.settlement_ts_ms <= available_at_ms
-                        })
-                        .collect::<Vec<_>>();
-                    let observed = lifecycle_rows.iter().map(|row| row.settlement_ts_ms).max();
-                    if let Some(observed) = observed {
-                        observations.push(self.carry_observation(
-                            "funding_update",
-                            observed,
-                            available_at_ms,
-                            ObservationPayload::FundingUpdate {
-                                decision_ts_ms,
-                                settled_funding: lifecycle_rows,
-                            },
-                            Vec::new(),
-                        )?);
-                    }
-                }
-                self.state.funding_coverage_mut().merge(
-                    &symbol,
-                    checked_from_ms,
-                    checked_through_ms,
-                    available_at_ms,
-                    replace_coverage,
-                )?;
-                self.state.last_observed_ts_ms =
-                    self.state.last_observed_ts_ms.max(available_at_ms);
-                let prune_clock_ms = self.state.last_observed_ts_ms;
-                self.prune(prune_clock_ms);
+                observations.extend(self.apply_funding_batch(
+                    HistoryBatch {
+                        symbol,
+                        available_at_ms,
+                        checked_from_ms,
+                        checked_through_ms,
+                        replace_coverage,
+                        rows,
+                    },
+                    emit_lifecycle,
+                )?);
             }
             WireEvent::BybitInstrumentSnapshot {
                 observed_ts_ms,
@@ -626,52 +610,7 @@ impl SignalWorker {
                 rows,
                 ..
             } => {
-                let allowed = self.owned_market_symbols();
-                let next = normalize_instruments(observed_ts_ms, available_at_ms, &rows)?
-                    .into_iter()
-                    .filter(|row| allowed.contains(&row.symbol))
-                    .map(|row| (row.symbol.clone(), row))
-                    .collect::<BTreeMap<_, _>>();
-                update_instrument_trading_intervals(
-                    &mut self.state.instrument_trading_intervals,
-                    &self.state.instruments,
-                    &next,
-                    &allowed,
-                    observed_ts_ms,
-                    &self.config.sources.bybit_settle_coin,
-                )?;
-                let mut current = next.clone();
-                for symbol in &allowed {
-                    if let Some(row) = next.get(symbol) {
-                        if instrument_is_trading(row, &self.config.sources.bybit_settle_coin)
-                            || row.delivery_time_ms.is_some_and(|clock| clock > 0)
-                        {
-                            self.state.instrument_status_unknown_since_ms.remove(symbol);
-                        } else {
-                            self.state
-                                .instrument_status_unknown_since_ms
-                                .entry(symbol.clone())
-                                .or_insert(observed_ts_ms);
-                        }
-                        continue;
-                    }
-                    self.state
-                        .instrument_status_unknown_since_ms
-                        .entry(symbol.clone())
-                        .or_insert(observed_ts_ms);
-                    if let Some(prior) = self.state.instruments.get(symbol) {
-                        let mut unknown = prior.clone();
-                        unknown.observed_ts_ms = observed_ts_ms;
-                        unknown.available_at_ms = available_at_ms;
-                        unknown.status = None;
-                        current.insert(symbol.clone(), unknown);
-                    }
-                }
-                self.state.instruments = current;
-                self.state.last_observed_ts_ms =
-                    self.state.last_observed_ts_ms.max(available_at_ms);
-                let prune_clock_ms = self.state.last_observed_ts_ms;
-                self.prune(prune_clock_ms);
+                self.apply_instruments(observed_ts_ms, available_at_ms, rows)?;
             }
             WireEvent::BybitTickerSnapshot {
                 observed_ts_ms,
@@ -679,68 +618,7 @@ impl SignalWorker {
                 rows,
                 ..
             } => {
-                let allowed = self.owned_market_symbols();
-                let rows = rows
-                    .into_iter()
-                    .filter(|row| allowed.contains(&row.symbol))
-                    .collect::<Vec<_>>();
-                let normalized = normalize_tickers(observed_ts_ms, available_at_ms, &rows)?;
-                let touched = normalized
-                    .iter()
-                    .map(|row| row.symbol.clone())
-                    .collect::<BTreeSet<_>>();
-                for row in normalized {
-                    merge_ticker_observation(&mut self.state.tickers, row);
-                }
-                let carry_tickers: Vec<TickerObservation> = touched
-                    .iter()
-                    .filter(|symbol| self.state.universe.carry_symbols.contains(symbol))
-                    .filter_map(|symbol| self.state.tickers.get(symbol).cloned())
-                    .collect();
-                let snapshot_observed_ts_ms = carry_tickers
-                    .iter()
-                    .flat_map(|row| {
-                        [
-                            Some(row.observed_ts_ms),
-                            row.mark_observed_ts_ms,
-                            row.funding_observed_ts_ms,
-                            row.schedule_observed_ts_ms,
-                        ]
-                        .into_iter()
-                        .flatten()
-                    })
-                    .fold(observed_ts_ms, i64::max)
-                    .min(available_at_ms);
-                let (marks, presettlement) =
-                    self.public_market_rows(&carry_tickers, snapshot_observed_ts_ms);
-                if (!marks.is_empty() || !presettlement.is_empty())
-                    && !self.suppressed_output_kinds.contains("market_snapshot")
-                {
-                    let oldest_actionable_clock_ms = marks
-                        .iter()
-                        .map(|row| row.observed_ts_ms)
-                        .chain(presettlement.iter().map(|row| row.observed_ts_ms))
-                        .min()
-                        .unwrap_or(snapshot_observed_ts_ms);
-                    let expires_at_ms = oldest_actionable_clock_ms
-                        .saturating_add(self.config.sources.mark_max_age_ms);
-                    if expires_at_ms >= available_at_ms {
-                        observations.push(self.carry_observation(
-                            "market_snapshot",
-                            snapshot_observed_ts_ms,
-                            available_at_ms,
-                            ObservationPayload::MarketSnapshot {
-                                expires_at_ms,
-                                tickers: carry_tickers,
-                                marks,
-                                presettlement,
-                            },
-                            Vec::new(),
-                        )?);
-                    }
-                }
-                self.state.last_observed_ts_ms =
-                    self.state.last_observed_ts_ms.max(available_at_ms);
+                observations.extend(self.apply_tickers(observed_ts_ms, available_at_ms, rows)?);
             }
             WireEvent::BinanceWhaleBatch {
                 available_at_ms,
@@ -748,43 +626,10 @@ impl SignalWorker {
                 rows,
                 ..
             } => {
-                for row in normalize_whales(available_at_ms, &rows)? {
-                    merge_row(
-                        self.state.whales.entry(row.symbol.clone()).or_default(),
-                        row,
-                    )?;
-                }
-                for item in coverage {
-                    self.state.whale_coverage_mut().merge(
-                        &item.symbol,
-                        Some(item.checked_from_ms),
-                        Some(item.checked_through_ms),
-                        available_at_ms,
-                        item.replace_coverage,
-                    )?;
-                }
-                self.state.last_observed_ts_ms =
-                    self.state.last_observed_ts_ms.max(available_at_ms);
-                let prune_clock_ms = self.state.last_observed_ts_ms;
-                self.prune(prune_clock_ms);
+                self.apply_whales(available_at_ms, coverage, rows)?;
             }
             WireEvent::UniverseSnapshot { universe, .. } => {
-                let available_at_ms = universe.available_at_ms;
-                let universe = validate_universe(universe, available_at_ms)?;
-                if universe.environment != self.config.live.environment {
-                    return Err(WorkerError::input(
-                        "universe event environment disagrees with config",
-                    ));
-                }
-                let changed = !same_membership(&self.state.universe, &universe);
-                self.state.universe = universe;
-                if changed {
-                    self.retain_owned_tickers();
-                    if self.state.last_observed_ts_ms > 0 {
-                        let prune_clock_ms = self.state.last_observed_ts_ms;
-                        self.prune(prune_clock_ms);
-                    }
-                }
+                self.apply_universe(universe)?;
             }
             WireEvent::LlmGateCandidates {
                 observed_ts_ms,
@@ -794,92 +639,16 @@ impl SignalWorker {
                 rows,
                 ..
             } => {
-                if observed_ts_ms <= 0
-                    || available_at_ms < observed_ts_ms
-                    || decision_ts_ms <= 0
-                    || valid_until_ms <= decision_ts_ms
-                {
-                    return Err(WorkerError::input("LLM gate publication clock is invalid"));
-                }
-                let tradable: BTreeSet<&str> = self
-                    .state
-                    .universe
-                    .symbols
-                    .iter()
-                    .map(String::as_str)
-                    .collect();
-                let gate = &self.config.llm_gate;
-                let mut accepted = Vec::new();
-                let mut seen = BTreeSet::new();
-                for row in rows {
-                    let symbol = normalized_symbol(&row.symbol)?;
-                    if !tradable.contains(symbol.as_str()) || !seen.insert(symbol.clone()) {
-                        continue;
-                    }
-                    let usable = row.score.is_finite()
-                        && row.score >= gate.min_score
-                        && matches!(row.band.as_str(), "core" | "wide")
-                        && row.trigger_ts_ms > 0
-                        && row.trigger_ts_ms <= available_at_ms
-                        && available_at_ms - row.trigger_ts_ms <= gate.trigger_max_age_ms
-                        && row.trigger_price.is_finite()
-                        && row.trigger_price > 0.0
-                        && row.atr_pct.is_finite()
-                        && row.atr_pct > 0.0
-                        && row.atr_pct < 1.0
-                        && row
-                            .sigma_daily_30d
-                            .is_none_or(|value| value.is_finite() && value >= 0.0)
-                        && row
-                            .turnover_rank
-                            .is_none_or(|value| value.is_finite() && value >= 1.0)
-                        && row.trigger_window_h.is_none_or(|value| value > 0);
-                    if usable {
-                        accepted.push(crate::model::LlmGateCandidate { symbol, ..row });
-                    }
-                }
-                accepted.sort_by(|a, b| a.symbol.cmp(&b.symbol));
-                if !self.suppressed_output_kinds.contains("llm_gate_candidates") {
-                    let symbols: Vec<String> =
-                        accepted.iter().map(|row| row.symbol.clone()).collect();
-                    let subscriptions = market_subscriptions(&symbols)?;
-                    let btc_rv_30 = crate::features::current_btc_rv_30(
-                        &self.state.klines,
-                        available_at_ms,
-                        &self.config.long,
-                    );
-                    observations.push(self.long_observation(
-                        "llm_gate_candidates",
-                        observed_ts_ms,
-                        available_at_ms,
-                        ObservationPayload::LlmGateCandidates {
-                            decision_ts_ms,
-                            valid_until_ms,
-                            btc_rv_30,
-                            rows: accepted,
-                        },
-                        subscriptions,
-                    )?);
-                }
+                observations.extend(self.apply_gate_candidates(
+                    observed_ts_ms,
+                    available_at_ms,
+                    decision_ts_ms,
+                    valid_until_ms,
+                    rows,
+                )?);
             }
             WireEvent::BootstrapComplete { coverage, .. } => {
-                if coverage.completed_at_ms <= 0
-                    || coverage.kline_end_ms <= 0
-                    || coverage.kline_end_ms % HOUR_MS != 0
-                    || coverage.kline_end_ms > coverage.completed_at_ms
-                    || coverage.funding_end_ms <= 0
-                    || coverage.funding_end_ms > coverage.completed_at_ms
-                    || coverage.whale_end_ms <= 0
-                    || coverage.whale_end_ms > coverage.completed_at_ms
-                    || coverage.source_contract_sha256 != self.state.source_contract_sha256
-                    || coverage.long_feature_sha256 != self.state.long_feature_sha256
-                    || coverage.carry_feature_sha256 != self.state.carry_feature_sha256
-                {
-                    return Err(WorkerError::input(
-                        "cold-bootstrap coverage marker is invalid",
-                    ));
-                }
-                self.state.bootstrap_coverage = Some(coverage);
+                self.apply_bootstrap(coverage)?;
             }
             WireEvent::Watermark { observed_ts_ms, .. } => {
                 if observed_ts_ms <= 0 || observed_ts_ms < self.state.last_observed_ts_ms {
@@ -970,6 +739,378 @@ impl SignalWorker {
         }
         self.state.last_input_sequence = event_sequence;
         Ok(observations)
+    }
+
+    fn apply_kline_batch(
+        &mut self,
+        batch: HistoryBatch<Vec<Vec<serde_json::Value>>>,
+    ) -> Result<(), WorkerError> {
+        let HistoryBatch {
+            symbol,
+            available_at_ms,
+            checked_from_ms,
+            checked_through_ms,
+            replace_coverage,
+            rows,
+        } = batch;
+        let normalized = normalize_kline_rows(&symbol, available_at_ms, &rows)?;
+        for row in normalized {
+            merge_row(
+                self.state.klines.entry(row.symbol.clone()).or_default(),
+                row,
+            )?;
+        }
+        // Kline replacement revokes coverage even if its frontier is absent or invalid.
+        if replace_coverage {
+            self.state.kline_checked_from_ms.remove(&symbol);
+            self.state.kline_checked_through_ms.remove(&symbol);
+            self.state.kline_coverage_intervals.remove(&symbol);
+        }
+        self.state.kline_coverage_mut().merge(
+            &symbol,
+            checked_from_ms,
+            checked_through_ms,
+            available_at_ms,
+            replace_coverage,
+        )?;
+        self.state.last_observed_ts_ms = self.state.last_observed_ts_ms.max(available_at_ms);
+        let prune_clock_ms = self.state.last_observed_ts_ms;
+        self.prune(prune_clock_ms);
+        Ok(())
+    }
+
+    fn apply_funding_batch(
+        &mut self,
+        batch: HistoryBatch<Vec<crate::model::BybitFundingWire>>,
+        emit_lifecycle: bool,
+    ) -> Result<Vec<NormalizedObservation>, WorkerError> {
+        let HistoryBatch {
+            symbol,
+            available_at_ms,
+            checked_from_ms,
+            checked_through_ms,
+            replace_coverage,
+            rows,
+        } = batch;
+        let mut observations = Vec::new();
+        let normalized = normalize_funding_rows(&symbol, available_at_ms, &rows)?;
+        let mut inserted = Vec::new();
+        for row in normalized {
+            if merge_row(
+                self.state.funding.entry(row.symbol.clone()).or_default(),
+                row.clone(),
+            )? {
+                inserted.push(row);
+            }
+        }
+        if emit_lifecycle && !inserted.is_empty() && self.state.last_carry_decision_ts_ms.is_some()
+        {
+            let decision_ts_ms = self
+                .state
+                .last_carry_decision_ts_ms
+                .expect("checked CARRY decision cursor");
+            let lifecycle_rows = inserted
+                .into_iter()
+                .filter(|row| {
+                    row.settlement_ts_ms > decision_ts_ms && row.settlement_ts_ms <= available_at_ms
+                })
+                .collect::<Vec<_>>();
+            let observed = lifecycle_rows.iter().map(|row| row.settlement_ts_ms).max();
+            if let Some(observed) = observed {
+                observations.push(self.carry_observation(
+                    "funding_update",
+                    observed,
+                    available_at_ms,
+                    ObservationPayload::FundingUpdate {
+                        decision_ts_ms,
+                        settled_funding: lifecycle_rows,
+                    },
+                    Vec::new(),
+                )?);
+            }
+        }
+        self.state.funding_coverage_mut().merge(
+            &symbol,
+            checked_from_ms,
+            checked_through_ms,
+            available_at_ms,
+            replace_coverage,
+        )?;
+        self.state.last_observed_ts_ms = self.state.last_observed_ts_ms.max(available_at_ms);
+        let prune_clock_ms = self.state.last_observed_ts_ms;
+        self.prune(prune_clock_ms);
+        Ok(observations)
+    }
+
+    fn apply_instruments(
+        &mut self,
+        observed_ts_ms: i64,
+        available_at_ms: i64,
+        rows: Vec<crate::model::BybitInstrumentWire>,
+    ) -> Result<(), WorkerError> {
+        let allowed = self.owned_market_symbols();
+        let next = normalize_instruments(observed_ts_ms, available_at_ms, &rows)?
+            .into_iter()
+            .filter(|row| allowed.contains(&row.symbol))
+            .map(|row| (row.symbol.clone(), row))
+            .collect::<BTreeMap<_, _>>();
+        update_instrument_trading_intervals(
+            &mut self.state.instrument_trading_intervals,
+            &self.state.instruments,
+            &next,
+            &allowed,
+            observed_ts_ms,
+            &self.config.sources.bybit_settle_coin,
+        )?;
+        let mut current = next.clone();
+        for symbol in &allowed {
+            if let Some(row) = next.get(symbol) {
+                if instrument_is_trading(row, &self.config.sources.bybit_settle_coin)
+                    || row.delivery_time_ms.is_some_and(|clock| clock > 0)
+                {
+                    self.state.instrument_status_unknown_since_ms.remove(symbol);
+                } else {
+                    self.state
+                        .instrument_status_unknown_since_ms
+                        .entry(symbol.clone())
+                        .or_insert(observed_ts_ms);
+                }
+                continue;
+            }
+            self.state
+                .instrument_status_unknown_since_ms
+                .entry(symbol.clone())
+                .or_insert(observed_ts_ms);
+            if let Some(prior) = self.state.instruments.get(symbol) {
+                let mut unknown = prior.clone();
+                unknown.observed_ts_ms = observed_ts_ms;
+                unknown.available_at_ms = available_at_ms;
+                unknown.status = None;
+                current.insert(symbol.clone(), unknown);
+            }
+        }
+        self.state.instruments = current;
+        self.state.last_observed_ts_ms = self.state.last_observed_ts_ms.max(available_at_ms);
+        let prune_clock_ms = self.state.last_observed_ts_ms;
+        self.prune(prune_clock_ms);
+        Ok(())
+    }
+
+    fn apply_tickers(
+        &mut self,
+        observed_ts_ms: i64,
+        available_at_ms: i64,
+        rows: Vec<crate::model::BybitTickerWire>,
+    ) -> Result<Vec<NormalizedObservation>, WorkerError> {
+        let mut observations = Vec::new();
+        let allowed = self.owned_market_symbols();
+        let rows = rows
+            .into_iter()
+            .filter(|row| allowed.contains(&row.symbol))
+            .collect::<Vec<_>>();
+        let normalized = normalize_tickers(observed_ts_ms, available_at_ms, &rows)?;
+        let touched = normalized
+            .iter()
+            .map(|row| row.symbol.clone())
+            .collect::<BTreeSet<_>>();
+        for row in normalized {
+            merge_ticker_observation(&mut self.state.tickers, row);
+        }
+        let carry_tickers: Vec<TickerObservation> = touched
+            .iter()
+            .filter(|symbol| self.state.universe.carry_symbols.contains(symbol))
+            .filter_map(|symbol| self.state.tickers.get(symbol).cloned())
+            .collect();
+        let snapshot_observed_ts_ms = carry_tickers
+            .iter()
+            .flat_map(|row| {
+                [
+                    Some(row.observed_ts_ms),
+                    row.mark_observed_ts_ms,
+                    row.funding_observed_ts_ms,
+                    row.schedule_observed_ts_ms,
+                ]
+                .into_iter()
+                .flatten()
+            })
+            .fold(observed_ts_ms, i64::max)
+            .min(available_at_ms);
+        let (marks, presettlement) =
+            self.public_market_rows(&carry_tickers, snapshot_observed_ts_ms);
+        if (!marks.is_empty() || !presettlement.is_empty())
+            && !self.suppressed_output_kinds.contains("market_snapshot")
+        {
+            let oldest_actionable_clock_ms = marks
+                .iter()
+                .map(|row| row.observed_ts_ms)
+                .chain(presettlement.iter().map(|row| row.observed_ts_ms))
+                .min()
+                .unwrap_or(snapshot_observed_ts_ms);
+            let expires_at_ms =
+                oldest_actionable_clock_ms.saturating_add(self.config.sources.mark_max_age_ms);
+            if expires_at_ms >= available_at_ms {
+                observations.push(self.carry_observation(
+                    "market_snapshot",
+                    snapshot_observed_ts_ms,
+                    available_at_ms,
+                    ObservationPayload::MarketSnapshot {
+                        expires_at_ms,
+                        tickers: carry_tickers,
+                        marks,
+                        presettlement,
+                    },
+                    Vec::new(),
+                )?);
+            }
+        }
+        self.state.last_observed_ts_ms = self.state.last_observed_ts_ms.max(available_at_ms);
+        Ok(observations)
+    }
+
+    fn apply_whales(
+        &mut self,
+        available_at_ms: i64,
+        coverage: Vec<crate::model::SourceCoverage>,
+        rows: Vec<crate::model::BinanceWhaleWire>,
+    ) -> Result<(), WorkerError> {
+        for row in normalize_whales(available_at_ms, &rows)? {
+            merge_row(
+                self.state.whales.entry(row.symbol.clone()).or_default(),
+                row,
+            )?;
+        }
+        for item in coverage {
+            self.state.whale_coverage_mut().merge(
+                &item.symbol,
+                Some(item.checked_from_ms),
+                Some(item.checked_through_ms),
+                available_at_ms,
+                item.replace_coverage,
+            )?;
+        }
+        self.state.last_observed_ts_ms = self.state.last_observed_ts_ms.max(available_at_ms);
+        let prune_clock_ms = self.state.last_observed_ts_ms;
+        self.prune(prune_clock_ms);
+        Ok(())
+    }
+
+    fn apply_universe(&mut self, universe: UniverseIdentity) -> Result<(), WorkerError> {
+        let available_at_ms = universe.available_at_ms;
+        let universe = validate_universe(universe, available_at_ms)?;
+        if universe.environment != self.config.live.environment {
+            return Err(WorkerError::input(
+                "universe event environment disagrees with config",
+            ));
+        }
+        let changed = !same_membership(&self.state.universe, &universe);
+        self.state.universe = universe;
+        if changed {
+            self.retain_owned_tickers();
+            if self.state.last_observed_ts_ms > 0 {
+                let prune_clock_ms = self.state.last_observed_ts_ms;
+                self.prune(prune_clock_ms);
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_gate_candidates(
+        &mut self,
+        observed_ts_ms: i64,
+        available_at_ms: i64,
+        decision_ts_ms: i64,
+        valid_until_ms: i64,
+        rows: Vec<crate::model::LlmGateCandidate>,
+    ) -> Result<Vec<NormalizedObservation>, WorkerError> {
+        let mut observations = Vec::new();
+        if observed_ts_ms <= 0
+            || available_at_ms < observed_ts_ms
+            || decision_ts_ms <= 0
+            || valid_until_ms <= decision_ts_ms
+        {
+            return Err(WorkerError::input("LLM gate publication clock is invalid"));
+        }
+        let tradable: BTreeSet<&str> = self
+            .state
+            .universe
+            .symbols
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let gate = &self.config.llm_gate;
+        let mut accepted = Vec::new();
+        let mut seen = BTreeSet::new();
+        for row in rows {
+            let symbol = normalized_symbol(&row.symbol)?;
+            if !tradable.contains(symbol.as_str()) || !seen.insert(symbol.clone()) {
+                continue;
+            }
+            let usable = row.score.is_finite()
+                && row.score >= gate.min_score
+                && matches!(row.band.as_str(), "core" | "wide")
+                && row.trigger_ts_ms > 0
+                && row.trigger_ts_ms <= available_at_ms
+                && available_at_ms - row.trigger_ts_ms <= gate.trigger_max_age_ms
+                && row.trigger_price.is_finite()
+                && row.trigger_price > 0.0
+                && row.atr_pct.is_finite()
+                && row.atr_pct > 0.0
+                && row.atr_pct < 1.0
+                && row
+                    .sigma_daily_30d
+                    .is_none_or(|value| value.is_finite() && value >= 0.0)
+                && row
+                    .turnover_rank
+                    .is_none_or(|value| value.is_finite() && value >= 1.0)
+                && row.trigger_window_h.is_none_or(|value| value > 0);
+            if usable {
+                accepted.push(crate::model::LlmGateCandidate { symbol, ..row });
+            }
+        }
+        accepted.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        if !self.suppressed_output_kinds.contains("llm_gate_candidates") {
+            let symbols: Vec<String> = accepted.iter().map(|row| row.symbol.clone()).collect();
+            let subscriptions = market_subscriptions(&symbols)?;
+            let btc_rv_30 = crate::features::current_btc_rv_30(
+                &self.state.klines,
+                available_at_ms,
+                &self.config.long,
+            );
+            observations.push(self.long_observation(
+                "llm_gate_candidates",
+                observed_ts_ms,
+                available_at_ms,
+                ObservationPayload::LlmGateCandidates {
+                    decision_ts_ms,
+                    valid_until_ms,
+                    btc_rv_30,
+                    rows: accepted,
+                },
+                subscriptions,
+            )?);
+        }
+        Ok(observations)
+    }
+
+    fn apply_bootstrap(&mut self, coverage: BootstrapCoverage) -> Result<(), WorkerError> {
+        if coverage.completed_at_ms <= 0
+            || coverage.kline_end_ms <= 0
+            || coverage.kline_end_ms % HOUR_MS != 0
+            || coverage.kline_end_ms > coverage.completed_at_ms
+            || coverage.funding_end_ms <= 0
+            || coverage.funding_end_ms > coverage.completed_at_ms
+            || coverage.whale_end_ms <= 0
+            || coverage.whale_end_ms > coverage.completed_at_ms
+            || coverage.source_contract_sha256 != self.state.source_contract_sha256
+            || coverage.long_feature_sha256 != self.state.long_feature_sha256
+            || coverage.carry_feature_sha256 != self.state.carry_feature_sha256
+        {
+            return Err(WorkerError::input(
+                "cold-bootstrap coverage marker is invalid",
+            ));
+        }
+        self.state.bootstrap_coverage = Some(coverage);
+        Ok(())
     }
 
     fn build_at_watermark(
@@ -2668,16 +2809,7 @@ impl DurableSignalWorker {
                 self.replaceable_outputs_coalesced.saturating_add(1);
         }
         let suppressed_output_kinds = suppressed.iter().map(ToString::to_string).collect();
-        self.worker.set_suppressed_output_kinds(suppressed);
-        let apply_result = (|| {
-            let mut observations = Vec::new();
-            for event in &events {
-                observations.extend(self.worker.apply(event.clone())?);
-            }
-            Ok::<_, WorkerError>(observations)
-        })();
-        self.worker.set_suppressed_output_kinds(BTreeSet::new());
-        let observations = apply_result?;
+        let (candidate, observations) = self.prepare_event_batch(&events, suppressed)?;
         let observation_json = encode_observations(&observations)?;
         let mut actual_by_class = BTreeMap::<&str, (u64, u64)>::new();
         for (observation, json) in observations.iter().zip(&observation_json) {
@@ -2737,15 +2869,63 @@ impl DurableSignalWorker {
             || projected_bytes > MAX_INPUT_JOURNAL_BYTES
             || self.journal_entries_retained.saturating_add(1) > MAX_INPUT_JOURNAL_ENTRIES
         {
-            self.compact_current_checkpoint(&observation_json)?;
+            self.compact_candidate_checkpoint(&candidate, &observation_json)?;
+            self.worker = candidate;
         } else {
             self.journal.append(&entry)?;
+            self.worker = candidate;
             self.journal_entries_retained = self.journal_entries_retained.saturating_add(1);
             for json in &observation_json {
                 self.record_spool_write(json)?;
             }
         }
         Ok(observations)
+    }
+
+    fn prepare_event_batch(
+        &self,
+        events: &[WireEvent],
+        suppressed: BTreeSet<&'static str>,
+    ) -> Result<(SignalWorker, Vec<NormalizedObservation>), WorkerError> {
+        let mut candidate = self.worker.clone();
+        candidate.set_suppressed_output_kinds(suppressed);
+        let mut observations = Vec::new();
+        for event in events {
+            observations.extend(candidate.apply(event.clone())?);
+        }
+        candidate.set_suppressed_output_kinds(BTreeSet::new());
+        Ok((candidate, observations))
+    }
+
+    pub fn respond_to_readiness_request(&self) -> Result<(), WorkerError> {
+        use engine_types::{SignalReadinessRequest, SignalReadinessResponse, SignalSourceFrontier};
+        let directory = self.spool.directory();
+        let request = AtomicJsonStore::new(directory.join("input-readiness-request.json"));
+        let Some(request) = request.load::<SignalReadinessRequest>()? else {
+            return Ok(());
+        };
+        if request.schema_version != 1 || request.boot_nonce.is_empty() {
+            return Err(WorkerError::input("unsupported input readiness request"));
+        }
+        let state = self.worker.state();
+        let source = &self.worker.config.routing.source;
+        let response = SignalReadinessResponse {
+            schema_version: 1,
+            boot_nonce: request.boot_nonce,
+            sources: vec![
+                SignalSourceFrontier {
+                    source: output_source(source, &state.source_generation, true)?,
+                    destination: StrategyId(state.long_destination),
+                    published_through: state.long_output_sequence,
+                },
+                SignalSourceFrontier {
+                    source: output_source(source, &state.source_generation, false)?,
+                    destination: StrategyId(state.carry_destination),
+                    published_through: state.carry_output_sequence,
+                },
+            ],
+        };
+        AtomicJsonStore::new(directory.join("input-readiness-response.json")).save(&response)
     }
 
     pub fn durability_metrics(&self) -> Result<DurabilityMetrics, WorkerError> {
@@ -3005,7 +3185,16 @@ impl DurableSignalWorker {
         &mut self,
         observation_json: &[String],
     ) -> Result<(), WorkerError> {
-        self.pending_next.save(self.worker.state())?;
+        let candidate = self.worker.clone();
+        self.compact_candidate_checkpoint(&candidate, observation_json)
+    }
+
+    fn compact_candidate_checkpoint(
+        &mut self,
+        candidate: &SignalWorker,
+        observation_json: &[String],
+    ) -> Result<(), WorkerError> {
+        self.pending_next.save(candidate.state())?;
         let next_state_sha256 = self
             .pending_next
             .sha256()?

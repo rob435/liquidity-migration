@@ -12,13 +12,13 @@ name = "market-tape"
 path = "src/main.rs"
 
 [dependencies]
-engine-types = { path = "../engine-types" }
-engine-marketdata = { path = "../engine-marketdata" }
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "time", "io-util", "macros", "sync", "signal"] }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-toml = "1.1.4"
-sha2 = "0.11.0"
-hex = "0.4.3"
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+engine-types = { workspace = true }
+engine-marketdata = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "macros", "sync", "signal"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

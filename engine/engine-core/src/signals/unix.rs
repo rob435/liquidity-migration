@@ -203,6 +203,28 @@ impl HybridSignalFeed {
 }
 
 impl SignalFeed for HybridSignalFeed {
+    fn request_readiness(&mut self) -> Result<(), SignalError> {
+        self.spool.request_readiness()
+    }
+
+    async fn next_event(&mut self) -> Result<engine_types::SignalFeedEvent, SignalError> {
+        let Some(unix) = self.unix.as_mut() else {
+            return self.spool.next_event().await;
+        };
+        loop {
+            tokio::select! {
+                biased;
+                event = self.spool.next_event() => return event,
+                frame = unix.next_doorbell() => {
+                    if let Err(error) = frame {
+                        tracing::warn!(%error, "signal doorbell rejected; durable spool remains authoritative");
+                    }
+                    self.spool.wake();
+                }
+            }
+        }
+    }
+
     fn set_gap_requests(
         &mut self,
         gaps: &[SignalGapRequest],

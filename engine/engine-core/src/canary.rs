@@ -610,127 +610,168 @@ fn signal_for(update: &OrderUpdate, client_id: &str) -> Option<PrivateSignal> {
     }
 }
 
-async fn cleanup<G: CanaryGateway>(
-    gateway: &mut G,
-    symbol: &str,
-    plan: &CanaryPlan,
-    start_ms: i64,
-    terminal_hint: bool,
-    timings: Timings,
-) -> Result<CleanupOutcome, Box<dyn Error>> {
-    let mut consecutive_clean = 0;
-    let mut close_attempted = false;
-    let mut close_terminal = true;
-    let mut original_filled = false;
-    let mut original_terminal = terminal_hint;
-    let mut original_cancelled = terminal_hint;
-    let observation_started = tokio::time::Instant::now();
-    let mut last_problem = String::new();
+#[derive(Copy, Clone)]
+enum OriginalDisposition {
+    Pending,
+    Terminal { cancelled: bool },
+}
+impl OriginalDisposition {
+    fn terminal(self) -> bool {
+        matches!(self, Self::Terminal { .. })
+    }
+}
 
-    for attempt in 0..timings.clean_scan_attempts {
-        let inventory = match gateway.inventory().await {
-            Ok(inventory) => inventory,
-            Err(error) => {
-                last_problem = format!("account inventory failed: {error}");
-                tracing::warn!(%error, "account inventory failed during canary cleanup");
-                if let Ok(working) = gateway.working().await {
-                    for order in working {
-                        let client_id = order.client_order_id.as_str();
-                        if client_id == plan.request.client_order_id || client_id == plan.close_id {
-                            let _ = gateway.cancel(plan.request.symbol, client_id).await;
-                        }
-                    }
-                }
-                consecutive_clean = 0;
-                if attempt + 1 < timings.clean_scan_attempts {
-                    tokio::time::sleep(timings.clean_scan_pause).await;
-                }
-                continue;
-            }
-        };
-        if let Err(error) = require_fresh_inventory(&inventory) {
-            last_problem = error.to_string();
-            tracing::warn!(%error, "stale account inventory during canary cleanup");
-            consecutive_clean = 0;
-            if attempt + 1 < timings.clean_scan_attempts {
-                tokio::time::sleep(timings.clean_scan_pause).await;
-            }
-            continue;
+#[derive(Copy, Clone)]
+enum RecoveryClose {
+    NotSent,
+    Pending,
+    Terminal,
+}
+impl RecoveryClose {
+    fn attempted(self) -> bool {
+        !matches!(self, Self::NotSent)
+    }
+    fn terminal_or_unsent(self) -> bool {
+        !matches!(self, Self::Pending)
+    }
+}
+
+struct CleanupState {
+    consecutive_clean: usize,
+    close: RecoveryClose,
+    original: OriginalDisposition,
+    original_filled: bool,
+    last_problem: String,
+}
+impl CleanupState {
+    fn new(terminal_hint: bool) -> Self {
+        Self {
+            consecutive_clean: 0,
+            close: RecoveryClose::NotSent,
+            original: if terminal_hint {
+                OriginalDisposition::Terminal { cancelled: true }
+            } else {
+                OriginalDisposition::Pending
+            },
+            original_filled: false,
+            last_problem: String::new(),
         }
-        let venue_end_ms = match gateway.venue_time().await {
-            Ok(value) => Some(value),
-            Err(error) => {
-                last_problem = format!("venue-time checkpoint failed: {error}");
-                tracing::warn!(%error, "venue-time checkpoint failed during canary cleanup");
-                None
-            }
-        };
-        let history_current = if let Some(end_ms) = venue_end_ms {
-            match gateway.executions_between(start_ms, end_ms).await {
-                Ok(executions) => {
-                    original_filled |= executions
-                        .iter()
-                        .any(|fill| fill.client_order_id == plan.request.client_order_id);
-                    true
-                }
-                Err(error) => {
-                    last_problem = format!("execution history failed: {error}");
-                    tracing::warn!(%error, "execution history failed during canary cleanup");
-                    false
-                }
-            }
-        } else {
-            false
-        };
+    }
+    fn outcome(&self) -> CleanupOutcome {
+        CleanupOutcome {
+            original_filled: self.original_filled,
+            close_attempted: self.close.attempted(),
+            original_terminal: self.original.terminal(),
+            original_cancelled: matches!(
+                self.original,
+                OriginalDisposition::Terminal { cancelled: true }
+            ),
+        }
+    }
+}
 
-        let mut receipt_says_active = false;
-        let receipt_current = match gateway
-            .receipt(plan.request.symbol, &plan.request.client_order_id)
-            .await
-        {
-            Ok(Some(receipt)) => {
-                original_filled |= receipt.has_fill();
-                if receipt.is_terminal() {
-                    original_terminal = true;
-                    original_cancelled = receipt.status == "Cancelled";
-                    println!(
-                        "canary order_status={} cumulative_filled_qty={}",
-                        receipt.status, receipt.cumulative_filled_qty
-                    );
-                } else {
-                    receipt_says_active = true;
-                }
-                true
-            }
-            Ok(None) => true,
-            Err(error) => {
-                last_problem = format!("exact order status failed: {error}");
-                tracing::warn!(%error, "exact order status failed during canary cleanup");
-                false
-            }
-        };
+struct ReceiptObservation {
+    current: bool,
+    active: bool,
+}
 
-        let mut close_receipt_active = false;
-        let close_receipt_current = if close_attempted {
-            match gateway.receipt(plan.request.symbol, &plan.close_id).await {
-                Ok(Some(receipt)) => {
-                    close_terminal = receipt.is_terminal();
-                    close_receipt_active = !close_terminal;
-                    true
-                }
-                Ok(None) => false,
-                Err(error) => {
-                    last_problem = format!("recovery-close status failed: {error}");
-                    tracing::warn!(%error, "recovery-close status failed during canary cleanup");
-                    false
-                }
+async fn read_original_receipt<G: CanaryGateway>(
+    gateway: &mut G,
+    plan: &CanaryPlan,
+    state: &mut CleanupState,
+) -> ReceiptObservation {
+    match gateway
+        .receipt(plan.request.symbol, &plan.request.client_order_id)
+        .await
+    {
+        Ok(Some(receipt)) => {
+            state.original_filled |= receipt.has_fill();
+            let terminal = receipt.is_terminal();
+            if terminal {
+                state.original = OriginalDisposition::Terminal {
+                    cancelled: receipt.status == "Cancelled",
+                };
+                println!(
+                    "canary order_status={} cumulative_filled_qty={}",
+                    receipt.status, receipt.cumulative_filled_qty
+                );
             }
-        } else {
-            true
-        };
+            ReceiptObservation {
+                current: true,
+                active: !terminal,
+            }
+        }
+        Ok(None) => ReceiptObservation {
+            current: true,
+            active: false,
+        },
+        Err(error) => {
+            state.last_problem = format!("exact order status failed: {error}");
+            tracing::warn!(%error, "exact order status failed during canary cleanup");
+            ReceiptObservation {
+                current: false,
+                active: false,
+            }
+        }
+    }
+}
 
-        let mut our_open = receipt_says_active;
-        let mut close_open = close_receipt_active;
+async fn read_close_receipt<G: CanaryGateway>(
+    gateway: &mut G,
+    plan: &CanaryPlan,
+    state: &mut CleanupState,
+) -> ReceiptObservation {
+    if !state.close.attempted() {
+        return ReceiptObservation {
+            current: true,
+            active: false,
+        };
+    }
+    match gateway.receipt(plan.request.symbol, &plan.close_id).await {
+        Ok(Some(receipt)) => {
+            let terminal = receipt.is_terminal();
+            state.close = if terminal {
+                RecoveryClose::Terminal
+            } else {
+                RecoveryClose::Pending
+            };
+            ReceiptObservation {
+                current: true,
+                active: !terminal,
+            }
+        }
+        Ok(None) => ReceiptObservation {
+            current: false,
+            active: false,
+        },
+        Err(error) => {
+            state.last_problem = format!("recovery-close status failed: {error}");
+            tracing::warn!(%error, "recovery-close status failed during canary cleanup");
+            ReceiptObservation {
+                current: false,
+                active: false,
+            }
+        }
+    }
+}
+
+struct CleanupInventory<'a> {
+    our_open: bool,
+    close_open: bool,
+    unexpected_orders: Vec<&'a engine_types::AccountOrder>,
+    our_positions: Vec<&'a engine_types::AccountPosition>,
+    unexpected_positions: Vec<&'a engine_types::AccountPosition>,
+}
+impl<'a> CleanupInventory<'a> {
+    fn classify(
+        inventory: &'a AccountInventory,
+        symbol: &str,
+        plan: &CanaryPlan,
+        original_active: bool,
+        close_active: bool,
+    ) -> Self {
+        let mut our_open = original_active;
+        let mut close_open = close_active;
         let mut unexpected_orders = Vec::new();
         for order in &inventory.open_orders {
             if order.client_order_id == plan.request.client_order_id {
@@ -741,6 +782,113 @@ async fn cleanup<G: CanaryGateway>(
                 unexpected_orders.push(order);
             }
         }
+        let mut our_positions = Vec::new();
+        let mut unexpected_positions = Vec::new();
+        for position in &inventory.positions {
+            if position.product == "wallet_asset" {
+                continue;
+            }
+            if position.product == "linear"
+                && position.symbol == symbol
+                && position.side == Side::Buy
+                && position.qty.is_finite()
+                && position.qty > 0.0
+            {
+                our_positions.push(position);
+            } else {
+                unexpected_positions.push(position);
+            }
+        }
+        Self {
+            our_open,
+            close_open,
+            unexpected_orders,
+            our_positions,
+            unexpected_positions,
+        }
+    }
+}
+
+async fn cleanup<G: CanaryGateway>(
+    gateway: &mut G,
+    symbol: &str,
+    plan: &CanaryPlan,
+    start_ms: i64,
+    terminal_hint: bool,
+    timings: Timings,
+) -> Result<CleanupOutcome, Box<dyn Error>> {
+    let mut state = CleanupState::new(terminal_hint);
+    let observation_started = tokio::time::Instant::now();
+
+    for attempt in 0..timings.clean_scan_attempts {
+        let inventory = match gateway.inventory().await {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                state.last_problem = format!("account inventory failed: {error}");
+                tracing::warn!(%error, "account inventory failed during canary cleanup");
+                if let Ok(working) = gateway.working().await {
+                    for order in working {
+                        let client_id = order.client_order_id.as_str();
+                        if client_id == plan.request.client_order_id || client_id == plan.close_id {
+                            let _ = gateway.cancel(plan.request.symbol, client_id).await;
+                        }
+                    }
+                }
+                state.consecutive_clean = 0;
+                if attempt + 1 < timings.clean_scan_attempts {
+                    tokio::time::sleep(timings.clean_scan_pause).await;
+                }
+                continue;
+            }
+        };
+        if let Err(error) = require_fresh_inventory(&inventory) {
+            state.last_problem = error.to_string();
+            tracing::warn!(%error, "stale account inventory during canary cleanup");
+            state.consecutive_clean = 0;
+            if attempt + 1 < timings.clean_scan_attempts {
+                tokio::time::sleep(timings.clean_scan_pause).await;
+            }
+            continue;
+        }
+        let venue_end_ms = match gateway.venue_time().await {
+            Ok(value) => Some(value),
+            Err(error) => {
+                state.last_problem = format!("venue-time checkpoint failed: {error}");
+                tracing::warn!(%error, "venue-time checkpoint failed during canary cleanup");
+                None
+            }
+        };
+        let history_current = if let Some(end_ms) = venue_end_ms {
+            match gateway.executions_between(start_ms, end_ms).await {
+                Ok(executions) => {
+                    state.original_filled |= executions
+                        .iter()
+                        .any(|fill| fill.client_order_id == plan.request.client_order_id);
+                    true
+                }
+                Err(error) => {
+                    state.last_problem = format!("execution history failed: {error}");
+                    tracing::warn!(%error, "execution history failed during canary cleanup");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        let original_receipt = read_original_receipt(gateway, plan, &mut state).await;
+        let close_receipt = read_close_receipt(gateway, plan, &mut state).await;
+
+        let inventory_state = CleanupInventory::classify(
+            &inventory,
+            symbol,
+            plan,
+            original_receipt.active,
+            close_receipt.active,
+        );
+        let our_open = inventory_state.our_open;
+        let close_open = inventory_state.close_open;
+        let unexpected_orders = &inventory_state.unexpected_orders;
         if our_open {
             if let Err(error) = gateway
                 .cancel(plan.request.symbol, &plan.request.client_order_id)
@@ -748,92 +896,67 @@ async fn cleanup<G: CanaryGateway>(
             {
                 tracing::warn!(%error, "retrying canary cancellation through account scans");
             }
-            consecutive_clean = 0;
+            state.consecutive_clean = 0;
         }
 
-        let is_our_position = |position: &engine_types::AccountPosition| {
-            position.product == "linear"
-                && position.symbol == symbol
-                && position.side == Side::Buy
-                && position.qty.is_finite()
-                && position.qty > 0.0
-        };
-        let non_wallet: Vec<_> = inventory
-            .positions
-            .iter()
-            .filter(|position| position.product != "wallet_asset")
-            .collect();
-        let our_positions: Vec<_> = non_wallet
-            .iter()
-            .copied()
-            .filter(|position| is_our_position(position))
-            .collect();
-        let unexpected_positions: Vec<_> = non_wallet
-            .iter()
-            .copied()
-            .filter(|position| !is_our_position(position))
-            .collect();
+        let our_positions = &inventory_state.our_positions;
+        let unexpected_positions = &inventory_state.unexpected_positions;
         if !our_positions.is_empty() {
             let qty: f64 = our_positions.iter().map(|position| position.qty).sum();
-            if !close_attempted {
+            if !state.close.attempted() {
                 let close = close_request(plan, qty);
-                close_attempted = true;
-                close_terminal = false;
+                state.close = RecoveryClose::Pending;
                 match gateway.send(&close).await {
                     Ok(ack) if ack.client_order_id == plan.close_id => {
                         println!("canary recovery=full-position-close qty={qty}");
                     }
                     Ok(ack) => {
-                        last_problem = format!(
+                        state.last_problem = format!(
                             "recovery close acknowledged a different client id {:?}",
                             ack.client_order_id
                         );
-                        tracing::error!(detail = %last_problem, "canary recovery close is ambiguous");
+                        tracing::error!(detail = %state.last_problem, "canary recovery close is ambiguous");
                     }
                     Err(error) => {
-                        last_problem = format!("recovery close was ambiguous or failed: {error}");
+                        state.last_problem =
+                            format!("recovery close was ambiguous or failed: {error}");
                         tracing::error!(%error, "canary full-position recovery close was refused");
                     }
                 }
             }
-            consecutive_clean = 0;
+            state.consecutive_clean = 0;
         } else if close_open {
             if let Err(error) = gateway.cancel(plan.request.symbol, &plan.close_id).await {
                 tracing::warn!(%error, "cancelling a leftover canary recovery order");
             }
-            consecutive_clean = 0;
+            state.consecutive_clean = 0;
         } else if !our_open && (!unexpected_positions.is_empty() || !unexpected_orders.is_empty()) {
-            if original_terminal && (!close_attempted || close_terminal) {
+            if state.original.terminal() && state.close.terminal_or_unsent() {
                 return Err(format!(
                     "unrelated account state appeared after canary teardown: positions={unexpected_positions:?} open_orders={unexpected_orders:?}"
                 )
                 .into());
             }
-            consecutive_clean = 0;
+            state.consecutive_clean = 0;
         } else if !our_open
             && inventory.open_orders.is_empty()
             && history_current
-            && receipt_current
-            && original_terminal
-            && (!close_attempted || (close_terminal && close_receipt_current))
+            && original_receipt.current
+            && state.original.terminal()
+            && (state.close.terminal_or_unsent() && close_receipt.current)
         {
-            consecutive_clean += 1;
+            state.consecutive_clean += 1;
             println!(
                 "canary cleanup_scan={} derivative_positions=0 open_orders=0",
-                consecutive_clean
+                state.consecutive_clean
             );
-            if consecutive_clean >= 2
+            if state.consecutive_clean >= 2
                 && observation_started.elapsed() >= timings.min_clean_observation
             {
-                return Ok(CleanupOutcome {
-                    original_filled,
-                    close_attempted,
-                    original_terminal,
-                    original_cancelled,
-                });
+                return Ok(state.outcome());
             }
         } else {
-            consecutive_clean = 0;
+            state.consecutive_clean = 0;
         }
 
         if attempt + 1 < timings.clean_scan_attempts {
@@ -843,13 +966,13 @@ async fn cleanup<G: CanaryGateway>(
     let _ = gateway
         .cancel(plan.request.symbol, &plan.request.client_order_id)
         .await;
-    if close_attempted {
+    if state.close.attempted() {
         let _ = gateway.cancel(plan.request.symbol, &plan.close_id).await;
     }
-    let detail = if last_problem.is_empty() {
+    let detail = if state.last_problem.is_empty() {
         "venue state stayed non-flat or uncertain".to_string()
     } else {
-        last_problem
+        state.last_problem
     };
     Err(
         format!("canary cleanup could not prove two consecutive flat account scans: {detail}")
@@ -1498,5 +1621,92 @@ mod tests {
         assert!(error.contains("unrelated account state"), "{error}");
         assert_eq!(gateway.sends.len(), 2);
         assert!(gateway.sends[1].reduce_only && gateway.sends[1].close_position);
+    }
+    #[tokio::test]
+    async fn a_missing_recovery_receipt_cannot_count_as_a_clean_scan_or_resubmit() {
+        let plan = plan();
+        let mut exposed = flat();
+        exposed.positions.push(AccountPosition {
+            product: "linear".into(),
+            symbol: "XRPUSDT".into(),
+            side: Side::Buy,
+            qty: plan.request.qty,
+        });
+        let mut gateway = FakeGateway {
+            sends: vec![plan.request.clone()],
+            inventories: VecDeque::from([exposed, flat(), flat(), flat()]),
+            working: Vec::new(),
+            executions: Vec::new(),
+            cancel_ok: true,
+            create_error: false,
+            close_error: true,
+            receipt_script: VecDeque::from([
+                Some("Cancelled"),
+                Some("Cancelled"),
+                None,
+                Some("Cancelled"),
+                Some("Filled"),
+                Some("Cancelled"),
+                Some("Filled"),
+            ]),
+            cancel_ids: Vec::new(),
+            execution_ends: Vec::new(),
+        };
+        let outcome = cleanup(&mut gateway, "XRPUSDT", &plan, 1, false, timings())
+            .await
+            .unwrap();
+        assert!(outcome.close_attempted);
+        assert_eq!(
+            gateway.sends.len(),
+            2,
+            "ambiguous recovery close must retain its one identity"
+        );
+        assert_eq!(gateway.sends[1].client_order_id, plan.close_id);
+        assert_eq!(
+            gateway.execution_ends.len(),
+            4,
+            "the missing receipt is not one of the two final clean scans"
+        );
+        assert!(gateway.inventories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_inventory_breaks_consecutive_clean_observation() {
+        let plan = plan();
+        let mut stale = flat();
+        stale.observed_ms = 0;
+        let mut gateway = FakeGateway {
+            sends: vec![plan.request.clone()],
+            inventories: VecDeque::from([flat(), stale, flat()]),
+            working: Vec::new(),
+            executions: Vec::new(),
+            cancel_ok: true,
+            create_error: false,
+            close_error: false,
+            receipt_script: VecDeque::new(),
+            cancel_ids: Vec::new(),
+            execution_ends: Vec::new(),
+        };
+        let mut limits = timings();
+        limits.clean_scan_attempts = 3;
+        let error = cleanup(&mut gateway, "XRPUSDT", &plan, 1, true, limits)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("two consecutive flat account scans"),
+            "{error}"
+        );
+        assert_eq!(
+            gateway.execution_ends.len(),
+            2,
+            "stale inventory cannot start a history observation"
+        );
+        assert_eq!(
+            gateway.sends.len(),
+            1,
+            "no close is warranted by this account"
+        );
+        assert_eq!(gateway.cancel_ids, vec![plan.request.client_order_id]);
     }
 }

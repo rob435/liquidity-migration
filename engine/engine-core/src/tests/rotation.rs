@@ -10,6 +10,17 @@ use engine_types::PositionView;
 const STOP_BTC: f64 = 90.0;
 const STOP_ETH: f64 = 80.0;
 
+fn stop_mover_replay() -> Vec<WalRecord> {
+    vec![
+        WalRecord::Names {
+            strategies: vec!["stop-mover".into()],
+            symbols: vec!["BTCUSDT".into()],
+        },
+        sent("eng-stop-owner", 0, 1.0, 80.0),
+        fill("eng-stop-owner", 0, 1.0),
+    ]
+}
+
 struct StopMover {
     symbol: String,
     stops: VecDeque<f64>,
@@ -55,7 +66,7 @@ async fn a_live_stop_move_is_validated_and_survives_rotation() {
         allow_all(),
         vec![Box::new(mover)],
         &["BTCUSDT"],
-        &[],
+        &stop_mover_replay(),
         Vec::new(),
         held,
     )
@@ -95,7 +106,7 @@ async fn an_equal_remembered_stop_is_not_sent_again_before_the_account_view_catc
         allow_all(),
         vec![Box::new(mover)],
         &["BTCUSDT"],
-        &[],
+        &stop_mover_replay(),
         Vec::new(),
         held,
     )
@@ -142,7 +153,7 @@ async fn an_equal_stop_is_retried_after_the_first_venue_call_fails() {
         allow_all(),
         vec![Box::new(mover)],
         &["BTCUSDT"],
-        &[],
+        &stop_mover_replay(),
         Vec::new(),
         held,
     )

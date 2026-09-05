@@ -2,9 +2,7 @@
 //! tests/policy/test_equity_anchored_envelope.py, plus the worst-case-loss
 //! allowance the Rust deny reason is written in.
 
-mod common;
-
-use common::*;
+use super::common::*;
 use engine_risk::{Kernel, KernelConfig};
 use engine_types::orders::Side;
 use engine_types::risk::{DenyReason, RiskKernel, RiskVerdict};

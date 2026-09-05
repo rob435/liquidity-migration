@@ -21,18 +21,15 @@
 //! `tokio::sync::mpsc::Receiver::recv` keeps. A feed that reads a socket must
 //! park partial reads in its own buffer, not in the future.
 //!
-//! The order of the intent pipeline is the part that a crash reads back:
-//! intent recorded, verdict recorded, order recorded **and handed to the
-//! operating system**, and only then the bytes leave. The disk barrier starts
-//! at the same moment and runs beside the flight to the venue; what waits for
-//! it is the first news that the order traded, never the send. A crash between
-//! the send and the reply leaves an order the log knows about and no reply for
-//! it, which is exactly what `engine replay` shows as in flight.
+//! Every placement records its intent, verdict and quantized order before
+//! dispatch. A callback carrying durable strategy/input state first journals
+//! its ordered transition and settles the order barrier before venue I/O.
+//! Restart restores its unfinished effects using the persisted order IDs.
 //!
-//! What that trades: a machine that dies inside the barrier — not a process
-//! that dies, whose bytes are already with the operating system — can leave an
-//! order at the venue the log does not name. Reconciliation reads that as an
-//! order it cannot account for and latches opening off.
+//! Ordinary order-only callbacks retain optimistic submission: the barrier
+//! runs alongside venue I/O and settles before dependent completion. A machine
+//! failure before that barrier finishes can leave an order absent from the WAL;
+//! reconciliation then blocks growth for the unaccounted order.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -53,7 +50,7 @@ use crate::attribution::{self, Attribution};
 use crate::clock;
 use crate::config::EngineSection;
 use crate::covers::CoverBook;
-use crate::ctx::{Books, StrategyHost, Timers};
+use crate::ctx::{Books, PendingAction, StrategyHost, Timers};
 use crate::execution::{self, Fills};
 use crate::execution_ids::{ExecutionIds, RECOVERY_PAD_MS, RECOVERY_REACH_MS};
 use crate::heartbeat::{self, Heartbeat};
@@ -72,6 +69,8 @@ use crate::working::{self, WorkingOrders};
 pub const MAX_INTENTS_PER_WAKE: usize = 64;
 
 pub(crate) const MAX_TIMER_CALLBACKS_PER_TURN: usize = 64;
+
+const MUTATION_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Largest set of placements that may share one risk reservation, WAL
 /// barrier, and concurrent venue submission. It matches Bybit's conservative
@@ -317,11 +316,11 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// the same; only the record of it is collapsed, so one stuck position
     /// cannot bury the log the fill and latency reports read.
     refusals: HashMap<(StrategyId, SymbolId, String), Refusal>,
-    deferred_actions: HashMap<SymbolId, VecDeque<(Action, u64)>>,
+    deferred_actions: HashMap<SymbolId, VecDeque<(PendingAction, u64)>>,
     /// Actions released by a completed symbol mutation, retaining the market
     /// wake that produced each one. The per-wake flood budget and latency
     /// origin therefore survive a slow venue round trip.
-    ready_actions: VecDeque<(Action, u64)>,
+    ready_actions: VecDeque<(PendingAction, u64)>,
     _venue: std::marker::PhantomData<V>,
     /// The strategies and what the engine holds on their behalf: timers,
     /// pending actions, checkpoints, cross-sleeve events, entry overrides.
@@ -465,6 +464,7 @@ mod boot_recovery;
 mod intent_admission;
 mod scheduling;
 mod signal_intake;
+mod strategy_effects;
 mod telemetry;
 mod venue_completion;
 
@@ -602,6 +602,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut flush_tick = timer.interval(self.group_flush);
         let mut signals_open = true;
         let mut controls_open = true;
+        if self.signals.readiness_required() {
+            self.signals.begin_readiness_request();
+            signal_feed
+                .request_readiness()
+                .map_err(|error| EngineError::State(error.to_string()))?;
+        }
         self.update_signal_requests(signal_feed)?;
 
         // Boot-restored cross-sleeve events and external observations were
@@ -653,7 +659,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             break reason;
                         }
                     }
-                    observation = signal_feed.next_observation(), if signals_open => {
+                    observation = signal_feed.next_event(), if signals_open => {
                         self.on_signal_feed(observation, signal_feed, &mut signals_open)?;
                     }
                     request = control_feed.next_request(), if controls_open => {
@@ -666,6 +672,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
 
             if self.drain_progress.is_some() {
+                tokio::select! {
+                    biased;
+                    completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
+                        let completion = completion.ok_or_else(|| EngineError::State("venue task stopped with mutations outstanding".into()))?;
+                        self.take_venue_completion(completion).await?;
+                    }
+                    _ = std::future::ready(()) => {}
+                }
                 // A completed venue mutation is the cooperative boundary.
                 // Poll one private update without waiting, then independently
                 // refresh a stale account view, and only then resume the wake.
@@ -725,7 +739,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         break reason;
                     }
                 }
-                observation = signal_feed.next_observation(), if signals_open => {
+                observation = signal_feed.next_event(), if signals_open => {
                     self.on_signal_feed(observation, signal_feed, &mut signals_open)?;
                 }
                 request = control_feed.next_request(), if controls_open => {
@@ -819,14 +833,24 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     fn on_signal_feed<F: SignalFeed>(
         &mut self,
-        observation: Result<SignalObservation, SignalError>,
+        observation: Result<engine_types::SignalFeedEvent, SignalError>,
         signal_feed: &mut F,
         signals_open: &mut bool,
     ) -> Result<(), EngineError> {
         match observation {
-            Ok(observation) => self.queue_signal_observation(observation, signal_feed),
+            Ok(engine_types::SignalFeedEvent::Observation(observation)) => {
+                self.queue_signal_observation(observation, signal_feed)
+            }
+            Ok(engine_types::SignalFeedEvent::Ready(frontiers)) => {
+                self.accept_signal_frontiers(frontiers, signal_feed)
+            }
+            Ok(engine_types::SignalFeedEvent::ReadinessUnavailable { reason }) => {
+                self.refuse_signal_readiness(reason, signal_feed)
+            }
             Err(SignalError::Closed) => {
                 *signals_open = false;
+                self.signals.clear_readiness();
+                self.queue_halted_entry_cancels()?;
                 Ok(())
             }
             Err(error) => Err(EngineError::State(error.to_string())),
@@ -892,6 +916,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.accept_pending_signals(signal_feed)?;
             self.drain(clock::now_ns()).await?;
         }
+        self.update_signal_requests(signal_feed)?;
         Ok(())
     }
 
@@ -901,7 +926,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub async fn finish(&mut self) -> Result<(), EngineError> {
         while !self.pending_mutations.is_empty() {
             let completion =
-                tokio::time::timeout(Duration::from_secs(10), self.venue_completions.recv())
+                tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.venue_completions.recv())
                     .await
                     .map_err(|_| {
                         EngineError::State(format!(
@@ -1137,10 +1162,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     fn mint_id(&mut self) -> String {
         let orders = &self.books.orders;
+        let registry = &self.books.registry;
         mint_unused(
             self.books.registry.prefix(),
             &mut self.next_order_n,
-            |candidate| orders.contains(candidate),
+            |candidate| orders.contains(candidate) || registry.owner_of(candidate).is_some(),
         )
     }
 
@@ -1221,6 +1247,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             signal_cursors: self.signals.cursors().cloned().collect(),
             signal_subscriptions: self.signals.subscriptions().cloned().collect(),
             signal_gaps: self.signals.gaps().cloned().collect(),
+            strategy_effects: self.host.effects.snapshot(),
             runtime_control_requests: self.runtime_control_requests.clone(),
             runtime_control_consumed: self.runtime_control_consumed.iter().cloned().collect(),
             open_orders: self

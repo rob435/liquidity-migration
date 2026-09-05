@@ -1,4 +1,5 @@
 use super::*;
+use engine_types::{OrderAck, VenueMutationTiming};
 
 /// The clocks every completed venue command carries: when it was queued
 /// behind the venue task, when the task took it, when the venue answered,
@@ -9,6 +10,173 @@ struct CompletionClocks {
     started_ns: u64,
     completed_ns: u64,
     rate_wait_ns: Option<u64>,
+}
+
+struct CompletedOrders {
+    clocks: CompletionClocks,
+    requests: Vec<OrderRequest>,
+    timings: Vec<(u64, u64)>,
+    replies: Vec<Result<OrderAck, VenueError>>,
+}
+
+struct CompletedCancels {
+    clocks: CompletionClocks,
+    requests: Vec<(SymbolId, String)>,
+    timing: Option<VenueMutationTiming>,
+    replies: Vec<Result<(), VenueError>>,
+}
+
+struct CompletedAmend {
+    clocks: CompletionClocks,
+    symbol: SymbolId,
+    client_order_id: String,
+    spec: AmendSpec,
+    existing: crate::inflight::OrderRec,
+    amended_intent: Box<Intent>,
+    remaining_qty: f64,
+    old_px: f64,
+    tif: TimeInForce,
+    timing: Option<VenueMutationTiming>,
+    reply: Result<(), VenueError>,
+}
+
+enum CompletedMutation {
+    Orders(CompletedOrders),
+    Cancels(CompletedCancels),
+    Amend(Box<CompletedAmend>),
+}
+
+impl CompletedMutation {
+    fn bind(
+        pending: PendingMutation,
+        completion: MutationCompletion,
+        command_id: u64,
+    ) -> Result<Self, EngineError> {
+        match (pending, completion) {
+            (
+                PendingMutation::Orders {
+                    requests,
+                    timings,
+                    queued_ns,
+                },
+                MutationCompletion::Orders {
+                    started_ns,
+                    completed_ns,
+                    rate_wait_ns,
+                    replies,
+                    ..
+                },
+            ) => {
+                let clocks = CompletionClocks {
+                    command_id,
+                    queued_ns,
+                    started_ns,
+                    completed_ns,
+                    rate_wait_ns,
+                };
+                Ok(Self::Orders(CompletedOrders {
+                    clocks,
+                    requests,
+                    timings,
+                    replies,
+                }))
+            }
+            (
+                PendingMutation::Cancels {
+                    requests,
+                    queued_ns,
+                },
+                MutationCompletion::Cancels {
+                    started_ns,
+                    completed_ns,
+                    timing,
+                    rate_wait_ns,
+                    replies,
+                    ..
+                },
+            ) => {
+                let clocks = CompletionClocks {
+                    command_id,
+                    queued_ns,
+                    started_ns,
+                    completed_ns,
+                    rate_wait_ns,
+                };
+                Ok(Self::Cancels(CompletedCancels {
+                    clocks,
+                    requests,
+                    timing,
+                    replies,
+                }))
+            }
+            (
+                PendingMutation::Amend {
+                    symbol,
+                    client_order_id,
+                    spec,
+                    existing,
+                    amended_intent,
+                    remaining_qty,
+                    old_px,
+                    tif,
+                    queued_ns,
+                },
+                MutationCompletion::Amend {
+                    started_ns,
+                    completed_ns,
+                    timing,
+                    rate_wait_ns,
+                    reply,
+                    ..
+                },
+            ) => {
+                let clocks = CompletionClocks {
+                    command_id,
+                    queued_ns,
+                    started_ns,
+                    completed_ns,
+                    rate_wait_ns,
+                };
+                Ok(Self::Amend(Box::new(CompletedAmend {
+                    clocks,
+                    symbol,
+                    client_order_id,
+                    spec,
+                    existing,
+                    amended_intent,
+                    remaining_qty,
+                    old_px,
+                    tif,
+                    timing,
+                    reply,
+                })))
+            }
+            (pending, completion) => {
+                let pending_kind = match pending {
+                    PendingMutation::Orders { .. } => "orders",
+                    PendingMutation::Cancels { .. } => "cancels",
+                    PendingMutation::Amend { .. } => "amend",
+                };
+                let completion_kind = match completion {
+                    MutationCompletion::Orders { .. } => "orders",
+                    MutationCompletion::Cancels { .. } => "cancels",
+                    MutationCompletion::Amend { .. } => "amend",
+                };
+                Err(EngineError::State(format!(
+                    "venue task returned {completion_kind} for pending {pending_kind} command {command_id}"
+                )))
+            }
+        }
+    }
+}
+
+/// Fill identity is captured before the order ledger is changed. Only the
+/// journal phase creates this value, after validation and WAL append succeed.
+struct JournaledUpdate {
+    update: OrderUpdate,
+    fill_owner: Option<StrategyId>,
+    fill_request: Option<OrderRequest>,
+    dedup_seen_ms: i64,
 }
 
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
@@ -94,349 +262,321 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             ))
         })?;
 
-        match (pending, completion) {
-            (
-                PendingMutation::Orders {
-                    requests,
-                    timings,
-                    queued_ns,
-                },
-                MutationCompletion::Orders {
-                    started_ns,
-                    completed_ns,
-                    rate_wait_ns,
-                    replies,
-                    ..
-                },
-            ) => {
-                let clocks = CompletionClocks {
-                    command_id,
-                    queued_ns,
-                    started_ns,
-                    completed_ns,
-                    rate_wait_ns,
-                };
-                self.record_quota_hold(&clocks);
-                self.note_missing_replies(replies.len(), requests.len(), "orders")?;
-                tracing::debug!(
-                    command_id,
-                    queue_ns = started_ns.saturating_sub(queued_ns),
-                    venue_ns = completed_ns.saturating_sub(started_ns),
-                    "placement command completed"
-                );
-                let symbols: Vec<_> = requests.iter().map(|request| request.symbol).collect();
-                let mut replies = replies.into_iter();
-                for (request, (decided_ns, origin_ns)) in requests.into_iter().zip(timings) {
-                    self.ledger
-                        .record(Segment::Wire, completed_ns.saturating_sub(decided_ns));
-                    let reply = replies.next().unwrap_or_else(|| {
-                        Err(VenueError::BadReply(
-                            "the venue omitted this order from its batch reply".to_string(),
-                        ))
-                    });
-                    let (socket_write_ns, ack_timing_ns) = match &reply {
-                        Ok(ack) => (
-                            (ack.sent_ns > 0).then_some(ack.sent_ns),
-                            Some(if ack.ack_ns > started_ns {
-                                ack.ack_ns
-                            } else {
-                                completed_ns
-                            }),
+        match CompletedMutation::bind(pending, completion, command_id)? {
+            CompletedMutation::Orders(completed) => self.complete_orders(completed).await,
+            CompletedMutation::Cancels(completed) => self.complete_cancels(completed),
+            CompletedMutation::Amend(completed) => self.complete_amend(*completed),
+        }
+    }
+
+    async fn complete_orders(&mut self, completed: CompletedOrders) -> Result<(), EngineError> {
+        let CompletedOrders {
+            clocks,
+            requests,
+            timings,
+            replies,
+        } = completed;
+        let CompletionClocks {
+            command_id,
+            queued_ns,
+            started_ns,
+            completed_ns,
+            ..
+        } = clocks;
+        self.record_quota_hold(&clocks);
+        self.note_missing_replies(replies.len(), requests.len(), "orders")?;
+        tracing::debug!(
+            command_id,
+            queue_ns = started_ns.saturating_sub(queued_ns),
+            venue_ns = completed_ns.saturating_sub(started_ns),
+            "placement command completed"
+        );
+        let symbols: Vec<_> = requests.iter().map(|request| request.symbol).collect();
+        let mut replies = replies.into_iter();
+        for (request, (decided_ns, origin_ns)) in requests.into_iter().zip(timings) {
+            self.ledger
+                .record(Segment::Wire, completed_ns.saturating_sub(decided_ns));
+            let reply = replies.next().unwrap_or_else(|| {
+                Err(VenueError::BadReply(
+                    "the venue omitted this order from its batch reply".to_string(),
+                ))
+            });
+            let (socket_write_ns, ack_timing_ns) = match &reply {
+                Ok(ack) => (
+                    (ack.sent_ns > 0).then_some(ack.sent_ns),
+                    Some(if ack.ack_ns > started_ns {
+                        ack.ack_ns
+                    } else {
+                        completed_ns
+                    }),
+                ),
+                Err(_) => (None, None),
+            };
+            self.journal_venue_timing(
+                &clocks,
+                "place",
+                &request.client_order_id,
+                socket_write_ns,
+                ack_timing_ns,
+            )?;
+            let update = match reply {
+                Ok(ack) => {
+                    let ack_ns = if ack.ack_ns > started_ns {
+                        ack.ack_ns
+                    } else {
+                        completed_ns
+                    };
+                    if ack.sent_ns > 0 {
+                        self.ledger
+                            .record(Segment::Ack, ack_ns.saturating_sub(ack.sent_ns));
+                    }
+                    Some(OrderUpdate::Ack(ack))
+                }
+                Err(VenueError::Rejected { code, message }) => Some(OrderUpdate::Reject {
+                    client_order_id: request.client_order_id.clone(),
+                    code,
+                    reason: message,
+                }),
+                Err(VenueError::BadRequest(detail)) => Some(OrderUpdate::Reject {
+                    client_order_id: request.client_order_id.clone(),
+                    code: 0,
+                    reason: format!("never sent: {detail}"),
+                }),
+                Err(other) => {
+                    tracing::error!(id = %request.client_order_id, error = %other, "send failed with no answer");
+                    self.wal.append(&WalRecord::Note {
+                        source: "engine".into(),
+                        text: format!(
+                            "{} sent with no answer ({other}); still counted as in flight",
+                            request.client_order_id
                         ),
-                        Err(_) => (None, None),
-                    };
-                    self.journal_venue_timing(
-                        &clocks,
-                        "place",
-                        &request.client_order_id,
-                        socket_write_ns,
-                        ack_timing_ns,
-                    )?;
-                    let update = match reply {
-                        Ok(ack) => {
-                            let ack_ns = if ack.ack_ns > started_ns {
-                                ack.ack_ns
-                            } else {
-                                completed_ns
-                            };
-                            if ack.sent_ns > 0 {
-                                self.ledger
-                                    .record(Segment::Ack, ack_ns.saturating_sub(ack.sent_ns));
-                            }
-                            Some(OrderUpdate::Ack(ack))
-                        }
-                        Err(VenueError::Rejected { code, message }) => Some(OrderUpdate::Reject {
-                            client_order_id: request.client_order_id.clone(),
-                            code,
-                            reason: message,
-                        }),
-                        Err(VenueError::BadRequest(detail)) => Some(OrderUpdate::Reject {
-                            client_order_id: request.client_order_id.clone(),
-                            code: 0,
-                            reason: format!("never sent: {detail}"),
-                        }),
-                        Err(other) => {
-                            tracing::error!(id = %request.client_order_id, error = %other, "send failed with no answer");
-                            self.wal.append(&WalRecord::Note {
-                                source: "engine".into(),
-                                text: format!(
-                                    "{} sent with no answer ({other}); still counted as in flight",
-                                    request.client_order_id
-                                ),
-                            })?;
-                            None
-                        }
-                    };
-                    self.ledger
-                        .record(Segment::EndToEnd, clock::now_ns().saturating_sub(origin_ns));
-                    if let Some(update) = update {
-                        self.take_update(update).await?;
-                    }
+                    })?;
+                    None
                 }
-                self.release_symbols(symbols);
+            };
+            self.ledger
+                .record(Segment::EndToEnd, clock::now_ns().saturating_sub(origin_ns));
+            if let Some(update) = update {
+                self.take_update(update).await?;
             }
-            (
-                PendingMutation::Cancels {
-                    requests,
-                    queued_ns,
-                },
-                MutationCompletion::Cancels {
-                    started_ns,
-                    completed_ns,
-                    timing,
-                    rate_wait_ns,
-                    replies,
-                    ..
-                },
-            ) => {
-                let clocks = CompletionClocks {
-                    command_id,
-                    queued_ns,
-                    started_ns,
-                    completed_ns,
-                    rate_wait_ns,
-                };
-                self.record_quota_hold(&clocks);
-                self.note_missing_replies(replies.len(), requests.len(), "cancels")?;
-                tracing::debug!(
-                    command_id,
-                    venue_ns = completed_ns.saturating_sub(started_ns),
-                    "cancel command completed"
+        }
+        self.release_symbols(symbols);
+        Ok(())
+    }
+
+    fn complete_cancels(&mut self, completed: CompletedCancels) -> Result<(), EngineError> {
+        let CompletedCancels {
+            clocks,
+            requests,
+            timing,
+            replies,
+        } = completed;
+        let CompletionClocks {
+            command_id,
+            started_ns,
+            completed_ns,
+            ..
+        } = clocks;
+        self.record_quota_hold(&clocks);
+        self.note_missing_replies(replies.len(), requests.len(), "cancels")?;
+        tracing::debug!(
+            command_id,
+            venue_ns = completed_ns.saturating_sub(started_ns),
+            "cancel command completed"
+        );
+        let symbols: Vec<_> = requests.iter().map(|(symbol, _)| *symbol).collect();
+        if let Some(mark) = timing {
+            self.ledger
+                .record(Segment::Ack, mark.ack_ns.saturating_sub(mark.sent_ns));
+        }
+        let mut replies = replies.into_iter();
+        let mut halt_failure = None;
+        let accepted_deadline = clock::now_ns().saturating_add(HALT_CANCEL_CONFIRM_NS);
+        for (_, client_order_id) in requests {
+            self.journal_venue_timing(
+                &clocks,
+                "cancel",
+                &client_order_id,
+                timing.map(|mark| mark.sent_ns),
+                timing.map(|mark| mark.ack_ns),
+            )?;
+            let reply = replies.next().unwrap_or_else(|| {
+                Err(VenueError::BadReply(
+                    "the venue omitted this order from its cancel-batch reply".to_string(),
+                ))
+            });
+            let taken = match reply {
+                Ok(()) => true,
+                Err(VenueError::BadRequest(detail)) => {
+                    tracing::error!(id = client_order_id, detail, "cancel never sent");
+                    self.wal.append(&WalRecord::Note {
+                        source: "engine".into(),
+                        text: format!("cancel of {client_order_id} never sent: {detail}"),
+                    })?;
+                    if self.halt_cancels.contains_key(&client_order_id) {
+                        halt_failure = Some(format!("{client_order_id}: {detail}"));
+                    }
+                    false
+                }
+                Err(VenueError::Rejected { code, message }) => {
+                    tracing::error!(id = client_order_id, code, message, "cancel rejected");
+                    self.wal.append(&WalRecord::Note {
+                        source: "engine".into(),
+                        text: format!(
+                            "cancel of {client_order_id} rejected ({code}: {message}); the order is still counted as working"
+                        ),
+                    })?;
+                    if self.halt_cancels.contains_key(&client_order_id) {
+                        halt_failure = Some(format!("{client_order_id}: {code}: {message}"));
+                    }
+                    false
+                }
+                Err(other) => {
+                    tracing::error!(id = client_order_id, error = %other, "cancel failed with no answer");
+                    self.wal.append(&WalRecord::Note {
+                        source: "engine".into(),
+                        text: format!(
+                            "cancel of {client_order_id} sent with no answer ({other}); the order is still counted as working"
+                        ),
+                    })?;
+                    if self.halt_cancels.contains_key(&client_order_id) {
+                        halt_failure = Some(format!("{client_order_id}: {other}"));
+                    }
+                    false
+                }
+            };
+            self.working.cancelled(&client_order_id, taken);
+            if taken {
+                if let Some(state) = self.halt_cancels.get_mut(&client_order_id) {
+                    *state = HaltCancelState::AwaitingPrivate {
+                        deadline_ns: accepted_deadline,
+                    };
+                }
+            }
+        }
+        self.release_symbols(symbols);
+        if let Some(detail) = halt_failure {
+            return Err(EngineError::State(format!(
+                "account-level halt left at least one opening cancel unconfirmed ({detail}); restarting for venue reconciliation"
+            )));
+        }
+        Ok(())
+    }
+
+    fn complete_amend(&mut self, completed: CompletedAmend) -> Result<(), EngineError> {
+        let CompletedAmend {
+            clocks,
+            symbol,
+            client_order_id,
+            spec,
+            existing,
+            amended_intent,
+            remaining_qty,
+            old_px,
+            tif,
+            timing,
+            reply,
+        } = completed;
+        let CompletionClocks {
+            command_id,
+            started_ns,
+            completed_ns,
+            ..
+        } = clocks;
+        self.record_quota_hold(&clocks);
+        if let Some(mark) = timing {
+            self.ledger
+                .record(Segment::Ack, mark.ack_ns.saturating_sub(mark.sent_ns));
+        }
+        self.journal_venue_timing(
+            &clocks,
+            "amend",
+            &client_order_id,
+            timing.map(|mark| mark.sent_ns),
+            timing.map(|mark| mark.ack_ns),
+        )?;
+        tracing::debug!(
+            command_id,
+            venue_ns = completed_ns.saturating_sub(started_ns),
+            "amend command completed"
+        );
+        match reply {
+            Ok(()) => {
+                // The venue took it and did not say at what price.
+                // It states that by republishing the order on the
+                // private stream, so the ambiguity stays open for
+                // that answer rather than being closed by pulling
+                // the order — which is the whole point of amending
+                // in place instead of replacing.
+                self.wal.append(&WalRecord::Note {
+                    source: "engine".into(),
+                    text: format!(
+                        "amend of {client_order_id} was accepted; waiting for the private stream to say what price it is working at"
+                    ),
+                })?;
+                self.amends_awaiting_price.insert(
+                    client_order_id.clone(),
+                    AwaitingAmend {
+                        symbol,
+                        existing,
+                        amended_intent,
+                        remaining_qty,
+                        tif,
+                        deadline_ns: clock::now_ns().saturating_add(AMEND_CONFIRM_NS),
+                    },
                 );
-                let symbols: Vec<_> = requests.iter().map(|(symbol, _)| *symbol).collect();
-                if let Some(mark) = timing {
-                    self.ledger
-                        .record(Segment::Ack, mark.ack_ns.saturating_sub(mark.sent_ns));
-                }
-                let mut replies = replies.into_iter();
-                let mut halt_failure = None;
-                let accepted_deadline = clock::now_ns().saturating_add(HALT_CANCEL_CONFIRM_NS);
-                for (_, client_order_id) in requests {
-                    self.journal_venue_timing(
-                        &clocks,
-                        "cancel",
-                        &client_order_id,
-                        timing.map(|mark| mark.sent_ns),
-                        timing.map(|mark| mark.ack_ns),
-                    )?;
-                    let reply = replies.next().unwrap_or_else(|| {
-                        Err(VenueError::BadReply(
-                            "the venue omitted this order from its cancel-batch reply".to_string(),
-                        ))
-                    });
-                    let taken = match reply {
-                        Ok(()) => true,
-                        Err(VenueError::BadRequest(detail)) => {
-                            tracing::error!(id = client_order_id, detail, "cancel never sent");
-                            self.wal.append(&WalRecord::Note {
-                                source: "engine".into(),
-                                text: format!("cancel of {client_order_id} never sent: {detail}"),
-                            })?;
-                            if self.halt_cancels.contains_key(&client_order_id) {
-                                halt_failure = Some(format!("{client_order_id}: {detail}"));
-                            }
-                            false
-                        }
-                        Err(VenueError::Rejected { code, message }) => {
-                            tracing::error!(id = client_order_id, code, message, "cancel rejected");
-                            self.wal.append(&WalRecord::Note {
-                                source: "engine".into(),
-                                text: format!(
-                                    "cancel of {client_order_id} rejected ({code}: {message}); the order is still counted as working"
-                                ),
-                            })?;
-                            if self.halt_cancels.contains_key(&client_order_id) {
-                                halt_failure =
-                                    Some(format!("{client_order_id}: {code}: {message}"));
-                            }
-                            false
-                        }
-                        Err(other) => {
-                            tracing::error!(id = client_order_id, error = %other, "cancel failed with no answer");
-                            self.wal.append(&WalRecord::Note {
-                                source: "engine".into(),
-                                text: format!(
-                                    "cancel of {client_order_id} sent with no answer ({other}); the order is still counted as working"
-                                ),
-                            })?;
-                            if self.halt_cancels.contains_key(&client_order_id) {
-                                halt_failure = Some(format!("{client_order_id}: {other}"));
-                            }
-                            false
-                        }
-                    };
-                    self.working.cancelled(&client_order_id, taken);
-                    if taken {
-                        if let Some(state) = self.halt_cancels.get_mut(&client_order_id) {
-                            *state = HaltCancelState::AwaitingPrivate {
-                                deadline_ns: accepted_deadline,
-                            };
-                        }
-                    }
-                }
-                self.release_symbols(symbols);
-                if let Some(detail) = halt_failure {
-                    return Err(EngineError::State(format!(
-                        "account-level halt left at least one opening cancel unconfirmed ({detail}); restarting for venue reconciliation"
-                    )));
-                }
             }
-            (
-                PendingMutation::Amend {
-                    symbol,
-                    client_order_id,
-                    spec,
-                    existing,
-                    amended_intent,
+            Err(VenueError::BadRequest(detail)) => {
+                tracing::error!(id = client_order_id, detail, "amend never sent");
+                self.resolve_amend(
+                    &client_order_id,
+                    &existing,
+                    &amended_intent,
                     remaining_qty,
                     old_px,
                     tif,
-                    queued_ns,
-                },
-                MutationCompletion::Amend {
-                    started_ns,
-                    completed_ns,
-                    timing,
-                    rate_wait_ns,
-                    reply,
-                    ..
-                },
-            ) => {
-                let clocks = CompletionClocks {
-                    command_id,
-                    queued_ns,
-                    started_ns,
-                    completed_ns,
-                    rate_wait_ns,
-                };
-                self.record_quota_hold(&clocks);
-                if let Some(mark) = timing {
-                    self.ledger
-                        .record(Segment::Ack, mark.ack_ns.saturating_sub(mark.sent_ns));
-                }
-                self.journal_venue_timing(
-                    &clocks,
-                    "amend",
-                    &client_order_id,
-                    timing.map(|mark| mark.sent_ns),
-                    timing.map(|mark| mark.ack_ns),
                 )?;
-                tracing::debug!(
-                    command_id,
-                    venue_ns = completed_ns.saturating_sub(started_ns),
-                    "amend command completed"
-                );
-                match reply {
-                    Ok(()) => {
-                        // The venue took it and did not say at what price.
-                        // It states that by republishing the order on the
-                        // private stream, so the ambiguity stays open for
-                        // that answer rather than being closed by pulling
-                        // the order — which is the whole point of amending
-                        // in place instead of replacing.
-                        self.wal.append(&WalRecord::Note {
-                            source: "engine".into(),
-                            text: format!(
-                                "amend of {client_order_id} was accepted; waiting for the private stream to say what price it is working at"
-                            ),
-                        })?;
-                        self.amends_awaiting_price.insert(
-                            client_order_id.clone(),
-                            AwaitingAmend {
-                                symbol,
-                                existing,
-                                amended_intent,
-                                remaining_qty,
-                                tif,
-                                deadline_ns: clock::now_ns().saturating_add(AMEND_CONFIRM_NS),
-                            },
-                        );
-                    }
-                    Err(VenueError::BadRequest(detail)) => {
-                        tracing::error!(id = client_order_id, detail, "amend never sent");
-                        self.resolve_amend(
-                            &client_order_id,
-                            &existing,
-                            &amended_intent,
-                            remaining_qty,
-                            old_px,
-                            tif,
-                        )?;
-                        self.wal.append(&WalRecord::Note {
-                            source: "engine".into(),
-                            text: format!("amend of {client_order_id} never sent: {detail}"),
-                        })?;
-                    }
-                    Err(VenueError::Rejected { code, message }) => {
-                        self.resolve_amend(
-                            &client_order_id,
-                            &existing,
-                            &amended_intent,
-                            remaining_qty,
-                            old_px,
-                            tif,
-                        )?;
-                        self.wal.append(&WalRecord::Note {
-                            source: "engine".into(),
-                            text: format!(
-                                "amend of {client_order_id} rejected by venue ({code}: {message})"
-                            ),
-                        })?;
-                    }
-                    Err(other) => {
-                        tracing::error!(id = client_order_id, error = %other, "amend failed with no answer");
-                        self.wal.append(&WalRecord::Note {
-                            source: "engine".into(),
-                            text: format!(
-                                "amend of {client_order_id} sent with no answer ({other}); its price and size are unconfirmed"
-                            ),
-                        })?;
-                        self.host.pending.push_front(Action::Cancel {
-                            symbol,
-                            client_order_id: client_order_id.clone(),
-                        });
-                    }
-                }
-                self.working
-                    .amended(&client_order_id, spec.px, false, clock::now_ns());
-                self.release_symbols([symbol]);
+                self.wal.append(&WalRecord::Note {
+                    source: "engine".into(),
+                    text: format!("amend of {client_order_id} never sent: {detail}"),
+                })?;
             }
-            (pending, completion) => {
-                let pending_kind = match pending {
-                    PendingMutation::Orders { .. } => "orders",
-                    PendingMutation::Cancels { .. } => "cancels",
-                    PendingMutation::Amend { .. } => "amend",
-                };
-                let completion_kind = match completion {
-                    MutationCompletion::Orders { .. } => "orders",
-                    MutationCompletion::Cancels { .. } => "cancels",
-                    MutationCompletion::Amend { .. } => "amend",
-                };
-                return Err(EngineError::State(format!(
-                    "venue task returned {completion_kind} for pending {pending_kind} command {command_id}"
-                )));
+            Err(VenueError::Rejected { code, message }) => {
+                self.resolve_amend(
+                    &client_order_id,
+                    &existing,
+                    &amended_intent,
+                    remaining_qty,
+                    old_px,
+                    tif,
+                )?;
+                self.wal.append(&WalRecord::Note {
+                    source: "engine".into(),
+                    text: format!(
+                        "amend of {client_order_id} rejected by venue ({code}: {message})"
+                    ),
+                })?;
+            }
+            Err(other) => {
+                tracing::error!(id = client_order_id, error = %other, "amend failed with no answer");
+                self.wal.append(&WalRecord::Note {
+                    source: "engine".into(),
+                    text: format!(
+                        "amend of {client_order_id} sent with no answer ({other}); its price and size are unconfirmed"
+                    ),
+                })?;
+                self.host.pending.push_front(
+                    Action::Cancel {
+                        symbol,
+                        client_order_id: client_order_id.clone(),
+                    }
+                    .into(),
+                );
             }
         }
+        self.working
+            .amended(&client_order_id, spec.px, false, clock::now_ns());
+        self.release_symbols([symbol]);
         Ok(())
     }
 
@@ -520,10 +660,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 ),
             })?;
             self.amends_pulled_unconfirmed += 1;
-            self.host.pending.push_front(Action::Cancel {
-                symbol: awaiting.symbol,
-                client_order_id,
-            });
+            self.host.pending.push_front(
+                Action::Cancel {
+                    symbol: awaiting.symbol,
+                    client_order_id,
+                }
+                .into(),
+            );
         }
         Ok(())
     }
@@ -721,10 +864,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         source: "risk".into(),
                         text: format!("{client_order_id} not amended: {halt}"),
                     })?;
-                    self.host.pending.push_front(Action::Cancel {
-                        symbol,
-                        client_order_id: client_order_id.to_string(),
-                    });
+                    self.host.pending.push_front(
+                        Action::Cancel {
+                            symbol,
+                            client_order_id: client_order_id.to_string(),
+                        }
+                        .into(),
+                    );
                     return Ok(false);
                 }
                 None => {
@@ -829,10 +975,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 },
             })?;
             if !awaited {
-                self.host.pending.push_front(Action::Cancel {
-                    symbol,
-                    client_order_id: client_order_id.to_string(),
-                });
+                self.host.pending.push_front(
+                    Action::Cancel {
+                        symbol,
+                        client_order_id: client_order_id.to_string(),
+                    }
+                    .into(),
+                );
             }
             return Ok(false);
         }
@@ -971,35 +1120,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     /// Every order update, wherever it came from, goes through here.
     pub(super) async fn take_update(&mut self, update: OrderUpdate) -> Result<(), EngineError> {
-        // Before anything is done with news about an order: the record of the
-        // order that earned it is on the disk. This is the wait the send no
-        // longer pays.
         self.settle_barrier()?;
-        if let OrderUpdate::FastFill {
-            exec_id,
-            client_order_id,
-            venue_order_id,
-            symbol,
-            side,
-            qty,
-            px,
-            is_maker,
-            venue_ts_ms,
-            recv_ns,
-        } = &update
-        {
-            self.wal.append(&WalRecord::FastExecution {
-                exec_id: exec_id.clone(),
-                client_order_id: client_order_id.clone(),
-                venue_order_id: venue_order_id.clone(),
-                symbol: *symbol,
-                side: *side,
-                qty: *qty,
-                px: *px,
-                is_maker: *is_maker,
-                venue_ts_ms: *venue_ts_ms,
-                recv_ns: *recv_ns,
-            })?;
+        if Self::journal_fast_execution(&update, &mut self.wal)? {
             self.route_order_update(update);
             return Ok(());
         }
@@ -1013,6 +1135,64 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.private_stream_ready = false;
             self.books.account.observed_ns = 0;
         }
+        let Some(journaled) = Self::journal_update(
+            update,
+            &mut self.wal,
+            &self.books.orders,
+            &self.books.attribution,
+            &mut self.recovered_exec_ids,
+            &mut self.may_open,
+        )?
+        else {
+            return Ok(());
+        };
+        let update = self.apply_journaled_update(journaled)?;
+        if stream_reset {
+            self.refresh_private_stream_after_gap().await?;
+        }
+        self.route_order_update(update);
+        Ok(())
+    }
+
+    fn journal_fast_execution(update: &OrderUpdate, wal: &mut W) -> Result<bool, EngineError> {
+        if let OrderUpdate::FastFill {
+            exec_id,
+            client_order_id,
+            venue_order_id,
+            symbol,
+            side,
+            qty,
+            px,
+            is_maker,
+            venue_ts_ms,
+            recv_ns,
+        } = update
+        {
+            wal.append(&WalRecord::FastExecution {
+                exec_id: exec_id.clone(),
+                client_order_id: client_order_id.clone(),
+                venue_order_id: venue_order_id.clone(),
+                symbol: *symbol,
+                side: *side,
+                qty: *qty,
+                px: *px,
+                is_maker: *is_maker,
+                venue_ts_ms: *venue_ts_ms,
+                recv_ns: *recv_ns,
+            })?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn journal_update(
+        update: OrderUpdate,
+        wal: &mut W,
+        orders: &LedgerOfOrders,
+        attribution: &Attribution,
+        recovered_exec_ids: &mut ExecutionIds,
+        may_open: &mut bool,
+    ) -> Result<Option<JournaledUpdate>, EngineError> {
         // Whose fill this is, answered once and used everywhere below. The
         // order ledger first; then, for a close the venue itself started, the
         // position it reduced. A fill that resolves to neither is a stranger's.
@@ -1023,9 +1203,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 side,
                 forced_close,
                 ..
-            } => self.books.orders.owner_of(client_order_id).or_else(|| {
+            } => orders.owner_of(client_order_id).or_else(|| {
                 attribution::forced_close_owner(
-                    &self.books.attribution,
+                    attribution,
                     client_order_id,
                     *symbol,
                     *side,
@@ -1037,9 +1217,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let fill_request = match &update {
             OrderUpdate::Fill {
                 client_order_id, ..
-            } => self
-                .books
-                .orders
+            } => orders
                 .orders
                 .get(client_order_id)
                 .map(|order| order.request.clone()),
@@ -1051,13 +1229,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         };
         let dedup_seen_ms = clock::wall_ms();
         if let Some(exec_id) = delivered_exec_id.as_deref() {
-            if !self
-                .recovered_exec_ids
+            if !recovered_exec_ids
                 .can_insert(exec_id, dedup_seen_ms)
                 .map_err(|e| EngineError::State(e.to_string()))?
             {
                 tracing::warn!(exec_id, "duplicate fill ignored");
-                return Ok(());
+                return Ok(None);
             }
         }
         if let OrderUpdate::Fill {
@@ -1070,11 +1247,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             ..
         } = &update
         {
-            if let Err(reason) =
-                self.books
-                    .orders
-                    .validate_fill(client_order_id, *symbol, *side, *qty, *px)
-            {
+            if let Err(reason) = orders.validate_fill(client_order_id, *symbol, *side, *qty, *px) {
                 let finding = Self::untrusted_fill_line(
                     exec_id,
                     client_order_id,
@@ -1085,32 +1258,57 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     &reason,
                 );
                 if let Some(exec_id) = delivered_exec_id {
-                    self.recovered_exec_ids.insert(exec_id, dedup_seen_ms);
+                    recovered_exec_ids.insert(exec_id, dedup_seen_ms);
                 }
-                self.may_open = false;
+                *may_open = false;
                 tracing::error!(%finding, "untrusted fill left order and risk state unchanged");
-                self.wal.append(&WalRecord::Reconciled {
+                wal.append(&WalRecord::Reconciled {
                     wall_ts_ms: dedup_seen_ms,
                     findings: vec![finding],
                     may_open: false,
                 })?;
-                self.wal.barrier()?;
-                return Ok(());
+                wal.barrier()?;
+                return Ok(None);
             }
         }
-        self.wal.append(&WalRecord::OrderUpdate {
+        wal.append(&WalRecord::OrderUpdate {
             update: update.clone(),
         })?;
         if let Some(exec_id) = delivered_exec_id {
-            self.recovered_exec_ids.insert(exec_id, dedup_seen_ms);
+            recovered_exec_ids.insert(exec_id, dedup_seen_ms);
         }
+        Ok(Some(JournaledUpdate {
+            update,
+            fill_owner,
+            fill_request,
+            dedup_seen_ms,
+        }))
+    }
+
+    fn apply_journaled_update(
+        &mut self,
+        journaled: JournaledUpdate,
+    ) -> Result<OrderUpdate, EngineError> {
+        let JournaledUpdate {
+            update,
+            fill_owner,
+            fill_request,
+            dedup_seen_ms,
+        } = journaled;
         self.risk.on_update(&update);
         self.books.orders.apply_update(&update);
+        self.resolve_private_order_state(&update)?;
+        self.update_fill_exposure(&update, fill_owner, fill_request.as_ref(), dedup_seen_ms)?;
+        self.attribute_order_update(&update, fill_owner);
+        Ok(update)
+    }
+
+    fn resolve_private_order_state(&mut self, update: &OrderUpdate) -> Result<(), EngineError> {
         // The venue naming the price a resting order is working at is the
         // answer an accepted amend was waiting for. It ends the ambiguity
         // the way a definitive rejection does, except that the order stays
         // where it is — with whatever queue position the venue left it.
-        let stated_price = match &update {
+        let stated_price = match update {
             OrderUpdate::Amended {
                 client_order_id,
                 px,
@@ -1138,7 +1336,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .amended(&client_order_id, Some(px), true, clock::now_ns());
             }
         }
-        if let Some(client_order_id) = inflight::client_order_id(&update) {
+        if let Some(client_order_id) = inflight::client_order_id(update) {
             let still_live = self
                 .books
                 .orders
@@ -1152,6 +1350,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.amends_awaiting_price.remove(client_order_id);
             }
         }
+        Ok(())
+    }
+
+    fn update_fill_exposure(
+        &mut self,
+        update: &OrderUpdate,
+        fill_owner: Option<StrategyId>,
+        fill_request: Option<&OrderRequest>,
+        dedup_seen_ms: i64,
+    ) -> Result<(), EngineError> {
         // Only fills joined to orders this log sent enter trusted exposure.
         // Foreign fills remain durable records and latch entries off below.
         if let (
@@ -1159,12 +1367,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             OrderUpdate::Fill {
                 symbol, side, qty, ..
             },
-        ) = (fill_owner, &update)
+        ) = (fill_owner, update)
         {
             reconcile::note_owned_fill(
                 &mut self.logged_exposure,
                 &mut self.intended_stops,
-                fill_request.as_ref(),
+                fill_request,
                 *symbol,
                 *side,
                 *qty,
@@ -1178,7 +1386,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             venue_ts_ms,
             qty,
             ..
-        } = &update
+        } = update
         {
             self.recent_fills
                 .push_back((client_order_id.clone(), *venue_ts_ms, *qty));
@@ -1190,7 +1398,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             client_order_id,
             symbol,
             ..
-        } = &update
+        } = update
         {
             if fill_owner.is_none() {
                 self.may_open = false;
@@ -1202,16 +1410,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.wal.barrier()?;
             }
         }
+        Ok(())
+    }
+
+    fn attribute_order_update(&mut self, update: &OrderUpdate, fill_owner: Option<StrategyId>) {
         // Whose fill it was, before any strategy is woken, so the one that
         // placed the order sees its own position already changed. The ledger
         // is asked rather than the registry: the registry knows only this
         // boot's ids and the ones in flight when it started, and a fill can
         // still arrive for an order older than either.
-        if let Some(id) = inflight::client_order_id(&update) {
+        if let Some(id) = inflight::client_order_id(update) {
             match self.books.orders.owner_of(id).or(fill_owner) {
                 Some(sid) => {
-                    self.books.attribution.on_update(sid, &update);
-                    self.price_fill(sid, &update);
+                    self.books.attribution.on_update(sid, update);
+                    self.price_fill(sid, update);
                     // Terminal news that ends size without a fill releases
                     // that much cover: the whole send on a reject, the
                     // unfilled remainder on a cancel. A fill releases nothing
@@ -1222,7 +1434,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             .orders
                             .orders
                             .get(id)
-                            .and_then(|order| match &update {
+                            .and_then(|order| match update {
                                 OrderUpdate::Reject { .. } => {
                                     Some((order.request.symbol, order.request.qty))
                                 }
@@ -1247,33 +1459,29 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 None => {}
             }
         }
+    }
 
-        // A private-stream gap may have swallowed fills. Refresh the account
-        // reading now rather than trusting exposure across the gap.
-        if stream_reset {
-            self.fills.stream_gap();
-            let mut account_refreshed = false;
-            match self.venue.account_view().await {
-                Ok(view) => {
-                    self.adopt_view(view);
-                    self.enforce_position_stop_intent().await?;
-                    account_refreshed = true;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "no fresh account reading after a stream gap");
-                }
+    async fn refresh_private_stream_after_gap(&mut self) -> Result<(), EngineError> {
+        self.fills.stream_gap();
+        let mut account_refreshed = false;
+        match self.venue.account_view().await {
+            Ok(view) => {
+                self.adopt_view(view);
+                self.enforce_position_stop_intent().await?;
+                account_refreshed = true;
             }
-            // The fills themselves CAN be repaired from the venue: its
-            // execution history is asked for the gap, so the log keeps
-            // accounting for what actually traded.
-            self.recover_gap_fills().await?;
-            if account_refreshed {
-                self.private_stream_ready = true;
+            Err(e) => {
+                tracing::warn!(error = %e, "no fresh account reading after a stream gap");
             }
-            self.queue_halted_entry_cancels()?;
         }
-
-        self.route_order_update(update);
+        // The fills themselves CAN be repaired from the venue: its
+        // execution history is asked for the gap, so the log keeps
+        // accounting for what actually traded.
+        self.recover_gap_fills().await?;
+        if account_refreshed {
+            self.private_stream_ready = true;
+        }
+        self.queue_halted_entry_cancels()?;
         Ok(())
     }
 

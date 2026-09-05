@@ -24,6 +24,7 @@
 //! Every needle below is assembled from fragments at runtime, so this file
 //! never contains a hostname of its own for the scan to trip over.
 
+use engine_venue::RealmCredentials;
 use std::path::{Path, PathBuf};
 
 /// One venue's hosts, and the one file allowed to write them down.
@@ -109,6 +110,12 @@ fn scanned_sources() -> Vec<PathBuf> {
     collect(&root.join("src"), &mut files);
     collect(&root.join("tests"), &mut files);
     collect(&marketdata.join("src"), &mut files);
+    let public = root.parent().unwrap().join("engine-public");
+    collect(&public.join("src"), &mut files);
+    assert!(
+        files.iter().any(|f| f.starts_with(&public)),
+        "public source was not scanned"
+    );
     assert!(files.len() > 15, "the scan found almost nothing: {files:?}");
     assert!(
         files.iter().any(|f| f.starts_with(&marketdata)),
@@ -167,6 +174,7 @@ fn is_host_home(file: &Path, venue: &str) -> bool {
     file.file_name().is_some_and(|n| n == "realm.rs")
         && named(file.parent(), venue)
         && named(file.parent().and_then(Path::parent), "venues")
+        && named(file.ancestors().nth(4), "engine-public")
 }
 
 #[test]

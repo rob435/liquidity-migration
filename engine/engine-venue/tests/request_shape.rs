@@ -1,6 +1,7 @@
 //! What the gateway actually puts on the wire, checked against a local
 //! server. No network, no credentials.
 
+use engine_venue::RealmCredentials;
 mod support;
 
 use std::time::Duration;

@@ -12,6 +12,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let requests: Vec<_> = self
             .signals
             .gaps()
+            .filter(|gap| self.signals.prefix_capacity(gap.destination))
             .map(|gap| engine_types::SignalGapRequest {
                 source: gap.source.clone(),
                 next_sequence: gap.next_sequence,
@@ -21,10 +22,59 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .signal_dependencies
             .iter()
             .enumerate()
-            .filter(|(id, _)| self.signal_inputs_blocked(StrategyId(*id as u16)))
+            .filter(|(id, _)| {
+                let destination = StrategyId(*id as u16);
+                self.signal_inputs_blocked(destination)
+                    || self.signals.consumer_pending(destination)
+                    || !self.signals.ordinary_capacity()
+            })
             .map(|(id, _)| StrategyId(id as u16))
             .collect();
         feed.set_gap_requests(&requests, &blocked_destinations)
+            .map_err(|error| EngineError::State(error.to_string()))
+    }
+
+    pub(super) fn accept_signal_frontiers<F: SignalFeed>(
+        &mut self,
+        frontiers: Vec<engine_types::SignalSourceFrontier>,
+        feed: &mut F,
+    ) -> Result<(), EngineError> {
+        let gaps = match self
+            .signals
+            .frontier_gaps(&frontiers, self.host.strategies.len())
+        {
+            Ok(gaps) => gaps,
+            Err(reason) => return self.refuse_signal_readiness(reason, feed),
+        };
+        for gap in gaps {
+            if self.signals.gap_changed(&gap) {
+                self.wal.append(&WalRecord::SignalGapRecorded {
+                    wall_ts_ms: clock::wall_ms(),
+                    gap: gap.clone(),
+                })?;
+                self.wal.barrier()?;
+                self.signals.record_gap(gap);
+            }
+        }
+        self.signals.set_frontiers(frontiers);
+        self.update_signal_requests(feed)?;
+        self.queue_halted_entry_cancels()?;
+        Ok(())
+    }
+
+    pub(super) fn refuse_signal_readiness<F: SignalFeed>(
+        &mut self,
+        reason: String,
+        feed: &mut F,
+    ) -> Result<(), EngineError> {
+        self.signals.begin_readiness_request();
+        tracing::error!(%reason, "producer readiness refused; dependent growth remains suspended");
+        self.wal.append(&WalRecord::Note {
+            source: "signals".into(),
+            text: format!("producer readiness refused: {reason}"),
+        })?;
+        self.queue_halted_entry_cancels()?;
+        feed.request_readiness()
             .map_err(|error| EngineError::State(error.to_string()))
     }
 
@@ -88,6 +138,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .map_err(|error| EngineError::State(error.to_string()));
             }
             crate::signal_state::Admission::Ready => {}
+        }
+
+        if !self.signals.can_accept(&observation) {
+            return feed
+                .defer_last(observation)
+                .map_err(|error| EngineError::State(error.to_string()));
         }
 
         let mut durable = self
@@ -180,6 +236,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         subscription.feed
                     )));
                 }
+            }
+            if !self.signals.can_accept(&observation) {
+                feed.defer_last(observation)
+                    .map_err(|error| EngineError::State(error.to_string()))?;
+                continue;
             }
             self.wal.append(&WalRecord::SignalObservation {
                 wall_ts_ms: clock::wall_ms(),

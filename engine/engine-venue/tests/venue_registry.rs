@@ -5,6 +5,7 @@
 //! these tests drive every method through it against the same local server
 //! the adapter's own tests use. No network, no credentials.
 
+use engine_venue::RealmCredentials;
 mod support;
 
 use engine_types::{

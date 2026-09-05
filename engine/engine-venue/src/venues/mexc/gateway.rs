@@ -16,6 +16,7 @@
 //! `takeProfitReverse` explicitly: MEXC documents none of their defaults, and
 //! a reverse stop would open an opposite position instead of flattening one.
 
+use crate::RealmCredentials;
 use std::collections::HashMap;
 
 use engine_types::ids::{Symbol, SymbolId};
@@ -103,8 +104,7 @@ fn execution_page_complete(symbol: &str, page: u32, raw_count: usize) -> Result<
 pub struct MexcGateway {
     realm: MexcRealm,
     rest: RestClient,
-    names: Vec<Symbol>,
-    ids: HashMap<Symbol, SymbolId>,
+    symbols: engine_public::symbols::SymbolCatalog,
     /// The venue's contract table, read once and kept. Every size that crosses
     /// this boundary needs it, so an adapter without it can convert nothing.
     contracts: Contracts,
@@ -147,22 +147,17 @@ impl MexcGateway {
     }
 
     fn build(realm: MexcRealm, base_url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
-        let ids = symbols
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), SymbolId(i as u16)))
-            .collect();
         Self {
             realm,
             rest: RestClient::new(base_url, creds),
-            names: symbols,
-            ids,
+            symbols: engine_public::symbols::SymbolCatalog::from_names(symbols),
             contracts: Contracts::default(),
         }
     }
 
     fn name_of(&self, symbol: SymbolId) -> Result<&Symbol, VenueError> {
-        self.names
+        self.symbols
+            .names()
             .get(symbol.0 as usize)
             .ok_or_else(|| VenueError::BadRequest(format!("no symbol at id {}", symbol.0)))
     }
@@ -474,13 +469,7 @@ impl VenueGateway for MexcGateway {
     }
 
     fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {
-        if let Some(id) = self.ids.get(symbol) {
-            return Some(*id);
-        }
-        let id = SymbolId(u16::try_from(self.names.len()).ok()?);
-        self.names.push(symbol.to_string());
-        self.ids.insert(symbol.to_string(), id);
-        Some(id)
+        self.symbols.intern(symbol)
     }
 
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
@@ -493,7 +482,7 @@ impl VenueGateway for MexcGateway {
             // alongside and joined in. Without it every position would report
             // itself unprotected, and the engine would act on that.
             let stops = parse_position_stops(&self.stop_records().await?);
-            let ids = self.ids.clone();
+            let ids = self.symbols.ids().clone();
             let contracts = self.contracts().await?;
             let positions = parse_positions(&positions_data, contracts, &ids, &stops)?;
             Ok::<_, VenueError>((equity_usdt, available_usdt, positions))
@@ -551,7 +540,7 @@ impl VenueGateway for MexcGateway {
     ) -> Result<Vec<VenueExecution>, VenueError> {
         // `symbol` is required here, so the sweep is per symbol rather than
         // account-wide. The engine asks about the symbols it follows.
-        let names = self.names.clone();
+        let names = self.symbols.names().clone();
         let mut out = Vec::new();
         for name in names {
             let venue_symbol = self

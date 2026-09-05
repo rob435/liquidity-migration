@@ -13,9 +13,7 @@
 //! Nothing here bounds one symbol on its own. The sleeve's own gross share is
 //! what stops a single name, and section 1 holds that to be true.
 
-mod common;
-
-use common::*;
+use super::common::*;
 use engine_risk::{EnvelopeConfig, Kernel, KernelConfig};
 use engine_types::orders::Side;
 use engine_types::risk::{AccountView, DenyReason, PositionView, RiskKernel, RiskVerdict};

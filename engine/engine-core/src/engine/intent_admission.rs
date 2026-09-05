@@ -10,6 +10,7 @@ pub(crate) enum OpeningRefusal {
     ForeignStrategyOwner,
     /// A durable signal source this strategy depends on has a recorded gap.
     SignalSequenceGap,
+    SignalProducerUnready,
     /// The operator switched this strategy's entries off.
     RuntimeEntriesDisabled,
     /// The private account stream has not completed gap recovery.
@@ -23,6 +24,7 @@ impl OpeningRefusal {
         match self {
             Self::ForeignStrategyOwner => "foreign_strategy_owner",
             Self::SignalSequenceGap => "signal_sequence_gap",
+            Self::SignalProducerUnready => "signal_producer_unready",
             Self::RuntimeEntriesDisabled => "runtime_entries_disabled",
             Self::PrivateStreamUnready => "private_stream_unready",
             Self::EngineLatched => "engine_latched",
@@ -37,6 +39,7 @@ impl OpeningRefusal {
             Self::SignalSequenceGap => {
                 "signal_sequence_gap: a required source has missing observations"
             }
+            Self::SignalProducerUnready => "signal_producer_unready: a required producer has not established its startup frontier",
             Self::RuntimeEntriesDisabled => {
                 "this strategy's runtime entry permission is disabled"
             }
@@ -51,6 +54,19 @@ impl std::fmt::Display for OpeningRefusal {
         f.write_str(self.as_str())
     }
 }
+
+struct RiskApprovedIntent {
+    intent: Intent,
+    client_order_id: String,
+    allowed_qty: f64,
+    work: Option<WorkPolicy>,
+}
+struct LegalOrder {
+    request: OrderRequest,
+    approval: RiskApprovedIntent,
+}
+/// Only the leverage/protection phase can hand an order to the durable commit phase.
+struct ProtectedOrder(LegalOrder);
 
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) fn signal_inputs_blocked(&self, strategy: StrategyId) -> bool {
@@ -69,6 +85,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) fn opening_permission_reason(&self, strategy: StrategyId) -> Option<OpeningRefusal> {
         if self.signal_inputs_blocked(strategy) {
             Some(OpeningRefusal::SignalSequenceGap)
+        } else if self
+            .signal_dependencies
+            .get(strategy.idx())
+            .is_some_and(|dependencies| {
+                dependencies
+                    .iter()
+                    .any(|source| self.signals.readiness_blocked(*source))
+            })
+        {
+            Some(OpeningRefusal::SignalProducerUnready)
         } else if self.host.entries_enabled.get(&strategy).copied() == Some(false) {
             Some(OpeningRefusal::RuntimeEntriesDisabled)
         } else {
@@ -91,11 +117,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     /// Judge and reserve one sibling, appending its send record to the WAL.
-    /// The caller starts one barrier for the accepted group and dispatches
-    /// while that barrier runs.
+    /// The caller owns the accepted group's durability barrier and dispatch.
     async fn prepare_intent(
         &mut self,
         intent: Intent,
+        client_order_id: Option<String>,
         origin_ns: u64,
         batch_protection: &mut std::collections::HashMap<(SymbolId, Side), f64>,
     ) -> Result<Option<PreparedOrder>, EngineError> {
@@ -107,9 +133,33 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.ledger
             .record(Segment::Decide, decided_ns.saturating_sub(origin_ns));
 
+        if !self.journal_and_admit_intent(&intent, decided_ns)? {
+            return Ok(None);
+        }
+        let Some(approval) = self.assess_intent(intent, client_order_id)? else {
+            return Ok(None);
+        };
+        let Some(legal) = self.quantize_approved_order(approval)? else {
+            return Ok(None);
+        };
+        let Some(protected) = self
+            .confirm_order_protection(legal, batch_protection)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.commit_prepared_order(protected, decided_ns, origin_ns)
+            .map(Some)
+    }
+
+    fn journal_and_admit_intent(
+        &mut self,
+        intent: &Intent,
+        decided_ns: u64,
+    ) -> Result<bool, EngineError> {
         // A non-finite number would be written to the log as null and stop
         // the next boot's replay dead, so it is refused before any append.
-        if let Some(what) = unreal_number(&intent) {
+        if let Some(what) = unreal_number(intent) {
             self.wal.append(&WalRecord::Note {
                 source: "engine".into(),
                 text: format!(
@@ -118,8 +168,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 ),
             })?;
             tracing::error!(tag = %intent.tag, what, "intent carries an unreal number");
-            self.tell_refused(&intent, "unreal_number");
-            return Ok(None);
+            self.tell_refused(intent, "unreal_number");
+            return Ok(false);
         }
 
         // The strategy's own words, work policy included, before the engine
@@ -138,7 +188,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.opening_refusal(intent.strategy)
             };
             if let Some(refusal) = refusal {
-                return self.deny_opening(&intent, refusal);
+                self.deny_opening(intent, refusal)?;
+                return Ok(false);
             }
         }
 
@@ -182,11 +233,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     never_quoted = quote_ns == 0,
                     "refused: the quote this entry was decided against is too old to open on"
                 );
-                self.tell_refused(&intent, "stale_quote");
-                return Ok(None);
+                self.tell_refused(intent, "stale_quote");
+                return Ok(false);
             }
         }
 
+        Ok(true)
+    }
+
+    fn assess_intent(
+        &mut self,
+        intent: Intent,
+        client_order_id: Option<String>,
+    ) -> Result<Option<RiskApprovedIntent>, EngineError> {
         // An entry the strategy asked to have worked starts as a resting
         // limit instead of crossing the spread. Rewritten here, before the
         // kernel judges it, so the kernel judges the order that is actually
@@ -213,12 +272,30 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
         // Minting the id here (not a log write) lets the verdict record name
         // the order it approved; a refused intent never burns an id.
-        let client_order_id = self.mint_id();
+        let client_order_id = client_order_id.unwrap_or_else(|| self.mint_id());
         self.wal.append(&WalRecord::Verdict {
             client_order_id: Some(client_order_id.clone()),
             verdict,
         })?;
 
+        Ok(Some(RiskApprovedIntent {
+            intent,
+            client_order_id,
+            allowed_qty,
+            work,
+        }))
+    }
+
+    fn quantize_approved_order(
+        &mut self,
+        approval: RiskApprovedIntent,
+    ) -> Result<Option<LegalOrder>, EngineError> {
+        let RiskApprovedIntent {
+            ref intent,
+            ref client_order_id,
+            allowed_qty,
+            ..
+        } = approval;
         // The risk kernel requires a position-opening intent to carry a stop.
         // A venue that keeps no stop of its own would leave that rule
         // unenforced without ever saying so: the order goes out, the log
@@ -226,8 +303,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // An exit sheds its stop below in any case, so it is not held back.
         if intent.stop.is_some() && !intent.reduce_only && !self.venue.caps().native_position_stop {
             self.refuse(
-                &client_order_id,
-                &intent,
+                client_order_id,
+                intent,
                 "the intent carries a stop and this venue keeps none",
             )?;
             return Ok(None);
@@ -241,8 +318,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .flatten()
         else {
             self.refuse(
-                &client_order_id,
-                &intent,
+                client_order_id,
+                intent,
                 "no instrument rule for this symbol",
             )?;
             return Ok(None);
@@ -289,8 +366,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             qty
         } else {
             self.refuse(
-                &client_order_id,
-                &intent,
+                client_order_id,
+                intent,
                 &format!(
                     "{allowed_qty} does not reach the smallest tradable size ({} step, {} minimum)",
                     rule.qty_step, rule.min_qty
@@ -302,8 +379,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             let notional = qty * reference_px;
             if notional + 1e-9 < rule.min_notional && !close_position {
                 self.refuse(
-                    &client_order_id,
-                    &intent,
+                    client_order_id,
+                    intent,
                     &format!(
                         "{notional:.4} is under the venue's smallest order value ({})",
                         rule.min_notional
@@ -335,6 +412,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             close_position,
         };
 
+        Ok(Some(LegalOrder { request, approval }))
+    }
+
+    async fn confirm_order_protection(
+        &mut self,
+        legal: LegalOrder,
+        batch_protection: &mut std::collections::HashMap<(SymbolId, Side), f64>,
+    ) -> Result<Option<ProtectedOrder>, EngineError> {
+        let request = &legal.request;
+        let intent = &legal.approval.intent;
+        let client_order_id = &legal.approval.client_order_id;
         // Before the durable record, because a leverage that could not be set
         // means this order must not go at all — and an OrderSent record is
         // the engine saying it is about to put one on the wire.
@@ -344,7 +432,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if !intent.reduce_only {
             if let Some(want) = intent.leverage {
                 if let Err(reason) = self.ensure_leverage(request.symbol, want).await {
-                    self.refuse(&client_order_id, &intent, &reason)?;
+                    self.refuse(client_order_id, intent, &reason)?;
                     return Ok(None);
                 }
             }
@@ -367,8 +455,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             if let Some(protected) = batch_protection.get(&key).copied() {
                 if stop_is_looser(request.side, stop.trigger_px, protected, tolerance) {
                     self.refuse(
-                        &client_order_id,
-                        &intent,
+                        client_order_id,
+                        intent,
                         &format!(
                             "stop {} would loosen the whole {:?} position from {}",
                             stop.trigger_px, request.side, protected
@@ -383,9 +471,25 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
 
-        // Appended before reservation and venue dispatch. The caller starts
-        // one disk barrier covering every accepted sibling, then lets that
-        // barrier race the group send.
+        Ok(Some(ProtectedOrder(legal)))
+    }
+
+    fn commit_prepared_order(
+        &mut self,
+        protected: ProtectedOrder,
+        decided_ns: u64,
+        origin_ns: u64,
+    ) -> Result<PreparedOrder, EngineError> {
+        let LegalOrder { request, approval } = protected.0;
+        let RiskApprovedIntent {
+            intent,
+            client_order_id,
+            work,
+            ..
+        } = approval;
+        let qty = request.qty;
+        // Appended before reservation and venue dispatch. One disk barrier
+        // covers every accepted sibling in the group.
         let sent_record = WalRecord::OrderSent {
             request: request.clone(),
             wire_ns: clock::now_ns(),
@@ -431,18 +535,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .take_on(&client_order_id, request.symbol, policy, state);
         }
 
-        Ok(Some(PreparedOrder {
+        Ok(PreparedOrder {
             request,
             decided_ns,
             origin_ns,
-        }))
+        })
     }
 
     pub(super) async fn process_intents(
         &mut self,
-        intents: Vec<Intent>,
+        intents: Vec<(Intent, Option<String>)>,
         origin_ns: u64,
     ) -> Result<bool, EngineError> {
+        let stateful = intents.iter().any(|(_, id)| id.is_some());
         if intents.len() > MAX_ORDERS_PER_BATCH {
             return Err(EngineError::State(format!(
                 "placement batch has {} orders; hard maximum is {MAX_ORDERS_PER_BATCH}",
@@ -457,7 +562,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // that symbol. Reduce-only exits still flow and never change leverage.
         let mut leverage_by_symbol = std::collections::HashMap::new();
         let mut leverage_conflicts = std::collections::HashSet::new();
-        for intent in &intents {
+        for (intent, _) in &intents {
             let Some(want) = intent
                 .leverage
                 .filter(|value| value.is_finite() && *value > 0.0)
@@ -499,7 +604,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 })
                 .or_insert(position.stop_px);
         }
-        for intent in intents {
+        for (intent, client_order_id) in intents {
             if !intent.reduce_only
                 && leverage_conflicts.contains(&intent.symbol)
                 // Keep non-finite values out of the WAL. `prepare_intent`
@@ -523,7 +628,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 continue;
             }
             if let Some(order) = self
-                .prepare_intent(intent, origin_ns, &mut batch_protection)
+                .prepare_intent(intent, client_order_id, origin_ns, &mut batch_protection)
                 .await?
             {
                 prepared.push(order);
@@ -533,16 +638,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(false);
         }
 
-        // Settle the preceding placement group before opening this one. The
-        // current records are already in the operating system's cache; their
-        // disk barrier starts below and races the venue dispatch. Private
-        // order updates settle it before they advance engine state.
-        //
-        // What this gives up, stated plainly: a machine that dies inside the
-        // barrier can leave an order at the venue that the log does not name.
-        // Boot reconciliation sees that as a foreign order and latches
-        // opening off, which is the same answer it gives for any order it
-        // cannot account for.
+        // Stateful effects wait for this barrier before dispatch so replay
+        // cannot resend an effect whose first order never reached the disk.
+        // Ordinary orders overlap the barrier and send; private news settles
+        // it before changing state. A machine failure during that overlap can
+        // leave a venue order unnamed in the WAL; reconciliation latches it.
         self.settle_barrier()?;
         self.pending_barrier = Some(self.wal.barrier_begin()?);
         let durable_ns = clock::now_ns();
@@ -560,6 +660,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             timings.push((order.decided_ns, order.origin_ns));
         }
 
+        if stateful {
+            self.settle_barrier()?;
+        }
         let queued_ns = clock::now_ns();
         let command_id = self.venue.dispatch_orders(requests.clone())?;
         self.mark_symbols_busy(requests.iter().map(|request| request.symbol));
@@ -581,7 +684,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         &mut self,
         intent: &Intent,
         refusal: OpeningRefusal,
-    ) -> Result<Option<PreparedOrder>, EngineError> {
+    ) -> Result<(), EngineError> {
         self.wal.append(&WalRecord::Verdict {
             client_order_id: None,
             verdict: RiskVerdict::Deny {
@@ -597,7 +700,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             "refused: this strategy cannot open exposure"
         );
         self.tell_refused(intent, refusal.as_str());
-        Ok(None)
+        Ok(())
     }
 
     fn refuse(
@@ -648,7 +751,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// engine, then tell the strategy. A refused exit means the covers
     /// describe exposure the account reading says is not there, and left
     /// standing they would re-plan the same doomed exit on every quote.
-    fn tell_refused(&mut self, intent: &Intent, reason: &str) {
+    pub(super) fn tell_refused(&mut self, intent: &Intent, reason: &str) {
         // Bookkeeping first, so the strategy woken below already reads the
         // truthful in-flight number. A refused exit drops every cover on the
         // symbol; a refused entry has none to drop, because covers are booked

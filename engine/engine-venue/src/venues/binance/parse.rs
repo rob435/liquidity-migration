@@ -24,12 +24,14 @@
 
 use std::collections::HashMap;
 
+use crate::wire::{self, Field, Id};
 use engine_types::ids::SymbolId;
 #[cfg(test)]
 use engine_types::orders::VenueExecution;
 use engine_types::orders::{InstrumentRule, Side, VenueOrder};
 use engine_types::risk::PositionView;
 use engine_types::VenueError;
+use serde::Deserialize;
 use serde_json::Value;
 
 #[cfg(test)]
@@ -77,26 +79,53 @@ pub(crate) fn refine_rejection(error: VenueError) -> VenueError {
     error
 }
 
+#[derive(Default, Deserialize)]
+struct ErrorEnvelope {
+    #[serde(default)]
+    code: Field<i64>,
+    #[serde(default)]
+    msg: Field<String>,
+}
 fn embedded_code_msg(text: &str) -> Option<(i64, String)> {
     let body = &text[text.find('{')?..];
     let parsed: Value = serde_json::from_str(body).ok()?;
-    let code = parsed.get("code")?.as_i64()?;
-    let message = parsed.get("msg")?.as_str()?.to_string();
-    Some((code, message))
+    let error: ErrorEnvelope = wire::object(&parsed);
+    Some((error.code.0?, error.msg.0?))
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcceptedOrder {
+    #[serde(default)]
+    client_order_id: Field<String>,
+    #[serde(default)]
+    order_id: Field<Id>,
+    #[serde(default)]
+    client_algo_id: Field<String>,
+    #[serde(default)]
+    algo_id: Field<Id>,
 }
 
 /// One accepted order: the client id the venue echoes and its own number.
 pub(crate) fn parse_order_ack(data: &Value) -> Result<(String, String), VenueError> {
-    let client_order_id = str_field(data, "clientOrderId")?;
-    let venue_order_id = id_text(data, "orderId")
-        .ok_or_else(|| VenueError::BadReply("an accepted order carried no orderId".to_string()))?;
+    let accepted: AcceptedOrder = wire::object(data);
+    let client_order_id = accepted.client_order_id.0.ok_or_else(|| {
+        VenueError::BadReply("field clientOrderId is missing or not a string".into())
+    })?;
+    let venue_order_id =
+        accepted.order_id.0.map(Id::into_text).ok_or_else(|| {
+            VenueError::BadReply("an accepted order carried no orderId".to_string())
+        })?;
     Ok((client_order_id, venue_order_id))
 }
 
 /// One accepted conditional order from `POST /fapi/v1/algoOrder`.
 pub(crate) fn parse_algo_ack(data: &Value) -> Result<(String, String), VenueError> {
-    let client_order_id = str_field(data, "clientAlgoId")?;
-    let venue_order_id = id_text(data, "algoId").ok_or_else(|| {
+    let accepted: AcceptedOrder = wire::object(data);
+    let client_order_id = accepted.client_algo_id.0.ok_or_else(|| {
+        VenueError::BadReply("field clientAlgoId is missing or not a string".into())
+    })?;
+    let venue_order_id = accepted.algo_id.0.map(Id::into_text).ok_or_else(|| {
         VenueError::BadReply("an accepted algo order carried no algoId".to_string())
     })?;
     Ok((client_order_id, venue_order_id))
@@ -1251,6 +1280,53 @@ mod tests {
         }
         for ours in ["eng-1788092000000-1", "x-grid-77", ""] {
             assert!(!is_exchange_or_stop_id(ours), "{ours:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tier1_wire_contract {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn acknowledgements_preserve_number_string_escaping_and_missing_contracts() {
+        for (id, expected) in [
+            (json!(42), "42"),
+            (json!(42.5), "42.5"),
+            (json!("venue-\"£"), "venue-\"£"),
+            (json!(""), ""),
+        ] {
+            let ack =
+                parse_order_ack(&json!({"clientOrderId":"client-\"£", "orderId":id,"unknown":[]}))
+                    .unwrap();
+            assert_eq!(ack, ("client-\"£".into(), expected.into()));
+        }
+        for id in [Value::Null, json!(true), json!([]), json!({})] {
+            assert!(matches!(
+                parse_order_ack(&json!({"clientOrderId":"c","orderId":id})),
+                Err(VenueError::BadReply(_))
+            ));
+        }
+        for client in [Value::Null, json!(1), json!(false), json!([])] {
+            assert!(matches!(
+                parse_order_ack(&json!({"clientOrderId":client,"orderId":1})),
+                Err(VenueError::BadReply(_))
+            ));
+        }
+        assert_eq!(
+            parse_algo_ack(&json!({"clientAlgoId":"stop","algoId":"7"})).unwrap(),
+            ("stop".into(), "7".into())
+        );
+        let raw = r#"HTTP 400: {"code":-1,"code":-2,"msg":"bad \"field\""}"#;
+        assert!(
+            matches!(refine_rejection(VenueError::Transport(raw.into())),VenueError::Rejected {code:-2,message} if message == "bad \"field\"")
+        );
+        for status in ["HTTP 429", "HTTP 418", "HTTP 500"] {
+            let raw = format!("{status}: {{\"code\":-1,\"msg\":\"wait\"}}");
+            assert!(matches!(
+                refine_rejection(VenueError::Transport(raw)),
+                VenueError::Transport(_)
+            ));
         }
     }
 }

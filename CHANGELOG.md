@@ -6,6 +6,79 @@ entry supersedes an earlier one — read from the top down. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 07:55 UTC — Resolve audit execution ownership and lifecycle defects (local implementation checkpoint).**
+  - A-001's destructive action cap is replaced by retained cooperative dispatch
+    and explicit opening refusals. Caller identity survives deferral for
+    cancel/amend/stop operations. Stateful callbacks journal ordered effects,
+    placement IDs and completion indexes; stateful orders settle durability
+    before dispatch. Ordinary order-only callbacks retain optimistic submission.
+    WAL rotation emits v3 with mandatory effect and gap state; legacy/v2 readers
+    remain supported by the new decoder, and older decoders refuse new required
+    state without truncation. No rollback reader compatibility is implied.
+  - Accepted inputs have consumed/rejected/retained outcomes, bounded allocation
+    ownership, destination backpressure and a missing-prefix slot. A fresh
+    producer nonce/frontier exchange controls growth and existing entries while
+    preserving account recovery, reductions and stops. Integration regressions
+    cover missing/malformed replies, true rewind, a concurrent acceptance race,
+    failed rejection barriers and restart. LONG/CARRY tests verify exact rejection
+    identity and reason; removing the emissions makes both fail.
+  - The durable worker prepares a complete candidate batch before journal or
+    checkpoint commit, fixing memory advancement on rejected unjournaled batches.
+    Typed admission/journal/completion phases, worker lanes and native reducer
+    phases simplify mutation ownership. The 62 complete reducer outputs from 42
+    lifecycle tests match exactly, including checkpoint bytes and effect order.
+  - Public realm/catalog/I/O ownership moves to engine-public; marketdata no
+    longer imports private execution adapters. Shared catalog, HMAC and stream
+    state preserve venue-specific authentication/reset behavior. Selected typed
+    envelopes and heartbeat/lease DTOs preserve wire/output contracts. Canary
+    cleanup uses explicit states; CLI parsing returns typed options before I/O.
+  - Six pure risk test targets consolidate without losing any of 99 tests:
+    isolated cached-dependency rebuild/test runs measure 1.46–1.97s separately
+    versus 0.77–0.81s combined. Venue process isolation remains. External package
+    IDs and resolved features match exactly after workspace dependency grouping.
+    Correction to the preceding audit receipt: async-trait is actively reexported
+    and used, so it remains; its removal is not a supported cleanup and syn 3 stays.
+  - Pinned Rust 1.90 debug/all-target checks pass 1,839 tests with the same five
+    opt-in ignores; strict Clippy and formatting pass. The full developer check
+    passes 1,499 Python tests, Ruff, ShellCheck, mypy over 100 files and Rust tests.
+    Optimized verification is still running at this checkpoint; its result is
+    recorded separately. Baseline and candidate-fault probes have distinct source
+    scopes in docs/tier1-audit-resolution.json. Initial setup/lint failures are
+    corrected without weakening assertions or ignores.
+  - All 22 CL and 30 LM-T1 findings have explicit resolutions or retained-policy
+    decisions. Exclusive symbols, dense durable identity, current accounting and
+    capital values remain; no cosmetic move is labelled a portfolio architecture
+    fix. Trusted callback/output and historical metadata limits remain explicit.
+    The work preserves the existing dirty audit receipts and changes no funded
+    deployment, credentials, capital, host permissions or live state. Checks are
+    local and consume no GitHub Actions minutes.
+
+- **2026-09-04 23:18 UTC — Consolidate and verify the trading-platform audit (documentation only).**
+  - `docs/tier1-audit.md` is the verified audit; the root handoff is its
+    execution index. All 30 original tickets and all 22 Claude findings have
+    explicit dispositions against merged local `f69a5fbf63afe11da78dde8bcf06a0ab6ba75046`.
+    Implemented signal/timer/latency/ownership/coverage fixes are distinguished
+    from open defects, contract limits and maintenance proposals.
+  - A-001 reproduces in an isolated source export: the existing
+    `a_flooded_wake_drops_entries_but_never_exits` test passes with 68 opening
+    actions and two reductions, but changing only the opening count to 256
+    fails with `both exits reach the venue`, `left: 0`, `right: 2`. The drain
+    hard cap clears the queued exits. The original test file is restored;
+    repository runtime code is untouched and the defect remains open.
+  - Corrected findings include four Bybit helpers being test-only, a 17-line
+    Exodus parser miscounted as 566, the 63-field heartbeat, and active macros
+    retaining syn 3 after unused async-trait removal. No CI-time or speedup
+    estimate is promoted to a measurement. Broader recommendations target
+    state/effect handoff, accepted-input lifecycle and transition ownership.
+  - Fresh actual Rust 1.90 verification passes 1,787 workspace/all-target
+    tests with five opt-in skips, strict Clippy and formatting. The isolated
+    larger-flood probe intentionally fails; the restored original passes.
+    `docs/tier1-audit-verification.json` records scope, source hashes, commands,
+    counts, corrections and reproduction. All three documentation checks pass,
+    with standalone checks covering the untracked handoff, all 52 finding rows
+    and 23 cited source hashes. Production and current GitHub settings are not
+    inspected; branch integration remains the other task's work.
+
 - **2026-09-04 23:02 UTC — Verify the combined modularity and audit changes for local integration.**
   - Audit checkpoints are rebased onto Claude's `efb5a9a5` module extraction,
     typed maps, `Books`/`StrategyHost`, shared native `SleeveCore` and worker

@@ -16,20 +16,20 @@ name = "signal-worker"
 path = "src/main.rs"
 
 [dependencies]
-bytes = "1.12.1"
-engine-types = { path = "../engine-types" }
-engine-strategies = { path = "../engine-strategies" }
-futures-util = "0.3.34"
-getrandom = "0.4.3"
-hex = "0.4.3"
-http-body-util = "0.1.5"
-hyper = { version = "1.11.0", features = ["client", "http1"] }
-hyper-rustls = { version = "0.27.9", default-features = false, features = ["webpki-roots", "http1", "ring"] }
-hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "tokio"] }
-rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-sha2 = "0.11.0"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "time", "io-util", "macros", "sync", "signal"] }
-tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
-toml = "1.1.4"
+bytes = { workspace = true }
+engine-types = { workspace = true }
+engine-strategies = { workspace = true }
+futures-util = { workspace = true }
+getrandom = { workspace = true }
+hex = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-rustls = { workspace = true, features = ["webpki-roots", "http1", "ring"] }
+hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "macros", "sync", "signal"] }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+toml = { workspace = true }

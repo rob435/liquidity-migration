@@ -39,7 +39,7 @@ use crate::bybit::state::{Applied, FeedState, ResyncReason};
 /// `engine-venue`'s own fence reads those files back to prove it — a host
 /// spelled out in this crate would be one the fence never sees.
 pub fn bybit_public_linear_url() -> &'static str {
-    engine_venue::VenueRealm::Demo.public_ws()
+    engine_public::VenueRealm::Demo.public_ws()
 }
 
 const PING_INTERVAL: Duration = Duration::from_secs(20);

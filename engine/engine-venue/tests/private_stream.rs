@@ -1,6 +1,7 @@
 //! The private stream handshake, against a local WebSocket server. No
 //! network, no credentials.
 
+use engine_venue::RealmCredentials;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

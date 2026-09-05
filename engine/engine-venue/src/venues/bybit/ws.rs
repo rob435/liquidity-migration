@@ -15,15 +15,19 @@
 //! spawned on the engine's own current-thread runtime, so it still runs on
 //! the one engine thread; it just is not part of the `select!`.
 
+use crate::stream::{hand_over, until_closed, AckMemory, Gone, Handover, ReconnectBackoff};
+use crate::RealmCredentials;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::wire::{self, Field};
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::market::{FeedError, OrderFeed};
 use engine_types::orders::{OrderAck, OrderUpdate, Side};
 use engine_types::VenueError;
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -44,11 +48,6 @@ const AUTH_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const SUBSCRIBE_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
-const BACKOFF_START: Duration = Duration::from_millis(250);
-const BACKOFF_CAP: Duration = Duration::from_secs(30);
-/// A socket that lasted this long was a real connection, so the wait between
-/// dials starts over. Shorter than that and the venue is still unhappy.
-const HEALTHY_AFTER: Duration = Duration::from_secs(30);
 /// How many client order ids to remember so one order acks once. Well past
 /// anything in flight, and it keeps a long run's memory flat.
 const ACK_MEMORY: usize = 8192;
@@ -56,11 +55,6 @@ const ACK_MEMORY: usize = 8192;
 const CHANNEL_DEPTH: usize = 1024;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
-/// What the socket task hands over: an update, or a failure worth telling the
-/// engine about. Never [`FeedError::Closed`] — that arrives as the channel
-/// itself closing, and means the task is gone.
-type Handover = Result<OrderUpdate, FeedError>;
-
 pub struct BybitOrderFeed {
     url: String,
     creds: Credentials,
@@ -107,11 +101,7 @@ impl BybitOrderFeed {
     }
 
     fn build(url: &str, creds: Credentials, symbols: Vec<Symbol>, fast_execution: bool) -> Self {
-        let ids = symbols
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), SymbolId(i as u16)))
-            .collect();
+        let ids = engine_public::symbols::indexed_names(&symbols);
         Self {
             url: url.to_string(),
             creds,
@@ -125,8 +115,7 @@ impl BybitOrderFeed {
     /// known keeps the id it had — an id that moved would make every record
     /// already in the log mean something else.
     pub fn learn(&mut self, symbol: &str, id: SymbolId) {
-        let mut ids = self.ids.write().expect("the symbol map lock is poisoned");
-        ids.entry(symbol.to_string()).or_insert(id);
+        engine_public::symbols::learn(&self.ids, symbol, id);
     }
 
     /// Start the socket task. The first `next_update` does this, because that
@@ -138,7 +127,7 @@ impl BybitOrderFeed {
             creds: self.creds.clone(),
             fast_execution: self.fast_execution,
             decoder: Decoder::new(self.ids.clone()),
-            backoff: Duration::ZERO,
+            backoff: ReconnectBackoff::default(),
         };
         tokio::spawn(worker.run(tx));
         self.updates = Some(rx);
@@ -171,22 +160,12 @@ struct Worker {
     creds: Credentials,
     fast_execution: bool,
     decoder: Decoder,
-    backoff: Duration,
+    backoff: ReconnectBackoff,
 }
-
-/// The engine dropped the feed: there is nobody left to hand updates to.
-struct Gone;
 
 impl Worker {
     async fn run(mut self, tx: mpsc::Sender<Handover>) {
-        let dropped = tx.closed();
-        tokio::pin!(dropped);
-        tokio::select! {
-            // Stop promptly when the feed goes away, even if the loop below is
-            // parked on a socket or a backoff sleep. No task is left behind.
-            _ = &mut dropped => (),
-            _ = self.reconnect_forever(&tx) => (),
-        }
+        until_closed(&tx, self.reconnect_forever(&tx)).await;
         tracing::info!("private stream task finished; the engine let the feed go");
     }
 
@@ -214,9 +193,7 @@ impl Worker {
                     if self.pump(socket, tx).await.is_err() {
                         return Gone;
                     }
-                    if opened.elapsed() >= HEALTHY_AFTER {
-                        self.backoff = Duration::ZERO;
-                    }
+                    self.backoff.completed_session(opened.elapsed());
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "private stream did not come up; trying again");
@@ -233,14 +210,7 @@ impl Worker {
     /// socket that died reaches here, so the wait grows while the venue is
     /// unhappy and never because the engine looked away.
     async fn wait_before_redialling(&mut self) {
-        if !self.backoff.is_zero() {
-            tokio::time::sleep(self.backoff).await;
-        }
-        self.backoff = if self.backoff.is_zero() {
-            BACKOFF_START
-        } else {
-            (self.backoff * 2).min(BACKOFF_CAP)
-        };
+        self.backoff.wait().await;
     }
 
     async fn connect(&self) -> Result<Socket, FeedError> {
@@ -356,8 +326,19 @@ impl Worker {
 }
 
 /// Hand one item to the engine, waiting if it is behind.
-async fn hand_over(tx: &mpsc::Sender<Handover>, item: Handover) -> Result<(), Gone> {
-    tx.send(item).await.map_err(|_| Gone)
+
+#[derive(Default, Deserialize)]
+struct PrivateEnvelope {
+    #[serde(default)]
+    topic: Field<String>,
+    #[serde(default)]
+    op: Field<String>,
+    #[serde(default)]
+    success: Field<bool>,
+    #[serde(default)]
+    ret_msg: Field<String>,
+    #[serde(default)]
+    data: Field<Vec<Value>>,
 }
 
 /// Frames in, updates out, plus the memory of which orders have already
@@ -365,8 +346,7 @@ async fn hand_over(tx: &mpsc::Sender<Handover>, item: Handover) -> Result<(), Go
 struct Decoder {
     ids: Arc<RwLock<HashMap<Symbol, SymbolId>>>,
     pending: VecDeque<OrderUpdate>,
-    acked: HashSet<String>,
-    acked_order: VecDeque<String>,
+    acknowledgements: AckMemory,
     order_links: HashMap<String, String>,
     order_link_order: VecDeque<String>,
     fast_execs: HashSet<String>,
@@ -380,8 +360,7 @@ impl Decoder {
         Self {
             ids,
             pending: VecDeque::new(),
-            acked: HashSet::new(),
-            acked_order: VecDeque::new(),
+            acknowledgements: AckMemory::new(ACK_MEMORY),
             order_links: HashMap::new(),
             order_link_order: VecDeque::new(),
             fast_execs: HashSet::new(),
@@ -396,25 +375,15 @@ impl Decoder {
         let frame: Value = serde_json::from_str(text)
             .map_err(|e| FeedError::BadMessage(format!("{e}: {}", first_chars(text))))?;
 
-        // Control replies (pong, subscribe acks) carry no topic.
-        let Some(topic) = frame.get("topic").and_then(Value::as_str) else {
-            if frame.get("success").and_then(Value::as_bool) == Some(false) {
-                let why = frame
-                    .get("ret_msg")
-                    .and_then(Value::as_str)
-                    .unwrap_or("no reason");
+        let frame: PrivateEnvelope = wire::object(&frame);
+        let Some(topic) = frame.topic.0.as_deref() else {
+            if frame.success.0 == Some(false) {
+                let why = frame.ret_msg.0.as_deref().unwrap_or("no reason");
                 return Err(FeedError::Transport(format!("venue refused an op: {why}")));
             }
-            return Ok(matches!(
-                frame.get("op").and_then(Value::as_str),
-                Some("ping" | "pong")
-            ));
+            return Ok(matches!(frame.op.0.as_deref(), Some("ping" | "pong")));
         };
-        let rows = frame
-            .get("data")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
+        let rows = frame.data.0.as_deref().unwrap_or(&[]);
         let recv_ns = mono_ns();
         let fast_topic = topic.starts_with("execution.fast");
         let execution_topic = topic.starts_with("execution") && !fast_topic;
@@ -498,16 +467,7 @@ impl Decoder {
 
     /// False if this order has already been acked.
     fn remember_ack(&mut self, client_order_id: &str) -> bool {
-        if !self.acked.insert(client_order_id.to_string()) {
-            return false;
-        }
-        self.acked_order.push_back(client_order_id.to_string());
-        while self.acked_order.len() > ACK_MEMORY {
-            if let Some(old) = self.acked_order.pop_front() {
-                self.acked.remove(&old);
-            }
-        }
-        true
+        self.acknowledgements.remember(client_order_id)
     }
 
     fn remember_order_link(&mut self, order_id: String, client_order_id: String) {
@@ -1454,7 +1414,34 @@ mod tests {
         for i in 0..(ACK_MEMORY + 100) {
             assert!(feed.remember_ack(&format!("eng-{i}")));
         }
-        assert_eq!(feed.acked.len(), ACK_MEMORY);
-        assert_eq!(feed.acked_order.len(), ACK_MEMORY);
+        assert_eq!(feed.acknowledgements.lengths(), (ACK_MEMORY, ACK_MEMORY));
+    }
+}
+
+#[cfg(test)]
+mod tier1_private_contract {
+    use super::*;
+    #[test]
+    fn escaped_private_envelopes_preserve_control_and_event_disposition() {
+        let mut decoder = Decoder::new(Arc::new(RwLock::new(HashMap::new())));
+        for frame in [
+            r#"null"#,
+            r#"[]"#,
+            r#"true"#,
+            r#"{"topic":7,"success":"false"}"#,
+            r#"{"topic":"future.topic","data":[{}]}"#,
+        ] {
+            assert!(!decoder.ingest(frame).unwrap());
+            assert!(decoder.pending.is_empty());
+        }
+        assert!(decoder.ingest(r#"{"op":"p\u006fng"}"#).unwrap());
+        assert!(
+            matches!(decoder.ingest(r#"{"success":false,"ret_msg":"bad \"topic\""}"#),Err(FeedError::Transport(message)) if message.ends_with("bad \"topic\""))
+        );
+        decoder.ingest(r#"{"topic":"order","data":[{"orderId":"v-\"1","orderLinkId":"client-\u00a3","orderStatus":"New"}]}"#).unwrap();
+        assert!(
+            matches!(decoder.pending.pop_front(),Some(OrderUpdate::Ack(ack)) if ack.client_order_id == "client-£" && ack.venue_order_id == "v-\"1")
+        );
+        assert!(decoder.ingest("{bad json").is_err());
     }
 }

@@ -104,13 +104,33 @@ pub struct Books {
     pub covers: CoverBook,
 }
 
+#[derive(Clone, Debug)]
+pub struct PendingAction {
+    pub caller: Option<StrategyId>,
+    pub action: Action,
+    pub(crate) effect: Option<crate::effects::EffectKey>,
+    pub(crate) callback_id: Option<u64>,
+}
+
+impl From<Action> for PendingAction {
+    fn from(action: Action) -> Self {
+        Self {
+            caller: None,
+            action,
+            effect: None,
+            callback_id: None,
+        }
+    }
+}
+
 /// The strategies and what the engine holds on their behalf.
 pub struct StrategyHost {
     pub strategies: Vec<Box<dyn Strategy>>,
     pub names: Vec<String>,
     pub timers: Timers,
     /// Actions emitted and not yet drained, in emission order.
-    pub pending: VecDeque<Action>,
+    pub pending: VecDeque<PendingAction>,
+    pub(crate) effects: crate::effects::Effects,
     /// Strategy-owned state, persisted before the action it guards and
     /// restated through rotation. The engine stores bytes, not meaning.
     pub checkpoints: BTreeMap<(StrategyId, SymbolId), StrategyCheckpoint>,
@@ -129,11 +149,12 @@ impl StrategyHost {
         let Some(strategy) = self.strategies.get_mut(sid.idx()) else {
             return;
         };
+        let mut actions = VecDeque::new();
         let mut ctx = Ctx {
             books,
             now_ns,
             strategy: sid,
-            out: &mut self.pending,
+            out: &mut actions,
             timers: &mut self.timers,
             checkpoints: &self.checkpoints,
             global_checkpoints: &self.global_checkpoints,
@@ -142,6 +163,51 @@ impl StrategyHost {
             runtime_entries_enabled: self.entries_enabled.get(&sid).copied(),
         };
         strategy.on_event(event, &mut ctx);
+        if actions.is_empty() {
+            return;
+        }
+        let actions: Vec<_> = actions.into_iter().collect();
+        let durable = actions.iter().any(|action| {
+            matches!(
+                action,
+                Action::SetStrategyCheckpoint { .. }
+                    | Action::SetStrategyGlobalCheckpoint { .. }
+                    | Action::PublishStrategyEvent { .. }
+                    | Action::ConsumeStrategyEvent { .. }
+                    | Action::ConsumeSignalObservation { .. }
+                    | Action::RejectSignalObservation { .. }
+                    | Action::ConsumeRuntimeControl { .. }
+            )
+        });
+        if !durable {
+            let callback_id = self.effects.next_id;
+            self.effects.next_id = callback_id
+                .checked_add(1)
+                .expect("strategy callback id exhausted");
+            self.pending
+                .extend(actions.into_iter().map(|action| PendingAction {
+                    caller: Some(sid),
+                    action,
+                    effect: None,
+                    callback_id: Some(callback_id),
+                }));
+            return;
+        }
+        let transition_id = self.effects.capture(sid, actions.clone());
+        self.pending.extend(
+            actions
+                .into_iter()
+                .enumerate()
+                .map(|(index, action)| PendingAction {
+                    caller: Some(sid),
+                    action,
+                    effect: Some(crate::effects::EffectKey {
+                        transition_id,
+                        index,
+                    }),
+                    callback_id: Some(transition_id),
+                }),
+        );
     }
 }
 
@@ -285,9 +351,8 @@ impl StrategyCtx for Ctx<'_> {
     }
 
     fn emit(&mut self, action: Action) {
-        // The context knows whose callback this is, so the intent is filed
-        // under that strategy whatever it claims. A cancel or an amend names
-        // an order id instead, and the id already carries its owner.
+        // Order-id and position effects keep this caller in PendingAction;
+        // dispatch checks ownership again after any symbol deferral.
         let action = match action {
             Action::Place(mut intent) => {
                 intent.strategy = self.strategy;
@@ -334,6 +399,19 @@ impl StrategyCtx for Ctx<'_> {
                 source,
                 sequence,
                 observation_id,
+            },
+            Action::RejectSignalObservation {
+                source,
+                sequence,
+                observation_id,
+                reason,
+                ..
+            } => Action::RejectSignalObservation {
+                strategy: self.strategy,
+                source,
+                sequence,
+                observation_id,
+                reason,
             },
             Action::ConsumeRuntimeControl { request_id, .. } => Action::ConsumeRuntimeControl {
                 strategy: self.strategy,

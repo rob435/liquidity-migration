@@ -406,7 +406,7 @@ async fn an_opening_amend_cannot_bypass_foreign_ownership() {
 }
 
 #[tokio::test]
-async fn foreign_ownership_leaves_exit_amends_cancels_and_stop_tightening_live() {
+async fn foreign_ownership_preserves_own_exit_orders_but_not_foreign_stop_control() {
     let (mut engine, h) = editor_engine(
         true,
         true,
@@ -420,5 +420,72 @@ async fn foreign_ownership_leaves_exit_amends_cancels_and_stop_tightening_live()
     one_quote(&mut engine).await;
     assert_eq!(h.amends.lock().unwrap().len(), 1);
     assert_eq!(h.cancels.lock().unwrap().len(), 1);
-    assert!(h.stops.lock().unwrap().contains(&(SymbolId(0), 29_500.0)));
+    assert!(!h.stops.lock().unwrap().contains(&(SymbolId(0), 29_500.0)));
+}
+
+struct ForeignOrderEditor {
+    amend: bool,
+}
+impl Strategy for ForeignOrderEditor {
+    fn name(&self) -> &str {
+        "right"
+    }
+    fn subscriptions(&self) -> Vec<Subscription> {
+        vec![Subscription {
+            symbol: "BTCUSDT".into(),
+            feed: Feed::Quote,
+        }]
+    }
+    fn on_market(&mut self, event: &MarketEvent, ctx: &mut dyn StrategyCtx) {
+        let MarketEvent::Quote { symbol, .. } = event else {
+            return;
+        };
+        if self.amend {
+            ctx.amend(
+                *symbol,
+                "eng-prior-1",
+                AmendSpec {
+                    px: Some(30_000.0),
+                    qty: None,
+                },
+            );
+        } else {
+            ctx.cancel(*symbol, "eng-prior-1");
+        }
+    }
+}
+
+#[tokio::test]
+async fn callback_cannot_cancel_or_amend_another_sleeves_order() {
+    let mut observed = Vec::new();
+    for amend in [false, true] {
+        let (idle, _) = proposer("left", Side::Buy, 0, false);
+        let mut prior = prior_order(0, Side::Buy);
+        let WalRecord::OrderSent { request, .. } = prior.last_mut().unwrap() else {
+            unreachable!()
+        };
+        request.kind = OrderKind::Limit {
+            px: 29_999.0,
+            tif: TimeInForce::Gtc,
+        };
+        let (mut engine, h) = build_with_venue_state(
+            allow_all(),
+            vec![idle, Box::new(ForeignOrderEditor { amend })],
+            &["BTCUSDT"],
+            &prior,
+            vec![still_working("eng-prior-1", "BTCUSDT", 0.01)],
+            vec![],
+        )
+        .await;
+        one_quote(&mut engine).await;
+        observed.push((
+            h.cancels.lock().unwrap().len(),
+            h.amends.lock().unwrap().len(),
+        ));
+    }
+    assert_eq!(
+        observed,
+        [(0, 0), (0, 0)],
+        "foreign cancel or amend reached venue"
+    );
 }

@@ -5,8 +5,7 @@
 //! the exact bytes that go on the wire, not a re-serialization of them. The
 //! signature is a lowercase hex HMAC-SHA256 under the API secret.
 
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+use crate::signing::hmac_sha256_hex;
 
 /// Sent as `X-BAPI-RECV-WINDOW`; the venue also defaults to this.
 pub(crate) const RECV_WINDOW_MS: &str = "5000";
@@ -24,13 +23,6 @@ pub(crate) fn sign_payload(
     body_or_query: &str,
 ) -> String {
     format!("{timestamp_ms}{api_key}{recv_window}{body_or_query}")
-}
-
-pub(crate) fn hmac_sha256_hex(secret: &str, message: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("HMAC-SHA256 takes a key of any length");
-    mac.update(message.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
 }
 
 /// Sign one REST request.
