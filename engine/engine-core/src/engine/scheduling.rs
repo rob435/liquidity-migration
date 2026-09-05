@@ -494,56 +494,58 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 
-    pub(super) async fn on_market(&mut self, event: MarketEvent) -> Result<(), EngineError> {
+    // A market event is 1.6 KB (the inline book). It is copied once, into
+    // the strategies' event, and otherwise travels by reference.
+    pub(super) async fn on_market(&mut self, event: &MarketEvent) -> Result<(), EngineError> {
         let now = clock::now_ns();
-        self.books.market.apply(&event);
-        self.observe_virtual_stops(&event)?;
+        self.books.market.apply(event);
+        self.observe_virtual_stops(event)?;
         self.enforce_position_stop_intent().await?;
         match event {
             MarketEvent::Quote { symbol, quote } if quote.bid_px > 0.0 && quote.ask_px > 0.0 => {
                 self.risk
-                    .observe_price(symbol, (quote.bid_px + quote.ask_px) / 2.0);
+                    .observe_price(*symbol, (quote.bid_px + quote.ask_px) / 2.0);
             }
             MarketEvent::Depth { symbol, depth }
                 if depth.best_bid().is_some() && depth.best_ask().is_some() =>
             {
                 let quote = depth.quote();
                 self.risk
-                    .observe_price(symbol, (quote.bid_px + quote.ask_px) / 2.0);
+                    .observe_price(*symbol, (quote.bid_px + quote.ask_px) / 2.0);
             }
             MarketEvent::Trades { symbol, trades } if trades.last_px > 0.0 => {
-                self.risk.observe_price(symbol, trades.last_px);
+                self.risk.observe_price(*symbol, trades.last_px);
             }
             MarketEvent::Ticker { symbol, ticker } if ticker.last_px > 0.0 => {
-                self.risk.observe_price(symbol, ticker.last_px);
+                self.risk.observe_price(*symbol, ticker.last_px);
             }
             _ => {}
         }
         self.ledger.saw_event();
         self.events_seen += 1;
-        let origin_ns = arrival_ns(&event, now);
-        let engine_event = EngineEvent::Market(event);
+        let origin_ns = arrival_ns(event, now);
+        let engine_event = EngineEvent::Market(*event);
         {
             let count = self.host.strategies.len();
             let mut feed = |sid| self.host.feed(&self.books, sid, &engine_event, now);
             match event {
                 MarketEvent::Quote { symbol, .. } => {
-                    for sid in self.routing.quote_listeners(symbol) {
+                    for sid in self.routing.quote_listeners(*symbol) {
                         feed(*sid);
                     }
                 }
                 MarketEvent::Depth { symbol, .. } => {
-                    for sid in self.routing.depth_listeners(symbol) {
+                    for sid in self.routing.depth_listeners(*symbol) {
                         feed(*sid);
                     }
                 }
                 MarketEvent::Trades { symbol, .. } => {
-                    for sid in self.routing.trade_listeners(symbol) {
+                    for sid in self.routing.trade_listeners(*symbol) {
                         feed(*sid);
                     }
                 }
                 MarketEvent::Ticker { symbol, .. } => {
-                    for sid in self.routing.ticker_listeners(symbol) {
+                    for sid in self.routing.ticker_listeners(*symbol) {
                         feed(*sid);
                     }
                 }

@@ -1597,7 +1597,7 @@ mod tests {
         );
         assert!(engine.host.callbacks.state.committed.is_empty());
         engine
-            .on_market(MarketEvent::Quote {
+            .on_market(&MarketEvent::Quote {
                 symbol: SymbolId(0),
                 quote: engine_types::Quote {
                     bid_px: 123.0,

@@ -357,30 +357,30 @@ mod tests {
         state.apply(&parse_frame(raw).expect("parses"), 42)
     }
 
-    fn quote(applied: Applied) -> Quote {
+    fn quote(applied: &Applied) -> Quote {
         match applied {
-            Applied::Event(MarketEvent::Quote { quote, .. }) => quote,
+            Applied::Event(MarketEvent::Quote { quote, .. }) => *quote,
             other => panic!("expected a quote, got {other:?}"),
         }
     }
 
-    fn ticker(applied: Applied) -> Ticker {
+    fn ticker(applied: &Applied) -> Ticker {
         match applied {
-            Applied::Event(MarketEvent::Ticker { ticker, .. }) => ticker,
+            Applied::Event(MarketEvent::Ticker { ticker, .. }) => *ticker,
             other => panic!("expected a ticker, got {other:?}"),
         }
     }
 
-    fn depth(applied: Applied) -> Depth {
+    fn depth(applied: &Applied) -> Depth {
         match applied {
-            Applied::Event(MarketEvent::Depth { depth, .. }) => depth,
+            Applied::Event(MarketEvent::Depth { depth, .. }) => *depth,
             other => panic!("expected depth, got {other:?}"),
         }
     }
 
-    fn trades(applied: Applied) -> TradeFlow {
+    fn trades(applied: &Applied) -> TradeFlow {
         match applied {
-            Applied::Event(MarketEvent::Trades { trades, .. }) => trades,
+            Applied::Event(MarketEvent::Trades { trades, .. }) => *trades,
             other => panic!("expected trades, got {other:?}"),
         }
     }
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn snapshot_becomes_a_quote() {
         let mut s = feed_state();
-        let q = quote(apply(
+        let q = quote(&apply(
             &mut s,
             &ob(
                 100,
@@ -418,7 +418,7 @@ mod tests {
                 r#"[["10.1","2.5"]]"#,
             ),
         );
-        let q = quote(apply(
+        let q = quote(&apply(
             &mut s,
             &ob(101, "delta", r#"[["10.05","3.0"]]"#, "[]"),
         ));
@@ -430,7 +430,7 @@ mod tests {
 
         // A side the message never mentions also survives.
         let raw = r#"{"topic":"orderbook.1.BTCUSDT","ts":10,"type":"delta","data":{"s":"BTCUSDT","a":[["10.2","4.0"]],"u":102},"cts":9}"#;
-        let q = quote(apply(&mut s, raw));
+        let q = quote(&apply(&mut s, raw));
         assert_eq!(q.bid_px, 10.05);
         assert_eq!(q.ask_px, 10.2);
     }
@@ -453,7 +453,7 @@ mod tests {
             Applied::Nothing
         );
         // The replacement bid restores it.
-        let q = quote(apply(
+        let q = quote(&apply(
             &mut s,
             &ob(102, "delta", r#"[["9.99","7.0"]]"#, "[]"),
         ));
@@ -497,7 +497,7 @@ mod tests {
             ),
         );
         // A snapshot replaces the book, so its id need not follow.
-        let q = quote(apply(
+        let q = quote(&apply(
             &mut s,
             &ob(
                 900,
@@ -564,7 +564,7 @@ mod tests {
             Applied::Resync(ResyncReason::DeltaBeforeSnapshot)
         );
         let ticker_delta = r#"{"topic":"tickers.BTCUSDT","type":"delta","data":{"symbol":"BTCUSDT","indexPrice":"200.5"},"cs":2,"ts":600}"#;
-        let ticker = ticker(apply(&mut state, ticker_delta));
+        let ticker = ticker(&apply(&mut state, ticker_delta));
         assert_eq!(ticker.last_px, 100.0);
         assert_eq!(ticker.mark_px, 100.1);
         assert_eq!(ticker.index_px, 200.5);
@@ -574,7 +574,7 @@ mod tests {
     fn ticker_delta_merges_onto_the_snapshot() {
         let mut s = feed_state();
         let snap = r#"{"topic":"tickers.BTCUSDT","type":"snapshot","data":{"symbol":"BTCUSDT","lastPrice":"100.0","markPrice":"100.1","indexPrice":"100.2","fundingRate":"0.0001","nextFundingTime":"1786665600000"},"cs":1,"ts":500}"#;
-        let t = ticker(apply(&mut s, snap));
+        let t = ticker(&apply(&mut s, snap));
         assert_eq!(t.last_px, 100.0);
         assert_eq!(t.mark_px, 100.1);
         assert_eq!(t.funding_rate, 0.0001);
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(t.venue_ts_ms, 500);
 
         let delta = r#"{"topic":"tickers.BTCUSDT","type":"delta","data":{"symbol":"BTCUSDT","indexPrice":"200.5"},"cs":2,"ts":600}"#;
-        let t = ticker(apply(&mut s, delta));
+        let t = ticker(&apply(&mut s, delta));
         // Only the index moved; everything absent held its value.
         assert_eq!(t.index_px, 200.5);
         assert_eq!(t.last_px, 100.0);
@@ -598,7 +598,7 @@ mod tests {
         let first = r#"{"topic":"tickers.BTCUSDT","type":"snapshot","data":{"symbol":"BTCUSDT","lastPrice":"100.0","markPrice":"100.1"},"cs":1,"ts":500}"#;
         apply(&mut s, first);
         let second = r#"{"topic":"tickers.BTCUSDT","type":"snapshot","data":{"symbol":"BTCUSDT","lastPrice":"7.0"},"cs":2,"ts":600}"#;
-        let t = ticker(apply(&mut s, second));
+        let t = ticker(&apply(&mut s, second));
         assert_eq!(t.last_px, 7.0);
         assert_eq!(t.mark_px, 0.0);
     }
@@ -643,12 +643,12 @@ mod tests {
     fn l50_deltas_update_delete_and_insert_without_losing_the_rest() {
         let mut state = feed_state();
         let snapshot = r#"{"topic":"orderbook.50.BTCUSDT","ts":10,"type":"snapshot","data":{"s":"BTCUSDT","b":[["100","1"],["99","2"],["98","3"]],"a":[["101","4"],["102","5"]],"u":100,"seq":1000},"cts":9}"#;
-        let first = depth(apply(&mut state, snapshot));
+        let first = depth(&apply(&mut state, snapshot));
         assert_eq!(first.bid_len, 3);
         assert_eq!(first.ask_len, 2);
 
         let delta = r#"{"topic":"orderbook.50.BTCUSDT","ts":11,"type":"delta","data":{"s":"BTCUSDT","b":[["100","0"],["99","7"],["99.5","6"]],"a":[["100.5","8"]],"u":101,"seq":1001},"cts":10}"#;
-        let next = depth(apply(&mut state, delta));
+        let next = depth(&apply(&mut state, delta));
         assert_eq!(next.bids[0], BookLevel { px: 99.5, qty: 6.0 });
         assert_eq!(next.bids[1], BookLevel { px: 99.0, qty: 7.0 });
         assert_eq!(next.bids[2], BookLevel { px: 98.0, qty: 3.0 });
@@ -674,7 +674,7 @@ mod tests {
     fn public_trade_flow_becomes_a_fixed_market_event() {
         let mut state = feed_state();
         let raw = r#"{"topic":"publicTrade.BTCUSDT","ts":1003,"data":[{"T":1000,"s":"BTCUSDT","S":"Buy","v":"2","p":"100.1","seq":10},{"T":1002,"s":"BTCUSDT","S":"Sell","v":"0.5","p":"100.0","seq":12}]}"#;
-        let flow = trades(apply(&mut state, raw));
+        let flow = trades(&apply(&mut state, raw));
         assert_eq!(flow.buy_qty, 2.0);
         assert_eq!(flow.sell_qty, 0.5);
         assert_eq!(flow.last_px, 100.0);

@@ -712,7 +712,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         self.drain(clock::now_ns()).await?;
                     }
                     event = market_feed.next_event() => {
-                        if let Turn::Stop(reason) = self.on_market_feed(event, order_feed).await? {
+                        if let Turn::Stop(reason) = self.on_market_feed(&event, order_feed).await? {
                             break reason;
                         }
                     }
@@ -836,7 +836,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     self.on_completion(completion, order_feed).await?;
                 }
                 event = market_feed.next_event() => {
-                    if let Turn::Stop(reason) = self.on_market_feed(event, order_feed).await? {
+                    if let Turn::Stop(reason) = self.on_market_feed(&event, order_feed).await? {
                         break reason;
                     }
                 }
@@ -899,7 +899,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// spinning the loop.
     async fn on_market_feed<O: OrderFeed>(
         &mut self,
-        event: Result<MarketEvent, FeedError>,
+        event: &Result<MarketEvent, FeedError>,
         order_feed: &mut O,
     ) -> Result<Turn, EngineError> {
         match event {
