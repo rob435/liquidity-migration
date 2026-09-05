@@ -144,7 +144,7 @@ edit STATE.md to match.
     over both realms — the engine fingerprint hashes the whole `engine` tree
     — so the funded engine restarts:
     ```bash
-    EXPECTED_COMMIT=<this entry's commit> scripts/ops.sh deploy
+    EXPECTED_COMMIT=06e17d4a82f9a5a19e00f1cd0928b4a0da96e315 scripts/ops.sh deploy
     scripts/ops.sh status
     ```
     Then the reading still open since 22:54 — whether tape or non-tape files
