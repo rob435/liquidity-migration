@@ -7,6 +7,61 @@ in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
 
+- **2026-09-05 03:48 UTC — The Bybit-ref page of the same crossing. No code
+  change and no new defect: every measurement in this payload is already in the
+  03:42 and 03:51 entries, and the one defect it points at was found from the
+  Binance side twenty minutes earlier and is already fixed on `main` in
+  `2c751c92`. What this page adds is a **second, independent derivation of that
+  diagnosis from the other unit**, and the disposition of a page that would
+  otherwise look unread.**
+  - Incident `host-681737fd16e1f806`, scope `host`, host `ip-208-84-103-4`,
+    `new_critical_refs=capture-disk` with `RESOLVED
+    capture-disk:forward-market-binance` in the same alert block — the
+    unsuffixed ref is the Bybit recorder
+    (`scripts/runtime/check_fleet_liveness.py:392-393`). Exact alert text:
+    `CRITICAL recorder storage is blocked; frames are counted but not written`,
+    raised at `scripts/runtime/check_fleet_liveness.py:431-433`. Journal window
+    03:35:45.719 → 03:48:16.280, 750.561 s,
+    `liquidity-migration-forward-capture.service` only, pid 2259813 unchanged.
+    Per the 03:21 entry the id names whose cooldown cleared first; the
+    `RESOLVED` is the tick-phase aliasing `2c751c92` already settles, not
+    recovery.
+  - **The funded engine is not implicated.** No engine, worker or timer is
+    named. Both units are `market_tape` recorders — research tape outside the
+    order path — and the 25 GiB floor is the reservation held for mainnet's
+    WAL, which `writable()` blocks the recorder *above*
+    (`market_tape/storage.py:426-433`).
+  - **The meter defect, seen on Bybit.** `projected_gb` falls monotonically
+    1265.7 → 1239.6 across this window, rising in exactly the three intervals
+    that followed a resumption — 1256.8 → 1257.3, 1248.5 → 1248.9, 1245.2 →
+    1245.7 — while the wire ran flat at **2 675 frames/s** and 88.0 % of the
+    window was blocked. Same shape as the Binance trace in `2c751c92` at a
+    different inbound rate, and it lands on the same line: `_write_loop`
+    metered below the `disk_blocked` gate, so `ByteMeter` — "bytes received" —
+    held bytes *written*. Two payloads, two units, one diagnosis. The fix
+    derived here was discarded as a duplicate; `2c751c92` is functionally the
+    same and better tested, and its one difference is deliberate and right — it
+    meters only `kind == "frame"` inbound, since side-lane rows are not wire
+    bytes.
+  - **Nothing else here is new.** Bybit's 03:37:51.666 pass (2 files, gate shut
+    84.2 s) is the 03:42 entry's table row; its 03:42:56.177 pass (3 files,
+    +19.9 s) and 03:48:01.724 pass (6 files, own gate +164.7 s) are the 03:51
+    entry's. The one thing a single-unit payload cannot settle — Bybit's
+    03:45:16.153 unblock with no deletion of its own for 139.98 s — the 03:51
+    entry already explains as Binance's 03:44:59.497 pass, 16.7 s earlier, on
+    the same filesystem. The sub-window ratios (88.0 % blocked, 6.99 discarded
+    per row kept, 338 rows/s against 775/s at 03:33) sit inside the 03:42
+    entry's 7.53 for this unit and the 03:51 entry's 84.6 % over a longer
+    window. They supersede nothing.
+  - **No deploy dispatched from this page.** The tip has not moved since
+    `2c751c92`, so run `33943636740` (the twenty-second refusal, entry below)
+    is that tip's receipt; a twenty-third identical dispatch would add a line
+    and no information. The blocker is outside the repository — the account's
+    failed payments — and it is now the fault: eight merged fixes have been
+    undeployed for ten hours while the pair discards thousands of frames a
+    second. The SSH path in the entry below is the only lever that does not
+    need a runner.
+
 - **2026-09-05 03:51 UTC — The twelfth page from the same free-space floor. No
   code change here, and no seventh defect *in the recorder*: every mechanism
   in this payload is the deployed behaviour of the six merged, undeployed
