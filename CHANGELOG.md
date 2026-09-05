@@ -7,6 +7,86 @@ incident, or a check that changed nothing gets no entry. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-05 22:41 UTC — Incident `mainnet-4117d27a32d02421`: both engines
+  were stopped four minutes after the deploy of `80dc5c69`, and the funded
+  engine is down with `REAL_MONEY` armed. The engines wrote about 7 GB in the
+  five minutes they ran; the paged isolated-callback path puts a full
+  all-symbol market snapshot in the log for every callback. No code changed.**
+  - Deploy run `33996136208` (`deploy` at `80dc5c69`, dispatched 22:31:11 UTC):
+    `deploy-ok commit=80dc5c69…` at 22:37:10, every mainnet precondition
+    `[PASS]`, `real-money armed`, `native-state-ok realm=mainnet
+    result=already-complete`. At 22:37:11 both engines were `active` with
+    heartbeats 3 s (demo) and 1 s (mainnet) and `/` read `51G used, 62G avail,
+    45%`. Both watchdogs logged `units-and-heartbeats-healthy` at 22:38:21.
+  - From the handover to the stop the funded engine logged, several times a
+    second for strategy 0 (`carry_native`) and strategy 1 (`long_native`):
+    `ERROR strategy callback not accepted; source must retain delivery
+    strategy=0 error="strategy callback has a prior durable input"`. It ended
+    at 22:41:18.878 with `RunOutcome { stopped_by: Shutdown, market_events:
+    35420, orders_sent: 0 }` and `Consumed 3min 4.365s CPU time, 1.5G memory
+    peak, 0B memory swap peak` — about 73% of a core for 4.2 minutes, and no
+    order decided in the whole run.
+  - `systemd[1]: Stopping …` was logged for both engine units in the same
+    second, 22:41:15–18; both `Deactivated successfully`. Every timer, both
+    signal workers, both recorders and the controls unit were left running,
+    and `REAL_MONEY` was left armed. That is a stop job someone enqueued, not a
+    crash: `Restart=always` does not restart a stopped unit, the deploy had
+    finished at 22:37:11, the liveness watchdogs only read (`systemctl
+    is-active`/`is-enabled`/`show`), the chaos drill is Sunday 09:13 UTC and
+    demo-only, and `disarm-mainnet` would have cleared `REAL_MONEY`. **Who
+    issued it is not established from anything this routine can read.** The one
+    settling reading is `journalctl -S 22:40 -U 22:42 -o short-iso` on the
+    host, system-wide.
+  - Both watchdogs paged at 22:41:24, `CRITICAL
+    unit:liquidity-migration-engine-mainnet.service … is inactive` and the same
+    for the demo unit. `diagnose` run `33996658896` at 22:42:14 confirms:
+    deployed `80dc5c69`, `real-money armed`, both engines `inactive`
+    (heartbeats 56 s and 59 s), 0 failed units, `/` at `58G used, 55G avail,
+    52%`.
+  - Free space fell 62 GB → 55 GB in the 5 min 3 s between the two readings,
+    about 7 GB, against 44% used at 22:17:54 and 45% at 22:37:11. Attribution
+    to the engine logs is arithmetic, not a direct measurement — the recorders
+    also write to `/` — and `du -sh /var/lib/liquidity-migration-engine{,-mainnet}`
+    would settle it. Spread over the ~4.2 minutes both engines ran it is about
+    14 MB/s per engine, against the pre-paging demo rate of one 268 MB segment
+    every 2.6 h (0.03 MB/s) recorded in the 22:20 UTC entry below.
+  - What writes it: `Engine::service_strategy_callbacks`
+    (`engine/engine-core/src/engine/strategy_callbacks.rs:111`) appends
+    `WalRecord::StrategyCallbackPrepared { input }` and a barrier for every
+    callback whose input has no snapshot yet — that is every callback,
+    market wakes included. The snapshot is `Ctx::callback_snapshot`
+    (`engine/engine-core/src/strategy_process/snapshot.rs:21`), which builds one
+    `SymbolSnapshot` for **every** symbol in the market table: name, quote, a
+    50-level `DepthSnapshot` (`BOOK_DEPTH = 50`), trades, ticker, instrument
+    rule, three position views, facts and checkpoint. The funded universe is
+    `universe_top_n = 100` for carry plus the LONG sleeve's subscriptions. The
+    only cap is `MAX_PROCESS_PROPOSAL_BYTES = 64 MiB` per snapshot.
+  - `80dc5c69` is the first host binary carrying this path: neither `efb658b`
+    (`StrategyCallbackPrepared`) nor `c082dc8` (paging, and the
+    `strategy callback has a prior durable input` refusal) is an ancestor of
+    `cece1d9f`, the commit the host ran until 22:37. `engine sim` and `engine
+    backtest` boot through `Engine::boot_as` — `CallbackExecution::Embedded` —
+    so neither harness exercises the paged path that `engine run` uses in
+    production; only `engine-core/tests/integration/strategy_process.rs` does.
+  - Rollback is not available. Since 22:37 both engine logs hold
+    `strategy_callback_source`, `strategy_callback_queued`,
+    `strategy_callback_prepared` and `identity_state` frames; none of those
+    four variants exists in `cece1d9f`'s `WalRecord`, which is
+    `#[serde(tag = "kind")]` with no unknown-variant fallback. `mode=rollback`
+    would fail on `unknown variant` the way the demo rollback failed at 22:14.
+  - No code changed and no deploy was dispatched. The fleet is stopped, so
+    nothing is burning disk now; restarting it is the owner's call, because the
+    stop looks deliberate and a `deploy` dispatch would restart both engines.
+    Taking the snapshot out of the log, or narrowing it to the symbols a
+    callback concerns, changes the funded engine's recovery contract and what
+    the isolated worker is shown — a strategy change, not a refactor — so it is
+    proposed here rather than pushed at speed onto a funded account.
+  - Owner action: (1) say whether the 22:41 stop was yours; (2) take
+    `journalctl -S 22:40 -U 22:42` and `du -sh` on the two engine state
+    directories if not; (3) decide between narrowing the prepared snapshot and
+    reverting the paged callback path before the funded engine runs on
+    `80dc5c69` again.
+
 - **2026-09-05 22:20 UTC — Incident `demo-b161102514734dd5`: the deploy of
   `60bb0abb` took the demo realm down for 949 s. The takeover's verify replayed the whole 6.6 GB
   WAL chain into 8 GB of memory and was OOM-killed; the import then wrote an
