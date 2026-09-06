@@ -562,15 +562,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let now = clock::now_ns();
         let mut due = [None; MAX_TIMER_CALLBACKS_PER_TURN];
         for slot in &mut due {
-            let Some(timer) = self.host.timers.pop_due(now) else {
+            let callbacks = &self.host.callbacks;
+            let Some(timer) = self.host.timers.pop_due_for(now, |strategy| {
+                !callbacks.isolated() || callbacks.timer_ready(strategy)
+            }) else {
                 break;
             };
             *slot = Some(timer);
         }
-        for (sid, timer) in due.into_iter().flatten() {
+        for (sid, timer, deadline) in due.into_iter().flatten() {
             // A callback may replace a timer already in this turn's snapshot.
             // Newly armed timers fire in a later turn, including zero-delay ones.
             if self.host.timers.is_armed(sid, timer) {
+                continue;
+            }
+            if !self.host.timer_ready(sid) {
+                self.host.timers.arm(sid, timer, deadline);
                 continue;
             }
             let event = EngineEvent::Timer {

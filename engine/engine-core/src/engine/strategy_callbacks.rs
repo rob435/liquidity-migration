@@ -302,6 +302,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let event = engine_types::strategy_process::CallbackEvent::from(&event);
         let ready = !self.host.callbacks.pending_for(strategy)
             && !self.host.callbacks.order_news.unread_for(strategy);
+        let offset = self.wal.segment_size();
         let sequence = self.wal.append(&WalRecord::StrategyCallbackSource {
             placement: placement.clone(),
             strategy,
@@ -321,7 +322,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.host
             .callbacks
             .order_news
-            .record(sequence, &[strategy])
+            .record_at(sequence, offset, &[strategy])
             .map_err(EngineError::State)?;
         if ready {
             let origin = self

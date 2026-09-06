@@ -653,6 +653,7 @@ mod tests {
         };
         let mut snapshot = serde_json::to_value(base(&[(0, 0.25)], 0.25)).unwrap();
         snapshot["portfolio"] = serde_json::to_value(claims.snapshot()).unwrap();
+        snapshot["intended_stops"] = serde_json::json!([]);
         let records = vec![
             serde_json::from_value(snapshot).unwrap(),
             WalRecord::OrderSent {

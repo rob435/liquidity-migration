@@ -209,6 +209,13 @@ async fn deliver_next_retained_input(engine: &mut TestEngine) -> StrategyCallbac
 }
 
 async fn finish_next_input(engine: &mut TestEngine) -> StrategyCallbackInput {
+    finish_next_input_with_timer(engine, None).await
+}
+
+async fn finish_next_input_with_timer(
+    engine: &mut TestEngine,
+    rearm: Option<engine_types::strategy_process::StrategyTimerState>,
+) -> StrategyCallbackInput {
     for _ in 0..10 {
         if engine.host.callbacks.write.is_some() {
             let durable = engine.host.callbacks.durable.recv().await;
@@ -216,7 +223,10 @@ async fn finish_next_input(engine: &mut TestEngine) -> StrategyCallbackInput {
         }
         if let Some(input) = engine.host.callbacks.state.inputs.values().next().cloned() {
             if input.snapshot().is_some() {
-                let proposal = worker_proposal(engine, &input);
+                let mut proposal = worker_proposal(engine, &input);
+                if let Some(timer) = rearm {
+                    proposal.timers.push(timer);
+                }
                 let completed = completion(engine, input.callback_id, proposal);
                 engine.on_strategy_callback(Some(completed)).unwrap();
                 if engine.host.callbacks.write.is_some() {
@@ -303,6 +313,309 @@ async fn a_timer_during_a_pending_market_callback_retries_without_fault() {
     );
     assert!(!engine.host.timers.is_armed(StrategyId(0), timer));
     assert!(engine.host.callbacks.faults.is_empty());
+    engine.host.callbacks.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn overdue_timer_keeps_its_deadline_while_a_callback_is_pending() {
+    let _clock = engine_types::clock::install_virtual(clock::wall_ns(), 1_000_000).unwrap();
+    let (mut engine, _, input) = held_market_with_working_order(disabled_probe()).await;
+    let proposal = worker_proposal(&engine, &input);
+    let completed = completion(&mut engine, input.callback_id, proposal);
+    let now = clock::now_ns();
+    let timer = engine_types::TimerId(77);
+    engine.host.timers = Timers::default();
+    engine.host.timers.arm(StrategyId(0), timer, now);
+    engine.on_timers().await.unwrap();
+    assert_eq!(
+        engine.host.timers.next_deadline(),
+        Some(now),
+        "busy callback moved the original timer deadline"
+    );
+    assert!(engine.host.callbacks.faults.is_empty());
+    engine.on_strategy_callback(Some(completed)).unwrap();
+    if engine.host.callbacks.write.is_some() {
+        let durable = engine.host.callbacks.durable.recv().await;
+        engine.on_callback_durable(durable).unwrap();
+    }
+    engine.on_timers().await.unwrap();
+    let delivered = finish_next_input(&mut engine).await;
+    assert!(
+        matches!(delivered.event, engine_types::strategy_process::CallbackEvent::Timer { id, now_ns } if id == timer && now_ns == now)
+    );
+    assert_eq!(clock::now_ns(), now);
+    engine.host.callbacks.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn overdue_timer_precedes_coalesced_market_when_the_owner_becomes_idle() {
+    let _clock = engine_types::clock::install_virtual(clock::wall_ns(), 1_000_000).unwrap();
+    let (mut engine, _, input) = held_market_with_working_order(disabled_probe()).await;
+    let now = clock::now_ns();
+    let timer = engine_types::TimerId(77);
+    engine.host.timers = Timers::default();
+    engine.host.timers.arm(StrategyId(0), timer, now);
+    assert!(engine.feed_one_strategy(StrategyId(0), &quote(0, now), now));
+    assert_eq!(engine.host.callbacks.retry_inputs.market.len(), 1);
+    accept(&mut engine, input).await;
+    engine.retry_callback_inputs();
+    assert!(
+        engine.host.callbacks.unwritten.is_empty(),
+        "coalesced market took the overdue timer slot: {:?}",
+        engine.host.callbacks.unwritten
+    );
+    engine.on_timers().await.unwrap();
+    let delivered = finish_next_input(&mut engine).await;
+    assert!(
+        matches!(delivered.event, engine_types::strategy_process::CallbackEvent::Timer { id, now_ns } if id == timer && now_ns == now),
+        "market callback took the overdue timer slot: {:?}",
+        delivered.event
+    );
+    assert_eq!(clock::now_ns(), now);
+    engine.retry_callback_inputs();
+    assert!(matches!(
+        engine
+            .host
+            .callbacks
+            .unwritten
+            .front()
+            .map(|input| &input.event),
+        Some(engine_types::strategy_process::CallbackEvent::Quote { .. })
+    ));
+    engine.host.callbacks.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn overdue_timer_waits_for_retained_order_news_then_precedes_market() {
+    let _clock = engine_types::clock::install_virtual(clock::wall_ns(), 1_000_000).unwrap();
+    let (mut engine, records, input) = held_market_with_working_order(disabled_probe()).await;
+    let now = clock::now_ns();
+    let timer = engine_types::TimerId(77);
+    engine.host.timers = Timers::default();
+    engine.host.timers.arm(StrategyId(0), timer, now);
+    engine.host.callbacks.state.committed.insert(
+        StrategyId(0),
+        StrategyProcessState {
+            strategy: StrategyId(0),
+            last_callback_id: 0,
+            runtime: engine.host.strategies[0].runtime_state().unwrap().unwrap(),
+            timers: vec![engine_types::strategy_process::StrategyTimerState {
+                id: timer,
+                deadline_ns: now,
+                deadline_wall_ms: clock::wall_ms(),
+            }],
+            retained_signal_subscriptions: None,
+        },
+    );
+    assert!(engine.feed_one_strategy(StrategyId(0), &quote(0, now), now));
+    engine
+        .take_update(OrderUpdate::Ack(engine_types::OrderAck {
+            client_order_id: "held-market-order".into(),
+            venue_order_id: "venue-held".into(),
+            sent_ns: now,
+            ack_ns: now,
+        }))
+        .await
+        .unwrap();
+    engine.on_timers().await.unwrap();
+    assert!(engine.host.callbacks.order_news.unread_for(StrategyId(0)));
+    accept(&mut engine, input).await;
+    let delivered = deliver_next_retained_input(&mut engine).await;
+    assert!(matches!(
+        delivered.event,
+        engine_types::strategy_process::CallbackEvent::Order {
+            update: OrderUpdate::Ack(_)
+        }
+    ));
+    assert!(!engine.host.callbacks.order_news.unread_for(StrategyId(0)));
+    engine.retry_callback_inputs();
+    assert!(
+        engine.host.callbacks.unwritten.is_empty(),
+        "retained order completed but coalesced market took the overdue timer slot: {:?}",
+        engine.host.callbacks.unwritten
+    );
+    engine.on_timers().await.unwrap();
+    let delivered = finish_next_input(&mut engine).await;
+    assert!(
+        matches!(delivered.event, engine_types::strategy_process::CallbackEvent::Timer { id, now_ns } if id == timer && now_ns == now),
+        "retained order completed but market overtook due timer: {:?}",
+        delivered.event
+    );
+    assert_eq!(clock::now_ns(), now);
+    let replayed =
+        crate::strategy_process::state::CallbackState::replay(&records.lock().unwrap(), 1).unwrap();
+    assert!(replayed.inputs.is_empty());
+    assert!(replayed.committed[&StrategyId(0)].timers.is_empty());
+    engine.host.callbacks.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn overdue_timer_wake_skips_busy_owners_and_respects_replacement() {
+    let _clock = engine_types::clock::install_virtual(clock::wall_ns(), 1_000_000).unwrap();
+    let (mut engine, _, input) = held_market_with_working_order(disabled_probe()).await;
+    let now = clock::now_ns();
+    let timer = engine_types::TimerId(77);
+    engine.host.timers = Timers::default();
+    engine.host.timers.arm(StrategyId(0), timer, now);
+    assert_eq!(
+        engine.host.next_timer_deadline(),
+        None,
+        "busy owner advertised an immediately ready timer wake"
+    );
+    engine.on_timers().await.unwrap();
+    assert_eq!(engine.host.timers.next_deadline(), Some(now));
+    let mut proposal = worker_proposal(&engine, &input);
+    proposal
+        .timers
+        .push(engine_types::strategy_process::StrategyTimerState {
+            id: timer,
+            deadline_ns: now + 20_000_000,
+            deadline_wall_ms: clock::wall_ms() + 20,
+        });
+    let completed = completion(&mut engine, input.callback_id, proposal);
+    engine.on_strategy_callback(Some(completed)).unwrap();
+    let durable = engine.host.callbacks.durable.recv().await;
+    engine.on_callback_durable(durable).unwrap();
+    assert_eq!(engine.host.next_timer_deadline(), Some(now + 20_000_000));
+    engine.on_timers().await.unwrap();
+    assert!(engine.host.callbacks.state.inputs.is_empty());
+    assert!(engine.host.callbacks.unwritten.is_empty());
+    engine_types::clock::advance_virtual_to(now + 20_000_000).unwrap();
+    engine.on_timers().await.unwrap();
+    let delivered = finish_next_input(&mut engine).await;
+    assert!(
+        matches!(delivered.event, engine_types::strategy_process::CallbackEvent::Timer { id, .. } if id == timer)
+    );
+    assert_eq!(engine.host.next_timer_deadline(), None);
+    engine.host.callbacks.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn overdue_timer_and_zero_delay_rearms_alternate_with_same_owner_market() {
+    let _clock = engine_types::clock::install_virtual(clock::wall_ns(), 1_000_000).unwrap();
+    let (mut engine, _, input) = held_market_with_working_order(disabled_probe()).await;
+    accept(&mut engine, input).await;
+    let now = clock::now_ns();
+    let timer = engine_types::TimerId(77);
+    engine.host.timers = Timers::default();
+    engine.host.timers.arm(StrategyId(0), timer, now);
+    for _ in 0..4 {
+        assert!(engine.feed_one_strategy(StrategyId(0), &quote(0, now), now));
+        assert!(engine.host.callbacks.unwritten.is_empty());
+        assert_eq!(engine.host.next_timer_deadline(), Some(now));
+        engine.on_timers().await.unwrap();
+        let delivered = finish_next_input_with_timer(
+            &mut engine,
+            Some(engine_types::strategy_process::StrategyTimerState {
+                id: timer,
+                deadline_ns: now,
+                deadline_wall_ms: clock::wall_ms(),
+            }),
+        )
+        .await;
+        assert!(
+            matches!(delivered.event, engine_types::strategy_process::CallbackEvent::Timer { id, .. } if id == timer)
+        );
+        assert_eq!(
+            engine.host.next_timer_deadline(),
+            None,
+            "zero-delay timer refused the waiting market turn"
+        );
+        engine.retry_callback_inputs();
+        let mut input = engine
+            .host
+            .callbacks
+            .unwritten
+            .pop_front()
+            .expect("timer starved its owner's quote callback");
+        assert!(matches!(
+            input.event,
+            engine_types::strategy_process::CallbackEvent::Quote { .. }
+        ));
+        engine
+            .host
+            .callbacks
+            .accept_volatile(input.clone())
+            .unwrap();
+        input.preparation = CallbackPreparation::Prepared {
+            snapshot: engine
+                .host
+                .snapshot(&engine.books, StrategyId(0), now)
+                .unwrap(),
+        };
+        engine.host.callbacks.state.prepared(input.clone()).unwrap();
+        accept(&mut engine, input).await;
+    }
+    assert_eq!(clock::now_ns(), now);
+    engine.host.callbacks.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn overdue_timer_replay_and_restore_keep_only_the_current_timer_owner() {
+    let _clock = engine_types::clock::install_virtual(clock::wall_ns(), 1_000_000).unwrap();
+    let (mut engine, records, input) = held_market_with_working_order(disabled_probe()).await;
+    let now = clock::now_ns();
+    let timer = engine_types::TimerId(77);
+    let mut proposal = worker_proposal(&engine, &input);
+    proposal
+        .timers
+        .push(engine_types::strategy_process::StrategyTimerState {
+            id: timer,
+            deadline_ns: now,
+            deadline_wall_ms: clock::wall_ms(),
+        });
+    let completed = completion(&mut engine, input.callback_id, proposal);
+    engine.on_strategy_callback(Some(completed)).unwrap();
+    let durable = engine.host.callbacks.durable.recv().await;
+    engine.on_callback_durable(durable).unwrap();
+    let before = records.lock().unwrap().clone();
+    let restart = crate::strategy_process::state::CallbackState::replay(&before, 1).unwrap();
+    let mut timers = Timers::default();
+    timers.restore(
+        StrategyId(0),
+        &restart.committed[&StrategyId(0)].timers,
+        now,
+        clock::wall_ms(),
+    );
+    assert_eq!(timers.next_deadline(), Some(now));
+    engine.on_timers().await.unwrap();
+    if engine.host.callbacks.write.is_some() {
+        let durable = engine.host.callbacks.durable.recv().await;
+        engine.on_callback_durable(durable).unwrap();
+    }
+    let accepted = records.lock().unwrap().clone();
+    let restart = crate::strategy_process::state::CallbackState::replay(&accepted, 1).unwrap();
+    assert_eq!(restart.inputs.len(), 1);
+    assert!(restart.committed[&StrategyId(0)].timers.is_empty());
+    timers.restore(
+        StrategyId(0),
+        &restart.committed[&StrategyId(0)].timers,
+        now,
+        clock::wall_ms(),
+    );
+    assert_eq!(
+        timers.next_deadline(),
+        None,
+        "queued callback and restored timer both own the same delivery"
+    );
+    let delivered = finish_next_input(&mut engine).await;
+    assert!(
+        matches!(delivered.event, engine_types::strategy_process::CallbackEvent::Timer { id, .. } if id == timer)
+    );
+    let restart =
+        crate::strategy_process::state::CallbackState::replay(&records.lock().unwrap(), 1).unwrap();
+    assert!(restart.inputs.is_empty());
+    assert!(restart.committed[&StrategyId(0)].timers.is_empty());
+    engine.host.timers.arm(StrategyId(0), timer, now);
+    engine
+        .host
+        .timers
+        .restore(StrategyId(0), &[], now, clock::wall_ms());
+    assert_eq!(
+        engine.host.next_timer_deadline(),
+        None,
+        "removed timer survived authoritative restore"
+    );
     engine.host.callbacks.stop().await;
 }
 

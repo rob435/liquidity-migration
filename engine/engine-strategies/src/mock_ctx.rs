@@ -238,8 +238,12 @@ impl MockCtx {
         );
     }
 
-    /// Start a test with this strategy already holding something of its own,
-    /// without walking it through the fills that got there.
+    pub fn set_in_flight(&mut self, symbol: &str, signed_qty: f64) {
+        let id = self.add_symbol(symbol);
+        self.in_flight.insert(id, signed_qty);
+    }
+
+    /// Start with owned inventory without walking through its fills.
     pub fn set_my_position(&mut self, symbol: &str, signed_qty: f64) {
         let id = self.add_symbol(symbol);
         self.mine.insert(id, signed_qty);

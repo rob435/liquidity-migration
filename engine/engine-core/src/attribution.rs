@@ -244,16 +244,24 @@ impl Attribution {
                     legacy.schema_version = 1;
                     self.accounting =
                         crate::execution_accounting::ExecutionAccounting::restore(&legacy)?;
-                    for stop in intended_stops {
-                        if let Some(strategy) = self.sole_owner(stop.symbol) {
-                            let side = if self.signed(strategy, stop.symbol) > 0.0 {
-                                Side::Buy
-                            } else {
-                                Side::Sell
-                            };
-                            if stop.side.is_none_or(|recorded| recorded == side) {
-                                self.remember_stop(strategy, stop.symbol, side, stop.trigger_px);
-                            }
+                }
+                for stop in intended_stops {
+                    if let Some(strategy) = self.sole_owner(stop.symbol) {
+                        let row = self
+                            .inventory
+                            .position(strategy, stop.symbol)
+                            .expect("sole owner has a position");
+                        let side = if row.signed_qty.is_positive() {
+                            Side::Buy
+                        } else {
+                            Side::Sell
+                        };
+                        if portfolio.is_some() && (row.stop_px.is_some() || stop.side != Some(side))
+                        {
+                            continue;
+                        }
+                        if stop.side.is_none_or(|recorded| recorded == side) {
+                            self.remember_stop(strategy, stop.symbol, side, stop.trigger_px);
                         }
                     }
                 }

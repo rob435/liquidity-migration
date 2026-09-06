@@ -1,4 +1,7 @@
 use super::*;
+
+#[cfg(test)]
+mod protection_tests;
 use engine_types::{OrderAck, VenueMutationTiming};
 
 /// The clocks every completed venue command carries: when it was queued
@@ -207,6 +210,7 @@ struct CallbackOwners<'a> {
 struct JournaledUpdate {
     update: OrderUpdate,
     sequence: u64,
+    offset: u64,
     callbacks: Option<Vec<StrategyId>>,
     fill_owner: Option<StrategyId>,
     fill_request: Option<OrderRequest>,
@@ -1319,6 +1323,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.ensure_callback_reader(&[])?;
         }
         if Self::journal_fast_execution(&update, &mut self.wal)? {
+            let offset = self.wal.segment_size();
             let sequence = if callbacks.is_some() {
                 self.wal.append(&WalRecord::OrderUpdate {
                     callbacks: callbacks.clone(),
@@ -1327,7 +1332,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             } else {
                 0
             };
-            self.route_order_update(update, sequence, callbacks.as_deref())?;
+            self.route_order_update(update, sequence, offset, callbacks.as_deref())?;
             return Ok(());
         }
         let stream_reset = matches!(&update, OrderUpdate::StreamReset { .. });
@@ -1352,13 +1357,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(());
         };
         let sequence = journaled.sequence;
+        let offset = journaled.offset;
         let callbacks = journaled.callbacks.clone();
         let update = self.apply_journaled_update(journaled)?;
         self.observe_order_dispatch(&update)?;
         if stream_reset {
             self.refresh_private_stream_after_gap().await?;
         }
-        self.route_order_update(update, sequence, callbacks.as_deref())?;
+        self.route_order_update(update, sequence, offset, callbacks.as_deref())?;
         Ok(())
     }
 
@@ -1533,6 +1539,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 owners.dedup();
             }
         }
+        let offset = wal.segment_size();
         let sequence = wal.append(&WalRecord::OrderUpdate {
             callbacks: callbacks.clone(),
             update: update.clone(),
@@ -1543,6 +1550,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(Some(JournaledUpdate {
             update,
             sequence,
+            offset,
             callbacks,
             fill_owner,
             fill_request,
@@ -1569,6 +1577,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .attribution
                 .commit_portfolio_fill(allocation)
                 .map_err(EngineError::State)?;
+            if let Some(request) = fill_request.as_ref() {
+                self.books.attribution.remember_order_stop(request);
+            }
         }
         self.portfolio_controls
             .apply(&WalRecord::OrderUpdate {
@@ -1868,6 +1879,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         &mut self,
         update: OrderUpdate,
         sequence: u64,
+        offset: u64,
         callbacks: Option<&[StrategyId]>,
     ) -> Result<(), EngineError> {
         let owners = callbacks
@@ -1885,7 +1897,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.host
                 .callbacks
                 .order_news
-                .record(sequence, &owners)
+                .record_at(sequence, offset, &owners)
                 .map_err(EngineError::State)?;
         }
         for owner in owners {

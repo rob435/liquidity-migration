@@ -183,11 +183,33 @@ impl OrderNews {
     }
 
     pub fn record(&mut self, sequence: u64, owners: &[StrategyId]) -> Result<(), String> {
+        self.record_at(sequence, 0, owners)
+    }
+
+    pub fn record_at(
+        &mut self,
+        sequence: u64,
+        offset: u64,
+        owners: &[StrategyId],
+    ) -> Result<(), String> {
         if sequence == 0 {
             return Err("order callback source has zero sequence".into());
         }
         let origin = self.origin(sequence)?;
         for owner in owners {
+            if !self.unread_for(*owner)
+                && self.latest.get(owner).is_none_or(|latest| origin > *latest)
+            {
+                // Only a caught-up owner may skip straight to its new source.
+                self.cursors.insert(
+                    *owner,
+                    CallbackWalCursor {
+                        segment: origin.segment,
+                        sequence,
+                        offset,
+                    },
+                );
+            }
             self.latest
                 .entry(*owner)
                 .and_modify(|known| *known = (*known).max(origin))
@@ -633,6 +655,208 @@ mod paging_tests {
         assert!(
             !news.unread(),
             "restarting after admission repeated a paused owner's old-segment source"
+        );
+    }
+
+    fn unrelated_prefix(wal: &mut engine_wal::WalWriter) {
+        for _ in 0..64 {
+            wal.append(&WalRecord::Note {
+                source: "unrelated-history".into(),
+                text: "x".repeat(16 * 1024),
+            })
+            .unwrap();
+        }
+    }
+
+    fn ack_source(id: &str, owners: Vec<StrategyId>) -> WalRecord {
+        WalRecord::OrderUpdate {
+            callbacks: Some(owners),
+            update: OrderUpdate::Ack(engine_types::OrderAck {
+                client_order_id: id.into(),
+                venue_order_id: format!("venue-{id}"),
+                sent_ns: 1,
+                ack_ns: 2,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deferred_live_source_starts_at_its_frame_after_direct_delivery() {
+        let path = crate::testpath::temp_path("live-source-large-prefix");
+        let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+        let owner = StrategyId(0);
+        let mut news = OrderNews::default();
+        news.attach(wal.callback_reader().unwrap().unwrap(), &[], 1)
+            .unwrap();
+        unrelated_prefix(&mut wal);
+        let first = wal.append(&ack_source("first", vec![owner])).unwrap();
+        news.record(first, &[owner]).unwrap();
+        news.accepted(owner, news.origin(first).unwrap());
+        unrelated_prefix(&mut wal);
+        let second = wal.append(&ack_source("second", vec![owner])).unwrap();
+        news.record(second, &[owner]).unwrap();
+        wal.flush().unwrap();
+        news.start_read();
+        let completion = news.completed.recv().await.unwrap();
+        let (actual_owner, cursor, record) = news.returned(completion).unwrap();
+        assert_eq!(actual_owner, owner);
+        assert_eq!(
+            cursor.sequence, second,
+            "live callback scanned unrelated WAL records before its known parent"
+        );
+        assert!(
+            matches!(record.source, Some((owners, CallbackEvent::Order { update: OrderUpdate::Ack(ack) })) if owners == vec![owner] && ack.client_order_id == "second")
+        );
+    }
+
+    #[tokio::test]
+    async fn caught_up_owner_moves_to_new_source_while_other_owner_keeps_first_unread() {
+        let path = crate::testpath::temp_path("live-source-distinct-owner-frontiers");
+        let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+        let mut news = OrderNews::default();
+        news.attach(wal.callback_reader().unwrap().unwrap(), &[], 2)
+            .unwrap();
+        unrelated_prefix(&mut wal);
+        let owners = [StrategyId(0), StrategyId(1)];
+        let first = wal
+            .append(&ack_source("shared-first", owners.to_vec()))
+            .unwrap();
+        news.record(first, &owners).unwrap();
+        news.accepted(owners[0], news.origin(first).unwrap());
+        unrelated_prefix(&mut wal);
+        let second = wal
+            .append(&ack_source("shared-second", owners.to_vec()))
+            .unwrap();
+        news.record(second, &owners).unwrap();
+        wal.flush().unwrap();
+        for (owner, expected) in [(owners[0], second), (owners[1], first)] {
+            news.start_read_for(|candidate| candidate == owner);
+            let completion = news.completed.recv().await.unwrap();
+            let (actual, cursor, record) = news.returned(completion).unwrap();
+            assert_eq!(actual, owner);
+            assert_eq!(
+                cursor.sequence, expected,
+                "source cursor skipped an unread owner or scanned irrelevant history"
+            );
+            assert!(record.source.unwrap().0.contains(&owner));
+        }
+    }
+
+    #[tokio::test]
+    async fn directly_positioned_source_still_checks_its_real_frame_crc() {
+        use std::os::unix::fs::FileExt;
+        let path = crate::testpath::temp_path("live-source-corrupt-crc");
+        let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+        let owner = StrategyId(0);
+        let mut news = OrderNews::default();
+        news.attach(wal.callback_reader().unwrap().unwrap(), &[], 1)
+            .unwrap();
+        unrelated_prefix(&mut wal);
+        let offset = wal.segment_size();
+        let sequence = wal.append(&ack_source("bad-crc", vec![owner])).unwrap();
+        news.record(sequence, &[owner]).unwrap();
+        wal.flush().unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut crc_byte = [0];
+        file.read_exact_at(&mut crc_byte, offset + 4).unwrap();
+        crc_byte[0] ^= 1;
+        file.write_all_at(&crc_byte, offset + 4).unwrap();
+        news.start_read();
+        let completion = news.completed.recv().await.unwrap();
+        assert!(
+            matches!(completion.result, Err(WalError::Corrupt { .. })),
+            "known live source bypassed validation or read unrelated history"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_byte_cursor_reads_the_exact_target_and_survives_a_serialized_frontier() {
+        struct ExactCursorReader {
+            inner: Box<dyn CallbackWalReader>,
+            expected: CallbackWalCursor,
+        }
+        impl CallbackWalReader for ExactCursorReader {
+            fn start(&self) -> CallbackWalCursor {
+                self.inner.start()
+            }
+            fn next(
+                &mut self,
+                cursor: CallbackWalCursor,
+            ) -> Result<Option<CallbackWalRecord>, WalError> {
+                assert_eq!(
+                    cursor, self.expected,
+                    "live source must not locate its offset by walking old frame headers"
+                );
+                self.inner.next(cursor)
+            }
+        }
+        let path = crate::testpath::temp_path("live-source-exact-offset");
+        let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+        let owner = StrategyId(0);
+        unrelated_prefix(&mut wal);
+        let offset = wal.segment_size();
+        let sequence = wal
+            .append(&ack_source("exact-offset", vec![owner]))
+            .unwrap();
+        let reader = wal.callback_reader().unwrap().unwrap();
+        let expected = CallbackWalCursor {
+            segment: reader.start().segment,
+            sequence,
+            offset,
+        };
+        let mut news = OrderNews::default();
+        news.attach(
+            Box::new(ExactCursorReader {
+                inner: reader,
+                expected,
+            }),
+            &[],
+            1,
+        )
+        .unwrap();
+        news.record_at(sequence, offset, &[owner]).unwrap();
+        let encoded = serde_json::to_vec(&news.snapshot()).unwrap();
+        let restored: Vec<engine_types::strategy_process::CallbackSourceFrontier> =
+            serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored[0].cursor, expected);
+        let params = toml::from_str("symbol='BTCUSDT'\nevery_s=60\nenabled=false").unwrap();
+        let strategy = engine_strategies::build_strategy("probe", owner, &params).unwrap();
+        let (engine, _) = crate::tests::callback_test_fixture(vec![strategy]).await;
+        let mut base = engine.rotation_base(1);
+        let WalRecord::SegmentBase {
+            strategy_callback_sources,
+            ..
+        } = &mut base
+        else {
+            unreachable!()
+        };
+        *strategy_callback_sources = restored;
+        wal.rotate(&base).unwrap();
+        drop(news);
+        drop(wal);
+        let (mut wal, rows) = engine_wal::open_current(&path).unwrap();
+        let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
+        let mut news = OrderNews::default();
+        news.attach(
+            Box::new(ExactCursorReader {
+                inner: wal.callback_reader().unwrap().unwrap(),
+                expected,
+            }),
+            &rows,
+            1,
+        )
+        .unwrap();
+        news.start_read();
+        let completion = news.completed.recv().await.unwrap();
+        let (actual_owner, cursor, record) = news.returned(completion).unwrap();
+        assert_eq!(actual_owner, owner);
+        assert_eq!(cursor, expected);
+        assert!(
+            matches!(record.source, Some((owners, CallbackEvent::Order { update: OrderUpdate::Ack(ack) })) if owners == vec![owner] && ack.client_order_id == "exact-offset")
         );
     }
 }

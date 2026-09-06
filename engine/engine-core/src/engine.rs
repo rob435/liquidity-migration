@@ -768,7 +768,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.drain(clock::now_ns()).await?;
 
         let stopped_by = loop {
-            let timer_deadline = self.host.timers.next_deadline();
+            let timer_deadline = self.host.next_timer_deadline();
             let timer_wait = timer_deadline
                 .map(|deadline| Duration::from_nanos(deadline.saturating_sub(clock::now_ns())));
 

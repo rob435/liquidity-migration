@@ -1,0 +1,786 @@
+{
+  "provenance": {
+    "source_sha256": "bcd5a94229ccaf03caa3d3fee4b01d9ab03b5ce82a127fd60f84b2e10e4bcd44",
+    "deployed_commit": "af09aab53fc13cf53f66c393931c0ecccd765598",
+    "selection": "Captured TAOUSDT configuration, pending state, prepared quote, OrderSent, ACK and authoritative Fill. Other symbols/checkpoints are omitted. Original symbol IDs, quantities, fees, times and order identities remain. Runtime payload is decoded for review. The test reconstructs the uncaptured ACK snapshot from replayed engine books; it is not an actual durable aborted invocation.",
+    "frame_checksums_validated_by_capture": false
+  },
+  "cases": [
+    {
+      "realm": "demo",
+      "source_file": "engine.wal.000039",
+      "source_offsets": {
+        "prepared_quote": 204051926,
+        "valid_transition": 204210026,
+        "order_sent": 204239429,
+        "ack": 204240987,
+        "fill": 204241377
+      },
+      "process": {
+        "strategy": 1,
+        "last_callback_id": 2666231,
+        "runtime": {
+          "schema_version": 1,
+          "kind": "long_native",
+          "configuration_sha256": "16b3eadbc32cf18fd2dc9522bf7c2d5ef930ad67a4e4b31b600ba73a22bdc51c"
+        },
+        "timers": [
+          {
+            "id": 1280265799,
+            "deadline_ns": 1249533474220,
+            "deadline_wall_ms": 1788717964637
+          }
+        ],
+        "retained_signal_subscriptions": [
+          {
+            "symbol": "TAOUSDT",
+            "feed": "Quote"
+          },
+          {
+            "symbol": "TAOUSDT",
+            "feed": "Ticker"
+          }
+        ]
+      },
+      "runtime_payload": {
+        "core": {
+          "blockers": {},
+          "checkpoint_fingerprint": "c2592b3b11f194796cc2845955e1e22fde5b379c1ef9bd46a75b464670bdb9fc",
+          "config": {
+            "book_validity_ms": 3600000,
+            "engine_entry_cutoff_ms": 900000,
+            "entries_enabled": true,
+            "entry_floor_usdt": 6.0,
+            "entry_leverage": 5.0,
+            "environment": "demo",
+            "feature_contract_sha256": "1b9f6fc251f1f2a57a9cd92b9fa39786336384e1db021342efb9a314c923d0b7",
+            "give_up_instead_of_crossing": false,
+            "hold_decision_price": false,
+            "max_new_entries_per_cycle": 5,
+            "notional_multiplier": 6.0,
+            "operational_profile_sha256": "00ff1d9ae66ad9d51e81d7f3e7d14cb62c6646f3d2f1b88a05fffb709c20d9c5",
+            "order_notional_pct_equity": 0.0,
+            "profile_name": "v12",
+            "resize_floor_fraction": 0.05,
+            "resize_floor_usdt": 1.0,
+            "rest_entries": false,
+            "rule": {
+              "cooldown_days": 7,
+              "entry_delay_hours": 1,
+              "execution_strategy_id": "long_native_v12_wide_stop",
+              "fc_atr_stop_mult": 3.0,
+              "fc_close_loc_multi_day": 0.6,
+              "fc_max_atr_pct": 0.12,
+              "fc_max_hold_days": 3,
+              "fc_min_close_location": 0.7,
+              "fc_min_day_return": 0.15,
+              "fc_sigma_mult": 2.5,
+              "fc_sniper_deadline_hours": 6,
+              "fc_sniper_retrace_pct": 0.01,
+              "fc_stop_time_decay_atr_mult": 1.5,
+              "fc_stop_time_decay_hours": 48,
+              "fc_top_volume_rank_max": 10.0,
+              "gross_exposure": 1.0,
+              "max_concurrent_positions": 10,
+              "max_position_weight": 0.3,
+              "vol_floor_annual": 0.3,
+              "vol_target_annual": 0.6,
+              "vol_target_max_scale": 1.25,
+              "vol_target_min_scale": 0.3,
+              "weekend_size_mult": 1.5
+            },
+            "rule_sha256": "a17751aec0655d51fc45f975a53c6b30ded359ce75b4cd72782f94173339405b",
+            "schema_version": 1,
+            "signal_freshness_ms": 86400000,
+            "wallet_balance_fraction": 1.0
+          },
+          "flatten_request_id": null,
+          "id": 1,
+          "last_error": null,
+          "restored": true,
+          "state": {
+            "attempted_signal_ts_ms": {
+              "TAOUSDT": 1788717600000
+            },
+            "cooldown_until_ms": {},
+            "entry_cycle_selected_symbols": [
+              "TAOUSDT"
+            ],
+            "entry_cycle_started_ms": 1788717904637,
+            "exit_pending": [],
+            "pending_signals": {},
+            "refused_entries": [],
+            "schema_version": 1,
+            "symbols": {
+              "TAOUSDT": {
+                "active_positions": 3,
+                "attempted_signal_ts_ms": 1788717600000,
+                "cooldown_until_ms": 0,
+                "decayed_stop_loss_fraction": 0.10755,
+                "entry_price": 257.515,
+                "entry_ts_ms": 0,
+                "entry_valid_until_ms": 1788721523666,
+                "filled": false,
+                "max_hold_deadline_ts_ms": 0,
+                "max_hold_duration_ms": 259200000,
+                "requested": true,
+                "stop_decay_after_ms": 172800000,
+                "stop_loss_fraction": 0.2151,
+                "target_notional_usdt": 821.9034322641935
+              }
+            }
+          }
+        }
+      },
+      "prepared_quote": {
+        "callback_id": 2666231,
+        "strategy": 1,
+        "event": {
+          "kind": "quote",
+          "symbol": 114,
+          "quote": {
+            "bid_px": 257.51,
+            "bid_qty": 0.02,
+            "ask_px": 257.52,
+            "ask_qty": 0.431,
+            "venue_ts_ms": 1788717923622,
+            "recv_ns": 1208534890903,
+            "seq": 277874858217
+          }
+        },
+        "preparation": {
+          "phase": "prepared",
+          "snapshot": {
+            "strategy": 1,
+            "now_ns": 1208561894284,
+            "wall_ms": 1788717923666,
+            "entries_enabled": true,
+            "account": {
+              "equity_usdt": 1774.0271187,
+              "available_margin_usdt": 1074.60310602,
+              "observed_ns": 1207161143901
+            },
+            "symbols": [
+              {
+                "id": 114,
+                "name": "TAOUSDT",
+                "quote": {
+                  "bid_px": 257.51,
+                  "bid_qty": 0.02,
+                  "ask_px": 257.52,
+                  "ask_qty": 0.233,
+                  "venue_ts_ms": 1788717923663,
+                  "recv_ns": 1208561743252,
+                  "seq": 277874858320
+                },
+                "depth": {
+                  "bids": [],
+                  "asks": [],
+                  "update_id": 0,
+                  "seq": 0,
+                  "venue_ts_ms": 0,
+                  "recv_ns": 0
+                },
+                "trades": {
+                  "buy_qty": 0.0,
+                  "sell_qty": 0.0,
+                  "last_px": 0.0,
+                  "trade_count": 0,
+                  "seq": 0,
+                  "venue_ts_ms": 0,
+                  "recv_ns": 0
+                },
+                "ticker": {
+                  "last_px": 257.57,
+                  "mark_px": 257.35,
+                  "index_px": 257.24,
+                  "funding_rate": 5e-05,
+                  "next_funding_ms": 1788724800000,
+                  "venue_ts_ms": 1788717923634,
+                  "recv_ns": 1208538259735
+                },
+                "instrument": {
+                  "tick_size": 0.01,
+                  "qty_step": 0.001,
+                  "min_qty": 0.001,
+                  "min_notional": 5.0
+                },
+                "position": null,
+                "foreign_position": false,
+                "my_position": 0.0,
+                "exact_my_position": {
+                  "n": "0",
+                  "d": "1"
+                },
+                "in_flight": 0.0,
+                "exact_in_flight": {
+                  "n": "0",
+                  "d": "1"
+                },
+                "facts": null,
+                "checkpoint": null
+              }
+            ],
+            "orders": [],
+            "global_checkpoint": null,
+            "strategy_names": [
+              "carry",
+              "long",
+              "exodus",
+              "probe"
+            ],
+            "strategy_events": []
+          }
+        }
+      },
+      "order_sent": {
+        "kind": "order_sent_v2",
+        "dispatch": {
+          "intent": {
+            "strategy": 1,
+            "symbol": 114,
+            "side": "Buy",
+            "qty": 3.191,
+            "exact_quantity": {
+              "n": "3191",
+              "d": "1000"
+            },
+            "exact_prices": {
+              "limit_price": null,
+              "stop_trigger_price": {
+                "n": "20213",
+                "d": "100"
+              }
+            },
+            "kind": "Market",
+            "stop": {
+              "trigger_px": 202.13
+            },
+            "reduce_only": false,
+            "tag": "long-native-llm-gate-wide",
+            "decided_ns": 1208566590079,
+            "work": null,
+            "leverage": 5.0
+          },
+          "origin_ns": 1208534890903
+        },
+        "request": {
+          "exact_terms": {
+            "quantity": {
+              "n": "3191",
+              "d": "1000"
+            },
+            "limit_price": null,
+            "stop_trigger_price": {
+              "n": "20213",
+              "d": "100"
+            },
+            "physical_stop_trigger_price": {
+              "n": "20213",
+              "d": "100"
+            },
+            "input_policy": "StrategyShortestDecimal"
+          },
+          "sleeve_effect": {
+            "kind": "increase",
+            "stop": {
+              "trigger_px": 202.13
+            }
+          },
+          "client_order_id": "eng-1788716715000-2",
+          "strategy": 1,
+          "symbol": 114,
+          "side": "Buy",
+          "qty": 3.191,
+          "kind": "Market",
+          "stop": {
+            "trigger_px": 202.13
+          },
+          "reduce_only": false,
+          "close_position": false
+        },
+        "wire_ns": 1208583443902,
+        "arrival_mid": 257.515
+      },
+      "ack": {
+        "kind": "order_update_v2",
+        "callbacks": [
+          1
+        ],
+        "update": {
+          "Ack": {
+            "client_order_id": "eng-1788716715000-2",
+            "venue_order_id": "af837233-3ab5-49bb-b7e1-51162197f5e3",
+            "sent_ns": 0,
+            "ack_ns": 1208598466217
+          }
+        }
+      },
+      "fill": {
+        "kind": "order_update_v2",
+        "callbacks": [
+          1
+        ],
+        "update": {
+          "Fill": {
+            "allocation": {
+              "policy": "direct_order",
+              "slices": [
+                {
+                  "strategy": 1,
+                  "strategy_key": "long",
+                  "quantity": {
+                    "n": "3191",
+                    "d": "1000"
+                  },
+                  "fee": {
+                    "asset": {
+                      "Named": "USDT"
+                    },
+                    "amount": {
+                      "value": {
+                        "n": "45204823",
+                        "d": "100000000"
+                      },
+                      "provenance": "VenueDecimal"
+                    }
+                  }
+                }
+              ]
+            },
+            "exec_id": "6b82c931-1255-4394-a226-b0595320123c",
+            "client_order_id": "eng-1788716715000-2",
+            "symbol": 114,
+            "side": "Buy",
+            "qty": 3.191,
+            "px": 257.57,
+            "fee": 0.45204823,
+            "amounts": {
+              "settlement_asset": {
+                "Named": "USDT"
+              },
+              "quantity": {
+                "value": {
+                  "n": "3191",
+                  "d": "1000"
+                },
+                "provenance": "VenueDecimal"
+              },
+              "price": {
+                "value": {
+                  "n": "25757",
+                  "d": "100"
+                },
+                "provenance": "VenueDecimal"
+              },
+              "fee": {
+                "asset": {
+                  "Named": "USDT"
+                },
+                "amount": {
+                  "value": {
+                    "n": "45204823",
+                    "d": "100000000"
+                  },
+                  "provenance": "VenueDecimal"
+                }
+              }
+            },
+            "is_maker": false,
+            "forced_close": null,
+            "venue_ts_ms": 1788717923700,
+            "recv_ns": 1208599111723
+          }
+        }
+      }
+    },
+    {
+      "realm": "mainnet",
+      "source_file": "engine.wal.000039",
+      "source_offsets": {
+        "prepared_quote": 144369764,
+        "valid_transition": 144529001,
+        "order_sent": 144557721,
+        "ack": 144559276,
+        "fill": 144560313
+      },
+      "process": {
+        "strategy": 1,
+        "last_callback_id": 2619664,
+        "runtime": {
+          "schema_version": 1,
+          "kind": "long_native",
+          "configuration_sha256": "2777cdb6e0c658a164ca2edb1a4f41198cbaf772df1176410ccddd77c39ceb98"
+        },
+        "timers": [
+          {
+            "id": 1280265799,
+            "deadline_ns": 1207099159953,
+            "deadline_wall_ms": 1788717957384
+          }
+        ],
+        "retained_signal_subscriptions": [
+          {
+            "symbol": "TAOUSDT",
+            "feed": "Quote"
+          },
+          {
+            "symbol": "TAOUSDT",
+            "feed": "Ticker"
+          }
+        ]
+      },
+      "runtime_payload": {
+        "core": {
+          "blockers": {},
+          "checkpoint_fingerprint": "c000ea7038bbaef727b31037e23fd3912acac2a0cc29ed14ad7b1381c460309f",
+          "config": {
+            "book_validity_ms": 3600000,
+            "engine_entry_cutoff_ms": 900000,
+            "entries_enabled": true,
+            "entry_floor_usdt": 6.0,
+            "entry_leverage": 5.0,
+            "environment": "mainnet",
+            "feature_contract_sha256": "1b9f6fc251f1f2a57a9cd92b9fa39786336384e1db021342efb9a314c923d0b7",
+            "give_up_instead_of_crossing": false,
+            "hold_decision_price": false,
+            "max_new_entries_per_cycle": 5,
+            "notional_multiplier": 6.0,
+            "operational_profile_sha256": "00ff1d9ae66ad9d51e81d7f3e7d14cb62c6646f3d2f1b88a05fffb709c20d9c5",
+            "order_notional_pct_equity": 0.0,
+            "profile_name": "v12",
+            "resize_floor_fraction": 0.05,
+            "resize_floor_usdt": 1.0,
+            "rest_entries": false,
+            "rule": {
+              "cooldown_days": 7,
+              "entry_delay_hours": 1,
+              "execution_strategy_id": "long_native_v12_wide_stop",
+              "fc_atr_stop_mult": 3.0,
+              "fc_close_loc_multi_day": 0.6,
+              "fc_max_atr_pct": 0.12,
+              "fc_max_hold_days": 3,
+              "fc_min_close_location": 0.7,
+              "fc_min_day_return": 0.15,
+              "fc_sigma_mult": 2.5,
+              "fc_sniper_deadline_hours": 6,
+              "fc_sniper_retrace_pct": 0.01,
+              "fc_stop_time_decay_atr_mult": 1.5,
+              "fc_stop_time_decay_hours": 48,
+              "fc_top_volume_rank_max": 10.0,
+              "gross_exposure": 1.0,
+              "max_concurrent_positions": 10,
+              "max_position_weight": 0.3,
+              "vol_floor_annual": 0.3,
+              "vol_target_annual": 0.6,
+              "vol_target_max_scale": 1.25,
+              "vol_target_min_scale": 0.3,
+              "weekend_size_mult": 1.5
+            },
+            "rule_sha256": "a17751aec0655d51fc45f975a53c6b30ded359ce75b4cd72782f94173339405b",
+            "schema_version": 1,
+            "signal_freshness_ms": 86400000,
+            "wallet_balance_fraction": 1.0
+          },
+          "flatten_request_id": null,
+          "id": 1,
+          "last_error": null,
+          "restored": true,
+          "state": {
+            "attempted_signal_ts_ms": {
+              "TAOUSDT": 1788717600000
+            },
+            "cooldown_until_ms": {},
+            "entry_cycle_selected_symbols": [
+              "TAOUSDT"
+            ],
+            "entry_cycle_started_ms": 1788717897384,
+            "exit_pending": [],
+            "pending_signals": {},
+            "refused_entries": [],
+            "schema_version": 1,
+            "symbols": {
+              "TAOUSDT": {
+                "active_positions": 3,
+                "attempted_signal_ts_ms": 1788717600000,
+                "cooldown_until_ms": 0,
+                "decayed_stop_loss_fraction": 0.10755,
+                "entry_price": 257.765,
+                "entry_ts_ms": 0,
+                "entry_valid_until_ms": 1788721544468,
+                "filled": false,
+                "max_hold_deadline_ts_ms": 0,
+                "max_hold_duration_ms": 259200000,
+                "requested": true,
+                "stop_decay_after_ms": 172800000,
+                "stop_loss_fraction": 0.2151,
+                "target_notional_usdt": 64.03379759294621
+              }
+            }
+          }
+        }
+      },
+      "prepared_quote": {
+        "callback_id": 2619664,
+        "strategy": 1,
+        "event": {
+          "kind": "quote",
+          "symbol": 137,
+          "quote": {
+            "bid_px": 257.76,
+            "bid_qty": 1.152,
+            "ask_px": 257.77,
+            "ask_qty": 4.437,
+            "venue_ts_ms": 1788717943958,
+            "recv_ns": 1194174850758,
+            "seq": 277874889136
+          }
+        },
+        "preparation": {
+          "phase": "prepared",
+          "snapshot": {
+            "strategy": 1,
+            "now_ns": 1194182938376,
+            "wall_ms": 1788717944468,
+            "entries_enabled": true,
+            "account": {
+              "equity_usdt": 138.21294447,
+              "available_margin_usdt": 84.47120572,
+              "observed_ns": 1192151604291
+            },
+            "symbols": [
+              {
+                "id": 137,
+                "name": "TAOUSDT",
+                "quote": {
+                  "bid_px": 257.76,
+                  "bid_qty": 1.152,
+                  "ask_px": 257.77,
+                  "ask_qty": 4.437,
+                  "venue_ts_ms": 1788717943958,
+                  "recv_ns": 1194174850758,
+                  "seq": 277874889136
+                },
+                "depth": {
+                  "bids": [],
+                  "asks": [],
+                  "update_id": 0,
+                  "seq": 0,
+                  "venue_ts_ms": 0,
+                  "recv_ns": 0
+                },
+                "trades": {
+                  "buy_qty": 0.0,
+                  "sell_qty": 0.0,
+                  "last_px": 0.0,
+                  "trade_count": 0,
+                  "seq": 0,
+                  "venue_ts_ms": 0,
+                  "recv_ns": 0
+                },
+                "ticker": {
+                  "last_px": 257.76,
+                  "mark_px": 257.77,
+                  "index_px": 257.64,
+                  "funding_rate": 5e-05,
+                  "next_funding_ms": 1788724800000,
+                  "venue_ts_ms": 1788717944433,
+                  "recv_ns": 1194178285801
+                },
+                "instrument": {
+                  "tick_size": 0.01,
+                  "qty_step": 0.001,
+                  "min_qty": 0.001,
+                  "min_notional": 5.0
+                },
+                "position": null,
+                "foreign_position": false,
+                "my_position": 0.0,
+                "exact_my_position": {
+                  "n": "0",
+                  "d": "1"
+                },
+                "in_flight": 0.0,
+                "exact_in_flight": {
+                  "n": "0",
+                  "d": "1"
+                },
+                "facts": null,
+                "checkpoint": null
+              }
+            ],
+            "orders": [],
+            "global_checkpoint": null,
+            "strategy_names": [
+              "carry",
+              "long",
+              "exodus",
+              "maker_canary"
+            ],
+            "strategy_events": []
+          }
+        }
+      },
+      "order_sent": {
+        "kind": "order_sent_v2",
+        "dispatch": {
+          "intent": {
+            "strategy": 1,
+            "symbol": 137,
+            "side": "Buy",
+            "qty": 0.248,
+            "exact_quantity": {
+              "n": "31",
+              "d": "125"
+            },
+            "exact_prices": {
+              "limit_price": null,
+              "stop_trigger_price": {
+                "n": "5058",
+                "d": "25"
+              }
+            },
+            "kind": "Market",
+            "stop": {
+              "trigger_px": 202.32
+            },
+            "reduce_only": false,
+            "tag": "long-native-llm-gate-wide",
+            "decided_ns": 1194186811804,
+            "work": null,
+            "leverage": 5.0
+          },
+          "origin_ns": 1194174850758
+        },
+        "request": {
+          "exact_terms": {
+            "quantity": {
+              "n": "31",
+              "d": "125"
+            },
+            "limit_price": null,
+            "stop_trigger_price": {
+              "n": "5058",
+              "d": "25"
+            },
+            "physical_stop_trigger_price": {
+              "n": "5058",
+              "d": "25"
+            },
+            "input_policy": "StrategyShortestDecimal"
+          },
+          "sleeve_effect": {
+            "kind": "increase",
+            "stop": {
+              "trigger_px": 202.32
+            }
+          },
+          "client_order_id": "eng-1788716750000-1",
+          "strategy": 1,
+          "symbol": 137,
+          "side": "Buy",
+          "qty": 0.248,
+          "kind": "Market",
+          "stop": {
+            "trigger_px": 202.32
+          },
+          "reduce_only": false,
+          "close_position": false
+        },
+        "wire_ns": 1194204481194,
+        "arrival_mid": 257.765
+      },
+      "ack": {
+        "kind": "order_update_v2",
+        "callbacks": [
+          1
+        ],
+        "update": {
+          "Ack": {
+            "client_order_id": "eng-1788716750000-1",
+            "venue_order_id": "962ce157-8321-4e5a-8091-6a173584bcf9",
+            "sent_ns": 1194210711064,
+            "ack_ns": 1194220318467
+          }
+        }
+      },
+      "fill": {
+        "kind": "order_update_v2",
+        "callbacks": [
+          1
+        ],
+        "update": {
+          "Fill": {
+            "allocation": {
+              "policy": "direct_order",
+              "slices": [
+                {
+                  "strategy": 1,
+                  "strategy_key": "long",
+                  "quantity": {
+                    "n": "31",
+                    "d": "125"
+                  },
+                  "fee": {
+                    "asset": {
+                      "Named": "USDT"
+                    },
+                    "amount": {
+                      "value": {
+                        "n": "799087",
+                        "d": "12500000"
+                      },
+                      "provenance": "VenueDecimal"
+                    }
+                  }
+                }
+              ]
+            },
+            "exec_id": "1156dc22-c974-5cd7-9398-6d36b41923f4",
+            "client_order_id": "eng-1788716750000-1",
+            "symbol": 137,
+            "side": "Buy",
+            "qty": 0.248,
+            "px": 257.77,
+            "fee": 0.06392696,
+            "amounts": {
+              "settlement_asset": {
+                "Named": "USDT"
+              },
+              "quantity": {
+                "value": {
+                  "n": "31",
+                  "d": "125"
+                },
+                "provenance": "VenueDecimal"
+              },
+              "price": {
+                "value": {
+                  "n": "25777",
+                  "d": "100"
+                },
+                "provenance": "VenueDecimal"
+              },
+              "fee": {
+                "asset": {
+                  "Named": "USDT"
+                },
+                "amount": {
+                  "value": {
+                    "n": "799087",
+                    "d": "12500000"
+                  },
+                  "provenance": "VenueDecimal"
+                }
+              }
+            },
+            "is_maker": false,
+            "forced_close": null,
+            "venue_ts_ms": 1788717944504,
+            "recv_ns": 1194222179635
+          }
+        }
+      }
+    }
+  ]
+}

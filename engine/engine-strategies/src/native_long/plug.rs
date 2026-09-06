@@ -195,21 +195,41 @@ impl NativeLong {
         decisions: Vec<DecisionInput>,
         signal_receipt: Option<(String, u64, String)>,
         ctx: &dyn StrategyCtx,
-    ) -> BatchInput {
+    ) -> Result<BatchInput, &'static str> {
         let mut symbols = self.known_symbols(ctx);
         symbols.extend(decisions.iter().map(|row| row.symbol.clone()));
         let (working, opening) = owned_order_state(ctx);
         symbols.extend(working.iter().cloned());
-        BatchInput {
+        let mut executed_positions = BTreeMap::new();
+        for name in &symbols {
+            let Some(symbol) = ctx.symbol_id(name) else {
+                continue;
+            };
+            let quantity = ctx
+                .my_position_exact(symbol)
+                .map_err(|_| "LONG executed quantity is invalid")?;
+            if quantity.is_zero() {
+                continue;
+            }
+            let facts = ctx.my_position_facts(symbol);
+            let basis = match facts.as_ref().and_then(|facts| facts.allocated.as_ref()) {
+                Some(allocated) => allocated.entry_px,
+                None => ctx.position(symbol).map(|position| position.entry_px),
+            }
+            .filter(|price| price.is_finite() && *price > 0.0);
+            executed_positions.insert(name.clone(), basis);
+        }
+        Ok(BatchInput {
             now_ms: ctx.wall_ms().max(1),
             decisions,
             facts: planner_facts(ctx, &symbols),
+            executed_positions,
             owned_working_symbols: working,
             owned_opening_order_ids: opening,
             checkpoint_fingerprint: self.core.checkpoint_fingerprint.clone(),
             signal_receipt,
             replace_gate_pending: false,
-        }
+        })
     }
 
     fn apply(&mut self, output: BatchOutput, ctx: &mut dyn StrategyCtx) {
@@ -281,7 +301,13 @@ impl NativeLong {
         if decisions.is_empty() && self.core.checkpoint_fingerprint.is_none() {
             return;
         }
-        let input = self.make_input(decisions, None, ctx);
+        let input = match self.make_input(decisions, None, ctx) {
+            Ok(input) => input,
+            Err(error) => {
+                self.core.last_error = Some(error.to_owned());
+                return;
+            }
+        };
         let config = self.effective_config(ctx);
         match reduce_batch_with_mode(input, self.core.state.clone(), &config, replan_mode) {
             Ok(output) => self.apply(output, ctx),
@@ -617,7 +643,9 @@ impl NativeLong {
             observation.sequence,
             observation.observation_id.clone(),
         ));
-        let mut input = self.make_input(decisions, receipt, ctx);
+        let mut input = self
+            .make_input(decisions, receipt, ctx)
+            .map_err(str::to_owned)?;
         for (symbol, mark) in mark_by_symbol {
             input.facts.prices.insert(symbol, mark);
         }
@@ -704,7 +732,9 @@ impl NativeLong {
             observation.sequence,
             observation.observation_id.clone(),
         ));
-        let mut input = self.make_input(decisions, receipt, ctx);
+        let mut input = self
+            .make_input(decisions, receipt, ctx)
+            .map_err(str::to_owned)?;
         input.replace_gate_pending = true;
         let config = self.effective_config(ctx);
         let output =
@@ -1234,6 +1264,165 @@ mod tests {
             ctx.arm_calls[0].due_ns - ctx.arm_calls[0].armed_ns,
             5_000_000_000
         );
+    }
+
+    fn requested_tao() -> SleeveState {
+        SleeveState {
+            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+            symbols: BTreeMap::from([(
+                "TAOUSDT".into(),
+                super::super::plan::PriorState {
+                    requested: true,
+                    entry_price: 257.57,
+                    target_notional_usdt: 3.191 * 257.57,
+                    stop_loss_fraction: 0.2151,
+                    max_hold_duration_ms: 2 * 86_400_000,
+                    entry_valid_until_ms: NOW_MS + 3_600_000,
+                    attempted_signal_ts_ms: NOW_MS - 1_000,
+                    ..super::super::plan::PriorState::default()
+                },
+            )]),
+            ..SleeveState::default()
+        }
+    }
+
+    fn pending_tao_context() -> MockCtx {
+        let mut ctx = MockCtx::new();
+        ctx.set_wall_ms(NOW_MS);
+        ctx.set_allocated_position("TAOUSDT", 0.0, None, None);
+        ctx.set_in_flight("TAOUSDT", 3.191);
+        ctx.set_rule(
+            "TAOUSDT",
+            engine_types::InstrumentRule {
+                tick_size: 0.01,
+                qty_step: 0.001,
+                min_qty: 0.001,
+                min_notional: 5.0,
+            },
+        );
+        ctx.resting.push(RestingSeed {
+            client_order_id: "pending-tao".into(),
+            symbol: ctx.id_of("TAOUSDT"),
+            side: Side::Buy,
+            kind: OrderKind::Market,
+            qty: 3.191,
+            filled_qty: 0.0,
+            reduce_only: false,
+            acked: true,
+        });
+        ctx
+    }
+
+    #[test]
+    fn an_acknowledged_opening_reservation_does_not_become_a_long_fill() {
+        let mut strategy = NativeLong::new(config(), requested_tao()).unwrap();
+        let mut ctx = pending_tao_context();
+        strategy.on_order(
+            &OrderUpdate::Ack(engine_types::OrderAck {
+                client_order_id: "pending-tao".into(),
+                venue_order_id: "venue-tao".into(),
+                sent_ns: 1,
+                ack_ns: 2,
+            }),
+            &mut ctx,
+        );
+        assert!(
+            strategy.core.state.validate().is_ok(),
+            "{:?}",
+            strategy.core.state
+        );
+        assert!(
+            !strategy.core.state.symbols["TAOUSDT"].filled,
+            "a reservation with zero executed inventory is not a fill"
+        );
+        assert_eq!(strategy.core.state.symbols["TAOUSDT"].entry_ts_ms, 0);
+        assert!(
+            !ctx.emitted.iter().any(|a| matches!(a, Action::Place(_))),
+            "the original opening remains reserved"
+        );
+        let mut restarted = NativeLong::new(config(), strategy.core.state.clone()).unwrap();
+        restarted.core.checkpoint_fingerprint = Some(config().fingerprint());
+        restarted.on_boot(&mut ctx);
+        assert!(restarted.core.state.validate().is_ok());
+        assert!(!restarted.core.state.symbols["TAOUSDT"].filled);
+
+        ctx.set_wall_ms(NOW_MS + 2_000);
+        ctx.set_allocated_position("TAOUSDT", 1.0, Some(257.57), Some(202.13));
+        ctx.set_in_flight("TAOUSDT", 2.191);
+        ctx.resting[0].filled_qty = 1.0;
+        restarted.replan(&mut ctx);
+        let prior = &restarted.core.state.symbols["TAOUSDT"];
+        assert!(prior.filled);
+        assert_eq!(prior.entry_ts_ms, NOW_MS + 2_000);
+        assert_eq!(prior.entry_price, 257.57);
+        assert!(restarted.core.state.validate().is_ok());
+    }
+
+    #[test]
+    fn a_pending_full_reduction_keeps_longs_executed_position_and_basis() {
+        let mut state = requested_tao();
+        let prior = state.symbols.get_mut("TAOUSDT").unwrap();
+        prior.filled = true;
+        prior.entry_ts_ms = NOW_MS - 5_000;
+        prior.max_hold_deadline_ts_ms = NOW_MS + 86_400_000;
+        let mut strategy = NativeLong::new(config(), state).unwrap();
+        let mut ctx = pending_tao_context();
+        ctx.set_allocated_position("TAOUSDT", 3.191, Some(258.0), Some(202.13));
+        ctx.set_in_flight("TAOUSDT", -3.191);
+        ctx.resting[0].side = Side::Sell;
+        ctx.resting[0].reduce_only = true;
+        strategy.replan(&mut ctx);
+        assert_eq!(
+            strategy.core.state.symbols["TAOUSDT"].entry_price, 258.0,
+            "a reserved full reduction must not hide actual inventory updates"
+        );
+        assert_eq!(
+            strategy.core.state.symbols["TAOUSDT"].entry_ts_ms,
+            NOW_MS - 5_000
+        );
+        assert!(strategy.core.state.validate().is_ok());
+        assert!(!ctx.emitted.iter().any(|a| matches!(a, Action::Place(_))));
+    }
+
+    #[test]
+    fn an_unknown_sleeve_basis_does_not_borrow_the_venue_basis() {
+        let mut strategy = NativeLong::new(config(), requested_tao()).unwrap();
+        let mut ctx = pending_tao_context();
+        ctx.set_position("TAOUSDT", Side::Buy, 10.0, 300.0);
+        ctx.set_allocated_position("TAOUSDT", 1.0, None, Some(202.13));
+        ctx.set_in_flight("TAOUSDT", 2.191);
+        let input = strategy.make_input(Vec::new(), None, &ctx).unwrap();
+        assert_eq!(input.executed_positions["TAOUSDT"], None);
+        strategy.replan(&mut ctx);
+        assert!(!strategy.core.state.symbols["TAOUSDT"].filled);
+        assert_eq!(strategy.core.state.symbols["TAOUSDT"].entry_ts_ms, 0);
+        assert!(strategy.core.state.validate().is_ok());
+        assert!(!ctx.emitted.iter().any(|a| matches!(a, Action::Place(_))));
+    }
+
+    #[test]
+    fn a_completed_long_reduction_retires_inventory_after_its_order_is_gone() {
+        let mut state = requested_tao();
+        let prior = state.symbols.get_mut("TAOUSDT").unwrap();
+        prior.filled = true;
+        prior.entry_ts_ms = NOW_MS - 5_000;
+        prior.max_hold_deadline_ts_ms = NOW_MS + 86_400_000;
+        state.exit_pending.insert("TAOUSDT".into());
+        let mut strategy = NativeLong::new(config(), state).unwrap();
+        let mut ctx = pending_tao_context();
+        ctx.set_in_flight("TAOUSDT", 0.0);
+        ctx.resting[0].side = Side::Sell;
+        ctx.resting[0].reduce_only = true;
+        strategy.replan(&mut ctx);
+        assert!(strategy.core.state.symbols.contains_key("TAOUSDT"));
+        assert!(strategy.core.state.exit_pending.contains("TAOUSDT"));
+        ctx.resting.clear();
+        strategy.replan(&mut ctx);
+        assert!(!strategy.core.state.symbols.contains_key("TAOUSDT"));
+        assert!(!strategy.core.state.exit_pending.contains("TAOUSDT"));
+        assert!(strategy.core.state.cooldown_until_ms["TAOUSDT"] > NOW_MS);
+        assert!(!ctx.emitted.iter().any(|a| matches!(a, Action::Place(_))));
+        assert!(strategy.core.state.validate().is_ok());
     }
 
     #[test]

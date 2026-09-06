@@ -73,17 +73,49 @@ impl Timers {
 
     /// Earliest deadline among the currently armed timers.
     pub fn next_deadline(&mut self) -> Option<u64> {
-        self.scheduled.first().map(|pending| pending.deadline_ns)
+        self.next_deadline_for(|_| true)
+    }
+
+    pub(crate) fn next_deadline_for(
+        &self,
+        mut ready: impl FnMut(StrategyId) -> bool,
+    ) -> Option<u64> {
+        self.scheduled
+            .iter()
+            .find(|pending| ready(StrategyId(pending.strategy)))
+            .map(|pending| pending.deadline_ns)
+    }
+
+    pub(crate) fn due_for(&self, strategy: StrategyId, now_ns: u64) -> bool {
+        self.scheduled
+            .iter()
+            .take_while(|pending| pending.deadline_ns <= now_ns)
+            .any(|pending| pending.strategy == strategy.0)
     }
 
     pub fn pop_due(&mut self, now_ns: u64) -> Option<(StrategyId, TimerId)> {
-        let top = self.scheduled.first().copied()?;
-        if top.deadline_ns > now_ns {
-            return None;
-        }
-        self.scheduled.pop_first();
+        self.pop_due_for(now_ns, |_| true)
+            .map(|(strategy, timer, _)| (strategy, timer))
+    }
+
+    pub(crate) fn pop_due_for(
+        &mut self,
+        now_ns: u64,
+        mut ready: impl FnMut(StrategyId) -> bool,
+    ) -> Option<(StrategyId, TimerId, u64)> {
+        let top = self
+            .scheduled
+            .iter()
+            .take_while(|pending| pending.deadline_ns <= now_ns)
+            .find(|pending| ready(StrategyId(pending.strategy)))
+            .copied()?;
+        self.scheduled.remove(&top);
         self.armed.remove(&(top.strategy, top.timer));
-        Some((StrategyId(top.strategy), TimerId(top.timer)))
+        Some((
+            StrategyId(top.strategy),
+            TimerId(top.timer),
+            top.deadline_ns,
+        ))
     }
 
     pub(crate) fn is_armed(&self, strategy: StrategyId, timer: TimerId) -> bool {
@@ -174,6 +206,15 @@ pub struct StrategyHost {
 }
 
 impl StrategyHost {
+    pub(crate) fn next_timer_deadline(&self) -> Option<u64> {
+        self.timers
+            .next_deadline_for(|strategy| self.timer_ready(strategy))
+    }
+
+    pub(crate) fn timer_ready(&self, strategy: StrategyId) -> bool {
+        !self.callbacks.isolated() || self.callbacks.timer_ready(strategy)
+    }
+
     pub(crate) fn snapshot(
         &mut self,
         books: &Books,
@@ -205,6 +246,13 @@ impl StrategyHost {
         now_ns: u64,
     ) -> bool {
         if self.callbacks.isolated() {
+            if matches!(event, EngineEvent::Market(_))
+                && self.timers.due_for(sid, now_ns)
+                && !self.callbacks.market_precedes_timer(sid)
+            {
+                self.callbacks.retry_inputs.remember(sid, event);
+                return true;
+            }
             if let Err(error) = self.callbacks.enqueue(sid, event) {
                 let crate::strategy_process::host::EnqueueError::Fault(error) = error else {
                     return false;
@@ -789,6 +837,24 @@ mod tests {
                 "restart={restarted}: only the unfilled remainder is pending"
             );
         }
+    }
+
+    #[test]
+    fn a_busy_timer_owner_does_not_hide_another_owners_deadline() {
+        let mut timers = Timers::default();
+        timers.arm(StrategyId(0), TimerId(1), 10);
+        timers.arm(StrategyId(1), TimerId(2), 20);
+        assert_eq!(
+            timers.next_deadline_for(|owner| owner == StrategyId(1)),
+            Some(20)
+        );
+        assert_eq!(
+            timers.pop_due_for(20, |owner| owner == StrategyId(1)),
+            Some((StrategyId(1), TimerId(2), 20))
+        );
+        assert_eq!(timers.next_deadline(), Some(10));
+        assert_eq!(timers.pop_due_for(20, |_| false), None);
+        assert_eq!(timers.pop_due(20), Some((StrategyId(0), TimerId(1))));
     }
 
     #[test]

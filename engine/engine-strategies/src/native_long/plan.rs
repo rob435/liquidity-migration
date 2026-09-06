@@ -1016,6 +1016,8 @@ pub struct BatchInput {
     pub now_ms: i64,
     pub decisions: Vec<DecisionInput>,
     pub facts: PlannerFacts,
+    /// Executed sleeve inventory; None retains an explicitly unknown entry basis.
+    pub executed_positions: BTreeMap<String, Option<f64>>,
     pub owned_working_symbols: BTreeSet<String>,
     pub owned_opening_order_ids: BTreeMap<String, Vec<String>>,
     pub checkpoint_fingerprint: Option<String>,
@@ -1105,6 +1107,11 @@ pub fn reduce_batch_with_mode(
         state.schema_version = DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION;
     }
     state.validate()?;
+    if input.executed_positions.iter().any(|(symbol, basis)| {
+        !valid_symbol(symbol) || basis.is_some_and(|price| !price.is_finite() || price <= 0.0)
+    }) {
+        return Err("LONG executed inventory basis is invalid");
+    }
     if input.replace_gate_pending {
         state
             .pending_signals
@@ -1156,6 +1163,7 @@ pub fn reduce_batch_with_mode(
             .facts
             .held_symbols()
             .into_iter()
+            .chain(input.executed_positions.keys().cloned())
             .chain(input.owned_working_symbols.iter().cloned())
             .collect::<BTreeSet<_>>();
         for symbol in &recovery_symbols {
@@ -1223,7 +1231,9 @@ pub fn reduce_batch_with_mode(
             let mut updated = prior.clone();
             let retire_expired = output.action == DecisionAction::Exit
                 && output.reason == "entry_expired"
-                && !input.facts.held.contains_key(&decision_input.symbol)
+                && !input
+                    .executed_positions
+                    .contains_key(&decision_input.symbol)
                 && !input.owned_working_symbols.contains(&decision_input.symbol);
             match output.action {
                 DecisionAction::Enter => {
@@ -1277,7 +1287,9 @@ pub fn reduce_batch_with_mode(
             }
             let unresolved_open = (prior.requested || updated.requested)
                 && !updated.filled
-                && !input.facts.held.contains_key(&decision_input.symbol)
+                && !input
+                    .executed_positions
+                    .contains_key(&decision_input.symbol)
                 && !input.owned_working_symbols.contains(&decision_input.symbol)
                 && config.entries_enabled
                 && !mismatch
@@ -1460,15 +1472,15 @@ fn reconcile_attributed_positions(
     for symbol in known_symbols {
         let mut remove = false;
         if let Some(prior) = state.symbols.get_mut(&symbol) {
-            if let Some(holding) = input.facts.held.get(&symbol) {
-                if !prior.filled {
-                    prior.filled = true;
-                    prior.entry_ts_ms = input.now_ms;
-                    prior.entry_price = holding.entry_px;
-                    prior.max_hold_deadline_ts_ms =
-                        input.now_ms.saturating_add(prior.max_hold_duration_ms);
-                } else if holding.entry_px > 0.0 {
-                    prior.entry_price = holding.entry_px;
+            if let Some(basis) = input.executed_positions.get(&symbol) {
+                if let Some(entry_price) = basis {
+                    if !prior.filled {
+                        prior.filled = true;
+                        prior.entry_ts_ms = input.now_ms;
+                        prior.max_hold_deadline_ts_ms =
+                            input.now_ms.saturating_add(prior.max_hold_duration_ms);
+                    }
+                    prior.entry_price = *entry_price;
                 }
             } else if prior.filled && !input.owned_working_symbols.contains(&symbol) {
                 remove = true;
@@ -1564,7 +1576,8 @@ fn retire_resolved_history(state: &mut SleeveState, input: &BatchInput, config: 
     // An exit stays in the checkpoint until the venue is conclusively flat and
     // no owned entry remains. Only that joined fact retires the symbol.
     state.exit_pending.retain(|symbol| {
-        input.facts.held.contains_key(symbol) || input.owned_working_symbols.contains(symbol)
+        input.executed_positions.contains_key(symbol)
+            || input.owned_working_symbols.contains(symbol)
     });
     state
         .cooldown_until_ms
@@ -1825,6 +1838,11 @@ mod tests {
         );
         let output = reduce_batch(
             BatchInput {
+                executed_positions: facts
+                    .held
+                    .iter()
+                    .map(|(symbol, held)| (symbol.clone(), Some(held.entry_px)))
+                    .collect(),
                 now_ms: 1_000,
                 decisions: vec![],
                 facts,
@@ -1858,6 +1876,7 @@ mod tests {
         future.decision_ts_ms = generation - 1;
         let before = reduce_batch(
             BatchInput {
+                executed_positions: BTreeMap::new(),
                 now_ms: generation - 1,
                 decisions: vec![future],
                 facts: entry_facts(&["BTCUSDT"]),
@@ -1897,6 +1916,7 @@ mod tests {
         let caught_up_at = generation + HOUR_MS;
         let after = reduce_batch(
             BatchInput {
+                executed_positions: BTreeMap::new(),
                 now_ms: caught_up_at,
                 decisions: vec![DecisionInput {
                     decision_ts_ms: caught_up_at,
@@ -1933,6 +1953,7 @@ mod tests {
         disabled.entries_enabled = false;
         let first = reduce_batch(
             BatchInput {
+                executed_positions: BTreeMap::new(),
                 now_ms: generation + HOUR_MS,
                 decisions: vec![entry_input("AUSDT", generation)],
                 facts: PlannerFacts::default(),
@@ -1952,6 +1973,7 @@ mod tests {
         enabled.max_new_entries_per_cycle = 1;
         let admitted = reduce_batch(
             BatchInput {
+                executed_positions: BTreeMap::new(),
                 now_ms: generation + HOUR_MS,
                 decisions: vec![
                     entry_input("AUSDT", generation),
@@ -1986,6 +2008,7 @@ mod tests {
             .expect("restart checkpoint");
         let repeated = reduce_batch(
             BatchInput {
+                executed_positions: BTreeMap::new(),
                 now_ms: generation + HOUR_MS,
                 decisions: vec![
                     entry_input("AUSDT", generation),
@@ -2031,6 +2054,7 @@ mod tests {
             .saturating_add(config.book_validity_ms)
             .saturating_sub(config.engine_entry_cutoff_ms);
         let make_input = |now_ms| BatchInput {
+            executed_positions: BTreeMap::new(),
             now_ms,
             decisions: vec![decision.clone()],
             facts: entry_facts(&["BTCUSDT"]),
@@ -2065,6 +2089,7 @@ mod tests {
             .collect::<Vec<_>>();
         let facts = entry_facts(&symbols);
         let input = || BatchInput {
+            executed_positions: BTreeMap::new(),
             now_ms: generation + HOUR_MS,
             decisions: decisions.clone(),
             facts: facts.clone(),
@@ -2207,6 +2232,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let input = BatchInput {
+            executed_positions: facts
+                .held
+                .iter()
+                .map(|(symbol, held)| (symbol.clone(), Some(held.entry_px)))
+                .collect(),
             now_ms,
             decisions,
             facts,
@@ -2312,6 +2342,11 @@ mod tests {
             );
             reduce_batch(
                 BatchInput {
+                    executed_positions: facts
+                        .held
+                        .iter()
+                        .map(|(symbol, held)| (symbol.clone(), Some(held.entry_px)))
+                        .collect(),
                     now_ms,
                     decisions: Vec::new(),
                     facts,
@@ -2356,6 +2391,7 @@ mod tests {
     fn checkpoint_mismatch_cancels_a_flat_working_opening_order() {
         let output = reduce_batch(
             BatchInput {
+                executed_positions: BTreeMap::new(),
                 now_ms: DAY_MS,
                 decisions: Vec::new(),
                 facts: PlannerFacts::default(),
@@ -2412,6 +2448,7 @@ mod tests {
 
     fn gate_batch(decisions: Vec<DecisionInput>, now_ms: i64, replace: bool) -> BatchInput {
         BatchInput {
+            executed_positions: BTreeMap::new(),
             now_ms,
             decisions,
             facts: entry_facts(&["BTCUSDT", "ETHUSDT"]),

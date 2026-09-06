@@ -83,6 +83,7 @@ pub struct CallbackHost {
     active: BTreeSet<StrategyId>,
     closing: bool,
     pub last_launched: Option<StrategyId>,
+    last_ordinary_was_timer: BTreeSet<StrategyId>,
     executable: Option<PathBuf>,
     processes: BTreeMap<StrategyId, StrategyProcess>,
     running: BTreeMap<StrategyId, u64>,
@@ -206,6 +207,7 @@ impl CallbackHost {
         Ok(Self {
             replayed_before: state.next_id,
             last_launched: None,
+            last_ordinary_was_timer: BTreeSet::new(),
             closing: false,
             write: None,
             durable,
@@ -278,6 +280,29 @@ impl CallbackHost {
                 .iter()
                 .any(|input| input.strategy == strategy)
             || matches!(&self.write, Some(CallbackWrite::Accept(inputs)) if inputs.iter().any(|(input, _)| input.strategy == strategy))
+    }
+
+    pub(crate) fn market_precedes_timer(&self, strategy: StrategyId) -> bool {
+        self.last_ordinary_was_timer.contains(&strategy)
+    }
+
+    pub(crate) fn timer_ready(&self, strategy: StrategyId) -> bool {
+        self.is_active(strategy)
+            && !self.closing
+            && !self.pending_for(strategy)
+            && !self.pending_boot.contains(&strategy)
+            && !self.order_news.unread_for(strategy)
+            && !self
+                .retry_inputs
+                .durable
+                .iter()
+                .any(|pending| pending.owner() == strategy)
+            && !(self.market_precedes_timer(strategy)
+                && self
+                    .retry_inputs
+                    .market
+                    .iter()
+                    .any(|(owner, _)| *owner == strategy))
     }
 
     pub fn isolated(&self) -> bool {
@@ -432,6 +457,19 @@ impl CallbackHost {
             .checked_add(1)
             .ok_or("strategy callback id exhausted")?;
         *self.unwritten_bytes.entry(strategy).or_default() += CallbackState::size(&input)?;
+        match input.event {
+            CallbackEvent::Timer { .. } => {
+                self.last_ordinary_was_timer.insert(strategy);
+            }
+            CallbackEvent::Quote { .. }
+            | CallbackEvent::Depth { .. }
+            | CallbackEvent::Trades { .. }
+            | CallbackEvent::Ticker { .. }
+            | CallbackEvent::FeedReset { .. } => {
+                self.last_ordinary_was_timer.remove(&strategy);
+            }
+            _ => {}
+        }
         self.unwritten.push_back(input);
         Ok(())
     }

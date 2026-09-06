@@ -69,6 +69,40 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     capture time: current wall time correctly triggers the captured LONG
     holding expiries and violates that fixture's stop-repair-only scope. All
     seven exact repairs, zero-order and accounting/replay assertions remain.
+  - Correction `af09aab5` passes 2,404 local release tests, strict Clippy, both
+    doctest profiles, six repeated heavy fault seeds and the copied-WAL
+    rehearsal. Three measured workloads complete 299/581/581 submits with no
+    risk refusal or barrier failure. The mandatory push gate passes 2,403
+    regular debug tests and 1,608 Python tests. Both Linux runs pass 2,408 tests;
+    workflow `34049060363` deploys the exact release artifact at 17:46:07 UTC.
+    Both workers are ready by 17:50:35 after startup coverage repair; all eight
+    positions retain their exact native stops and original entry permissions.
+  - The 18:00 demo probe still queues PULL 5.912 seconds late. A deferred
+    second ACK rereads unrelated WAL frames for 6.851 seconds, while busy
+    per-sleeve timers shift their deadline by one second and race market
+    callbacks. New callback sources retain their exact append offset; unread
+    owners retain their first source. Busy timers keep their deadline and
+    alternate with market callbacks through the existing owners.
+  - At 18:05:23/18:05:44 UTC, both LONG children abort with `LONG filled state
+    is invalid` after the TAO opening acknowledgement. Planning exposure
+    includes the unfilled reservation and incorrectly becomes a filled state
+    with no entry basis. LONG now reconciles fills and retirement against
+    executed sleeve inventory; reservations still constrain order sizing.
+    The existing heartbeat error field also includes callback-process faults.
+    All ten native positions retain exact full-size stops during repair.
+    Allocated fills also skip recording the opening order's logical stop,
+    leaving the canonical TAO sleeve stop empty while its native stop remains
+    attached. Repeated missing-stop reconciliation records latch both accounts
+    and add WAL traffic. The correction restores the owned stop before
+    callbacks and recovers already rotated sole-owner state from its explicit
+    same-side durable stop witness; reconciliation remains an explicit step.
+    The integrated residual fixture now explicitly omits its helper stop,
+    matching its unprotected starting state without changing quantity or
+    accounting assertions.
+  - Combined correction passes 2,426 debug and 2,426 release tests, strict
+    Clippy, both doctest profiles, six repeated heavy fault seeds and the
+    historical copied-WAL boot/rotation/reboot rehearsal. The source manifest
+    contains 662 unchanged implementation and check files.
 
 - **2026-09-06 08:07 UTC — Worker recovery, recorder finalization and rollback repair.**
   - Both workers on `cece1d9f` remain alive but degraded: hourly source pruning

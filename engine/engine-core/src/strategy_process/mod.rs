@@ -21,6 +21,9 @@ pub mod state;
 pub mod wire;
 pub mod worker;
 
+#[cfg(test)]
+mod long_restart_tests;
+
 pub const CALLBACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]

@@ -561,11 +561,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     recv_ns: clock::now_ns(),
                 },
             };
+            let offset = wal.segment_size();
             let sequence = wal.append(&ended)?;
             if let Some(owners) = owners {
                 callbacks
                     .order_news
-                    .record(sequence, &owners)
+                    .record_at(sequence, offset, &owners)
                     .map_err(EngineError::State)?;
             }
             orders.try_apply(&ended).map_err(EngineError::State)?;
@@ -964,6 +965,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     recv_ns: clock::now_ns(),
                 });
             }
+            let offset = wal.segment_size();
             let sequence = wal.append(&record)?;
             if let WalRecord::RecoveredFill {
                 callbacks: Some(owners),
@@ -972,7 +974,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             {
                 callbacks
                     .order_news
-                    .record(sequence, &owners.owners)
+                    .record_at(sequence, offset, &owners.owners)
                     .map_err(EngineError::State)?;
             }
             let owned = allocation.is_some();
@@ -1430,6 +1432,7 @@ mod callback_recovery_tests {
         let mut table = SymbolTable::default();
         table.intern("BTCUSDT");
         let mut ids = ExecutionIds::from_records(&replay, now).unwrap();
+        let source_offset = wal.segment_size();
         let _outcome = Engine::<
             engine_wal::WalWriter,
             crate::tests::MockRisk,
@@ -1455,6 +1458,11 @@ mod callback_recovery_tests {
         )
         .await
         .unwrap();
+        assert_eq!(
+            callbacks.order_news.snapshot()[0].cursor.offset,
+            source_offset,
+            "a newly recovered fill must retain its physical frame offset instead of scanning old headers"
+        );
         assert!(
             callbacks.order_news.unread_for(StrategyId(0)),
             "initial recovery fill has no durable callback retry owner"

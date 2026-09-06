@@ -206,6 +206,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     recv_ns,
                 });
             }
+            let offset = self.wal.segment_size();
             let sequence = self.wal.append(&record)?;
             if let Some(allocation) = allocation {
                 self.books
@@ -319,7 +320,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.risk
                     .complete_order(&exec.client_order_id, clock::now_ns());
             }
-            self.route_order_update(update, sequence, callbacks.as_deref())?;
+            self.route_order_update(update, sequence, offset, callbacks.as_deref())?;
             batch.recovered += 1;
         }
 

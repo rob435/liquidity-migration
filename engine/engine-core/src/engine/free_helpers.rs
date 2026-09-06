@@ -263,10 +263,16 @@ pub(crate) fn named_entry_blockers(
 pub(crate) fn named_strategy_errors(
     strategies: &[Box<dyn Strategy>],
     names: &[String],
+    callback_faults: &BTreeMap<StrategyId, String>,
 ) -> Vec<(String, String)> {
     let mut errors = Vec::new();
     for (index, strategy) in strategies.iter().enumerate() {
-        let Some(error) = strategy.health_error() else {
+        let Some(error) = u16::try_from(index)
+            .ok()
+            .and_then(|id| callback_faults.get(&StrategyId(id)))
+            .map(String::as_str)
+            .or_else(|| strategy.health_error())
+        else {
             continue;
         };
         let Some(strategy_name) = names.get(index) else {

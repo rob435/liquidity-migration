@@ -53,6 +53,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let StrategyHost {
             strategies,
             names,
+            callbacks,
             entries_enabled: runtime_entries_enabled,
             ..
         } = host;
@@ -77,7 +78,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // same symbol and need their own answer. Within one sleeve the first
         // reason wins, so its kernel refusal still outranks a planner skip.
         let blockers = named_entry_blockers(strategies, names);
-        let strategy_errors = named_strategy_errors(strategies, names);
+        let strategy_errors = named_strategy_errors(strategies, names, &callbacks.faults);
         // The rolling loss window is an account-wide gate the kernel applies
         // to every entry, so a sleeve whose own switches are all on is still
         // opening nothing while it is tripped. Reporting the switches alone
@@ -221,5 +222,39 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// What the fills have cost so far this run.
     pub fn fills(&self) -> &Fills {
         &self.fills
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn callback_process_faults_appear_under_their_configured_sleeve() {
+        let path = crate::testpath::temp_path("heartbeat-callback-error");
+        let params = toml::from_str("symbol='BTCUSDT'\nevery_s=60\nenabled=false").unwrap();
+        let strategy = engine_strategies::build_strategy("probe", StrategyId(0), &params).unwrap();
+        let (mut engine, _) = crate::tests::callback_test_fixture(vec![strategy]).await;
+        engine
+            .host
+            .callbacks
+            .faults
+            .insert(StrategyId(0), "LONG filled state is invalid".into());
+        engine.write_heartbeat(Heartbeat::with_every(
+            path.to_path_buf(),
+            None,
+            None,
+            Duration::from_millis(1),
+        ));
+        engine.beat(clock::now_ns());
+        let fields: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            fields["strategy_errors"],
+            serde_json::json!([{
+                "strategy": "probe",
+                "error": "LONG filled state is invalid",
+            }])
+        );
     }
 }
