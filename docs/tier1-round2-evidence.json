@@ -11,7 +11,8 @@
     "sha256": "86ed033d796a12c14a8910c392b5cf21c0135bb011610ea5f3950857fa141e3b",
     "manifest_encoding": "SHA256 of the sorted file-to-SHA256 JSON object with compact separators",
     "scope": "Tracked and new engine, scripts, tests, deployment, workflow and dependency files; documentation is excluded. Full hashes and command logs are retained in the private evidence archive.",
-    "unchanged_through_suite": true
+    "unchanged_through_suite": true,
+    "basis_commit": "8f96e60366b753245ed448cfe5405f7681433a0c"
   },
   "local_checks": {
     "toolchain": "rustc 1.90.0 (1159e78c4 2025-09-14)",
@@ -40,7 +41,13 @@
       "failed": 0,
       "byte_identical_replay": true
     },
-    "debug_and_developer_gate": "Mandatory pre-push developer/debug gate pending; final release source is frozen.",
+    "debug_and_developer_gate": {
+      "basis_commit": "8f96e60366b753245ed448cfe5405f7681433a0c",
+      "regular_debug_passed": 2394,
+      "additional_debug_example_passed": 1,
+      "python_passed": 1608,
+      "passed": true
+    },
     "qualified_utc": "2026-09-06T15:13:49.579332+00:00"
   },
   "regression_evidence": [
@@ -134,5 +141,23 @@
     "risk_refusals": 0,
     "barrier_failures": 0,
     "compiler_processes_observed": false
-  }
+  },
+  "test_only_followup": {
+    "path": "engine/engine-core/src/tests/venue_boundary.rs",
+    "sha256": "2df1aacb7b7f5e163821b1bf8e5c5b7add3532db70b2040d6faf1eb9991d6c75",
+    "production_unchanged": true,
+    "evidence": "/tmp/tier1-venue-boundary-scheduling-proof/proof.json",
+    "controlled_before": "One compiled failure reproduces the Linux cancellation timeout with100ms socket delivery delay.",
+    "debug_venue_tests": 6,
+    "debug_deadline_controls": 4,
+    "release_venue_tests": 6,
+    "full_debug_developer_gate": "pending after fixture correction"
+  },
+  "deployment_attempts": [
+    {
+      "run_id": 34042301279,
+      "commit": "8f96e60366b753245ed448cfe5405f7681433a0c",
+      "result": "Linux test-fixture scheduling failure; VPS job skipped; no deployment."
+    }
+  ]
 }

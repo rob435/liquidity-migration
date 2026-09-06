@@ -54,7 +54,7 @@ Define the execution ownership model, the current qualification checkpoint and t
 | Qualification | Result and scope |
 | --- | --- |
 | Accounting baseline `2422be0d` | 2,333 release tests, six ignored, six repeated heavy fault seeds and real copied-WAL accounting fixtures; full historical evidence is retained in that Git revision |
-| Current combined source | 2,395 release tests pass, 6 expected ignores; strict Clippy, both doctest profiles and six repeated heavy-fault seeds pass with 659 source files unchanged. Current binary copied-WAL boot/rotation/reboot passes. Mandatory pre-push developer/debug gate remains pending; [evidence](tier1-round2-evidence.json) |
+| Current combined source | Production source retains the 2,395-pass release qualification, Clippy, doctests, repeated fault/replay and measured workloads from `8f96e603`. A subsequent socket-test clock correction passes six venue tests in debug/release and four deadline controls; the full developer/debug gate is rerun before push. [Evidence](tier1-round2-evidence.json) |
 | Regression controls | Actual assertion failures exist for callback timing/freshness, nonfinite fee preservation, canary exact terms, malformed private stream recovery and broken recovery CLI verbs; setup and compile failures add no count |
 | Production mode | Bench and child-worker integration exercise isolated callbacks; virtual-clock simulation and backtests declare embedded reducers |
 | Host evidence | [STATE.md](../STATE.md) owns dated observations; both realms run `420c7347` at the 14:25:52 UTC native capture; combined Round-2 rollout is pending |

@@ -37,6 +37,12 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     risk refusals or barrier failures. The mandatory pre-push debug/developer
     gate and combined rollout remain pending; full-day replay and broader
     resource measurements retain explicit scope limits.
+  - The first combined workflow stops before VPS installation: a real-socket
+    test races its 25 ms in-memory-test cancellation deadline on Linux. A
+    controlled 100 ms delivery delay reproduces the failure. Only that test
+    freezes its engine clock; HTTP timeouts and fill/cancel/replay assertions
+    remain, with six venue tests passing in both profiles and four existing
+    cancellation-deadline controls passing. Production code is unchanged.
 
 - **2026-09-06 08:07 UTC — Worker recovery, recorder finalization and rollback repair.**
   - Both workers on `cece1d9f` remain alive but degraded: hourly source pruning

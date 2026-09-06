@@ -297,6 +297,8 @@ fn assert_accounted(records: &Records, id: &str, expected: &str) {
 
 #[tokio::test]
 async fn http_timeout_keeps_exposure_until_the_late_bybit_execution_settles_once() {
+    let _engine_clock =
+        engine_types::clock::install_virtual(clock::wall_ns(), clock::now_ns()).unwrap();
     let server = TestServer::start_with_delay(accepted, |request, _| {
         if request.path == CREATE {
             Duration::from_secs(30)
@@ -337,6 +339,7 @@ async fn http_timeout_keeps_exposure_until_the_late_bybit_execution_settles_once
     let mut socket = private_socket().await;
     let late_fill = async {
         until(|| !server.to_path(CANCEL).is_empty()).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         socket.frames.send(execution(&id, "late", "0.01")).unwrap();
         socket.frames.send(execution(&id, "late", "0.01")).unwrap();
         socket.frames.send(cancelled(&id)).unwrap();
