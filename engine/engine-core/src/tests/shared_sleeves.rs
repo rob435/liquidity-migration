@@ -681,3 +681,64 @@ pub(crate) async fn exact_single_sleeve_engine(
 pub(crate) fn fail_private_updates(engine: &mut Engine<MockWal, Kernel, MockVenue>, fail: bool) {
     engine.wal.fail_on = fail.then(|| "order_update".into());
 }
+
+pub(crate) async fn legacy_single_sleeve_engine(
+    legacy_quantity: f64,
+    native_quantity: &str,
+    step: &str,
+) -> Engine<MockWal, Kernel, MockVenue> {
+    legacy_single_sleeve_recovery(legacy_quantity, native_quantity, step, vec![], None, None)
+        .await
+        .unwrap()
+}
+
+pub(crate) async fn legacy_single_sleeve_recovery(
+    legacy_quantity: f64,
+    native_quantity: &str,
+    step: &str,
+    history: Vec<VenueExecution>,
+    prefix: Option<Vec<WalRecord>>,
+    fail_barrier: Option<&'static str>,
+) -> Result<Engine<MockWal, Kernel, MockVenue>, crate::engine::EngineError> {
+    let tape = tape();
+    let (mut wal, _) = MockWal::new(tape.clone());
+    wal.fail_barrier_after = fail_barrier;
+    let (mut venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
+    *venue.executions.lock().unwrap() = Some(history);
+    let mut rules = spec();
+    rules.qty_step = Some(Exact::parse_decimal(step).unwrap());
+    rules.market_qty_step = rules.qty_step.clone();
+    rules.min_qty = rules.qty_step.clone();
+    rules.market_min_qty = rules.qty_step.clone();
+    rules.min_notional = None;
+    venue.exact_specs = Some(vec![("BTCUSDT".into(), rules)]);
+    let mut positions = physical_long(native_quantity.parse().unwrap());
+    positions[0].exact_amounts = Some(Box::new(engine_types::risk::PositionAmounts {
+        quantity: engine_types::numeric::ExactNumber::venue_decimal(native_quantity).unwrap(),
+        entry_price: engine_types::numeric::ExactNumber::venue_decimal("100").unwrap(),
+    }));
+    if native_quantity == "0" {
+        positions.clear();
+    }
+    venue.account_readings.lock().unwrap().push_back(positions);
+    let prior = serde_json::from_value(serde_json::json!({
+        "kind":"segment_base", "wall_ts_ms":recent_replay_ms(),
+        "strategies":["left","right"], "symbols":["BTCUSDT"],
+        "may_open":true, "control_anchors":[], "open_orders":[],
+        "intended_stops":[{"symbol":0,"trigger_px":90.0}],
+        "attribution":[{"strategy":0,"symbol":0,"signed_qty":legacy_quantity}],
+        "logged_exposure":[{"symbol":0,"signed_qty":legacy_quantity}],
+        "execution_history_through_ms":recent_replay_ms()
+    }))
+    .unwrap();
+    Engine::boot(
+        &portfolio_settings(),
+        "0",
+        wal,
+        kernel(),
+        venue,
+        vec![idle("left"), idle("right")],
+        &prefix.unwrap_or_else(|| vec![prior]),
+    )
+    .await
+}

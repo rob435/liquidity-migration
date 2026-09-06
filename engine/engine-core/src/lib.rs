@@ -29,6 +29,7 @@ pub mod identities;
 pub mod inflight;
 mod inventory;
 pub mod ledger;
+mod legacy_quantity;
 pub mod legacy_signals;
 mod order_dispatch;
 mod portfolio_allocation;

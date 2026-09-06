@@ -73,34 +73,51 @@ pub(super) struct RecoveryOutcome {
 }
 
 impl RecoveryOutcome {
+    #[cfg(test)]
     fn replay<R: RiskKernel>(
         records: &[WalRecord],
         risk: &mut R,
         through_ms: i64,
     ) -> Result<Self, EngineError> {
-        let mut fills = Fills::default();
-        let closed = fills.try_seed_lots(records).map_err(EngineError::Boot)?;
+        let mut state = Self::prepare(records, None, through_ms)?;
+        state.seed_loss(records, risk);
+        Ok(state)
+    }
+
+    fn seed_loss<R: RiskKernel>(&mut self, records: &[WalRecord], risk: &mut R) {
         if let Some(rows) = records.iter().rev().find_map(|record| match record {
             WalRecord::SegmentBase {
                 rolling_loss_rows, ..
-            } => Some(rolling_loss_rows),
+            } => Some(rolling_loss_rows.as_slice()),
             _ => None,
         }) {
             risk.restore_rolling_loss_rows(rows);
         }
-        for trade in closed {
+        for trade in self.fills.take_closed() {
             if let Some(row) = trade.loss_row() {
                 risk.observe_closed_trade(row);
             }
         }
+    }
+
+    fn prepare(
+        records: &[WalRecord],
+        pending: Option<&WalRecord>,
+        through_ms: i64,
+    ) -> Result<Self, EngineError> {
+        let (physical, intended, _, _) =
+            reconcile::position_state_with_adoption(records, pending, false)
+                .map_err(EngineError::Boot)?;
         Ok(Self {
             orders: LedgerOfOrders::try_from_records(records).map_err(EngineError::Boot)?,
-            attribution: Attribution::try_from_records(records).map_err(EngineError::Boot)?,
-            fills,
+            attribution: crate::legacy_quantity::Replay::new(records, pending)
+                .and_then(|replay| replay.finish())
+                .map_err(EngineError::Boot)?,
+            fills: Fills::recovery_lots(records, pending).map_err(EngineError::Boot)?,
             portfolio_controls: crate::portfolio_control::PortfolioControls::replay(records)
                 .map_err(EngineError::Boot)?,
-            physical: reconcile::physical_exposure(records).map_err(EngineError::Boot)?,
-            intended: reconcile::intended_stops(records).map_err(EngineError::Boot)?,
+            physical,
+            intended,
             latched: false,
             through_ms,
         })
@@ -454,12 +471,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             &mut callbacks,
             &account,
             &mut risk,
+            (!instrument_specs.is_empty() || require_exact_instruments)
+                .then_some(&instrument_specs),
         )
         .await?;
         let RecoveryOutcome {
             mut orders,
-            mut attribution,
-            mut fills,
+            attribution,
+            fills,
             mut portfolio_controls,
             physical: logged_exposure,
             intended: intended_stops,
@@ -553,76 +572,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             portfolio_controls.retire_completed_orders(&orders);
         }
         let recovered = orders.in_flight().len();
-
-        // A sleeve's claim on a symbol the venue holds nothing of is a close
-        // this log never got to charge (a hand close, an inherited position
-        // wound down), and it would lock every other sleeve out of the name
-        // for good. The venue reading is the authority on what is
-        // held, so flat clears the claim; a symbol with an order still in
-        // flight is left alone.
-        let in_flight_symbols: std::collections::HashSet<SymbolId> = orders
-            .in_flight()
-            .iter()
-            .map(|order| order.request.symbol)
-            .collect();
-        let stale_claims = attribution.drop_where_flat(|symbol| {
-            !in_flight_symbols.contains(&symbol)
-                && !account
-                    .positions
-                    .iter()
-                    .any(|p| p.symbol == symbol && p.qty > 0.0)
-        });
-        if !stale_claims.is_empty() {
-            let words = stale_claims
-                .iter()
-                .map(|(strategy, symbol, qty)| {
-                    format!(
-                        "{} {} {qty}",
-                        names
-                            .get(strategy.0 as usize)
-                            .map(String::as_str)
-                            .unwrap_or("unknown"),
-                        market.table.name(*symbol)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            tracing::warn!(
-                claims = %words,
-                "dropping sleeve claims on symbols the venue holds nothing of"
-            );
-            // Durable, not a note: a later boot replays the drop instead of
-            // rebuilding the residue from the old fills — by then another
-            // sleeve may hold the symbol, and a venue no longer flat would
-            // make the residue undroppable.
-            // The same names, out of the position accounting too: a claim the
-            // venue does not back has no exit price, so its trip cannot be
-            // reported and must not sit waiting for one.
-            let gone: std::collections::HashSet<(String, String)> = stale_claims
-                .iter()
-                .map(|(strategy, symbol, _)| {
-                    (
-                        names.get(strategy.0 as usize).cloned().unwrap_or_default(),
-                        market.table.name(*symbol).to_string(),
-                    )
-                })
-                .collect();
-            fills.lots().drop_symbols(|sleeve, symbol| {
-                gone.contains(&(sleeve.to_string(), symbol.to_string()))
-            });
-            wal.append(&WalRecord::ClaimsDropped {
-                wall_ts_ms: clock::wall_ms(),
-                rows: stale_claims
-                    .iter()
-                    .map(|(strategy, symbol, qty)| engine_types::FilledTotal {
-                        strategy: *strategy,
-                        symbol: *symbol,
-                        signed_qty: *qty,
-                    })
-                    .collect(),
-            })?;
-            wal.barrier()?;
-        }
 
         let registry =
             restore_order_reservations(&mut risk, &orders, order_id_epoch_ms, &account, &working)?;
@@ -781,6 +730,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         callbacks: &mut crate::strategy_process::host::CallbackHost,
         account: &AccountView,
         risk: &mut R,
+        specs: Option<&BTreeMap<SymbolId, engine_types::numeric::ExactInstrumentSpec>>,
     ) -> Result<RecoveryOutcome, EngineError> {
         let now_ms = clock::wall_ms();
         let newest = match execution_history_through_ms(replayed) {
@@ -792,7 +742,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 ))
             }
         };
-        let mut recovered_state = RecoveryOutcome::replay(replayed, risk, newest)?;
+        let adoption = specs
+            .map(|specs| crate::legacy_quantity::plan(replayed, specs, now_ms))
+            .transpose()
+            .map_err(EngineError::Boot)?
+            .flatten();
+        let mut recovered_state = RecoveryOutcome::prepare(replayed, adoption.as_ref(), newest)?;
+        if let Some(record) = &adoption {
+            wal.append(record)?;
+            wal.barrier()?;
+        }
+        recovered_state.seed_loss(replayed, risk);
+
         let since = newest.saturating_sub(RECOVERY_PAD_MS);
         if since < now_ms - RECOVERY_REACH_MS {
             return Err(EngineError::Boot(format!(
@@ -1490,6 +1451,7 @@ mod callback_recovery_tests {
                 observed_ns: clock::now_ns(),
             },
             &mut crate::tests::MockRisk::with(crate::tests::allow_all()).0,
+            None,
         )
         .await
         .unwrap();
@@ -1634,6 +1596,7 @@ mod memory_tests {
             &mut callbacks,
             &account,
             &mut risk,
+            None,
         )
         .await
         .unwrap();
@@ -1693,6 +1656,7 @@ mod memory_tests {
             &mut callbacks,
             &account,
             &mut risk,
+            None,
         )
         .await
         .unwrap();
@@ -1771,6 +1735,7 @@ mod memory_tests {
             &mut callbacks,
             &account,
             &mut risk,
+            None,
         )
         .await
         .unwrap();
@@ -1954,6 +1919,7 @@ mod memory_tests {
             &mut callbacks,
             &account,
             &mut risk,
+            None,
         )
         .await
         .unwrap();
@@ -2085,6 +2051,7 @@ mod valuation_recovery_tests {
             &mut callbacks,
             &account,
             &mut risk,
+            None,
         )
         .await
         .unwrap();

@@ -33,9 +33,12 @@ edit STATE.md to match.
     refreshed credential and retain protected pre-change backups.
     Backup completes at 08:24:45 UTC (83 files, 15,034,191,872 bytes), and tape
     upload at 08:27:06 UTC (13 archives, 5,636,556,800 bytes); remote sizes,
-    archive hashes and the backup check match. The OAuth app remains in
-    Testing: Production is disabled by incomplete Branding, so the refreshed
-    token still has Google's seven-day Testing limit.
+    archive hashes and the backup check match. The existing app is now In
+    production: static homepage/privacy pages ship from `6b5ed1d5` through
+    Pages run `34023744649`, without adding OAuth clients or scopes. A fresh
+    Production authorization passes forced token refresh; canonical/runtime
+    configs are installed atomically at 09:20:57 UTC. This removes the fixed
+    seven-day Testing expiry; brand verification is not claimed.
   - Three stopped legacy sources in each realm have no accepted pending
     observations but cannot report their terminal publication frontiers.
     Source retirement now records that terminal outcome without advancing
@@ -49,6 +52,35 @@ edit STATE.md to match.
     retain this outcome through restart and reject incompatible old readers.
     Copied live WAL rehearsals preserve every original byte and accepted
     cursor, pass native verification and append nothing on identical retry.
+  - Live-WAL rehearsal exposes legacy quantity drift: a `0.2899999999999999`
+    holding sends `0.28` and retains uncloseable dust. `LegacyQuantityGridAdopted`
+    durably resolves each eligible legacy contribution to its unique native
+    grid point within 64 binary64 ULPs per input before history allocation.
+    Canonical suffixes remain exact; cash, fees, unknown basis and sleeve
+    stops remain intact. Durable exact allocation slices also retain residuals
+    below `1e-9` when the raw execution has no native amount fields.
+    An integration regression then exposes a priced legacy `0.1 + 0.2` lot
+    whose exact `0.3` native close leaves dust and loses its closed trade.
+    Adoption context now normalizes legacy units before canonical reductions,
+    so normal accounting reconstructs closes and reopenings at their actual
+    timestamps. Original automatic FIFO and internal full-close allocations
+    are validated before reconstructing their legacy-dependent slices;
+    explicit native quantities and fees remain unchanged.
+  - Demo ENA's missing StopLoss execution at 2026-08-25 21:08:19.719 UTC sells
+    1,564 units with a 0.12135702 USDT fee. All fifteen recorded executions
+    match native receipts; the missing identity appears nowhere in the
+    retained 29-file WAL family. `ClaimsDropped` on August 27 removes only
+    ownership and leaves phantom physical exposure. New boots retain missing
+    claims and report physical/native disagreement. Historical WAL remains
+    unchanged; the recovered venue receipt and chronological accounting stay
+    in the private operational evidence archive. `reconcile-clear` preserves
+    exact native quantities and refuses a still-owned missing fill.
+  - Frozen migration source passes 2,333 release tests (six ignored), release
+    doctests and six heavy-fault 300-second simulations with two crashes and
+    identical repeated replay. Captured native fixtures preserve all fourteen
+    positions through boot and rotation; seven removed mock stops are repaired
+    without orders. Current qualification and actual fail-before controls are
+    indexed in `docs/tier1-deployment-evidence.json`.
   - Deployment and post-repair observations are recorded here when complete.
 
 - **2026-09-06 — Tier-1 exact ownership and recovery qualification.**

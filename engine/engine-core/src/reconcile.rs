@@ -362,9 +362,20 @@ pub(crate) fn reconcile_positions(
         }
     }
 
-    // A symbol the log has fills for but the venue reports flat is not a
-    // finding: the position was closed while the engine was down, which is
-    // ordinary. The venue is the truth about what is held.
+    for (symbol, quantity) in logged {
+        if !quantity.is_zero()
+            && !account
+                .positions
+                .iter()
+                .any(|position| position.symbol == *symbol)
+        {
+            findings.push(Finding::UnaccountedExposure {
+                symbol: *symbol,
+                venue_qty: 0.0,
+                logged_qty: quantity.to_f64().map_err(|error| error.to_string())?,
+            });
+        }
+    }
     Ok(Reconciliation { findings })
 }
 
@@ -392,7 +403,16 @@ fn foreign_fills(replayed: &[WalRecord]) -> Result<Vec<Finding>, String> {
     let mut claims = Attribution::default();
     let mut strategy_names = Vec::new();
     let mut findings = Vec::new();
-    for record in replayed {
+    let mut replay = crate::legacy_quantity::Replay::new(replayed, None)?;
+    while let Some(event) = replay.next()? {
+        let record = match event {
+            crate::legacy_quantity::Event::Cut { sleeves, .. } => {
+                claims.adopt_legacy_quantity_subset(&sleeves)?;
+                continue;
+            }
+            crate::legacy_quantity::Event::Record(record) => record,
+        };
+        let record = record.as_ref();
         if let WalRecord::Names { strategies, .. } | WalRecord::SegmentBase { strategies, .. } =
             record
         {
@@ -653,10 +673,27 @@ fn matching_intended_stop(
     Some((row.symbol, IntendedPositionStop { side, trigger_px }))
 }
 
-type PositionState = (PhysicalExposure, BTreeMap<SymbolId, IntendedPositionStop>);
+type PositionState = (
+    PhysicalExposure,
+    BTreeMap<SymbolId, IntendedPositionStop>,
+    BTreeMap<SymbolId, crate::legacy_quantity::Origin>,
+    std::collections::BTreeSet<SymbolId>,
+);
 
 fn position_state(replayed: &[WalRecord]) -> Result<PositionState, String> {
+    position_state_with_adoption(replayed, None, false)
+}
+
+pub(crate) fn position_state_with_adoption(
+    replayed: &[WalRecord],
+    pending: Option<&WalRecord>,
+    planning: bool,
+) -> Result<PositionState, String> {
     let mut exposure = BTreeMap::new();
+    let mut discovered = std::collections::BTreeSet::new();
+    let mut used = std::collections::BTreeSet::new();
+    let mut delta = BTreeMap::new();
+    let mut origins = BTreeMap::<SymbolId, crate::legacy_quantity::Origin>::new();
     let mut intended = BTreeMap::new();
     let mut sent: HashMap<String, OrderRequest> = HashMap::new();
     // The claims a venue-initiated close is charged against, kept the way
@@ -665,7 +702,48 @@ fn position_state(replayed: &[WalRecord]) -> Result<PositionState, String> {
     let mut claims = Attribution::default();
     let mut strategy_names = Vec::new();
 
-    for record in replayed {
+    let mut replay = crate::legacy_quantity::Replay::with_planning(replayed, pending, planning)?;
+    while let Some(event) = replay.next()? {
+        let record = match event {
+            crate::legacy_quantity::Event::Cut {
+                sleeves,
+                physical,
+                symbol,
+                terminal,
+                validate_terminal,
+            } => {
+                claims.adopt_legacy_quantity_subset(&sleeves)?;
+                crate::legacy_quantity::physical_cut(
+                    &mut exposure,
+                    &mut origins,
+                    &mut delta,
+                    &mut used,
+                    physical,
+                    symbol,
+                    terminal.then_some(validate_terminal),
+                )?;
+                intended.retain(|symbol, _| exposure.contains_key(symbol));
+                continue;
+            }
+            crate::legacy_quantity::Event::Record(record) => record,
+        };
+        let record = record.as_ref();
+        if let Some(symbol) = crate::legacy_quantity::canonical_symbol(record) {
+            if origins.contains_key(&symbol) {
+                discovered.insert(symbol);
+            }
+        }
+        if matches!(
+            record,
+            WalRecord::SegmentBase { .. } | WalRecord::LegacyQuantityGridAdopted { .. }
+        ) {
+            discovered.clear();
+            used.clear();
+            delta.clear();
+        }
+        if matches!(record, WalRecord::LatchCleared { .. }) {
+            delta.clear();
+        }
         if let WalRecord::Names { strategies, .. } | WalRecord::SegmentBase { strategies, .. } =
             record
         {
@@ -730,6 +808,17 @@ fn position_state(replayed: &[WalRecord]) -> Result<PositionState, String> {
                         _ => unreachable!(),
                     };
                     let quantity = fill_quantity(*qty, amounts)?;
+                    if amounts.is_none() && !has_allocation(record) {
+                        origins
+                            .entry(*symbol)
+                            .or_default()
+                            .note(&if *side == Side::Buy {
+                                quantity.clone()
+                            } else {
+                                -&quantity
+                            })?;
+                    }
+
                     note_owned_fill(
                         &mut exposure,
                         &mut intended,
@@ -738,6 +827,9 @@ fn position_state(replayed: &[WalRecord]) -> Result<PositionState, String> {
                         *side,
                         &quantity,
                     )?;
+                    if !exposure.contains_key(symbol) {
+                        origins.remove(symbol);
+                    }
                 }
             }
             WalRecord::StopSet {
@@ -771,12 +863,24 @@ fn position_state(replayed: &[WalRecord]) -> Result<PositionState, String> {
             WalRecord::ClaimsDropped { rows, .. } => claims.forget(rows),
             WalRecord::SegmentBase {
                 logged_exposure,
+                portfolio,
                 intended_stops,
                 open_orders,
                 ..
             } => {
                 claims = Attribution::try_from_records(std::slice::from_ref(record))?;
                 exposure = restored_exposure(logged_exposure)?;
+                origins.clear();
+                if portfolio.is_none() {
+                    for row in logged_exposure {
+                        if row.exact_signed_qty.is_none() && row.signed_qty != 0.0 {
+                            origins
+                                .entry(row.symbol)
+                                .or_default()
+                                .note(&row.exact_quantity().map_err(|e| e.to_string())?)?;
+                        }
+                    }
+                }
                 intended = intended_stops
                     .iter()
                     .filter_map(|row| matching_intended_stop(row, &exposure))
@@ -791,6 +895,15 @@ fn position_state(replayed: &[WalRecord]) -> Result<PositionState, String> {
             } => {
                 claims.keep_held(restated_exposure)?;
                 exposure = restored_exposure(restated_exposure)?;
+                origins.clear();
+                for row in restated_exposure {
+                    if row.exact_signed_qty.is_none() && row.signed_qty != 0.0 {
+                        origins
+                            .entry(row.symbol)
+                            .or_default()
+                            .note(&row.exact_quantity().map_err(|e| e.to_string())?)?;
+                    }
+                }
                 // The operator accepted the venue's quantity, not an old
                 // order's stop provenance. Reusing a same-direction stop from
                 // before the clear could attach one writer's intent to
@@ -801,7 +914,8 @@ fn position_state(replayed: &[WalRecord]) -> Result<PositionState, String> {
         }
     }
 
-    Ok((exposure, intended))
+    discovered.extend(origins.keys().copied());
+    Ok((exposure, intended, origins, discovered))
 }
 
 /// Signed quantity per symbol from fills that join to orders this log sent.
@@ -818,6 +932,13 @@ pub(crate) fn logged_exposure(replayed: &[WalRecord]) -> Result<BTreeMap<SymbolI
                 .map_err(|e| e.to_string())
         })
         .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn legacy_physical_origins(
+    replayed: &[WalRecord],
+) -> Result<BTreeMap<SymbolId, crate::legacy_quantity::Origin>, String> {
+    Ok(position_state(replayed)?.2)
 }
 
 pub(crate) fn physical_exposure(replayed: &[WalRecord]) -> Result<PhysicalExposure, String> {

@@ -586,6 +586,7 @@ realm_fingerprint() {
 # the realm — the funded engine included — is left trading.
 realm_unchanged() {
     local realm="$1" worker_unit owner_unit recorded
+    [ ! -f "/etc/liquidity-migration/reconcile-clear.$realm.note" ] || return 1
     worker_unit="$(lm_signal_worker_unit "$realm")" || return 1
     owner_unit="$(lm_owner_unit "$realm")" || return 1
     recorded="$(cat "$RELEASE_DIR/$realm.fingerprint" 2>/dev/null || true)"
@@ -863,6 +864,23 @@ retire_legacy_signal_sources() {
     [ -f "$plan" ] || return 0
     run_engine_takeover_command "$realm" "$config" retire-legacy-signal-sources \
         --plan "$plan" --execute
+}
+
+clear_reconciliation_if_requested() {
+    local realm="$1" config pending note
+    case "$realm" in
+        demo) config="$ENGINE_DEMO_CONFIG" ;;
+        mainnet) config="$ENGINE_MAINNET_CONFIG" ;;
+        *) fail "unsupported reconciliation realm: $realm" ;;
+    esac
+    pending="/etc/liquidity-migration/reconcile-clear.$realm.note"
+    [ -f "$pending" ] || return 0
+    note="$(cat -- "$pending")" || fail "cannot read $realm reconciliation note"
+    [ -n "$note" ] || fail "$realm reconciliation note is empty"
+    run_engine_takeover_command "$realm" "$config" reconcile-clear \
+        --note "$note" --execute || return $?
+    mv -- "$pending" "$pending.applied" \
+        || fail "cannot retire the applied $realm reconciliation note"
 }
 
 stage_native_takeover_source() {
@@ -1145,6 +1163,7 @@ handover_realm() {
         stop_realm_units "$realm" \
             && retire_legacy_signal_sources "$realm" \
             && import_native_strategy_state "$realm" \
+            && clear_reconciliation_if_requested "$realm" \
             && start_realm "$realm"
     ); then
         rollback_after_failure "$realm"

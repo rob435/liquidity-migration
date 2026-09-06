@@ -655,6 +655,32 @@ impl Fills {
     }
 
     /// Quantity, cost basis and fees required to continue open trades after rotation.
+    pub(crate) fn adopt_legacy_quantities(
+        &mut self,
+        corrections: &[engine_types::LegacySleeveQuantityCorrection],
+    ) -> Result<(), String> {
+        let named = corrections
+            .iter()
+            .map(|row| {
+                Ok((
+                    self.names
+                        .strategies
+                        .get(row.strategy.idx())
+                        .ok_or("adoption has unknown analytic sleeve")?
+                        .clone(),
+                    self.names
+                        .symbols
+                        .get(row.symbol.idx())
+                        .ok_or("adoption has unknown analytic symbol")?
+                        .clone(),
+                    row.before.clone(),
+                    row.after.clone(),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        self.lots.adopt_legacy_quantities(&named)
+    }
+
     pub fn open_trade_lots(&self) -> Vec<engine_types::trade::OpenTradeLot> {
         self.lots.checkpoint()
     }
@@ -714,6 +740,18 @@ impl Fills {
         Ok(())
     }
 
+    pub(crate) fn recovery_lots(
+        records: &[WalRecord],
+        pending: Option<&WalRecord>,
+    ) -> Result<Self, String> {
+        let rebuilt = Self::try_from_records_with_adoption(records, pending)?;
+        Ok(Self {
+            lots: rebuilt.lots,
+            names: rebuilt.names,
+            ..Self::default()
+        })
+    }
+
     pub fn try_seed_lots(
         &mut self,
         records: &[WalRecord],
@@ -721,6 +759,7 @@ impl Fills {
         let mut rebuilt = Fills::try_from_records(records)?;
         let already_closed = rebuilt.lots.take_closed();
         self.lots = rebuilt.lots;
+        self.names = rebuilt.names;
         Ok(already_closed)
     }
 
@@ -738,12 +777,31 @@ impl Fills {
     }
 
     pub fn try_from_records(records: &[WalRecord]) -> Result<Self, String> {
-        let mut sent: HashMap<&str, (&engine_types::OrderRequest, f64)> = HashMap::new();
+        Self::try_from_records_with_adoption(records, None)
+    }
+
+    pub(crate) fn try_from_records_with_adoption(
+        records: &[WalRecord],
+        pending: Option<&WalRecord>,
+    ) -> Result<Self, String> {
+        let mut sent: HashMap<String, (engine_types::OrderRequest, f64)> = HashMap::new();
         let mut me = Fills::default();
-        for record in records {
+        let mut replay = crate::legacy_quantity::Replay::new(records, pending)?;
+        while let Some(event) = replay.next()? {
+            let record = match event {
+                crate::legacy_quantity::Event::Cut { sleeves, .. } => {
+                    me.adopt_legacy_quantities(&sleeves)?;
+                    continue;
+                }
+                crate::legacy_quantity::Event::Record(record) => record,
+            };
+            let record = record.as_ref();
             // Before the record is folded, never after: a row is keyed by what
             // its ids meant at its own place in the log, not at the end of it.
             me.learn(record);
+            if matches!(record, WalRecord::LegacyQuantityGridAdopted { .. }) {
+                continue;
+            }
             if let WalRecord::PortfolioOffsetSettled { settlement } = record {
                 me.on_internal_settlement(settlement)?;
                 continue;
@@ -836,12 +894,15 @@ impl Fills {
                     arrival_mid,
                     ..
                 } => {
-                    sent.insert(request.client_order_id.as_str(), (request, *arrival_mid));
+                    sent.insert(
+                        request.client_order_id.clone(),
+                        (request.clone(), *arrival_mid),
+                    );
                 }
                 WalRecord::OrderLineageRestored { order } => {
                     sent.insert(
-                        order.request.client_order_id.as_str(),
-                        (&order.request, order.arrival_mid),
+                        order.request.client_order_id.clone(),
+                        (order.request.clone(), order.arrival_mid),
                     );
                 }
                 WalRecord::OrderUpdate {
@@ -1002,8 +1063,8 @@ impl Fills {
                 } => {
                     for open in open_orders {
                         sent.insert(
-                            open.request.client_order_id.as_str(),
-                            (&open.request, open.arrival_mid),
+                            open.request.client_order_id.clone(),
+                            (open.request.clone(), open.arrival_mid),
                         );
                     }
                     // What each sleeve was HOLDING, which the cost totals

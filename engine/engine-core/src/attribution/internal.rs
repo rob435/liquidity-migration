@@ -135,6 +135,8 @@ impl Attribution {
             return Err("internal settlement was prepared against different totals".into());
         }
         self.inventory.apply_batch(prepared.inventory)?;
+        self.legacy_quantities
+            .retain(|(strategy, symbol), _| self.inventory.position(*strategy, *symbol).is_some());
         for (key, _, next) in prepared.totals {
             self.internal.0.insert(key, next);
         }

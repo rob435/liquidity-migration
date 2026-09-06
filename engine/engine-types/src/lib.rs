@@ -62,7 +62,8 @@ pub use strategy::{
     STRATEGY_ENTRY_PERMISSION_SCHEMA_VERSION,
 };
 pub use wal::{
-    AnchorState, FilledTotal, IntendedStop, LegacySignalSourceRetirement, OpenOrderState,
+    AnchorState, FilledTotal, IntendedStop, LegacyPhysicalQuantityCorrection,
+    LegacySignalSourceRetirement, LegacySleeveQuantityCorrection, OpenOrderState,
     RecentExecutionId, SignalCursor, SignalGap, SignalSubscriptionState, StrategyCheckpointState,
     StrategyGlobalCheckpointState, StrategySymbol, SymbolTotal, Wal, WalError, WalRecord,
 };

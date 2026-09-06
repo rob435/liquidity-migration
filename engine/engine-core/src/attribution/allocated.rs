@@ -7,8 +7,6 @@ pub(crate) struct PreparedPortfolioFill {
     pub allocation: ExecutionAllocation,
     inventory: crate::inventory::InventoryBatchChange,
     accounting: crate::execution_accounting::AccountingBatch,
-    symbol: SymbolId,
-    legacy: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -245,8 +243,6 @@ impl Attribution {
             allocation,
             inventory,
             accounting,
-            symbol: execution.symbol,
-            legacy: execution.amounts.is_none(),
         }))
     }
 
@@ -258,13 +254,8 @@ impl Attribution {
         self.accounting.validate_batch(&prepared.accounting)?;
         self.inventory.apply_batch(prepared.inventory)?;
         self.accounting.apply_batch(prepared.accounting)?;
-        if prepared.legacy {
-            for slice in prepared.allocation.slices {
-                if self.signed(slice.strategy, prepared.symbol).abs() < FLAT {
-                    self.inventory.remove(slice.strategy, prepared.symbol);
-                }
-            }
-        }
+        self.legacy_quantities
+            .retain(|(strategy, symbol), _| self.inventory.position(*strategy, *symbol).is_some());
         Ok(())
     }
 }

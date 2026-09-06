@@ -483,6 +483,7 @@ mod tests {
                 &mut callbacks,
                 &engine.books.account,
                 &mut engine.risk,
+                None,
             )
             .await
             .unwrap();
@@ -684,6 +685,7 @@ mod tests {
                     &mut callbacks,
                     &engine.books.account,
                     &mut engine.risk,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -855,6 +857,7 @@ mod tests {
             &mut callbacks,
             &engine.books.account,
             &mut engine.risk,
+            None,
         )
         .await
         .unwrap();

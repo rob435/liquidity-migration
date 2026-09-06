@@ -116,7 +116,7 @@ gh workflow run vps-deploy.yml --ref main -f mode=diagnose
 | Exact source | Fetch and verify the requested commit belongs to `origin/main`. A backward deployment uses the same compatibility decision as rollback before moving the checkout. |
 | Artifact delivery | Verify and install the CI-built archive for that commit; missing artifacts fail before stopping the fleet. The funded host does not compile releases. |
 | Installation | Binaries and units land while both realms run. Independent recorders restart only when their own inputs change. |
-| Realm handover | Compare the engine source tree, systemd units, fleet manifest, worker config and rendered realm inputs with the retained fingerprint. Unchanged active realms keep running; changed realms stop, apply any explicit legacy retirement plan, verify/import native state, then restart. |
+| Realm handover | Compare the engine source tree, systemd units, fleet manifest, worker config and rendered realm inputs with the retained fingerprint. Unchanged active realms keep running; changed realms stop, apply any explicit legacy retirement plan, verify/import native state, apply any explicit reconciliation note, then restart. |
 | Readiness | Require a fresh heartbeat and the same active main PID/restart counter throughout the 12-second settle window before recording the realm fingerprint. |
 | Failed handover or manual rollback | A predecessor must have identical Rust, dependency, toolchain and build inputs to the current checkout and recorded deployed generation. Incompatible or unavailable inputs leave the installed candidate and durable state in place for forward repair. The worker has no read-only state compatibility command, so a changed-runtime rollback is not inferred safe. |
 | Durable state | Rollback never restores old WAL or worker files over newer state; required record refusal remains explicit. |
@@ -219,6 +219,24 @@ Must never delete later-generation rows, rewrite accepted hashes, or edit a live
 ```bash
 journalctl -u liquidity-migration-signal-worker-<realm> -n 100 --no-pager
 journalctl -u liquidity-migration-engine<-mainnet or empty> -n 100 --no-pager
+```
+
+### Resolve verified historical physical residue
+
+| Field | Contract |
+| --- | --- |
+| Pending note | `/etc/liquidity-migration/reconcile-clear.<realm>.note`, root owned, mode `0600`; exact historical execution evidence path and hash |
+| Handover | After native-state verification, before startup, the release binary runs `reconcile-clear --execute` under the existing realm runtime identity and credential environment |
+| Ownership | Native quantities remain exact. Every currently owned net position must match authenticated native exposure after eligible legacy grid resolution; another missing close requires history recovery |
+| Completion | A successful clear renames the note to `.note.applied`. Failure preserves the pending note and prevents startup. A pending note prevents unchanged-realm skipping; identical interrupted WAL append retries write nothing |
+| Protection | Canonical sleeve stops survive restatement. Boot confirms native protection from sleeve inventory and exact metadata; unmet protection remains pending for repair or reduction |
+
+```sh
+# Run through the existing realm credential environment with the engine stopped.
+engine reconcile-clear --config /etc/liquidity-migration/engine.demo.toml \
+  --note 'verified historical execution; private evidence path and SHA256'
+engine reconcile-clear --config /etc/liquidity-migration/engine.demo.toml \
+  --note 'verified historical execution; private evidence path and SHA256' --execute
 ```
 
 ### Retire a permanently stopped legacy signal source

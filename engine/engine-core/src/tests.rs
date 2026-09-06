@@ -119,6 +119,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::SignalObservationConsumed { .. } => "signal_observation_consumed",
         WalRecord::SignalObservationRejected { .. } => "signal_observation_rejected",
         WalRecord::SignalGapRecorded { .. } => "signal_gap_recorded",
+        WalRecord::LegacyQuantityGridAdopted { .. } => "legacy_quantity_grid_adopted_v2",
         WalRecord::LegacySignalSourceRetired { .. } => "legacy_signal_source_retired",
         WalRecord::RuntimeControlAccepted { .. } => "runtime_control_accepted",
         WalRecord::RuntimeControlConsumed { .. } => "runtime_control_consumed",
@@ -1805,6 +1806,7 @@ mod forced_close;
 mod gap_recovery;
 mod halt_cancels;
 mod heartbeat;
+mod live_legacy_fixture;
 mod order_path;
 mod ownership;
 mod quote_staleness;
@@ -2174,3 +2176,5 @@ pub(crate) async fn recovery_inventory_fixture() -> (
     .await;
     (engine, harness.records)
 }
+
+mod legacy_accounting_boot;

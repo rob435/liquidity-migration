@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -478,22 +479,28 @@ printf '%s\\n' "$*" >> "$SYSTEMCTL_TRACE"
 
 
 def _trace_handover_realm(
-    tmp_path: Path, *, import_status: int, start_status: int, retirement_status: int = 0
+    tmp_path: Path,
+    *,
+    import_status: int,
+    start_status: int,
+    retirement_status: int = 0,
+    clear_status: int = 0,
 ) -> tuple[int, list[str]]:
-    trace = tmp_path / f"handover-{import_status}-{start_status}-{retirement_status}.trace"
+    trace = tmp_path / f"handover-{import_status}-{start_status}-{retirement_status}-{clear_status}.trace"
     deploy = DEPLOY.read_text(encoding="utf-8")
     harness = "\n".join(
         [
             "set -uo pipefail",
             'trace() { printf \'%s\\n\' "$1" >> "$HANDOVER_TRACE"; }',
-            'stop_realm_units() { trace stop; }',
+            "stop_realm_units() { trace stop; }",
             'retire_legacy_signal_sources() { trace retire; return "$RETIREMENT_STATUS"; }',
             'import_native_strategy_state() { trace import; return "$IMPORT_STATUS"; }',
+            'clear_reconciliation_if_requested() { trace clear; return "$CLEAR_STATUS"; }',
             'start_realm() { trace start; return "$START_STATUS"; }',
-            'rollback_after_failure() { trace rollback; }',
-            'record_realm_fingerprint() { trace record; }',
+            "rollback_after_failure() { trace rollback; }",
+            "record_realm_fingerprint() { trace record; }",
             _function(deploy, "handover_realm"),
-            'handover_realm demo; exit $?',
+            "handover_realm demo; exit $?",
         ]
     )
     result = subprocess.run(
@@ -505,6 +512,7 @@ def _trace_handover_realm(
             "IMPORT_STATUS": str(import_status),
             "START_STATUS": str(start_status),
             "RETIREMENT_STATUS": str(retirement_status),
+            "CLEAR_STATUS": str(clear_status),
         },
         text=True,
         capture_output=True,
@@ -546,11 +554,18 @@ def test_every_handover_failure_rolls_back_before_recording_a_fingerprint(tmp_pa
     )
     assert _trace_handover_realm(tmp_path, import_status=0, start_status=1) == (
         1,
-        ["stop", "retire", "import", "start", "rollback"],
+        ["stop", "retire", "import", "clear", "start", "rollback"],
     )
     assert _trace_handover_realm(tmp_path, import_status=0, start_status=0) == (
         0,
-        ["stop", "retire", "import", "start", "record"],
+        ["stop", "retire", "import", "clear", "start", "record"],
+    )
+
+
+def test_reconciliation_clear_failure_prevents_start_after_verified_import(tmp_path: Path) -> None:
+    assert _trace_handover_realm(tmp_path, import_status=0, start_status=0, clear_status=19) == (
+        1,
+        ["stop", "retire", "import", "clear", "rollback"],
     )
 
 
@@ -579,6 +594,116 @@ def test_legacy_retirement_uses_the_realms_optional_plan_and_preserves_failure(
     assert present.stdout.splitlines() == [
         realm, f"{realm}.toml", "retire-legacy-signal-sources", "--plan", str(plan), "--execute"
     ]
+
+
+def _run_reconciliation_clear(tmp_path: Path, realm: str, status: int) -> subprocess.CompletedProcess[str]:
+    helper = _function(DEPLOY.read_text(encoding="utf-8"), "clear_reconciliation_if_requested")
+    helper = helper.replace("/etc/liquidity-migration/", f"{tmp_path}/")
+    harness = "\n".join(
+        [
+            "set -uo pipefail",
+            "ENGINE_DEMO_CONFIG=demo.toml",
+            "ENGINE_MAINNET_CONFIG=mainnet.toml",
+            "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }",
+            "run_engine_takeover_command() {",
+            '  "$TEST_PYTHON" -c \'import json, os, sys; '
+            'open(os.environ["ARGUMENTS_PATH"], "a").write(json.dumps(sys.argv[1:]) + "\\n")\' "$@"',
+            '  return "$CLEAR_STATUS"',
+            "}",
+            helper,
+            f"clear_reconciliation_if_requested {realm}",
+        ]
+    )
+    return subprocess.run(
+        ["bash", "-c", harness],
+        env={
+            **os.environ,
+            "TEST_PYTHON": sys.executable,
+            "ARGUMENTS_PATH": str(tmp_path / "arguments.jsonl"),
+            "CLEAR_STATUS": str(status),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+
+@pytest.mark.parametrize("realm", ["demo", "mainnet"])
+def test_optional_reconciliation_note_is_literal_preserved_on_failure_and_retired_on_success(
+    tmp_path: Path, realm: str
+) -> None:
+    arguments = tmp_path / "arguments.jsonl"
+    note_path = tmp_path / f"reconcile-clear.{realm}.note"
+    applied = tmp_path / f"reconcile-clear.{realm}.note.applied"
+    sentinel = tmp_path / "must-not-execute"
+    note = f"ENA historical close; evidence=proof.json; literal=$(touch {sentinel}) `touch {sentinel}`"
+    other = "mainnet" if realm == "demo" else "demo"
+    (tmp_path / f"reconcile-clear.{other}.note").write_text("other realm\n", encoding="utf-8")
+    assert _run_reconciliation_clear(tmp_path, realm, 0).returncode == 0
+    assert not arguments.exists()
+
+    note_path.write_text(note + "\n", encoding="utf-8")
+    failed = _run_reconciliation_clear(tmp_path, realm, 19)
+    assert failed.returncode == 19, failed.stderr
+    assert note_path.read_text(encoding="utf-8") == note + "\n"
+    assert not applied.exists()
+    assert not sentinel.exists()
+
+    succeeded = _run_reconciliation_clear(tmp_path, realm, 0)
+    assert succeeded.returncode == 0, succeeded.stderr
+    assert not note_path.exists()
+    assert applied.read_text(encoding="utf-8") == note + "\n"
+    assert not sentinel.exists()
+    expected = [realm, f"{realm}.toml", "reconcile-clear", "--note", note, "--execute"]
+    assert [json.loads(line) for line in arguments.read_text(encoding="utf-8").splitlines()] == [expected, expected]
+    assert _run_reconciliation_clear(tmp_path, realm, 0).returncode == 0
+    assert len(arguments.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_empty_reconciliation_note_is_retained_without_running_a_clear(tmp_path: Path) -> None:
+    pending = tmp_path / "reconcile-clear.demo.note"
+    pending.write_text("\n", encoding="utf-8")
+    result = _run_reconciliation_clear(tmp_path, "demo", 0)
+    assert result.returncode == 1
+    assert "note is empty" in result.stderr
+    assert pending.exists()
+    assert not (tmp_path / "arguments.jsonl").exists()
+
+
+@pytest.mark.parametrize("realm", ["demo", "mainnet"])
+def test_pending_reconciliation_note_prevents_unchanged_realm_skip(tmp_path: Path, realm: str) -> None:
+    helper = _function(DEPLOY.read_text(encoding="utf-8"), "realm_unchanged")
+    helper = helper.replace("/etc/liquidity-migration/", f"{tmp_path}/")
+    (tmp_path / f"{realm}.fingerprint").write_text("unchanged\n", encoding="utf-8")
+    harness = "\n".join(
+        [
+            "set -uo pipefail",
+            "lm_signal_worker_unit() { printf worker; }",
+            "lm_owner_unit() { printf engine; }",
+            "realm_fingerprint() { printf unchanged; }",
+            "systemctl() { return 0; }",
+            helper,
+            f"realm_unchanged {realm}",
+        ]
+    )
+
+    def unchanged() -> int:
+        return subprocess.run(
+            ["bash", "-c", harness],
+            env={**os.environ, "RELEASE_DIR": str(tmp_path)},
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        ).returncode
+
+    assert unchanged() == 0
+    pending = tmp_path / f"reconcile-clear.{realm}.note"
+    pending.write_text("verified historical close\n", encoding="utf-8")
+    assert unchanged() == 1
+    pending.rename(tmp_path / f"reconcile-clear.{realm}.note.applied")
+    assert unchanged() == 0
 
 
 def test_a_realm_start_runs_its_liveness_watchdog_after_every_unit_it_watches(

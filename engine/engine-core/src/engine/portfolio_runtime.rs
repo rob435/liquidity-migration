@@ -1687,4 +1687,154 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn legacy_quantity_only_rotation_adopts_native_grid_before_general_exit() {
+        use engine_types::numeric::{AssetAmount, ExactNumber, ExecutionAmounts};
+        let mut engine = crate::tests::shared_sleeves::legacy_single_sleeve_engine(
+            0.2899999999999999,
+            "0.29",
+            "0.01",
+        )
+        .await;
+        priced(&mut engine);
+        let matched = super::super::account_recovery::history_account_matches(
+            &engine.books.account,
+            &engine.logged_exposure,
+        )
+        .unwrap();
+        engine
+            .request_portfolio_exit(StrategyId(0), SymbolId(0), Side::Buy, Exact::zero(), None)
+            .unwrap();
+        let first = pending_order(&mut engine).await;
+        let sent = first.exact_terms.as_ref().unwrap().quantity.clone();
+        acknowledge(&mut engine).await;
+        engine
+            .take_update(OrderUpdate::Fill {
+                allocation: None,
+                amounts: Some(Box::new(ExecutionAmounts {
+                    quantity: ExactNumber::venue_decimal(&sent.to_decimal_string().unwrap())
+                        .unwrap(),
+                    price: ExactNumber::venue_decimal("100").unwrap(),
+                    fee: Some(AssetAmount {
+                        asset: AssetId::Named("USDT".into()),
+                        amount: ExactNumber::venue_decimal("0").unwrap(),
+                    }),
+                    settlement_asset: AssetId::Named("USDT".into()),
+                })),
+                exec_id: "legacy-general-exit".into(),
+                client_order_id: first.client_order_id,
+                symbol: SymbolId(0),
+                side: Side::Sell,
+                qty: sent.to_f64().unwrap(),
+                px: 100.0,
+                fee: Some(0.0),
+                is_maker: false,
+                forced_close: None,
+                venue_ts_ms: clock::wall_ms(),
+                recv_ns: clock::now_ns(),
+            })
+            .await
+            .unwrap();
+        let remaining = engine.books.attribution.snapshot().positions;
+        for _ in 0..300 {
+            engine.service_order_dispatches().await.unwrap();
+            engine.service_portfolio_controls().await.unwrap();
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        eprintln!("history_account_matches={matched}, sent={sent:?}, remaining={remaining:?}, in_flight={}, exits={}, emergencies={}",
+            engine.books.orders.in_flight().len(), engine.portfolio_controls.exits.len(), engine.portfolio_controls.emergencies.len());
+        assert_eq!(
+            sent,
+            Exact::parse_decimal("0.29").unwrap(),
+            "legacy migration rounded a full close down by one venue step"
+        );
+        assert!(
+            matched,
+            "unchanged native account failed its migration boundary"
+        );
+        assert!(
+            remaining.is_empty(),
+            "legacy full close left non-executable binary dust"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn legacy_grid_adoption_precedes_a_full_native_stop_during_downtime() {
+        use engine_types::numeric::{AssetAmount, ExactNumber, ExecutionAmounts};
+        let stopped = engine_types::VenueExecution {
+            exec_id: "native-legacy-full-stop".into(),
+            client_order_id: String::new(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Sell,
+            qty: 0.29,
+            px: 90.0,
+            fee: Some(0.0066016),
+            amounts: Some(ExecutionAmounts {
+                quantity: ExactNumber::venue_decimal("0.29").unwrap(),
+                price: ExactNumber::venue_decimal("90").unwrap(),
+                fee: Some(AssetAmount {
+                    asset: AssetId::Named("USDT".into()),
+                    amount: ExactNumber::venue_decimal("0.0066016").unwrap(),
+                }),
+                settlement_asset: AssetId::Named("USDT".into()),
+            }),
+            is_maker: false,
+            forced_close: Some(engine_types::ForcedClose::StopLoss),
+            venue_ts_ms: clock::wall_ms() - 10,
+        };
+        let engine = crate::tests::shared_sleeves::legacy_single_sleeve_recovery(
+            0.2899999999999999,
+            "0",
+            "0.01",
+            vec![stopped],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(engine.books.attribution.snapshot().positions.is_empty());
+        assert!(engine.logged_exposure.is_empty());
+        assert!(engine.fills.open_trade_lots().is_empty());
+        let records = engine.wal.snapshot_records();
+        let adopted = records
+            .iter()
+            .position(|row| matches!(row, WalRecord::LegacyQuantityGridAdopted { .. }))
+            .unwrap();
+        let recovered=records.iter().position(|row|matches!(row,WalRecord::RecoveredFill{exec_id,..} if exec_id=="native-legacy-full-stop")).unwrap();
+        assert!(adopted < recovered);
+        assert!(!records.iter().any(|row|matches!(row,WalRecord::Reconciled{findings,..} if findings.iter().any(|finding|finding.contains("cannot allocate")))));
+        assert!(super::super::account_recovery::history_account_matches(
+            &engine.books.account,
+            &engine.logged_exposure
+        )
+        .unwrap());
+        let portfolio = engine.books.attribution.snapshot();
+        assert_eq!(
+            portfolio
+                .accounting
+                .iter()
+                .fold(Exact::zero(), |sum, row| sum + &row.fees),
+            Exact::parse_decimal("0.0066016").unwrap()
+        );
+        assert!(portfolio.unvalued.iter().any(|row| row.legacy_prefix));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn legacy_grid_adoption_barrier_failure_stops_boot_before_recovery() {
+        let result = crate::tests::shared_sleeves::legacy_single_sleeve_recovery(
+            0.2899999999999999,
+            "0.29",
+            "0.01",
+            vec![],
+            None,
+            Some("legacy_quantity_grid_adopted_v2"),
+        )
+        .await;
+        let error = result
+            .err()
+            .expect("boot ignored the grid adoption durability failure");
+        assert!(error.to_string().contains("test barrier failure"));
+    }
 }

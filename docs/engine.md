@@ -268,6 +268,8 @@ The risk kernel (`engine-risk`) gates every order before it reaches the venue ad
 | --- | --- |
 | Strategy intent | `Intent.exact_quantity` and `Intent.exact_prices` carry chosen exact quantities and limit/stop prices; supplied values must match compatibility projections. `StrategyCtx` exposes exact owned and in-flight quantities. |
 | General exits | Exact retained targets survive partial fills, market maximum chunks and restart. Native full exits use the canonical owned lot; explicit partial reductions retain their chosen amount even when its `f64` projection equals the full lot. Legacy scalar full-close projection matching is a compatibility rule only. |
+| Legacy quantity adoption | Required durable grid context resolves aggregate legacy units within 64 ULPs per input before canonical fill reduction and at the adoption boundary. Contextual replay preserves raw legacy cash/fees, native exact totals and real close timestamps. Validated legacy-dependent automatic FIFO and internal full-close allocations are reconstructed; internal settlement retains its recorded price, time and zero-net contract. Canonical-only allocations and explicit native partial amounts remain exact. Canonical inventory never uses legacy dust deletion. |
+| Missing closes | A native flat reading cannot erase owned inventory. Unmatched physical exposure blocks openings until history or explicit operator reconciliation resolves it. Historical `ClaimsDropped` records remain readable. |
 | Wire legality | Exact instrument steps, minima/maxima, notional bounds and directional price rounding determine `ExactOrderTerms`; canonical terms flow through dispatch, amendment and risk reassessment. |
 | Account / Risk | Canonical venue decimals and provenance determine equity, available balance, position quantity/entry/stop, reservations and risk comparisons. Legacy numeric inputs retain explicit binary64 semantics; display projections do not replace known exact values. |
 | Ambiguous amendments | Exact reservation lower/upper prices retain both possible wire outcomes until resolved. Replay refuses a persisted range that excludes the current canonical request. |
@@ -309,6 +311,7 @@ When performing rollouts or cold starts, state is seeded or verified while units
 | `initialize-native-strategy-state` | Initializes canonical empty checkpoints in a fresh WAL. | Empty WAL file only. |
 | `import-strategy-state` | Ingests verified historical strategy bundles into the WAL. | Requires WAL lock and account match. |
 | `retire-legacy-signal-sources` | Records an operator-selected terminal outcome for stopped legacy sources without rewriting accepted cursors. | WAL lock; full plan validation; explicit `--execute`; no accepted pending observations. |
+| `reconcile-clear` | Restates canonical authenticated physical quantities and records the operator's historical evidence note; currently owned net quantities must agree first. | WAL lock; exact native quantities; explicit `--execute`; identical interrupted clear retries append nothing. |
 | `verify-native-strategy-state` | Verifies WAL checkpoint identity, frame CRC, and state provenance from the newest trusted segment, the records boot replays (`engine_wal::replay_current`). | Run before restarting units on deploy. |
 
 #### Handover Invariants

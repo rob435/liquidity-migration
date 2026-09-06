@@ -276,6 +276,7 @@ dependencies = [
 name = "engine-core"
 version = "0.1.0"
 dependencies = [
+ "crc32c",
  "engine-marketdata",
  "engine-risk",
  "engine-strategies",

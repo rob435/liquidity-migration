@@ -37,11 +37,12 @@ Define the completed Tier-1 ownership model, its local qualification evidence an
 | Late terminal events | Reuse the canonical order from the retained WAL family | A separate tombstone ledger duplicates allocation/replay; eviction without recovery loses late fills |
 | Market callbacks | Coalesce transient inputs; persist only proposals that change behavior | Embedded-only production avoids the observed write load but gives up process isolation; persisting every unchanged quote repeats the resource defect |
 | Numeric boundary | Exact canonical values with validated legacy projections | Removing legacy fields breaks old WAL and adapters; converting canonical values through float loses valid quantity and price distinctions |
+| Legacy accounting migration | Durable grid context normalizes eligible legacy units before canonical fill reducers; validated automatic FIFO and internal full-close allocations depending on those units are reconstructed with the same native totals, fees, stable policy and internal settlement price/time | Preserving faulty derived slices or permitting partial internal settlement creates microscopic opposing holdings; canonical-only allocations and explicit native amounts remain authoritative |
 | Unknown valuation | Retain typed settlement/fee valuation debt in the rolling-loss window; preserve reductions | Assuming USDC or another asset equals USDT invents unavailable conversion evidence |
 
 | Boundary | Explicit behavior |
 | --- | --- |
-| Legacy values | Old binary64 input values retain their represented value; old missing cost basis remains explicitly unpriced. Strategy scalar order intent uses shortest decimal consistent with outbound wire policy. |
+| Legacy values | Eligible legacy quantity contributions resolve to a unique native grid point within 64 binary64 ULPs per input, durably before missed-fill allocation. Canonical suffixes and monetary values stay exact; old missing cost basis stays unpriced. Strategy scalar intent follows the outbound decimal policy. |
 | Reporting | Money projections may underflow to zero or saturate at finite signed `f64::MAX`; canonical accounting and risk values remain exact. |
 | Archive retention | Order lineage requires the retained WAL family from segment 1. External pruning must also preserve unresolved callback sources. Missing archive data is an unresolved recovery condition. |
 | Storage and process limits | History resident memory is bounded by run/row contracts, not total history length; disk usage scales with retained history. Linux resource tests qualify the stated workload, not a universal RAM ceiling. macOS lacks equivalent OS memory/fork enforcement. |

@@ -68,6 +68,15 @@ impl Inventory {
         Ok(Self { positions })
     }
 
+    pub(crate) fn positions_on_symbol(
+        &self,
+        symbol: SymbolId,
+    ) -> impl Iterator<Item = &PortfolioPosition> {
+        self.positions
+            .values()
+            .filter(move |row| row.symbol == symbol)
+    }
+
     pub(crate) fn snapshot(&self) -> PortfolioState {
         PortfolioState {
             schema_version: 2,

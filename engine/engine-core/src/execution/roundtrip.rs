@@ -302,6 +302,42 @@ pub struct Lots {
 }
 
 impl Lots {
+    pub(crate) fn adopt_legacy_quantities(
+        &mut self,
+        corrections: &[(String, String, Exact, Exact)],
+    ) -> Result<(), String> {
+        let mut next = self.open.clone();
+        let mut seen = std::collections::BTreeSet::new();
+        for (sleeve, symbol, before, after) in corrections {
+            let key = (sleeve.clone(), symbol.clone());
+            if !seen.insert(key.clone()) {
+                return Err("repeated analytic quantity adoption".into());
+            }
+            let lot = next
+                .get_mut(&key)
+                .ok_or("quantity adoption has no analytic lot")?;
+            if &lot.signed_qty != before {
+                return Err("quantity adoption changes its analytic source quantity".into());
+            }
+            if after.is_zero() {
+                next.remove(&key);
+                continue;
+            }
+            if lot.priced {
+                let delta = after - before;
+                lot.in_qty += if lot.held > 0.0 { delta } else { -delta };
+                if lot.in_qty.is_negative() {
+                    return Err("quantity adoption makes negative analytical input units".into());
+                }
+            }
+            lot.signed_qty = after.clone();
+            lot.held = if after.is_positive() { 1.0 } else { -1.0 };
+            lot.exact_quantity = true;
+        }
+        self.open = next;
+        Ok(())
+    }
+
     pub fn checkpoint(&self) -> Vec<engine_types::trade::OpenTradeLot> {
         self.open
             .iter()

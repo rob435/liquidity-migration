@@ -224,11 +224,7 @@ impl Strategy for ForeignProbe {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
-    // A previous run's log: the first sleeve bought ZEC, and the close never
-    // made the log — a venue stop fired inside a stream gap, say. The venue
-    // is flat now. The leftover claim must not keep the second sleeve out of
-    // the name forever.
+async fn a_missing_close_retains_owned_inventory_and_latches_across_restart() {
     let previous = vec![
         WalRecord::Names {
             strategies: vec!["carry".to_string(), "probe".to_string()],
@@ -300,25 +296,56 @@ async fn a_stale_claim_on_a_flat_symbol_clears_at_boot() {
         "the probe must have been asked something"
     );
     assert!(
-        saw.lock().unwrap().iter().all(|foreign| !foreign),
-        "a flat symbol is nobody's; the stale claim must not survive boot"
+        saw.lock().unwrap().iter().all(|foreign| *foreign),
+        "a missing close cannot erase the recorded owner"
     );
-    let records = h.records.lock().unwrap();
-    assert!(
-        records
-            .iter()
-            .any(|r| matches!(r, WalRecord::ClaimsDropped { .. })),
-        "the drop must be durable in the log, not just in memory"
+    let mut records = previous.clone();
+    records.extend(h.records.lock().unwrap().iter().cloned());
+    assert!(!records
+        .iter()
+        .any(|r| matches!(r, WalRecord::ClaimsDropped { .. })));
+    assert!(records.iter().any(|r| matches!(
+        r,
+        WalRecord::Reconciled {
+            may_open: false,
+            ..
+        }
+    )));
+    let before = crate::attribution::Attribution::try_from_records(&records)
+        .unwrap()
+        .snapshot();
+    assert_eq!(
+        before.positions[0].signed_qty,
+        engine_types::numeric::Exact::parse_decimal("2").unwrap()
     );
+    let (idle, _) = Buyer::new("ZECUSDT", u64::MAX, 0.01);
+    let (_restarted, h2) = build(
+        allow_all(),
+        vec![
+            Box::new(idle),
+            Box::new(ForeignProbe {
+                symbol: "ZECUSDT".into(),
+                saw,
+            }),
+        ],
+        &["ZECUSDT"],
+        &records,
+    )
+    .await;
+    records.extend(h2.records.lock().unwrap().iter().cloned());
+    assert_eq!(
+        crate::attribution::Attribution::try_from_records(&records)
+            .unwrap()
+            .snapshot(),
+        before
+    );
+    assert!(!records
+        .iter()
+        .any(|r| matches!(r, WalRecord::ClaimsDropped { .. })));
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
-    // The wedge the durable record exists for: boot drops the stale claim
-    // against a flat venue, the second sleeve enters the name, and the next
-    // boot replays the same old fills — with the symbol now held, a flat
-    // sweep can never fire again. Only the replayed drop keeps the new
-    // owner's name its own.
     let previous = vec![
         WalRecord::Names {
             strategies: vec!["carry".to_string(), "probe".to_string()],
@@ -362,25 +389,15 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
         },
     ];
 
-    // First boot: flat venue, the claim drops and the drop is written down.
-    let (idle, _) = Buyer::new("ZECUSDT", u64::MAX, 0.01);
-    let saw = Rc::new(RefCell::new(Vec::new()));
-    let probe = ForeignProbe {
-        symbol: "ZECUSDT".to_string(),
-        saw: saw.clone(),
-    };
-    let (_engine, h) = build(
-        allow_all(),
-        vec![Box::new(idle), Box::new(probe)],
-        &["ZECUSDT"],
-        &previous,
-    )
-    .await;
-
-    // The log the next boot replays: the old fills, everything the first
-    // boot wrote (the drop included), then the second sleeve's own entry.
-    let mut log = previous.clone();
-    log.extend(h.records.lock().unwrap().iter().cloned());
+    let mut log = previous;
+    log.push(WalRecord::ClaimsDropped {
+        wall_ts_ms: recent_replay_ms(),
+        rows: vec![engine_types::FilledTotal {
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            signed_qty: 2.0,
+        }],
+    });
     log.push(WalRecord::OrderSent {
         dispatch: None,
         request: OrderRequest {
@@ -492,4 +509,31 @@ async fn a_latch_from_an_earlier_boot_survives_the_restart() {
         h.sends.lock().unwrap().is_empty(),
         "the latch did not survive the restart"
     );
+}
+
+#[test]
+fn a_logged_physical_position_missing_from_native_account_is_unreconciled() {
+    use crate::reconcile::{self, Finding};
+    use engine_types::numeric::Exact;
+    let physical =
+        std::collections::BTreeMap::from([(SymbolId(0), Exact::parse_decimal("1564").unwrap())]);
+    let result = reconcile::reconcile_positions(
+        &crate::inflight::LedgerOfOrders::default(),
+        &[],
+        (&physical, &Default::default()),
+        &[],
+        &AccountView {
+            exact_amounts: None,
+            equity_usdt: 1000.0,
+            available_usdt: 1000.0,
+            positions: vec![],
+            observed_ns: 1,
+        },
+        |_| Some(SymbolId(0)),
+        |_| Some(1.0),
+        |_| Some(0.001),
+    )
+    .unwrap();
+    assert!(result.findings.iter().any(|f|matches!(f,Finding::UnaccountedExposure{symbol:SymbolId(0),venue_qty,logged_qty} if *venue_qty==0.0 && *logged_qty==1564.0)));
+    assert!(result.must_not_open());
 }

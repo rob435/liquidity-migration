@@ -502,6 +502,13 @@ pub enum WalRecord {
         wall_ts_ms: i64,
         state: crate::SignalProducerLifecycle,
     },
+    #[serde(rename = "legacy_quantity_grid_adopted_v2")]
+    LegacyQuantityGridAdopted {
+        version: u8,
+        wall_ts_ms: i64,
+        sleeves: Vec<LegacySleeveQuantityCorrection>,
+        physical: Vec<LegacyPhysicalQuantityCorrection>,
+    },
     LegacySignalSourceRetired {
         wall_ts_ms: i64,
         retirement: LegacySignalSourceRetirement,
@@ -656,6 +663,23 @@ pub enum WalRecord {
         #[serde(default)]
         rolling_loss_rows: Vec<ClosedTradeRow>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacySleeveQuantityCorrection {
+    pub strategy: StrategyId,
+    pub symbol: SymbolId,
+    pub before: crate::numeric::Exact,
+    pub after: crate::numeric::Exact,
+    pub step: crate::numeric::Exact,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyPhysicalQuantityCorrection {
+    pub symbol: SymbolId,
+    pub before: crate::numeric::Exact,
+    pub after: crate::numeric::Exact,
+    pub step: crate::numeric::Exact,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

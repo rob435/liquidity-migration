@@ -956,10 +956,20 @@ fn legacy_partial_and_reversal_lot_quantities_match_portfolio_at_every_rotation(
         let mut base = segment_base(vec![], vec![], vec![]);
         if let WalRecord::SegmentBase {
             portfolio: state,
+            attribution,
             open_trade_lots,
             ..
         } = &mut base
         {
+            *attribution = portfolio
+                .positions
+                .iter()
+                .map(|row| engine_types::FilledTotal {
+                    strategy: row.strategy,
+                    symbol: row.symbol,
+                    signed_qty: row.signed_qty.to_f64().unwrap(),
+                })
+                .collect();
             *state = Some(portfolio);
             *open_trade_lots = Some(lots.clone());
         }
