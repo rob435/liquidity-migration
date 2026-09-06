@@ -3913,6 +3913,21 @@
         "path": "/tmp/tier1-forward-repair-qualified/sim.log",
         "bytes": 3701827,
         "sha256": "e1d0632f1082945dc73b14cb6f88ef0a498a995a37df81fae4d0b94afd1a5744"
+      },
+      "pre-push": {
+        "path": "/tmp/tier1-forward-repair-qualified/pre-push.log",
+        "bytes": 9545,
+        "sha256": "87d00689f20fd6cc8f9fe1a47b8e2202356d0cd620c4cfd7cc7dca7f7c1b6f21",
+        "rust_test_totals": {
+          "passed": 2351,
+          "failed": 0,
+          "ignored": 6
+        }
+      },
+      "docs": {
+        "path": "/tmp/tier1-forward-repair-qualified/docs.log",
+        "bytes": 98,
+        "sha256": "ed0d6c079627b8413ba6fa1e9b0419bf2bb3f2c7f1917b91d9f908f1f9a678d2"
       }
     },
     "final_suite_manifest": {
@@ -3922,8 +3937,153 @@
     },
     "qualification_boundary": "Completed local qualifications are individually source-bound; missing gates remain pending. Selected original archive frames cover observed epoch shapes and maxima, not full account/day accounting replay. Native deployment observations are separate.",
     "deployment": {
-      "status": "not dispatched"
+      "status": "workflow succeeded; observation continues",
+      "commit": "420c73477fbc85c4d23981ebea3042b310362e7f",
+      "run_id": 34035526455,
+      "url": "https://github.com/rob435/liquidity-migration/actions/runs/34035526455",
+      "dispatched_utc": "2026-09-06T13:15:10.735976+00:00",
+      "mainnet_entry_permissions": "Original carry/long/exodus permissions restored true with durable runtime controls at 13:29:52-13:29:58 UTC; actual WAL CRC/content hashes, fresh heartbeat and empty spool verified at 13:30:37 UTC.",
+      "completed_utc": "2026-09-06T13:28:02Z",
+      "workflow_receipt": {
+        "path": "/tmp/tier1-deploy-observation/run-34035526455/observation.json",
+        "bytes": 12104,
+        "sha256": "9a2040e44b05f5a7560f98251f5f583b93f72d063765bd2adf2a909bde2a74e7"
+      },
+      "entry_resume": {
+        "path": "/tmp/tier1-deploy-observation/entry-resume-420c/verified.json",
+        "bytes": 1446,
+        "sha256": "852275386488089cf96a6491b2c3600a85673d94f42f479305790bd2ad38be76"
+      },
+      "root_authenticated_protection": {
+        "path": "/tmp/tier1-deploy-observation/root-native-after-420c.json",
+        "bytes": 10700,
+        "sha256": "8f50bb90f875a3b61b3e1c3103b4d56a18d5674e769a0af8e3db4c3292ab1086"
+      },
+      "live_startup": "Both engine processes run installed release 420c73477fbc85c4d23981ebea3042b310362e7f; 6 native positions and 6 matching reduce-only stops per realm at 13:28:38 UTC. Mainnet ZEC stop 792.43, LIT 3.697; demo LIT 3.694.",
+      "remaining_observation": "Worker repair gaps remain under investigation; signal-worker shutdown while awaiting startup readiness requires a forward fix. Historical on-call HTTP400 reason remains unconfirmed: no natural post-install rejection and routine settings UI needs authenticated owner session."
     },
-    "observations": {}
+    "observations": {},
+    "committed_source_verification": {
+      "commit": "420c73477fbc85c4d23981ebea3042b310362e7f",
+      "qualified_files": 589,
+      "differences": {},
+      "manifest_sha256": "48d437703f77a0c9fdb466f296eb63a42694b754e40798300559dd5eeafa424a"
+    },
+    "mandatory_pre_push": {
+      "commit": "420c73477fbc85c4d23981ebea3042b310362e7f",
+      "started_utc": "2026-09-06T13:05:47.589042+00:00",
+      "command": [
+        "git",
+        "push",
+        "origin",
+        "main"
+      ],
+      "mandatory_hook": "scripts/git-hooks/pre-push",
+      "exit_code": 0,
+      "finished_utc": "2026-09-06T13:13:10.367034+00:00",
+      "log_sha256": "87d00689f20fd6cc8f9fe1a47b8e2202356d0cd620c4cfd7cc7dca7f7c1b6f21"
+    },
+    "private_host_archive": {
+      "path": "/var/lib/liquidity-migration-wal-quarantine/tier1-forward-repair-20260906/final-proofs-420c7347.tar.gz",
+      "bytes": 7597963,
+      "sha256": "4f85402059f826847df41843417780ea5b8e24e9bd6e56d1497b90df8426ae20",
+      "verified_internal_files": 702,
+      "mode": "0600",
+      "directory_mode": "0o700",
+      "staged_utc": "2026-09-06T13:14:01.934623+00:00"
+    }
+  },
+  "observed_runtime_repair": {
+    "base_commit": "420c73477fbc85c4d23981ebea3042b310362e7f",
+    "status": "integrated release qualification passed; mandatory developer/debug push gate pending",
+    "live_faults": [
+      {
+        "fault": "Persistent CARRY/LONG child processes expire after 20 cumulative CPU seconds and return failed to fill whole buffer",
+        "first_demo_utc": "2026-09-06T13:30:01Z",
+        "fix": "Remove process lifetime RLIMIT_CPU; retain existing per-callback supervisor timeout and process group termination, memory and syscall restrictions."
+      },
+      {
+        "fault": "Signal worker ignores SIGTERM while waiting for engine readiness, and may lose a shutdown signal between recovery and run",
+        "first_demo_utc": "2026-09-06T13:23:49Z",
+        "fix": "Retain continuously registered SIGTERM/SIGINT listeners from initialization through readiness and live operation."
+      },
+      {
+        "fault": "Demo probe opening refused because legacy sleeve accounting basis is unknown although market price and protection are available",
+        "first_demo_utc": "2026-09-06T13:30:00Z",
+        "fix": "Value unknown-cost sleeves prospectively at latest accepted market price while retaining unknown accounting; preserve conservative known-cost values, all stop checks and separate sleeve gross."
+      }
+    ],
+    "linux_cpu": {
+      "before": {
+        "path": "/tmp/tier1-persistent-cpu-proof/linux-before.json",
+        "bytes": 2522,
+        "sha256": "159f1da6ea733d17e136ea26b151b6ea357f146487d6b9fd877e168e054e73bc"
+      },
+      "after": {
+        "path": "/tmp/tier1-persistent-cpu-proof/linux-after.json",
+        "bytes": 2338,
+        "sha256": "f76a9a786b401ea6c27ac0f02a2a4b48a3a827082c08976c16f46618c4875016"
+      },
+      "source_binding": {
+        "path": "/tmp/tier1-persistent-cpu-proof/source-binding.json",
+        "bytes": 1927,
+        "sha256": "066481532c6e69d5de063f3cfc8a2939e2eff112697f1f86e4202a62cd18bb16"
+      },
+      "scope": "Linux harness includes byte-identical production limits.rs and the same synthetic framed CPU callback fixture as the committed integration regression; full supervisor/deadline integration is separately exercised. Before: callback19 EOF/SIGKILL after18 healthy callbacks; after:20 healthy callbacks, same child,22.028040 CPU seconds, exit0.",
+      "final_receipt": {
+        "path": "/tmp/tier1-persistent-cpu-proof/proof.json",
+        "bytes": 6216,
+        "sha256": "bd6538f0f16c3ce0907d0f8f4172b4f0463dcf7be2d02aac1f508bbe5cf69e50"
+      }
+    },
+    "shutdown": {
+      "before": {
+        "path": "/tmp/tier1-worker-shutdown-proof/before.json",
+        "bytes": 471,
+        "sha256": "c4d80657adae0802b2017eb235118cd08dcfd66db85c4df2d7d9816f8abcf0ff"
+      },
+      "handoff-before": {
+        "path": "/tmp/tier1-worker-shutdown-proof/handoff-before.json",
+        "bytes": 500,
+        "sha256": "81465db6ad265581b44cc66193dd62b44561aa600bc52508aa42b1c7755e6973"
+      },
+      "after": {
+        "path": "/tmp/tier1-worker-shutdown-proof/after.json",
+        "bytes": 468,
+        "sha256": "0e608a2dbe8eff97935cf2d56d107faf5280be764ccf5b5284ae02858d0a496c"
+      }
+    },
+    "prospective_risk": {
+      "before": {
+        "path": "/tmp/tier1-prospective-risk-proof/before.json",
+        "bytes": 387,
+        "sha256": "0e0d069cdc548c0a65c883176b08507b097f687da325fbfd1fb9de249359320c"
+      },
+      "after": {
+        "path": "/tmp/tier1-prospective-risk-proof/after.json",
+        "bytes": 850,
+        "sha256": "65768859c6724c49804409aeda723a7a6bc29f3d3cb5a244d85e245f40c48d6c"
+      }
+    },
+    "observation": {
+      "path": "/tmp/tier1-deploy-observation/post420-observation-summary.json",
+      "bytes": 37128,
+      "sha256": "778618e2270416d22d6f830755dda26e9ccca03046adbd6c25851aa52c8e456b"
+    },
+    "qualification": {
+      "path": "/tmp/tier1-observed-repair-qualified/final-suite.json",
+      "bytes": 142528,
+      "sha256": "b9c0447ce24e972f83fca8bf9ef7775d29da85a2a0914a1ba88f6750104f3374",
+      "source_files_unchanged": 591,
+      "release_tests_passed": 2358,
+      "release_failed": 0,
+      "release_ignored": 6,
+      "fmt": "pass",
+      "strict_workspace_clippy": "pass",
+      "release_doctests": "pass",
+      "simulation": "6 heavy-fault seeds, 300 seconds, 2 crashes, each repeated with identical replay"
+    },
+    "deployment": null,
+    "unresolved_external_fault": "Historical on-call HTTP400 remains unconfirmed. Installed bounded/redacted diagnostics have not received a natural post-install rejection; fire-only credential has no documented read capability and settings UI redirects to reauthentication."
   }
 }

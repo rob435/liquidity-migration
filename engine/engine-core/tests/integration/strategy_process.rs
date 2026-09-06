@@ -289,6 +289,53 @@ async fn a_stalled_process_is_killed_while_the_core_executor_keeps_running() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn healthy_persistent_callbacks_do_not_exhaust_a_lifetime_cpu_limit() {
+    let mut command = Command::new("python3");
+    command
+        .arg("-c")
+        .arg(include_str!("../fixtures/strategy-cpu-callback.py"))
+        .arg("healthy");
+    let mut process = StrategyProcess::spawn_command(command).unwrap();
+    let pid = process.id();
+    for callback_id in 1..=20 {
+        let mut input = probe();
+        input.callback_id = callback_id;
+        let (next, proposal) = process
+            .call(input, engine_core::strategy_process::CALLBACK_TIMEOUT)
+            .await
+            .unwrap_or_else(|error| panic!("healthy callback {callback_id} failed: {error}"));
+        assert_eq!(
+            next.id(),
+            pid,
+            "healthy callbacks must retain their process"
+        );
+        assert_eq!(proposal.callback_id, callback_id);
+        assert!(proposal.actions.is_empty());
+        process = next;
+    }
+}
+
+#[tokio::test]
+async fn a_cpu_runaway_callback_is_killed_at_its_own_deadline() {
+    let mut command = Command::new("python3");
+    command
+        .arg("-c")
+        .arg(include_str!("../fixtures/strategy-cpu-callback.py"))
+        .arg("runaway");
+    let process = StrategyProcess::spawn_command(command).unwrap();
+    let pid = process.id();
+    let started = std::time::Instant::now();
+    let error = match process.call(probe(), Duration::from_millis(120)).await {
+        Ok(_) => panic!("CPU runaway callback completed"),
+        Err(error) => error,
+    };
+    assert!(error.contains("exceeded its deadline"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+}
+
 #[tokio::test]
 async fn cancellation_of_a_callback_kills_and_reaps_its_owned_process() {
     let mut command = Command::new("/bin/sleep");

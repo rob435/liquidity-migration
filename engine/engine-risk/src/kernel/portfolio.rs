@@ -195,11 +195,12 @@ impl Kernel {
             worst_case_loss_usdt: self.envelope.position_worst_case_usdt(notional, fraction),
         };
         for row in &portfolio.positions {
-            let entry = row
-                .entry_px
-                .as_ref()
-                .ok_or_else(|| unknown("portfolio position has unknown entry value"))?;
-            let current = self.book.px(row.symbol).unwrap_or_else(|| entry.clone());
+            let current = self
+                .book
+                .px(row.symbol)
+                .or_else(|| row.entry_px.clone())
+                .ok_or_else(|| unknown("portfolio position has no market price or entry value"))?;
+            let entry = row.entry_px.as_ref().unwrap_or(&current);
             let price = current.clone().max(entry.clone());
             let low = current.clone().min(entry.clone());
             let stop = row.stop_px.as_ref().ok_or(DenyReason::MissingStop)?;

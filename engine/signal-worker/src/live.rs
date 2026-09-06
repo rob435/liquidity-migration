@@ -129,6 +129,7 @@ pub struct WorkerHeartbeat {
 }
 
 pub struct LiveRunner {
+    shutdown: Option<ShutdownSignal>,
     config: SignalWorkerConfig,
     durable: DurableSignalWorker,
     bybit: PublicHttpClient,
@@ -464,6 +465,7 @@ impl LiveRunner {
         config: SignalWorkerConfig,
         options: LiveRunOptions,
     ) -> Result<Option<Self>, WorkerError> {
+        let mut shutdown = ShutdownSignal::install()?;
         write_provisional_heartbeat(&config, None, &options.heartbeat, "starting")?;
         let state_dir = options.state_dir.clone();
         let spool_dir = options.spool_dir.clone();
@@ -478,8 +480,6 @@ impl LiveRunner {
             .map_err(|error| WorkerError::io("spawn signal-worker recovery", error))?;
         let mut heartbeat_tick = cadence(config.live.ticker_cadence_ms.min(5_000));
         heartbeat_tick.tick().await;
-        let shutdown = shutdown_signal();
-        tokio::pin!(shutdown);
         let durable = loop {
             tokio::select! {
                 result = &mut recovery_rx => {
@@ -489,7 +489,7 @@ impl LiveRunner {
                 _ = heartbeat_tick.tick() => {
                     write_provisional_heartbeat(&config, None, &options.heartbeat, "starting")?;
                 }
-                signal = &mut shutdown => {
+                signal = shutdown.recv() => {
                     signal?;
                     write_provisional_heartbeat(&config, None, &options.heartbeat, "stopped")?;
                     return Ok(None);
@@ -523,6 +523,7 @@ impl LiveRunner {
             request_budget,
         )?;
         Ok(Some(Self {
+            shutdown: Some(shutdown),
             config,
             durable,
             bybit,
@@ -587,6 +588,7 @@ impl LiveRunner {
             options.spool_dir,
         )?;
         Ok(Self {
+            shutdown: None,
             config,
             durable,
             bybit,
@@ -709,9 +711,23 @@ impl LiveRunner {
     }
 
     pub async fn run(mut self) -> Result<(), WorkerError> {
+        let mut shutdown = match self.shutdown.take() {
+            Some(shutdown) => shutdown,
+            None => ShutdownSignal::install()?,
+        };
         self.write_heartbeat("starting", None)?;
-        self.resolve_named_destinations().await?;
-        self.resolve_universe().await?;
+        tokio::select! {
+            biased;
+            signal = shutdown.recv() => {
+                signal?;
+                self.write_heartbeat("stopped", None)?;
+                return Ok(());
+            }
+            result = async {
+                self.resolve_named_destinations().await?;
+                self.resolve_universe().await
+            } => result?,
+        }
         self.durable.respond_to_readiness_request()?;
         let run_started_at_ms = wall_ms()?;
         let symbols = self.kline_symbols();
@@ -743,9 +759,6 @@ impl LiveRunner {
         whale_tick.tick().await;
         gate_tick.tick().await;
         heartbeat_tick.tick().await;
-        let shutdown = shutdown_signal();
-        tokio::pin!(shutdown);
-
         lanes.instruments = true;
         spawn_instrument_lane(
             lane_tx.clone(),
@@ -852,7 +865,7 @@ impl LiveRunner {
                     );
                     self.write_heartbeat(status, Some(health))?;
                 }
-                signal = &mut shutdown => {
+                signal = shutdown.recv() => {
                     signal?;
                     self.write_heartbeat("stopped", Some(stream.health()))?;
                     return Ok(());
@@ -2606,21 +2619,38 @@ fn carry_required_lanes_pending(lanes: &LaneState) -> bool {
     lanes.instruments || !lanes.instruments_ready || lanes.funding || !lanes.funding_ready
 }
 
-async fn shutdown_signal() -> Result<(), WorkerError> {
+struct ShutdownSignal {
     #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .map_err(|error| WorkerError::io("install SIGTERM handler", error))?;
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => result.map_err(|error| WorkerError::io("wait for SIGINT", error)),
-            _ = terminate.recv() => Ok(()),
-        }
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    interrupt: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignal {
+    fn install() -> Result<Self, WorkerError> {
+        Ok(Self {
+            #[cfg(unix)]
+            terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|error| WorkerError::io("install SIGTERM handler", error))?,
+            #[cfg(unix)]
+            interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .map_err(|error| WorkerError::io("install SIGINT handler", error))?,
+        })
     }
-    #[cfg(not(unix))]
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(|error| WorkerError::io("wait for shutdown", error))
+
+    async fn recv(&mut self) -> Result<(), WorkerError> {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = self.interrupt.recv() => Ok(()),
+                _ = self.terminate.recv() => Ok(()),
+            }
+        }
+        #[cfg(not(unix))]
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|error| WorkerError::io("wait for shutdown", error))
+    }
 }
 
 pub fn heartbeat_path_parent(path: &Path) -> Result<&Path, WorkerError> {

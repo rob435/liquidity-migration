@@ -123,7 +123,34 @@ edit STATE.md to match.
     rejection diagnostics now retain the reason; eight mocked cases fail
     before the fix and pass afterward. The remote rejection cause remains
     unconfirmed until the existing timer reports it.
-  - Deployment and post-repair observations are recorded here when complete.
+  - Forward repair `420c7347` passes 2,352 local release tests, the full developer
+    gate and six repeated heavy-fault simulations. Run `34035526455` deploys
+    successfully at 13:28:02 UTC. Both engines replay retained archives and
+    adopt exact quantities; all six legacy retirements are durable. Native
+    reads show six positions and six matching stops per realm; mainnet ZEC
+    and LIT stops tighten to 792.43 and 3.697, demo LIT to 3.694. Three funded
+    entry permissions resume at 13:29:52–13:29:58 with verified durable controls.
+    Both workers close their repair gaps and report ready by 13:32 UTC;
+    recorder drops and old-hour partial counts remain zero.
+  - Post-deploy observation finds repeated CARRY/LONG subprocess failures:
+    `failed to fill whole buffer` begins at 13:30:01 UTC. Linux applies a
+    20-second cumulative CPU limit to children reused for many callbacks.
+    The lifetime limit is removed; the supervisor retains its per-callback
+    deadline and process-group termination. The deployment also exposes a
+    signal worker ignoring SIGTERM while awaiting engine readiness; one
+    registered listener now spans recovery, readiness and live operation.
+    Actual CLI tests cover shutdown, restart and the listener handoff.
+  - Demo probe is refused at 13:30:00 UTC with `portfolio position has unknown
+    entry value`. Legacy inventory correctly retains unknown accounting
+    cost, but prospective risk unnecessarily requires that cost. Unknown-cost
+    sleeves now use the latest accepted market price for exposure and stop
+    distance; known costs retain their conservative valuation. Missing prices,
+    missing/crossed stops and gross caps still refuse new risk. Two actual
+    failing-before regressions cover shared/opposing ownership and restart
+    without changing accounting bytes; all 144 risk tests pass afterward.
+    The integrated block passes 2,358 release tests (six ignored), strict
+    Clippy, release doctests and six repeated heavy-fault simulations; all 591
+    source files remain unchanged through qualification. Its deployment is pending.
 
 - **2026-09-06 — Tier-1 exact ownership and recovery qualification.**
   - All 56 accepted audit IDs have current dispositions: 42 implemented,

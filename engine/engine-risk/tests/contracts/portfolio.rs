@@ -24,6 +24,98 @@ fn portfolio(rows: Vec<PortfolioPosition>) -> PortfolioState {
 }
 
 #[test]
+fn unknown_legacy_cost_uses_current_exposure_without_inventing_accounting_after_restart() {
+    for quantities in [[2, 3], [2, -2], [-2, -3]] {
+        let mut state = portfolio(vec![
+            held(CARRY, BUSDT, quantities[0]),
+            held(LONG, BUSDT, quantities[1]),
+        ]);
+        for row in &mut state.positions {
+            row.entry_value = None;
+        }
+        let encoded = serde_json::to_vec(&state).unwrap();
+        let restart = serde_json::from_slice(&encoded).unwrap();
+        for state in [state, restart] {
+            let mut kernel = Kernel::new(demo_config()).unwrap();
+            kernel.observe_price(BUSDT, 10.0);
+            let net = quantities.iter().sum::<i64>();
+            let positions = if net == 0 {
+                Vec::new()
+            } else {
+                vec![position(
+                    BUSDT,
+                    if net > 0 { Side::Buy } else { Side::Sell },
+                    net.unsigned_abs() as f64,
+                    10.0,
+                    true,
+                )]
+            };
+            let verdict = kernel.assess_portfolio(
+                &entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC),
+                &view(250_000.0, positions, SEC),
+                &state,
+            );
+            assert_eq!(
+                verdict,
+                PortfolioRiskVerdict::Allow {
+                    qty: Exact::one(),
+                    venue_reduce_only: false,
+                },
+                "protected legacy portfolio {quantities:?}: {verdict:?}"
+            );
+            assert_eq!(serde_json::to_vec(&state).unwrap(), encoded);
+        }
+    }
+}
+
+#[test]
+fn unknown_legacy_cost_still_counts_opposing_gross_and_requires_price_and_protection() {
+    let mut state = portfolio(vec![held(CARRY, BUSDT, 30_000), held(LONG, BUSDT, -30_000)]);
+    for row in &mut state.positions {
+        row.entry_value = None;
+    }
+    let mut kernel = Kernel::new(demo_config()).unwrap();
+    kernel.observe_price(BUSDT, 10.0);
+    let intent = entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC);
+    let account = flat(250_000.0, SEC);
+    let verdict = kernel.assess_portfolio(&intent, &account, &state);
+    assert!(
+        matches!(
+            verdict,
+            PortfolioRiskVerdict::Deny {
+                reason: DenyReason::EnvelopeBreached { .. }
+            }
+        ),
+        "unknown cost hid opposing gross: {verdict:?}"
+    );
+    for row in &mut state.positions {
+        row.signed_qty = if row.signed_qty.is_positive() {
+            Exact::one()
+        } else {
+            -Exact::one()
+        };
+    }
+    let mut no_price = Kernel::new(demo_config()).unwrap();
+    assert!(matches!(
+        no_price.assess_portfolio(&intent, &account, &state),
+        PortfolioRiskVerdict::Deny {
+            reason: DenyReason::UnknownState { .. }
+        }
+    ));
+    for stop in [None, Some(Exact::from_i64(10)), Some(Exact::from_i64(11))] {
+        state.positions[0].stop_px = stop;
+        let mut kernel = Kernel::new(demo_config()).unwrap();
+        kernel.observe_price(BUSDT, 10.0);
+        assert_eq!(
+            kernel.assess_portfolio(&intent, &account, &state),
+            PortfolioRiskVerdict::Deny {
+                reason: DenyReason::MissingStop
+            }
+        );
+    }
+}
+
+#[test]
 fn opposing_virtual_inventory_counts_against_gross_after_physical_flat_and_restart() {
     let state = portfolio(vec![held(CARRY, BUSDT, 30_000), held(LONG, BUSDT, -30_000)]);
     let restart = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();

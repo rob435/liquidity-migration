@@ -1,7 +1,6 @@
 use std::process::Command;
 
 pub const MAX_ADDRESS_SPACE_BYTES: u64 = 512 * 1024 * 1024;
-pub const MAX_CPU_SECONDS: u64 = 20;
 
 pub(super) fn install(command: &mut Command) {
     #[cfg(target_os = "linux")]
@@ -18,9 +17,9 @@ pub(super) fn install(command: &mut Command) {
 
 #[cfg(target_os = "linux")]
 fn apply() -> std::io::Result<()> {
+    // The supervisor limits each callback; the child persists across callbacks.
     let limits = [
         (libc::RLIMIT_AS, MAX_ADDRESS_SPACE_BYTES),
-        (libc::RLIMIT_CPU, MAX_CPU_SECONDS),
         (libc::RLIMIT_NOFILE, 32),
         (libc::RLIMIT_FSIZE, 0),
         (libc::RLIMIT_CORE, 0),

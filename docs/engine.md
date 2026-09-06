@@ -181,7 +181,7 @@ A run that ends without being asked returns one `EngineError`. The supervisor re
 | Producer retirement | A generation seals its published tail before retirement. `retired_through` compacts managed generations; unresolved legacy tails keep their owner and opening restriction until reconciled. An explicit offline `LegacySignalSourceRetired` outcome can terminate a permanently stopped legacy suffix while retaining its original accepted cursor; managed sources cannot use it. Retired generations cannot reopen a cursor. |
 | Failure | Missing, malformed or I/O-failed readiness keeps required growth suspended and retries. Request-time accepted prefixes distinguish a rewind from concurrent arrivals. Reductions, protective stops and account recovery remain available. |
 | Metadata | A durable exact catalog binds native instruments to venue/environment. A retained catalog supports recovery during a failed refresh; new growth waits for an authoritative refresh, and a delisted instrument retains recovery ownership without becoming eligible for growth. |
-| Worker bounds | At most four child workers; 10 s callback deadline, 64 KiB frames, 4 MiB runtime state, 64 MiB proposal/aggregate retained-process budget and 256 timers per process. Linux also enforces 512 MiB address space, 20 s CPU, 32 descriptors and no child processes. Over-budget proposals do not install candidate state. |
+| Worker bounds | At most four child workers; 10 s callback deadline, 64 KiB frames, 4 MiB runtime state, 64 MiB proposal/aggregate retained-process budget and 256 timers per process. Linux also enforces 512 MiB address space, 32 descriptors and no child processes. The supervisor deadline applies to each callback; healthy child processes persist without a cumulative CPU expiry. Over-budget proposals do not install candidate state. |
 
 ---
 
@@ -282,6 +282,7 @@ The risk kernel (`engine-risk`) gates every order before it reaches the venue ad
 | Emergency exits | Durable phases resolve outstanding orders, close physical net exposure in legal exact chunks, then settle opposing virtual offsets. Rejection/cancellation retains the obligation with a new attempt; ambiguous sends keep their existing identity until resolved. |
 | Client order identity | Normal, general-exit and emergency orders use `eng-<whole-second-ms>-<counter>`. A durable logical boot epoch advances beyond prior epochs even if wall time moves backward; the 18-bit counter remains reversible through Lighter’s native client index. |
 | Cost basis / Loss | Exact open trade lots, entry cash and proportional fees survive rotation. Closed canonical net amounts feed the exact rolling-loss sum. Missing cost basis or an unvalued settlement/fee asset produces an unpriced row, never a fabricated zero or USDT value. Funding is outside this closed-fill loss calculation. |
+| Prospective portfolio risk | A sleeve with unknown historical cost uses the latest accepted market price for gross exposure and stop distance; the accounting basis remains unknown. Known cost retains conservative entry/current-price valuation. Missing both market price and basis, missing/crossed stops, and breached gross limits refuse openings. Shared and opposing sleeves count separately. |
 
 #### Rolling-Loss Circuit Breaker Invariant
 
