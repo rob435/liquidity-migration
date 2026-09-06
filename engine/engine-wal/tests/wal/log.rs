@@ -580,6 +580,7 @@ fn a_barrier_after_a_rotation_covers_the_new_segment() {
     let base = WalRecord::SegmentBase {
         order_id_epoch_ms: None,
         open_trade_lots: Some(Vec::new()),
+        legacy_signal_source_retirements: Vec::new(),
         portfolio_control: Default::default(),
         pending_order_dispatches: Vec::new(),
         signal_producers: Vec::new(),

@@ -7,6 +7,50 @@ incident, or a check that changed nothing gets no entry. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-06 08:07 UTC — Worker recovery, recorder finalization and rollback repair.**
+  - Both workers on `cece1d9f` remain alive but degraded: hourly source pruning
+    discards the beginning of the unchanged daily CARRY repair range. Repair
+    then fetches that same prefix again. Pruning now retains the daily scorer
+    cursor's full kline/funding/whale windows until the next decision advances.
+    Ingest, hot-update and serialized-restart regression fails with all three
+    coverage windows missing before the fix and preserves them afterward.
+  - Quiet recorder symbols retain prior-hour `.partial` files while continuous
+    traffic prevents the writer queue's one-second idle timeout. The writer
+    now checks hourly finalization on a monotonic cadence even under load.
+    The regression leaves the quiet symbol open before the fix and publishes
+    its complete file afterward, without waiting for a new frame on it.
+  - Automatic/manual rollback and an explicit older deploy can replace the
+    candidate with a reader that refuses its WAL or worker checkpoint. They
+    now preserve the candidate for forward repair unless runtime inputs are
+    identical; twelve failing-before cases exercise the destructive paths and
+    equivalent-runtime rollback controls remain available. The imported
+    heartbeat regression fixture now models Linux stat on macOS.
+  - Backup at 03:17 UTC and tape upload at 08:10 UTC fail with Google OAuth
+    `invalid_grant: Token has been expired or revoked.` The three configured
+    copies contain the same rejected credential. At 08:18:52 UTC the existing
+    client reconnects with unchanged `drive.file` scope; authenticated access
+    to the backup and tape folders succeeds. Canonical/runtime copies use the
+    refreshed credential and retain protected pre-change backups.
+    Backup completes at 08:24:45 UTC (83 files, 15,034,191,872 bytes), and tape
+    upload at 08:27:06 UTC (13 archives, 5,636,556,800 bytes); remote sizes,
+    archive hashes and the backup check match. The OAuth app remains in
+    Testing: Production is disabled by incomplete Branding, so the refreshed
+    token still has Google's seven-day Testing limit.
+  - Three stopped legacy sources in each realm have no accepted pending
+    observations but cannot report their terminal publication frontiers.
+    Source retirement now records that terminal outcome without advancing
+    accepted cursors or fabricating consumption. Demo sequence 11613 and
+    mainnet 11226 remain irrecoverable; demo 11614 and mainnet 11227/49416 are
+    recovered expired snapshots retained without application. Exact checkpoint
+    evidence and recovered bytes remain under
+    `/var/lib/liquidity-migration-wal-quarantine/legacy-source-retirement-20260906`.
+    The deployment applies an explicit realm plan under the WAL lock after
+    stopping it. Required `LegacySignalSourceRetired` and `segment_base_v7`
+    retain this outcome through restart and reject incompatible old readers.
+    Copied live WAL rehearsals preserve every original byte and accepted
+    cursor, pass native verification and append nothing on identical retry.
+  - Deployment and post-repair observations are recorded here when complete.
+
 - **2026-09-06 — Tier-1 exact ownership and recovery qualification.**
   - All 56 accepted audit IDs have current dispositions: 42 implemented,
     13 retained decisions and one corrected finding. The accepted audit is
@@ -37,7 +81,7 @@ edit STATE.md to match.
 - **2026-09-05 22:48 UTC — The rollback printed `deploy-ok` over a crash-looping
   fleet, and the workers that replaced their quarantined state started their
   sequences at 0. Two faults left by `mainnet-4117d27a32d02421` below. The gate
-  is fixed here; the sequence reset is not.**
+  is fixed here; the sequence-reset concern is checked below.**
   - `wait_fresh_heartbeat` (`scripts/deploy_vps_live.sh:242`) samples
     `systemctl is-active` and the heartbeat mtime once per attempt. A unit on
     `Restart=always` is `active` for the moments it lives and rewrites its
@@ -74,9 +118,12 @@ edit STATE.md to match.
     That is a fault in code that runs, not a new guard, so the no-new-safety-
     machinery rule does not hold it back. Reverting it is one commit if the
     owner disagrees.
-  - The sequence reset is not fixed and is the owner's call: it is boot-time
-    reconciliation the worker does not do today, and it changes what a worker
-    may republish after its state is replaced.
+  - Current-state check on 2026-09-06: worker and engine generations match;
+    the mainnet WAL observes and consumes LONG sequence 12 at 08:06:05 UTC and
+    CARRY sequence 8157 at 08:15:11 UTC. The old generation's frontier remains
+    separate. The current source is advancing, so no sequence reset or floor
+    rewrite is applied. The observed degraded worker has the retention defect
+    recorded above.
 
 - **2026-09-05 22:50 UTC — Incident `mainnet-4117d27a32d02421`: the deploy of
   `80dc5c69` reached both

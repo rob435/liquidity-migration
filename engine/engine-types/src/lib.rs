@@ -62,9 +62,9 @@ pub use strategy::{
     STRATEGY_ENTRY_PERMISSION_SCHEMA_VERSION,
 };
 pub use wal::{
-    AnchorState, FilledTotal, IntendedStop, OpenOrderState, RecentExecutionId, SignalCursor,
-    SignalGap, SignalSubscriptionState, StrategyCheckpointState, StrategyGlobalCheckpointState,
-    StrategySymbol, SymbolTotal, Wal, WalError, WalRecord,
+    AnchorState, FilledTotal, IntendedStop, LegacySignalSourceRetirement, OpenOrderState,
+    RecentExecutionId, SignalCursor, SignalGap, SignalSubscriptionState, StrategyCheckpointState,
+    StrategyGlobalCheckpointState, StrategySymbol, SymbolTotal, Wal, WalError, WalRecord,
 };
 
 /// Which venue account a gateway's credentials actually reach, as the venue

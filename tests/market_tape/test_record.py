@@ -1723,3 +1723,39 @@ def test_without_a_windowed_universe_no_history_is_kept(tmp_path: Path) -> None:
     recorder = build(tmp_path, Tier("deep", DEEP_FEEDS, Universe("symbols", symbols=("BTCUSDT",))))
     recorder.live.observe("BTCUSDT", {"mark_price": 1.0}, BASE_NS)
     assert recorder.live.history == {} and recorder.live.history_ns == 0
+
+
+def test_continuous_frames_close_a_quiet_symbols_previous_hour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = build(tmp_path, Tier("wide", WIDE_FEEDS, Universe("listed", quote="USDT")))
+    quiet = {"kind": "ticker", "symbol": "QUIETUSDT", "local_receive_ts_ns": BASE_NS}
+    active = {"kind": "ticker", "symbol": "BTCUSDT", "local_receive_ts_ns": BASE_NS + HOUR_NS}
+    recorder.frames.put(("rows", [quiet], BASE_NS, "wide"))
+    recorder.frames.put(("rows", [active], BASE_NS + HOUR_NS, "wide"))
+    recorder.frames.put(None)
+    clock = {"wall": BASE_NS, "elapsed": 0}
+    get = recorder.frames.get
+
+    def receive(timeout: float) -> Any:
+        item = get(timeout=timeout)
+        if item is not None:
+            clock["wall"] = item[2]
+            clock["elapsed"] = item[2] - BASE_NS
+        return item
+
+    closed: list[Any] = []
+    monkeypatch.setattr(recorder.frames, "get", receive)
+    monkeypatch.setattr(record.time, "time_ns", lambda: clock["wall"])
+    monkeypatch.setattr(record.time, "monotonic_ns", lambda: clock["elapsed"])
+    monkeypatch.setattr(recorder.compressor, "submit", closed.append)
+    try:
+        recorder._write_loop()
+        assert [segment.symbol for segment in closed] == ["QUIETUSDT"]
+        assert "QUIETUSDT" not in recorder.writer.active
+        assert "BTCUSDT" in recorder.writer.active
+        assert closed[0].records == 1
+        assert json.loads(closed[0].path.read_text()) == quiet
+        assert not list(closed[0].path.parent.glob("*.partial"))
+    finally:
+        recorder.writer.close()

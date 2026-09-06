@@ -25,6 +25,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
         "import-strategy-state" => import_strategy_state(args),
         "initialize-native-strategy-state" => initialize_native_strategy_state(args),
         "verify-native-strategy-state" => verify_native_strategy_state(args),
+        "retire-legacy-signal-sources" => retire_legacy_signal_sources(args),
         "set-strategy-entry-permission" => set_strategy_entry_permission(args),
         "flatten-strategy" => flatten_strategy(args),
         "-h" | "--help" | "help" => {
@@ -295,6 +296,26 @@ fn initialize_native_strategy_state(args: &[String]) -> Result<(), Box<dyn Error
 fn verify_native_strategy_state(args: &[String]) -> Result<(), Box<dyn Error>> {
     let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
     engine_core::takeover::verify_native_strategy_state(&config)
+}
+
+fn retire_legacy_signal_sources(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let config = PathBuf::from(
+        value(args, "--config").ok_or("retire-legacy-signal-sources needs --config PATH")?,
+    );
+    let plan = PathBuf::from(
+        value(args, "--plan").ok_or("retire-legacy-signal-sources needs --plan PATH")?,
+    );
+    let requests = serde_json::from_reader::<_, Vec<engine_core::legacy_signals::RetirementRequest>>(
+        std::io::BufReader::new(std::fs::File::open(plan)?),
+    )?;
+    if requests.is_empty() {
+        return Err("legacy source retirement plan is empty".into());
+    }
+    let execute = args.iter().any(|arg| arg == "--execute");
+    let retired = engine_core::legacy_signals::retire(&config, &requests, execute)?;
+    println!("{}", serde_json::to_string_pretty(&retired)?);
+    println!("legacy-source-retirement execute={execute}");
+    Ok(())
 }
 
 fn set_strategy_entry_permission(args: &[String]) -> Result<(), Box<dyn Error>> {

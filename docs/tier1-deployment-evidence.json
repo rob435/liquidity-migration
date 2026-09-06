@@ -1,0 +1,1205 @@
+{
+  "purpose": "Source-bound qualification and observed deployment repairs for the Tier-1 candidate; current host truth remains distinct from local tests.",
+  "base_commit": "66a6ab78941f5712ff80966390044fd82abe0ee6",
+  "source_sha256": {
+    "engine/engine-core/src/cli.rs": "8f884958e5cbe6cd1d064c035f230b26bb7f7d1742c2ca900e5c84ad505946a5",
+    "engine/engine-core/src/engine.rs": "24a3aa1220b4140b6ae721c20592cfcbf9642f98c49e63dcd927968eb9f32e76",
+    "engine/engine-core/src/execution/tests.rs": "d359a7e8112a1fdffc1183b0d939317c9e09aa9a9404ca27c951915498fd9d05",
+    "engine/engine-core/src/execution_ids.rs": "3ee44de2a36a48200fdacbf4e2c1a0a1bd2620eedfec5653f58106c39174708f",
+    "engine/engine-core/src/legacy_signals.rs": "7cd4d9c087f10bfe9aac11e48fb3d7d43b56e6b6760dd6525c734e895bba2ed8",
+    "engine/engine-core/src/lib.rs": "22b475e88cfc30d1cb43aebc047c61d6f95fb2efa5c9f47568dad54df21b5aef",
+    "engine/engine-core/src/main.rs": "f89863cb7008c4d7750a46d39224a407b3eca5c9ea4a07e18aaa889f494ec07a",
+    "engine/engine-core/src/replay.rs": "32473a6c4fa98c6e6340eddc8d0a396950862f6f03eea370b57e74bad1ed9a32",
+    "engine/engine-core/src/signal_state.rs": "8df261c6784d1c9d5321204f126d915805fb6853a25442008225317fb286d271",
+    "engine/engine-core/src/signal_state/lifecycle.rs": "62b19717d13336d87863b39a61b35306d3d96c09ba0baeb0615f655be79f6bdf",
+    "engine/engine-core/src/signal_state/retirement.rs": "6ddb5ae7351477c706d7cd1cc983ab58d3a7dd4e093f6acd31f96e9909c2b471",
+    "engine/engine-core/src/signals/tests.rs": "cea784265abf83a2b62eec1eed1fd72a6979ab70c2fd70dade6d62e7291d6223",
+    "engine/engine-core/src/takeover.rs": "2a0f858071266171d11123fabbfe63f6056e26228559891d75e6dd9380bd819e",
+    "engine/engine-core/src/tests.rs": "70930100774b6f9fcad9b8c6687a1069b489d4d82afe5a359188a9cca32787d4",
+    "engine/engine-core/src/tests/rolling_loss.rs": "e0309e7cfb148a0cfa9d318bbde70c2f397e401b13ff3d9d4912a7d6040dc475",
+    "engine/engine-types/src/lib.rs": "64e0da4c648a37ed22350c6deac60d5b5ae5f00db648f1abdaea3c6070066c4e",
+    "engine/engine-types/src/wal.rs": "71dd70bdbbed3c254c582bd25566331562f4e7a1b8c54a6e7f91c416e823a217",
+    "engine/engine-wal/src/lib.rs": "09340428cf87481ec714547dc2cd13f81640a28eed0ece6d78f324ba7ec5d28e",
+    "engine/engine-wal/src/order_lineage.rs": "416f19fcbe483cdec6a85bc6f8c0b3b8d088e4aa0085664dd1d4a50b995ed9ba",
+    "engine/engine-wal/tests/wal/log.rs": "85ab37c4e81f5fefc9f6b2fc60dccc778fc1da2d98ef8578a046ba6103ba6d33",
+    "engine/engine-wal/tests/wal/segments.rs": "d7a437337038843508a6bc56937d1e3152f37e731b6daca15848be15f941e547",
+    "engine/signal-worker/src/worker.rs": "f488e82a02cf56d9dd1844294289b461bcbbab0953861e21bd476edbad59f816",
+    "engine/signal-worker/src/worker/tests.rs": "abeac78fcab79af7d97dd3c9b6cacf09e9a36987e965f0023e1f4daaaa2924d7",
+    "engine/signal-worker/tests/perpetual_resource_envelope.rs": "f71e82bf9cb7c2d01c60686bf2895d272f520693dd0c12c27c60e6a086d41d6d",
+    "market_tape/record.py": "18cf0220de2ce4441e9a7fe2a9c7e7c838b21e1c7a38e27e5530b0a0ec5300bf",
+    "scripts/deploy_vps_live.sh": "744de324dca8fad21107b8a648e24aaefb4f992ba5049f9fb38f4bb30c2a1300",
+    "tests/market_tape/test_record.py": "3493d402c758a89a3c0e68ae784a077fcb31954d1678584d04ab1a518807ec58",
+    "tests/scripts/test_runtime_scripts.py": "f84958eccc56b9575190fd1d50a5f45c927095fdf770efaf0106d004c12c1318"
+  },
+  "qualification": {
+    "fmt": {
+      "log": "/tmp/tier1-deploy-qualified/fmt.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "rust_test_totals": null
+    },
+    "clippy": {
+      "log": "/tmp/tier1-deploy-qualified/clippy.log",
+      "bytes": 175,
+      "sha256": "13e174ae169fcd211a10896dbc0a7a1338fd60346647d10fb106efd6111a156c",
+      "rust_test_totals": null
+    },
+    "debug": {
+      "log": "/tmp/tier1-deploy-qualified/debug.log",
+      "bytes": 216474,
+      "sha256": "5586df3ef693a3d1d5cb903e3112f3c618ad24326e1c3b2d08f313ab0d662267",
+      "rust_test_totals": {
+        "passed": 2309,
+        "failed": 0,
+        "ignored": 5
+      },
+      "test_cleanup": "Final strict Clippy removes two redundant test clones and rustfmt wraps two assertions; production behavior unchanged, pre-push reruns final source."
+    },
+    "release": {
+      "log": "/tmp/tier1-deploy-qualified/release.log",
+      "bytes": 216009,
+      "sha256": "074368e334868fd24a2b85122a4eefa98aa7e224b6cdbc1ec123cc158ff02630",
+      "rust_test_totals": {
+        "passed": 2309,
+        "failed": 0,
+        "ignored": 5
+      }
+    },
+    "sim": {
+      "log": "/tmp/tier1-deploy-qualified/sim.log",
+      "bytes": 3549564,
+      "sha256": "6e5827b9b14b10f806538e150dcdc73277afd15baed08c70855b2478278aa1ae",
+      "rust_test_totals": null,
+      "seeds": 6,
+      "crashes_per_seed": 2,
+      "faults": "heavy",
+      "replays_identical": 6
+    },
+    "docs": {
+      "log": "/tmp/tier1-deploy-qualified/docs.log",
+      "bytes": 180,
+      "sha256": "477aedff648e8e37824d291be380878c9390e0e21ccfe0fa29dc85a8de4d3916",
+      "rust_test_totals": null
+    }
+  },
+  "receipts": {
+    "carry-retention-proof.json": {
+      "root_cause": "Hourly pruning advances the carry lookback start while acquisition still requires the retained daily scorer decision window. Repairs lose their newly fetched prefix on ingestion and cannot converge.",
+      "implemented_in": [
+        "engine/signal-worker/src/worker.rs",
+        "engine/signal-worker/src/worker/tests.rs",
+        "engine/signal-worker/tests/perpetual_resource_envelope.rs"
+      ],
+      "test": "worker::tests::daily_carry_repair_survives_hot_inputs_and_restart_until_the_next_decision",
+      "failure_exit": 101,
+      "failure_assertion": "coverage (false,false,false) != (true,true,true)",
+      "restored_debug_exit": 0,
+      "restored_release_exit": 0,
+      "debug_tests_passed": 137,
+      "release_tests_passed": 137,
+      "ignored": 3,
+      "toolchain": "rustc 1.90.0",
+      "files": [
+        {
+          "path": "/tmp/tier1-deploy-observation/carry-retention-before.log",
+          "sha256": "93f1fb0129509b85640492493d0f8f9ef23b625dea9df56526ed4f3f7ca9baa7",
+          "bytes": 1069
+        },
+        {
+          "path": "/tmp/tier1-deploy-observation/carry-retention-after-suite.log",
+          "sha256": "098609adcc22fe7522e0e0fccb098cf0a34dc2b6e831050eb423f2be8f6ec93d",
+          "bytes": 13286
+        },
+        {
+          "path": "/tmp/tier1-deploy-observation/carry-retention-release.log",
+          "sha256": "57a2a42c5ff8e1fbdaf61a3b6c7289b30ca1594d1317c6c77dc4f81f5c0abc41",
+          "bytes": 13500
+        },
+        {
+          "path": "/tmp/tier1-deploy-observation/worker-intervals-before.json",
+          "sha256": "5532e68454fee11375d8781c8fd2a156e8c5ee8db514d8970f2983188a0b5a87",
+          "bytes": 4717
+        },
+        {
+          "path": "/tmp/tier1-deploy-observation/baseline.json",
+          "sha256": "cac73acd93c041de4277144aba1055582d905f12e2c64c734adc130ce839ae4c",
+          "bytes": 77415
+        },
+        {
+          "path": "/tmp/tier1-deploy-observation/baseline-rates.json",
+          "sha256": "530c3f689504268f4965053526d9cf6d0db862fff3016db6907b17fc7c21f0ef",
+          "bytes": 1768
+        },
+        {
+          "path": "/tmp/tier1-deploy-observation/carry-retention-resource-qualified.log",
+          "sha256": "cd9570f72b137748949745884300f24552393dab3ca38543827407a893d45567",
+          "bytes": 843
+        },
+        {
+          "path": "/tmp/tier1-deploy-observation/carry-retention-resource-final-print-build.log",
+          "sha256": "ee0fdf22b55ff63f3d2fa7f7b627c09f7e8e3fde97700e09a856caad1f06fe32",
+          "bytes": 285
+        },
+        {
+          "path": "/tmp/tier1-deploy-observation/carry-retention-clippy.log",
+          "sha256": "cae4d41ac7ce91982eb8b8a3f1c87ab5e3c982030fa3584a6478836bbd1332d6",
+          "bytes": 677
+        },
+        {
+          "path": "/tmp/tier1-deploy-observation/carry-retention-fmt.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        },
+        {
+          "path": "/tmp/tier1-deploy-observation/carry-retention-resource.log",
+          "sha256": "302270643a744df646f258218786e20fcaea952f28ae1c511d4d95e197dcf349",
+          "bytes": 929
+        },
+        {
+          "path": "/tmp/tier1-deploy-observation/carry-retention-resource-final.log",
+          "sha256": "b15e454352327b0e1a8413c1c2d70fff2a0a21dd2edb184319c501c41f7315cb",
+          "bytes": 1037
+        }
+      ],
+      "source_hashes": {
+        "engine/signal-worker/src/worker.rs": "f488e82a02cf56d9dd1844294289b461bcbbab0953861e21bd476edbad59f816",
+        "engine/signal-worker/src/worker/tests.rs": "abeac78fcab79af7d97dd3c9b6cacf09e9a36987e965f0023e1f4daaaa2924d7",
+        "engine/signal-worker/tests/perpetual_resource_envelope.rs": "f71e82bf9cb7c2d01c60686bf2895d272f520693dd0c12c27c60e6a086d41d6d"
+      },
+      "resource": {
+        "exit": 0,
+        "elapsed_seconds": 341.2,
+        "symbols": 270,
+        "ticker_hours": 2,
+        "outage_hours": 12,
+        "restart_verified": true,
+        "checkpoint_bytes": 107228082,
+        "checkpoint_cap_bytes": 134217728,
+        "spool_files": 4,
+        "spool_bytes": 7299677,
+        "input_sequence": 3306,
+        "final_klines_asserted": 414480,
+        "final_funding_asserted": 122550,
+        "diagnostic_format_changed_after_run": "Replaced old hardcoded final row counts in println with actual reopened state counts; assertion and production behavior unchanged. Final test compiled successfully; no costly rerun solely for diagnostic formatting."
+      },
+      "excluded_intermediate_checks": [
+        {
+          "log": "carry-retention-resource.log",
+          "reason": "Old exact row-count fixture omitted retained prior daily history, first cold watermark assertion; +24h x150 rows expected for each kline/funding."
+        },
+        {
+          "log": "carry-retention-resource-final.log",
+          "reason": "Same stale exact row-count fixture remained at final outage assertion; updated to same bounded daily history formula. Resource caps unchanged."
+        }
+      ],
+      "strict_clippy": true,
+      "format_check": true
+    },
+    "drive-reconnect.json": {
+      "observed_at": "2026-09-06T08:18:52.177167+00:00",
+      "status": "reconnected_and_seeded",
+      "client_and_scope_unchanged": true,
+      "scope": "drive.file",
+      "refresh_token_changed": true,
+      "expiry": "2026-09-06T09:17:49.862869573Z",
+      "existing_project_folders_verified": [
+        "engine-state",
+        "market-tape"
+      ],
+      "remote_free_bytes": 5472452595107,
+      "seed": "/etc/liquidity-migration/rclone.conf",
+      "seed_backup": "/etc/liquidity-migration/.rclone-before-reconnect-20260906T081529Z.conf",
+      "runtime": [
+        {
+          "path": "/var/lib/liquidity-migration/backup/rclone.conf",
+          "mode": "0o600",
+          "backup": "/var/lib/liquidity-migration/backup/.rclone-before-reconnect-20260906T081529Z.conf",
+          "matches_seed": true
+        },
+        {
+          "path": "/var/lib/liquidity-migration/market-tape-upload/rclone.conf",
+          "mode": "0o600",
+          "backup": "/var/lib/liquidity-migration/market-tape-upload/.rclone-before-reconnect-20260906T081529Z.conf",
+          "matches_seed": true
+        }
+      ],
+      "services_restarted": false,
+      "google_oauth_app_publishing": "Testing observed in Google authorization UI; unchanged"
+    },
+    "drive-publication-review.json": {
+      "observed_at": "2026-09-06T08:22:56.827170+00:00",
+      "scope": "same-client durable-production repair attempted with root authorization",
+      "project_id": "liquidity-507023",
+      "project_number": "595179210797",
+      "client_type": "Desktop",
+      "client_count": 1,
+      "client_created": "2026-08-30",
+      "publishing_status": "Testing",
+      "user_type": "External",
+      "test_user_count": 1,
+      "make_internal_enabled": false,
+      "publish_enabled": false,
+      "publish_blocker": "Your app's OAuth configuration is incomplete. You must enter the missing information to proceed. Please visit the Branding page to finish configuring your app.",
+      "branding": {
+        "app_name": "liquidity",
+        "support_email_present": true,
+        "developer_email_present": true,
+        "logo_present": true,
+        "home_page_blank": true,
+        "privacy_policy_blank": true,
+        "terms_blank": true,
+        "authorized_domains_empty": true
+      },
+      "declared_scopes": {
+        "non_sensitive": [
+          "https://www.googleapis.com/auth/drive.file"
+        ],
+        "sensitive": [],
+        "restricted": []
+      },
+      "runtime_requested_scope": "https://www.googleapis.com/auth/drive.file",
+      "verification_status": "Verification is not required since app is configured with Testing status",
+      "official_behavior": {
+        "testing_refresh_tokens": "External Testing authorizations and refresh tokens expire after seven days unless only basic identity scopes are requested. Drive file scope is not an exception.",
+        "production_audience": "Any Google account can choose to authorize the same client; removes the test-user allowlist. This change itself does not share existing Drive files or change the requested scope.",
+        "drive_file_category": "Non-sensitive per-file scope.",
+        "personal_use": "Google documents an exception to verification for personal use by only the owner or a few known users.",
+        "logo": "External published apps displaying branding may require brand verification; current UI specifically warns an uploaded logo requires verification outside Testing/Internal.",
+        "token_reissue": "Recommend reconnect once after Production is verified, preserving client and exact scope, so credentials are issued under the production setting.",
+        "specific_incomplete_field": "Current UI requires homepage URL and privacy policy URL; both are blank. App name and support email already exist."
+      },
+      "recommendation": "Keep the same Desktop client and drive.file scope. Supply real app homepage and privacy URLs on an existing owned domain, register that domain, publish same app, then reconnect same client and reseed runtime configs. Scope verification exception for personal use does not waive the observed publishing fields. No existing homepage/domain is configured; repository homepageUrl is empty. Do not invent URLs or treat changing OAuth clients as access-preserving.",
+      "sources": [
+        "https://support.google.com/cloud/answer/15549945?hl=en",
+        "https://developers.google.com/identity/protocols/oauth2",
+        "https://developers.google.com/workspace/drive/api/guides/api-specific-auth",
+        "https://support.google.com/cloud/answer/13464323?hl=en",
+        "https://developers.google.com/identity/protocols/oauth2/production-readiness/brand-verification",
+        "https://support.google.com/cloud/answer/15549049?hl=en",
+        "https://developers.google.com/identity/protocols/oauth2/policies",
+        "https://docs.cloud.google.com/iap/docs/reference/rest/v1/projects.brands"
+      ],
+      "mutations": [
+        {
+          "operation": "declare exact already-used scope",
+          "scope": "https://www.googleapis.com/auth/drive.file",
+          "saved": true,
+          "permission_expansion": false
+        },
+        {
+          "operation": "temporarily remove optional logo to test incomplete-branding blocker",
+          "saved": true,
+          "published_enabled_after": false,
+          "original_logo_restored_and_saved": true
+        }
+      ],
+      "updated_at": "2026-09-06T08:52:45.351930+00:00",
+      "logo_backup": {
+        "path": "/tmp/tier1-deploy-observation/oauth-logo-before-production.png",
+        "sha256": "1ca709350daaaf2113885828be116a9c53a8b3c2b694f95450a871b76ad3010b",
+        "restored": true
+      },
+      "verification": {
+        "scope_save_notification": "Data access changes saved",
+        "logo_restore_notification": "Branding changes saved.",
+        "audience_hard_reload": "Testing; Publish app disabled; same incomplete-branding message",
+        "support_email_reselected": "same saved email; Save stayed disabled indicating no change",
+        "new_oauth_token_issued_under_production": false,
+        "existing_working_refreshed_credentials_changed": false
+      },
+      "status": "precise_required_homepage_and_privacy_urls_identified",
+      "remaining_boundary": "Production remains disabled because the app lacks real homepage and privacy policy URLs; current constraint forbids inventing these or creating infrastructure. Name/support/scope are already configured. Current working credentials are untouched in this read-only pass.",
+      "live_publish_tooltip": "Valid app name, support email, homepage URL and privacy policy URL are required for switching the app to external production mode. You must enter the missing information to proceed. Please visit the Branding page to finish configuring your app.",
+      "live_publish_tooltip_method": "Current signed-in Google Cloud Console Audience page; click disabled Publish app; accessibility text exposes requirement; no mutation.",
+      "alternatives": [
+        {
+          "option": "Same client, same drive.file, truthful existing owned app homepage/privacy, Production, reconnect",
+          "assessment": "Smallest durable route preserving current app file authorization. Requires actual URLs; none configured or declared in repository metadata."
+        },
+        {
+          "option": "Stay Testing and periodically reconnect",
+          "assessment": "Works temporarily but refresh grants still expire seven days after consent; not durable unattended repair."
+        },
+        {
+          "option": "Internal or Workspace-admin-trusted app",
+          "assessment": "Requires organization identity/admin path. Current personal Gmail project has Make internal disabled; outside existing-account constraints."
+        },
+        {
+          "option": "New client, built-in rclone client, or service account",
+          "assessment": "Changes authorization identity and does not establish access to current app-specific Drive files. Outside same-client constraint; not recommended."
+        },
+        {
+          "option": "IAP Brand API",
+          "assessment": "Official documented API exposes partial brand metadata with create/get/list only; no publish/update operation to bypass required URLs."
+        }
+      ],
+      "read_only_repository_metadata": {
+        "nameWithOwner": "rob435/liquidity-migration",
+        "visibility": "PUBLIC",
+        "homepageUrl": ""
+      }
+    },
+    "independent-jobs-retry-verified.json": {
+      "observed_at": "2026-09-06T08:42:45.051029+00:00",
+      "units": {
+        "liquidity-migration-backup.service": {
+          "Result": "success",
+          "ExecMainStartTimestamp": "Sun 2026-09-06 08:21:27 UTC",
+          "ExecMainExitTimestamp": "Sun 2026-09-06 08:24:45 UTC",
+          "ExecMainStatus": "0",
+          "ActiveState": "inactive",
+          "SubState": "dead"
+        },
+        "liquidity-migration-market-tape-upload.service": {
+          "Result": "success",
+          "ExecMainStartTimestamp": "Sun 2026-09-06 08:21:27 UTC",
+          "ExecMainExitTimestamp": "Sun 2026-09-06 08:27:06 UTC",
+          "ExecMainStatus": "0",
+          "ActiveState": "inactive",
+          "SubState": "dead"
+        }
+      },
+      "receipts": {
+        "backup.last-success": "backed_up_at=2026-09-06T08:24:45Z\nrun_stamp=20260906T082132Z\nfile_count=83\nbytes=15034191872\ndestination=gdrive:LiquidityMigration/engine-state\nremote_free_bytes=5466747933100\n",
+        "market-tape-upload.last-success": "uploaded_at=2026-09-06T08:27:06Z\narchives=bybit-linear/2026-09-06T00Z,bybit-linear/2026-09-06T01Z,bybit-linear/2026-09-06T02Z,bybit-linear/2026-09-06T03Z,bybit-linear/2026-09-06T04Z,bybit-linear/2026-09-06T05Z,bybit-linear/2026-09-06T06Z,bybit-linear/2026-09-06T07Z,binance-usdm/2026-09-05T11Z,binance-usdm/2026-09-05T12Z,binance-usdm/2026-09-05T15Z,binance-usdm/2026-09-05T20Z,binance-usdm/2026-09-05T23Z\nfile_count=6976\nbytes=5636556800\nbytes_30d=78310010880\ndestination=gdrive:LiquidityMigration/market-tape\ntapes=bybit-linear,binance-usdm\nremote_free_bytes=5464402348460\nkeep_hours=24.0\npruned_hours=16\npruned_bytes=2424116165\n"
+      },
+      "tape_archives_independently_verified": [
+        {
+          "remote": "gdrive:LiquidityMigration/market-tape/bybit-linear/2026/09/06/2026-09-06T00Z.tar",
+          "bytes": 618403840,
+          "md5_matches_ledger": true
+        },
+        {
+          "remote": "gdrive:LiquidityMigration/market-tape/bybit-linear/2026/09/06/2026-09-06T01Z.tar",
+          "bytes": 711782400,
+          "md5_matches_ledger": true
+        },
+        {
+          "remote": "gdrive:LiquidityMigration/market-tape/bybit-linear/2026/09/06/2026-09-06T02Z.tar",
+          "bytes": 650158080,
+          "md5_matches_ledger": true
+        },
+        {
+          "remote": "gdrive:LiquidityMigration/market-tape/bybit-linear/2026/09/06/2026-09-06T03Z.tar",
+          "bytes": 643983360,
+          "md5_matches_ledger": true
+        },
+        {
+          "remote": "gdrive:LiquidityMigration/market-tape/bybit-linear/2026/09/06/2026-09-06T04Z.tar",
+          "bytes": 666644480,
+          "md5_matches_ledger": true
+        },
+        {
+          "remote": "gdrive:LiquidityMigration/market-tape/bybit-linear/2026/09/06/2026-09-06T05Z.tar",
+          "bytes": 666224640,
+          "md5_matches_ledger": true
+        },
+        {
+          "remote": "gdrive:LiquidityMigration/market-tape/bybit-linear/2026/09/06/2026-09-06T06Z.tar",
+          "bytes": 623646720,
+          "md5_matches_ledger": true
+        },
+        {
+          "remote": "gdrive:LiquidityMigration/market-tape/bybit-linear/2026/09/06/2026-09-06T07Z.tar",
+          "bytes": 685363200,
+          "md5_matches_ledger": true
+        },
+        {
+          "remote": "gdrive:LiquidityMigration/market-tape/binance-usdm/2026/09/05/2026-09-05T11Z.tar",
+          "bytes": 73666560,
+          "md5_matches_ledger": true
+        },
+        {
+          "remote": "gdrive:LiquidityMigration/market-tape/binance-usdm/2026/09/05/2026-09-05T12Z.tar",
+          "bytes": 79964160,
+          "md5_matches_ledger": true
+        },
+        {
+          "remote": "gdrive:LiquidityMigration/market-tape/binance-usdm/2026/09/05/2026-09-05T15Z.tar",
+          "bytes": 78499840,
+          "md5_matches_ledger": true
+        },
+        {
+          "remote": "gdrive:LiquidityMigration/market-tape/binance-usdm/2026/09/05/2026-09-05T20Z.tar",
+          "bytes": 72980480,
+          "md5_matches_ledger": true
+        },
+        {
+          "remote": "gdrive:LiquidityMigration/market-tape/binance-usdm/2026/09/05/2026-09-05T23Z.tar",
+          "bytes": 65239040,
+          "md5_matches_ledger": true
+        }
+      ],
+      "tape_verified_bytes": 5636556800,
+      "backup_independent_check": {
+        "remote": "gdrive:LiquidityMigration/engine-state/latest",
+        "file_count": 83,
+        "matching_local_sizes": 83,
+        "matching_md5_for_files_at_most_4MiB": 23,
+        "large_file_hash_scope": "Service already ran rclone check on whole snapshot before success; independent read checks remote sizes for large files.",
+        "missing": [],
+        "mismatches": []
+      }
+    },
+    "deploy-retirement-before.json": {
+      "control": "66a6ab78 production handover before retirement integration",
+      "expected_failure": true,
+      "observed": [
+        0,
+        [
+          "stop",
+          "import",
+          "start",
+          "record"
+        ]
+      ],
+      "required_result": [
+        1,
+        [
+          "stop",
+          "retire",
+          "rollback"
+        ]
+      ]
+    }
+  },
+  "rollback_regressions": {
+    "base_commit": "66a6ab78941f5712ff80966390044fd82abe0ee6",
+    "source": {
+      "scripts/deploy_vps_live.sh": "425c72c7dc08050ba25a5f16b28532e752df723f06769ff6995991e9ff9e5532",
+      "tests/scripts/test_runtime_scripts.py": "015959560e03a42c1b9f29209bc14eb6be1c20fd6d666c2fc2925bf537780170"
+    },
+    "before": {
+      "log": "before.log",
+      "failed_behavioral_cases": 11,
+      "positive_controls_passed": 2,
+      "failure": "candidate installation occurs on unverified automatic/manual rollback"
+    },
+    "backward_before": {
+      "log": "backward-before.log",
+      "failed_behavioral_cases": 1,
+      "failure": "explicit older deploy moves checkout before compatibility verification"
+    },
+    "after": {
+      "log": "combined-final.log",
+      "passed": 80,
+      "failed": 0
+    },
+    "heartbeat_fixture": "portable stat stub; macOS setup failures are excluded from runtime regression counts",
+    "checks": [
+      "Ruff",
+      "ShellCheck warning severity",
+      "bash syntax via runtime tests",
+      "git diff --check"
+    ],
+    "artifacts": {
+      "combined.log": {
+        "sha256": "d1ee5763f280f6133dffd365c28fa9368a0ecabb2dd0b5dedba88e4359fa505d",
+        "bytes": 179
+      },
+      "combined-final.log": {
+        "sha256": "b64201d6ff259b02c4cc45b23c58439273f3dd3560a66b4315afc1afcaf04f0d",
+        "bytes": 180
+      },
+      "backward-before.log": {
+        "sha256": "739759160f8600c7b447a2de76b476e6ff2ed63ced4a5f2bfa8875977ac37ebe",
+        "bytes": 2740
+      },
+      "before.log": {
+        "sha256": "19ea75e01cdc2e0592ad064d76794b76f67a99d117f40574852b495844812d53",
+        "bytes": 17805
+      },
+      "after.log": {
+        "sha256": "8b2223663837ff2472c16f2c92f9e16608b1f77d469a6fb5618955b71d0c165a",
+        "bytes": 99
+      }
+    }
+  },
+  "retirement_plan": {
+    "scope": "Offline administrative retirement of obsolete legacy sources only. Real accepted cursors stay unchanged; current generations are excluded.",
+    "snapshot_scope": "Latest archived local copies, no host mutation or claim that sampled current source is frozen.",
+    "realms": {
+      "demo": {
+        "current_generation_excluded": "9a34d978c0622885458940ae8b62dfa3",
+        "engine_wal_snapshot": {
+          "path": "/tmp/tier1-live-state-check/demo/engine.wal.000029",
+          "sha256": "0f4baa5ff3692336544b081aa298ead18b9c321888c04b44f70fcbdd600c460f",
+          "last_wall_ts_ms": 1788682507078
+        },
+        "source_retirements": [
+          {
+            "source": "directional_public_v1.gc3ed639adeda431c852d55eadb21ce68.carry",
+            "destination": 0,
+            "accepted_through": 49105,
+            "published_through_in_durable_checkpoint": 49105,
+            "publication_evidence": {
+              "path": "/var/lib/liquidity-migration-wal-quarantine/worker-state-20260905T224219Z/demo/checkpoint.json",
+              "sha256": "451985b60115d6899ddcfd4f52150f2e2db0708feef114d725028cb1369f1ea3",
+              "generation": "c3ed639adeda431c852d55eadb21ce68",
+              "last_input_sequence": 2118586,
+              "last_observed_ts_ms": 1788647814360,
+              "durably_sealed": true
+            },
+            "pending_accepted_observations": [],
+            "unprocessed_ranges": [],
+            "disposition": "retire obsolete producer generation; no fabricated acceptance, consumption or sequence-floor reset"
+          },
+          {
+            "source": "directional_public_v1.gc3ed639adeda431c852d55eadb21ce68.long",
+            "destination": 1,
+            "accepted_through": 76,
+            "published_through_in_durable_checkpoint": 76,
+            "publication_evidence": {
+              "path": "/var/lib/liquidity-migration-wal-quarantine/worker-state-20260905T224219Z/demo/checkpoint.json",
+              "sha256": "451985b60115d6899ddcfd4f52150f2e2db0708feef114d725028cb1369f1ea3",
+              "generation": "c3ed639adeda431c852d55eadb21ce68",
+              "last_input_sequence": 2118586,
+              "last_observed_ts_ms": 1788647814360,
+              "durably_sealed": true
+            },
+            "pending_accepted_observations": [],
+            "unprocessed_ranges": [],
+            "disposition": "retire obsolete producer generation; no fabricated acceptance, consumption or sequence-floor reset"
+          },
+          {
+            "source": "directional_public_v1.gc4d0071f167eb01e3287bcf29516f49c.carry",
+            "destination": 0,
+            "accepted_through": 11612,
+            "published_through_in_durable_checkpoint": 11614,
+            "publication_evidence": {
+              "path": "/var/lib/liquidity-migration-signal-worker-demo/checkpoint.json.bak-20260903T114317Z",
+              "sha256": "45f48f71f75a5fb0e4ece15b2e1295d254bb58377d8007d68ed33425e5eaf9bc",
+              "generation": "c4d0071f167eb01e3287bcf29516f49c",
+              "last_input_sequence": 22098,
+              "last_observed_ts_ms": 1788435703717,
+              "durably_sealed": false
+            },
+            "pending_accepted_observations": [],
+            "unprocessed_ranges": [
+              {
+                "first": 11613,
+                "last": 11613,
+                "state": "unrecoverable_payload",
+                "reason": "Socket acknowledgment preceded WAL admission; no source file survived. Available archived hot journal starts after this output and contains no observation_json entries."
+              },
+              {
+                "first": 11614,
+                "last": 11614,
+                "state": "retained_expired_market_snapshot",
+                "artifact": "demo-11614-original.json"
+              }
+            ],
+            "disposition": "retire obsolete producer generation; no fabricated acceptance, consumption or sequence-floor reset"
+          }
+        ],
+        "pending_accepted_observations_all_sources": 0
+      },
+      "mainnet": {
+        "current_generation_excluded": "673cdf1f562f4d221769976c3a5c5700",
+        "engine_wal_snapshot": {
+          "path": "/tmp/tier1-live-state-check/mainnet/engine.wal.000028",
+          "sha256": "172236ac1bf6f68c2a53cb14433924bcbb4fb42442f3207831fddffb852daa3e",
+          "last_wall_ts_ms": 1788682511018
+        },
+        "source_retirements": [
+          {
+            "source": "directional_public_v1.g805c44f0d2e19e3650561d9e2ec9a6e8.carry",
+            "destination": 0,
+            "accepted_through": 11225,
+            "published_through_in_durable_checkpoint": 11227,
+            "publication_evidence": {
+              "path": "/var/lib/liquidity-migration-signal-worker-mainnet/checkpoint.json.bak-20260903T114314Z",
+              "sha256": "7e862e13fb1052e0a2453247c3ab9e27846345ac1396d229055abcfde2b723af",
+              "generation": "805c44f0d2e19e3650561d9e2ec9a6e8",
+              "last_input_sequence": 21115,
+              "last_observed_ts_ms": 1788435742716,
+              "durably_sealed": false
+            },
+            "pending_accepted_observations": [],
+            "unprocessed_ranges": [
+              {
+                "first": 11226,
+                "last": 11226,
+                "state": "unrecoverable_payload",
+                "reason": "Socket acknowledgment preceded WAL admission; no source file survived. Available archived hot journal starts after this output and contains no observation_json entries."
+              },
+              {
+                "first": 11227,
+                "last": 11227,
+                "state": "retained_expired_market_snapshot",
+                "artifact": "mainnet-11227-original.json"
+              }
+            ],
+            "disposition": "retire obsolete producer generation; no fabricated acceptance, consumption or sequence-floor reset"
+          },
+          {
+            "source": "directional_public_v1.gb01e9e6f1ce00f7177aeefb2825c1b10.carry",
+            "destination": 0,
+            "accepted_through": 49415,
+            "published_through_in_durable_checkpoint": 49416,
+            "publication_evidence": {
+              "path": "/var/lib/liquidity-migration-wal-quarantine/worker-state-20260905T224219Z/mainnet/checkpoint.json",
+              "sha256": "82e0a870928c26fdef3feda0686f5a14f93a1799562eb7203fd4c3b95d8fcf11",
+              "generation": "b01e9e6f1ce00f7177aeefb2825c1b10",
+              "last_input_sequence": 2205482,
+              "last_observed_ts_ms": 1788647824840,
+              "durably_sealed": true
+            },
+            "pending_accepted_observations": [],
+            "unprocessed_ranges": [
+              {
+                "first": 49416,
+                "last": 49416,
+                "state": "retained_expired_market_snapshot",
+                "artifact": "mainnet-49416-original-observation.json",
+                "wal_origin": {
+                  "path": "/var/lib/liquidity-migration-wal-quarantine/mainnet-20260905T224219Z/engine.wal.000025",
+                  "offset": 87446,
+                  "frame_sha256": "3aca88c58a74a219f6288badd452f8c60315850c5e4cac99821d23993f903295",
+                  "wall_ts_ms": 1788647820635
+                }
+              }
+            ],
+            "disposition": "retire obsolete producer generation; no fabricated acceptance, consumption or sequence-floor reset"
+          },
+          {
+            "source": "directional_public_v1.gb01e9e6f1ce00f7177aeefb2825c1b10.long",
+            "destination": 1,
+            "accepted_through": 74,
+            "published_through_in_durable_checkpoint": 74,
+            "publication_evidence": {
+              "path": "/var/lib/liquidity-migration-wal-quarantine/worker-state-20260905T224219Z/mainnet/checkpoint.json",
+              "sha256": "82e0a870928c26fdef3feda0686f5a14f93a1799562eb7203fd4c3b95d8fcf11",
+              "generation": "b01e9e6f1ce00f7177aeefb2825c1b10",
+              "last_input_sequence": 2205482,
+              "last_observed_ts_ms": 1788647824840,
+              "durably_sealed": true
+            },
+            "pending_accepted_observations": [],
+            "unprocessed_ranges": [],
+            "disposition": "retire obsolete producer generation; no fabricated acceptance, consumption or sequence-floor reset"
+          }
+        ],
+        "pending_accepted_observations_all_sources": 0
+      }
+    },
+    "artifacts": [
+      {
+        "path": "backup-history-dirs.txt",
+        "bytes": 306,
+        "sha256": "7e97c141f52221b14c0c323970a637caa9be693c6cdcc8ef50e969ef4ea78a08"
+      },
+      {
+        "path": "backup-sep3-1517-signals.txt",
+        "bytes": 195,
+        "sha256": "5ce3fc6949c30f79dc7bdda75d23e4bff2bdc8948d38f45094a88e688918b5d4"
+      },
+      {
+        "path": "demo-11614-original.json",
+        "bytes": 35323,
+        "sha256": "06ad9e46dd61c2caeefc3a2666cbf835c2fc85829f3b0c8bfebd9c0072a5a5fc"
+      },
+      {
+        "path": "engine-frontiers-before.json",
+        "bytes": 2692,
+        "sha256": "d8c7280d1a99845536a7435165610b61b74dbb903c2bc8ad14608377fe0d3d07"
+      },
+      {
+        "path": "lost-tail-recovery.json",
+        "bytes": 616,
+        "sha256": "1117d1c305bd8bb92e5f231ac5c4bec8e6d58a29827f656e1746bc0e5f080e62"
+      },
+      {
+        "path": "mainnet-11227-original.json",
+        "bytes": 35321,
+        "sha256": "47b4f711960b00d4c8f4964f0542ebd3dfd526c3ab5e53489de40607a7807025"
+      },
+      {
+        "path": "mainnet-49416-original-observation.json",
+        "bytes": 121465,
+        "sha256": "b0760a46037686c7801618a0fa1ddc3e51721cc2c364715442045f2c9dd46d91"
+      },
+      {
+        "path": "quarantined-frontiers.json",
+        "bytes": 12665,
+        "sha256": "6fc6c7982ab690acc4dc867b56d89b6a94fbc37e2e6f8bc427f6da5e17c32157"
+      },
+      {
+        "path": "recovered-orphans.json",
+        "bytes": 1132,
+        "sha256": "4643cf050d24f36e4b452d9be90e35060f1401a1c790f5a8648ee8dd6fc8c2dc"
+      },
+      {
+        "path": "worker-frontiers-before.json",
+        "bytes": 1120,
+        "sha256": "6f4fb7736686f630e749ecb51bcb80eceffa1d5a51a5cb14b3c74c9068b7e12e"
+      }
+    ]
+  },
+  "retirement_copied_live_wal_rehearsal": {
+    "demo": {
+      "retirements": [
+        {
+          "source": "directional_public_v1.gc3ed639adeda431c852d55eadb21ce68.carry",
+          "destination": 0,
+          "accepted_through": 49105,
+          "published_through": 49105,
+          "reason": "Retire stopped legacy generation. checkpoint durably sealed; accepted through 49105; no unprocessed tail. Published frontier evidence /var/lib/liquidity-migration-wal-quarantine/worker-state-20260905T224219Z/demo/checkpoint.json sha256=451985b60115d6899ddcfd4f52150f2e2db0708feef114d725028cb1369f1ea3. Recovered bytes remain in /var/lib/liquidity-migration-wal-quarantine/legacy-source-retirement-20260906; no historical observation is applied."
+        },
+        {
+          "source": "directional_public_v1.gc3ed639adeda431c852d55eadb21ce68.long",
+          "destination": 1,
+          "accepted_through": 76,
+          "published_through": 76,
+          "reason": "Retire stopped legacy generation. checkpoint durably sealed; accepted through 76; no unprocessed tail. Published frontier evidence /var/lib/liquidity-migration-wal-quarantine/worker-state-20260905T224219Z/demo/checkpoint.json sha256=451985b60115d6899ddcfd4f52150f2e2db0708feef114d725028cb1369f1ea3. Recovered bytes remain in /var/lib/liquidity-migration-wal-quarantine/legacy-source-retirement-20260906; no historical observation is applied."
+        },
+        {
+          "source": "directional_public_v1.gc4d0071f167eb01e3287bcf29516f49c.carry",
+          "destination": 0,
+          "accepted_through": 11612,
+          "published_through": 11614,
+          "reason": "Retire stopped legacy generation. worker permanently stopped 2026-09-03T11:43:17Z; accepted through 11612; 11613..11613 unrecoverable_payload; 11614..11614 retained_expired_market_snapshot. Published frontier evidence /var/lib/liquidity-migration-signal-worker-demo/checkpoint.json.bak-20260903T114317Z sha256=45f48f71f75a5fb0e4ece15b2e1295d254bb58377d8007d68ed33425e5eaf9bc. Recovered bytes remain in /var/lib/liquidity-migration-wal-quarantine/legacy-source-retirement-20260906; no historical observation is applied."
+        }
+      ],
+      "before_bytes": 12385682,
+      "after_bytes": 12387801,
+      "before_sha256": "0f4baa5ff3692336544b081aa298ead18b9c321888c04b44f70fcbdd600c460f",
+      "after_sha256": "9616f72118be87d2cd8a591c57648cb6dda2bac3bd9e21a875e9f5f638048535",
+      "preview_unchanged": true,
+      "original_prefix_unchanged": true,
+      "idempotent_repeat": true,
+      "native_strategy_verification": true,
+      "old_reader_refusal": "engine: wal frame corrupt at offset 12385682: frame passed its checksum but is not a readable record: unknown variant `legacy_signal_source_retired`, expected one of `order_id_epoch`, `execution_precision_v1`, `portfolio_exit_changed`, `portfolio_exit_completed`, `portfolio_emergency_changed`, `portfolio_emergency_completed`, `portfolio_offset_settled`, `sleeve_stop_set`, `boot`, `order_dispatch_queued`, `order_dispatch_attempted`, `order_dispatch_completed`, `strategy_transition_queued`, `strategy_callback_source`, `strategy_callback_queued`, `strategy_callback_prepared`, `strategy_process_transition_queued`, `strategy_effect_completed`, `intent`, `verdict`, `order_lineage_restored`, `order_sent`, `order_sent_v2`, `order_update`, `order_update_v2`, `cancel_sent`, `stop_set`, `amend_sent`, `amend_sent_v2`, `amend_resolved`, `amend_resolved_v2`, `names`, `markout`, `quote_fill`, `latency_ledger`, `venue_timing`, `fast_execution`, `note`, `control_anchor`, `reconciled`, `recovered_fill`, `recovered_fill_v2`, `execution_history_checkpoint`, `latch_cleared`, `claims_dropped`, `target_book_latch`, `strategy_checkpoint`, `strategy_global_checkpoint`, `strategy_event_published`, `strategy_event_consumed`, `signal_observation`, `signal_observation_consumed`, `signal_observation_rejected`, `signal_gap_recorded`, `signal_admission_changed`, `instrument_catalog_checkpoint`, `identity_state`, `signal_producer_lifecycle`, `runtime_control_accepted`, `runtime_control_consumed`, `segment_base`, `segment_base_v2`, `segment_base_v3`, `segment_base_v4`, `segment_base_v5`, `segment_base_v6` at line 1 column 38"
+    },
+    "mainnet": {
+      "retirements": [
+        {
+          "source": "directional_public_v1.g805c44f0d2e19e3650561d9e2ec9a6e8.carry",
+          "destination": 0,
+          "accepted_through": 11225,
+          "published_through": 11227,
+          "reason": "Retire stopped legacy generation. worker permanently stopped 2026-09-03T11:43:14Z; accepted through 11225; 11226..11226 unrecoverable_payload; 11227..11227 retained_expired_market_snapshot. Published frontier evidence /var/lib/liquidity-migration-signal-worker-mainnet/checkpoint.json.bak-20260903T114314Z sha256=7e862e13fb1052e0a2453247c3ab9e27846345ac1396d229055abcfde2b723af. Recovered bytes remain in /var/lib/liquidity-migration-wal-quarantine/legacy-source-retirement-20260906; no historical observation is applied."
+        },
+        {
+          "source": "directional_public_v1.gb01e9e6f1ce00f7177aeefb2825c1b10.carry",
+          "destination": 0,
+          "accepted_through": 49415,
+          "published_through": 49416,
+          "reason": "Retire stopped legacy generation. checkpoint durably sealed; accepted through 49415; 49416..49416 retained_expired_market_snapshot. Published frontier evidence /var/lib/liquidity-migration-wal-quarantine/worker-state-20260905T224219Z/mainnet/checkpoint.json sha256=82e0a870928c26fdef3feda0686f5a14f93a1799562eb7203fd4c3b95d8fcf11. Recovered bytes remain in /var/lib/liquidity-migration-wal-quarantine/legacy-source-retirement-20260906; no historical observation is applied."
+        },
+        {
+          "source": "directional_public_v1.gb01e9e6f1ce00f7177aeefb2825c1b10.long",
+          "destination": 1,
+          "accepted_through": 74,
+          "published_through": 74,
+          "reason": "Retire stopped legacy generation. checkpoint durably sealed; accepted through 74; no unprocessed tail. Published frontier evidence /var/lib/liquidity-migration-wal-quarantine/worker-state-20260905T224219Z/mainnet/checkpoint.json sha256=82e0a870928c26fdef3feda0686f5a14f93a1799562eb7203fd4c3b95d8fcf11. Recovered bytes remain in /var/lib/liquidity-migration-wal-quarantine/legacy-source-retirement-20260906; no historical observation is applied."
+        }
+      ],
+      "before_bytes": 67299951,
+      "after_bytes": 67302105,
+      "before_sha256": "172236ac1bf6f68c2a53cb14433924bcbb4fb42442f3207831fddffb852daa3e",
+      "after_sha256": "e7a4c7115ff5d7ddc55ebadcc3437e7776fb172473ddb6a7ec07611cc6642e69",
+      "preview_unchanged": true,
+      "original_prefix_unchanged": true,
+      "idempotent_repeat": true,
+      "native_strategy_verification": true,
+      "old_reader_refusal": "engine: wal frame corrupt at offset 67299951: frame passed its checksum but is not a readable record: unknown variant `legacy_signal_source_retired`, expected one of `order_id_epoch`, `execution_precision_v1`, `portfolio_exit_changed`, `portfolio_exit_completed`, `portfolio_emergency_changed`, `portfolio_emergency_completed`, `portfolio_offset_settled`, `sleeve_stop_set`, `boot`, `order_dispatch_queued`, `order_dispatch_attempted`, `order_dispatch_completed`, `strategy_transition_queued`, `strategy_callback_source`, `strategy_callback_queued`, `strategy_callback_prepared`, `strategy_process_transition_queued`, `strategy_effect_completed`, `intent`, `verdict`, `order_lineage_restored`, `order_sent`, `order_sent_v2`, `order_update`, `order_update_v2`, `cancel_sent`, `stop_set`, `amend_sent`, `amend_sent_v2`, `amend_resolved`, `amend_resolved_v2`, `names`, `markout`, `quote_fill`, `latency_ledger`, `venue_timing`, `fast_execution`, `note`, `control_anchor`, `reconciled`, `recovered_fill`, `recovered_fill_v2`, `execution_history_checkpoint`, `latch_cleared`, `claims_dropped`, `target_book_latch`, `strategy_checkpoint`, `strategy_global_checkpoint`, `strategy_event_published`, `strategy_event_consumed`, `signal_observation`, `signal_observation_consumed`, `signal_observation_rejected`, `signal_gap_recorded`, `signal_admission_changed`, `instrument_catalog_checkpoint`, `identity_state`, `signal_producer_lifecycle`, `runtime_control_accepted`, `runtime_control_consumed`, `segment_base`, `segment_base_v2`, `segment_base_v3`, `segment_base_v4`, `segment_base_v5`, `segment_base_v6` at line 1 column 38"
+    }
+  },
+  "staged_plan_receipt": "demo 3 03125e8ef7a62e60ff8b1b74eb4a04ff40f4f4376932876c845f53632ffc321c 0o640\nmainnet 3 75135f2172d01a288187b6b483f3b35fec34fffc7ae92e4e916d2adf9b489775 0o640\nEvidence archive verified; plans staged without engine or worker changes.\n",
+  "deployment": {
+    "status": "qualified locally; not yet dispatched"
+  },
+  "retirement_regressions": {
+    "summary.json": {
+      "toolchain": "rustc 1.90.0 (1159e78c4 2025-09-14)",
+      "signal_state_passed": 25,
+      "wal_and_types_passed": 125,
+      "isolated_final_retirement_baseline_passed": 4,
+      "actual_mutants_failed_and_restored_passed": 6,
+      "mutants_file": "mutant-results.json",
+      "original_shared_target_modified": false,
+      "final_shared_source_delta": "shared-test-cleanup.patch contains only two redundant clone removals in tests",
+      "previous_reader_file": "previous-reader-results.json",
+      "current_reader_file": "current-reader-results.json",
+      "isolated_cache_removed": true
+    },
+    "mutant-results.json": [
+      {
+        "case": "terminal_outcome",
+        "path": "engine-core/src/signal_state/lifecycle.rs",
+        "test": "signal_state::retirement::tests::operator_retirement_closes_only_the_explicit_lost_tail_without_consuming_it",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "engine-core",
+          "--lib",
+          "signal_state::retirement::tests::operator_retirement_closes_only_the_explicit_lost_tail_without_consuming_it",
+          "--locked",
+          "--",
+          "--exact"
+        ],
+        "source_before_sha256": "62b19717d13336d87863b39a61b35306d3d96c09ba0baeb0615f655be79f6bdf",
+        "source_mutant_sha256": "5b376a3532a64c4fcab526cdfd7b19adebc0b8558c13c744cbd63e9465cae4e2",
+        "without_fix_exit": 101,
+        "actual_assertion_failure": true,
+        "restored_exit": 0
+      },
+      {
+        "case": "late_retired_arrival",
+        "path": "engine-core/src/signal_state/lifecycle.rs",
+        "test": "signal_state::retirement::tests::operator_retirement_closes_only_the_explicit_lost_tail_without_consuming_it",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "engine-core",
+          "--lib",
+          "signal_state::retirement::tests::operator_retirement_closes_only_the_explicit_lost_tail_without_consuming_it",
+          "--locked",
+          "--",
+          "--exact"
+        ],
+        "source_before_sha256": "62b19717d13336d87863b39a61b35306d3d96c09ba0baeb0615f655be79f6bdf",
+        "source_mutant_sha256": "2ff0636de16e4f58cc44e656950f3e501642f3263c7e1360263cc6fc56e3c57a",
+        "without_fix_exit": 101,
+        "actual_assertion_failure": true,
+        "restored_exit": 0
+      },
+      {
+        "case": "snapshot_outcome",
+        "path": "engine-core/src/signal_state/retirement.rs",
+        "test": "signal_state::retirement::tests::operator_retirement_closes_only_the_explicit_lost_tail_without_consuming_it",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "engine-core",
+          "--lib",
+          "signal_state::retirement::tests::operator_retirement_closes_only_the_explicit_lost_tail_without_consuming_it",
+          "--locked",
+          "--",
+          "--exact"
+        ],
+        "source_before_sha256": "0f65d8e67a1b1b0836a570df3b75ca52434e1e8fbc2fd7a0936cf02b9101aeb8",
+        "source_mutant_sha256": "5164be6d7491a231813e7e322333c26158e64538899d30b84c2791b011fcc630",
+        "without_fix_exit": 101,
+        "actual_assertion_failure": true,
+        "restored_exit": 0
+      },
+      {
+        "case": "required_v7_outcome",
+        "path": "engine-wal/src/lib.rs",
+        "test": "segments::retirement_rotation_requires_outcomes_but_preserves_legacy_v6_bytes",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "engine-wal",
+          "--test",
+          "wal",
+          "segments::retirement_rotation_requires_outcomes_but_preserves_legacy_v6_bytes",
+          "--locked",
+          "--",
+          "--exact"
+        ],
+        "source_before_sha256": "09340428cf87481ec714547dc2cd13f81640a28eed0ece6d78f324ba7ec5d28e",
+        "source_mutant_sha256": "9e0ff159becc175ee6cbfa581e773a40cce3332d8f1aa0bc6eea0275372b694e",
+        "without_fix_exit": 101,
+        "actual_assertion_failure": true,
+        "restored_exit": 0
+      },
+      {
+        "case": "operator_append",
+        "path": "engine-core/src/legacy_signals.rs",
+        "test": "legacy_signals::tests::retirement_command_is_read_only_until_execution_and_retries_without_rewriting_wal",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "engine-core",
+          "--lib",
+          "legacy_signals::tests::retirement_command_is_read_only_until_execution_and_retries_without_rewriting_wal",
+          "--locked",
+          "--",
+          "--exact"
+        ],
+        "source_before_sha256": "9eabfbe3b70f0e4c6c174ac423792a0267d8804761016754bca114613287297e",
+        "source_mutant_sha256": "c545b9262b97b59495e2e90aa00673faa4bda20873b0656412ba492c11da664d",
+        "without_fix_exit": 101,
+        "actual_assertion_failure": true,
+        "restored_exit": 0
+      },
+      {
+        "case": "retry_strategy_bound",
+        "path": "engine-core/src/signal_state/retirement.rs",
+        "test": "signal_state::retirement::tests::retirement_refuses_pending_work_false_frontiers_and_changed_retries",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "engine-core",
+          "--lib",
+          "signal_state::retirement::tests::retirement_refuses_pending_work_false_frontiers_and_changed_retries",
+          "--locked",
+          "--",
+          "--exact"
+        ],
+        "source_before_sha256": "0f65d8e67a1b1b0836a570df3b75ca52434e1e8fbc2fd7a0936cf02b9101aeb8",
+        "source_mutant_sha256": "fae7304a4d07b67c873437fd6def5fce637e46a4edf4acab24f716275cd48b92",
+        "without_fix_exit": 101,
+        "actual_assertion_failure": true,
+        "restored_exit": 0
+      }
+    ],
+    "previous-reader-results.json": {
+      "reader_sha256": "9676f1de8d90f7196bcda3cbb9278b5c2bd5dfe7e024c4bc1d63f4a13f0cbd9f",
+      "cases": [
+        {
+          "case": "v6",
+          "file": "/tmp/tier1-legacy-retirement-proof/v6.wal",
+          "sha256": "3935381c4bf49afae51c016ed689d67dedc74d026ef6b53c39b1a6e694c931ae",
+          "exit_code": 0,
+          "stdout": "     1  rotation   this segment restates the ones before it (at 1788700000000): 1 symbol(s), 0 open order(s), may open: false\n\n1 records; 0 still out there at the end: nothing\n",
+          "stderr": "",
+          "bytes_unchanged": true
+        },
+        {
+          "case": "retirement",
+          "file": "/tmp/tier1-legacy-retirement-proof/retirement.wal",
+          "sha256": "7d370caf43d6490a73b422a662ed09c3c39eec60195cde49d16abc72c84f3984",
+          "exit_code": 1,
+          "stdout": "",
+          "stderr": "engine: wal frame corrupt at offset 8: frame passed its checksum but is not a readable record: unknown variant `legacy_signal_source_retired`, expected one of `order_id_epoch`, `execution_precision_v1`, `portfolio_exit_changed`, `portfolio_exit_completed`, `portfolio_emergency_changed`, `portfolio_emergency_completed`, `portfolio_offset_settled`, `sleeve_stop_set`, `boot`, `order_dispatch_queued`, `order_dispatch_attempted`, `order_dispatch_completed`, `strategy_transition_queued`, `strategy_callback_source`, `strategy_callback_queued`, `strategy_callback_prepared`, `strategy_process_transition_queued`, `strategy_effect_completed`, `intent`, `verdict`, `order_lineage_restored`, `order_sent`, `order_sent_v2`, `order_update`, `order_update_v2`, `cancel_sent`, `stop_set`, `amend_sent`, `amend_sent_v2`, `amend_resolved`, `amend_resolved_v2`, `names`, `markout`, `quote_fill`, `latency_ledger`, `venue_timing`, `fast_execution`, `note`, `control_anchor`, `reconciled`, `recovered_fill`, `recovered_fill_v2`, `execution_history_checkpoint`, `latch_cleared`, `claims_dropped`, `target_book_latch`, `strategy_checkpoint`, `strategy_global_checkpoint`, `strategy_event_published`, `strategy_event_consumed`, `signal_observation`, `signal_observation_consumed`, `signal_observation_rejected`, `signal_gap_recorded`, `signal_admission_changed`, `instrument_catalog_checkpoint`, `identity_state`, `signal_producer_lifecycle`, `runtime_control_accepted`, `runtime_control_consumed`, `segment_base`, `segment_base_v2`, `segment_base_v3`, `segment_base_v4`, `segment_base_v5`, `segment_base_v6` at line 1 column 38\n",
+          "bytes_unchanged": true
+        },
+        {
+          "case": "v7",
+          "file": "/tmp/tier1-legacy-retirement-proof/v7.wal",
+          "sha256": "f70ed49dabb1215474d582acd4876a2c0c9a2c1bb4908df27cb1491950c2525e",
+          "exit_code": 1,
+          "stdout": "",
+          "stderr": "engine: wal frame corrupt at offset 8: frame passed its checksum but is not a readable record: unknown variant `segment_base_v7`, expected one of `order_id_epoch`, `execution_precision_v1`, `portfolio_exit_changed`, `portfolio_exit_completed`, `portfolio_emergency_changed`, `portfolio_emergency_completed`, `portfolio_offset_settled`, `sleeve_stop_set`, `boot`, `order_dispatch_queued`, `order_dispatch_attempted`, `order_dispatch_completed`, `strategy_transition_queued`, `strategy_callback_source`, `strategy_callback_queued`, `strategy_callback_prepared`, `strategy_process_transition_queued`, `strategy_effect_completed`, `intent`, `verdict`, `order_lineage_restored`, `order_sent`, `order_sent_v2`, `order_update`, `order_update_v2`, `cancel_sent`, `stop_set`, `amend_sent`, `amend_sent_v2`, `amend_resolved`, `amend_resolved_v2`, `names`, `markout`, `quote_fill`, `latency_ledger`, `venue_timing`, `fast_execution`, `note`, `control_anchor`, `reconciled`, `recovered_fill`, `recovered_fill_v2`, `execution_history_checkpoint`, `latch_cleared`, `claims_dropped`, `target_book_latch`, `strategy_checkpoint`, `strategy_global_checkpoint`, `strategy_event_published`, `strategy_event_consumed`, `signal_observation`, `signal_observation_consumed`, `signal_observation_rejected`, `signal_gap_recorded`, `signal_admission_changed`, `instrument_catalog_checkpoint`, `identity_state`, `signal_producer_lifecycle`, `runtime_control_accepted`, `runtime_control_consumed`, `segment_base`, `segment_base_v2`, `segment_base_v3`, `segment_base_v4`, `segment_base_v5`, `segment_base_v6` at line 1 column 25\n",
+          "bytes_unchanged": true
+        }
+      ]
+    },
+    "current-reader-results.json": {
+      "reader_sha256": "0c8e93a8802c737fad8c4740fce996e46c6a77f94332c1b717cf92df096cbda4",
+      "cases": [
+        {
+          "case": "v6",
+          "file": "/tmp/tier1-legacy-retirement-proof/v6.wal",
+          "sha256": "3935381c4bf49afae51c016ed689d67dedc74d026ef6b53c39b1a6e694c931ae",
+          "exit_code": 0,
+          "stdout": "     1  rotation   this segment restates the ones before it (at 1788700000000): 1 symbol(s), 0 open order(s), may open: false\n\n1 records; 0 still out there at the end: nothing\n",
+          "stderr": "",
+          "bytes_unchanged": true
+        },
+        {
+          "case": "retirement",
+          "file": "/tmp/tier1-legacy-retirement-proof/retirement.wal",
+          "sha256": "7d370caf43d6490a73b422a662ed09c3c39eec60195cde49d16abc72c84f3984",
+          "exit_code": 0,
+          "stdout": "     1  legacy source native.gbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.long retired: accepted 5, published 7; lost historical input; cursor remains five\n\n1 records; 0 still out there at the end: nothing\n",
+          "stderr": "",
+          "bytes_unchanged": true
+        },
+        {
+          "case": "v7",
+          "file": "/tmp/tier1-legacy-retirement-proof/v7.wal",
+          "sha256": "f70ed49dabb1215474d582acd4876a2c0c9a2c1bb4908df27cb1491950c2525e",
+          "exit_code": 0,
+          "stdout": "     1  rotation   this segment restates the ones before it (at 1788700000000): 1 symbol(s), 0 open order(s), may open: false\n\n1 records; 0 still out there at the end: nothing\n",
+          "stderr": "",
+          "bytes_unchanged": true
+        }
+      ]
+    }
+  },
+  "observations": {
+    "staged_read_check": {
+      "utc": "2026-09-06T08:51:19Z",
+      "artifact_hashes": {
+        "worker-frontiers-before.json": {
+          "bytes": 1120,
+          "sha256": "6f4fb7736686f630e749ecb51bcb80eceffa1d5a51a5cb14b3c74c9068b7e12e"
+        },
+        "plan.json": {
+          "bytes": 9732,
+          "sha256": "1ca8456d2c0ef0d72a5d1ce16e82d45280f800a208e0811c2d6c0ece16d58f57"
+        },
+        "lost-tail-recovery.json": {
+          "bytes": 616,
+          "sha256": "1117d1c305bd8bb92e5f231ac5c4bec8e6d58a29827f656e1746bc0e5f080e62"
+        },
+        "demo-11614-original.json": {
+          "bytes": 35323,
+          "sha256": "06ad9e46dd61c2caeefc3a2666cbf835c2fc85829f3b0c8bfebd9c0072a5a5fc"
+        },
+        "mainnet-11227-original.json": {
+          "bytes": 35321,
+          "sha256": "47b4f711960b00d4c8f4964f0542ebd3dfd526c3ab5e53489de40607a7807025"
+        },
+        "legacy-signal-retirements.mainnet.json": {
+          "bytes": 1848,
+          "sha256": "75135f2172d01a288187b6b483f3b35fec34fffc7ae92e4e916d2adf9b489775"
+        },
+        "engine-frontiers-before.json": {
+          "bytes": 2692,
+          "sha256": "d8c7280d1a99845536a7435165610b61b74dbb903c2bc8ad14608377fe0d3d07"
+        },
+        "backup-history-dirs.txt": {
+          "bytes": 306,
+          "sha256": "7e97c141f52221b14c0c323970a637caa9be693c6cdcc8ef50e969ef4ea78a08"
+        },
+        "sha256.json": {
+          "bytes": 1315,
+          "sha256": "e11dcf53173adcb6ae7bfbe71a3e2e9976e543257e596c10701fc3c32212523c"
+        },
+        "mainnet-49416-original-observation.json": {
+          "bytes": 121465,
+          "sha256": "b0760a46037686c7801618a0fa1ddc3e51721cc2c364715442045f2c9dd46d91"
+        },
+        "quarantined-frontiers.json": {
+          "bytes": 12665,
+          "sha256": "6fc6c7982ab690acc4dc867b56d89b6a94fbc37e2e6f8bc427f6da5e17c32157"
+        },
+        "recovered-orphans.json": {
+          "bytes": 1132,
+          "sha256": "4643cf050d24f36e4b452d9be90e35060f1401a1c790f5a8648ee8dd6fc8c2dc"
+        },
+        "legacy-signal-retirements.demo.json": {
+          "bytes": 1813,
+          "sha256": "03125e8ef7a62e60ff8b1b74eb4a04ff40f4f4376932876c845f53632ffc321c"
+        },
+        "backup-sep3-1517-signals.txt": {
+          "bytes": 195,
+          "sha256": "5ce3fc6949c30f79dc7bdda75d23e4bff2bdc8948d38f45094a88e688918b5d4"
+        }
+      },
+      "realms": {
+        "demo": {
+          "plan_path": "/etc/liquidity-migration/legacy-signal-retirements.demo.json",
+          "plan_uid": 0,
+          "plan_gid": 987,
+          "plan_mode": "0o640",
+          "runtime_user": "liquidity-engine-demo",
+          "runtime_read_exit": 0,
+          "plan_sha256": "03125e8ef7a62e60ff8b1b74eb4a04ff40f4f4376932876c845f53632ffc321c",
+          "archive_plan_identical": true,
+          "current_worker": {
+            "source_generation": "9a34d978c0622885458940ae8b62dfa3",
+            "last_input_sequence": 313742,
+            "long_output_sequence": 12,
+            "carry_output_sequence": 8637,
+            "signal_lifecycle": null
+          },
+          "heartbeat": {
+            "source_generation": "9a34d978c0622885458940ae8b62dfa3",
+            "status": "degraded",
+            "last_input_sequence": 314325,
+            "long_output_sequence": 12,
+            "carry_output_sequence": 8652,
+            "bybit_ws_gap_open": true,
+            "last_carry_cycle_completed_wall_ts_ms": 1788656467342,
+            "updated_at_ms": 1788684677172
+          },
+          "retirements": [
+            {
+              "source": "directional_public_v1.gc3ed639adeda431c852d55eadb21ce68.carry",
+              "published_through": 49105,
+              "accepted_through": 49105,
+              "pending_accepted": 0,
+              "reason": "Retire stopped legacy generation. checkpoint durably sealed; accepted through 49105; no unprocessed tail. Published frontier evidence /var/lib/liquidity-migration-wal-quarantine/worker-state-20260905T224219Z/demo/checkpoint.json sha256=451985b60115d6899ddcfd4f52150f2e2db0708feef114d725028cb1369f1ea3. Recovered bytes remain in /var/lib/liquidity-migration-wal-quarantine/legacy-source-retirement-20260906; no historical observation is applied."
+            },
+            {
+              "source": "directional_public_v1.gc3ed639adeda431c852d55eadb21ce68.long",
+              "published_through": 76,
+              "accepted_through": 76,
+              "pending_accepted": 0,
+              "reason": "Retire stopped legacy generation. checkpoint durably sealed; accepted through 76; no unprocessed tail. Published frontier evidence /var/lib/liquidity-migration-wal-quarantine/worker-state-20260905T224219Z/demo/checkpoint.json sha256=451985b60115d6899ddcfd4f52150f2e2db0708feef114d725028cb1369f1ea3. Recovered bytes remain in /var/lib/liquidity-migration-wal-quarantine/legacy-source-retirement-20260906; no historical observation is applied."
+            },
+            {
+              "source": "directional_public_v1.gc4d0071f167eb01e3287bcf29516f49c.carry",
+              "published_through": 11614,
+              "accepted_through": 11612,
+              "pending_accepted": 0,
+              "reason": "Retire stopped legacy generation. worker permanently stopped 2026-09-03T11:43:17Z; accepted through 11612; 11613..11613 unrecoverable_payload; 11614..11614 retained_expired_market_snapshot. Published frontier evidence /var/lib/liquidity-migration-signal-worker-demo/checkpoint.json.bak-20260903T114317Z sha256=45f48f71f75a5fb0e4ece15b2e1295d254bb58377d8007d68ed33425e5eaf9bc. Recovered bytes remain in /var/lib/liquidity-migration-wal-quarantine/legacy-source-retirement-20260906; no historical observation is applied."
+            }
+          ],
+          "wal": {
+            "path": "/var/lib/liquidity-migration-engine/engine.wal.000029",
+            "pinned_file_size": 69465302,
+            "complete_frame_bytes_read": 69465302,
+            "complete_frame_sha256": "e128c69251d725ce9b17acba02cc333e917367bd17c86813a7e41f7d213c8b45",
+            "records": 2362
+          }
+        },
+        "mainnet": {
+          "plan_path": "/etc/liquidity-migration/legacy-signal-retirements.mainnet.json",
+          "plan_uid": 0,
+          "plan_gid": 987,
+          "plan_mode": "0o640",
+          "runtime_user": "liquidity-engine-mainnet",
+          "runtime_read_exit": 0,
+          "plan_sha256": "75135f2172d01a288187b6b483f3b35fec34fffc7ae92e4e916d2adf9b489775",
+          "archive_plan_identical": true,
+          "current_worker": {
+            "source_generation": "673cdf1f562f4d221769976c3a5c5700",
+            "last_input_sequence": 313742,
+            "long_output_sequence": 12,
+            "carry_output_sequence": 8651,
+            "signal_lifecycle": null
+          },
+          "heartbeat": {
+            "source_generation": "673cdf1f562f4d221769976c3a5c5700",
+            "status": "degraded",
+            "last_input_sequence": 314200,
+            "long_output_sequence": 12,
+            "carry_output_sequence": 8653,
+            "bybit_ws_gap_open": true,
+            "last_carry_cycle_completed_wall_ts_ms": 1788656466160,
+            "updated_at_ms": 1788684680807
+          },
+          "retirements": [
+            {
+              "source": "directional_public_v1.g805c44f0d2e19e3650561d9e2ec9a6e8.carry",
+              "published_through": 11227,
+              "accepted_through": 11225,
+              "pending_accepted": 0,
+              "reason": "Retire stopped legacy generation. worker permanently stopped 2026-09-03T11:43:14Z; accepted through 11225; 11226..11226 unrecoverable_payload; 11227..11227 retained_expired_market_snapshot. Published frontier evidence /var/lib/liquidity-migration-signal-worker-mainnet/checkpoint.json.bak-20260903T114314Z sha256=7e862e13fb1052e0a2453247c3ab9e27846345ac1396d229055abcfde2b723af. Recovered bytes remain in /var/lib/liquidity-migration-wal-quarantine/legacy-source-retirement-20260906; no historical observation is applied."
+            },
+            {
+              "source": "directional_public_v1.gb01e9e6f1ce00f7177aeefb2825c1b10.carry",
+              "published_through": 49416,
+              "accepted_through": 49415,
+              "pending_accepted": 0,
+              "reason": "Retire stopped legacy generation. checkpoint durably sealed; accepted through 49415; 49416..49416 retained_expired_market_snapshot. Published frontier evidence /var/lib/liquidity-migration-wal-quarantine/worker-state-20260905T224219Z/mainnet/checkpoint.json sha256=82e0a870928c26fdef3feda0686f5a14f93a1799562eb7203fd4c3b95d8fcf11. Recovered bytes remain in /var/lib/liquidity-migration-wal-quarantine/legacy-source-retirement-20260906; no historical observation is applied."
+            },
+            {
+              "source": "directional_public_v1.gb01e9e6f1ce00f7177aeefb2825c1b10.long",
+              "published_through": 74,
+              "accepted_through": 74,
+              "pending_accepted": 0,
+              "reason": "Retire stopped legacy generation. checkpoint durably sealed; accepted through 74; no unprocessed tail. Published frontier evidence /var/lib/liquidity-migration-wal-quarantine/worker-state-20260905T224219Z/mainnet/checkpoint.json sha256=82e0a870928c26fdef3feda0686f5a14f93a1799562eb7203fd4c3b95d8fcf11. Recovered bytes remain in /var/lib/liquidity-migration-wal-quarantine/legacy-source-retirement-20260906; no historical observation is applied."
+            }
+          ],
+          "wal": {
+            "path": "/var/lib/liquidity-migration-engine-mainnet/engine.wal.000028",
+            "pinned_file_size": 124357399,
+            "complete_frame_bytes_read": 124357399,
+            "complete_frame_sha256": "e9dd60abb19d173a7b067e2c8272ff1b43839cc9a423ecf936a72c69504651af",
+            "records": 4308
+          }
+        }
+      }
+    }
+  },
+  "qualification_status": "passed before deployment",
+  "toolchain": {
+    "rustc": "1.90.0",
+    "cargo_incremental": "0"
+  }
+}

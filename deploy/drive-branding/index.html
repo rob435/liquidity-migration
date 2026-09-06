@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="liquidity is an operator-only utility that backs up Liquidity Migration runtime state and market data to the operator's Google Drive.">
+  <title>liquidity — backup utility</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.65; }
+    body { max-width: 48rem; margin: 0 auto; padding: 3rem 1.25rem; }
+    h1, h2 { line-height: 1.2; }
+    h1 { font-size: 2.5rem; margin-bottom: .5rem; }
+    h2 { margin-top: 2rem; font-size: 1.25rem; }
+    a { color: #1768bf; text-underline-offset: .15em; }
+    footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #8886; }
+    @media (prefers-color-scheme: dark) { a { color: #86bdff; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>liquidity</h1>
+    <p>A private backup utility for Liquidity Migration.</p>
+    <p>The operator uses this tool to copy trading-engine state and recorded market data from the operator's server to the operator's Google Drive. Those copies support recovery after a server failure and preserve market-data archives.</p>
+
+    <h2>What the app does</h2>
+    <ul>
+      <li>Copies runtime logs, trade and order records, worker checkpoints, and configuration needed for recovery.</li>
+      <li>Uploads completed market-data archives and checks the uploaded files against the local copies.</li>
+      <li>Keeps the latest state backup and cleans up older backup history according to the operator's retention setting.</li>
+    </ul>
+
+    <h2>Google Drive access</h2>
+    <p>The app requests <code>drive.file</code> access to create and manage its backup files, and files explicitly made available to the app. It does not request access to all files in the Google Drive account. Authorization is performed by the operator through Google's consent screen.</p>
+
+    <h2>Who uses it</h2>
+    <p>This is an operator-only tool, with no public account registration or backup service. This website explains the app; it does not sign users in or receive backup data.</p>
+    <p>Read the <a href="privacy.html">privacy policy</a> for the data involved, retention, and access controls.</p>
+    <p>Project source: <a href="https://github.com/rob435/liquidity-migration">Liquidity Migration on GitHub</a>.</p>
+  </main>
+  <footer>
+    <p>App support: <a href="https://github.com/rob435/liquidity-migration/issues">contact the project maintainer</a>. Do not post credentials or account records in a public issue.</p>
+  </footer>
+</body>
+</html>

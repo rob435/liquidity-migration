@@ -301,6 +301,7 @@ impl Reader {
                         | "segment_base_v4"
                         | "segment_base_v5"
                         | "segment_base_v6"
+                        | "segment_base_v7"
                 ) {
                     self.source.record(cursor, length)?;
                     self.advance_segment();

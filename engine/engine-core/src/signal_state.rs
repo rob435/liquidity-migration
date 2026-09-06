@@ -6,6 +6,7 @@ use engine_types::{
 };
 
 mod lifecycle;
+mod retirement;
 
 pub(crate) fn dependency_closure(
     names: &[String],
@@ -74,6 +75,7 @@ pub(crate) struct SignalState {
     producer_frontiers: BTreeMap<String, engine_types::SignalSourceFrontier>,
     readiness_request_cursors: BTreeMap<String, u64>,
     producers: BTreeMap<String, engine_types::SignalProducerLifecycle>,
+    legacy_retirements: BTreeMap<String, engine_types::LegacySignalSourceRetirement>,
 }
 
 impl SignalState {
@@ -88,6 +90,11 @@ impl SignalState {
                     state.set_suspension(*destination, suspension.clone(), strategies)?;
                 }
                 WalRecord::SignalObservation { observation, .. } => {
+                    if state.legacy_retirements.contains_key(&observation.source) {
+                        return Err(
+                            "retired legacy source contains a later accepted observation".into(),
+                        );
+                    }
                     state.validate_destination(observation, strategies)?;
                     state.validate_retained_source(
                         &observation.source,
@@ -154,12 +161,16 @@ impl SignalState {
                 } => {
                     state.apply_producer_lifecycle(producer.clone(), strategies)?;
                 }
+                WalRecord::LegacySignalSourceRetired { retirement, .. } => {
+                    state.apply_legacy_source_retirement(retirement.clone(), strategies)?;
+                }
                 WalRecord::SegmentBase {
                     signal_observations,
                     signal_cursors,
                     signal_subscriptions,
                     signal_gaps,
                     signal_producers,
+                    legacy_signal_source_retirements,
                     signal_suspensions,
                     signal_callback_deliveries,
                     ..
@@ -232,6 +243,15 @@ impl SignalState {
                         if state.gaps.insert(gap.source.clone(), gap.clone()).is_some() {
                             return Err("repeated signal gap in rotation".into());
                         }
+                    }
+                    for retirement in legacy_signal_source_retirements {
+                        if signal_observations
+                            .iter()
+                            .any(|row| row.source == retirement.source)
+                        {
+                            return Err("rotation retires a pending accepted observation".into());
+                        }
+                        state.restore_legacy_source_retirement(retirement.clone(), strategies)?;
                     }
                     for cursor in state.cursors.values() {
                         state.validate_retained_source(
@@ -408,20 +428,22 @@ impl SignalState {
     pub fn readiness_blocked(&self, destination: StrategyId) -> bool {
         self.lifecycle_blocked(destination)
             || self.required_readiness.contains(&destination)
-                && (!self
+                && (!self.producer_frontiers.values().any(|row| {
+                    row.destination == destination
+                        && !self.legacy_retirements.contains_key(&row.source)
+                }) || self
                     .producer_frontiers
                     .values()
-                    .any(|row| row.destination == destination)
-                    || self
-                        .producer_frontiers
-                        .values()
-                        .filter(|row| row.destination == destination)
-                        .any(|row| {
-                            self.cursors
-                                .get(&row.source)
-                                .map_or(0, |cursor| cursor.sequence)
-                                < row.published_through
-                        }))
+                    .filter(|row| {
+                        row.destination == destination
+                            && !self.legacy_retirements.contains_key(&row.source)
+                    })
+                    .any(|row| {
+                        self.cursors
+                            .get(&row.source)
+                            .map_or(0, |cursor| cursor.sequence)
+                            < row.published_through
+                    }))
     }
 
     pub fn frontier_gaps(
@@ -444,6 +466,14 @@ impl SignalState {
                     .is_some_and(|known| known != row.destination)
             {
                 return Err("producer readiness contains an invalid source identity".into());
+            }
+            if let Some(retirement) = self.legacy_retirements.get(&row.source) {
+                if retirement.destination != row.destination
+                    || retirement.published_through != row.published_through
+                {
+                    return Err("producer rewrote an operator-retired source frontier".into());
+                }
+                continue;
             }
             let accepted = self
                 .cursors
@@ -761,6 +791,11 @@ impl SignalState {
                     .next()
                     .map(|(_, row)| row.destination)
             })
+            .or_else(|| {
+                self.legacy_retirements
+                    .get(source)
+                    .map(|row| row.destination)
+            })
     }
 
     fn next_sequence(&self, source: &str) -> Result<u64, String> {
@@ -803,6 +838,9 @@ impl SignalState {
     }
 
     fn validate_gap(&self, gap: &SignalGap, strategies: usize) -> Result<(), String> {
+        if self.legacy_retirements.contains_key(&gap.source) {
+            return Err("retired legacy source cannot acquire a new gap".into());
+        }
         if gap.destination.0 as usize >= strategies
             || gap.source.is_empty()
             || gap.source.len() > 256

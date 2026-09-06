@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -475,14 +477,17 @@ printf '%s\\n' "$*" >> "$SYSTEMCTL_TRACE"
     return trace.read_text(encoding="utf-8").splitlines()
 
 
-def _trace_handover_realm(tmp_path: Path, *, import_status: int, start_status: int) -> tuple[int, list[str]]:
-    trace = tmp_path / f"handover-{import_status}-{start_status}.trace"
+def _trace_handover_realm(
+    tmp_path: Path, *, import_status: int, start_status: int, retirement_status: int = 0
+) -> tuple[int, list[str]]:
+    trace = tmp_path / f"handover-{import_status}-{start_status}-{retirement_status}.trace"
     deploy = DEPLOY.read_text(encoding="utf-8")
     harness = "\n".join(
         [
             "set -uo pipefail",
             'trace() { printf \'%s\\n\' "$1" >> "$HANDOVER_TRACE"; }',
             'stop_realm_units() { trace stop; }',
+            'retire_legacy_signal_sources() { trace retire; return "$RETIREMENT_STATUS"; }',
             'import_native_strategy_state() { trace import; return "$IMPORT_STATUS"; }',
             'start_realm() { trace start; return "$START_STATUS"; }',
             'rollback_after_failure() { trace rollback; }',
@@ -499,6 +504,7 @@ def _trace_handover_realm(tmp_path: Path, *, import_status: int, start_status: i
             "HANDOVER_TRACE": str(trace),
             "IMPORT_STATUS": str(import_status),
             "START_STATUS": str(start_status),
+            "RETIREMENT_STATUS": str(retirement_status),
         },
         text=True,
         capture_output=True,
@@ -530,18 +536,49 @@ def test_a_deploy_handover_stops_units_without_disabling_the_watchdogs(tmp_path:
 
 
 def test_every_handover_failure_rolls_back_before_recording_a_fingerprint(tmp_path: Path) -> None:
+    assert _trace_handover_realm(tmp_path, import_status=0, start_status=0, retirement_status=1) == (
+        1,
+        ["stop", "retire", "rollback"],
+    )
     assert _trace_handover_realm(tmp_path, import_status=1, start_status=0) == (
         1,
-        ["stop", "import", "rollback"],
+        ["stop", "retire", "import", "rollback"],
     )
     assert _trace_handover_realm(tmp_path, import_status=0, start_status=1) == (
         1,
-        ["stop", "import", "start", "rollback"],
+        ["stop", "retire", "import", "start", "rollback"],
     )
     assert _trace_handover_realm(tmp_path, import_status=0, start_status=0) == (
         0,
-        ["stop", "import", "start", "record"],
+        ["stop", "retire", "import", "start", "record"],
     )
+
+
+@pytest.mark.parametrize("realm", ["demo", "mainnet"])
+def test_legacy_retirement_uses_the_realms_optional_plan_and_preserves_failure(
+    tmp_path: Path, realm: str
+) -> None:
+    helper = _function(DEPLOY.read_text(encoding="utf-8"), "retire_legacy_signal_sources")
+    helper = helper.replace("/etc/liquidity-migration/", f"{tmp_path}/")
+    harness = "\n".join(
+        [
+            "set -uo pipefail",
+            "ENGINE_DEMO_CONFIG=demo.toml",
+            "ENGINE_MAINNET_CONFIG=mainnet.toml",
+            'run_engine_takeover_command() { printf \'%s\\n\' "$@"; return 19; }',
+            helper,
+            f"retire_legacy_signal_sources {realm}",
+        ]
+    )
+    missing = subprocess.run(["bash", "-c", harness], text=True, capture_output=True, check=False)
+    assert (missing.returncode, missing.stdout) == (0, "")
+    plan = tmp_path / f"legacy-signal-retirements.{realm}.json"
+    plan.write_text("[]\n", encoding="utf-8")
+    present = subprocess.run(["bash", "-c", harness], text=True, capture_output=True, check=False)
+    assert present.returncode == 19
+    assert present.stdout.splitlines() == [
+        realm, f"{realm}.toml", "retire-legacy-signal-sources", "--plan", str(plan), "--execute"
+    ]
 
 
 def test_a_realm_start_runs_its_liveness_watchdog_after_every_unit_it_watches(
@@ -609,6 +646,15 @@ esac
     sleep = bin_dir / "sleep"
     sleep.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     sleep.chmod(0o755)
+    stat = bin_dir / "stat"
+    stat.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "assert sys.argv[1:3] == ['-c', '%Y']\n"
+        "print(int(os.stat(sys.argv[3]).st_mtime))\n",
+        encoding="utf-8",
+    )
+    stat.chmod(0o755)
 
     heartbeat = tmp_path / name / "heartbeat.json"
     heartbeat.write_text("{}", encoding="utf-8")
@@ -675,3 +721,176 @@ def test_the_heartbeat_gate_reads_unit_state_and_not_only_file_freshness() -> No
     assert 'sleep "$HEARTBEAT_SETTLE_SECONDS"' in gate
     # is-active is true for the instant a crash-looping process is running.
     assert "systemctl is-active" not in gate
+
+
+def _rollback_fixture(tmp_path: Path, changed: str) -> tuple[Path, str, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "Rollback fixture")
+    git("config", "user.email", "rollback@example.invalid")
+    for path in (
+        "engine/engine-core/src/lib.rs",
+        "engine/Cargo.lock",
+        "rust-toolchain.toml",
+        ".cargo/config.toml",
+        ".github/workflows/vps-deploy.yml",
+        "scripts/ops.sh",
+    ):
+        destination = repo / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("before\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-qm", "predecessor")
+    previous = git("rev-parse", "HEAD")
+    (repo / changed).write_text("after\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-qm", "candidate")
+    return repo, previous, git("rev-parse", "HEAD")
+
+
+def _run_rollback(
+    tmp_path: Path, *, changed: str, automatic: bool, displaced_checkout: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], list[str], dict[str, bytes], dict[str, bytes]]:
+    repo, target, current = _rollback_fixture(tmp_path, changed)
+    deployed = tmp_path / "deployed-commit"
+    deployed.write_text(current if displaced_checkout else target, encoding="utf-8")
+    previous = tmp_path / "previous-commit"
+    previous.write_text(target, encoding="utf-8")
+    if displaced_checkout:
+        subprocess.run(["git", "-C", str(repo), "checkout", "-q", target], check=True)
+    state = tmp_path / "state"
+    state.mkdir()
+    for name, data in {
+        "engine": b"candidate executable",
+        "signal-worker": b"candidate worker",
+        "engine.wal.000001": b"legacy history",
+        "engine.wal.000002": b"ExecutionPrecisionV1, OrderIdEpoch, exact fill",
+        "worker-checkpoint.json": b"new committed sequence",
+        "spool.json": b"unconsumed candidate event",
+    }.items():
+        (state / name).write_bytes(data)
+    before = {path.name: path.read_bytes() for path in state.iterdir()}
+    trace = tmp_path / "rollback.trace"
+    trace.touch()
+    remote = _remote_script()
+    compatibility = (
+        _function(remote, "rollback_runtime_compatible")
+        if "rollback_runtime_compatible() {" in remote else ""
+    )
+    harness = "\n".join([
+        "set -euo pipefail",
+        'fail() { echo "deploy failed: $*" >&2; exit 1; }',
+        'deploy_mode() { printf "deploy %s\\n" "$EXPECTED_COMMIT" >> "$ROLLBACK_TRACE"; '
+        'printf predecessor > "$ROLLBACK_STATE/engine"; }',
+        'systemctl() { printf "systemctl %s\\n" "$*" >> "$ROLLBACK_TRACE"; }',
+        'rollback_target() { printf "%s\\n" "$ROLLBACK_TARGET"; }',
+        compatibility,
+        _function(remote, "rollback_after_failure"),
+        _function(remote, "rollback_mode"),
+        "rollback_after_failure mainnet" if automatic else "rollback_mode",
+    ])
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "REPO_DIR": str(repo),
+            "EXPECTED_COMMIT": current,
+            "DEPLOYED_COMMIT_FILE": str(deployed),
+            "PREVIOUS_COMMIT_FILE": str(previous),
+            "ROLLBACK_TARGET": target,
+            "ROLLBACK_TRACE": str(trace),
+            "ROLLBACK_STATE": str(state),
+        },
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    after = {path.name: path.read_bytes() for path in state.iterdir()}
+    return result, trace.read_text(encoding="utf-8").splitlines(), before, after
+
+
+@pytest.mark.parametrize("automatic", [True, False], ids=["automatic", "manual"])
+@pytest.mark.parametrize("changed", [
+    "engine/engine-core/src/lib.rs",
+    "engine/Cargo.lock",
+    "rust-toolchain.toml",
+    ".cargo/config.toml",
+    ".github/workflows/vps-deploy.yml",
+])
+def test_rollback_preserves_candidate_and_advanced_state_when_runtime_compatibility_is_unknown(
+    tmp_path: Path, changed: str, automatic: bool,
+) -> None:
+    result, calls, before, after = _run_rollback(tmp_path, changed=changed, automatic=automatic)
+    assert calls == [], result.stdout + result.stderr
+    assert after == before
+    assert result.returncode != 0
+    assert "forward repair" in result.stderr
+
+
+@pytest.mark.parametrize("automatic", [True, False], ids=["automatic", "manual"])
+def test_an_ops_only_rollback_with_identical_runtime_inputs_remains_available(
+    tmp_path: Path, automatic: bool,
+) -> None:
+    result, calls, before, after = _run_rollback(
+        tmp_path, changed="scripts/ops.sh", automatic=automatic,
+    )
+    assert len(calls) == 1 and calls[0].startswith("deploy "), result.stdout + result.stderr
+    assert result.returncode == (1 if automatic else 0)
+    assert after.pop("engine") == b"predecessor"
+    before.pop("engine")
+    assert after == before
+
+
+def test_rollback_also_checks_the_recorded_deployed_runtime_when_checkout_has_moved(
+    tmp_path: Path,
+) -> None:
+    result, calls, before, after = _run_rollback(
+        tmp_path, changed="engine/engine-core/src/lib.rs", automatic=False,
+        displaced_checkout=True,
+    )
+    assert calls == [], result.stdout + result.stderr
+    assert after == before
+    assert result.returncode != 0
+    assert "forward repair" in result.stderr
+
+
+def test_an_explicit_older_deploy_cannot_bypass_rollback_compatibility(tmp_path: Path) -> None:
+    repo, target, current = _rollback_fixture(tmp_path, "engine/engine-core/src/lib.rs")
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(repo)], check=True)
+    branch = subprocess.check_output(
+        ["git", "-C", str(repo), "branch", "--show-current"], text=True,
+    ).strip()
+    deployed = tmp_path / "deployed-commit"
+    deployed.write_text(current, encoding="utf-8")
+    remote = _remote_script()
+    harness = "\n".join([
+        "set -euo pipefail",
+        'fail() { echo "deploy failed: $*" >&2; exit 1; }',
+        'git_authorized() { git -C "$REPO_DIR" "$@"; }',
+        _function(remote, "rollback_runtime_compatible"),
+        _function(remote, "fetch_exact_commit"),
+        "fetch_exact_commit",
+    ])
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        env={
+            **os.environ,
+            "REPO_DIR": str(repo),
+            "EXPECTED_COMMIT": target,
+            "DEPLOYED_COMMIT_FILE": str(deployed),
+            "REMOTE": "origin",
+            "BRANCH": branch,
+        },
+        text=True, capture_output=True, timeout=30, check=False,
+    )
+    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    assert head == current, result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "forward repair" in result.stderr

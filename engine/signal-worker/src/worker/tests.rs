@@ -1041,6 +1041,126 @@ fn source_ingestion_stays_bounded_when_no_watermark_can_complete() {
 }
 
 #[test]
+fn daily_carry_repair_survives_hot_inputs_and_restart_until_the_next_decision() {
+    let config = test_config();
+    let mut universe = test_universe();
+    universe.symbols.push("AAAUSDT".into());
+    universe.carry_symbols = vec!["AAAUSDT".into()];
+    let mut worker = SignalWorker::with_universe(config.clone(), universe).unwrap();
+    let decision = 100 * DAY_MS;
+    worker.state.last_carry_decision_ts_ms = Some(decision);
+    worker.state.last_carry_scorer_ts_ms = Some(decision);
+    let history = required_carry_history_hours(&config, &worker.state) * HOUR_MS;
+    let start = decision - history;
+    let whale_start = decision
+        - (config.carry.whale_change_lookback_hours + config.carry.whale_freshness_hours + 24)
+            * HOUR_MS;
+    let available = decision + 8 * HOUR_MS;
+    worker
+        .apply(WireEvent::BybitKlineBatch {
+            schema_version: SCHEMA_VERSION,
+            sequence: 1,
+            symbol: "AAAUSDT".into(),
+            available_at_ms: available,
+            checked_from_ms: Some(start),
+            checked_through_ms: Some(decision),
+            replace_coverage: false,
+            rows: (start..decision)
+                .step_by(HOUR_MS as usize)
+                .map(|hour| {
+                    vec![
+                        Value::from(hour),
+                        Value::from("1"),
+                        Value::from("1"),
+                        Value::from("1"),
+                        Value::from("1"),
+                        Value::from("1"),
+                        Value::from("1"),
+                    ]
+                })
+                .collect(),
+        })
+        .unwrap();
+    worker
+        .apply(WireEvent::BybitFundingBatch {
+            schema_version: SCHEMA_VERSION,
+            sequence: 2,
+            symbol: "AAAUSDT".into(),
+            available_at_ms: available,
+            checked_from_ms: Some(start),
+            checked_through_ms: Some(decision),
+            replace_coverage: false,
+            emit_lifecycle: false,
+            rows: vec![BybitFundingWire {
+                funding_rate_timestamp: Value::from(start + HOUR_MS),
+                funding_rate: Value::from("-0.001"),
+                funding_interval_hour: Some(Value::from(1)),
+            }],
+        })
+        .unwrap();
+    worker
+        .apply(WireEvent::BinanceWhaleBatch {
+            schema_version: SCHEMA_VERSION,
+            sequence: 3,
+            available_at_ms: available,
+            coverage: vec![SourceCoverage {
+                symbol: "AAAUSDT".into(),
+                checked_from_ms: whale_start,
+                checked_through_ms: decision,
+                replace_coverage: false,
+            }],
+            rows: vec![BinanceWhaleWire {
+                symbol: "AAAUSDT".into(),
+                day_end_ms: Value::from(whale_start),
+                long_short_ratio: Some(Value::from("1.1")),
+            }],
+        })
+        .unwrap();
+    for hour in 9..24 {
+        worker
+            .apply(WireEvent::BybitTickerSnapshot {
+                schema_version: SCHEMA_VERSION,
+                sequence: worker.state.last_input_sequence + 1,
+                observed_ts_ms: decision + hour * HOUR_MS,
+                available_at_ms: decision + hour * HOUR_MS,
+                rows: Vec::new(),
+            })
+            .unwrap();
+    }
+    let state =
+        serde_json::from_slice::<WorkerState>(&serde_json::to_vec(&worker.state).unwrap()).unwrap();
+    let mut restored = SignalWorker::restore(config, state).unwrap();
+    assert_eq!(
+        (
+            restored
+                .state
+                .kline_coverage()
+                .contains("AAAUSDT", start, decision),
+            restored
+                .state
+                .funding_coverage()
+                .contains("AAAUSDT", start, decision),
+            restored
+                .state
+                .whale_coverage()
+                .contains("AAAUSDT", whale_start, decision)
+        ),
+        (true, true, true),
+        "hourly pruning must retain the full source range the daily repair planner requests",
+    );
+    assert!(restored.state.klines["AAAUSDT"].contains_key(&start));
+    assert!(restored.state.funding["AAAUSDT"].contains_key(&(start + HOUR_MS)));
+    assert!(restored.state.whales["AAAUSDT"].contains_key(&whale_start));
+    restored.state.last_carry_decision_ts_ms = Some(decision + DAY_MS);
+    restored.state.last_carry_scorer_ts_ms = Some(decision + DAY_MS);
+    restored.prune(decision + DAY_MS + 8 * HOUR_MS);
+    assert!(!restored.state.klines["AAAUSDT"].contains_key(&start));
+    assert!(!restored.state.funding["AAAUSDT"].contains_key(&(start + HOUR_MS)));
+    assert!(!restored.state.whales["AAAUSDT"].contains_key(&whale_start));
+    assert!(restored.state.klines["AAAUSDT"].len() <= (history / HOUR_MS) as usize);
+}
+
+#[test]
 fn restore_rejects_noncanonical_source_coverage_intervals() {
     let config = test_config();
     let universe = test_universe();

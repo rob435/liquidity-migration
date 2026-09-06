@@ -13,6 +13,9 @@ impl SignalState {
     pub fn lifecycle_legacy_sources(&self) -> Vec<SignalSourceFrontier> {
         let mut rows = BTreeMap::new();
         for cursor in self.cursors.values() {
+            if self.legacy_retirements.contains_key(&cursor.source) {
+                continue;
+            }
             if ManagedSignalSource::parse(&cursor.source).is_none() {
                 if let Some(destination) = self.destination(&cursor.source) {
                     rows.insert(
@@ -61,6 +64,16 @@ impl SignalState {
         let mut lanes = BTreeSet::new();
         let mut destinations = BTreeSet::new();
         for source in &report.sources {
+            if self
+                .legacy_retirements
+                .get(&source.source)
+                .is_some_and(|retirement| {
+                    retirement.destination != source.destination
+                        || retirement.published_through != source.published_through
+                })
+            {
+                return Err("producer rewrote an operator-retired source frontier".into());
+            }
             let lane = match report.epoch {
                 Some(epoch) => {
                     let identity = ManagedSignalSource::parse(&source.source)
@@ -317,7 +330,11 @@ impl SignalState {
     }
 
     fn source_finished(&self, source: &str, last: u64) -> bool {
-        self.cursors.get(source).map_or(0, |row| row.sequence) == last
+        (self.cursors.get(source).map_or(0, |row| row.sequence) == last
+            || self
+                .legacy_retirements
+                .get(source)
+                .is_some_and(|row| row.published_through == last))
             && !self.gaps.contains_key(source)
             && !self.observations.keys().any(|(known, _)| known == source)
     }
@@ -500,8 +517,11 @@ impl SignalState {
         {
             return Err("producer lifecycle retires unfinished input".into());
         }
-        self.cursors.retain(|source, _| !retired(source));
-        self.subscriptions.retain(|(source, _), _| !retired(source));
+        self.cursors
+            .retain(|source, _| !retired(source) || self.legacy_retirements.contains_key(source));
+        self.subscriptions.retain(|(source, _), _| {
+            !retired(source) || self.legacy_retirements.contains_key(source)
+        });
         for row in self.subscriptions.values_mut() {
             if let Some(route) = state
                 .routes
@@ -537,6 +557,13 @@ impl SignalState {
         destination: StrategyId,
         last: u64,
     ) -> Result<(), String> {
+        if let Some(retirement) = self.legacy_retirements.get(source) {
+            return if retirement.destination == destination && retirement.accepted_through == last {
+                Ok(())
+            } else {
+                Err("retired source rewrites its accepted cursor".into())
+            };
+        }
         let allowed = if let Some(identity) = ManagedSignalSource::parse(source) {
             self.producers.get(identity.producer).is_some_and(|state| {
                 state.legacy.is_empty()
@@ -578,6 +605,9 @@ impl SignalState {
         &self,
         observation: &SignalObservation,
     ) -> Result<Option<Admission>, String> {
+        if self.legacy_retirements.contains_key(&observation.source) {
+            return Ok(Some(Admission::Unregistered));
+        }
         if let Some(identity) = ManagedSignalSource::parse(&observation.source) {
             let Some(state) = self.producers.get(identity.producer) else {
                 return Ok(Some(Admission::Unregistered));

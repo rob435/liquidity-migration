@@ -1087,11 +1087,15 @@ class Recorder:
         self.meter.add(f"tier:{tier}", count, now_ns)
 
     def _write_loop(self) -> None:
+        next_roll_ns = time.monotonic_ns() + 1_000_000_000
         while True:
+            now_ns = time.monotonic_ns()
+            if now_ns >= next_roll_ns:
+                self._roll_idle()
+                next_roll_ns = now_ns + 1_000_000_000
             try:
                 item = self.frames.get(timeout=1.0)
             except queue.Empty:
-                self._roll_idle()
                 continue
             if item is None:
                 return

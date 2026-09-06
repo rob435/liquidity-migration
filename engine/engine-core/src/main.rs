@@ -138,6 +138,11 @@ engine — the execution loop
       Lock and read the stopped engine WAL, then verify exact strategy names,
       current checkpoint identities and payloads, and completed provenance.
 
+  engine retire-legacy-signal-sources --config engine.toml --plan PATH [--execute]
+      Read an operator retirement plan for permanently stopped legacy sources.
+      With --execute, journal each unprocessed suffix under the WAL lock;
+      accepted cursors and recovered input payloads are not rewritten.
+
   engine set-strategy-entry-permission --config engine.toml --strategy SLEEVE
              --entries-enabled true|false --request-id ID [--wait-ms MS]
       Submit one idempotent live command to the engine and wait until its WAL

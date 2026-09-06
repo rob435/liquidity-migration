@@ -2,8 +2,8 @@
 # One-command VPS deploy, rollback, read-only verify, and the funded safety stops.
 #
 # deploy: verify its qualified binaries, fetch the exact commit, install, restart the fleet. A realm
-#   that does not publish a fresh heartbeat on the new commit is rolled back
-#   to the last commit that did.
+#   that does not publish a fresh heartbeat is rolled back only when the
+#   predecessor uses identical runtime inputs; otherwise repair forward.
 # rollback: deploy the last commit whose deploy finished (or, when the current
 #   one finished, the one before it).
 # verify: read-only fleet summary.
@@ -218,6 +218,11 @@ fetch_exact_commit() {
     git -C "$REPO_DIR" merge-base --is-ancestor \
         "$EXPECTED_COMMIT" "refs/remotes/$REMOTE/$BRANCH" \
         || fail "EXPECTED_COMMIT $EXPECTED_COMMIT is not on $REMOTE/$BRANCH"
+    if [ "$(git -C "$REPO_DIR" rev-parse HEAD)" != "$EXPECTED_COMMIT" ] \
+        && git -C "$REPO_DIR" merge-base --is-ancestor "$EXPECTED_COMMIT" HEAD; then
+        rollback_runtime_compatible "$EXPECTED_COMMIT" \
+            || fail "an older deploy has the same compatibility requirements as rollback; use a forward repair"
+    fi
     git -C "$REPO_DIR" checkout -B "$BRANCH" "$EXPECTED_COMMIT" \
         || fail "cannot check out $EXPECTED_COMMIT"
     [ "$(git -C "$REPO_DIR" rev-parse HEAD)" = "$EXPECTED_COMMIT" ] \
@@ -359,15 +364,34 @@ rollback_target() {
     fi
 }
 
+rollback_runtime_compatible() {
+    local target="$1" current deployed runtime
+    current="$(git -C "$REPO_DIR" rev-parse --verify HEAD)" || return 1
+    deployed="$(cat "$DEPLOYED_COMMIT_FILE" 2>/dev/null || true)"
+    # The worker has no read-only checkpoint compatibility command. Its
+    # check-config only checks configuration; an older WAL reader may refuse
+    # state that this generation has already committed.
+    for runtime in "$current" "$deployed"; do
+        [ -n "$runtime" ] || continue
+        if ! git -C "$REPO_DIR" diff --quiet "$target" "$runtime" -- \
+            engine rust-toolchain.toml .cargo .github/workflows/vps-deploy.yml; then
+            echo "rollback refused: $target has different or unavailable runtime inputs from $runtime; current binaries, services and durable state are unchanged; use a forward repair" >&2
+            return 1
+        fi
+    done
+}
+
 rollback_after_failure() {
     local realm="$1" failed="$EXPECTED_COMMIT" target
     if [ "${AUTO_ROLLBACK:-0}" = 1 ]; then
-        fail "$realm did not come up on the rolled-back commit $failed either; the fleet is stopped"
+        fail "$realm did not come up on the rolled-back commit $failed either; inspect the installed runtime and use a forward repair"
     fi
     target="$(rollback_target)" \
         || fail "$realm did not come up on $failed and no earlier finished deploy is recorded"
     [ "$target" != "$failed" ] \
         || fail "$realm did not come up on $failed and the only recorded generation is that commit"
+    rollback_runtime_compatible "$target" \
+        || fail "$realm did not come up on $failed; $failed remains installed for a forward repair"
     echo "deploy failed: $realm did not come up on $failed; rolling back to $target" >&2
     AUTO_ROLLBACK=1 EXPECTED_COMMIT="$target" deploy_mode
     fail "$failed did not come up; the fleet runs $target again"
@@ -828,6 +852,19 @@ run_engine_takeover_command() {
     )
 }
 
+retire_legacy_signal_sources() {
+    local realm="$1" config plan
+    case "$realm" in
+        demo) config="$ENGINE_DEMO_CONFIG" ;;
+        mainnet) config="$ENGINE_MAINNET_CONFIG" ;;
+        *) fail "unsupported legacy retirement realm: $realm" ;;
+    esac
+    plan="/etc/liquidity-migration/legacy-signal-retirements.$realm.json"
+    [ -f "$plan" ] || return 0
+    run_engine_takeover_command "$realm" "$config" retire-legacy-signal-sources \
+        --plan "$plan" --execute
+}
+
 stage_native_takeover_source() {
     [ "$#" -eq 5 ] || return 2
     local source="$1" template="$2" kind="$3"
@@ -1106,6 +1143,7 @@ handover_realm() {
     local realm="$1"
     if ! (
         stop_realm_units "$realm" \
+            && retire_legacy_signal_sources "$realm" \
             && import_native_strategy_state "$realm" \
             && start_realm "$realm"
     ); then
@@ -1258,6 +1296,8 @@ rollback_mode() {
     local target
     target="$(rollback_target)" \
         || fail "no earlier finished deploy is recorded; deploy an exact commit instead"
+    rollback_runtime_compatible "$target" \
+        || fail "rollback compatibility is unverified; the installed runtime remains available for a forward repair"
     echo "rollback to $target"
     EXPECTED_COMMIT="$target"
     deploy_mode

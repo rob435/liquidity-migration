@@ -174,11 +174,11 @@ A run that ends without being asked returns one `EngineError`. The supervisor re
 | Volatile market callbacks | An unchanged callback with no actions is discarded. Any changed state, timer, subscription or action promotes its input to `StrategyCallbackQueued` and `StrategyCallbackPrepared`; `StrategyProcessTransitionQueued` commits candidate state and effects behind a WAL barrier before installation or dispatch. |
 | Ordered effects | `StrategyTransitionQueued` / `StrategyProcessTransitionQueued` retain effect order and placement IDs. `StrategyEffectCompleted` retires an index only after its required completion; a per-turn work budget retains the suffix, including reductions. |
 | Orders | `OrderDispatchQueued` and `OrderDispatchAttempted` preserve dispatch ownership through barriers and ambiguous sends. Terminal rejection/cancellation releases an exit attempt ID; the durable exit target remains until fulfilled. |
-| Rotation | `segment_base_v6` restates canonical portfolio/accounting, open trade lots, pending dispatches, callbacks/effects, identities, metadata, input lifecycle and retained terminal orders. Legacy segment aliases remain readable; required precision and record kinds make incompatible readers refuse without truncating the log. |
+| Rotation | `segment_base_v7` restates canonical portfolio/accounting, open trade lots, pending dispatches, callbacks/effects, identities, metadata, input lifecycle, explicit legacy source retirements and retained terminal orders. Legacy segment aliases remain readable; required precision and record kinds make incompatible readers refuse without truncating the log. |
 | Accepted inputs | The channel admits at most 256 rows / 64 MiB. Durable admission retains one ordinary delivery per destination plus missing-prefix recovery ownership within byte limits; spool acknowledgement follows the acceptance barrier. |
 | Outcomes | Consumed, explicitly rejected and retained pending are distinct. Terminal payload release follows its WAL barrier; failed callbacks retain the accepted input for retry. |
 | Readiness exchange | `input-readiness-request.json` / `input-readiness-response.json` carry a fresh matching `boot_nonce`. Schema 2 lifecycle reports bind producer generations, granted epochs, stable sleeve destinations and published frontiers; schema 1 responses retain legacy compatibility. Metadata files are excluded from observation inventory. |
-| Producer retirement | A generation seals its published tail before retirement. `retired_through` compacts managed generations; unresolved legacy tails keep their owner and opening restriction until reconciled. Retired generations cannot reopen a cursor. |
+| Producer retirement | A generation seals its published tail before retirement. `retired_through` compacts managed generations; unresolved legacy tails keep their owner and opening restriction until reconciled. An explicit offline `LegacySignalSourceRetired` outcome can terminate a permanently stopped legacy suffix while retaining its original accepted cursor; managed sources cannot use it. Retired generations cannot reopen a cursor. |
 | Failure | Missing, malformed or I/O-failed readiness keeps required growth suspended and retries. Request-time accepted prefixes distinguish a rewind from concurrent arrivals. Reductions, protective stops and account recovery remain available. |
 | Metadata | A durable exact catalog binds native instruments to venue/environment. A retained catalog supports recovery during a failed refresh; new growth waits for an authoritative refresh, and a delisted instrument retains recovery ownership without becoming eligible for growth. |
 | Worker bounds | At most four child workers; 10 s callback deadline, 64 KiB frames, 4 MiB runtime state, 64 MiB proposal/aggregate retained-process budget and 256 timers per process. Linux also enforces 512 MiB address space, 20 s CPU, 32 descriptors and no child processes. Over-budget proposals do not install candidate state. |
@@ -308,6 +308,7 @@ When performing rollouts or cold starts, state is seeded or verified while units
 | :--- | :--- | :--- |
 | `initialize-native-strategy-state` | Initializes canonical empty checkpoints in a fresh WAL. | Empty WAL file only. |
 | `import-strategy-state` | Ingests verified historical strategy bundles into the WAL. | Requires WAL lock and account match. |
+| `retire-legacy-signal-sources` | Records an operator-selected terminal outcome for stopped legacy sources without rewriting accepted cursors. | WAL lock; full plan validation; explicit `--execute`; no accepted pending observations. |
 | `verify-native-strategy-state` | Verifies WAL checkpoint identity, frame CRC, and state provenance from the newest trusted segment, the records boot replays (`engine_wal::replay_current`). | Run before restarting units on deploy. |
 
 #### Handover Invariants
@@ -318,7 +319,7 @@ When performing rollouts or cold starts, state is seeded or verified while units
 * **Must** leave a refused or already-complete import unchanged
   (`takeover::append_import`).
 * **Must Never** reinterpret an unsupported required record as a torn tail or
-  truncate it. `ExecutionPrecisionV1` and `segment_base_v6` require a compatible
+  truncate it. `ExecutionPrecisionV1` and `segment_base_v7` require a compatible
   reader; an older reader’s explicit refusal is the compatibility behavior.
 
 #### Strategy Table Invariants

@@ -306,10 +306,22 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
     }
     if matches!(record, WalRecord::SegmentBase { .. }) {
         let value: serde_json::Value = serde_json::from_slice(payload)?;
-        if value.get("kind").and_then(serde_json::Value::as_str) == Some("segment_base_v6")
+        if value.get("kind").and_then(serde_json::Value::as_str) == Some("segment_base_v7")
             && !value
-                .get("open_trade_lots")
+                .get("legacy_signal_source_retirements")
                 .is_some_and(serde_json::Value::is_array)
+        {
+            return Err(serde_json::Error::io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "segment_base_v7 is missing required legacy source retirements",
+            )));
+        }
+        if matches!(
+            value.get("kind").and_then(serde_json::Value::as_str),
+            Some("segment_base_v6" | "segment_base_v7")
+        ) && !value
+            .get("open_trade_lots")
+            .is_some_and(serde_json::Value::is_array)
         {
             return Err(serde_json::Error::io(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -318,7 +330,7 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
         }
         if matches!(
             value.get("kind").and_then(serde_json::Value::as_str),
-            Some("segment_base_v5" | "segment_base_v6")
+            Some("segment_base_v5" | "segment_base_v6" | "segment_base_v7")
         ) {
             for field in [
                 "strategy_callback_queues",
@@ -374,7 +386,7 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
         }
         if matches!(
             value.get("kind").and_then(serde_json::Value::as_str),
-            Some("segment_base_v4" | "segment_base_v5" | "segment_base_v6")
+            Some("segment_base_v4" | "segment_base_v5" | "segment_base_v6" | "segment_base_v7")
         ) {
             for field in [
                 "signal_producers",
@@ -402,7 +414,13 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
         }
         if matches!(
             value.get("kind").and_then(serde_json::Value::as_str),
-            Some("segment_base_v3" | "segment_base_v4" | "segment_base_v5" | "segment_base_v6")
+            Some(
+                "segment_base_v3"
+                    | "segment_base_v4"
+                    | "segment_base_v5"
+                    | "segment_base_v6"
+                    | "segment_base_v7"
+            )
         ) && value.get("strategy_effects").is_none()
         {
             return Err(serde_json::Error::io(io::Error::new(
@@ -418,6 +436,7 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
                     | "segment_base_v4"
                     | "segment_base_v5"
                     | "segment_base_v6"
+                    | "segment_base_v7"
             )
         ) && value.get("signal_gaps").is_none()
         {

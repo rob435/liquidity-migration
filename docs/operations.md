@@ -110,25 +110,16 @@ gh workflow run vps-deploy.yml --ref main -f mode=diagnose
 ```
 
 ### Deployment Flow & Decoupled Handover
-1. **Fetch & Verify**: Verifies target commit is on `origin/main`.
-2. **Artifact Delivery**: Detects CI precompiled binary archive or builds locally via throttled cargo (`nice -n 10 --jobs 2`).
-3. **Install while both realms run**: release binaries, units, and independent
-   units (recorders restart only when their own inputs changed) land with demo
-   and mainnet still trading.
-4. **Handover only when the realm's inputs changed**: `realm_unchanged <realm>`
-   compares a fingerprint of what the realm runs from — the engine source tree
-   hash (`git rev-parse <commit>:engine`, not the binary, which embeds the
-   commit), `deploy/systemd`, the fleet manifest, `configs/signal-worker.<realm>.json`,
-   and the rendered config and env files on the host — against
-   `/opt/liquidity-migration-engine/<realm>.fingerprint`, and requires both
-   long-running units active. Unchanged: `<realm>-ok result=unchanged-left-running`,
-   nothing stops. Changed: `stop_realm_units` preserves unit enablement, then
-   `import state` $\to$ `start_realm` $\to$ fresh heartbeat within 180s, then
-   the fingerprint is recorded. Mainnet's config is rendered first, while it
-   is live.
-5. **Auto-Rollback**: If stop, state takeover, start, or heartbeat readiness
-   fails for either realm, the script rolls back to
-   `/opt/liquidity-migration-engine/deployed-commit`.
+
+| Phase | Implemented behavior |
+| --- | --- |
+| Exact source | Fetch and verify the requested commit belongs to `origin/main`. A backward deployment uses the same compatibility decision as rollback before moving the checkout. |
+| Artifact delivery | Verify and install the CI-built archive for that commit; missing artifacts fail before stopping the fleet. The funded host does not compile releases. |
+| Installation | Binaries and units land while both realms run. Independent recorders restart only when their own inputs change. |
+| Realm handover | Compare the engine source tree, systemd units, fleet manifest, worker config and rendered realm inputs with the retained fingerprint. Unchanged active realms keep running; changed realms stop, apply any explicit legacy retirement plan, verify/import native state, then restart. |
+| Readiness | Require a fresh heartbeat and the same active main PID/restart counter throughout the 12-second settle window before recording the realm fingerprint. |
+| Failed handover or manual rollback | A predecessor must have identical Rust, dependency, toolchain and build inputs to the current checkout and recorded deployed generation. Incompatible or unavailable inputs leave the installed candidate and durable state in place for forward repair. The worker has no read-only state compatibility command, so a changed-runtime rollback is not inferred safe. |
+| Durable state | Rollback never restores old WAL or worker files over newer state; required record refusal remains explicit. |
 
 ### Native State Takeover Sources
 | Sleeve | Source Format | Named Source Roles |
@@ -219,13 +210,38 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | Missing sequence is recoverable | Restore its exact immutable envelope under the original source/generation, sequence, destination and content hash; the engine requests that prefix ahead of later rows |
 | Later rows are present | Keep them in the spool; the WAL gap record does not duplicate these payloads |
 | Worker starts a new generation | Its inputs wait while its destination or an input dependency has an older known gap; the new source cannot clear that gap |
-| Missing history is irrecoverable | Keep affected openings blocked; reconcile strategy state, venue exposure and producer history before an explicitly approved state transition. No automatic gap waiver exists |
+| Missing history is irrecoverable | Reconcile strategy state, venue exposure and producer history. For a permanently stopped legacy source, the offline retirement command records the final published ceiling and disposition of its unprocessed suffix without advancing its accepted cursor. Managed sources cannot use this transition |
 | Accepted legacy cursor already skipped history | The missing history is not recoverable from the cursor; assess the producer/account evidence separately |
-| Binary rollback | An older engine rejects `SignalGapRecorded` and `segment_base_v2`; artifact qualification alone does not establish WAL compatibility. Preserve state and obtain approval before adoption or migration |
+| Binary rollback | Required WAL records and `segment_base_v7` make incompatible readers refuse; deployment permits predecessor recovery only when its runtime inputs match. Preserve all durable state and repair forward otherwise |
 
 Must never delete later-generation rows, rewrite accepted hashes, or edit a live cursor to clear a gap. Inspect logs read-only before selecting a recovery action (`<realm>` is `demo` or `mainnet`):
 
 ```bash
 journalctl -u liquidity-migration-signal-worker-<realm> -n 100 --no-pager
 journalctl -u liquidity-migration-engine<-mainnet or empty> -n 100 --no-pager
+```
+
+### Retire a permanently stopped legacy signal source
+
+| Item | Contract |
+| --- | --- |
+| Plan path | `/etc/liquidity-migration/legacy-signal-retirements.<realm>.json`, root owned, group `liquidity-migration`, mode `0640` |
+| JSON schema | Array of `{ "source": "exact legacy namespace", "published_through": 7, "reason": "publication evidence and unprocessed suffix disposition" }` |
+| Execution | Existing engine WAL lock; engine and worker stopped. The full batch validates before any append. Identical retries append nothing; changed outcomes fail |
+| Durable result | `LegacySignalSourceRetired` preserves destination and accepted cursor, records the published ceiling and reason, rejects later arrivals, and permits lifecycle completion. Rotation retains the result in `segment_base_v7` |
+| Refusals | Managed or unknown source, pending accepted observation, inconsistent publication ceiling, changed retry, running WAL writer, or torn WAL tail |
+| Evidence | Preserve original worker checkpoints, WAL family and recovered payloads. Distinguish irrecoverable payloads from retained rows deliberately left unapplied |
+
+- Must never invent a missing envelope, consumption record or accepted cursor.
+- Must never retire a producer that can still publish under the source being retired.
+- Must preserve protective stops, reductions and reconciled ownership during the realm handover.
+
+```bash
+# Use the stopped realm's runtime user and config. Omit --execute to inspect the result.
+engine retire-legacy-signal-sources \
+  --config /etc/liquidity-migration/engine-mainnet.toml \
+  --plan /etc/liquidity-migration/legacy-signal-retirements.mainnet.json
+engine retire-legacy-signal-sources \
+  --config /etc/liquidity-migration/engine-mainnet.toml \
+  --plan /etc/liquidity-migration/legacy-signal-retirements.mainnet.json --execute
 ```

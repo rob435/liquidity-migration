@@ -159,6 +159,10 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
         WalRecord::OrderIdEpoch { epoch_ms } => format!("order ID epoch {epoch_ms}"),
         WalRecord::OrderLineageRestored { order } => format!("order lineage restored: {}", order.request.client_order_id),
         WalRecord::IdentityState { state, .. } => format!("identity registry: {} sleeves, {} instruments", state.sleeves.len(), state.instruments.len()),
+        WalRecord::LegacySignalSourceRetired { retirement, .. } => format!(
+            "legacy source {} retired: accepted {}, published {}; {}",
+            retirement.source, retirement.accepted_through, retirement.published_through, retirement.reason
+        ),
         WalRecord::SignalProducerLifecycle { state, .. } => format!(
             "producer   {} retired through epoch {}", state.producer, state.retired_through
         ),

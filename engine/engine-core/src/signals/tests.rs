@@ -207,6 +207,7 @@ fn consumed_universe_changes_keep_earlier_subscriptions_through_rotation() {
     let rotated = WalRecord::SegmentBase {
         order_id_epoch_ms: None,
         open_trade_lots: Some(Vec::new()),
+        legacy_signal_source_retirements: Vec::new(),
         portfolio_control: Default::default(),
         pending_order_dispatches: Vec::new(),
         signal_producers: Vec::new(),

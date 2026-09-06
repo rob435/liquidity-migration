@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="How the liquidity backup utility accesses, uses, stores, and retains backup data in the operator's Google Drive.">
+  <title>Privacy policy — liquidity</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.65; }
+    body { max-width: 48rem; margin: 0 auto; padding: 3rem 1.25rem; }
+    h1, h2 { line-height: 1.2; }
+    h1 { font-size: 2rem; }
+    h2 { margin-top: 2rem; font-size: 1.25rem; }
+    a { color: #1768bf; text-underline-offset: .15em; }
+    th, td { padding: .65rem; text-align: left; vertical-align: top; border-bottom: 1px solid #8886; }
+    table { border-collapse: collapse; width: 100%; }
+    footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #8886; }
+    @media (prefers-color-scheme: dark) { a { color: #86bdff; } }
+  </style>
+</head>
+<body>
+  <main>
+    <p><a href="./">liquidity</a></p>
+    <h1>Privacy policy</h1>
+    <p>This notice describes the operator-only Google Drive backup components of Liquidity Migration. The operator authorizes the app to store server backups and market-data archives in the operator's own Google Drive account.</p>
+
+    <h2>Data accessed and used</h2>
+    <table>
+      <thead><tr><th scope="col">Data</th><th scope="col">Purpose</th></tr></thead>
+      <tbody>
+        <tr><td>Engine logs, trade and order records, account identifiers, positions, and accounting state</td><td>Preserve the engine's records for recovery and reconciliation.</td></tr>
+        <tr><td>Worker checkpoints, target books, pending signals and controls, and rendered engine configuration</td><td>Restore the state needed to resume operation.</td></tr>
+        <tr><td>Recorded public market data, instrument metadata, and archive manifests</td><td>Preserve captured market history and check archive contents.</td></tr>
+        <tr><td>Drive file names, paths, sizes, hashes, and available-storage metadata</td><td>Upload, locate, verify, and manage the app's backups and archives.</td></tr>
+      </tbody>
+    </table>
+    <p>The app uses Google's <code>drive.file</code> permission. This permits access to files created by the app or explicitly made available to it, rather than all files in the account. Google authorization credentials are kept in the operator's local configuration so scheduled backups can access Drive.</p>
+    <p>The state-backup job excludes environment files named <code>*.env</code> and <code>*.env.*</code>. Its configured sources do not include the Google authorization configuration or the server's environment-secret files. Market-data uploads contain completed compressed recorder files and their archive manifests.</p>
+
+    <h2>Storage and sharing</h2>
+    <p>Backup data is processed on the operator's server and stored in the operator's Google Drive. Google processes the uploaded data to provide that service under its own <a href="https://policies.google.com/privacy">privacy policy</a>. These backup components do not sell data or use it for marketing, advertising, or user profiling. They do not publish backup contents on this website.</p>
+
+    <h2>Retention and deletion</h2>
+    <p>The state-backup job maintains a latest snapshot. When files change or disappear, the previous copies move to backup history. By default, the cleanup removes history files older than 60 days; the operator can change that setting. The latest snapshot remains until it is replaced or deleted.</p>
+    <p>Uploaded market-data archives have no automatic remote expiry in the uploader. They remain in Google Drive until the operator deletes them. Local staging copies and recorded data have separate cleanup settings.</p>
+    <p>The operator can delete app files in Google Drive. Scheduled jobs can upload local source data again, so stopping those jobs and removing the relevant local data is also necessary when ending retention.</p>
+
+    <h2>Control over access</h2>
+    <p>The operator can remove the app's authorization through <a href="https://myaccount.google.com/connections">Google Account connections</a>. Revoking access stops future authorized access once existing credentials are no longer valid; it does not delete files already stored in Drive or on the server. Contact the app operator for questions about access or deletion.</p>
+
+    <h2>This website</h2>
+    <p>This informational site contains no sign-in form, analytics script, or advertising code. GitHub Pages serves the site and may process request information under the <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub privacy statement</a>.</p>
+  </main>
+  <footer>
+    <p>App support: <a href="https://github.com/rob435/liquidity-migration/issues">contact the project maintainer</a>. Do not post credentials or account records in a public issue.</p>
+    <p><a href="./">App homepage</a></p>
+  </footer>
+</body>
+</html>

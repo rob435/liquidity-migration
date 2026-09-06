@@ -502,6 +502,10 @@ pub enum WalRecord {
         wall_ts_ms: i64,
         state: crate::SignalProducerLifecycle,
     },
+    LegacySignalSourceRetired {
+        wall_ts_ms: i64,
+        retirement: LegacySignalSourceRetirement,
+    },
     /// One operator request, durable before its gate changes in memory.
     RuntimeControlAccepted {
         wall_ts_ms: i64,
@@ -538,7 +542,8 @@ pub enum WalRecord {
     /// already produced, which is what makes chain reads and single-segment
     /// reads agree.
     #[serde(
-        rename = "segment_base_v6",
+        rename = "segment_base_v7",
+        alias = "segment_base_v6",
         alias = "segment_base_v5",
         alias = "segment_base_v4",
         alias = "segment_base_v3",
@@ -629,6 +634,8 @@ pub enum WalRecord {
         #[serde(default)]
         signal_producers: Vec<crate::SignalProducerLifecycle>,
         #[serde(default)]
+        legacy_signal_source_retirements: Vec<LegacySignalSourceRetirement>,
+        #[serde(default)]
         signal_suspensions: Vec<crate::SignalAdmissionSuspension>,
         #[serde(default)]
         strategy_effects: StrategyEffectsState,
@@ -649,6 +656,15 @@ pub enum WalRecord {
         #[serde(default)]
         rolling_loss_rows: Vec<ClosedTradeRow>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacySignalSourceRetirement {
+    pub source: String,
+    pub destination: StrategyId,
+    pub accepted_through: u64,
+    pub published_through: u64,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1202,6 +1218,7 @@ mod tests {
         let base = WalRecord::SegmentBase {
             order_id_epoch_ms: None,
             open_trade_lots: Some(Vec::new()),
+            legacy_signal_source_retirements: Vec::new(),
             portfolio_control: Default::default(),
             pending_order_dispatches: Vec::new(),
             signal_producers: Vec::new(),
@@ -1244,7 +1261,7 @@ mod tests {
             }],
         };
         let mut encoded = serde_json::to_value(&base).expect("serialize segment base");
-        assert_eq!(encoded["kind"], "segment_base_v6");
+        assert_eq!(encoded["kind"], "segment_base_v7");
         encoded["kind"] = serde_json::Value::String("segment_base".into());
         encoded
             .as_object_mut()

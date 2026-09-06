@@ -199,8 +199,17 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
     )?;
     assert_eq!(durable.worker().state().last_input_sequence, 426);
     assert_eq!(
+        durable.worker().state().last_carry_scorer_ts_ms,
+        Some(end_ms - DAY_MS),
+    );
+    let carry_retained_hours = 33 * 24 + 24;
+    assert_eq!(
         population_counts(durable.worker().state()),
-        (412_560, 118_950, 1_050)
+        (
+            LONG_SYMBOLS * 102 * 24 + CARRY_SYMBOLS * carry_retained_hours,
+            CARRY_SYMBOLS * (carry_retained_hours + 1),
+            1_050,
+        ),
     );
     let cold_restart_identity = state_identity(durable.worker().state())?;
     drop(durable);
@@ -239,8 +248,17 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
     }
     assert_eq!(durable.worker().state().last_input_sequence, 1_866);
     assert_eq!(
+        durable.worker().state().last_carry_scorer_ts_ms,
+        Some(end_ms - DAY_MS),
+    );
+    let carry_retained_hours = 33 * 24 + 24;
+    assert_eq!(
         population_counts(durable.worker().state()),
-        (412_560, 118_950, 1_050)
+        (
+            LONG_SYMBOLS * 102 * 24 + CARRY_SYMBOLS * carry_retained_hours,
+            CARRY_SYMBOLS * (carry_retained_hours + 1),
+            1_050,
+        ),
     );
     let ticker_metrics = durable.durability_metrics()?;
     assert_eq!(ticker_metrics.spool_files, pre_ticker_spool.spool_files);
@@ -274,9 +292,14 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
     }
 
     assert_eq!(durable.worker().state().last_input_sequence, 3_306);
+    let elapsed_hours = (TICKER_STRESS_MINUTES + OUTAGE_MINUTES) / 60;
     assert_eq!(
         population_counts(durable.worker().state()),
-        (410_880, 118_950, 1_050)
+        (
+            LONG_SYMBOLS * (102 * 24 - elapsed_hours) + CARRY_SYMBOLS * carry_retained_hours,
+            CARRY_SYMBOLS * (carry_retained_hours + 1),
+            1_050,
+        ),
     );
     let outage_metrics = durable.durability_metrics()?;
     assert_eq!(outage_metrics.spool_files, stable_spool.spool_files);
@@ -299,8 +322,9 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
     assert_eq!(reopened_metrics.journal_bytes, 0);
     assert_eq!(reopened_metrics.journal_entries_retained, 0);
     assert_durability_bounds(&reopened_metrics);
+    let (final_klines, final_funding, _) = population_counts(reopened.worker().state());
     println!(
-        "resource_envelope union=270 long=120 carry=150 cold_klines=736560 cold_funding=442800 ticker_cadence_ms=5000 ticker_events=1440 ticker_hours=2 outage_watermark_hours=12 final_klines=410880 final_funding=118950 checkpoint_bytes={} spool_files={} spool_bytes={} sequence=3306",
+        "resource_envelope union=270 long=120 carry=150 cold_klines=736560 cold_funding=442800 ticker_cadence_ms=5000 ticker_events=1440 ticker_hours=2 outage_watermark_hours=12 final_klines={final_klines} final_funding={final_funding} checkpoint_bytes={} spool_files={} spool_bytes={} sequence=3306",
         reopened_metrics.checkpoint_bytes,
         reopened_metrics.spool_files,
         reopened_metrics.spool_bytes,

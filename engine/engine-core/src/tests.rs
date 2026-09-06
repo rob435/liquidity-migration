@@ -119,6 +119,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::SignalObservationConsumed { .. } => "signal_observation_consumed",
         WalRecord::SignalObservationRejected { .. } => "signal_observation_rejected",
         WalRecord::SignalGapRecorded { .. } => "signal_gap_recorded",
+        WalRecord::LegacySignalSourceRetired { .. } => "legacy_signal_source_retired",
         WalRecord::RuntimeControlAccepted { .. } => "runtime_control_accepted",
         WalRecord::RuntimeControlConsumed { .. } => "runtime_control_consumed",
     }

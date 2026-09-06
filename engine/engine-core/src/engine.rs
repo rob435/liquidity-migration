@@ -1363,6 +1363,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         WalRecord::SegmentBase {
             order_id_epoch_ms: Some(self.order_id_epoch_ms),
             open_trade_lots: Some(self.fills.open_trade_lots()),
+            legacy_signal_source_retirements: self
+                .signals
+                .legacy_source_retirements()
+                .cloned()
+                .collect(),
             portfolio_control: self.portfolio_controls.snapshot(),
             strategy_processes: self
                 .host

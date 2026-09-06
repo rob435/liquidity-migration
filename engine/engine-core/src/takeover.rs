@@ -146,6 +146,7 @@ fn initial_state_record(
     Ok(WalRecord::SegmentBase {
         order_id_epoch_ms: None,
         open_trade_lots: Some(Vec::new()),
+        legacy_signal_source_retirements: Vec::new(),
         portfolio_control: Default::default(),
         portfolio: Some(Default::default()),
         pending_order_dispatches: Vec::new(),
@@ -453,6 +454,7 @@ fn initialize_or_verify_names<W: Wal>(
         let names = WalRecord::SegmentBase {
             order_id_epoch_ms: None,
             open_trade_lots: Some(Vec::new()),
+            legacy_signal_source_retirements: Vec::new(),
             portfolio_control: Default::default(),
             portfolio: Some(Default::default()),
             pending_order_dispatches: Vec::new(),

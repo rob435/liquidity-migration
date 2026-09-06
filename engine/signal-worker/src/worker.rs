@@ -1820,12 +1820,17 @@ impl SignalWorker {
 
     fn prune(&mut self, observed_ts_ms: i64) {
         let retained_through_ms = observed_ts_ms - observed_ts_ms.rem_euclid(HOUR_MS);
-        let carry_retained_through_ms = self
+        let carry_cursor_ms = self
             .state
             .last_carry_scorer_ts_ms
-            .or(self.state.last_carry_decision_ts_ms)
+            .or(self.state.last_carry_decision_ts_ms);
+        let carry_retained_through_ms = carry_cursor_ms
             .map(|last| last.saturating_add(DAY_MS).min(retained_through_ms))
             .unwrap_or(retained_through_ms);
+        // The daily repair range stays required until the next scorer decision.
+        let carry_history_end_ms = carry_cursor_ms
+            .map(|last| last.min(carry_retained_through_ms))
+            .unwrap_or(carry_retained_through_ms);
         let mut long_symbols: BTreeSet<String> =
             self.state.universe.long_symbols.iter().cloned().collect();
         long_symbols.insert(self.config.long.regime_symbol.clone());
@@ -1833,10 +1838,6 @@ impl SignalWorker {
         let carry_symbols: BTreeSet<String> =
             self.state.universe.carry_symbols.iter().cloned().collect();
         let symbols: BTreeSet<String> = long_symbols.union(&carry_symbols).cloned().collect();
-        let carry_cursor_ms = self
-            .state
-            .last_carry_scorer_ts_ms
-            .or(self.state.last_carry_decision_ts_ms);
         let cold_carry_instrument_hours = required_carry_history_hours(&self.config, &self.state)
             .max(
                 i64::try_from(self.config.carry.whale_feed_days)
@@ -1861,7 +1862,7 @@ impl SignalWorker {
                 )
             });
             let carry_cutoff = carry_symbols.contains(&symbol).then(|| {
-                carry_retained_through_ms.saturating_sub(
+                carry_history_end_ms.saturating_sub(
                     required_carry_history_hours(&self.config, &self.state).saturating_mul(HOUR_MS),
                 )
             });
@@ -1895,7 +1896,7 @@ impl SignalWorker {
         self.state.kline_coverage_mut().drop_empty();
         let funding_hours = required_carry_history_hours(&self.config, &self.state);
         let funding_cutoff =
-            carry_retained_through_ms.saturating_sub(funding_hours.saturating_mul(HOUR_MS));
+            carry_history_end_ms.saturating_sub(funding_hours.saturating_mul(HOUR_MS));
         self.state
             .funding_coverage_mut()
             .retain_symbols(|symbol| carry_symbols.contains(symbol));
@@ -1918,7 +1919,7 @@ impl SignalWorker {
                 .retain_windows(symbol, &funding_windows);
         }
         self.state.funding_coverage_mut().drop_empty();
-        let whale_cutoff = carry_retained_through_ms.saturating_sub(
+        let whale_cutoff = carry_history_end_ms.saturating_sub(
             (self.config.carry.whale_change_lookback_hours
                 + self.config.carry.whale_freshness_hours
                 + 24)
