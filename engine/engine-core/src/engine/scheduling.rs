@@ -794,17 +794,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         else {
             return Ok(());
         };
-        let Some((symbol, known_filled)) = self
+        let Some(order) = self
             .books
             .orders
             .orders
             .get(id)
             .filter(|order| order.in_flight())
-            .map(|order| (order.request.symbol, order.filled_qty))
         else {
             self.halt_cancels.remove(id);
             return Ok(());
         };
+        let symbol = order.request.symbol;
+        let known_filled = order.filled_exact().map_err(EngineError::State)?;
         let name = self.books.market.table.name(symbol).to_string();
         let now_ns = clock::now_ns();
         let identity = |row: &engine_types::orders::OrderLookupRow| {
@@ -825,12 +826,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 )
             }
             Ok(OrderLookup::Terminal { status, row }) if identity(&row) => {
-                let venue_filled = row
-                    .filled_qty
-                    .value
-                    .to_f64()
-                    .map_err(|error| EngineError::State(error.to_string()))?;
-                if venue_filled > known_filled + 1e-12 {
+                if row.filled_qty.value > known_filled {
                     self.recovery.history_requested = true;
                     (
                         again,

@@ -35,6 +35,15 @@ fn projection(frontier: &OrderFillQuantity) -> Result<f64, String> {
 }
 
 impl OrderRec {
+    pub(crate) fn filled_exact(&self) -> Result<Exact, String> {
+        match &self.fill_quantity {
+            OrderFillQuantity::Exact { quantity } => Ok(quantity.clone()),
+            OrderFillQuantity::LegacyBinary64 { quantity } => {
+                Exact::from_legacy_f64(*quantity).map_err(|error| error.to_string())
+            }
+        }
+    }
+
     pub(crate) fn remaining_exact(&self) -> Result<Exact, String> {
         match &self.fill_quantity {
             OrderFillQuantity::Exact { quantity } => {

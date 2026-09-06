@@ -28,10 +28,12 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -742,6 +744,53 @@ INCIDENT_FIRE_URL_ENV = "INCIDENT_ROUTINE_FIRE_URL"
 INCIDENT_FIRE_TOKEN_ENV = "INCIDENT_ROUTINE_FIRE_TOKEN"
 INCIDENT_FIRE_BETA = "experimental-cc-routine-2026-04-01"
 INCIDENT_TEXT_MAX = 60_000
+INCIDENT_ERROR_BODY_MAX = 4_096
+_INCIDENT_ERROR_TYPES = frozenset(
+    {
+        "invalid_request_error",
+        "authentication_error",
+        "permission_error",
+        "not_found_error",
+        "rate_limit_error",
+        "api_error",
+        "overloaded_error",
+    }
+)
+
+
+class IncidentRoutineError(RuntimeError):
+    def __init__(self, code: int, detail: str):
+        self.code = code
+        self.detail = detail
+        super().__init__(f"HTTP {code} ({detail})")
+
+
+def _incident_error_detail(error: urllib.error.HTTPError, token: str) -> str:
+    try:
+        with error:
+            body = error.read(INCIDENT_ERROR_BODY_MAX + 1)
+    except (OSError, ValueError):
+        return "unreadable error response"
+    if len(body) > INCIDENT_ERROR_BODY_MAX:
+        return "response too large"
+    try:
+        payload = json.loads(body)
+    except (ValueError, RecursionError):
+        return "invalid error response"
+    problem = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(problem, dict) or not isinstance(problem.get("message"), str):
+        return "invalid error response"
+    kind = problem.get("type")
+    if not isinstance(kind, str) or kind not in _INCIDENT_ERROR_TYPES:
+        kind = "unknown_error"
+    message = problem["message"]
+    if token:
+        message = message.replace(token, "[redacted]")
+    message = re.sub(r"(?i)\b(?:authorization|proxy-authorization|x-api-key)\s*:[^\r\n]*", "[redacted header]", message)
+    message = re.sub(r"(?i)\bBearer\s+\S+|\bsk-ant-[\w-]+", "[redacted token]", message)
+    message = re.sub(r"(?i)https?://\S+", "[redacted URL]", message)
+    message = " ".join("".join(char if char.isprintable() else " " for char in message).split())
+    return f"{kind}: {message[:300]}"
 
 
 def unit_journal_tail(unit: str, lines: int = 40) -> str:
@@ -848,12 +897,17 @@ def fire_incident_routine(url: str, token: str, text: str) -> str:
             "Content-Type": "application/json",
         },
     )
-    with urllib.request.urlopen(request, timeout=20) as response:
-        payload = json.loads(response.read().decode() or "{}")
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.loads(response.read().decode() or "{}")
+    except urllib.error.HTTPError as error:
+        raise IncidentRoutineError(error.code, _incident_error_detail(error, token)) from None
     return str(payload.get("claude_code_session_url") or "")
 
 
 def transport_error(error: BaseException) -> str:
+    if isinstance(error, IncidentRoutineError):
+        return str(error)
     code = getattr(error, "code", None)
     if isinstance(code, int):
         return f"HTTP {code}"

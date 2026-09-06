@@ -1865,7 +1865,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let ready: Vec<_> = owners
             .iter()
             .copied()
-            .filter(|owner| !self.host.callbacks.order_news.unread_for(*owner))
+            .filter(|owner| {
+                !self.host.callbacks.pending_for(*owner)
+                    && !self.host.callbacks.order_news.unread_for(*owner)
+            })
             .collect();
         if callbacks.is_some() {
             self.host
@@ -1887,7 +1890,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .order_news
                     .origin(sequence)
                     .map_err(EngineError::State)?;
-                if let Err(error) = self.host.callbacks.enqueue_order(owner, view, origin) {
+                if let Err(crate::strategy_process::host::EnqueueError::Fault(error)) =
+                    self.host.callbacks.enqueue_order(owner, view, origin)
+                {
                     self.host.callbacks.faults.insert(owner, error);
                 }
             } else {

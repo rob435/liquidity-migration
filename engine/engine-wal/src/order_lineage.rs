@@ -149,14 +149,15 @@ impl<'de> Visitor<'de> for Select<'_> {
             ordinal: None,
             order: None,
         };
+        let mut client_id = None;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "kind" => {
                     selected.kind = map.next_value_seed(Bounded::<String>::new(&self.budget))?
                 }
                 "client_order_id" => {
-                    selected.matches |=
-                        map.next_value_seed(Bounded::<String>::new(&self.budget))? == self.wanted
+                    client_id =
+                        Some(map.next_value_seed(Bounded::<Option<String>>::new(&self.budget))?)
                 }
                 "request" | "update" | "order" => {
                     selected.matches |= map
@@ -176,6 +177,13 @@ impl<'de> Visitor<'de> for Select<'_> {
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
+            }
+        }
+        if let Some(id) = client_id {
+            match id {
+                Some(id) => selected.matches |= id == self.wanted,
+                None if selected.kind == "verdict" => {}
+                None => return Err(serde::de::Error::custom("required order identity is null")),
             }
         }
         Ok(selected)
@@ -414,6 +422,7 @@ impl OrderLineageReader for Reader {
 
 struct EpochSeed {
     budget: Arc<AtomicU64>,
+    record: bool,
 }
 impl<'de> Visitor<'de> for EpochSeed {
     type Value = Option<i64>;
@@ -425,31 +434,44 @@ impl<'de> Visitor<'de> for EpochSeed {
         let mut from_ids = None;
         let mut wall_ms = None;
         let mut epoch = None;
+        let mut client_id = None;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                "kind" => kind = map.next_value_seed(Bounded::<String>::new(&self.budget))?,
-                "wall_ts_ms" => wall_ms = Some(map.next_value::<i64>()?),
-                "epoch_ms" | "order_id_epoch_ms" => {
+                "kind" if self.record => {
+                    kind = map.next_value_seed(Bounded::<String>::new(&self.budget))?
+                }
+                "wall_ts_ms" if self.record => wall_ms = Some(map.next_value::<i64>()?),
+                "epoch_ms" | "order_id_epoch_ms" if self.record => {
                     epoch = epoch.max(map.next_value::<Option<i64>>()?)
                 }
                 "client_order_id" => {
-                    let id: String = map.next_value_seed(Bounded::<String>::new(&self.budget))?;
-                    if let Some((stamp, counter)) = id
-                        .strip_prefix("eng-")
-                        .and_then(|rest| rest.split_once('-'))
-                    {
-                        if counter.parse::<u64>().is_ok() {
-                            from_ids = from_ids.max(stamp.parse::<i64>().ok());
-                        }
-                    }
+                    client_id =
+                        Some(map.next_value_seed(Bounded::<Option<String>>::new(&self.budget))?);
                 }
                 "request" | "order" | "open_orders" => {
                     from_ids = from_ids.max(map.next_value_seed(EpochSeed {
                         budget: self.budget.clone(),
+                        record: false,
                     })?)
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        if let Some(id) = client_id {
+            let id = match id {
+                Some(id) => Some(id),
+                None if self.record && kind == "verdict" => None,
+                None => return Err(serde::de::Error::custom("required order identity is null")),
+            };
+            if let Some((stamp, counter)) = id
+                .as_deref()
+                .and_then(|id| id.strip_prefix("eng-"))
+                .and_then(|rest| rest.split_once('-'))
+            {
+                if counter.parse::<u64>().is_ok() {
+                    from_ids = from_ids.max(stamp.parse::<i64>().ok());
                 }
             }
         }
@@ -462,6 +484,7 @@ impl<'de> Visitor<'de> for EpochSeed {
         let mut maximum = None;
         while let Some(epoch) = seq.next_element_seed(EpochSeed {
             budget: self.budget.clone(),
+            record: false,
         })? {
             maximum = maximum.max(epoch);
         }
@@ -491,7 +514,10 @@ impl engine_types::wal::OrderEpochReader for Reader {
                 length,
                 crc,
                 budget.clone(),
-                EpochSeed { budget },
+                EpochSeed {
+                    budget,
+                    record: true,
+                },
             )?);
         }
         Ok(maximum)
@@ -755,5 +781,104 @@ mod tests {
             .is_err());
         drop(wal);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn legacy_epoch_scan_distinguishes_limit_order_kinds_from_wal_record_tags() {
+        let root = root("epoch-limit");
+        let path = root.join("engine.wal");
+        let (mut wal, _) = crate::WalWriter::open(&path).unwrap();
+        let mut order = sent("eng-1800000000000-1");
+        if let WalRecord::OrderSent { request, .. } = &mut order {
+            request.kind = OrderKind::Limit {
+                px: 100.0,
+                tif: engine_types::TimeInForce::Gtc,
+            };
+        }
+        wal.append(&order).unwrap();
+        wal.barrier().unwrap();
+        let original = std::fs::read(&path).unwrap();
+        assert_eq!(
+            wal.order_epoch_reader()
+                .unwrap()
+                .unwrap()
+                .max_order_epoch_ms()
+                .unwrap(),
+            Some(1800000000000)
+        );
+        wal.rotate(&base(vec![])).unwrap();
+        drop(wal);
+        let (mut wal, _) = crate::open_current(&path).unwrap();
+        assert_eq!(
+            wal.order_epoch_reader()
+                .unwrap()
+                .unwrap()
+                .max_order_epoch_ms()
+                .unwrap(),
+            Some(1800000000000)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        drop(wal);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn optional_verdict_identity_does_not_break_epoch_or_lineage_archive_reads() {
+        let root = root("verdict-null");
+        let path = root.join("engine.wal");
+        let (mut wal, _) = crate::WalWriter::open(&path).unwrap();
+        wal.append(&WalRecord::Verdict {
+            client_order_id: None,
+            verdict: engine_types::RiskVerdict::Allow { qty: 1.0 },
+        })
+        .unwrap();
+        wal.append(&sent("eng-1800000000000-1")).unwrap();
+        wal.barrier().unwrap();
+        let mut lineage = wal
+            .order_lineage_reader("eng-1800000000000-1")
+            .unwrap()
+            .unwrap();
+        assert!(lineage.next().unwrap().is_some());
+        assert!(lineage.next().unwrap().is_none());
+        assert_eq!(
+            wal.order_epoch_reader()
+                .unwrap()
+                .unwrap()
+                .max_order_epoch_ms()
+                .unwrap(),
+            Some(1800000000000)
+        );
+        drop(lineage);
+        drop(wal);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn epoch_metadata_is_scoped_to_the_record_and_required_identities_stay_strict() {
+        let decode = |text: &str| {
+            EpochSeed {
+                budget: Arc::new(AtomicU64::new(u64::MAX)),
+                record: true,
+            }
+            .deserialize(&mut serde_json::Deserializer::from_str(text))
+        };
+        assert_eq!(decode(r#"{"kind":"order_sent","request":{"client_order_id":"eng-1800000000000-1","kind":{"Limit":{}},"wall_ts_ms":9999999999999,"epoch_ms":9999999999999,"order_id_epoch_ms":9999999999999}}"#).unwrap(), Some(1800000000000));
+        assert_eq!(decode(r#"{"kind":"segment_base","wall_ts_ms":1800000001000,"order_id_epoch_ms":1800000002000,"open_orders":[{"request":{"client_order_id":"eng-1800000003000-2","kind":{"Limit":{}}}}]}"#).unwrap(), Some(1800000003000));
+        assert_eq!(
+            decode(r#"{"client_order_id":null,"kind":"verdict"}"#).unwrap(),
+            None
+        );
+        for text in [
+            r#"{"client_order_id":null,"kind":"order_dispatch_completed"}"#,
+            r#"{"kind":"order_sent","request":{"client_order_id":null}}"#,
+        ] {
+            assert!(decode(text).is_err());
+            let budget = Arc::new(AtomicU64::new(u64::MAX));
+            assert!(Select {
+                wanted: "irrelevant",
+                budget,
+                ordinal: None
+            }
+            .deserialize(&mut serde_json::Deserializer::from_str(text))
+            .is_err());
+        }
     }
 }

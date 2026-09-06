@@ -872,7 +872,7 @@ impl Strategy for Quoter {
             }
             _ => return,
         };
-        if self.mine(symbol) || self.manages_drain_inventory(symbol, ctx) {
+        if (self.quote_enabled && self.mine(symbol)) || self.manages_drain_inventory(symbol, ctx) {
             self.requote(symbol, signal, ctx);
         }
     }

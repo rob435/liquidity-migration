@@ -1813,6 +1813,7 @@ mod quote_staleness;
 mod reconciliation;
 mod recovery_liveness;
 mod resting_orders;
+mod retained_archive_boot;
 mod rolling_loss;
 mod rotation;
 mod runtime_controls;

@@ -69,8 +69,16 @@ impl Read for Window<'_> {
 #[derive(serde::Deserialize)]
 struct Envelope {
     kind: String,
-    callbacks: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct OrderEnvelope {
+    callbacks: Option<Vec<StrategyId>>,
     update: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct EventEnvelope {
     strategy: Option<StrategyId>,
     event: Option<engine_types::strategy_process::CallbackEvent>,
 }
@@ -203,6 +211,24 @@ impl Reader {
         ))
     }
 
+    fn envelope<T: serde::de::DeserializeOwned>(
+        &self,
+        cursor: CallbackWalCursor,
+        length: u64,
+        crc: u32,
+    ) -> Result<T, WalError> {
+        let mut reader = self.frame(cursor, length);
+        let envelope = serde_json::from_reader(&mut reader).map_err(crate::json_error)?;
+        let consumed = reader.into_inner();
+        if consumed.left != 0 || consumed.crc != crc {
+            return Err(WalError::Corrupt {
+                offset: cursor.offset,
+                detail: "callback WAL source checksum does not match".into(),
+            });
+        }
+        Ok(envelope)
+    }
+
     fn frame(&self, cursor: CallbackWalCursor, length: u64) -> BufReader<Window<'_>> {
         self.bounded_frame(cursor, length, None)
     }
@@ -318,23 +344,16 @@ impl CallbackWalReader for Reader {
             cursor = self.start();
         }
         let (length, crc) = self.header(cursor)?;
-        let mut reader = self.frame(cursor, length);
-        let envelope: Envelope = serde_json::from_reader(&mut reader).map_err(crate::json_error)?;
-        let consumed = reader.into_inner();
+        let envelope: Envelope = self.envelope(cursor, length, crc)?;
         let corrupt = |detail: &str| WalError::Corrupt {
             offset: cursor.offset,
             detail: detail.into(),
         };
-        if consumed.left != 0 || consumed.crc != crc {
-            return Err(corrupt("callback WAL source checksum does not match"));
-        }
         let source = if envelope.kind == "order_update_v2" {
-            let owners = serde_json::from_value(
-                envelope
-                    .callbacks
-                    .ok_or_else(|| corrupt("order callback source has no owner metadata"))?,
-            )
-            .map_err(crate::json_error)?;
+            let envelope: OrderEnvelope = self.envelope(cursor, length, crc)?;
+            let owners = envelope
+                .callbacks
+                .ok_or_else(|| corrupt("order callback source has no owner metadata"))?;
             let mut update = envelope
                 .update
                 .ok_or_else(|| corrupt("order callback source has no parent update"))?;
@@ -368,6 +387,7 @@ impl CallbackWalReader for Reader {
                 engine_types::strategy_process::CallbackEvent::Order { update },
             ))
         } else if envelope.kind == "strategy_callback_source" {
+            let envelope: EventEnvelope = self.envelope(cursor, length, crc)?;
             Some((
                 vec![envelope
                     .strategy
@@ -387,7 +407,7 @@ impl CallbackWalReader for Reader {
                     .sequence
                     .checked_add(1)
                     .ok_or_else(|| corrupt("callback source sequence exhausted"))?,
-                offset: consumed.offset,
+                offset: cursor.offset + FRAME_HEADER_LEN as u64 + length,
             },
             source,
         }))

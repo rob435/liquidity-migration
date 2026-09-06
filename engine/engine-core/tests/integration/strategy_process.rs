@@ -688,3 +688,143 @@ async fn independent_exact_bench_recovery_forwards_the_read_capability() {
     assert!(view.positions.is_empty());
     assert!(client.executions(&[], 0, 1).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn a_disabled_flat_quoter_preserves_worker_state_on_market_updates() {
+    let mut input = quoter();
+    let (mut process, boot) = worker()
+        .call(input.clone(), Duration::from_secs(10))
+        .await
+        .unwrap();
+    input.state = boot.state;
+    for tick in 1_u64..=8 {
+        input.callback_id += 1;
+        input.snapshot.now_ns += 1_000_000;
+        let quote = Quote {
+            bid_px: 99.0 + tick as f64,
+            ask_px: 101.0 + tick as f64,
+            recv_ns: input.snapshot.now_ns,
+            seq: tick,
+            ..Quote::default()
+        };
+        input.snapshot.symbols[0].quote = quote;
+        input.event = CallbackEvent::Quote {
+            symbol: SymbolId(0),
+            quote,
+        };
+        let (next, proposal) = process
+            .call(input.clone(), Duration::from_secs(10))
+            .await
+            .unwrap();
+        process = next;
+        assert!(proposal.actions.is_empty());
+        assert_eq!(
+            proposal.state, input.state,
+            "disabled flat quoter mutated durable state on tick {tick}"
+        );
+        assert!(proposal.timers.is_empty());
+    }
+}
+
+struct CallbackReadyFeed {
+    path: std::path::PathBuf,
+    feed: engine_core::bench::ScriptedFeed,
+    booted: bool,
+}
+
+impl engine_types::MarketFeed for CallbackReadyFeed {
+    async fn next_event(&mut self) -> Result<engine_types::MarketEvent, engine_types::FeedError> {
+        if !self.booted {
+            wait_for_commits(self.path.clone(), 1).await;
+            self.booted = true;
+        }
+        self.feed.next_event().await
+    }
+}
+
+#[tokio::test]
+async fn isolated_engine_quotes_do_not_amplify_the_wal_for_an_unchanged_strategy() {
+    let input = quoter();
+    let root = std::env::temp_dir().join(format!(
+        "strategy-process-wal-volume-{}-{}",
+        std::process::id(),
+        engine_types::clock::mono_ns()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("engine.wal");
+    let address = engine_core::bench::start_mock_venue().unwrap();
+    let (wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+    let settings: engine_core::config::EngineSection = toml::from_str(&format!(
+        "wal_path = {:?}\ngroup_flush_ms = 5\nwal_rotate_mb = 0",
+        path.to_str().unwrap()
+    ))
+    .unwrap();
+    let strategy = engine_strategies::runtime::restore(&input.state).unwrap();
+    let mut engine = engine_core::engine::Engine::boot_as_isolated(
+        &settings,
+        "isolated-noop-quotes",
+        wal,
+        engine_core::bench::AllowEverything,
+        ExactBenchVenue(engine_core::bench::HttpVenue::new(
+            address,
+            vec!["BTCUSDT".into()],
+        )),
+        vec![strategy],
+        std::slice::from_ref(&input.state.kind),
+        &[],
+        env!("CARGO_BIN_EXE_engine").into(),
+    )
+    .await
+    .unwrap();
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    let outcome = engine
+        .run(
+            &mut CallbackReadyFeed {
+                path: path.clone(),
+                feed: engine_core::bench::ScriptedFeed::new(vec![symbol], 64, 100),
+                booted: false,
+            },
+            &mut engine_core::bench::SilentOrderFeed,
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.market_events, 64);
+    assert_eq!(outcome.orders_sent, 0);
+    drop(engine);
+    let (records, torn) = engine_wal::replay_scan(&path).unwrap();
+    assert!(!torn);
+    let records: Vec<_> = records.into_iter().map(|(_, record)| record).collect();
+    let callbacks: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                engine_types::WalRecord::StrategyCallbackQueued { .. }
+                    | engine_types::WalRecord::StrategyCallbackPrepared { .. }
+                    | engine_types::WalRecord::StrategyProcessTransitionQueued { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        callbacks.len(),
+        3,
+        "only Boot is persisted; ordinary quotes wrote {} callback records",
+        callbacks.len()
+    );
+    assert!(
+        callbacks.iter().any(|record| matches!(record,
+            engine_types::WalRecord::StrategyProcessTransitionQueued { process, .. }
+                if process.runtime.kind == input.state.kind
+                    && process.timers.is_empty()
+        )),
+        "the actual worker must finish its registered Boot callback"
+    );
+    assert!(
+        !records.iter().any(|record| matches!(record,
+            engine_types::WalRecord::Note { source, .. } if source == "strategy_process"
+        )),
+        "a failed worker cannot masquerade as a quiet strategy"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

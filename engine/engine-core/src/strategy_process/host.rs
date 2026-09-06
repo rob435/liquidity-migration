@@ -15,6 +15,24 @@ pub enum CallbackExecution {
     Isolated { executable: PathBuf },
 }
 
+#[derive(Debug)]
+pub enum EnqueueError {
+    Deferred,
+    Fault(String),
+}
+
+impl From<String> for EnqueueError {
+    fn from(error: String) -> Self {
+        Self::Fault(error)
+    }
+}
+
+impl From<&str> for EnqueueError {
+    fn from(error: &str) -> Self {
+        Self::Fault(error.into())
+    }
+}
+
 pub struct CallbackCompletion {
     pub strategy: StrategyId,
     pub input_id: u64,
@@ -273,7 +291,11 @@ impl CallbackHost {
         self.running() || !self.unwritten.is_empty() || !self.state.inputs.is_empty()
     }
 
-    pub fn enqueue(&mut self, strategy: StrategyId, event: &EngineEvent) -> Result<(), String> {
+    pub fn enqueue(
+        &mut self,
+        strategy: StrategyId,
+        event: &EngineEvent,
+    ) -> Result<(), EnqueueError> {
         if matches!(event, EngineEvent::Market(_))
             && (self.pending_for(strategy)
                 || self.order_news.unread_for(strategy)
@@ -288,7 +310,7 @@ impl CallbackHost {
         }
         let result =
             if self.order_news.unread_for(strategy) || self.retry_inputs.blocks(strategy, event) {
-                Err("prior durable callback sources await delivery".into())
+                Err(EnqueueError::Deferred)
             } else {
                 self.enqueue_inner(strategy, event, None)
             };
@@ -308,7 +330,7 @@ impl CallbackHost {
         strategy: StrategyId,
         update: engine_types::OrderUpdate,
         origin: engine_types::strategy_process::CallbackOrderOrigin,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnqueueError> {
         self.enqueue_source(strategy, CallbackEvent::Order { update }, origin)
     }
 
@@ -317,7 +339,7 @@ impl CallbackHost {
         strategy: StrategyId,
         event: CallbackEvent,
         origin: engine_types::strategy_process::CallbackOrderOrigin,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnqueueError> {
         self.enqueue_inner(strategy, &EngineEvent::try_from(&event)?, Some(origin))?;
         self.order_news.accepted(strategy, origin);
         Ok(())
@@ -328,7 +350,7 @@ impl CallbackHost {
         strategy: StrategyId,
         event: &EngineEvent,
         order_origin: Option<engine_types::strategy_process::CallbackOrderOrigin>,
-    ) -> Result<(), String> {
+    ) -> Result<(), EnqueueError> {
         let event: CallbackEvent = event.into();
         let durable = matches!(
             event,
@@ -381,7 +403,7 @@ impl CallbackHost {
                     )
             })
         {
-            return Err("strategy callback has a pending market invocation".into());
+            return Err(EnqueueError::Deferred);
         }
         if self.pages.enabled() {
             let hash = super::paging::CallbackPages::hash(&input)?;
@@ -395,7 +417,7 @@ impl CallbackHost {
                 return Ok(());
             }
             if !self.is_active(strategy) || self.pending_for(strategy) {
-                return Err("strategy callback has a prior durable input".into());
+                return Err(EnqueueError::Deferred);
             }
         }
         let used = self.unwritten_bytes.values().sum();

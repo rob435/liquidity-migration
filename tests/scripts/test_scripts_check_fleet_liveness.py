@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import sys
 import time
 import urllib.error
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts" / "runtime" / "check_fleet_liveness.py"
@@ -880,3 +883,106 @@ def test_transport_errors_never_log_a_secret_url() -> None:
     rendered = liveness.transport_error(error)
     assert rendered == "HTTP 401"
     assert "SECRET" not in rendered
+
+
+def test_routine_http_rejection_exposes_reason_without_credentials(monkeypatch) -> None:
+    token = "sk-ant-oat01-PRIVATE-RUNTIME-TOKEN"
+    message = (
+        "Routine is paused. " + token + " https://example.com/private?key=SECRET\n"
+        "Authorization: Bearer ANOTHER-SECRET\n"
+        "x-api-key: HEADER-SECRET\n"
+        "Other credential sk-ant-api03-THIRD-SECRET\n"
+        "Resume the routine."
+    )
+    response = io.BytesIO(
+        json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": message}}).encode()
+    )
+
+    def reject(_request, timeout):
+        assert timeout == 20
+        raise urllib.error.HTTPError("https://example.com/private?key=SECRET", 400, "Bad Request", {}, response)
+
+    monkeypatch.setattr(liveness.urllib.request, "urlopen", reject)
+    with pytest.raises(Exception) as raised:
+        liveness.fire_incident_routine("https://example.com/fire", token, "incident")
+    rendered = liveness.transport_error(raised.value)
+    assert "HTTP 400" in rendered
+    assert "invalid_request_error" in rendered
+    assert "Routine is paused." in rendered
+    assert "Resume the routine." in rendered
+    for secret in (token, "https://", "PRIVATE", "SECRET", "Authorization", "x-api-key", "sk-ant-"):
+        assert secret not in rendered
+    assert response.closed
+
+
+@pytest.mark.parametrize(
+    "body,detail",
+    [
+        (b"PRIVATE" * 1000, "response too large"),
+        (b"<html>PRIVATE</html>", "invalid error response"),
+        (b"[" * 1500 + b"]" * 1500, "invalid error response"),
+        (b'{"error":{"type":"PRIVATE","message":42}}', "invalid error response"),
+        (b'{"error":{"type":"PRIVATE","message":"Routine is paused."}}', "unknown_error: Routine is paused."),
+    ],
+    ids=["oversize", "invalid-json", "excessive-depth", "invalid-message", "unknown-type"],
+)
+def test_routine_http_rejection_bounds_and_validates_response(monkeypatch, body, detail) -> None:
+    class BoundedResponse(io.BytesIO):
+        def read(self, size=-1):
+            assert 0 <= size <= 4097, "error diagnostics must never read an unbounded body"
+            return super().read(size)
+
+    response = BoundedResponse(body)
+
+    def reject(_request, timeout):
+        raise urllib.error.HTTPError("https://example.com/PRIVATE", 400, "PRIVATE", {}, response)
+
+    monkeypatch.setattr(liveness.urllib.request, "urlopen", reject)
+    with pytest.raises(Exception) as raised:
+        liveness.fire_incident_routine("https://example.com/fire", "PRIVATE", "incident")
+    rendered = liveness.transport_error(raised.value)
+    assert rendered == f"HTTP 400 ({detail})"
+    assert "PRIVATE" not in rendered
+    assert response.closed
+
+
+def test_routine_http_rejection_truncates_after_redaction(monkeypatch) -> None:
+    token = "sk-ant-oat01-" + "s" * 400
+    response = io.BytesIO(
+        json.dumps(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": token + "Routine is paused. " * 100,
+                }
+            }
+        ).encode()
+    )
+
+    def reject(_request, timeout):
+        raise urllib.error.HTTPError("https://example.com/fire", 400, "Bad Request", {}, response)
+
+    monkeypatch.setattr(liveness.urllib.request, "urlopen", reject)
+    with pytest.raises(Exception) as raised:
+        liveness.fire_incident_routine("https://example.com/fire", token, "incident")
+    rendered = liveness.transport_error(raised.value)
+    assert "Routine is paused." in rendered
+    assert "ssss" not in rendered
+    assert len(rendered) <= 350
+
+
+def test_routine_http_rejection_keeps_status_when_body_read_fails(monkeypatch) -> None:
+    class FailedResponse(io.BytesIO):
+        def read(self, size=-1):
+            raise OSError("PRIVATE transport failure")
+
+    response = FailedResponse()
+
+    def reject(_request, timeout):
+        raise urllib.error.HTTPError("https://example.com/PRIVATE", 400, "PRIVATE", {}, response)
+
+    monkeypatch.setattr(liveness.urllib.request, "urlopen", reject)
+    with pytest.raises(Exception) as raised:
+        liveness.fire_incident_routine("https://example.com/fire", "PRIVATE", "incident")
+    assert liveness.transport_error(raised.value) == "HTTP 400 (unreadable error response)"
+    assert response.closed

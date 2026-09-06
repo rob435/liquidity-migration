@@ -298,7 +298,7 @@ async fn submit_runtime_control(
         .control_spool_path
         .as_deref()
         .ok_or("engine.control_spool_path is required for live runtime controls")?;
-    let (records, torn) = engine_wal::replay_chain(&loaded.config.engine.wal_path)?;
+    let (records, torn) = engine_wal::replay_current(&loaded.config.engine.wal_path)?;
     if torn {
         return Err("runtime control waits for a complete WAL identity frame".into());
     }

@@ -1324,6 +1324,19 @@
           "failed": 0,
           "ignored": 0
         }
+      },
+      "pre-push": {
+        "commit": "2422be0d9ca5a40e0ad954c6499d9f5a35e77d5c",
+        "completed_utc": "2026-09-06T11:24:37.655716+00:00",
+        "log": "/tmp/tier1-live-migration-qualified/pre-push.log",
+        "sha256": "817164fc411952f2eaab34a384f8afac2f34d33060a5095cc217a2e67b6ac470",
+        "rust_test_totals": {
+          "passed": 2332,
+          "failed": 0,
+          "ignored": 6
+        },
+        "python_passed": 1540,
+        "exit_code": 0
       }
     },
     "first_phase_source_disabled_controls": {
@@ -3130,6 +3143,784 @@
       "A directly invoked debug test binary initially used the repository root instead of the crate working directory; the profile-path test passes from its Cargo working directory.",
       "Initial Clippy diagnostics concern lazy error construction, helper placement after tests and the exact f64 projection0.25. No source-disabled compile failures count as regressions."
     ],
+    "deployment": {
+      "status": "startup_failed",
+      "run_id": 34030217207,
+      "sha": "2422be0d9ca5a40e0ad954c6499d9f5a35e77d5c",
+      "dispatched_at": "2026-09-06T11:25:33Z",
+      "url": "https://github.com/rob435/liquidity-migration/actions/runs/34030217207",
+      "failure": "demo startup: wal io: invalid type: map, expected a string at line 1 column 129",
+      "workflow_conclusion": "cancelled",
+      "vps_job_conclusion": "failure",
+      "mainnet_handover": false,
+      "demo_clear_applied": true,
+      "evidence": "/tmp/tier1-deploy-observation/run-34030217207/observation.json"
+    },
+    "observations": {},
+    "commit": "2422be0d9ca5a40e0ad954c6499d9f5a35e77d5c",
+    "private_proof_archive": {
+      "staged_utc": "2026-09-06T11:25:27.269321+00:00",
+      "candidate": "2422be0d9ca5a40e0ad954c6499d9f5a35e77d5c",
+      "archive": "/var/lib/liquidity-migration-wal-quarantine/legacy-quantity-migration-20260906/final-proofs-2422be0d.tar.gz",
+      "archive_sha256": "0e1dd71a43100b5e8210a5190e85e76ca006936f847742e06cea4cd41e4a41e1",
+      "pending_note": "/etc/liquidity-migration/reconcile-clear.demo.note",
+      "note_sha256": "16902b3bf8dfaa5418d2884b8de5e614fce36fc1487b92ce71a359d56bce75f6",
+      "mode": "0600",
+      "mainnet_note": false,
+      "engine_or_order_mutations": false
+    },
+    "committed_source_verification": {
+      "path": "/tmp/tier1-live-migration-qualified/committed-source-verification.json",
+      "sha256": "7881f0e98083605d55426c8e5401edb17f88bdafa90928d4f90d717182122988",
+      "commit": "2422be0d9ca5a40e0ad954c6499d9f5a35e77d5c",
+      "qualified_files": 587,
+      "all_committed_sources_match_qualification": true,
+      "manifest_sha256": "288fdee05d2ca2295b43a4f7f5053edf9f568e6f90f6d69f72b5cc6b7ed9baf9"
+    }
+  },
+  "forward_repair": {
+    "base_commit": "2422be0d9ca5a40e0ad954c6499d9f5a35e77d5c",
+    "source_sha256": {
+      "engine/engine-core/src/ctx.rs": "63108921618fe0163e801e69faaa3eb152f3469f0a12f4b8a09d87135adb01b7",
+      "engine/engine-core/src/engine/order_dispatch.rs": "39b53afe427893ae362b91f026359cc55596c0e867860fc658496cacef91c6a9",
+      "engine/engine-core/src/engine/scheduling.rs": "a1c5ea7b44822fa24fbc10cce819a3516270a9908ced9f504cc087f8aad1e420",
+      "engine/engine-core/src/engine/strategy_callbacks.rs": "3d06a7282087ddcd0e03b2c1305fcb0e530c231fd80fc02343f2496a81172d25",
+      "engine/engine-core/src/engine/strategy_callbacks/market_tests.rs": "057231cb81b8510b2e9e6142323757f67aa7fb08995ebe0256309b42283a1ac8",
+      "engine/engine-core/src/engine/venue_completion.rs": "d9b10041c26cc42427d7cdbe9b60b6647dba7866f02e14386813073df8edeffb",
+      "engine/engine-core/src/inflight/quantities.rs": "b5b50e1480d36c43e93cf3452ce707de2637fa2278926e8d339aa1b008bd2a23",
+      "engine/engine-core/src/main.rs": "efb276b91ca9228dbfe9b31d1062466ce594ba1ed27b5abea61404cf9ffa8a50",
+      "engine/engine-core/src/strategy_process/host.rs": "5c73023fde34c6d113d8fd17ea56614e9f47cc50fe46861eb70c7ef6a3050743",
+      "engine/engine-core/src/tests.rs": "34c2e338a6ad74078630791e978dd7d5f1da084272cdf2b8b7e3e29d5bfcc401",
+      "engine/engine-core/src/tests/live_legacy_fixture.rs": "ade7f3d23f68e2ecce3c83cec8695d4a2563f4e0a688ce1c8f3a771a703665b2",
+      "engine/engine-core/src/tests/retained_archive_boot.rs": "b840228efe1e415d10e8ce1089f6cd2542c4cd3bfcb45d2c77385358f788addb",
+      "engine/engine-core/tests/integration/main.rs": "0096a6ecfb4ab12d8d46f63f10aad7eed9af18f5f85a32889b9a4cc50030ebea",
+      "engine/engine-core/tests/integration/runtime_control_cli.rs": "b928ddbd823aa5c5660c55f1b374cec44bcc4dcc573c1302e37080d9074d3752",
+      "engine/engine-core/tests/integration/strategy_process.rs": "605e517f49f7cba9d58623c63df2189d21aa54c9af27e922e98f72342fd1021f",
+      "engine/engine-strategies/src/quoter/plug.rs": "58a5adb065fe4e8ff2b0d70b4b16f7a5d6be3d49346f2b9733b3281c10ce788f",
+      "engine/engine-wal/src/callback_reader.rs": "e99fa62524b4492f18ccc582a70aa32e29ebfd753dacd338b3214909948b7c3a",
+      "engine/engine-wal/src/order_lineage.rs": "f57c8c4c1c940b7c63eac7410d339bc82fad7a8f5bc5e3f4137e10158eebc999",
+      "engine/engine-wal/tests/wal/log.rs": "11c362048d165732ae31e34141d484fd7fe5f3b51045684b484e7ecf996f0c79",
+      "scripts/runtime/check_fleet_liveness.py": "1cd8e438ba8cfd218509e6f35c0e82be0e5fea3ad4807537266506bb4aea9889",
+      "tests/scripts/test_scripts_check_fleet_liveness.py": "2529511400a3c1836c5f123f00ff7fa1c1d9147dd2623f51e51acc0fc07d9597"
+    },
+    "root_causes": [
+      "Epoch recovery recursively decoded a limit request kind as the top-level WAL string tag; actual demo archive row313 reproduces the deployed error.",
+      "Epoch and lineage readers required a string on nullable Verdict.client_order_id; actual demo and mainnet archived verdicts reproduce this independent failure.",
+      "Callback projection eagerly decoded unrelated StrategyEventPublished.event as a callback event.",
+      "The disabled flat mainnet quoter changed microstate on subscribed market updates and amplified callback WAL writes.",
+      "Terminal order and halt lookups compared cumulative exact fills through binary64 plus an epsilon, allowing retirement before missing fills were recovered.",
+      "Durable order news, timers and controls were reported as strategy failures when a transient market invocation was busy; typed deferral preserves their delivery.",
+      "Runtime control identity resolution loaded the entire retained WAL family and caused a production CLI OOM before submitting an entry pause."
+    ],
+    "failed_deployment": {
+      "run_id": 34030217207,
+      "expected_commit": "2422be0d9ca5a40e0ad954c6499d9f5a35e77d5c",
+      "run_url": "https://github.com/rob435/liquidity-migration/actions/runs/34030217207",
+      "started_observing_utc": "2026-09-06T11:26:56.941086+00:00",
+      "source_at_commit_sha256": {
+        ".github/workflows/vps-deploy.yml": "fea9060c5d22eb0ba6d5b47437c9c4aced44ad5240ddd747d9f6a420d3cc610c",
+        "scripts/deploy_vps_live.sh": "028840410188b021e08180f83c838ae39d4eda7259b50ebe4e1c57385b04ee06",
+        "scripts/release_artifact.py": "8afc5ecfcb5cad08827009480fefb6e309a67adb4a8c8adf034242ac14e067c1",
+        "engine/Cargo.lock": "8baf3b8ed60742e1f65e8d8b35bdaf13c6b68a39d9cb691de56727bd5310982f"
+      },
+      "scope": "Independent read-only GitHub workflow/artifact and installed binary verification. Root owns deploy and host actions.",
+      "qualification_commit_binding": {
+        "receipt": "/tmp/tier1-deploy-observation/run-34030217207/commit-source-binding.json",
+        "receipt_sha256": "ceb9ecd90c238d9c8ac62b66778f88dd790c4ccc43a5bf59021b66c468934722",
+        "files_checked": 587,
+        "differences": []
+      },
+      "completed_observation_utc": "2026-09-06T11:42:46.406238+00:00",
+      "workflow_status": "completed",
+      "workflow_conclusion": "cancelled",
+      "jobs": [
+        {
+          "name": "rust",
+          "id": 101478233602,
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-06T11:25:38Z",
+          "completed_at": "2026-09-06T11:34:26Z"
+        },
+        {
+          "name": "Release artifact",
+          "id": 101478233699,
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-06T11:25:38Z",
+          "completed_at": "2026-09-06T11:30:20Z"
+        },
+        {
+          "name": "ci",
+          "id": 101478233745,
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-09-06T11:25:38Z",
+          "completed_at": "2026-09-06T11:27:20Z"
+        },
+        {
+          "name": "diagnose",
+          "id": 101478234138,
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-09-06T11:25:35Z",
+          "completed_at": "2026-09-06T11:25:35Z"
+        },
+        {
+          "name": "Qualified release artifact",
+          "id": 101478234218,
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-09-06T11:25:35Z",
+          "completed_at": "2026-09-06T11:25:35Z"
+        },
+        {
+          "name": "disarm",
+          "id": 101478234312,
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-09-06T11:25:35Z",
+          "completed_at": "2026-09-06T11:25:35Z"
+        },
+        {
+          "name": "vps",
+          "id": 101479376642,
+          "status": "completed",
+          "conclusion": "failure",
+          "started_at": "2026-09-06T11:34:31Z",
+          "completed_at": "2026-09-06T11:40:13Z"
+        }
+      ],
+      "ci_counts": {
+        "python_passed": 1540,
+        "python_failed": 0,
+        "rust_passed": 2336,
+        "rust_failed": 0,
+        "rust_ignored": 6
+      },
+      "artifact": {
+        "id": 9988405238,
+        "name": "engine-binaries-2422be0d9ca5a40e0ad954c6499d9f5a35e77d5c",
+        "github_reported_zip_digest": "sha256:8710c1b76e2e3ef5accd4a0e1976db8fc5fc2f803e100aa5d23cd31b17c6b92a",
+        "tar_gz_sha256": "bc47cf3422952382368b06059a243d1655438b5df28cea5d1944c722d344ab41",
+        "binaries_sha256": {
+          "engine": "22f2eb79cb99ec01e78e987d6393e3d7366361f11aa001e7a773da02a6cbb4a4",
+          "signal-worker": "94c1ab879e4d628a13f882f90f82e8db8d70b7a16c1d0aec1ce10427c9567e64",
+          "market-tape": "be8a8cc43b987d8eab414fec20f086f0e72f379b0a246e2c5485e2604938ce90"
+        },
+        "architecture": "Linux ELF64 x86-64",
+        "checksum_manifest_matches": true,
+        "installed_binaries_match_at_utc": "2026-09-06T11:36:07.650461+00:00"
+      },
+      "deployment_result": {
+        "success": false,
+        "vps_failure_utc": "2026-09-06T11:40:10Z",
+        "vps_error": "liquidity-migration-engine.service did not publish a fresh heartbeat",
+        "observed_demo_boot_error": "engine: log: wal io: invalid type: map, expected a string at line 1 column 129",
+        "demo_legacy_retirement_completed": true,
+        "demo_explicit_clear_completed": true,
+        "mainnet_handover_completed": false,
+        "rollback": "refused for differing or unavailable runtime inputs; current binary retained for forward repair",
+        "cancellation_settled_utc": "2026-09-06T11:41:45.027624+00:00",
+        "remote_deploy_processes_remaining": [],
+        "demo_engine_active_state": "inactive",
+        "mainnet_incumbent_pid": "2525649"
+      },
+      "evidence": {
+        "commit-source-binding.json": "ceb9ecd90c238d9c8ac62b66778f88dd790c4ccc43a5bf59021b66c468934722",
+        "artifact-verification.json": "a40286ca034b98daac2bebb484ff2bfb5422b5141abd4e64a90aa0beb2b33a91",
+        "ci.log": "0d74e8e39aa67b126743ec3ae3ef0a0a5c04fecc80e8b0744f07d465810488ea",
+        "rust.log": "caca98c6143542465512e85ad7c96f5a2d1727fe760ec2d89800dbddd239f88a",
+        "release-artifact.log": "c9ee47b12c132708937a223473b5332f863ffd98c5f3a7b6ad5ba1cf1371d8f5",
+        "build-diagnostics.json": "ba067259cbdaf0b5b5d985d7c0c4ac4534642f18c644860c64274184c6c11119",
+        "host-first-installed-check.json": "852629aef1536d9a06bd3a97dd023f105ea27fccfb48b58b9c95fa7acc28222e",
+        "vps.log": "6c7ecb1d0e126fe26ce393b7c660698313bbe4d7bfe36c4d2ff6ae06ae903c8b",
+        "vps-log-receipt.json": "cac553628ead5624325a08de266e4da922fbc9b9bd0ea5b34bf5b05b7271f2b2",
+        "cancellation-settled-host-read.json": "6db02184cedf06ebb3217e87515eca0a81a42585a8da7d758b529596f0042e55",
+        "transitions.jsonl": "d0f27f8b330e5d863de30055e293130db3d8e4178f749a49ae12a319a5364575"
+      },
+      "agent_actions": "Read-only GitHub and host observation; local artifact download and evidence writes only. No cancellation, re-dispatch, service change, WAL change or host mutation by this agent."
+    },
+    "actual_error_frame": {
+      "source": "/tmp/tier1-live-startup-failure/archive/engine.wal",
+      "source_sha256": "687070125cd5c590ff75b3a5569a2c62806beddec1705c61641238b7a0d7d3b7",
+      "sequence": 313,
+      "offset": 39606,
+      "length": 262,
+      "kind": "order_sent",
+      "request_kind": {
+        "Limit": {
+          "px": 0.0432,
+          "tif": "Gtc"
+        }
+      },
+      "payload_sha256": "4041742c59176c4a13e85487db473b9342b5479992c3c206311ceec5868fcc6c",
+      "column129_excerpt": "ide\":\"Buy\",\"qty\":820.1,\"kind\":{\"Limit\":{\"px\":0.0432,\"tif\":\"G"
+    },
+    "wal_before_after": {
+      "epoch-limit-before": {
+        "path": "/tmp/tier1-callback-reader-proof/epoch-limit-before.log",
+        "bytes": 1155,
+        "sha256": "aa463e82c2d00a68c9ee9c2cb576320ffd20141d100856889dc5dc087ad6ef56"
+      },
+      "nullable-before": {
+        "path": "/tmp/tier1-callback-reader-proof/nullable-before.log",
+        "bytes": 1159,
+        "sha256": "01126f401aeff66a69cbd539950a0efcfc8645c459d097e7f338e4c14419e4cf"
+      },
+      "heterogeneous-before": {
+        "path": "/tmp/tier1-callback-reader-proof/heterogeneous-before.log",
+        "bytes": 1748,
+        "sha256": "0926d9c84b94e4144f5f5b7e9800a50352fe919e7400c1730a70aabe15cec4b0"
+      },
+      "wal-final": {
+        "path": "/tmp/tier1-callback-reader-proof/wal-final.log",
+        "bytes": 6681,
+        "sha256": "aa9b28999e6e0c51348a0f62d4791415d37d127b33c2961b811877b44456c09b"
+      },
+      "wal-clippy-final": {
+        "path": "/tmp/tier1-callback-reader-proof/wal-clippy-final.log",
+        "bytes": 451,
+        "sha256": "3f605051aef2182bc89e8d16fc7f9a34042c4a0c614f6fac53c07ee2aef47df6"
+      },
+      "epoch-archive-before": {
+        "path": "/tmp/tier1-callback-reader-proof/epoch-archive-before.log",
+        "bytes": 93,
+        "sha256": "88b3919f2091d6c8625331d4a19c33d25b1b0c0156c3ceb021c7dd0aa50554bd"
+      },
+      "epoch-archive-after": {
+        "path": "/tmp/tier1-callback-reader-proof/epoch-archive-after.log",
+        "bytes": 47,
+        "sha256": "205f3cc4b7330abcec463f4f0af312ed25a167a191d7cf4130fd8205dae1a2d0"
+      }
+    },
+    "demo_family_structural_control": [
+      {
+        "version": "before",
+        "binary_sha256": "9e36f821c0b2b4d61803595acaaf1b2f6cfa66dea3a72ae3bc5fc9c5855cdc31",
+        "command": [
+          "/tmp/tier1-callback-reader-proof/scan-epoch-before",
+          "/tmp/tier1-callback-reader-proof/epoch-structural-fixture.wal"
+        ],
+        "exit": 1,
+        "seconds": 0.36254304100293666,
+        "fixture_sha256_before": "0d861e55d660aa0a797fda0af86f37ad027ad832df36c8294574e349b067588c",
+        "fixture_sha256_after": "0d861e55d660aa0a797fda0af86f37ad027ad832df36c8294574e349b067588c",
+        "output": "typed records 420\nFAIL wal io: invalid type: map, expected a string at line 1 column 129\n"
+      },
+      {
+        "version": "after",
+        "binary_sha256": "877c7aff33c36d27748dbfd3b65bb12fab6bce1360cbd591b6e7a8445a475590",
+        "command": [
+          "/tmp/tier1-callback-reader-proof/scan-epoch-after",
+          "/tmp/tier1-callback-reader-proof/epoch-structural-fixture.wal"
+        ],
+        "exit": 0,
+        "seconds": 0.6717312920081895,
+        "fixture_sha256_before": "0d861e55d660aa0a797fda0af86f37ad027ad832df36c8294574e349b067588c",
+        "fixture_sha256_after": "0d861e55d660aa0a797fda0af86f37ad027ad832df36c8294574e349b067588c",
+        "output": "typed records 420\nPASS Some(1788692257086)\n"
+      }
+    ],
+    "mainnet_family_structural_control": {
+      "fixture": "/tmp/tier1-live-startup-failure/epoch-family-mainnet/epoch-structural-fixture.wal",
+      "fixture_sha256": "df7f43613ba74f8dbf6da814ef7b4e99f6e01903c1ae064910e81d7b1eedc691",
+      "fixture_unchanged": true,
+      "expected_max_epoch": 1788690171060,
+      "scope": "Selected original frames cover all observed mainnet epoch structures and each segment maximum; not complete accounting replay.",
+      "results": [
+        {
+          "name": "before",
+          "exit": 1,
+          "seconds": 0.3307997499941848,
+          "output": "typed records 332\nFAIL wal io: invalid type: null, expected a string at line 1 column 40\n",
+          "binary_sha256": "9e36f821c0b2b4d61803595acaaf1b2f6cfa66dea3a72ae3bc5fc9c5855cdc31",
+          "log_sha256": "e0ec865a3f686cdadc58e1b7b4a479ef32c17cd344fd7bc12dc5d27c6a367a4d"
+        },
+        {
+          "name": "after",
+          "exit": 0,
+          "seconds": 0.6084616250009276,
+          "output": "typed records 332\nPASS Some(1788690171060)\n",
+          "binary_sha256": "877c7aff33c36d27748dbfd3b65bb12fab6bce1360cbd591b6e7a8445a475590",
+          "log_sha256": "68cc18927b459968b6bcb35cc4a1fac64a6c64f617ff179fcb0676abcff2f6d5"
+        }
+      ]
+    },
+    "structural_coverage_and_held_services": {
+      "demo": {
+        "segments": 30,
+        "family_bytes": 7848885810,
+        "frames": 2226290,
+        "max_frame_bytes": 20293838,
+        "expected_epoch_max": 1788692257086,
+        "selected_frames": 420,
+        "selected_crc32c_verified": 420,
+        "combined_fixture": {
+          "path": "/private/tmp/tier1-live-startup-failure/epoch-family/epoch-structural-fixture.wal",
+          "bytes": 5643639,
+          "sha256": "0d861e55d660aa0a797fda0af86f37ad027ad832df36c8294574e349b067588c"
+        }
+      },
+      "mainnet": {
+        "segments": 29,
+        "family_bytes": 7676614238,
+        "frames": 825834,
+        "max_frame_bytes": 20825048,
+        "expected_epoch_max": 1788690171060,
+        "selected_frames": 332,
+        "selected_crc32c_verified": 332,
+        "combined_fixture": {
+          "path": "/private/tmp/tier1-live-startup-failure/epoch-family-mainnet/epoch-structural-fixture.wal",
+          "bytes": 5275421,
+          "sha256": "df7f43613ba74f8dbf6da814ef7b4e99f6e01903c1ae064910e81d7b1eedc691"
+        }
+      },
+      "mainnet_live_boundary": {
+        "file": "/var/lib/liquidity-migration-engine-mainnet/engine.wal.000029",
+        "pinned_at": "2026-09-06T12:01:32.508411+00:00",
+        "bytes": 159087060,
+        "complete_prefix_bytes": 159087060,
+        "tail": null,
+        "after_bytes": 159087182,
+        "sha256": "594adffdaa44cc70ef715b01c8eefc2f909a1a3268e16a983e7965a39f29ec7e"
+      },
+      "mainnet_only_shapes": [
+        {
+          "shape": {
+            "kind": {
+              "string": "quote_fill"
+            }
+          },
+          "segments": [
+            1
+          ]
+        },
+        {
+          "shape": {
+            "client_order_id": "string:eng",
+            "kind": {
+              "string": "fast_execution"
+            }
+          },
+          "segments": [
+            1,
+            3,
+            4,
+            7,
+            16,
+            19,
+            22,
+            25,
+            26,
+            27,
+            29
+          ]
+        },
+        {
+          "shape": {
+            "client_order_id": "string:eng",
+            "kind": {
+              "string": "recovered_fill"
+            }
+          },
+          "segments": [
+            1
+          ]
+        }
+      ],
+      "demo_only_shapes": [
+        {
+          "shape": {
+            "kind": {
+              "string": "segment_base"
+            },
+            "open_orders": {
+              "sequence": [
+                "{\"request\": {\"client_order_id\": \"string:eng\", \"kind\": {\"string\": \"Market\"}}}"
+              ]
+            },
+            "wall_ts_ms": "integer"
+          },
+          "segments": [
+            28,
+            29
+          ]
+        },
+        {
+          "shape": {
+            "kind": {
+              "string": "legacy_signal_source_retired"
+            },
+            "wall_ts_ms": "integer"
+          },
+          "segments": [
+            30
+          ]
+        }
+      ],
+      "limitations": [
+        "Full source bytes are hashed and parsed structurally; only selected frame CRCs are independently verified.",
+        "Selected fixtures omit accounting records and must never replace a production WAL family.",
+        "Actual snapshot nested orders are Market. Nested Limit snapshot cases and nested epoch collisions require synthetic tests."
+      ],
+      "observation": "Demo worker input/cycle startup is gated on engine destination readiness; no post-upgrade CARRY recovery claim while engine is held. Current retained spool10930..10936 is at or below stopped engine consumed frontier10936. Both recorders have zero old-hour partials and zero drops at2026-09-06T12:01:26UTC."
+    },
+    "full_boot_restart_rotation": {
+      "completed_utc": "2026-09-06T12:04:35.518971+00:00",
+      "test": "tests::retained_archive_boot::isolated_boot_recovers_epoch_lineage_and_callbacks_from_a_heterogeneous_archive",
+      "test_source": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/engine/engine-core/src/tests/retained_archive_boot.rs",
+      "test_source_sha256": "b840228efe1e415d10e8ce1089f6cd2542c4cd3bfcb45d2c77385358f788addb",
+      "head": "2422be0d9ca5a40e0ad954c6499d9f5a35e77d5c",
+      "scope": "One synthetic full public isolated Engine boot using real WalWriter, newest complete SegmentBase without a saved order epoch, retained heterogeneous archive, native late-fill history, recovery through real order lineage and callback readers, full-prefix restart and real rotation. MockVenue performs no venue writes. No live account bytes are part of the committed test.",
+      "assertions": [
+        "An archived Limit OrderRequest with a structured kind must not break the legacy epoch scan; successive boot epochs exceed the archived order ID epoch.",
+        "The late fill of an archived rejected order is recovered as exact0.5 owned units with entry value50 and fee0.001 exactly once.",
+        "The unrelated structured StrategyEventPublished does not break callback scanning; both archived rejection and recovered fill sources are readable.",
+        "The archived rejection is queued durably exactly once; no callback source origin is queued twice; any later source remains represented by the saved callback frontier.",
+        "Restart and real rotation preserve quantities, fees, lots and archive bytes."
+      ],
+      "before": {
+        "exit_code": 101,
+        "actual_failure": "retained archive boot failed: log: wal io: invalid type: map, expected a string at line1column127",
+        "source_replacement": {
+          "path": "engine/engine-wal/src/order_lineage.rs",
+          "before": "f57c8c4c1c940b7c63eac7410d339bc82fad7a8f5bc5e3f4137e10158eebc999",
+          "after": "046ed9b108fd12a9c5150a57d2cd1d24ea8ab925f27115b19ffb7af77803024a",
+          "old_file": "/tmp/tier1-callback-reader-proof/order_lineage-before.rs"
+        },
+        "log": "/tmp/tier1-retained-archive-boot-proof/before.log",
+        "log_sha256": "84cabecac22127707b860f9b2c532dfb76006d71eeb2a8d050bf2c81013ed2ce"
+      },
+      "candidate": {
+        "exit_code": 0,
+        "seconds": 0.21,
+        "log": "/tmp/tier1-retained-archive-boot-proof/candidate-frontier.log",
+        "log_sha256": "e251cef963b9c9d2e1d1d8d753aa90379a35a63b02db93edb6437f8937546a24"
+      },
+      "restored": {
+        "exit_code": 0,
+        "seconds": 0.22,
+        "log": "/tmp/tier1-retained-archive-boot-proof/restored.log",
+        "log_sha256": "6035c442da24761096e98ccbae1c2ba484a8ff3bdcfebd60999595d0ad0d75ee",
+        "source_restoration": {
+          "files_verified": 441,
+          "differences": {},
+          "restored_epoch_source_sha256": "f57c8c4c1c940b7c63eac7410d339bc82fad7a8f5bc5e3f4137e10158eebc999"
+        }
+      },
+      "actual_host_failure_boundary": {
+        "archive_record": 313,
+        "archive_offset": 39606,
+        "archive_record_length": 262,
+        "error_column": 129,
+        "source": "/tmp/tier1-callback-reader-proof/actual-epoch-failing-record.json",
+        "note": "Actual archive diagnostics belong to implementer; synthetic regression reproduces the same map-versus-string decoder failure."
+      },
+      "rejected_test_diagnostics": "Initial assertions that accepted must be None or equal latest were too strict: boot durably queues callbacks subject to its active-work bound. Those failed assumptions are preserved in initial-frontier-assumption-candidate.log and candidate.log; they are not product bugs or fix evidence.",
+      "commands_and_source_hash_receipts": {
+        "plan.json": "362e60580089dd1524f155ac7ced7e85655c145930e604242edc9b736c6a0b6f",
+        "candidate-frontier.json": "4c665c06fa3181d4f54e772986c7cbd28c67bbf44c46f76b5949f9b867c5b734",
+        "before-source.json": "73c2f5b3ae53be749a332e9042115a4e81550d9abf83797acb2137e137b96082",
+        "before.json": "3e3fc7130c9843dbb3abff9c2b006da21b03882b9e46c00ad26b0d4c04fb9cef",
+        "restored.json": "fb471ea59a46bde7fceeb4c250362e63de605f817e8a65e05ce8e549da8faf8c",
+        "restored-source.json": "33ad9d5c5fc1d50d5bd523708f4c6b664242ba9facc4a70e7cbf99782a303211",
+        "run.py": "f39e788e9edfea5767a9bb60c368bbf596b83cb47caa1cb988bbdb37f7f714f6"
+      },
+      "main_source_mutations": "New retained_archive_boot.rs only; implementer registered its test module. Production mutations for before control occurred only in the isolated source-only copy and were byte-restored.",
+      "callback_execution_boundary": "The test supplies /bin/false as the isolated callback executable. It verifies boot, durable callback queuing/source retention and archive decoding, not successful child-strategy execution. Existing real-child tests cover that separate boundary."
+    },
+    "disabled_quoter_independent_current_control": {
+      "base_commit": "2422be0d9ca5a40e0ad954c6499d9f5a35e77d5c",
+      "before_exit": 101,
+      "before_failures": [
+        "a_disabled_flat_quoter_preserves_worker_state_on_market_updates",
+        "isolated_engine_quotes_do_not_amplify_the_wal_for_an_unchanged_strategy"
+      ],
+      "source_before": {
+        "engine/engine-strategies/src/quoter/plug.rs": "21d2b88f5de5a6ee25cd0bf81b61bd9940b8c45309d0694248357388e116679e",
+        "engine/engine-core/tests/integration/strategy_process.rs": "437bf5d893825e5a7591eca54924d0e943fb521a0b2fd9a2e6cb160953d47efa",
+        "engine/engine-wal/src/callback_reader.rs": "e99fa62524b4492f18ccc582a70aa32e29ebfd753dacd338b3214909948b7c3a",
+        "engine/engine-wal/src/order_lineage.rs": "f57c8c4c1c940b7c63eac7410d339bc82fad7a8f5bc5e3f4137e10158eebc999",
+        "engine/target/debug/engine": "c7471e3b37b926f3af264a19028c82d23e39193ea37cdfbac463acf893b510f3"
+      },
+      "before_log_sha256": "b1e98dcea51627593af245363d4a9dc382fb3cb67b5c36ddb51e7df5c33d7f2a",
+      "after_exit": 0,
+      "after_source": {
+        "engine/engine-strategies/src/quoter/plug.rs": "58a5adb065fe4e8ff2b0d70b4b16f7a5d6be3d49346f2b9733b3281c10ce788f",
+        "engine/engine-core/tests/integration/strategy_process.rs": "437bf5d893825e5a7591eca54924d0e943fb521a0b2fd9a2e6cb160953d47efa",
+        "engine/engine-wal/src/callback_reader.rs": "e99fa62524b4492f18ccc582a70aa32e29ebfd753dacd338b3214909948b7c3a",
+        "engine/engine-wal/src/order_lineage.rs": "f57c8c4c1c940b7c63eac7410d339bc82fad7a8f5bc5e3f4137e10158eebc999",
+        "engine/target/debug/engine": "dcf4c91f6fdb18536f4c84d253518997448fe7bbabb6094bd31e5a682b446e8c"
+      },
+      "after_log_sha256": "503caa0bf2d5ad46c2cfc6a97b9d59fac277ee647e73556cd0b10de59274db80",
+      "passed": 13,
+      "scope": "Independent current root callback implementation, real engine and child; only the quoter condition changes between runs."
+    },
+    "exact_terminal_independent_current_control": {
+      "before": 101,
+      "after": 0,
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "engine/Cargo.toml",
+        "-p",
+        "engine-core",
+        "--lib",
+        "terminal_",
+        "--",
+        "--nocapture"
+      ],
+      "source_sha256": {
+        "engine/engine-core/src/engine/order_dispatch.rs": "39b53afe427893ae362b91f026359cc55596c0e867860fc658496cacef91c6a9",
+        "engine/engine-core/src/engine/scheduling.rs": "a1c5ea7b44822fa24fbc10cce819a3516270a9908ced9f504cc087f8aad1e420",
+        "engine/engine-core/src/inflight/quantities.rs": "b5b50e1480d36c43e93cf3452ce707de2637fa2278926e8d339aa1b008bd2a23"
+      },
+      "control_sha256": {
+        "engine/engine-core/src/engine/order_dispatch.rs": "ba1dbd1d5fdf1246d2b20ddccf4b664343aaa58ebe6b639f340cdd7ad8370d39",
+        "engine/engine-core/src/engine/scheduling.rs": "60fc5b912c30e63e1c8b26eb86ee4e400b021558a2f92736ca407c141b623ca0",
+        "engine/engine-core/src/inflight/quantities.rs": "b5b50e1480d36c43e93cf3452ce707de2637fa2278926e8d339aa1b008bd2a23"
+      },
+      "log_sha256": {
+        "before": "155bda00e51fd9f597f4d4bcb07b7a8d58c73027b99f9afa6d2d90f044f9bf2c",
+        "after": "ee3f56780b0d428fe7aeaef398d273c461989f7f88d6b3eadfce1ac46f0b1547"
+      }
+    },
+    "callback_independent_current_controls": {
+      "ack": {
+        "before": 101,
+        "after": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "engine/Cargo.toml",
+          "-p",
+          "engine-core",
+          "--lib",
+          "an_ack_during_a_pending_market_callback_is_retained_without_fault",
+          "--",
+          "--nocapture"
+        ],
+        "source_sha256": {
+          "engine/engine-core/src/engine/strategy_callbacks.rs": "bc2bafc098558aa2632e30c34b0fd345c5b943393e60dc2f7f1e86a5ec489797",
+          "engine/engine-core/src/engine/venue_completion.rs": "cd2ca018085e3ef721a81184d284e2ef2b1fc60db24528092b351d74cf5aac00",
+          "engine/engine-core/src/engine/strategy_callbacks/market_tests.rs": "7c01206b1ff3a33bb93901620dd30e2d996f9b4279d90c9f8fcfb36404bcb140"
+        },
+        "control_sha256": {
+          "engine/engine-core/src/engine/strategy_callbacks.rs": "483eb9353c8d3afee54e8977315edd96e52011028e2b797077ea5ea649dd3e94",
+          "engine/engine-core/src/engine/venue_completion.rs": "a1384cc8814001da0f34bb50f4c05fbfcba9835c98f6b373c8d8da74127b3e35",
+          "engine/engine-core/src/engine/strategy_callbacks/market_tests.rs": "7c01206b1ff3a33bb93901620dd30e2d996f9b4279d90c9f8fcfb36404bcb140"
+        },
+        "log_sha256": {
+          "ack-before": "8f9e863b6949bafc33d2d074d30eee0670cf312ef2ae17f37e8e7aeac607ea52",
+          "ack-after": "babc9d5ea1f786d468055d884ffa936b0b42ec64faae7cc06a0696f4fbeab6d6"
+        }
+      },
+      "typed": {
+        "before": 101,
+        "after": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "engine/Cargo.toml",
+          "-p",
+          "engine-core",
+          "--lib",
+          "engine::strategy_callbacks",
+          "--",
+          "--nocapture"
+        ],
+        "source_sha256": {
+          "engine/engine-core/src/engine/strategy_callbacks.rs": "3d06a7282087ddcd0e03b2c1305fcb0e530c231fd80fc02343f2496a81172d25",
+          "engine/engine-core/src/engine/venue_completion.rs": "d9b10041c26cc42427d7cdbe9b60b6647dba7866f02e14386813073df8edeffb",
+          "engine/engine-core/src/strategy_process/host.rs": "5c73023fde34c6d113d8fd17ea56614e9f47cc50fe46861eb70c7ef6a3050743",
+          "engine/engine-core/src/ctx.rs": "63108921618fe0163e801e69faaa3eb152f3469f0a12f4b8a09d87135adb01b7",
+          "engine/engine-core/src/engine/strategy_callbacks/market_tests.rs": "057231cb81b8510b2e9e6142323757f67aa7fb08995ebe0256309b42283a1ac8"
+        },
+        "control_sha256": {
+          "engine/engine-core/src/engine/strategy_callbacks.rs": "bc2bafc098558aa2632e30c34b0fd345c5b943393e60dc2f7f1e86a5ec489797",
+          "engine/engine-core/src/engine/venue_completion.rs": "cd2ca018085e3ef721a81184d284e2ef2b1fc60db24528092b351d74cf5aac00",
+          "engine/engine-core/src/strategy_process/host.rs": "d1f149848c85f60d9d95357133b48a7de3e53196f170223dab1a4f594fef1a90",
+          "engine/engine-core/src/ctx.rs": "0a6bdecfb28ebf4ba6d019b326484f5e92ba058fbf2ce7b7b34222b464a0047a",
+          "engine/engine-core/src/engine/strategy_callbacks/market_tests.rs": "057231cb81b8510b2e9e6142323757f67aa7fb08995ebe0256309b42283a1ac8"
+        },
+        "log_sha256": {
+          "typed-before": "64725924c02c0f39718de1b9a3086756646c88539de0030a4a0269dfbe68abda",
+          "typed-after": "fc735273ce9087283c1bd864f303581c932d41216bace0dd8c75a27650b05592"
+        }
+      }
+    },
+    "cap_reversal_current_rehearsal": {
+      "path": "/tmp/tier1-legacy-quantity-proof/live-fixtures/cap-refresh-20260906T123705Z/candidate-rehearsal-5959-1788698389894/report.json",
+      "bytes": 47351,
+      "sha256": "7b113e3b4b46078d957e5e342f385806123f01d872f0d6011cdcda5957ae8dd6"
+    },
+    "cap_execution_source_comparison": {
+      "path": "/tmp/tier1-deploy-observation/cap-intervening-candidate-source-comparison.json",
+      "bytes": 2000,
+      "sha256": "24824e2182cd2f816c3cba7b5eadeb08098faa0ac77c8690382330d9c9542fae"
+    },
+    "entry_hold_failed_candidate_cli": {
+      "prior_permissions": {
+        "carry": true,
+        "long": true,
+        "exodus": true
+      },
+      "results": [
+        {
+          "strategy": "carry",
+          "request_id": "tier1-incumbent-entry-hold-20260906-carry",
+          "exit_code": 255,
+          "finished_utc": "2026-09-06T12:42:45.970038+00:00"
+        }
+      ]
+    },
+    "entry_hold_applied_incumbent_cli": {
+      "prior_permissions": {
+        "carry": true,
+        "long": true,
+        "exodus": true
+      },
+      "results": [
+        {
+          "strategy": "carry",
+          "request_id": "tier1-incumbent-entry-hold-20260906-carry",
+          "binary": "/proc/2525649/exe",
+          "exit_code": 0,
+          "finished_utc": "2026-09-06T12:46:14.615778+00:00"
+        },
+        {
+          "strategy": "long",
+          "request_id": "tier1-incumbent-entry-hold-20260906-long",
+          "binary": "/proc/2525649/exe",
+          "exit_code": 0,
+          "finished_utc": "2026-09-06T12:46:16.867911+00:00"
+        },
+        {
+          "strategy": "exodus",
+          "request_id": "tier1-incumbent-entry-hold-20260906-exodus",
+          "binary": "/proc/2525649/exe",
+          "exit_code": 0,
+          "finished_utc": "2026-09-06T12:46:19.181877+00:00"
+        }
+      ]
+    },
+    "oncall_rejection_diagnostics": {
+      "independent_control": {
+        "before": 1,
+        "after": 0,
+        "source_sha256": "1cd8e438ba8cfd218509e6f35c0e82be0e5fea3ad4807537266506bb4aea9889",
+        "test_sha256": "2529511400a3c1836c5f123f00ff7fa1c1d9147dd2623f51e51acc0fc07d9597",
+        "log_sha256": {
+          "before": "5122976f4c22a15212c728c02dee96b5d689b856b027b200ef336b39f786d666",
+          "after": "87917d2010511647c5c91dd73106df28ef98c885822cb751749bd8d73ec90e45"
+        }
+      },
+      "boundary": "Diagnostic repair only; actual remote HTTP400 cause remains unconfirmed until a naturally scheduled rejection reports it."
+    },
+    "runtime_control_memory": {
+      "before": {
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "engine-core",
+          "--test",
+          "integration",
+          "--locked",
+          "runtime_control_cli::",
+          "--",
+          "--nocapture"
+        ],
+        "exit_code": 101,
+        "elapsed_seconds": 21.28640580177307,
+        "main_sha256": "f89863cb7008c4d7750a46d39224a407b3eca5c9ea4a07e18aaa889f494ec07a"
+      },
+      "after": {
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "engine-core",
+          "--test",
+          "integration",
+          "--locked",
+          "runtime_control_cli::",
+          "--",
+          "--nocapture"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 13.783447980880737,
+        "sources": {
+          "engine/engine-core/src/main.rs": "efb276b91ca9228dbfe9b31d1062466ce594ba1ed27b5abea61404cf9ffa8a50",
+          "engine/engine-core/tests/integration/main.rs": "0096a6ecfb4ab12d8d46f63f10aad7eed9af18f5f85a32889b9a4cc50030ebea",
+          "engine/engine-core/tests/integration/runtime_control_cli.rs": "b928ddbd823aa5c5660c55f1b374cec44bcc4dcc573c1302e37080d9074d3752"
+        }
+      }
+    },
+    "final_native_rehearsal": {
+      "started_utc": "2026-09-06T13:04:02.675674+00:00",
+      "command": [
+        "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/engine/target/release/deps/engine_core-46a3ef927cdf318b",
+        "--exact",
+        "tests::live_legacy_fixture::full_live_legacy_quantity_boot_replay_rotation_and_reboot",
+        "--ignored",
+        "--nocapture"
+      ],
+      "fixture": "/tmp/tier1-legacy-quantity-proof/live-fixtures/cover-refresh-20260906T125343Z",
+      "test_executable_sha256": "08ac52055156b4350a8d13de9b1f292c6dff362a80730fa254c12d4e5f271247",
+      "source_manifest_sha256": "48d437703f77a0c9fdb466f296eb63a42694b754e40798300559dd5eeafa424a",
+      "exit_code": 0,
+      "source_unchanged": true,
+      "finished_utc": "2026-09-06T13:04:11.439323+00:00",
+      "log_sha256": "f5b64f0086eda29b3e8ce9b471afa58aa1bdf52a471d8383bbba1453db7d3364"
+    },
+    "qualification": {
+      "fmt": {
+        "path": "/tmp/tier1-forward-repair-qualified/fmt.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "clippy": {
+        "path": "/tmp/tier1-forward-repair-qualified/clippy.log",
+        "bytes": 1127,
+        "sha256": "fac09e400b505b5897b4dc4bad3bd110ff52cc7e7e17a470f27458be0adbb405"
+      },
+      "release": {
+        "path": "/tmp/tier1-forward-repair-qualified/release.log",
+        "bytes": 219917,
+        "sha256": "a642a0e20aff6d086d5e28b151a33c0a30d3bfd2d5e86e6c324d4eadd939d71b",
+        "rust_test_totals": {
+          "passed": 2352,
+          "failed": 0,
+          "ignored": 6
+        }
+      },
+      "doc-release": {
+        "path": "/tmp/tier1-forward-repair-qualified/doc-release.log",
+        "bytes": 1459,
+        "sha256": "ba6f5b5d84969859b32dba9f7ff9cddb3df167024fc957a9b00c0d10315de142",
+        "rust_test_totals": {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      },
+      "sim": {
+        "path": "/tmp/tier1-forward-repair-qualified/sim.log",
+        "bytes": 3701827,
+        "sha256": "e1d0632f1082945dc73b14cb6f88ef0a498a995a37df81fae4d0b94afd1a5744"
+      }
+    },
+    "final_suite_manifest": {
+      "path": "/tmp/tier1-forward-repair-qualified/final-suite.json",
+      "bytes": 142011,
+      "sha256": "48d437703f77a0c9fdb466f296eb63a42694b754e40798300559dd5eeafa424a"
+    },
+    "qualification_boundary": "Completed local qualifications are individually source-bound; missing gates remain pending. Selected original archive frames cover observed epoch shapes and maxima, not full account/day accounting replay. Native deployment observations are separate.",
     "deployment": {
       "status": "not dispatched"
     },

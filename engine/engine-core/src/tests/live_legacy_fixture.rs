@@ -296,10 +296,18 @@ async fn verify_rotated_stop_repair(
             .iter()
             .find(|(symbol, _)| *symbol == position.symbol)
             .unwrap();
-        assert_eq!(repair.position_side, Side::Buy);
+        let side = if position.signed_qty.is_positive() {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
+        assert_eq!(repair.position_side, side);
         assert!(
-            repair.trigger_price >= *target,
-            "native tick quantization may only tighten long protection"
+            match side {
+                Side::Buy => repair.trigger_price >= *target,
+                Side::Sell => repair.trigger_price <= *target,
+            },
+            "native tick quantization may only tighten protection"
         );
     }
     let repaired = engine.rotation_base(clock::wall_ms());

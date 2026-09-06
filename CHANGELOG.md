@@ -81,6 +81,48 @@ edit STATE.md to match.
     positions through boot and rotation; seven removed mock stops are repaired
     without orders. Current qualification and actual fail-before controls are
     indexed in `docs/tier1-deployment-evidence.json`.
+  - Deployment of `2422be0d` reaches demo startup at 11:36:57 UTC, then
+    exits at 11:37:01 with `wal io: invalid type: map, expected a string at
+    line 1 column 129`. Retained archive sequence 313 reproduces the same
+    failure: the boot epoch reader interprets a limit request's structured
+    `kind` as a WAL record tag. Demo is held stopped with seven native stops;
+    mainnet retains its incumbent process. The explicit demo reconciliation
+    completes before this independent archive failure.
+  - Epoch and lineage readers now distinguish record tags, nested order
+    kinds and nullable verdict IDs. Callback readers decode event payloads
+    only for callback record kinds. The actual demo failure, a real nullable
+    mainnet verdict and a real-WAL boot/restart regression fail before these
+    changes and pass afterward.
+  - The disabled, flat mainnet quoter updates microstate on every subscribed
+    quote and forces callback WAL writes. Its normal quote path now requires
+    quoting to be enabled; inventory drains and cancellation remain active.
+    Two real-child regressions fail before this condition change and pass
+    afterward on the integrated source.
+  - Terminal lookups now compare exact cumulative fills before retiring an
+    order, including halt recovery; missing executions request history.
+    Durable callbacks distinguish temporary contention from failure, retaining
+    acknowledgements, timers and controls until the current invocation settles.
+    Independent before/after controls exercise both faults on the integrated tree.
+  - At 11:45 UTC the incumbent mainnet process opens eight 930-unit CAP shorts
+    before reducing 6510 units. All 29 venue fills match WAL records; the final
+    protected EXODUS short is 930. The candidate uses owned sleeve allocations
+    across stale venue-net readings, and the refreshed full current-segment
+    migration rehearsal passes with the new ownership.
+  - At 12:42:45 UTC the installed runtime-control CLI exhausts host memory
+    while loading the retained WAL family solely to resolve a sleeve identity;
+    the kernel kills it at 7,181,820 KiB anonymous RSS before submission.
+    Reading the newest trusted segment lowers the actual archived-history CLI
+    regression from 150 MB to 14 MB while preserving durable identity and
+    torn-tail refusal. The incumbent engine remains healthy. Its existing CLI durably pauses all
+    three directional sleeves while the forward repair is qualified. The
+    EXODUS pause callback closes the remaining CAP short at 12:46:19.109;
+    its incumbent checkpoint has already removed that target prematurely.
+    The exact 930-unit reduction and fee match native execution history.
+  - Host liveness repeatedly receives HTTP 400 from the existing on-call
+    routine, but discards its error body. Bounded, credential-redacted API
+    rejection diagnostics now retain the reason; eight mocked cases fail
+    before the fix and pass afterward. The remote rejection cause remains
+    unconfirmed until the existing timer reports it.
   - Deployment and post-repair observations are recorded here when complete.
 
 - **2026-09-06 — Tier-1 exact ownership and recovery qualification.**

@@ -1327,3 +1327,113 @@ fn recovered_callback_metadata_is_required_only_on_the_current_tag() {
     );
     assert_eq!(replay(&path).unwrap(), [(1, legacy)]);
 }
+
+#[test]
+fn callback_cursor_skips_published_strategy_events_in_a_heterogeneous_archive() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let unrelated = WalRecord::StrategyEventPublished {
+        wall_ts_ms: 1,
+        event: engine_types::StrategyEvent {
+            source: StrategyId(0),
+            destination: StrategyId(1),
+            kind: "sleeve_closed".into(),
+            event_id: "closed-1".into(),
+            payload: vec![1, 2, 3],
+        },
+    };
+    let callback = WalRecord::StrategyCallbackSource {
+        placement: None,
+        strategy: StrategyId(1),
+        event: engine_types::strategy_process::CallbackEvent::Boot,
+    };
+    let (mut writer, _) = WalWriter::open(&path).unwrap();
+    writer.append(&unrelated).unwrap();
+    writer.append(&callback).unwrap();
+    writer.barrier().unwrap();
+    drop(writer);
+    let original = fs::read(&path).unwrap();
+    let (mut writer, _) = WalWriter::open(&path).unwrap();
+    let mut reader = writer.callback_reader().unwrap().unwrap();
+    let first = reader.next(reader.start()).unwrap().unwrap();
+    assert!(first.source.is_none());
+    let second = reader.next(first.next).unwrap().unwrap();
+    assert_eq!(
+        second.source,
+        Some((
+            vec![StrategyId(1)],
+            engine_types::strategy_process::CallbackEvent::Boot
+        ))
+    );
+    assert!(reader.next(second.next).unwrap().is_none());
+    assert_eq!(fs::read(&path).unwrap(), original);
+}
+
+#[test]
+fn archive_projections_accept_heterogeneous_record_shapes() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let (mut writer, _) = WalWriter::open(&path).unwrap();
+    for record in every_variant() {
+        writer.append(&record).unwrap();
+    }
+    writer.barrier().unwrap();
+    let original = fs::read(&path).unwrap();
+    let mut callbacks = writer.callback_reader().unwrap().unwrap();
+    let mut cursor = callbacks.start();
+    while let Some(record) = callbacks.next(cursor).unwrap() {
+        cursor = record.next;
+    }
+    let mut lineage = writer
+        .order_lineage_reader("not-an-order")
+        .unwrap()
+        .unwrap();
+    assert!(lineage.next().unwrap().is_none());
+    assert!(writer
+        .order_epoch_reader()
+        .unwrap()
+        .unwrap()
+        .max_order_epoch_ms()
+        .unwrap()
+        .is_some());
+    assert_eq!(fs::read(&path).unwrap(), original);
+}
+
+#[test]
+fn callback_projection_rejects_malformed_relevant_fields_and_bad_unrelated_checksums() {
+    for (value, corrupt_crc) in [
+        (
+            serde_json::json!({"kind":"strategy_callback_source","strategy":0,"event":{"kind":{"Boot":{}}}}),
+            false,
+        ),
+        (
+            serde_json::json!({"kind":"strategy_callback_source","strategy":{},"event":{"kind":"boot"}}),
+            false,
+        ),
+        (
+            serde_json::json!({"kind":"order_update_v2","callbacks":null,"update":{"Cancelled":{"client_order_id":"owned","recv_ns":2}}}),
+            false,
+        ),
+        (
+            serde_json::json!({"kind":"order_update_v2","callbacks":[0],"update":{"Unknown":{}}}),
+            false,
+        ),
+        (
+            serde_json::json!({"kind":"note","source":"unrelated","message":"still checksummed"}),
+            true,
+        ),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let path = log_path(&dir);
+        let (mut writer, _) = WalWriter::open(&path).unwrap();
+        let payload = serde_json::to_vec(&value).unwrap();
+        let mut bytes = b"EWAL0001".to_vec();
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(crc32c::crc32c(&payload) ^ u32::from(corrupt_crc)).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        fs::write(&path, &bytes).unwrap();
+        let mut reader = writer.callback_reader().unwrap().unwrap();
+        assert!(reader.next(reader.start()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}

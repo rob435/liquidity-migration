@@ -233,9 +233,9 @@ journalctl -u liquidity-migration-engine<-mainnet or empty> -n 100 --no-pager
 
 ```sh
 # Run through the existing realm credential environment with the engine stopped.
-engine reconcile-clear --config /etc/liquidity-migration/engine.demo.toml \
+engine reconcile-clear --config /etc/liquidity-migration/engine.toml \
   --note 'verified historical execution; private evidence path and SHA256'
-engine reconcile-clear --config /etc/liquidity-migration/engine.demo.toml \
+engine reconcile-clear --config /etc/liquidity-migration/engine.toml \
   --note 'verified historical execution; private evidence path and SHA256' --execute
 ```
 

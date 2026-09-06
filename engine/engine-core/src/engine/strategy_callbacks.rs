@@ -1,6 +1,6 @@
 use super::*;
 use crate::effects::EffectKey;
-use crate::strategy_process::host::{CallbackCompletion, CallbackWrite};
+use crate::strategy_process::host::{CallbackCompletion, CallbackWrite, EnqueueError};
 use engine_types::strategy_process::{CallbackPreparation, StrategyProcessState};
 
 #[cfg(test)]
@@ -16,7 +16,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.service_order_callback_sources()?;
         let pending_boot: Vec<_> = self.host.callbacks.pending_boot.iter().copied().collect();
         for strategy in pending_boot {
-            let _ = self.host.callbacks.enqueue(strategy, &EngineEvent::Boot);
+            self.feed_one_strategy(strategy, &EngineEvent::Boot, clock::now_ns());
         }
         self.retry_callback_inputs();
         if self.host.callbacks.write.is_some() {
@@ -234,7 +234,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     }),
             };
             if let Some(event) = event {
-                if self.host.callbacks.enqueue(strategy, &event).is_err() {
+                if !self.feed_one_strategy(strategy, &event, clock::now_ns()) {
                     blocked.insert(strategy);
                 }
             } else {
@@ -258,10 +258,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 &self.books.market,
                 self.host.callbacks.retry_inputs.reset_ns,
             );
-            let _ = self
-                .host
-                .callbacks
-                .enqueue(strategy, &EngineEvent::Market(event));
+            self.feed_one_strategy(strategy, &EngineEvent::Market(event), clock::now_ns());
         }
     }
 
@@ -303,7 +300,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         self.ensure_callback_reader(&[])?;
         let event = engine_types::strategy_process::CallbackEvent::from(&event);
-        let ready = !self.host.callbacks.order_news.unread_for(strategy);
+        let ready = !self.host.callbacks.pending_for(strategy)
+            && !self.host.callbacks.order_news.unread_for(strategy);
         let sequence = self.wal.append(&WalRecord::StrategyCallbackSource {
             placement: placement.clone(),
             strategy,
@@ -332,7 +330,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .order_news
                 .origin(sequence)
                 .map_err(EngineError::State)?;
-            if let Err(error) = self.host.callbacks.enqueue_source(strategy, event, origin) {
+            if let Err(EnqueueError::Fault(error)) =
+                self.host.callbacks.enqueue_source(strategy, event, origin)
+            {
                 self.host.callbacks.faults.insert(strategy, error);
             }
         }
@@ -355,8 +355,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .map(|index| StrategyId(index as u16))
                 .filter(|strategy| {
                     self.host.callbacks.is_active(*strategy)
-                        && (!self.host.callbacks.pages.enabled()
-                            || !self.host.callbacks.pending_for(*strategy))
+                        && !self.host.callbacks.pending_for(*strategy)
                 })
                 .collect();
             self.host
@@ -387,6 +386,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     },
                 )
             {
+                if self.host.callbacks.pending_for(strategy) {
+                    // Keep the cursor on its durable parent until the current invocation settles.
+                    return Ok(());
+                }
                 let event = match event {
                     engine_types::strategy_process::CallbackEvent::Order { update } => {
                         engine_types::strategy_process::CallbackEvent::Order {
@@ -403,8 +406,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     sequence: cursor.sequence,
                 };
                 if let Err(error) = self.host.callbacks.enqueue_source(strategy, event, origin) {
-                    self.host.callbacks.faults.insert(strategy, error);
-                    self.host.callbacks.order_news.refused(strategy);
+                    if let EnqueueError::Fault(error) = error {
+                        self.host.callbacks.faults.insert(strategy, error);
+                        self.host.callbacks.order_news.refused(strategy);
+                    }
                     return Ok(());
                 }
             }

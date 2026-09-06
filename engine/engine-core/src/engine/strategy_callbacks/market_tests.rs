@@ -125,6 +125,254 @@ async fn accept(engine: &mut TestEngine, input: StrategyCallbackInput) -> Vec<Ac
     actions
 }
 
+async fn held_market_with_working_order(
+    plug: Box<dyn Strategy>,
+) -> (
+    TestEngine,
+    std::sync::Arc<std::sync::Mutex<Vec<WalRecord>>>,
+    StrategyCallbackInput,
+) {
+    let (mut engine, records) = crate::tests::callback_test_fixture(vec![plug]).await;
+    engine.host.callbacks = CallbackHost::new(
+        CallbackExecution::Isolated {
+            executable: "/bin/false".into(),
+        },
+        &engine.host.strategies,
+        &[],
+    )
+    .unwrap();
+    engine.ensure_callback_reader(&[]).unwrap();
+    let sent = WalRecord::OrderSent {
+        dispatch: None,
+        request: OrderRequest {
+            client_order_id: "held-market-order".into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 0.01,
+            kind: OrderKind::Market,
+            stop: Some(StopSpec {
+                trigger_px: 29_000.0,
+            }),
+            reduce_only: false,
+            close_position: false,
+            sleeve_effect: None,
+            exact_terms: None,
+        },
+        wire_ns: clock::now_ns(),
+        arrival_mid: 30_000.0,
+    };
+    engine.wal.append(&sent).unwrap();
+    engine.books.orders.apply(&sent);
+    engine
+        .books
+        .registry
+        .own("held-market-order", StrategyId(0));
+    let mut event = quote(0, clock::now_ns());
+    if let EngineEvent::Market(MarketEvent::Quote { quote, .. }) = &mut event {
+        quote.seq = 1;
+    }
+    let input = prepare_market(&mut engine, &event);
+    (engine, records, input)
+}
+
+async fn deliver_next_retained_input(engine: &mut TestEngine) -> StrategyCallbackInput {
+    for _ in 0..100 {
+        engine.service_order_callback_sources().unwrap();
+        if !engine.host.callbacks.unwritten.is_empty() {
+            break;
+        }
+        if engine.host.callbacks.order_news.pending() {
+            let read = engine
+                .host
+                .callbacks
+                .order_news
+                .completed
+                .recv()
+                .await
+                .unwrap();
+            engine.on_order_callback_source(read).unwrap();
+        }
+    }
+    assert!(
+        !engine.host.callbacks.unwritten.is_empty(),
+        "retained source did not progress after the market callback completed"
+    );
+    finish_next_input(engine).await
+}
+
+async fn finish_next_input(engine: &mut TestEngine) -> StrategyCallbackInput {
+    for _ in 0..10 {
+        if engine.host.callbacks.write.is_some() {
+            let durable = engine.host.callbacks.durable.recv().await;
+            engine.on_callback_durable(durable).unwrap();
+        }
+        if let Some(input) = engine.host.callbacks.state.inputs.values().next().cloned() {
+            if input.snapshot().is_some() {
+                let proposal = worker_proposal(engine, &input);
+                let completed = completion(engine, input.callback_id, proposal);
+                engine.on_strategy_callback(Some(completed)).unwrap();
+                if engine.host.callbacks.write.is_some() {
+                    let durable = engine.host.callbacks.durable.recv().await;
+                    engine.on_callback_durable(durable).unwrap();
+                }
+                return input;
+            }
+        }
+        engine.service_strategy_callbacks().unwrap();
+    }
+    panic!("retained input did not reach preparation");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_ack_during_a_pending_market_callback_is_retained_without_fault() {
+    let params = toml::from_str("symbol = 'BTCUSDT'\nevery_s = 60\nenabled = false").unwrap();
+    let plug =
+        Box::new(engine_strategies::probe::Probe::from_params(StrategyId(0), &params).unwrap());
+    let (mut engine, _, input) = held_market_with_working_order(plug).await;
+    engine
+        .take_update(OrderUpdate::Ack(engine_types::OrderAck {
+            client_order_id: "held-market-order".into(),
+            venue_order_id: "venue-held".into(),
+            sent_ns: clock::now_ns(),
+            ack_ns: clock::now_ns(),
+        }))
+        .await
+        .unwrap();
+    assert!(
+        engine.host.callbacks.faults.is_empty(),
+        "{:?}",
+        engine.host.callbacks.faults
+    );
+    engine.queue_halted_entry_cancels().unwrap();
+    assert!(engine.halt_cancel_queue.is_empty());
+    assert!(engine.host.callbacks.order_news.unread_for(StrategyId(0)));
+    assert!(accept(&mut engine, input).await.is_empty());
+    let delivered = deliver_next_retained_input(&mut engine).await;
+    assert!(
+        matches!(delivered.event, engine_types::strategy_process::CallbackEvent::Order { update: OrderUpdate::Ack(ack) } if ack.client_order_id == "held-market-order")
+    );
+    assert!(!engine.host.callbacks.order_news.unread_for(StrategyId(0)));
+    assert!(engine.host.callbacks.faults.is_empty());
+    engine.host.callbacks.stop().await;
+}
+
+fn disabled_probe() -> Box<dyn Strategy> {
+    let params = toml::from_str("symbol = 'BTCUSDT'\nevery_s = 60\nenabled = false").unwrap();
+    Box::new(engine_strategies::probe::Probe::from_params(StrategyId(0), &params).unwrap())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timer_during_a_pending_market_callback_retries_without_fault() {
+    let _clock = engine_types::clock::install_virtual(clock::wall_ns(), 1_000_000).unwrap();
+    let (mut engine, _, input) = held_market_with_working_order(disabled_probe()).await;
+    let proposal = worker_proposal(&engine, &input);
+    let completed = completion(&mut engine, input.callback_id, proposal);
+    let timer = engine_types::TimerId(77);
+    engine.host.timers = Timers::default();
+    engine
+        .host
+        .timers
+        .arm(StrategyId(0), timer, clock::now_ns());
+    engine.on_timers().await.unwrap();
+    assert!(
+        engine.host.callbacks.faults.is_empty(),
+        "{:?}",
+        engine.host.callbacks.faults
+    );
+    assert!(engine.host.timers.is_armed(StrategyId(0), timer));
+    engine.queue_halted_entry_cancels().unwrap();
+    assert!(engine.halt_cancel_queue.is_empty());
+    engine.on_strategy_callback(Some(completed)).unwrap();
+    if engine.host.callbacks.write.is_some() {
+        let durable = engine.host.callbacks.durable.recv().await;
+        engine.on_callback_durable(durable).unwrap();
+    }
+    engine_types::clock::advance_virtual_to(clock::now_ns() + 1_000_000_000).unwrap();
+    engine.on_timers().await.unwrap();
+    let delivered = finish_next_input(&mut engine).await;
+    assert!(
+        matches!(delivered.event, engine_types::strategy_process::CallbackEvent::Timer { id, .. } if id == timer)
+    );
+    assert!(!engine.host.timers.is_armed(StrategyId(0), timer));
+    assert!(engine.host.callbacks.faults.is_empty());
+    engine.host.callbacks.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn controls_during_a_pending_market_callback_retry_in_order_without_fault() {
+    let (mut engine, records, input) = held_market_with_working_order(disabled_probe()).await;
+    let proposal = worker_proposal(&engine, &input);
+    let completed = completion(&mut engine, input.callback_id, proposal);
+    for request_id in ["control-first", "control-next"] {
+        let mut request = engine_types::RuntimeControlRequest {
+            schema_version: engine_types::STRATEGY_ENTRY_PERMISSION_SCHEMA_VERSION,
+            strategy: StrategyId(0),
+            strategy_name: engine.host.names[0].clone(),
+            request_id: request_id.into(),
+            command: engine_types::RuntimeControlCommand::SetEntriesEnabled {
+                entries_enabled: true,
+            },
+            content_sha256: String::new(),
+        };
+        request.content_sha256 = crate::controls::content_sha256(&request);
+        assert!(engine.admit_runtime_control(&request).unwrap());
+        engine.apply_runtime_control(request).unwrap();
+        assert!(
+            engine.host.callbacks.faults.is_empty(),
+            "{:?}",
+            engine.host.callbacks.faults
+        );
+        assert!(engine.halt_cancel_queue.is_empty());
+    }
+    assert_eq!(engine.host.callbacks.retry_inputs.durable.len(), 2);
+    assert_eq!(
+        records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| matches!(row, WalRecord::RuntimeControlAccepted { .. }))
+            .count(),
+        2
+    );
+    engine.on_strategy_callback(Some(completed)).unwrap();
+    for expected in ["control-first", "control-next"] {
+        let delivered = finish_next_input(&mut engine).await;
+        assert!(
+            matches!(delivered.event, engine_types::strategy_process::CallbackEvent::EntryPermission { request_id, entries_enabled: true } if request_id == expected)
+        );
+    }
+    assert!(engine.host.callbacks.retry_inputs.durable.is_empty());
+    assert!(engine.host.callbacks.state.inputs.is_empty());
+    assert!(engine.host.callbacks.faults.is_empty());
+    engine.host.callbacks.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_exhausted_callback_id_still_faults_the_strategy() {
+    let (mut engine, _, input) = held_market_with_working_order(disabled_probe()).await;
+    accept(&mut engine, input).await;
+    engine.host.callbacks.state.next_id = u64::MAX;
+    assert!(!engine.feed_one_strategy(
+        StrategyId(0),
+        &EngineEvent::Timer {
+            id: engine_types::TimerId(77),
+            now_ns: clock::now_ns()
+        },
+        clock::now_ns()
+    ));
+    assert_eq!(
+        engine
+            .host
+            .callbacks
+            .faults
+            .get(&StrategyId(0))
+            .map(String::as_str),
+        Some("strategy callback id exhausted")
+    );
+    engine.host.callbacks.stop().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn native_held_sleeves_do_not_log_the_270_symbol_runtime_on_ordinary_quotes() {
     for kind in ["long_native", "carry_native"] {

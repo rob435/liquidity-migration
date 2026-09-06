@@ -462,14 +462,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .orders
                     .orders
                     .get(id)
-                    .map_or(0.0, |known| known.filled_qty);
-                if row
-                    .filled_qty
-                    .value
-                    .to_f64()
-                    .map_err(|error| EngineError::State(error.to_string()))?
-                    > known + 1e-12
-                {
+                    .map(|known| known.filled_exact())
+                    .transpose()
+                    .map_err(EngineError::State)?
+                    .unwrap_or_else(engine_types::numeric::Exact::zero);
+                if row.filled_qty.value > known {
+                    self.recovery.history_requested = true;
                     self.dispatches.unresolved.insert(
                         id.into(),
                         "terminal order contains fills outside recovered execution history".into(),
@@ -544,6 +542,10 @@ mod tests {
     }
 
     fn prepared_order(engine: &mut TestEngine, id: &str) -> PreparedOrder {
+        prepared_order_with_terms(engine, id, false)
+    }
+
+    fn prepared_order_with_terms(engine: &mut TestEngine, id: &str, exact: bool) -> PreparedOrder {
         let intent = Intent {
             exact_prices: None,
             exact_quantity: None,
@@ -559,7 +561,7 @@ mod tests {
             work: None,
             leverage: None,
         };
-        let request = OrderRequest {
+        let mut request = OrderRequest {
             client_order_id: id.into(),
             strategy: intent.strategy,
             symbol: intent.symbol,
@@ -572,6 +574,17 @@ mod tests {
             sleeve_effect: None,
             exact_terms: None,
         };
+        if exact {
+            engine_types::order_terms::ExactOrderTerms {
+                quantity: engine_types::numeric::Exact::parse_decimal("0.5").unwrap(),
+                limit_price: None,
+                stop_trigger_price: None,
+                physical_stop_trigger_price: None,
+                input_policy: engine_types::order_terms::OrderInputPolicy::StrategyShortestDecimal,
+            }
+            .apply_projection(&mut request)
+            .unwrap();
+        }
         let record = WalRecord::OrderSent {
             dispatch: Some(Box::new(
                 engine_types::order_dispatch::QueuedOrderDispatch {
@@ -600,6 +613,204 @@ mod tests {
             origin_ns: intent.decided_ns,
             intent,
             request,
+        }
+    }
+
+    async fn recover_lookup_fill(
+        engine: &mut TestEngine,
+        id: &str,
+        exec_id: &str,
+        quantity: engine_types::numeric::Exact,
+    ) {
+        use engine_types::numeric::{AssetAmount, AssetId, ExactNumber, ExecutionAmounts};
+        let execution = engine_types::VenueExecution {
+            client_order_id: id.into(),
+            exec_id: exec_id.into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Sell,
+            qty: quantity.to_f64().unwrap(),
+            px: 100.0,
+            fee: Some(0.0),
+            amounts: Some(ExecutionAmounts {
+                settlement_asset: AssetId::Named("USDT".into()),
+                quantity: ExactNumber::derived(quantity),
+                price: ExactNumber::venue_decimal("100").unwrap(),
+                fee: Some(AssetAmount {
+                    asset: AssetId::Named("USDT".into()),
+                    amount: ExactNumber::venue_decimal("0").unwrap(),
+                }),
+            }),
+            is_maker: false,
+            forced_close: None,
+            venue_ts_ms: clock::wall_ms(),
+        };
+        engine.recovery.history_requested = true;
+        engine
+            .apply_history_batch(super::super::account_recovery::HistoryBatch {
+                query: super::super::account_recovery::Query {
+                    started_ns: clock::now_ns(),
+                    generation: engine.recovery.generation,
+                    history: Some((clock::wall_ms() - 1_000, clock::wall_ms())),
+                },
+                account: Err(VenueError::Transport(
+                    "account refresh remains pending".into(),
+                )),
+                rows: engine_types::ExecutionHistory::from_rows([execution]).unwrap(),
+                resume: None,
+                untrusted: false,
+                delivered: Default::default(),
+                recovered: 0,
+                foreign: Vec::new(),
+            })
+            .unwrap();
+        assert!(engine.recovery.uncommitted());
+        let completion = engine.recovery.completed.recv().await.unwrap();
+        engine.on_recovery_completion(completion).await.unwrap();
+        assert!(!engine.recovery.uncommitted());
+    }
+
+    async fn exact_terminal_lookup_waits_for_history(halt: bool, known: &str, venue: &str) {
+        use engine_types::numeric::{Exact, ExactNumber};
+        let (mut engine, records) = fixture().await;
+        let id = "terminal-exact-history";
+        let _ = prepared_order_with_terms(&mut engine, id, true);
+        let known = Exact::parse_decimal(known).unwrap();
+        let venue = ExactNumber::venue_decimal(venue).unwrap();
+        assert!(venue.value > known);
+        assert!(venue.value.to_f64().unwrap() <= known.to_f64().unwrap() + 1e-12);
+        if !known.is_zero() {
+            recover_lookup_fill(&mut engine, id, "known-before-lookup", known.clone()).await;
+        }
+        engine.recovery.history_requested = false;
+        if halt {
+            engine.halt_cancels.insert(
+                id.into(),
+                HaltCancelState::Resolving {
+                    deadline_ns: clock::now_ns() + 10_000_000_000,
+                    retry_after_ns: clock::now_ns(),
+                },
+            );
+        }
+        let lookup = || OrderLookup::Terminal {
+            status: TerminalOrderStatus::Cancelled,
+            row: OrderLookupRow {
+                symbol: "BTCUSDT".into(),
+                client_order_id: id.into(),
+                venue_order_id: "venue-terminal".into(),
+                filled_qty: venue.clone(),
+            },
+        };
+        for _ in 0..2 {
+            if halt {
+                engine.apply_halt_lookup(id, Ok(lookup())).await.unwrap();
+                assert!(engine.recovery.history_requested);
+                assert!(engine.halt_cancels.contains_key(id));
+            } else {
+                engine.apply_order_lookup(id, lookup()).await.unwrap();
+                assert!(engine.recovery.history_requested);
+                assert!(engine.dispatches.unresolved.contains_key(id));
+                assert!(engine.dispatches.orders.contains_key(id));
+            }
+            assert!(engine.books.orders.orders[id].in_flight());
+        }
+        assert!(!records.lock().unwrap().iter().any(|record| matches!(
+            record,
+            WalRecord::OrderUpdate { update: OrderUpdate::Cancelled { client_order_id, .. }, .. }
+                if client_order_id == id
+        )));
+        recover_lookup_fill(
+            &mut engine,
+            id,
+            "recovered-after-lookup",
+            &venue.value - &known,
+        )
+        .await;
+        if halt {
+            engine.apply_halt_lookup(id, Ok(lookup())).await.unwrap();
+            assert!(!engine.halt_cancels.contains_key(id));
+        } else {
+            engine.apply_order_lookup(id, lookup()).await.unwrap();
+            assert!(!engine.dispatches.unresolved.contains_key(id));
+            assert!(!engine.dispatches.orders.contains_key(id));
+        }
+        assert!(!engine.books.orders.orders[id].in_flight());
+        assert!(matches!(
+            &engine.books.orders.orders[id].fill_quantity,
+            engine_types::wal::OrderFillQuantity::Exact { quantity } if *quantity == venue.value
+        ));
+        let ledger =
+            crate::inflight::LedgerOfOrders::try_from_records(&records.lock().unwrap()).unwrap();
+        assert!(!ledger.orders[id].in_flight());
+        assert_eq!(
+            ledger.orders[id].fill_quantity,
+            engine.books.orders.orders[id].fill_quantity
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_dispatch_lookup_waits_for_sub_epsilon_fill_history() {
+        exact_terminal_lookup_waits_for_history(false, "0", "0.0000000000005").await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_dispatch_lookup_preserves_distinct_exact_fill_totals() {
+        exact_terminal_lookup_waits_for_history(false, "0.1", "0.100000000000000001").await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_halt_lookup_waits_for_sub_epsilon_fill_history() {
+        exact_terminal_lookup_waits_for_history(true, "0", "0.0000000000005").await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_halt_lookup_preserves_distinct_exact_fill_totals() {
+        exact_terminal_lookup_waits_for_history(true, "0.1", "0.100000000000000001").await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_lookup_preserves_the_legacy_binary64_fill_frontier() {
+        use engine_types::numeric::{Exact, ExactNumber};
+        for halt in [false, true] {
+            let (mut engine, _) = fixture().await;
+            let id = "legacy-terminal";
+            let _ = prepared_order(&mut engine, id);
+            recover_lookup_fill(
+                &mut engine,
+                id,
+                "legacy-known",
+                Exact::parse_decimal("0.1").unwrap(),
+            )
+            .await;
+            let binary = Exact::from_legacy_f64(0.1).unwrap();
+            assert_eq!(
+                engine.books.orders.orders[id].filled_exact().unwrap(),
+                binary
+            );
+            let venue = ExactNumber::venue_decimal("0.100000000000000003").unwrap();
+            assert!(venue.value > Exact::parse_decimal("0.1").unwrap());
+            assert!(venue.value < binary);
+            let lookup = OrderLookup::Terminal {
+                status: TerminalOrderStatus::Cancelled,
+                row: OrderLookupRow {
+                    symbol: "BTCUSDT".into(),
+                    client_order_id: id.into(),
+                    venue_order_id: "legacy-venue".into(),
+                    filled_qty: venue,
+                },
+            };
+            if halt {
+                engine.halt_cancels.insert(
+                    id.into(),
+                    HaltCancelState::Resolving {
+                        deadline_ns: clock::now_ns() + 10_000_000_000,
+                        retry_after_ns: clock::now_ns(),
+                    },
+                );
+                engine.apply_halt_lookup(id, Ok(lookup)).await.unwrap();
+            } else {
+                engine.apply_order_lookup(id, lookup).await.unwrap();
+            }
+            assert!(!engine.books.orders.orders[id].in_flight());
         }
     }
 

@@ -198,6 +198,9 @@ impl StrategyHost {
     ) -> bool {
         if self.callbacks.isolated() {
             if let Err(error) = self.callbacks.enqueue(sid, event) {
+                let crate::strategy_process::host::EnqueueError::Fault(error) = error else {
+                    return false;
+                };
                 if self.callbacks.faults.get(&sid) != Some(&error) {
                     tracing::error!(
                         strategy = sid.0,
