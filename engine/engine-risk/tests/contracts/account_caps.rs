@@ -66,6 +66,7 @@ fn view_with_available(
     positions: Vec<PositionView>,
 ) -> AccountView {
     AccountView {
+        exact_amounts: None,
         equity_usdt,
         available_usdt,
         positions,

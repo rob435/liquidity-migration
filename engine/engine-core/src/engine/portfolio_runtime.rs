@@ -160,9 +160,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .get(&symbol)
             .cloned()
             .unwrap_or_else(Exact::zero);
-        let Ok(expected) = expected.to_f64() else {
-            return false;
-        };
         let rows: Vec<_> = self
             .books
             .account
@@ -171,14 +168,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .filter(|row| row.symbol == symbol && row.qty != 0.0)
             .collect();
         let observed = match rows.as_slice() {
-            [] => 0.0,
-            [row] if row.qty.is_finite() && row.qty > 0.0 => {
-                if row.side == Side::Buy {
-                    row.qty
-                } else {
-                    -row.qty
+            [] => Exact::zero(),
+            [row] => match row.quantity() {
+                Ok(quantity) if quantity.is_positive() => {
+                    if row.side == Side::Buy {
+                        quantity
+                    } else {
+                        -quantity
+                    }
                 }
-            }
+                _ => return false,
+            },
             _ => return false,
         };
         observed == expected
@@ -211,7 +211,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if intent.side != side.flipped() {
             return Ok(());
         }
-        let requested = engine_types::order_terms::strategy_decimal(intent.qty)
+        let requested = intent
+            .quantity()
             .map_err(|e| EngineError::State(e.to_string()))?;
         let quantity = held.signed_qty.abs();
         let target = &quantity - &requested.min(quantity.clone());
@@ -396,14 +397,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 symbol: exit.symbol,
             });
         }
-        let qty = (remaining - &exit.target_remaining)
-            .to_f64()
-            .map_err(|e| EngineError::State(e.to_string()))?
-            * if exit.position_side == Side::Buy {
-                1.0
-            } else {
-                -1.0
-            };
+        let qty = if exit.position_side == Side::Buy {
+            remaining - &exit.target_remaining
+        } else {
+            -(remaining - &exit.target_remaining)
+        };
         if !self.portfolio_controls.retry_ready(exit.id) {
             return Ok(());
         }
@@ -418,7 +416,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             exit.attempt = exit.attempt.checked_add(1).ok_or_else(|| {
                 EngineError::State("portfolio exit attempt capacity exhausted".into())
             })?;
-            exit.order_id = Some(format!("eng-px-{}-{}", exit.id, exit.attempt));
+            exit.order_id = Some(self.mint_id()?);
             return self.append_portfolio_control(WalRecord::PortfolioExitChanged { state: exit });
         }
         self.portfolio_controls.attempted(exit.id, exit.attempt);
@@ -427,7 +425,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             exit.symbol,
             qty,
             format!("portfolio-exit:{}", exit.id),
-        );
+        )?;
         let mut protection = HashMap::new();
         if let Some(order) = self
             .prepare_intent(
@@ -459,18 +457,23 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         &self,
         strategy: StrategyId,
         symbol: SymbolId,
-        signed_qty: f64,
+        signed_qty: Exact,
         tag: String,
-    ) -> Intent {
-        Intent {
+    ) -> Result<Intent, EngineError> {
+        Ok(Intent {
+            exact_prices: None,
+            exact_quantity: Some(Box::new(signed_qty.abs())),
             strategy,
             symbol,
-            side: if signed_qty > 0.0 {
+            side: if signed_qty.is_positive() {
                 Side::Sell
             } else {
                 Side::Buy
             },
-            qty: signed_qty.abs(),
+            qty: signed_qty
+                .abs()
+                .to_f64()
+                .map_err(|error| EngineError::State(error.to_string()))?,
             kind: OrderKind::Market,
             stop: None,
             reduce_only: true,
@@ -478,7 +481,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             decided_ns: clock::now_ns(),
             work: None,
             leverage: None,
-        }
+        })
     }
 
     async fn service_portfolio_emergency(
@@ -555,7 +558,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     state.attempt = state.attempt.checked_add(1).ok_or_else(|| {
                         EngineError::State("portfolio emergency attempt capacity exhausted".into())
                     })?;
-                    state.order_id = Some(format!("eng-pe-{}-{}", state.id, state.attempt));
+                    state.order_id = Some(self.mint_id()?);
                     return self
                         .append_portfolio_control(WalRecord::PortfolioEmergencyChanged { state });
                 }
@@ -585,11 +588,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .logged_exposure
                     .get(&state.symbol)
                     .cloned()
-                    .unwrap_or_else(Exact::zero)
-                    .to_f64()
-                    .map_err(|e| EngineError::State(e.to_string()))?;
-                if interval.low() != expected
-                    || interval.high() != expected
+                    .unwrap_or_else(Exact::zero);
+                if interval.low() != &expected
+                    || interval.high() != &expected
                     || self
                         .books
                         .orders
@@ -1083,6 +1084,8 @@ mod tests {
         let order = engine
             .prepare_intent(
                 Intent {
+                    exact_prices: None,
+                    exact_quantity: None,
                     strategy: StrategyId(0),
                     symbol: SymbolId(0),
                     side: Side::Sell,
@@ -1179,5 +1182,509 @@ mod tests {
             .unwrap();
         engine.service_portfolio_controls().await.unwrap();
         assert!(records.lock().unwrap().iter().any(|record| matches!(record, WalRecord::PortfolioExitChanged { state } if state.id == 2 && state.order_id.is_some())), "a busy symbol monopolized the durable exit owner");
+    }
+    fn priced(
+        engine: &mut Engine<crate::tests::MockWal, engine_risk::Kernel, crate::tests::MockVenue>,
+    ) {
+        engine.books.market.apply(&MarketEvent::Quote {
+            symbol: SymbolId(0),
+            quote: engine_types::Quote {
+                bid_px: 99.9,
+                ask_px: 100.1,
+                recv_ns: clock::now_ns(),
+                ..Default::default()
+            },
+        });
+        engine.risk.observe_price(SymbolId(0), 100.0);
+    }
+
+    async fn pending_order(
+        engine: &mut Engine<crate::tests::MockWal, engine_risk::Kernel, crate::tests::MockVenue>,
+    ) -> OrderRequest {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            engine.service_order_dispatches().await.unwrap();
+            engine.service_portfolio_controls().await.unwrap();
+            if let Some(order) = engine.books.orders.in_flight().first() {
+                return order.request.clone();
+            }
+            tokio::task::yield_now().await;
+            // Portfolio retry uses a real monotonic clock even in paused-runtime tests.
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!(
+            "exit obligation produced no pending order: {:?}",
+            engine.wal.snapshot_records()
+        );
+    }
+
+    fn assert_reversible_order_id(id: &str) {
+        let fields: Vec<_> = id.split('-').collect();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0], "eng");
+        assert_eq!(fields[1].parse::<u64>().unwrap() % 1000, 0);
+        assert!((1..(1 << 18)).contains(&fields[2].parse::<u32>().unwrap()));
+    }
+
+    async fn acknowledge(
+        engine: &mut Engine<crate::tests::MockWal, engine_risk::Kernel, crate::tests::MockVenue>,
+    ) {
+        for _ in 0..2 {
+            let durable =
+                tokio::time::timeout(Duration::from_secs(1), engine.dispatches.durable.recv())
+                    .await
+                    .unwrap();
+            engine.on_order_dispatch_durable(durable).await.unwrap();
+        }
+        let completion =
+            tokio::time::timeout(Duration::from_secs(1), engine.venue_completions.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        engine.take_venue_completion(completion).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ordinary_exits_keep_exact_units_and_chunk_without_emergency_takeover() {
+        for (quantity, maximum, expected) in [
+            ("0.100000000000000001", None, "0.100000000000000001"),
+            ("1.000000000000000001", Some("0.5"), "0.5"),
+            ("1", Some("0.500000000000000001"), "0.500000000000000001"),
+        ] {
+            let mut engine =
+                crate::tests::shared_sleeves::exact_single_sleeve_engine(quantity, maximum).await;
+            priced(&mut engine);
+            engine
+                .request_portfolio_exit(StrategyId(0), SymbolId(0), Side::Buy, Exact::zero(), None)
+                .unwrap();
+            let request = pending_order(&mut engine).await;
+            assert_reversible_order_id(&request.client_order_id);
+            assert_eq!(
+                request.exact_terms.as_ref().unwrap().quantity,
+                Exact::parse_decimal(expected).unwrap()
+            );
+            assert_eq!(request.sleeve_owner(), Some(StrategyId(0)));
+            let interval = engine
+                .risk
+                .physical_exposure_interval(SymbolId(0), &engine.books.account)
+                .unwrap();
+            assert_eq!(
+                interval.low(),
+                &(Exact::parse_decimal(quantity).unwrap()
+                    - Exact::parse_decimal(expected).unwrap()),
+                "quantized reservation lost canonical units"
+            );
+            assert!(
+                engine.portfolio_controls.emergencies.is_empty(),
+                "an ordinary legal exit unnecessarily flattened other sleeves"
+            );
+            let snapshot = engine.rotation_base(clock::wall_ms());
+            let restored =
+                crate::portfolio_control::PortfolioControls::replay(&[snapshot]).unwrap();
+            assert_eq!(
+                restored.exits[&(StrategyId(0), SymbolId(0))].target_remaining,
+                Exact::zero()
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn explicit_partial_quantity_does_not_become_a_full_close_at_the_same_projection() {
+        for canonical in [false, true] {
+            let mut engine = crate::tests::shared_sleeves::exact_single_sleeve_engine(
+                "0.100000000000000001",
+                None,
+            )
+            .await;
+            priced(&mut engine);
+            let quantity = Exact::parse_decimal("0.1").unwrap();
+            let intent = Intent {
+                exact_prices: None,
+                exact_quantity: canonical.then(|| Box::new(quantity.clone())),
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                side: Side::Sell,
+                qty: 0.1,
+                kind: OrderKind::Market,
+                stop: None,
+                reduce_only: true,
+                tag: "partial-precision".into(),
+                decided_ns: clock::now_ns(),
+                work: None,
+                leverage: None,
+            };
+            let prepared = engine
+                .prepare_intent(intent, None, clock::now_ns(), &mut HashMap::new())
+                .await
+                .unwrap()
+                .unwrap();
+            let expected = if canonical {
+                quantity
+            } else {
+                Exact::parse_decimal("0.100000000000000001").unwrap()
+            };
+            assert_eq!(
+                prepared.request.exact_terms.as_ref().unwrap().quantity,
+                expected
+            );
+            assert_eq!(
+                engine.portfolio_controls.exits[&(StrategyId(0), SymbolId(0))].target_remaining,
+                if canonical {
+                    Exact::parse_decimal("0.000000000000000001").unwrap()
+                } else {
+                    Exact::zero()
+                }
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canonical_partial_exit_target_and_order_survive_rotation_without_projection_loss() {
+        let mut engine = crate::tests::shared_sleeves::exact_single_sleeve_engine("1", None).await;
+        priced(&mut engine);
+        let quantity = Exact::parse_decimal("0.100000000000000001").unwrap();
+        let intent = Intent {
+            exact_prices: None,
+            exact_quantity: Some(Box::new(quantity.clone())),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Sell,
+            qty: quantity.to_f64().unwrap(),
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: true,
+            tag: "canonical-partial".into(),
+            decided_ns: clock::now_ns(),
+            work: None,
+            leverage: None,
+        };
+        let prepared = engine
+            .prepare_intent(intent, None, clock::now_ns(), &mut HashMap::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prepared.request.exact_terms.as_ref().unwrap().quantity,
+            quantity
+        );
+        let base = engine.rotation_base(clock::wall_ms());
+        let restored = crate::portfolio_control::PortfolioControls::replay(&[base]).unwrap();
+        assert_eq!(
+            restored.exits[&(StrategyId(0), SymbolId(0))].target_remaining,
+            Exact::parse_decimal("0.899999999999999999").unwrap()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mismatched_exact_intent_is_refused_before_it_can_poison_the_journal() {
+        let mut engine = crate::tests::shared_sleeves::exact_single_sleeve_engine("1", None).await;
+        priced(&mut engine);
+        let before = engine.wal.snapshot_records().len();
+        let intent = Intent {
+            exact_prices: None,
+            exact_quantity: Some(Box::new(Exact::parse_decimal("0.2").unwrap())),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Sell,
+            qty: 0.1,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: true,
+            tag: "inconsistent-quantity".into(),
+            decided_ns: clock::now_ns(),
+            work: None,
+            leverage: None,
+        };
+        assert!(engine
+            .prepare_intent(intent, None, clock::now_ns(), &mut HashMap::new())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(engine.portfolio_controls.exits.is_empty());
+        assert!(engine.wal.snapshot_records()[before..]
+            .iter()
+            .all(|record| !matches!(
+                record,
+                WalRecord::Intent { .. } | WalRecord::OrderSent { .. }
+            )));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rejected_emergency_parent_restarts_with_the_same_owned_obligation_and_new_attempt() {
+        let mut engine = crate::tests::shared_sleeves::fragmented_engine().await;
+        priced(&mut engine);
+        engine
+            .start_portfolio_emergency(
+                SymbolId(0),
+                Exact::parse_decimal("100").unwrap(),
+                PortfolioEmergencyReason::ExitUnavailable,
+            )
+            .unwrap();
+        let request = pending_order(&mut engine).await;
+        assert_reversible_order_id(&request.client_order_id);
+        acknowledge(&mut engine).await;
+        let before = engine.books.attribution.snapshot();
+        engine
+            .take_update(OrderUpdate::Reject {
+                client_order_id: request.client_order_id.clone(),
+                reason: "temporary venue refusal".into(),
+                code: 10001,
+            })
+            .await
+            .unwrap();
+        assert_eq!(engine.books.attribution.snapshot(), before);
+        let control = engine.portfolio_controls.emergencies[&SymbolId(0)].clone();
+        assert_eq!(control.phase, PortfolioEmergencyPhase::CloseNet);
+        assert!(
+            control.order_id.is_none(),
+            "terminal attempt identity must be retired before rotation"
+        );
+        let base = engine.rotation_base(clock::wall_ms());
+        let mut restart = crate::tests::shared_sleeves::restart_portfolio(
+            &[base],
+            crate::tests::shared_sleeves::physical_long(1.0),
+        )
+        .await;
+        priced(&mut restart);
+        let next = pending_order(&mut restart).await;
+        assert_ne!(next.client_order_id, request.client_order_id);
+        assert_eq!(next.exact_terms.as_ref().unwrap().quantity, Exact::one());
+        assert_eq!(next.sleeve_owner(), None);
+        assert_eq!(
+            restart.portfolio_controls.emergencies[&SymbolId(0)].id,
+            control.id
+        );
+        assert_eq!(restart.books.attribution.snapshot(), before);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aggregate_parent_fill_failure_and_restart_preserve_each_sleeve_and_fee_once() {
+        use engine_types::numeric::{AssetAmount, ExactNumber, ExecutionAmounts};
+        let mut engine = crate::tests::shared_sleeves::fragmented_engine().await;
+        priced(&mut engine);
+        engine
+            .start_portfolio_emergency(
+                SymbolId(0),
+                Exact::parse_decimal("100").unwrap(),
+                PortfolioEmergencyReason::ExitUnavailable,
+            )
+            .unwrap();
+        let request = pending_order(&mut engine).await;
+        acknowledge(&mut engine).await;
+        let before = engine.books.attribution.snapshot();
+        let fill = OrderUpdate::Fill {
+            allocation: None,
+            amounts: Some(Box::new(ExecutionAmounts {
+                quantity: ExactNumber::venue_decimal("0.5").unwrap(),
+                price: ExactNumber::venue_decimal("99").unwrap(),
+                fee: Some(AssetAmount {
+                    asset: AssetId::Named("USDT".into()),
+                    amount: ExactNumber::venue_decimal("0.005").unwrap(),
+                }),
+                settlement_asset: AssetId::Named("USDT".into()),
+            })),
+            client_order_id: request.client_order_id.clone(),
+            exec_id: "parent-crash-fill".into(),
+            symbol: SymbolId(0),
+            side: Side::Sell,
+            qty: 0.5,
+            px: 99.0,
+            fee: Some(0.005),
+            is_maker: false,
+            forced_close: None,
+            venue_ts_ms: clock::wall_ms(),
+            recv_ns: clock::now_ns(),
+        };
+        crate::tests::shared_sleeves::fail_private_updates(&mut engine, true);
+        assert!(engine.take_update(fill.clone()).await.is_err());
+        assert_eq!(engine.books.attribution.snapshot(), before);
+        assert_eq!(
+            engine.books.orders.orders[&request.client_order_id]
+                .remaining_exact()
+                .unwrap(),
+            Exact::one()
+        );
+        crate::tests::shared_sleeves::fail_private_updates(&mut engine, false);
+        engine.take_update(fill.clone()).await.unwrap();
+        let partial = engine.books.attribution.snapshot();
+        assert_eq!(partial.positions.len(), 1);
+        assert_eq!(partial.positions[0].strategy, StrategyId(1));
+        assert_eq!(
+            partial.positions[0].signed_qty,
+            Exact::parse_decimal("0.5").unwrap()
+        );
+        engine
+            .take_update(OrderUpdate::Cancelled {
+                client_order_id: request.client_order_id.clone(),
+                recv_ns: clock::now_ns(),
+            })
+            .await
+            .unwrap();
+        let base = engine.rotation_base(clock::wall_ms());
+        let mut restart = crate::tests::shared_sleeves::restart_portfolio(
+            &[base],
+            crate::tests::shared_sleeves::physical_long(0.5),
+        )
+        .await;
+        priced(&mut restart);
+        restart.take_update(fill).await.unwrap();
+        assert_eq!(
+            restart.books.attribution.snapshot(),
+            partial,
+            "replayed venue fill allocated twice"
+        );
+        let next = pending_order(&mut restart).await;
+        assert_ne!(next.client_order_id, request.client_order_id);
+        assert_eq!(
+            next.exact_terms.as_ref().unwrap().quantity,
+            Exact::parse_decimal("0.5").unwrap()
+        );
+        assert_eq!(next.sleeve_owner(), None);
+        assert_eq!(restart.books.attribution.snapshot(), partial);
+        let total = partial
+            .accounting
+            .iter()
+            .fold(Exact::zero(), |sum, row| sum + &row.fees);
+        assert_eq!(total, Exact::parse_decimal("0.005").unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_filled_general_exit_chunk_rotates_and_resumes_with_a_new_owned_order_id() {
+        use engine_types::numeric::{AssetAmount, ExactNumber, ExecutionAmounts};
+        let mut engine =
+            crate::tests::shared_sleeves::exact_single_sleeve_engine("1", Some("0.5")).await;
+        priced(&mut engine);
+        engine
+            .request_portfolio_exit(StrategyId(0), SymbolId(0), Side::Buy, Exact::zero(), None)
+            .unwrap();
+        let first = pending_order(&mut engine).await;
+        acknowledge(&mut engine).await;
+        engine
+            .take_update(OrderUpdate::Fill {
+                allocation: None,
+                amounts: Some(Box::new(ExecutionAmounts {
+                    quantity: ExactNumber::venue_decimal("0.5").unwrap(),
+                    price: ExactNumber::venue_decimal("100").unwrap(),
+                    fee: Some(AssetAmount {
+                        asset: AssetId::Named("USDT".into()),
+                        amount: ExactNumber::venue_decimal("0").unwrap(),
+                    }),
+                    settlement_asset: AssetId::Named("USDT".into()),
+                })),
+                exec_id: "ordinary-first-chunk".into(),
+                client_order_id: first.client_order_id.clone(),
+                symbol: SymbolId(0),
+                side: Side::Sell,
+                qty: 0.5,
+                px: 100.0,
+                fee: Some(0.0),
+                is_maker: false,
+                forced_close: None,
+                venue_ts_ms: clock::wall_ms(),
+                recv_ns: clock::now_ns(),
+            })
+            .await
+            .unwrap();
+        let before = engine.books.attribution.snapshot();
+        let base = engine.rotation_base(clock::wall_ms());
+        let mut restart = crate::tests::shared_sleeves::restart_portfolio(
+            &[base],
+            crate::tests::shared_sleeves::physical_long(0.5),
+        )
+        .await;
+        priced(&mut restart);
+        let second = pending_order(&mut restart).await;
+        assert_ne!(first.client_order_id, second.client_order_id);
+        assert_eq!(second.sleeve_owner(), Some(StrategyId(0)));
+        assert_eq!(
+            second.exact_terms.as_ref().unwrap().quantity,
+            Exact::parse_decimal("0.5").unwrap()
+        );
+        assert_eq!(restart.books.attribution.snapshot(), before);
+        assert!(restart.portfolio_controls.emergencies.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_fill_after_emergency_rejection_debits_the_original_sleeves_once() {
+        use engine_types::numeric::{AssetAmount, ExactNumber, ExecutionAmounts};
+        for rotate_before_fill in [false, true] {
+            let mut engine = crate::tests::shared_sleeves::fragmented_engine().await;
+            priced(&mut engine);
+            engine
+                .start_portfolio_emergency(
+                    SymbolId(0),
+                    Exact::parse_decimal("100").unwrap(),
+                    PortfolioEmergencyReason::ExitUnavailable,
+                )
+                .unwrap();
+            let request = pending_order(&mut engine).await;
+            acknowledge(&mut engine).await;
+            engine
+                .take_update(OrderUpdate::Reject {
+                    client_order_id: request.client_order_id.clone(),
+                    code: 10001,
+                    reason: "late venue rejection".into(),
+                })
+                .await
+                .unwrap();
+            if rotate_before_fill {
+                let base = engine.rotation_base(clock::wall_ms());
+                engine = crate::tests::shared_sleeves::restart_portfolio(
+                    &[base],
+                    crate::tests::shared_sleeves::physical_long(1.0),
+                )
+                .await;
+                priced(&mut engine);
+                assert!(!engine.books.orders.orders[&request.client_order_id].in_flight());
+            }
+            let fill = OrderUpdate::Fill {
+                allocation: None,
+                amounts: Some(Box::new(ExecutionAmounts {
+                    quantity: ExactNumber::venue_decimal("0.5").unwrap(),
+                    price: ExactNumber::venue_decimal("100").unwrap(),
+                    fee: Some(AssetAmount {
+                        asset: AssetId::Named("USDT".into()),
+                        amount: ExactNumber::venue_decimal("0.005").unwrap(),
+                    }),
+                    settlement_asset: AssetId::Named("USDT".into()),
+                })),
+                exec_id: "late-rejected-parent-fill".into(),
+                client_order_id: request.client_order_id.clone(),
+                symbol: SymbolId(0),
+                side: Side::Sell,
+                qty: 0.5,
+                px: 100.0,
+                fee: Some(0.005),
+                is_maker: false,
+                forced_close: None,
+                venue_ts_ms: clock::wall_ms(),
+                recv_ns: clock::now_ns(),
+            };
+            engine.take_update(fill.clone()).await.unwrap();
+            let once = engine.books.attribution.snapshot();
+            assert_eq!(once.positions.len(), 1);
+            assert_eq!(once.positions[0].strategy, StrategyId(1));
+            assert_eq!(
+                once.positions[0].signed_qty,
+                Exact::parse_decimal("0.5").unwrap()
+            );
+            engine.take_update(fill.clone()).await.unwrap();
+            assert_eq!(engine.books.attribution.snapshot(), once);
+            let base = engine.rotation_base(clock::wall_ms());
+            let mut restart = crate::tests::shared_sleeves::restart_portfolio(
+                &[base],
+                crate::tests::shared_sleeves::physical_long(0.5),
+            )
+            .await;
+            priced(&mut restart);
+            restart.take_update(fill).await.unwrap();
+            assert_eq!(restart.books.attribution.snapshot(), once);
+            let next = pending_order(&mut restart).await;
+            assert_ne!(next.client_order_id, request.client_order_id);
+            assert_eq!(
+                next.exact_terms.as_ref().unwrap().quantity,
+                Exact::parse_decimal("0.5").unwrap()
+            );
+        }
     }
 }

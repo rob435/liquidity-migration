@@ -13,6 +13,7 @@
 
 pub mod clock;
 pub mod execution_allocation;
+pub mod execution_history;
 pub mod identity;
 pub mod ids;
 pub mod market;
@@ -29,6 +30,7 @@ pub mod strategy_process;
 pub mod wal;
 
 pub use async_trait::async_trait;
+pub use execution_history::{ExecutionHistory, ExecutionHistoryBuilder};
 pub use ids::{StrategyId, Symbol, SymbolId, SymbolTable, TimerId};
 pub use market::{
     BookLevel, Depth, Feed, FeedError, MarketEvent, MarketFeed, MarketState, OrderFeed, Quote,
@@ -314,7 +316,7 @@ pub trait VenueGateway: Send + 'static {
         &mut self,
         start_ms: i64,
         end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<ExecutionHistory, VenueError> {
         let _ = (start_ms, end_ms);
         Err(VenueError::BadRequest(
             "this venue cannot list its execution history".to_string(),
@@ -331,3 +333,5 @@ pub struct VenueMutationTiming {
 pub use wal::{StrategyEffectsState, StrategyTransitionState};
 
 pub mod order_dispatch;
+
+pub mod trade;

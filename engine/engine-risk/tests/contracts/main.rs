@@ -9,3 +9,5 @@ mod stops;
 mod portfolio;
 
 mod margin_frontier;
+
+mod precision;

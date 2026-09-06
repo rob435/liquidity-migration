@@ -50,7 +50,9 @@ pub struct CallbackHost {
     pub retry_inputs: super::retry::RetryInputs,
     pub refused_orders: BTreeSet<String>,
     pub unwritten: VecDeque<StrategyCallbackInput>,
+    pub volatile: BTreeSet<u64>,
     pub completions: tokio::sync::mpsc::Receiver<CallbackCompletion>,
+    pub deferred_completions: VecDeque<CallbackCompletion>,
     pub faults: BTreeMap<StrategyId, String>,
     pub write: Option<CallbackWrite>,
     pub durable: tokio::sync::mpsc::Receiver<Result<(), engine_types::WalError>>,
@@ -193,7 +195,9 @@ impl CallbackHost {
             retry_inputs: Default::default(),
             refused_orders,
             unwritten: VecDeque::new(),
+            volatile: BTreeSet::new(),
             completions,
+            deferred_completions: VecDeque::new(),
             faults: BTreeMap::new(),
             initial,
             initial_bytes,
@@ -270,6 +274,14 @@ impl CallbackHost {
     }
 
     pub fn enqueue(&mut self, strategy: StrategyId, event: &EngineEvent) -> Result<(), String> {
+        if matches!(event, EngineEvent::Market(_))
+            && (self.pending_for(strategy)
+                || self.order_news.unread_for(strategy)
+                || self.retry_inputs.blocks(strategy, event))
+        {
+            self.retry_inputs.remember(strategy, event);
+            return Ok(());
+        }
         let boot = matches!(event, EngineEvent::Boot);
         if boot {
             self.pending_boot.insert(strategy);
@@ -352,6 +364,25 @@ impl CallbackHost {
             event,
             preparation: CallbackPreparation::Queued,
         };
+        if self
+            .state
+            .inputs
+            .values()
+            .chain(self.unwritten.iter())
+            .any(|pending| {
+                pending.strategy == strategy
+                    && matches!(
+                        pending.event,
+                        CallbackEvent::Quote { .. }
+                            | CallbackEvent::Depth { .. }
+                            | CallbackEvent::Trades { .. }
+                            | CallbackEvent::Ticker { .. }
+                            | CallbackEvent::FeedReset { .. }
+                    )
+            })
+        {
+            return Err("strategy callback has a pending market invocation".into());
+        }
         if self.pages.enabled() {
             let hash = super::paging::CallbackPages::hash(&input)?;
             if (durable || order_origin.is_some())
@@ -384,7 +415,23 @@ impl CallbackHost {
         input: StrategyCallbackInput,
         cursor: engine_types::strategy_process::CallbackWalCursor,
     ) -> Result<(), String> {
-        let bytes = CallbackState::size(&input)?;
+        self.release_unwritten(&input)?;
+        if self.pages.enabled() {
+            self.pages.queued(&input, cursor)?;
+        }
+        self.state.accept(input)
+    }
+
+    pub fn accept_volatile(&mut self, input: StrategyCallbackInput) -> Result<(), String> {
+        self.release_unwritten(&input)?;
+        let id = input.callback_id;
+        self.state.accept(input)?;
+        self.volatile.insert(id);
+        Ok(())
+    }
+
+    fn release_unwritten(&mut self, input: &StrategyCallbackInput) -> Result<(), String> {
+        let bytes = CallbackState::size(input)?;
         let used = self
             .unwritten_bytes
             .get_mut(&input.strategy)
@@ -392,10 +439,28 @@ impl CallbackHost {
         *used = used
             .checked_sub(bytes)
             .ok_or("unwritten callback byte ownership underflow")?;
-        if self.pages.enabled() {
-            self.pages.queued(&input, cursor)?;
+        Ok(())
+    }
+
+    pub fn unchanged(
+        &self,
+        process: &engine_types::strategy_process::StrategyProcessState,
+    ) -> bool {
+        if let Some(prior) = self.state.committed.get(&process.strategy) {
+            prior.runtime == process.runtime
+                && prior.timers == process.timers
+                && prior.retained_signal_subscriptions == process.retained_signal_subscriptions
+        } else {
+            self.initial.get(&process.strategy) == Some(&process.runtime)
+                && process.timers.is_empty()
+                && process.retained_signal_subscriptions.is_none()
         }
-        self.state.accept(input)
+    }
+
+    pub fn recycle(&mut self, strategy: StrategyId, process: StrategyProcess) {
+        self.faults.remove(&strategy);
+        self.retry_at.remove(&strategy);
+        self.processes.insert(strategy, process);
     }
 
     pub fn launch(&mut self, strategy: StrategyId) -> Result<(), String> {

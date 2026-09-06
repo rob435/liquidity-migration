@@ -285,6 +285,7 @@ impl Costs {
 /// One fill, with everything needed to price it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fill {
+    pub amounts: Option<Box<engine_types::numeric::ExecutionAmounts>>,
     pub client_order_id: String,
     pub strategy: StrategyId,
     pub symbol: SymbolId,
@@ -484,7 +485,14 @@ impl Fills {
                 costs.maker_notional_usdt += notional;
             }
         }
-        let stated_fee = fill.fee.filter(|fee| fee.is_finite());
+        let stated_fee = fill.fee.filter(|fee| fee.is_finite()).filter(|_| {
+            fill.amounts.as_ref().is_none_or(|amounts| {
+                amounts.fee.as_ref().is_some_and(|fee| {
+                    fee.amount.value.is_zero()
+                        || matches!(&fee.asset, engine_types::numeric::AssetId::Named(asset) if asset == "USDT")
+                })
+            })
+        });
         costs.fee_usdt = match (costs.fee_usdt, stated_fee) {
             (Some(total), Some(fee)) => Some(total + fee),
             _ => None,
@@ -646,7 +654,11 @@ impl Fills {
         self.lots.take_closed()
     }
 
-    /// The open positions, for a caller that has to drop some of them.
+    /// Quantity, cost basis and fees required to continue open trades after rotation.
+    pub fn open_trade_lots(&self) -> Vec<engine_types::trade::OpenTradeLot> {
+        self.lots.checkpoint()
+    }
+
     pub fn lots(&mut self) -> &mut roundtrip::Lots {
         &mut self.lots
     }
@@ -675,7 +687,7 @@ impl Fills {
                 &self.names.strategy(slice.strategy),
                 &self.names.symbol(settlement.symbol),
                 &slice.signed_quantity,
-                settlement.price.to_f64().map_err(|e| e.to_string())?,
+                &settlement.price,
             )?;
         }
         Ok(())
@@ -688,12 +700,15 @@ impl Fills {
         self.validate_internal_settlement(settlement)?;
         for slice in &settlement.slices {
             self.lots.settle_internal(
-                &self.names.strategy(slice.strategy),
-                &self.names.symbol(settlement.symbol),
+                (
+                    &self.names.strategy(slice.strategy),
+                    &self.names.symbol(settlement.symbol),
+                ),
                 &slice.signed_quantity,
-                settlement.price.to_f64().map_err(|e| e.to_string())?,
+                &settlement.price,
                 settlement.settled_ms,
                 settlement.emergency_id,
+                &slice.settlement_asset,
             )?;
         }
         Ok(())
@@ -787,6 +802,7 @@ impl Fills {
                         .get(client_order_id.as_str())
                         .map_or(0.0, |(_, mid)| *mid);
                     let fill = Fill {
+                        amounts: amounts.clone(),
                         client_order_id,
                         strategy,
                         symbol,
@@ -821,6 +837,12 @@ impl Fills {
                     ..
                 } => {
                     sent.insert(request.client_order_id.as_str(), (request, *arrival_mid));
+                }
+                WalRecord::OrderLineageRestored { order } => {
+                    sent.insert(
+                        order.request.client_order_id.as_str(),
+                        (&order.request, order.arrival_mid),
+                    );
                 }
                 WalRecord::OrderUpdate {
                     update:
@@ -863,6 +885,7 @@ impl Fills {
                     };
                     me.on_fill_with_quantity(
                         &Fill {
+                            amounts: amounts.clone(),
                             client_order_id: client_order_id.clone(),
                             strategy,
                             symbol: *symbol,
@@ -948,6 +971,7 @@ impl Fills {
                     };
                     me.on_recovered_fill_with_quantity(
                         &Fill {
+                            amounts: amounts.clone().map(Box::new),
                             client_order_id: client_order_id.clone(),
                             strategy,
                             symbol: *symbol,
@@ -970,6 +994,7 @@ impl Fills {
                 // segment's fills, and the whole history is a chain read
                 // away.
                 WalRecord::SegmentBase {
+                    open_trade_lots,
                     open_orders,
                     attribution,
                     portfolio,
@@ -996,7 +1021,61 @@ impl Fills {
                             )
                         })
                         .collect();
-                    if let Some(portfolio) = portfolio {
+                    if let Some(lots) = open_trade_lots {
+                        let expected = if let Some(portfolio) = portfolio {
+                            portfolio
+                                .positions
+                                .iter()
+                                .map(|row| {
+                                    Ok((
+                                        (
+                                            me.names
+                                                .strategies
+                                                .get(row.strategy.idx())
+                                                .ok_or("trade cost basis has an unknown sleeve ID")?
+                                                .clone(),
+                                            me.names
+                                                .symbols
+                                                .get(row.symbol.idx())
+                                                .ok_or("trade cost basis has an unknown symbol ID")?
+                                                .clone(),
+                                        ),
+                                        row.signed_qty.clone(),
+                                    ))
+                                })
+                                .collect::<Result<BTreeMap<_, _>, String>>()?
+                        } else {
+                            held.iter()
+                                .map(|(sleeve, symbol, qty)| {
+                                    Ok((
+                                        (sleeve.clone(), symbol.clone()),
+                                        engine_types::numeric::Exact::from_legacy_f64(*qty)
+                                            .map_err(|error| error.to_string())?,
+                                    ))
+                                })
+                                .collect::<Result<BTreeMap<_, _>, String>>()?
+                        };
+                        let actual: BTreeMap<_, _> = lots
+                            .iter()
+                            .map(|row| {
+                                (
+                                    (row.sleeve.clone(), row.symbol.clone()),
+                                    row.signed_qty.clone(),
+                                )
+                            })
+                            .collect();
+                        let expected: BTreeMap<_, _> = expected
+                            .into_iter()
+                            .filter(|(_, qty)| !qty.is_zero())
+                            .collect();
+                        if actual.len() != lots.len() || actual != expected {
+                            return Err(
+                                "open trade cost basis does not match owned portfolio quantities"
+                                    .into(),
+                            );
+                        }
+                        me.lots.restore(lots)?;
+                    } else if let Some(portfolio) = portfolio {
                         let exact_held: Vec<_> = portfolio
                             .positions
                             .iter()

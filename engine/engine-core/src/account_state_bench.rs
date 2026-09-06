@@ -426,6 +426,7 @@ fn prior_state(history_rows: usize, now_ms: i64) -> (Vec<WalRecord>, AccountView
             arrival_mid: 100.0,
         });
         vec![PositionView {
+            exact_amounts: None,
             exact_stop_px: None,
             symbol: SymbolId(0),
             side: Side::Buy,
@@ -439,6 +440,7 @@ fn prior_state(history_rows: usize, now_ms: i64) -> (Vec<WalRecord>, AccountView
     (
         replayed,
         AccountView {
+            exact_amounts: None,
             equity_usdt: 1_000_000.0,
             available_usdt: 1_000_000.0,
             positions,
@@ -556,12 +558,12 @@ impl engine_types::orders::AccountRecoveryClient for HistoryRecovery {
         _symbols: &[String],
         _start_ms: i64,
         _end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
         let mut rows = self
             .executions
             .lock()
             .map_err(|_| VenueError::BadReply("benchmark history lock poisoned".into()))?;
-        Ok(std::mem::take(&mut *rows))
+        engine_types::ExecutionHistory::from_rows(std::mem::take(&mut *rows))
     }
 }
 
@@ -649,12 +651,12 @@ impl VenueGateway for HistoryVenue {
         &mut self,
         _start_ms: i64,
         _end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
         let mut rows = self
             .executions
             .lock()
             .map_err(|_| VenueError::BadReply("benchmark history lock poisoned".into()))?;
-        Ok(std::mem::take(&mut *rows))
+        engine_types::ExecutionHistory::from_rows(std::mem::take(&mut *rows))
     }
 }
 
@@ -737,6 +739,7 @@ mod recovery_client_tests {
         let mut venue = HistoryVenue {
             executions: std::sync::Arc::new(std::sync::Mutex::new(history(2, clock::wall_ms()))),
             account: AccountView {
+                exact_amounts: None,
                 equity_usdt: 100.0,
                 available_usdt: 80.0,
                 positions: vec![],

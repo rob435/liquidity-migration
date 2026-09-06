@@ -4,6 +4,9 @@ use engine_types::numeric::{AssetId, Exact};
 use engine_types::portfolio::{PortfolioPosition, PortfolioState};
 use engine_types::risk::{DenyReason, PortfolioRiskVerdict, RiskKernel, RiskVerdict};
 use engine_types::{OrderAck, OrderUpdate, Side};
+fn binary(value: f64) -> Exact {
+    Exact::from_legacy_f64(value).unwrap()
+}
 
 fn five_free() -> engine_types::AccountView {
     let mut account = flat(250_000.0, SEC);
@@ -162,7 +165,7 @@ fn pending_virtual_exits_reserve_cumulative_physical_margin_before_any_fill() {
     assert_eq!(
         kernel.assess_portfolio(&intent, &account, &state),
         PortfolioRiskVerdict::Allow {
-            qty: 1.0,
+            qty: engine_types::numeric::Exact::parse_decimal("1.0").unwrap(),
             venue_reduce_only: false
         }
     );
@@ -319,15 +322,21 @@ fn physical_interval_uses_the_same_pending_and_unabsorbed_fills_as_admission() {
         1.0,
     );
     let interval = kernel.physical_exposure_interval(BUSDT, &account).unwrap();
-    assert_eq!((interval.low(), interval.high()), (-0.5, 2.0));
-    assert!(!interval.certainly_reduces(Side::Sell, 0.1));
-    let after = interval.after(Side::Sell, 0.5).unwrap();
-    assert_eq!((after.low(), after.high()), (-1.0, 1.5));
+    assert_eq!(
+        (interval.low(), interval.high()),
+        (&binary(-0.5), &binary(2.0))
+    );
+    assert!(!interval.certainly_reduces(Side::Sell, &binary(0.1)));
+    let after = interval.after(Side::Sell, &binary(0.5)).unwrap();
+    assert_eq!((after.low(), after.high()), (&binary(-1.0), &binary(1.5)));
     for (low, high) in [(f64::NAN, 1.0), (0.0, f64::INFINITY), (1.0, -1.0)] {
         assert!(engine_types::risk::PhysicalExposureInterval::try_new(low, high).is_err());
     }
     let huge = engine_types::risk::PhysicalExposureInterval::try_new(1e308, 1e308).unwrap();
-    assert!(huge.after(Side::Buy, 1e308).is_err());
+    assert_eq!(
+        huge.after(Side::Buy, &binary(1e308)).unwrap().low(),
+        &(binary(1e308) + binary(1e308))
+    );
 }
 
 #[test]
@@ -364,12 +373,12 @@ fn canonical_completion_removes_float_residue_but_preserves_unabsorbed_fills() {
     let interval = kernel.physical_exposure_interval(BUSDT, &account).unwrap();
     assert_eq!(
         interval.low(),
-        0.0,
+        &(binary(0.6) - binary(0.1) * Exact::from_u64(6)),
         "completed order retains a false pending quantity"
     );
     assert_eq!(
         interval.high(),
-        0.0,
+        &(binary(0.6) - binary(0.1) * Exact::from_u64(6)),
         "completion erased unabsorbed physical fills"
     );
 }
@@ -381,15 +390,18 @@ fn dispatch_reassessment_excludes_only_its_pending_order_and_restores_the_hold()
     let intent = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC);
     kernel.register_order_with_account("first", &intent, 1.0, &account);
     let before = kernel.physical_exposure_interval(BUSDT, &account).unwrap();
-    assert_eq!((before.low(), before.high()), (0.0, 1.0));
+    assert_eq!((before.low(), before.high()), (&binary(0.0), &binary(1.0)));
     let excluded = kernel
         .physical_exposure_interval_excluding("first", BUSDT, &account)
         .unwrap();
-    assert_eq!((excluded.low(), excluded.high()), (0.0, 0.0));
+    assert_eq!(
+        (excluded.low(), excluded.high()),
+        (&binary(0.0), &binary(0.0))
+    );
     let state = PortfolioState::default();
     assert!(matches!(
         kernel.reassess_portfolio_order("first", &intent, &account, &state),
-        PortfolioRiskVerdict::Allow { qty: 1.0, .. }
+        PortfolioRiskVerdict::Allow { qty, .. } if qty == Exact::one()
     ));
     denied_margin(kernel.assess(&second(), &account));
     assert_eq!(
@@ -450,7 +462,7 @@ fn canonical_partial_quantity_replaces_subtraction_drift_without_losing_fill_or_
         .unwrap();
     assert_eq!(
         (interval.low(), interval.high()),
-        (0.5, 0.6),
+        (&binary(0.5), &(binary(0.5) + binary(0.1))),
         "risk kept a different pending remainder than the canonical order ledger"
     );
     assert!(kernel.on_update_with_remaining(&update, f64::NAN).is_err());
@@ -467,9 +479,9 @@ fn canonical_partial_quantity_replaces_subtraction_drift_without_losing_fill_or_
     let recent = kernel
         .physical_exposure_interval(BUSDT, &caught_up)
         .unwrap();
-    assert_eq!(recent.low(), 0.6);
+    assert_eq!(recent.low(), &(binary(0.5) + binary(0.1)));
     assert!(
-        recent.low() > 0.0,
+        recent.low().is_positive(),
         "canonical completion discarded actual recent fills"
     );
     assert_eq!(recent.low(), recent.high());

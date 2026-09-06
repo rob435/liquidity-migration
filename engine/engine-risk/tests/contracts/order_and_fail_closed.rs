@@ -619,6 +619,7 @@ fn a_view_from_after_the_decision_refuses() {
     let mut kernel = kernel();
     let intent = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW);
     let ahead = AccountView {
+        exact_amounts: None,
         observed_ns: NOW + 1,
         ..flat(250_000.0, NOW)
     };

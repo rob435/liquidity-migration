@@ -56,7 +56,7 @@ fn virtual_exit_clamps_to_owner_and_survives_physical_flatness() {
     assert_eq!(
         kernel.assess_portfolio(&intent, &flat(250_000.0, SEC), &state),
         PortfolioRiskVerdict::Allow {
-            qty: 2.0,
+            qty: engine_types::numeric::Exact::parse_decimal("2.0").unwrap(),
             venue_reduce_only: false
         }
     );
@@ -84,7 +84,7 @@ fn sibling_exit_reservations_cannot_consume_another_sleeves_exit_capacity() {
             &state
         ),
         PortfolioRiskVerdict::Allow {
-            qty: 3.0,
+            qty: engine_types::numeric::Exact::parse_decimal("3.0").unwrap(),
             venue_reduce_only: true
         }
     );
@@ -115,7 +115,7 @@ fn a_new_opposing_sleeve_may_cross_physical_flat_within_existing_gross_caps() {
             &state
         ),
         PortfolioRiskVerdict::Allow {
-            qty: 3.0,
+            qty: engine_types::numeric::Exact::parse_decimal("3.0").unwrap(),
             venue_reduce_only: false
         }
     );
@@ -149,7 +149,7 @@ fn a_legal_exact_position_below_legacy_dust_tolerance_can_reduce() {
             &state
         ),
         PortfolioRiskVerdict::Allow {
-            qty: 1e-13,
+            qty: engine_types::numeric::Exact::parse_decimal("1e-13").unwrap(),
             venue_reduce_only: true
         }
     );
@@ -161,11 +161,15 @@ fn reduction_direction_does_not_multiply_tiny_quantities_to_zero() {
     config.qty_tolerance = 0.0;
     let mut kernel = Kernel::new(config).unwrap();
     let state = portfolio(vec![exact_held("1e-200")]);
-    let account = view(
+    let mut account = view(
         250_000.0,
         vec![position(BUSDT, Side::Buy, 1e-200, 10.0, false)],
         SEC,
     );
+    account.positions[0].exact_amounts = Some(Box::new(engine_types::risk::PositionAmounts {
+        quantity: engine_types::numeric::ExactNumber::venue_decimal("1e-200").unwrap(),
+        entry_price: engine_types::numeric::ExactNumber::venue_decimal("10").unwrap(),
+    }));
     assert_eq!(
         kernel.assess_portfolio(
             &exit(CARRY, BUSDT, Side::Sell, 1e-200, 10.0, SEC),
@@ -173,7 +177,7 @@ fn reduction_direction_does_not_multiply_tiny_quantities_to_zero() {
             &state
         ),
         PortfolioRiskVerdict::Allow {
-            qty: 1e-200,
+            qty: engine_types::numeric::Exact::parse_decimal("1e-200").unwrap(),
             venue_reduce_only: true
         }
     );
@@ -196,7 +200,7 @@ fn virtual_exit_accepts_a_profit_locking_stop_on_the_surviving_short() {
             &state
         ),
         PortfolioRiskVerdict::Allow {
-            qty: 3.0,
+            qty: engine_types::numeric::Exact::parse_decimal("3.0").unwrap(),
             venue_reduce_only: false
         }
     );
@@ -258,7 +262,7 @@ fn pending_opposite_order_does_not_hide_margin_when_a_virtual_exit_fills_first()
             &state
         ),
         PortfolioRiskVerdict::Allow {
-            qty: 1.0,
+            qty: engine_types::numeric::Exact::parse_decimal("1.0").unwrap(),
             venue_reduce_only: false
         }
     );
@@ -335,7 +339,7 @@ fn tiny_opposing_native_rows_do_not_hide_the_one_way_account_violation() {
 }
 
 #[test]
-fn overflowing_native_rows_cannot_make_every_exit_appear_physically_reducing() {
+fn native_position_totals_beyond_binary64_keep_their_exact_direction() {
     let mut kernel = Kernel::new(demo_config()).unwrap();
     let account = view(
         250_000.0,
@@ -350,10 +354,19 @@ fn overflowing_native_rows_cannot_make_every_exit_appear_physically_reducing() {
         &account,
         &portfolio(vec![held(CARRY, BUSDT, 1)]),
     );
-    assert!(
-        matches!(verdict, PortfolioRiskVerdict::Deny { .. }),
-        "overflow made physical reduction certain: {verdict:?}"
-    );
+    assert!(matches!(
+        verdict,
+        PortfolioRiskVerdict::Allow {
+            venue_reduce_only: true,
+            ..
+        }
+    ));
+    let interval = kernel.physical_exposure_interval(BUSDT, &account).unwrap();
+    let total = Exact::from_legacy_f64(1e308).unwrap() * Exact::from_u64(2);
+    assert_eq!(interval.low(), &total);
+    assert_eq!(interval.high(), &total);
+    assert!(interval.certainly_reduces(Side::Sell, &Exact::one()));
+    assert!(!interval.certainly_reduces(Side::Buy, &Exact::one()));
 }
 
 #[test]

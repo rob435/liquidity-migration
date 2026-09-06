@@ -217,6 +217,8 @@ impl Strategy for PermissionActor {
         self.seen.lock().unwrap().push(ctx.entries_enabled(true));
         for reduce_only in [false, true] {
             ctx.place(Intent {
+                exact_prices: None,
+                exact_quantity: None,
                 strategy: StrategyId(99),
                 symbol: SymbolId(0),
                 side: Side::Sell,

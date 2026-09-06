@@ -34,8 +34,7 @@
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::market::{FeedError, OrderFeed};
 use engine_types::orders::{
-    AccountInventory, AmendSpec, InstrumentRule, OrderAck, OrderRequest, OrderUpdate,
-    VenueExecution, VenueOrder,
+    AccountInventory, AmendSpec, InstrumentRule, OrderAck, OrderRequest, OrderUpdate, VenueOrder,
 };
 use engine_types::risk::AccountView;
 use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway, VenueMutationTiming};
@@ -499,7 +498,7 @@ impl VenueGateway for Venue {
         &mut self,
         start_ms: i64,
         end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
         match self {
             Venue::Bybit(gw) => gw.executions(start_ms, end_ms).await,
             Venue::Hyperliquid(gw) => gw.executions(start_ms, end_ms).await,

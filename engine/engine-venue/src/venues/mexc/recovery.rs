@@ -1,12 +1,14 @@
 use super::*;
 
 pub(super) struct RecoveryClient {
+    history_progress: std::sync::Arc<std::sync::atomic::AtomicU64>,
     rest: RestClient,
     catalog: std::sync::RwLock<std::sync::Arc<Contracts>>,
 }
 impl RecoveryClient {
     pub(super) fn new(gateway: &MexcGateway) -> Self {
         Self {
+            history_progress: Default::default(),
             rest: gateway.rest.clone(),
             catalog: std::sync::RwLock::new(std::sync::Arc::new(gateway.contracts.clone())),
         }
@@ -18,6 +20,9 @@ impl RecoveryClient {
 
 #[engine_types::async_trait]
 impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
+    fn execution_history_progress(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicU64>> {
+        Some(self.history_progress.clone())
+    }
     fn install_instrument_catalog(
         &self,
         catalog: &engine_types::orders::InstrumentCatalog,
@@ -48,9 +53,22 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
             .map_err(|_| VenueError::BadReply("recovery catalog lock poisoned".into()))?
             .clone();
         let (observed_ns, reply) = account_scan(async {
-            let assets = self.rest.get_signed(PATH_ASSETS, &[]).await?;
+            let raw_assets = self
+                .rest
+                .get_signed_as::<Box<serde_json::value::RawValue>>(PATH_ASSETS, &[])
+                .await?;
+            let exact_amounts = crate::account_numbers::mexc_assets(raw_assets.get())?;
+            let assets = serde_json::from_str(raw_assets.get())
+                .map_err(|e| VenueError::BadReply(e.to_string()))?;
             let (equity_usdt, available_usdt) = parse_assets(venue_result(&assets)?)?;
-            let positions_body = self.rest.get_signed(PATH_POSITIONS, &[]).await?;
+            let raw_positions = self
+                .rest
+                .get_signed_as::<Box<serde_json::value::RawValue>>(PATH_POSITIONS, &[])
+                .await?;
+            let exact_positions =
+                crate::account_numbers::mexc_positions(raw_positions.get(), &contracts)?;
+            let positions_body = serde_json::from_str(raw_positions.get())
+                .map_err(|e| VenueError::BadReply(e.to_string()))?;
             let positions_data = venue_result(&positions_body)?.clone();
             // The position rows say nothing about stops, so the stop book is read
             // alongside and joined in. Without it every position would report
@@ -63,6 +81,7 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
             let ids = crate::account_recovery::ids(symbols)?;
 
             let mut positions = parse_positions(&positions_data, &contracts, &ids, &stops)?;
+            crate::account_numbers::assign(&mut positions, exact_positions, symbols)?;
             let held_rows: Vec<_> = positions_data
                 .as_array()
                 .ok_or_else(|| VenueError::BadReply("position list missing".into()))?
@@ -84,11 +103,12 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
                         .and_then(|stop| stop.for_side(position.side)),
                 )?;
             }
-            Ok::<_, VenueError>((equity_usdt, available_usdt, positions))
+            Ok::<_, VenueError>((equity_usdt, available_usdt, positions, exact_amounts))
         })
         .await;
-        let (equity_usdt, available_usdt, positions) = reply?;
+        let (equity_usdt, available_usdt, positions, exact_amounts) = reply?;
         Ok(AccountView {
+            exact_amounts: Some(Box::new(exact_amounts)),
             equity_usdt,
             available_usdt,
             positions,
@@ -100,7 +120,7 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
         symbols: &[Symbol],
         start_ms: i64,
         end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
         // `symbol` is required here, so the sweep is per symbol rather than
         // account-wide. The engine asks about the symbols it follows.
         let names = symbols;
@@ -109,7 +129,8 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
             .read()
             .map_err(|_| VenueError::BadReply("recovery catalog lock poisoned".into()))?
             .clone();
-        let mut out = Vec::new();
+        let mut out =
+            engine_types::ExecutionHistoryBuilder::with_progress(self.history_progress.clone());
         for name in names {
             let venue_symbol = contracts
                 .any(name)
@@ -120,8 +141,9 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
                 })?
                 .venue_symbol
                 .clone();
-            let mut complete = false;
-            for page in 1..=MAX_PAGES {
+            let mut page = 1u32;
+            let mut progress = crate::account_recovery::PageProgress::default();
+            loop {
                 let body: engine_public::numeric_wire::RawObject<
                     super::super::execution::HistoryReply,
                 > = self
@@ -139,18 +161,20 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
                     .await?;
 
                 let (rows, raw_count) = body.0.executions(&contracts)?;
-                out.extend(rows);
+                if raw_count > 0 {
+                    progress.rows(&rows)?;
+                }
+                out = crate::account_recovery::append_history(out, rows).await?;
                 if execution_page_complete(name, page, raw_count)? {
-                    complete = true;
                     break;
                 }
-            }
-            if !complete {
-                return Err(VenueError::BadReply(format!(
-                    "execution history for {name} still had pages after {MAX_PAGES} full pages"
-                )));
+                self.history_progress
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                page = page.checked_add(1).ok_or_else(|| {
+                    VenueError::BadReply("execution history page number exhausted".into())
+                })?;
             }
         }
-        Ok(out)
+        crate::account_recovery::finish_history(out).await
     }
 }

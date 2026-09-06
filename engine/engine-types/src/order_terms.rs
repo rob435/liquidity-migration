@@ -219,7 +219,7 @@ pub fn quantize_portfolio_close(
     )
 }
 
-fn quantize_with_quantity(
+pub fn quantize_with_quantity(
     spec: &ExactInstrumentSpec,
     side: Side,
     input: (Exact, OrderInputPolicy),
@@ -228,7 +228,31 @@ fn quantize_with_quantity(
     reference_px: Option<f64>,
     policy: QuantityPolicy,
 ) -> Result<ExactOrderTerms, OrderLegalityError> {
-    let (input_qty, input_policy) = input;
+    quantize_with_exact_prices(
+        spec,
+        side,
+        (input.0, input.1, None),
+        kind,
+        stop,
+        reference_px,
+        policy,
+    )
+}
+
+pub fn quantize_with_exact_prices(
+    spec: &ExactInstrumentSpec,
+    side: Side,
+    input: (
+        Exact,
+        OrderInputPolicy,
+        Option<&crate::orders::IntentPrices>,
+    ),
+    kind: OrderKind,
+    stop: Option<StopSpec>,
+    reference_px: Option<f64>,
+    policy: QuantityPolicy,
+) -> Result<ExactOrderTerms, OrderLegalityError> {
+    let (input_qty, input_policy, prices) = input;
     input_qty.validate_storage()?;
     let market = matches!(kind, OrderKind::Market);
     let quantity = if policy == QuantityPolicy::CloseEntirePosition {
@@ -255,7 +279,14 @@ fn quantize_with_quantity(
     };
     let limit_price = match kind {
         OrderKind::Market => None,
-        OrderKind::Limit { px, .. } => Some(quantize_price(&strategy_decimal(px)?, side, spec)?),
+        OrderKind::Limit { px, .. } => Some(quantize_price(
+            &prices
+                .and_then(|prices| prices.limit_price.clone())
+                .map(Ok)
+                .unwrap_or_else(|| strategy_decimal(px))?,
+            side,
+            spec,
+        )?),
     };
     let reference = reference_px.map(strategy_decimal).transpose()?;
     if policy != QuantityPolicy::CloseEntirePosition {
@@ -277,8 +308,14 @@ fn quantize_with_quantity(
     }
     let stop_trigger_price = stop
         .map(|stop| {
-            let trigger =
-                quantize_price(&strategy_decimal(stop.trigger_px)?, side.flipped(), spec)?;
+            let trigger = quantize_price(
+                &prices
+                    .and_then(|prices| prices.stop_trigger_price.clone())
+                    .map(Ok)
+                    .unwrap_or_else(|| strategy_decimal(stop.trigger_px))?,
+                side.flipped(),
+                spec,
+            )?;
             let reference = reference
                 .as_ref()
                 .ok_or(OrderLegalityError::Unavailable("stop reference price"))?;
@@ -482,17 +519,36 @@ pub fn quantize_amend(
     if let Some(terms) = current.exact_terms.as_deref() {
         terms.validate_projection(current)?;
     }
+    if let Some(terms) = amendment.exact_terms.as_deref() {
+        terms.validate_projection(amendment)?;
+    }
     let quantity = amendment
         .qty
         .map(|qty| {
-            strategy_decimal(qty)?
+            amendment
+                .exact_terms
+                .as_deref()
+                .and_then(|terms| terms.quantity.clone())
+                .map(Ok)
+                .unwrap_or_else(|| strategy_decimal(qty))?
                 .floor_to(required_positive(&spec.qty_step, "quantity step")?)
                 .map_err(OrderLegalityError::from)
         })
         .transpose()?;
     let limit_price = amendment
         .px
-        .map(|px| quantize_price(&strategy_decimal(px)?, current.side, spec))
+        .map(|px| {
+            quantize_price(
+                &amendment
+                    .exact_terms
+                    .as_deref()
+                    .and_then(|terms| terms.limit_price.clone())
+                    .map(Ok)
+                    .unwrap_or_else(|| strategy_decimal(px))?,
+                current.side,
+                spec,
+            )
+        })
         .transpose()?;
     let full_quantity = match &quantity {
         Some(qty) => qty.clone(),
@@ -628,6 +684,71 @@ mod tests {
             fee_step: None,
         }
     }
+    #[test]
+    fn canonical_order_and_amend_prices_keep_sub_projection_ticks() {
+        let mut instrument = spec();
+        instrument.tick_size = Some(d("0.000000000000000001"));
+        instrument.qty_step = Some(d("0.000000000000000001"));
+        let prices = crate::orders::IntentPrices {
+            limit_price: Some(d("1.000000000000000001")),
+            stop_trigger_price: Some(d("1.000000000000000003")),
+        };
+        let terms = quantize_with_exact_prices(
+            &instrument,
+            Side::Sell,
+            (
+                Exact::one(),
+                OrderInputPolicy::CanonicalPortfolio,
+                Some(&prices),
+            ),
+            limit(1.0),
+            Some(StopSpec { trigger_px: 1.0 }),
+            Some(1.0),
+            QuantityPolicy::Normal,
+        )
+        .unwrap();
+        assert_eq!(terms.limit_price, prices.limit_price);
+        assert_eq!(terms.stop_trigger_price, prices.stop_trigger_price);
+        let mut current = OrderRequest {
+            client_order_id: "canonical-amend".into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Sell,
+            qty: 1.0,
+            kind: limit(1.0),
+            stop: None,
+            reduce_only: false,
+            close_position: false,
+            exact_terms: None,
+            sleeve_effect: Some(SleeveOrderEffect::Increase {
+                stop: StopSpec { trigger_px: 1.0 },
+            }),
+        };
+        terms
+            .with_physical_stop(None)
+            .unwrap()
+            .apply_projection(&mut current)
+            .unwrap();
+        let amendment = AmendSpec {
+            qty: Some(0.1),
+            px: Some(1.0),
+            exact_terms: Some(Box::new(ExactAmendTerms {
+                quantity: Some(d("0.100000000000000001")),
+                limit_price: Some(d("1.000000000000000002")),
+                input_policy: OrderInputPolicy::CanonicalPortfolio,
+            })),
+        };
+        let amended = quantize_amend(&instrument, &current, &amendment, Some(1.0)).unwrap();
+        assert_eq!(
+            amended.quantity,
+            amendment.exact_terms.as_ref().unwrap().quantity
+        );
+        assert_eq!(
+            amended.limit_price,
+            amendment.exact_terms.as_ref().unwrap().limit_price
+        );
+    }
+
     fn limit(px: f64) -> OrderKind {
         OrderKind::Limit {
             px,

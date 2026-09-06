@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) struct RecoveryClient {
+    history_progress: std::sync::Arc<std::sync::atomic::AtomicU64>,
     http: HttpClient,
     account: AccountKey,
     secret: Scalar,
@@ -9,15 +10,12 @@ pub(super) struct RecoveryClient {
 impl RecoveryClient {
     pub(super) fn new(gateway: &LighterGateway) -> Self {
         Self {
+            history_progress: Default::default(),
             http: gateway.http.clone(),
             account: gateway.account,
             secret: gateway.secret,
             catalog: std::sync::RwLock::new(std::sync::Arc::new(gateway.markets.clone())),
         }
-    }
-    async fn get(&self, path: &str, query: &str) -> Result<Value, VenueError> {
-        let reply = self.http.get(path, query, &[]).await?;
-        venue_result(reply)
     }
     async fn get_signed_as<T: serde::de::DeserializeOwned>(
         &self,
@@ -49,6 +47,9 @@ impl RecoveryClient {
 
 #[engine_types::async_trait]
 impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
+    fn execution_history_progress(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicU64>> {
+        Some(self.history_progress.clone())
+    }
     fn install_instrument_catalog(
         &self,
         catalog: &engine_types::orders::InstrumentCatalog,
@@ -81,11 +82,18 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
         // Two reads, issued together: the account, and the open orders that
         // say which positions carry a stop.
         let account_query = format!("by=index&value={}", self.account.account_index);
-        let account = self.get(PATH_ACCOUNT, &account_query);
+        let account =
+            self.http
+                .get_as::<Box<serde_json::value::RawValue>>(PATH_ACCOUNT, &account_query, &[]);
         let orders = self.active_orders();
         let (observed_ns, reply) =
             account_scan(futures_util::future::try_join(account, orders)).await;
-        let (account, raw_orders) = reply?;
+        let (raw_account, raw_orders) = reply?;
+        let (exact_amounts, exact_positions) = crate::account_numbers::lighter(raw_account.get())?;
+        let account = venue_result(
+            serde_json::from_str(raw_account.get())
+                .map_err(|e| VenueError::BadReply(e.to_string()))?,
+        )?;
         let orders = venue_result(
             serde_json::from_str(raw_orders.get())
                 .map_err(|e| VenueError::BadReply(e.to_string()))?,
@@ -97,6 +105,7 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
         let ids = crate::account_recovery::ids(symbols)?;
         let resolve = |name: &str| ids.get(name).copied();
         let mut positions = parse_positions(&account, &markets, &stops, &resolve)?;
+        crate::account_numbers::assign(&mut positions, exact_positions, symbols)?;
         let rows = account
             .get("accounts")
             .and_then(Value::as_array)
@@ -114,17 +123,21 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
             ));
         }
         for (position, row) in positions.iter_mut().zip(held_rows) {
+            let quantity = position
+                .quantity()
+                .map_err(|e| VenueError::BadReply(e.to_string()))?;
             let index = i16::try_from(crate::json::int_field(row, "market_id")?)
                 .map_err(|e| VenueError::BadReply(e.to_string()))?;
             crate::account_stops::assign(
                 position,
                 exact_stops
                     .get(&index)
-                    .and_then(|stop| stop.for_side(position.side)),
+                    .and_then(|stop| stop.covering(position.side, &quantity)),
             )?;
         }
 
         Ok(AccountView {
+            exact_amounts: Some(Box::new(exact_amounts)),
             equity_usdt,
             available_usdt,
             positions,
@@ -136,7 +149,7 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
         _symbols: &[Symbol],
         start_ms: i64,
         end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
         let markets = self
             .catalog
             .read()
@@ -148,12 +161,13 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
         // paces resyncs and carries no fills of its own — so one truncated
         // page is a fill the log never gets.
         const PAGE_LIMIT: usize = 100;
-        const MAX_PAGES: usize = 20;
-        let mut out: Vec<VenueExecution> = Vec::new();
+        let mut out =
+            engine_types::ExecutionHistoryBuilder::with_progress(self.history_progress.clone());
         let mut from = start_ms;
-        for _ in 0..MAX_PAGES {
+        let mut boundary = std::collections::BTreeSet::new();
+        loop {
             if from > end_ms {
-                return Ok(out);
+                return crate::account_recovery::finish_history(out).await;
             }
             let query = format!(
                 "account_index={}&sort_by=timestamp&sort_dir=asc&from={from}&to={end_ms}\
@@ -165,18 +179,23 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
             > = self.get_signed_as(PATH_TRADES, &query).await?;
             let (rows, count) = reply.0.executions(self.account.account_index, &markets)?;
             let newest = rows.iter().map(|r| r.venue_ts_ms).max();
-            // Fills already held are dropped by their own id, so a page that
-            // overlaps the last one does not double-count.
-            for row in rows {
-                if row.venue_ts_ms < start_ms || row.venue_ts_ms > end_ms {
-                    continue;
-                }
-                if !out.iter().any(|held| held.exec_id == row.exec_id) {
-                    out.push(row);
-                }
-            }
+            let next_boundary = rows
+                .iter()
+                .filter(|row| Some(row.venue_ts_ms) == newest)
+                .map(|row| row.exec_id.clone())
+                .collect();
+            let page = rows
+                .into_iter()
+                .filter(|row| {
+                    row.venue_ts_ms >= start_ms
+                        && row.venue_ts_ms <= end_ms
+                        && !(row.venue_ts_ms == from && boundary.contains(&row.exec_id))
+                })
+                .collect();
+            out = crate::account_recovery::append_history(out, page).await?;
+            boundary = next_boundary;
             if count < PAGE_LIMIT {
-                return Ok(out);
+                return crate::account_recovery::finish_history(out).await;
             }
             match newest {
                 // Every fill in a full page shares one millisecond: stepping
@@ -191,10 +210,5 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
                 }
             }
         }
-        // A truncated history would quietly leave fills missing, which is the
-        // one answer this read must never give.
-        Err(VenueError::BadReply(format!(
-            "fill history still had pages after {MAX_PAGES}"
-        )))
     }
 }

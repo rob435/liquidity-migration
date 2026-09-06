@@ -102,6 +102,7 @@ mod tests {
 
     fn trade(symbol: &str, net: Option<f64>) -> ClosedTrade {
         ClosedTrade {
+            unpriced: None,
             internal_settlement: None,
             sleeve: "carry".into(),
             symbol: symbol.into(),
@@ -115,6 +116,7 @@ mod tests {
             gross_usdt: net.map(|net_usdt| net_usdt + 0.53),
             fees_usdt: net.map(|_| 0.53),
             round_trip: net.map(|net_usdt| RoundTrip {
+                net_usdt_exact: engine_types::numeric::Exact::from_legacy_f64(net_usdt).unwrap(),
                 entry_px: 0.068,
                 entry_notional_usdt: 478.10,
                 gross_usdt: net_usdt + 0.53,

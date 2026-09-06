@@ -198,3 +198,18 @@ mod tests {
         assert_eq!(bytes_as_fields(&[1u8, 0, 0, 0, 0, 0, 0, 0, 2]), vec![1, 2]);
     }
 }
+#[test]
+fn logical_epochs_keep_restart_and_counter_rollover_ids_reversible() {
+    let ids = [
+        "eng-1800000000000-1",
+        "eng-1800000000000-262143",
+        "eng-1800000001000-1",
+        "eng-1800000002000-1",
+    ];
+    let mut indexes = std::collections::BTreeSet::new();
+    for id in ids {
+        let index = to_index(id);
+        assert!(indexes.insert(index));
+        assert_eq!(from_index(index).as_deref(), Some(id));
+    }
+}

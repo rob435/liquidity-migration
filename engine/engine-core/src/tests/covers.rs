@@ -85,6 +85,8 @@ impl Strategy for CoverProbe {
                     Side::Sell
                 };
                 ctx.place(Intent {
+                    exact_prices: None,
+                    exact_quantity: None,
                     strategy: StrategyId(0),
                     symbol,
                     side,
@@ -252,6 +254,7 @@ async fn the_reading_catching_up_part_way_shrinks_the_cover_to_the_remainder() {
         .lock()
         .unwrap()
         .push_back(vec![PositionView {
+            exact_amounts: None,
             exact_stop_px: None,
             symbol,
             side: Side::Buy,

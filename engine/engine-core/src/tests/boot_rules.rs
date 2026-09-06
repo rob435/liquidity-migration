@@ -100,3 +100,21 @@ async fn changing_an_existing_wal_strategy_id_still_refuses_boot() {
         "{message}"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn boot_durably_marks_exact_execution_before_any_new_record() {
+    let (buyer, _) = Buyer::new("BTCUSDT", 1, 0.01);
+    let (_, harness) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let records = harness.records.lock().unwrap();
+    assert!(matches!(
+        records.first(),
+        Some(WalRecord::ExecutionPrecisionV1)
+    ));
+    let tape = harness.tape.lock().unwrap();
+    let marker = tape
+        .iter()
+        .position(|step| matches!(step, Step::Append(kind) if kind == "execution_precision_v1"))
+        .unwrap();
+    assert!(matches!(&tape[marker + 1], Step::Append(kind) if kind == "order_id_epoch"));
+    assert!(matches!(tape[marker + 2], Step::Barrier));
+}

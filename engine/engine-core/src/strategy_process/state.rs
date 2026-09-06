@@ -244,6 +244,40 @@ impl CallbackState {
 
     pub fn commit(&mut self, input_id: u64, state: StrategyProcessState) -> Result<(), String> {
         let committed_size = self.can_commit(input_id, &state)?;
+        self.discard(input_id)?;
+        self.committed_bytes.insert(state.strategy, committed_size);
+        self.committed.insert(state.strategy, state);
+        Ok(())
+    }
+
+    pub fn promote_volatile(&mut self, input_id: u64) -> Result<u64, String> {
+        let mut input = self
+            .inputs
+            .remove(&input_id)
+            .ok_or("volatile callback is absent")?;
+        let new_id = self.next_id;
+        self.next_id = new_id
+            .checked_add(1)
+            .ok_or("strategy callback id exhausted")?;
+        input.callback_id = new_id;
+        let old_size = Self::size(&StrategyCallbackInput {
+            callback_id: input_id,
+            ..input.clone()
+        })?;
+        let new_size = Self::size(&input)?;
+        let bytes = self
+            .bytes
+            .get_mut(&input.strategy)
+            .ok_or("callback byte owner is absent")?;
+        *bytes = bytes
+            .checked_sub(old_size)
+            .and_then(|bytes| bytes.checked_add(new_size))
+            .ok_or("callback byte ownership overflow")?;
+        self.inputs.insert(new_id, input);
+        Ok(new_id)
+    }
+
+    pub fn discard(&mut self, input_id: u64) -> Result<(), String> {
         let input = self
             .inputs
             .get(&input_id)
@@ -251,15 +285,13 @@ impl CallbackState {
         let size = Self::size(input)?;
         let used = self
             .bytes
-            .get_mut(&state.strategy)
+            .get_mut(&input.strategy)
             .ok_or("strategy callback byte ownership is absent")?;
         *used = used
             .checked_sub(size)
             .ok_or("strategy callback byte ownership underflow")?;
-        self.prepared_bytes.remove(&state.strategy);
-        self.committed_bytes.insert(state.strategy, committed_size);
+        self.prepared_bytes.remove(&input.strategy);
         self.inputs.remove(&input_id);
-        self.committed.insert(state.strategy, state);
         Ok(())
     }
 

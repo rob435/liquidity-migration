@@ -38,6 +38,8 @@ impl Strategy for Proposer {
             .push(ctx.foreign_position(*symbol));
         for _ in 0..self.copies {
             ctx.place(Intent {
+                exact_prices: None,
+                exact_quantity: None,
                 strategy: StrategyId(0),
                 symbol: *symbol,
                 side: self.side,
@@ -146,6 +148,7 @@ fn fill(side: Side) -> WalRecord {
 
 fn held(side: Side) -> Vec<engine_types::PositionView> {
     vec![engine_types::PositionView {
+        exact_amounts: None,
         exact_stop_px: None,
         symbol: SymbolId(0),
         side,

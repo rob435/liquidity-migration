@@ -243,11 +243,13 @@ mod tests {
 
     fn reading(rows: &[(SymbolId, f64)]) -> AccountView {
         AccountView {
+            exact_amounts: None,
             equity_usdt: 1_000.0,
             available_usdt: 1_000.0,
             positions: rows
                 .iter()
                 .map(|(symbol, signed)| PositionView {
+                    exact_amounts: None,
                     exact_stop_px: None,
                     symbol: *symbol,
                     side: if *signed >= 0.0 {

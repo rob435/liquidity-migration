@@ -288,7 +288,11 @@ pub struct SymbolSnapshot {
     pub position: Option<PositionView>,
     pub foreign_position: bool,
     pub my_position: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_my_position: Option<Box<crate::numeric::Exact>>,
     pub in_flight: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_in_flight: Option<Box<crate::numeric::Exact>>,
     pub facts: Option<StrategyPositionFacts>,
     pub checkpoint: Option<StrategyCheckpoint>,
 }
@@ -500,6 +504,26 @@ impl<F: FnMut(CallbackReply)> StrategyCtx for SnapshotCtx<'_, F> {
     fn in_flight(&self, symbol: SymbolId) -> f64 {
         self.symbol(symbol).map_or(0.0, |row| row.in_flight)
     }
+    fn my_position_exact(
+        &self,
+        symbol: SymbolId,
+    ) -> Result<crate::numeric::Exact, crate::numeric::ExactError> {
+        snapshot_quantity(
+            self.symbol(symbol)
+                .and_then(|row| row.exact_my_position.as_deref()),
+            self.my_position(symbol),
+        )
+    }
+    fn in_flight_exact(
+        &self,
+        symbol: SymbolId,
+    ) -> Result<crate::numeric::Exact, crate::numeric::ExactError> {
+        snapshot_quantity(
+            self.symbol(symbol)
+                .and_then(|row| row.exact_in_flight.as_deref()),
+            self.in_flight(symbol),
+        )
+    }
     fn my_position_facts(&self, symbol: SymbolId) -> Option<StrategyPositionFacts> {
         self.symbol(symbol).and_then(|row| row.facts.clone())
     }
@@ -650,4 +674,20 @@ pub trait CallbackWalReader: Send {
         &mut self,
         cursor: CallbackWalCursor,
     ) -> Result<Option<CallbackWalRecord>, crate::WalError>;
+}
+
+fn snapshot_quantity(
+    exact: Option<&crate::numeric::Exact>,
+    projection: f64,
+) -> Result<crate::numeric::Exact, crate::numeric::ExactError> {
+    match exact {
+        Some(quantity) => {
+            quantity.validate_storage()?;
+            if quantity.to_f64()? != projection {
+                return Err(crate::numeric::ExactError::InvalidProjection);
+            }
+            Ok(quantity.clone())
+        }
+        None => crate::numeric::Exact::from_legacy_f64(projection),
+    }
 }

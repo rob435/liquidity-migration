@@ -100,6 +100,9 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::Note { .. } => "note",
         WalRecord::ControlAnchor { .. } => "control_anchor",
         WalRecord::Reconciled { .. } => "reconciled",
+        WalRecord::ExecutionPrecisionV1 => "execution_precision_v1",
+        WalRecord::OrderIdEpoch { .. } => "order_id_epoch",
+        WalRecord::OrderLineageRestored { .. } => "order_lineage_restored",
         WalRecord::SegmentBase { .. } => "segment_base",
         WalRecord::RecoveredFill { .. } => "recovered_fill",
         WalRecord::ExecutionHistoryCheckpoint { .. } => "execution_history_checkpoint",
@@ -226,6 +229,10 @@ pub(crate) struct MockWal {
 }
 
 impl MockWal {
+    pub(crate) fn fail_append(&mut self, kind: &str) {
+        self.fail_on = Some(kind.into());
+    }
+
     pub(crate) fn snapshot_records(&self) -> Vec<WalRecord> {
         self.records.lock().unwrap().clone()
     }
@@ -460,6 +467,7 @@ impl engine_types::orders::AccountRecoveryClient for MockRecoveryClient {
             ));
         }
         Ok(AccountView {
+            exact_amounts: None,
             equity_usdt: 10_000.0,
             available_usdt: 9_000.0,
             positions,
@@ -471,7 +479,7 @@ impl engine_types::orders::AccountRecoveryClient for MockRecoveryClient {
         _: &[Symbol],
         _: i64,
         _: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
         let rows = self.executions.lock().unwrap().clone();
         let delay = self
             .control
@@ -481,13 +489,14 @@ impl engine_types::orders::AccountRecoveryClient for MockRecoveryClient {
             self.control.history_started.notify_one();
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
-        rows.ok_or_else(|| {
+        engine_types::ExecutionHistory::from_rows(rows.ok_or_else(|| {
             VenueError::BadRequest("this venue cannot list its execution history".into())
-        })
+        })?)
     }
 }
 
 pub(crate) struct MockVenue {
+    spooled_history: Option<engine_types::ExecutionHistory>,
     recovery_reads: Arc<MockRecoveryControl>,
     tape: Tape,
     /// Shared with the log's deferred barrier, so one ordered list holds the
@@ -559,6 +568,7 @@ impl MockVenue {
             .collect();
         (
             MockVenue {
+                spooled_history: None,
                 recovery_reads: Arc::new(MockRecoveryControl::default()),
                 tape,
                 crossing_tape: None,
@@ -724,7 +734,10 @@ impl VenueGateway for MockVenue {
         &mut self,
         start_ms: i64,
         end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
+        if let Some(history) = self.spooled_history.take() {
+            return Ok(history);
+        }
         engine_types::orders::AccountRecoveryClient::executions(
             &self.recovery_client(),
             &[],
@@ -873,7 +886,7 @@ pub(crate) struct MockRisk {
 
 impl MockRisk {
     /// `Allow { qty: NaN }` means "whatever was asked for".
-    fn with(verdict: RiskVerdict) -> (Self, Rc<RefCell<Vec<OrderUpdate>>>) {
+    pub(crate) fn with(verdict: RiskVerdict) -> (Self, Rc<RefCell<Vec<OrderUpdate>>>) {
         let seen = Rc::new(RefCell::new(Vec::new()));
         (
             MockRisk {
@@ -896,9 +909,20 @@ impl RiskKernel for MockRisk {
         _portfolio: &engine_types::portfolio::PortfolioState,
     ) -> engine_types::risk::PortfolioRiskVerdict {
         match self.assess(intent, account) {
-            RiskVerdict::Allow { qty } => engine_types::risk::PortfolioRiskVerdict::Allow {
-                qty,
-                venue_reduce_only: intent.reduce_only,
+            RiskVerdict::Allow { qty } => match engine_types::order_terms::strategy_decimal(qty) {
+                Ok(quantity) => engine_types::risk::PortfolioRiskVerdict::Allow {
+                    qty: if qty == intent.qty {
+                        intent.quantity().unwrap_or(quantity)
+                    } else {
+                        quantity
+                    },
+                    venue_reduce_only: intent.reduce_only,
+                },
+                Err(error) => engine_types::risk::PortfolioRiskVerdict::Deny {
+                    reason: engine_types::DenyReason::UnknownState {
+                        detail: error.to_string(),
+                    },
+                },
             },
             RiskVerdict::Deny { reason } => {
                 engine_types::risk::PortfolioRiskVerdict::Deny { reason }
@@ -976,7 +1000,7 @@ impl RiskKernel for MockRisk {
             .calls
             .lock()
             .unwrap()
-            .push(RollingLossCall::Closed(row));
+            .push(RollingLossCall::Closed(row.clone()));
         self.rolling.rows.lock().unwrap().push(row);
     }
 
@@ -1196,6 +1220,8 @@ impl Strategy for Buyer {
                     return;
                 }
                 ctx.place(Intent {
+                    exact_prices: None,
+                    exact_quantity: None,
                     strategy: StrategyId(0),
                     symbol: *symbol,
                     side: Side::Buy,
@@ -1324,6 +1350,7 @@ fn owned_exit_fixture(
         },
     ];
     let held = vec![engine_types::PositionView {
+        exact_amounts: None,
         exact_stop_px: None,
         symbol: SymbolId(0),
         side,
@@ -1757,7 +1784,7 @@ fn someone_elses_order(symbol: &str) -> VenueOrder {
     }
 }
 
-fn allow_all() -> RiskVerdict {
+pub(crate) fn allow_all() -> RiskVerdict {
     RiskVerdict::Allow { qty: f64::NAN }
 }
 
@@ -2071,6 +2098,7 @@ pub(crate) async fn physical_recovery_test_fixture(
     Arc<Mutex<Vec<WalRecord>>>,
 ) {
     let held = engine_types::PositionView {
+        exact_amounts: None,
         exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
@@ -2123,6 +2151,12 @@ pub(crate) async fn portfolio_route_test_fixture(
 pub(crate) fn recovery_venue_fixture(rows: Vec<VenueExecution>) -> MockVenue {
     let (venue, _) = MockVenue::new(tape(), &["BTCUSDT"]);
     *venue.executions.lock().unwrap() = Some(rows);
+    venue
+}
+
+pub(crate) fn recovery_spool_fixture(history: engine_types::ExecutionHistory) -> MockVenue {
+    let (mut venue, _) = MockVenue::new(tape(), &["BTCUSDT"]);
+    venue.spooled_history = Some(history);
     venue
 }
 

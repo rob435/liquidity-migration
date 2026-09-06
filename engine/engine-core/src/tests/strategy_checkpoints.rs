@@ -156,6 +156,8 @@ impl Strategy for CheckpointThenBuyer {
             checkpoint: checkpoint(),
         });
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(91),
             symbol: *symbol,
             side: Side::Buy,
@@ -436,6 +438,8 @@ impl Strategy for GlobalCheckpointThenBuyer {
             checkpoint: checkpoint(),
         });
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(77),
             symbol: *symbol,
             side: Side::Buy,
@@ -606,6 +610,8 @@ impl Strategy for OrderThenCheckpoint {
             return;
         };
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: *symbol,
             side: Side::Sell,
@@ -675,6 +681,8 @@ impl Strategy for CheckpointThenExit {
             checkpoint: checkpoint(),
         });
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: *symbol,
             side: Side::Sell,

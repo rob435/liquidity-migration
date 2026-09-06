@@ -7,6 +7,33 @@ incident, or a check that changed nothing gets no entry. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
+- **2026-09-06 — Tier-1 exact ownership and recovery qualification.**
+  - All 56 accepted audit IDs have current dispositions: 42 implemented,
+    13 retained decisions and one corrected finding. The accepted audit is
+    not revalidated; implementation and regression evidence are verified.
+  - Ordinary and native sleeve exits, account/risk quantities, known prices,
+    margin and loss calculations keep canonical values. Exact lot cash and
+    fees survive partial fills and rotation; v6 requires linked cost basis,
+    and the precision marker makes incompatible predecessor readers refuse.
+  - Terminal order ownership uses a bounded cache and one cancellable WAL
+    lookup. Durable epochs prevent restart/counter ID reuse; rejected exits,
+    late fills, fees and shared/opposing sleeve obligations replay once.
+  - Execution history sorts on disk and folds into books without retaining
+    the complete response. Empty or untrusted pages and pending durable
+    dispatches cannot advance history. Abandoned rotation prefixes no longer
+    strand archive lookup; corruption after a committed restatement errors.
+  - Qualification: 2,300 debug and 2,300 release tests pass,
+    five expected ignores per profile; strict Clippy, formatting, doctests,
+    1,514 Python tests, Linux process limits and the 270-symbol worker envelope
+    pass. All 48 simulator seed runs, each repeated, pass evaluated checks
+    and produce identical WAL replay; flat-only accounting checks run on
+    36 flat endings. 108 isolated fault/pass cases cover 106 distinct controls.
+  - [Current audit](docs/tier1-audit.md),
+    [source-bound evidence](docs/tier1-round-evidence.json) and
+    [implementation contract](docs/tier1-round-handoff.md) contain the details.
+    The callback incident below records its local repair. No deployment or
+    live account qualification is performed in this round.
+
 - **2026-09-05 22:48 UTC — The rollback printed `deploy-ok` over a crash-looping
   fleet, and the workers that replaced their quarantined state started their
   sequences at 0. Two faults left by `mainnet-4117d27a32d02421` below. The gate
@@ -129,12 +156,15 @@ edit STATE.md to match.
     at 22:54; the incumbent workers started clean at 22:54, rebuilt a fresh
     `checkpoint.json` and `hot-input-journal.jsonl`, and have run without
     error since. Sleeves were without signals 22:37–22:54.
-  - Decision for the owner: no engine deploy from this tree until the
-    isolated callback path stops persisting the runtime per quote and stops
-    refusing at ERROR per event — or production boots embedded
-    (`Engine::boot_as`, the path `engine sim` and the tests use), which writes
-    none of these records. The takeover and WAL fixes of 22:20 stand and were
-    exercised by this deploy.
+  - Local repair qualified on 2026-09-06: market callbacks coalesce while
+    pending; unchanged runtime/checkpoint/timer/subscription proposals write
+    no WAL. Changed proposals become durable before state or effects publish.
+    Actual held LONG/CARRY 270-symbol fixtures write zero additional WAL bytes
+    for 20 unchanged quotes; removing either elision reproduces about 6.5 MB.
+    Linux child limits and restart/replay checks pass. Production keeps the
+    isolated path; no fleet deploy is performed in this qualification round.
+    [Source-bound evidence](docs/tier1-round-evidence.json).
+
 - **2026-09-05 22:20 UTC — Incident `demo-b161102514734dd5`: the deploy of
   `60bb0abb` took the demo realm down for 949 s. The takeover's verify replayed the whole 6.6 GB
   WAL chain into 8 GB of memory and was OOM-killed; the import then wrote an

@@ -134,6 +134,8 @@ async fn owned_exit(
     });
     engine.host.pending.push_back(
         Action::Place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: SymbolId(0),
             side: Side::Sell,
@@ -515,6 +517,8 @@ async fn refreshed_catalog_retains_omitted_native_exit_metadata_without_reopenin
     });
     engine.host.pending.push_back(
         Action::Place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: SymbolId(0),
             side: Side::Buy,

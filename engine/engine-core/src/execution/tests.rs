@@ -44,6 +44,7 @@ fn market(bid: f64, ask: f64) -> MarketState {
 
 fn fill(side: Side, px: f64, qty: f64, arrival_mid: f64) -> Fill {
     Fill {
+        amounts: None,
         client_order_id: "eng-1".into(),
         strategy: CARRY,
         symbol: BTC,
@@ -282,6 +283,48 @@ fn an_unstated_fee_is_not_folded_as_zero() {
     explicit_zero.on_fill(&fill(Side::Buy, 100.0, 1.0, 100.0), 0);
     assert_eq!(explicit_zero.total().fee_usdt, Some(0.0));
     assert_eq!(explicit_zero.total().fee_coverage(), Some(1.0));
+}
+
+#[test]
+fn a_foreign_asset_fee_stays_unavailable_in_live_and_replayed_usdt_rollups() {
+    use engine_types::numeric::{AssetAmount, AssetId, ExactNumber, ExecutionAmounts};
+    let amounts = ExecutionAmounts {
+        quantity: ExactNumber::venue_decimal("10").unwrap(),
+        price: ExactNumber::venue_decimal("101").unwrap(),
+        settlement_asset: AssetId::Named("USDT".into()),
+        fee: Some(AssetAmount {
+            asset: AssetId::Named("BNB".into()),
+            amount: ExactNumber::venue_decimal("0.5555").unwrap(),
+        }),
+    };
+    let mut f = fill(Side::Buy, 101.0, 10.0, 100.0);
+    f.fee = Some(0.5555);
+    f.amounts = Some(Box::new(amounts.clone()));
+    let mut live = Fills::default();
+    live.learn(&names());
+    live.on_fill(&f, 0);
+    let mut row = filled("eng-1", 101.0, false);
+    let WalRecord::OrderUpdate {
+        update: OrderUpdate::Fill {
+            amounts: recorded, ..
+        },
+        ..
+    } = &mut row
+    else {
+        unreachable!()
+    };
+    *recorded = Some(Box::new(amounts));
+    let rows = vec![names(), sent("eng-1", CARRY, 100.0), row];
+    let rows =
+        serde_json::from_slice::<Vec<WalRecord>>(&serde_json::to_vec(&rows).unwrap()).unwrap();
+    let replayed = Fills::from_records(&rows);
+    for costs in [live.total(), replayed.total()] {
+        assert_eq!(costs.fills, 1);
+        assert_eq!(costs.notional_usdt, 1010.0);
+        assert_eq!(costs.fee_usdt, None);
+        assert_eq!(costs.fee_coverage(), Some(0.0));
+        assert_eq!(costs.all_in_arrival_bps(), None);
+    }
 }
 
 #[test]
@@ -589,6 +632,7 @@ fn the_log_alone_says_what_the_trading_cost() {
     {
         live.on_fill(
             &Fill {
+                amounts: None,
                 client_order_id: id.into(),
                 strategy,
                 symbol: BTC,
@@ -1046,6 +1090,7 @@ fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
     // without the seed this reads as opening a short and reports nothing.
     fresh.on_fill(
         &Fill {
+            amounts: None,
             client_order_id: "eng-4".into(),
             strategy: CARRY,
             symbol: BTC,
@@ -1076,6 +1121,8 @@ fn boot_adopts_the_open_positions_a_log_leaves_and_not_its_closed_ones() {
 #[test]
 fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
     let held = WalRecord::SegmentBase {
+        order_id_epoch_ms: None,
+        open_trade_lots: None,
         portfolio_control: Default::default(),
         pending_order_dispatches: Vec::new(),
         signal_producers: Vec::new(),

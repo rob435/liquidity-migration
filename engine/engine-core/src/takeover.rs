@@ -144,6 +144,8 @@ fn initial_state_record(
     }
     let wall_ts_ms = clock::wall_ms();
     Ok(WalRecord::SegmentBase {
+        order_id_epoch_ms: None,
+        open_trade_lots: Some(Vec::new()),
         portfolio_control: Default::default(),
         portfolio: Some(Default::default()),
         pending_order_dispatches: Vec::new(),
@@ -449,6 +451,8 @@ fn initialize_or_verify_names<W: Wal>(
     if replayed.is_empty() {
         let wall_ts_ms = clock::wall_ms();
         let names = WalRecord::SegmentBase {
+            order_id_epoch_ms: None,
+            open_trade_lots: Some(Vec::new()),
             portfolio_control: Default::default(),
             portfolio: Some(Default::default()),
             pending_order_dispatches: Vec::new(),

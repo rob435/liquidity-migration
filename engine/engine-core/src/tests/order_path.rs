@@ -36,6 +36,8 @@ impl Strategy for NonBlockingProbe {
         let number = self.seen.fetch_add(1, Ordering::SeqCst) + 1;
         if number == 1 {
             ctx.place(Intent {
+                exact_prices: None,
+                exact_quantity: None,
                 strategy: StrategyId(0),
                 symbol: *symbol,
                 side: Side::Buy,
@@ -73,6 +75,8 @@ impl Strategy for QuoteCoalescingProbe {
             return;
         };
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: *symbol,
             side: Side::Buy,
@@ -257,6 +261,8 @@ async fn the_log_is_written_in_order_and_the_barrier_comes_before_the_send() {
 
     let kinds = appends(&h.tape);
     let want = [
+        "execution_precision_v1",
+        "order_id_epoch",
         "identity_state",
         "boot",
         "note",  // boot says which mode it is in
@@ -379,6 +385,8 @@ async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
     assert_eq!(
         kinds,
         [
+            "execution_precision_v1",
+            "order_id_epoch",
             "identity_state",
             "boot",
             "note",
@@ -571,6 +579,7 @@ async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
         .lock()
         .unwrap()
         .push_back(vec![engine_types::PositionView {
+            exact_amounts: None,
             exact_stop_px: None,
             symbol: SymbolId(0),
             side: Side::Buy,
@@ -846,6 +855,8 @@ impl Strategy for BurstEmitter {
             for i in 0..(self.entries + self.exits) {
                 let exit = i >= self.entries;
                 ctx.place(Intent {
+                    exact_prices: None,
+                    exact_quantity: None,
                     strategy: StrategyId(0),
                     symbol: *symbol,
                     side: if exit { Side::Sell } else { Side::Buy },
@@ -953,6 +964,8 @@ impl Strategy for StopPerWake {
             return;
         };
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: *symbol,
             side: Side::Buy,
@@ -990,6 +1003,8 @@ impl Strategy for StopSequence {
         self.fired = true;
         for (index, trigger_px) in self.stops.iter().copied().enumerate() {
             ctx.place(Intent {
+                exact_prices: None,
+                exact_quantity: None,
                 strategy: StrategyId(0),
                 symbol: *symbol,
                 side: Side::Buy,
@@ -1120,6 +1135,7 @@ async fn a_fresh_account_view_repairs_a_loosened_whole_position_stop() {
         },
     ];
     let protected = engine_types::PositionView {
+        exact_amounts: None,
         exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
@@ -1446,6 +1462,8 @@ impl Strategy for ConflictingLeverageSiblings {
         self.fired = true;
         for (index, leverage) in [3.0, 5.0].into_iter().enumerate() {
             ctx.place(Intent {
+                exact_prices: None,
+                exact_quantity: None,
                 strategy: StrategyId(0),
                 symbol: *symbol,
                 side: Side::Buy,
@@ -1464,6 +1482,8 @@ impl Strategy for ConflictingLeverageSiblings {
         // Risk-reducing work does not depend on the entry leverage and must
         // not be stranded behind the conflicting siblings.
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: *symbol,
             side: Side::Sell,
@@ -1593,6 +1613,8 @@ impl Strategy for SloppyExiter {
             if !self.sent {
                 self.sent = true;
                 ctx.place(Intent {
+                    exact_prices: None,
+                    exact_quantity: None,
                     strategy: StrategyId(0),
                     symbol: *symbol,
                     side: Side::Sell,
@@ -1726,6 +1748,7 @@ pub(super) async fn build_exit_inventory(
 
 fn held_long(qty: f64) -> engine_types::PositionView {
     engine_types::PositionView {
+        exact_amounts: None,
         exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
@@ -1936,6 +1959,7 @@ async fn a_refused_retired_maker_exit_retries_on_a_later_wake_without_hitting_th
         },
     ];
     let held = vec![engine_types::PositionView {
+        exact_amounts: None,
         exact_stop_px: None,
         symbol: SymbolId(1),
         side: Side::Sell,
@@ -2166,6 +2190,7 @@ async fn a_venue_rejected_native_long_exit_retries_only_after_its_timer() {
         },
     ];
     let held = vec![engine_types::PositionView {
+        exact_amounts: None,
         exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
@@ -2736,21 +2761,24 @@ async fn boot_reads_the_rules_and_the_account_before_anything_else() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (_engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
     let steps = h.tape.lock().unwrap().clone();
-    assert_eq!(steps[0], Step::Append("identity_state".into()));
+    assert_eq!(steps[0], Step::Append("execution_precision_v1".into()));
+    assert_eq!(steps[1], Step::Append("order_id_epoch".into()));
+    assert_eq!(steps[2], Step::Barrier);
+    assert_eq!(steps[3], Step::Append("identity_state".into()));
     assert_eq!(
-        steps[1],
+        steps[4],
         Step::Barrier,
         "identity reservation is durable before use"
     );
-    assert_eq!(steps[2], Step::Append("boot".into()));
-    assert_eq!(steps[3], Step::Append("note".into()), "which mode it is in");
+    assert_eq!(steps[5], Step::Append("boot".into()));
+    assert_eq!(steps[6], Step::Append("note".into()), "which mode it is in");
     assert_eq!(
-        steps[4],
+        steps[7],
         Step::Append("names".into()),
         "dense ids are named before use"
     );
-    assert_eq!(steps[5], Step::ReadRules);
-    assert_eq!(steps[6], Step::ReadAccount);
+    assert_eq!(steps[8], Step::ReadRules);
+    assert_eq!(steps[9], Step::ReadAccount);
 }
 
 #[tokio::test]

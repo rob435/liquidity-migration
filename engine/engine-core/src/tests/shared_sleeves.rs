@@ -73,6 +73,8 @@ impl Strategy for Once {
         }
         self.done = true;
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: *symbol,
             side: self.side,
@@ -261,6 +263,7 @@ pub(crate) fn owned_records(left: &str, right: &str) -> Vec<WalRecord> {
 }
 pub(crate) fn physical_long(qty: f64) -> Vec<engine_types::PositionView> {
     vec![engine_types::PositionView {
+        exact_amounts: None,
         exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
@@ -615,8 +618,16 @@ pub(crate) async fn restart_portfolio(
     records: &[WalRecord],
     positions: Vec<engine_types::PositionView>,
 ) -> Engine<MockWal, Kernel, MockVenue> {
+    let (wal, _) = MockWal::new(tape());
+    restart_portfolio_with_wal(wal, records, positions).await
+}
+
+pub(crate) async fn restart_portfolio_with_wal<W: Wal>(
+    wal: W,
+    records: &[WalRecord],
+    positions: Vec<engine_types::PositionView>,
+) -> Engine<W, Kernel, MockVenue> {
     let tape = tape();
-    let (wal, _) = MockWal::new(tape.clone());
     let (mut venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
     venue.exact_specs = Some(vec![("BTCUSDT".into(), spec())]);
     venue.account_readings.lock().unwrap().push_back(positions);
@@ -648,13 +659,12 @@ pub(crate) async fn exact_single_sleeve_engine(
     rules.min_notional = None;
     rules.max_market_qty = max.map(|value| Exact::parse_decimal(value).unwrap());
     venue.exact_specs = Some(vec![("BTCUSDT".into(), rules)]);
-    venue
-        .account_readings
-        .lock()
-        .unwrap()
-        .push_back(physical_long(
-            Exact::parse_decimal(quantity).unwrap().to_f64().unwrap(),
-        ));
+    let mut positions = physical_long(Exact::parse_decimal(quantity).unwrap().to_f64().unwrap());
+    positions[0].exact_amounts = Some(Box::new(engine_types::risk::PositionAmounts {
+        quantity: engine_types::numeric::ExactNumber::venue_decimal(quantity).unwrap(),
+        entry_price: engine_types::numeric::ExactNumber::venue_decimal("100").unwrap(),
+    }));
+    venue.account_readings.lock().unwrap().push_back(positions);
     Engine::boot(
         &portfolio_settings(),
         "0",
@@ -666,4 +676,8 @@ pub(crate) async fn exact_single_sleeve_engine(
     )
     .await
     .unwrap()
+}
+
+pub(crate) fn fail_private_updates(engine: &mut Engine<MockWal, Kernel, MockVenue>, fail: bool) {
+    engine.wal.fail_on = fail.then(|| "order_update".into());
 }

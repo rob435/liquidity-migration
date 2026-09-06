@@ -24,6 +24,10 @@ pub struct RecoveredCallbacks {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 pub enum WalRecord {
+    OrderIdEpoch {
+        epoch_ms: i64,
+    },
+    ExecutionPrecisionV1,
     PortfolioExitChanged {
         state: crate::portfolio_control::PortfolioExit,
     },
@@ -103,6 +107,9 @@ pub enum WalRecord {
     /// Written and made durable BEFORE the order bytes leave the socket. A
     /// crash between this record and the ack can never forget an in-flight
     /// order.
+    OrderLineageRestored {
+        order: OpenOrderState,
+    },
     #[serde(rename = "order_sent_v2", alias = "order_sent")]
     OrderSent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -531,13 +538,18 @@ pub enum WalRecord {
     /// already produced, which is what makes chain reads and single-segment
     /// reads agree.
     #[serde(
-        rename = "segment_base_v5",
+        rename = "segment_base_v6",
+        alias = "segment_base_v5",
         alias = "segment_base_v4",
         alias = "segment_base_v3",
         alias = "segment_base_v2",
         alias = "segment_base"
     )]
     SegmentBase {
+        #[serde(default)]
+        order_id_epoch_ms: Option<i64>,
+        #[serde(default)]
+        open_trade_lots: Option<Vec<crate::trade::OpenTradeLot>>,
         #[serde(default)]
         portfolio_control: crate::portfolio_control::PortfolioControlState,
         #[serde(default)]
@@ -802,6 +814,26 @@ pub enum OrderFillQuantity {
     LegacyBinary64 { quantity: f64 },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum OrderEnding {
+    Rejected { code: i64, reason: String },
+    Cancelled,
+    Filled,
+    NeverSent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TerminalOrderState {
+    pub ending: OrderEnding,
+    pub retained_since_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExactPriceRange {
+    pub low: crate::numeric::Exact,
+    pub high: crate::numeric::Exact,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OpenOrderState {
     pub request: OrderRequest,
@@ -818,6 +850,10 @@ pub struct OpenOrderState {
     pub reservation_low_px: f64,
     #[serde(default)]
     pub reservation_high_px: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_price_range: Option<ExactPriceRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalOrderState>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -884,6 +920,15 @@ impl std::fmt::Debug for PendingBarrier {
 /// The append-only log. One writer (the engine loop). Appends are buffered;
 /// `barrier` is the durability point used before order sends; `flush` is the
 /// cheap group commit for everything else.
+pub trait OrderLineageReader: Send {
+    fn set_cancel(&mut self, _cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) {}
+    fn next(&mut self) -> Result<Option<WalRecord>, WalError>;
+}
+pub trait OrderEpochReader: Send {
+    fn set_cancel(&mut self, _cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) {}
+    fn max_order_epoch_ms(&mut self) -> Result<Option<i64>, WalError>;
+}
+
 pub trait Wal {
     /// Buffered append. Returns the record's sequence number.
     fn append(&mut self, record: &WalRecord) -> Result<u64, WalError>;
@@ -908,6 +953,19 @@ pub trait Wal {
     fn callback_reader(
         &mut self,
     ) -> Result<Option<Box<dyn crate::strategy_process::CallbackWalReader>>, WalError> {
+        Ok(None)
+    }
+    /// Matching order records from the retained WAL family, through this read's frontier.
+    fn order_lineage_reader(
+        &mut self,
+        _client_order_id: &str,
+    ) -> Result<Option<Box<dyn OrderLineageReader>>, WalError> {
+        Ok(None)
+    }
+    fn supports_order_lineage_archive(&self) -> bool {
+        false
+    }
+    fn order_epoch_reader(&mut self) -> Result<Option<Box<dyn OrderEpochReader>>, WalError> {
         Ok(None)
     }
     /// Bytes in the current segment, buffered ones included. Zero for a log
@@ -1142,6 +1200,8 @@ mod tests {
     #[test]
     fn old_segment_base_without_new_defaulted_fields_still_reads() {
         let base = WalRecord::SegmentBase {
+            order_id_epoch_ms: None,
+            open_trade_lots: Some(Vec::new()),
             portfolio_control: Default::default(),
             pending_order_dispatches: Vec::new(),
             signal_producers: Vec::new(),
@@ -1177,12 +1237,14 @@ mod tests {
             runtime_control_consumed: Vec::new(),
             open_orders: Vec::new(),
             rolling_loss_rows: vec![ClosedTradeRow {
+                unpriced: None,
+                net_usdt_exact: None,
                 closed_ms: 1,
                 net_usdt: -4.0,
             }],
         };
         let mut encoded = serde_json::to_value(&base).expect("serialize segment base");
-        assert_eq!(encoded["kind"], "segment_base_v5");
+        assert_eq!(encoded["kind"], "segment_base_v6");
         encoded["kind"] = serde_json::Value::String("segment_base".into());
         encoded
             .as_object_mut()

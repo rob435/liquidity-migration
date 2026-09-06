@@ -51,6 +51,8 @@ fn request(kind: &str, params: &str) -> CallbackRequest {
                 position: None,
                 foreign_position: false,
                 my_position: 0.0,
+                exact_my_position: None,
+                exact_in_flight: None,
                 in_flight: 0.0,
                 facts: None,
                 checkpoint: None,
@@ -91,6 +93,114 @@ fn order(id: String) -> OwnedOrderSnapshot {
 
 fn worker() -> StrategyProcess {
     StrategyProcess::spawn(Path::new(env!("CARGO_BIN_EXE_engine"))).unwrap()
+}
+
+#[path = "../fixtures/native-held.rs"]
+mod native_held;
+
+#[tokio::test]
+async fn real_native_workers_keep_held_runtime_stable_across_270_symbol_market_snapshots() {
+    let now = 1_800_000_000_000;
+    for kind in ["long_native", "carry_native"] {
+        let mut input = probe();
+        input.state = native_held::held_plug(kind, now, 10_000.0)
+            .runtime_state()
+            .unwrap()
+            .unwrap();
+        input.snapshot.account.equity_usdt = 10_000.0;
+        input.snapshot.account.available_margin_usdt = 9000.0;
+        input.snapshot.wall_ms = now;
+        input.snapshot.strategy_names = vec![kind.into()];
+        let mut symbol = input.snapshot.symbols[0].clone();
+        symbol.quote.bid_px = 29_999.0;
+        symbol.quote.ask_px = 30_001.0;
+        let mut depth = Depth {
+            bid_len: 10,
+            ask_len: 10,
+            ..Depth::default()
+        };
+        for level in 0..10 {
+            depth.bids[level] = engine_types::BookLevel {
+                px: 29_999.0 - level as f64,
+                qty: 10.0,
+            };
+            depth.asks[level] = engine_types::BookLevel {
+                px: 30_001.0 + level as f64,
+                qty: 10.0,
+            };
+        }
+        symbol.depth = DepthSnapshot::from(&depth);
+        input.snapshot.symbols = (0..270)
+            .map(|id| {
+                let mut row = symbol.clone();
+                row.id = SymbolId(id);
+                row.name = if id == 0 {
+                    "BTCUSDT".into()
+                } else {
+                    format!("TOKEN{id}USDT")
+                };
+                row.my_position = if id == 0 { 0.01 } else { 0.0 };
+                row.exact_my_position = Some(Box::new(
+                    if id == 0 { "0.01" } else { "0" }.parse().unwrap(),
+                ));
+                row.position = (id == 0).then_some(engine_types::PositionView {
+                    exact_amounts: None,
+                    symbol: SymbolId(0),
+                    side: Side::Buy,
+                    qty: 0.01,
+                    entry_px: 30_000.0,
+                    stop_attached: true,
+                    stop_px: 27_000.0,
+                    exact_stop_px: None,
+                    leverage: None,
+                });
+                row
+            })
+            .collect();
+        assert!(serde_json::to_vec(&input.snapshot).unwrap().len() > 180_000);
+        input.event = CallbackEvent::Quote {
+            symbol: SymbolId(0),
+            quote: input.snapshot.symbols[0].quote,
+        };
+        let mut process = worker();
+        let mut stable = None;
+        for index in 0..23 {
+            input.callback_id += 1;
+            input.snapshot.now_ns += 1_000_000;
+            input.snapshot.wall_ms += 1;
+            let (next, proposal) = process
+                .call(input.clone(), Duration::from_secs(10))
+                .await
+                .unwrap();
+            process = next;
+            assert!(
+                !proposal
+                    .actions
+                    .iter()
+                    .any(|action| matches!(action, Action::Place(_))),
+                "{kind}: {:?}",
+                proposal.actions
+            );
+            for action in &proposal.actions {
+                match action {
+                    Action::SetStrategyGlobalCheckpoint { checkpoint, .. } => {
+                        input.snapshot.global_checkpoint = Some(checkpoint.clone())
+                    }
+                    Action::SetStrategyCheckpoint {
+                        symbol, checkpoint, ..
+                    } => input.snapshot.symbols[symbol.idx()].checkpoint = Some(checkpoint.clone()),
+                    _ => {}
+                }
+            }
+            input.state = proposal.state;
+            if index == 2 {
+                stable = Some(input.state.clone());
+            }
+            if index > 2 {
+                assert_eq!(Some(&input.state), stable.as_ref(), "{kind} quote {index}");
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -398,7 +508,7 @@ impl engine_types::VenueGateway for ExactBenchVenue {
         &mut self,
         start: i64,
         end: i64,
-    ) -> Result<Vec<engine_types::VenueExecution>, engine_types::VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, engine_types::VenueError> {
         self.0.executions(start, end).await
     }
     async fn instrument_specs(

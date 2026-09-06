@@ -15,6 +15,7 @@ pub(crate) struct Reader {
     pub file: File,
     pub segment: u64,
     pub family: PathBuf,
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 struct Window<'a> {
@@ -22,10 +23,29 @@ struct Window<'a> {
     offset: u64,
     left: u64,
     crc: u32,
+    budget: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 impl Read for Window<'_> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        let count = bytes.len().min(self.left as usize);
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            return Err(io::Error::other("order archive read cancelled"));
+        }
+        let mut count = bytes.len().min(self.left as usize);
+        if let Some(budget) = &self.budget {
+            let left = budget.load(std::sync::atomic::Ordering::Relaxed);
+            if left == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "order lineage field exceeds byte limit",
+                ));
+            }
+            count = count.min(left as usize);
+        }
         if count == 0 {
             return Ok(0);
         }
@@ -39,6 +59,9 @@ impl Read for Window<'_> {
         self.crc = crc32c::crc32c_append(self.crc, &bytes[..read]);
         self.offset += read as u64;
         self.left -= read as u64;
+        if let Some(budget) = &self.budget {
+            budget.fetch_sub(read as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(read)
     }
 }
@@ -120,7 +143,7 @@ impl<'de> DeserializeSeed<'de> for InputsSeed {
 }
 
 impl Reader {
-    fn select(&mut self, segment: u64) -> Result<(), WalError> {
+    pub(crate) fn select(&mut self, segment: u64) -> Result<(), WalError> {
         if segment != self.segment {
             let file = File::open(crate::segment_path(&self.family, segment))?;
             let mut header = [0; HEADER_LEN as usize];
@@ -155,7 +178,7 @@ impl Reader {
         Ok(cursor)
     }
 
-    fn header(&self, cursor: CallbackWalCursor) -> Result<(u64, u32), WalError> {
+    pub(crate) fn header(&self, cursor: CallbackWalCursor) -> Result<(u64, u32), WalError> {
         let corrupt = |detail: &str| WalError::Corrupt {
             offset: cursor.offset,
             detail: detail.into(),
@@ -181,6 +204,15 @@ impl Reader {
     }
 
     fn frame(&self, cursor: CallbackWalCursor, length: u64) -> BufReader<Window<'_>> {
+        self.bounded_frame(cursor, length, None)
+    }
+
+    fn bounded_frame(
+        &self,
+        cursor: CallbackWalCursor,
+        length: u64,
+        budget: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    ) -> BufReader<Window<'_>> {
         BufReader::with_capacity(
             64 * 1024,
             Window {
@@ -188,8 +220,49 @@ impl Reader {
                 offset: cursor.offset + FRAME_HEADER_LEN as u64,
                 left: length,
                 crc: 0,
+                budget,
+                cancel: self.cancel.clone(),
             },
         )
+    }
+    pub(crate) fn decode<T, S>(
+        &self,
+        cursor: CallbackWalCursor,
+        length: u64,
+        crc: u32,
+        budget: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        seed: S,
+    ) -> Result<T, WalError>
+    where
+        S: for<'de> DeserializeSeed<'de, Value = T>,
+    {
+        let mut reader = self.bounded_frame(cursor, length, Some(budget));
+        let mut json = serde_json::Deserializer::from_reader(&mut reader);
+        let result = seed.deserialize(&mut json).map_err(crate::json_error)?;
+        json.end().map_err(crate::json_error)?;
+        let consumed = reader.into_inner();
+        if consumed.left != 0 || consumed.crc != crc {
+            return Err(WalError::Corrupt {
+                offset: cursor.offset,
+                detail: "order lineage WAL checksum does not match".into(),
+            });
+        }
+        Ok(result)
+    }
+    pub(crate) fn record(
+        &self,
+        cursor: CallbackWalCursor,
+        length: u64,
+    ) -> Result<engine_types::WalRecord, WalError> {
+        if length > crate::order_lineage::MAX_ROW_BYTES {
+            return Err(WalError::Corrupt {
+                offset: cursor.offset,
+                detail: "order lineage record exceeds byte limit".into(),
+            });
+        }
+        let mut bytes = Vec::new();
+        self.frame(cursor, length).read_to_end(&mut bytes)?;
+        crate::read_record(&bytes).map_err(crate::json_error)
     }
 }
 
@@ -318,5 +391,45 @@ impl CallbackWalReader for Reader {
             },
             source,
         }))
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    #[test]
+    fn cancelling_between_frame_reads_stops_json_byte_iteration() {
+        use std::io::Write;
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"remaining frame payload").unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut window = Window {
+            file: &file,
+            offset: 0,
+            left: 23,
+            crc: 0,
+            budget: None,
+            cancel: Some(cancel.clone()),
+        };
+        assert_eq!(window.read(&mut [0; 1]).unwrap(), 1);
+        cancel.store(true, Ordering::Relaxed);
+        let error = window.read(&mut [0; 1]).unwrap_err();
+        assert_ne!(
+            error.kind(),
+            io::ErrorKind::Interrupted,
+            "JSON byte iteration retries Interrupted forever"
+        );
+        assert!(std::io::BufReader::new(window)
+            .bytes()
+            .next()
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled"));
     }
 }

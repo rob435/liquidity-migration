@@ -7,6 +7,36 @@ use std::sync::Arc;
 const RETRY_NS: u64 = 1_000_000_000;
 pub(super) const HISTORY_ROWS_PER_TURN: usize = 32;
 
+pub(super) fn history_account_matches(
+    account: &AccountView,
+    logged: &reconcile::PhysicalExposure,
+) -> Result<bool, EngineError> {
+    let mut actual = std::collections::BTreeMap::new();
+    for position in &account.positions {
+        let quantity = position
+            .quantity()
+            .map_err(|error| EngineError::State(error.to_string()))?;
+        let signed = if position.side == Side::Buy {
+            quantity
+        } else {
+            -quantity
+        };
+        let prior = actual
+            .entry(position.symbol)
+            .or_insert_with(engine_types::numeric::Exact::zero);
+        *prior = &*prior + &signed;
+    }
+    actual.retain(|_, quantity| !quantity.is_zero());
+    Ok(actual.len()
+        == logged
+            .values()
+            .filter(|quantity| !quantity.is_zero())
+            .count()
+        && actual
+            .iter()
+            .all(|(symbol, quantity)| logged.get(symbol) == Some(quantity)))
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Query {
     pub started_ns: u64,
@@ -16,13 +46,15 @@ pub(super) struct Query {
 
 pub(super) struct ReadResult {
     pub account: Result<AccountView, VenueError>,
-    pub history: Option<Result<Vec<engine_types::VenueExecution>, VenueError>>,
+    pub history: Option<Result<engine_types::ExecutionHistory, VenueError>>,
 }
 
 pub(super) struct HistoryBatch {
     pub query: Query,
     pub account: Result<AccountView, VenueError>,
-    pub rows: VecDeque<engine_types::VenueExecution>,
+    pub rows: engine_types::ExecutionHistory,
+    pub resume: Option<engine_types::VenueExecution>,
+    pub untrusted: bool,
     pub delivered: HashMap<(String, i64, u64), usize>,
     pub recovered: usize,
     pub foreign: Vec<String>,
@@ -123,19 +155,33 @@ impl Recovery {
                 };
                 let history = async {
                     if let Some((since, through)) = query.history {
-                        Some(
-                            match tokio::time::timeout(
-                                MUTATION_DRAIN_TIMEOUT,
-                                client.executions(&symbols, since, through),
-                            )
-                            .await
-                            {
-                                Ok(result) => result,
-                                Err(_) => Err(VenueError::Transport(
-                                    "execution history recovery timed out".into(),
-                                )),
-                            },
-                        )
+                        if since < through.saturating_sub(RECOVERY_REACH_MS) {
+                            return Some(Err(VenueError::BadRequest(
+                                "execution history boundary exceeds venue recovery reach".into(),
+                            )));
+                        }
+                        let progress = client.execution_history_progress();
+                        let sample = || {
+                            progress
+                                .as_ref()
+                                .map(|progress| progress.load(std::sync::atomic::Ordering::Relaxed))
+                        };
+                        let mut observed = sample();
+                        let read = client.executions(&symbols, since, through);
+                        tokio::pin!(read);
+                        loop {
+                            match tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, &mut read).await {
+                                Ok(result) => break Some(result),
+                                Err(_) if sample() != observed => {
+                                    observed = sample();
+                                }
+                                Err(_) => {
+                                    break Some(Err(VenueError::Transport(
+                                        "execution history recovery stopped making progress".into(),
+                                    )))
+                                }
+                            }
+                        }
                     } else {
                         None
                     }
@@ -178,6 +224,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if let Ok(completion) = self.recovery.completed.try_recv() {
             self.on_recovery_completion(completion).await?;
         }
+        if self.order_lineage.waiting() {
+            return Ok(());
+        }
         if self.recovery.applying() {
             let Phase::Applying(batch) = std::mem::replace(&mut self.recovery.phase, Phase::Idle)
             else {
@@ -199,7 +248,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let now_ms = clock::wall_ms();
         let history = self.recovery.history_requested.then(|| {
             (
-                (self.recovered_until_ms - RECOVERY_PAD_MS).max(now_ms - RECOVERY_REACH_MS),
+                self.recovered_until_ms.saturating_sub(RECOVERY_PAD_MS),
                 now_ms,
             )
         });
@@ -229,12 +278,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             completion,
         ) {
             (Phase::Reading { query, .. }, Completion::Read(result)) => match result.history {
-                Some(Ok(mut rows)) => {
-                    rows.sort_by_key(|row| row.venue_ts_ms);
+                Some(Ok(rows)) => {
                     self.recovery.phase = Phase::Applying(Box::new(HistoryBatch {
                         query,
                         account: result.account,
-                        rows: rows.into(),
+                        rows,
+                        resume: None,
+                        untrusted: false,
                         delivered: HashMap::new(),
                         recovered: 0,
                         foreign: Vec::new(),
@@ -264,8 +314,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 result?;
                 if let Some(through_ms) = through_ms {
                     self.recovered_until_ms = through_ms;
-                    self.next_history_checkpoint_ms =
-                        through_ms.saturating_add(HISTORY_CHECKPOINT_INTERVAL_MS);
+                    self.next_history_checkpoint_ms = query
+                        .history
+                        .expect("published history interval")
+                        .1
+                        .saturating_add(HISTORY_CHECKPOINT_INTERVAL_MS);
                     if query.generation == self.recovery.generation {
                         self.recovery.history_requested = false;
                         self.recovery.history_generation = Some(query.generation);
@@ -378,6 +431,7 @@ mod tests {
             ))
             .await;
             Ok(AccountView {
+                exact_amounts: None,
                 equity_usdt: 1234.0,
                 available_usdt: 1000.0,
                 positions: Vec::new(),
@@ -389,7 +443,7 @@ mod tests {
             _: &[String],
             _: i64,
             _: i64,
-        ) -> Result<Vec<engine_types::VenueExecution>, VenueError> {
+        ) -> Result<engine_types::ExecutionHistory, VenueError> {
             tokio::time::sleep(Duration::from_millis(
                 self.0.delay_ms.load(Ordering::Relaxed),
             ))
@@ -397,7 +451,7 @@ mod tests {
             if self.0.fail_history {
                 Err(VenueError::Transport("history disconnected".into()))
             } else {
-                Ok(Vec::new())
+                Ok(engine_types::ExecutionHistory::default())
             }
         }
     }
@@ -517,6 +571,88 @@ mod tests {
         assert!(matches!(engine.recovery.phase, Phase::Idle));
         assert!(engine.recovery.history_requested);
         assert_eq!(engine.recovered_until_ms, before);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconciled_empty_scans_keep_idle_accounts_recoverable_beyond_seven_days() {
+        let (mut engine, _) = crate::tests::callback_test_fixture(Vec::new()).await;
+        let origin = clock::wall_ms();
+        let _clock = engine_types::clock::install_virtual(origin as u64 * 1_000_000, 1).unwrap();
+        engine.recovery = Recovery::new(Some(Box::new(SharedReadClient(Arc::new(ReadClient {
+            delay_ms: AtomicU64::new(0),
+            fail_history: false,
+            started: Default::default(),
+        })))));
+        for day in 1..=12 {
+            engine_types::clock::advance_virtual_to(1 + day * 86_400_000_000_000).unwrap();
+            engine.renew_execution_history().await.unwrap();
+            assert_eq!(
+                engine.recovered_until_ms,
+                clock::wall_ms(),
+                "idle day {day}"
+            );
+            assert!(!engine.recovery.history_requested);
+            assert!(engine.private_stream_ready);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn long_history_reads_retain_ownership_only_while_progressing() {
+        struct ProgressClient {
+            progress: Arc<AtomicU64>,
+            stall: bool,
+        }
+        #[engine_types::async_trait]
+        impl AccountRecoveryClient for ProgressClient {
+            fn execution_history_progress(&self) -> Option<Arc<AtomicU64>> {
+                Some(self.progress.clone())
+            }
+            async fn account_view(&self, _: &[String]) -> Result<AccountView, VenueError> {
+                Ok(AccountView {
+                    exact_amounts: None,
+                    equity_usdt: 1.0,
+                    available_usdt: 1.0,
+                    positions: vec![],
+                    observed_ns: clock::now_ns(),
+                })
+            }
+            async fn executions(
+                &self,
+                _: &[String],
+                _: i64,
+                _: i64,
+            ) -> Result<engine_types::ExecutionHistory, VenueError> {
+                for page in 0..4 {
+                    tokio::time::sleep(Duration::from_secs(8)).await;
+                    if self.stall && page > 0 {
+                        std::future::pending::<()>().await;
+                    }
+                    self.progress.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(Default::default())
+            }
+        }
+        for stall in [false, true] {
+            let mut recovery = Recovery::new(Some(Box::new(ProgressClient {
+                progress: Default::default(),
+                stall,
+            })));
+            let now = clock::wall_ms();
+            recovery.start(
+                Query {
+                    started_ns: clock::now_ns(),
+                    generation: 0,
+                    history: Some((now - 100, now)),
+                },
+                vec![],
+            );
+            let Completion::Read(result) = recovery.completed.recv().await.unwrap() else {
+                panic!("unexpected barrier");
+            };
+            assert_eq!(result.history.unwrap().is_err(), stall);
+            recovery.stop_read();
+            assert!(matches!(recovery.phase, Phase::Idle));
+        }
     }
 
     #[tokio::test(start_paused = true)]

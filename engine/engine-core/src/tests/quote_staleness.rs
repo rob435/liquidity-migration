@@ -60,6 +60,8 @@ impl Strategy for Opener {
                     .symbol_id(&self.target)
                     .expect("the target is subscribed");
                 ctx.place(Intent {
+                    exact_prices: None,
+                    exact_quantity: None,
                     strategy: StrategyId(0),
                     symbol,
                     side: Side::Buy,

@@ -148,7 +148,7 @@ pub(crate) struct HistoryReply {
 }
 
 impl HistoryReply {
-    pub(crate) fn executions(self) -> Result<(Vec<VenueExecution>, String), VenueError> {
+    pub(crate) fn executions(self) -> Result<(Vec<VenueExecution>, String, [u8; 32]), VenueError> {
         if self.ret_code != 0 {
             return Err(VenueError::Rejected {
                 code: self.ret_code,
@@ -167,7 +167,11 @@ impl HistoryReply {
         let page: Page = engine_public::numeric_wire::decode_object(result.get())
             .map_err(|e| VenueError::BadReply(e.to_string()))?;
         let mut executions = Vec::with_capacity(page.list.len());
+        use sha2::Digest;
+        let mut digest = sha2::Sha256::new();
         for raw in page.list {
+            digest.update(raw.get().len().to_le_bytes());
+            digest.update(raw.get().as_bytes());
             if let Some(mut execution) = ExecutionRow::decode_raw(raw.get())?.normalized(false)? {
                 // This history request is explicitly scoped to settleCoin=USDT.
                 let amounts = execution
@@ -183,7 +187,7 @@ impl HistoryReply {
                 executions.push(execution);
             }
         }
-        Ok((executions, page.next_page_cursor))
+        Ok((executions, page.next_page_cursor, digest.finalize().into()))
     }
 }
 

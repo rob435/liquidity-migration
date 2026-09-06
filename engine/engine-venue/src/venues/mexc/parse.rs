@@ -193,6 +193,7 @@ pub(crate) fn parse_positions(
             .and_then(|pid| stops.get(&pid).copied())
             .unwrap_or(0.0);
         out.push(PositionView {
+            exact_amounts: None,
             exact_stop_px: None,
             symbol: id,
             side,

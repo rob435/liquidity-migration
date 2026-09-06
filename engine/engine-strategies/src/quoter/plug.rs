@@ -511,6 +511,8 @@ impl Quoter {
                 QuoteEffect::Flatten { side, qty } => {
                     self.flatten_pending.insert(symbol);
                     ctx.place(Intent {
+                        exact_prices: None,
+                        exact_quantity: None,
                         strategy: self.id,
                         symbol,
                         side,
@@ -689,6 +691,8 @@ impl Quoter {
         ctx: &mut dyn StrategyCtx,
     ) {
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: self.id,
             symbol,
             side,

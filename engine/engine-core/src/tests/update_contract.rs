@@ -153,6 +153,7 @@ async fn late_partial_fills_keep_exact_delivery_order_and_dedup_after_rotation()
         &[base],
         Vec::new(),
         vec![engine_types::PositionView {
+            exact_amounts: None,
             exact_stop_px: None,
             symbol: SymbolId(0),
             side: Side::Buy,

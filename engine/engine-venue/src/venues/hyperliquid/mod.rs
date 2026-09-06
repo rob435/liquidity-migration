@@ -11,6 +11,7 @@ pub mod gateway;
 pub use engine_public::venues::hyperliquid::realm;
 
 mod assets;
+pub(crate) use assets::symbol_of;
 mod cloid;
 mod execution;
 mod msgpack;

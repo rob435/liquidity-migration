@@ -26,6 +26,8 @@ fn every_variant() -> Vec<WalRecord> {
         },
         WalRecord::Intent {
             intent: Intent {
+                exact_prices: None,
+                exact_quantity: None,
                 strategy: StrategyId(2),
                 symbol: SymbolId(11),
                 side: Side::Sell,
@@ -576,6 +578,8 @@ fn a_barrier_after_a_rotation_covers_the_new_segment() {
     let (mut wal, _) = WalWriter::open(&path).unwrap();
     wal.append(&note("before rotation")).unwrap();
     let base = WalRecord::SegmentBase {
+        order_id_epoch_ms: None,
+        open_trade_lots: Some(Vec::new()),
         portfolio_control: Default::default(),
         pending_order_dispatches: Vec::new(),
         signal_producers: Vec::new(),
@@ -930,6 +934,8 @@ fn atomic_queued_order() -> WalRecord {
     *dispatch = Some(Box::new(
         engine_types::order_dispatch::QueuedOrderDispatch {
             intent: Intent {
+                exact_prices: None,
+                exact_quantity: None,
                 strategy: request.strategy,
                 symbol: request.symbol,
                 side: request.side,

@@ -949,6 +949,7 @@ impl SimulatedVenue {
             .filter_map(|i| {
                 let p = self.positions[i].as_ref()?;
                 Some(PositionView {
+                    exact_amounts: None,
                     exact_stop_px: None,
                     symbol: SymbolId(i as u16),
                     side: p.side,
@@ -961,6 +962,7 @@ impl SimulatedVenue {
             })
             .collect();
         AccountView {
+            exact_amounts: None,
             equity_usdt: self.equity_usdt(),
             available_usdt: self.available_usdt(),
             positions,
@@ -1357,8 +1359,8 @@ impl VenueGateway for SimVenueGateway {
         &mut self,
         start_ms: i64,
         end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
-        Ok(self.lock().executions_between(start_ms, end_ms))
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
+        engine_types::ExecutionHistory::from_rows(self.lock().executions_between(start_ms, end_ms))
     }
 }
 
@@ -1412,11 +1414,11 @@ impl engine_types::orders::AccountRecoveryClient for SimVenueGateway {
         _symbols: &[Symbol],
         start_ms: i64,
         end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
         self.half_flight().await;
         let rows = self.lock().executions_between(start_ms, end_ms);
         self.half_flight().await;
-        Ok(rows)
+        engine_types::ExecutionHistory::from_rows(rows)
     }
 }
 

@@ -253,12 +253,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             let owned = self
                 .books
                 .attribution
-                .signed(order.intent.strategy, order.intent.symbol);
+                .signed_exact(order.intent.strategy, order.intent.symbol);
             let reduces = match order.intent.side {
-                Side::Sell => owned > 0.0,
-                Side::Buy => owned < 0.0,
+                Side::Sell => owned.is_positive(),
+                Side::Buy => owned.is_negative(),
             };
-            (!reduces || order.request.qty > owned.abs() + 1e-12)
+            let quantity = order
+                .request
+                .exact_terms
+                .as_ref()
+                .map(|terms| Ok(terms.quantity.clone()))
+                .unwrap_or_else(|| engine_types::numeric::Exact::from_legacy_f64(order.request.qty))
+                .map_err(|error| EngineError::State(error.to_string()))?;
+            (!reduces || quantity > owned.abs())
                 .then(|| "allocated position changed before dispatch".into())
         };
         if refusal.is_none()
@@ -267,6 +274,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         {
             let mut intent = order.intent.clone();
             intent.qty = order.request.qty;
+            intent.exact_prices = order.request.canonical_intent_prices();
+            intent.exact_quantity = order
+                .request
+                .exact_terms
+                .as_ref()
+                .map(|terms| Box::new(terms.quantity.clone()));
             refusal = match self.risk.reassess_portfolio_order(
                 id,
                 &intent,
@@ -274,7 +287,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 &self.books.attribution.snapshot(),
             ) {
                 engine_types::risk::PortfolioRiskVerdict::Allow { qty, .. }
-                    if qty == order.request.qty =>
+                    if intent.quantity().is_ok_and(|requested| qty == requested) =>
                 {
                     None
                 }
@@ -532,6 +545,8 @@ mod tests {
 
     fn prepared_order(engine: &mut TestEngine, id: &str) -> PreparedOrder {
         let intent = Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: SymbolId(0),
             side: Side::Sell,
@@ -642,6 +657,8 @@ mod tests {
     async fn an_order_sent_record_also_owns_its_unsent_dispatch_at_the_crash_cut() {
         let (mut engine, records) = fixture().await;
         let intent = Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: SymbolId(0),
             side: Side::Sell,
@@ -856,6 +873,8 @@ mod portfolio_tests {
         engine
             .prepare_intent(
                 Intent {
+                    exact_prices: None,
+                    exact_quantity: None,
                     strategy: StrategyId(0),
                     symbol: SymbolId(0),
                     side: Side::Sell,

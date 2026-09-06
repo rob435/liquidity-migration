@@ -24,7 +24,7 @@
 
 use std::collections::BTreeMap;
 
-use engine_types::numeric::Exact;
+use engine_types::numeric::{AssetId, Exact};
 use engine_types::Side;
 use serde::Serialize;
 
@@ -40,6 +40,8 @@ const LEGACY_FLAT: f64 = 1e-9;
 /// JSON line and puts them on the owner's phone.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ClosedTrade {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unpriced: Option<engine_types::risk::UnpricedTradeReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub internal_settlement: Option<u64>,
     pub sleeve: String,
@@ -63,11 +65,29 @@ pub struct ClosedTrade {
     /// Total venue fee when every contributing fill stated one. `None` is an
     /// unknown fee, not a numeric zero.
     pub fees_usdt: Option<f64>,
-    /// What it made — absent when this log does not hold the fills that
-    /// opened it, which is what a rotation leaves behind. The close is still
-    /// worth saying then; what it made is not knowable from here, and a
-    /// number invented for the gap would be worse than the gap.
+    /// Absent when a legacy checkpoint lacks entry cost or a fee's USDT value.
     pub round_trip: Option<RoundTrip>,
+}
+
+impl ClosedTrade {
+    pub fn loss_row(&self) -> Option<engine_types::risk::ClosedTradeRow> {
+        if let Some(trip) = &self.round_trip {
+            Some(engine_types::risk::ClosedTradeRow {
+                unpriced: None,
+                net_usdt_exact: Some(trip.net_usdt_exact.clone()),
+                closed_ms: self.closed_ms,
+                net_usdt: trip.net_usdt,
+            })
+        } else {
+            self.unpriced
+                .map(|reason| engine_types::risk::ClosedTradeRow {
+                    unpriced: Some(reason),
+                    net_usdt_exact: None,
+                    closed_ms: self.closed_ms,
+                    net_usdt: 0.0,
+                })
+        }
+    }
 }
 
 /// The money, present only when both legs of the trip are in the log.
@@ -81,6 +101,8 @@ pub struct RoundTrip {
     pub fees_usdt: f64,
     /// `gross_usdt - fees_usdt`, and no crowd fee (module note).
     pub net_usdt: f64,
+    #[serde(skip)]
+    pub net_usdt_exact: Exact,
     /// `net_usdt` against what went in, in basis points.
     pub net_bps: f64,
     pub opened_ms: i64,
@@ -95,24 +117,19 @@ struct Lot {
     /// +1 while held long, −1 short. `signed_qty` is zero by the time the
     /// trip closes, so the side it was held on has to be remembered.
     held: f64,
-    cash: f64,
-    in_qty: f64,
-    in_value: f64,
-    out_qty: f64,
-    out_value: f64,
-    fees: Option<f64>,
+    cash: Exact,
+    in_qty: Exact,
+    in_value: Exact,
+    out_qty: Exact,
+    out_value: Exact,
+    fees: Option<Exact>,
+    usdt: bool,
     fills: u64,
     notional: f64,
     maker_notional: f64,
     shortfall: Weighted,
     opened_ms: i64,
-    /// Whether this reader watched the position open.
-    ///
-    /// False for one restated across a log rotation, and it stays false for
-    /// the rest of that position's life however much is added to it: `cash`
-    /// never saw what the earlier segment paid, so the difference at the end
-    /// is not what the trip made. Being out by a whole entry is not a small
-    /// error — a coin that doubled reads as a profit twice over.
+    /// False when a legacy checkpoint lacks this position's entry cost.
     priced: bool,
 }
 
@@ -122,12 +139,13 @@ impl Default for Lot {
             signed_qty: Exact::zero(),
             exact_quantity: false,
             held: 0.0,
-            cash: 0.0,
-            in_qty: 0.0,
-            in_value: 0.0,
-            out_qty: 0.0,
-            out_value: 0.0,
-            fees: Some(0.0),
+            cash: Exact::zero(),
+            in_qty: Exact::zero(),
+            in_value: Exact::zero(),
+            out_qty: Exact::zero(),
+            out_value: Exact::zero(),
+            fees: Some(Exact::zero()),
+            usdt: true,
             fills: 0,
             notional: 0.0,
             maker_notional: 0.0,
@@ -142,47 +160,73 @@ impl Lot {
     /// Fold in `qty` of a fill — all of it, or the part of it that belongs to
     /// this lot when one fill takes a position through zero.
     fn fold(&mut self, fill: &Fill, quantity: &Exact, exact: bool) -> Result<(), String> {
-        let qty = quantity.to_f64().map_err(|e| e.to_string())?;
         let signed = match fill.side {
             Side::Buy => quantity.clone(),
             Side::Sell => -quantity,
         };
-        let value = fill.px * qty;
+        let price = fill
+            .amounts
+            .as_ref()
+            .map(|a| Ok(a.price.value.clone()))
+            .unwrap_or_else(|| Exact::from_legacy_f64(fill.px))
+            .map_err(|e| e.to_string())?;
+        let value = &price * quantity;
         if self.signed_qty.is_zero() {
             self.held = if signed.is_negative() { -1.0 } else { 1.0 };
             self.opened_ms = fill.venue_ts_ms;
             self.priced = true;
         }
         if signed.is_negative() == (self.held < 0.0) {
-            self.in_qty += qty;
-            self.in_value += value;
+            self.in_qty += quantity;
+            self.in_value += &value;
         } else {
-            self.out_qty += qty;
-            self.out_value += value;
+            self.out_qty += quantity;
+            self.out_value += &value;
         }
         self.exact_quantity |= exact;
-        self.signed_qty = if self.exact_quantity {
-            &self.signed_qty + &signed
-        } else {
-            Exact::from_legacy_f64(
-                self.signed_qty.to_f64().map_err(|e| e.to_string())?
-                    + signed.to_f64().map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?
-        };
-        self.signed_qty.to_f64().map_err(|e| e.to_string())?;
-        self.cash -= signed.to_f64().map_err(|e| e.to_string())? * fill.px;
+        self.signed_qty += &signed;
+        self.cash -= &signed * &price;
         self.fills += 1;
-        self.notional += value;
+        let projected_value = value.reporting_f64();
+        self.notional = (self.notional + projected_value).min(f64::MAX);
         if fill.is_maker {
-            self.maker_notional += value;
+            self.maker_notional = (self.maker_notional + projected_value).min(f64::MAX);
         }
-        self.fees = match (self.fees, fill.fee.filter(|fee| fee.is_finite())) {
-            (Some(total), Some(fee)) if fill.qty > 0.0 => Some(total + fee * (qty / fill.qty)),
+        let (fee, whole_quantity) = if let Some(amounts) = &fill.amounts {
+            self.usdt &=
+                matches!(&amounts.settlement_asset, AssetId::Named(asset) if asset == "USDT");
+            let fee = amounts.fee.as_ref().and_then(|fee| {
+                (fee.amount.value.is_zero()
+                    || matches!(&fee.asset, AssetId::Named(asset) if asset == "USDT"))
+                .then(|| fee.amount.value.clone())
+            });
+            (fee, amounts.quantity.value.clone())
+        } else {
+            (
+                fill.fee
+                    .filter(|fee| fee.is_finite())
+                    .map(Exact::from_legacy_f64)
+                    .transpose()
+                    .map_err(|e| e.to_string())?,
+                Exact::from_legacy_f64(fill.qty).map_err(|e| e.to_string())?,
+            )
+        };
+        self.fees = match (&self.fees, fee) {
+            (Some(total), Some(fee)) => Some(
+                total
+                    + &(&fee
+                        * &quantity
+                            .checked_div(&whole_quantity)
+                            .map_err(|e| e.to_string())?),
+            ),
             _ => None,
         };
         if let Some(bps) = arrival_shortfall_bps(fill.side, fill.px, fill.arrival_mid) {
-            self.shortfall.add(bps, value);
+            let weight = self.shortfall.weight + projected_value;
+            let total = self.shortfall.total + bps * projected_value;
+            if weight.is_finite() && total.is_finite() && projected_value > 0.0 {
+                self.shortfall = Weighted { weight, total };
+            }
         }
         Ok(())
     }
@@ -191,35 +235,58 @@ impl Lot {
         self.signed_qty.is_zero()
     }
 
-    fn closed(&self, sleeve: &str, symbol: &str, closed_ms: i64) -> ClosedTrade {
-        let priced = self.priced && self.in_qty > 0.0 && self.in_value > 0.0;
-        ClosedTrade {
+    fn closed(&self, sleeve: &str, symbol: &str, closed_ms: i64) -> Result<ClosedTrade, String> {
+        let project = Exact::reporting_f64;
+        let ratio = |a: &Exact, b: &Exact| {
+            a.checked_div(b)
+                .map_err(|e| e.to_string())
+                .map(|v| project(&v))
+        };
+        let basis_known = self.priced && self.in_qty.is_positive() && self.in_value.is_positive();
+        let priced = basis_known && self.usdt;
+        let unpriced = if basis_known && self.exact_quantity {
+            if !self.usdt {
+                Some(engine_types::risk::UnpricedTradeReason::SettlementAsset)
+            } else if self.fees.is_none() {
+                Some(engine_types::risk::UnpricedTradeReason::FeeValue)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let round_trip = if let Some(fees) = self.fees.as_ref().filter(|_| priced) {
+            let net = &self.cash - fees;
+            Some(RoundTrip {
+                entry_px: ratio(&self.in_value, &self.in_qty)?,
+                entry_notional_usdt: project(&self.in_value),
+                gross_usdt: project(&self.cash),
+                fees_usdt: project(fees),
+                net_usdt: project(&net),
+                net_bps: ratio(&(&net * &Exact::from_i64(10_000)), &self.in_value)?,
+                net_usdt_exact: net,
+                opened_ms: self.opened_ms,
+                held_ms: closed_ms - self.opened_ms,
+            })
+        } else {
+            None
+        };
+        Ok(ClosedTrade {
+            unpriced,
             internal_settlement: None,
             sleeve: sleeve.to_string(),
             symbol: symbol.to_string(),
             side: if self.held < 0.0 { "short" } else { "long" },
-            qty: self.out_qty,
-            exit_px: self.out_value / self.out_qty,
+            qty: project(&self.out_qty),
+            exit_px: ratio(&self.out_value, &self.out_qty)?,
             closed_ms,
             fills: self.fills,
             maker_share: (self.notional > 0.0).then(|| self.maker_notional / self.notional),
             arrival_shortfall_bps: self.shortfall.mean(),
-            gross_usdt: priced.then_some(self.cash),
-            fees_usdt: priced.then_some(self.fees).flatten(),
-            round_trip: priced.then_some(self.fees).flatten().map(|fees| {
-                let net = self.cash - fees;
-                RoundTrip {
-                    entry_px: self.in_value / self.in_qty,
-                    entry_notional_usdt: self.in_value,
-                    gross_usdt: self.cash,
-                    fees_usdt: fees,
-                    net_usdt: net,
-                    net_bps: 10_000.0 * net / self.in_value,
-                    opened_ms: self.opened_ms,
-                    held_ms: closed_ms - self.opened_ms,
-                }
-            }),
-        }
+            gross_usdt: priced.then(|| project(&self.cash)),
+            fees_usdt: self.fees.as_ref().filter(|_| priced).map(project),
+            round_trip,
+        })
     }
 }
 
@@ -235,14 +302,117 @@ pub struct Lots {
 }
 
 impl Lots {
+    pub fn checkpoint(&self) -> Vec<engine_types::trade::OpenTradeLot> {
+        self.open
+            .iter()
+            .map(
+                |((sleeve, symbol), lot)| engine_types::trade::OpenTradeLot {
+                    sleeve: sleeve.clone(),
+                    symbol: symbol.clone(),
+                    signed_qty: lot.signed_qty.clone(),
+                    exact_quantity: lot.exact_quantity,
+                    cash: lot.cash.clone(),
+                    in_qty: lot.in_qty.clone(),
+                    in_value: lot.in_value.clone(),
+                    out_qty: lot.out_qty.clone(),
+                    out_value: lot.out_value.clone(),
+                    fees: lot.fees.clone(),
+                    usdt: lot.usdt,
+                    fills: lot.fills,
+                    notional: lot.notional,
+                    maker_notional: lot.maker_notional,
+                    shortfall_weight: lot.shortfall.weight,
+                    shortfall_total: lot.shortfall.total,
+                    opened_ms: lot.opened_ms,
+                    priced: lot.priced,
+                },
+            )
+            .collect()
+    }
+
+    pub fn restore(&mut self, rows: &[engine_types::trade::OpenTradeLot]) -> Result<(), String> {
+        let mut open = BTreeMap::new();
+        for row in rows {
+            for value in [
+                &row.signed_qty,
+                &row.cash,
+                &row.in_qty,
+                &row.in_value,
+                &row.out_qty,
+                &row.out_value,
+            ]
+            .into_iter()
+            .chain(row.fees.iter())
+            {
+                value.validate_storage().map_err(|e| e.to_string())?;
+            }
+            if row.signed_qty.is_zero()
+                || [&row.in_qty, &row.in_value, &row.out_qty, &row.out_value]
+                    .iter()
+                    .any(|v| v.is_negative())
+                || [
+                    row.notional,
+                    row.maker_notional,
+                    row.shortfall_weight,
+                    row.shortfall_total,
+                ]
+                .iter()
+                .any(|v| !v.is_finite())
+            {
+                return Err("invalid open trade cost basis".into());
+            }
+            let expected_cash = if row.signed_qty.is_positive() {
+                &row.out_value - &row.in_value
+            } else {
+                &row.in_value - &row.out_value
+            };
+            if row.cash != expected_cash {
+                return Err("open trade cash disagrees with its entry and exit values".into());
+            }
+            let lot = Lot {
+                signed_qty: row.signed_qty.clone(),
+                exact_quantity: row.exact_quantity,
+                held: if row.signed_qty.is_negative() {
+                    -1.0
+                } else {
+                    1.0
+                },
+                cash: row.cash.clone(),
+                in_qty: row.in_qty.clone(),
+                in_value: row.in_value.clone(),
+                out_qty: row.out_qty.clone(),
+                out_value: row.out_value.clone(),
+                fees: row.fees.clone(),
+                usdt: row.usdt,
+                fills: row.fills,
+                notional: row.notional,
+                maker_notional: row.maker_notional,
+                shortfall: Weighted {
+                    weight: row.shortfall_weight,
+                    total: row.shortfall_total,
+                },
+                opened_ms: row.opened_ms,
+                priced: row.priced,
+            };
+            if open
+                .insert((row.sleeve.clone(), row.symbol.clone()), lot)
+                .is_some()
+            {
+                return Err("duplicate open trade cost basis owner".into());
+            }
+        }
+        self.open = open;
+        Ok(())
+    }
+
     pub(super) fn validate_internal(
         &self,
         sleeve: &str,
         symbol: &str,
         signed_delta: &Exact,
-        px: f64,
+        px: &Exact,
     ) -> Result<(), String> {
-        if signed_delta.is_zero() || !px.is_finite() || px <= 0.0 {
+        if signed_delta.is_zero() || !px.is_positive() {
             return Err("invalid internal settlement projection".into());
         }
         let delta = signed_delta.to_f64().map_err(|e| e.to_string())?;
@@ -265,12 +435,12 @@ impl Lots {
     }
     pub(super) fn settle_internal(
         &mut self,
-        sleeve: &str,
-        symbol: &str,
+        (sleeve, symbol): (&str, &str),
         signed_delta: &Exact,
-        px: f64,
+        px: &Exact,
         closed_ms: i64,
         id: u64,
+        asset: &AssetId,
     ) -> Result<(), String> {
         self.validate_internal(sleeve, symbol, signed_delta, px)?;
         let delta = signed_delta.to_f64().map_err(|e| e.to_string())?;
@@ -281,11 +451,12 @@ impl Lots {
             held: -delta.signum(),
             ..Lot::default()
         });
-        lot.out_qty += delta.abs();
-        lot.out_value += delta.abs() * px;
-        lot.cash -= delta * px;
+        lot.out_qty += signed_delta.abs();
+        lot.out_value += &signed_delta.abs() * px;
+        lot.cash -= signed_delta * px;
+        lot.usdt &= matches!(asset, AssetId::Named(asset) if asset == "USDT");
         lot.signed_qty = Exact::zero();
-        let mut closed = lot.closed(sleeve, symbol, closed_ms);
+        let mut closed = lot.closed(sleeve, symbol, closed_ms)?;
         closed.internal_settlement = Some(id);
         self.open.remove(&key);
         self.closed.push(closed);
@@ -303,6 +474,19 @@ impl Lots {
         fill: &Fill,
         exact_qty: Option<&Exact>,
     ) -> Result<(), String> {
+        if let Some(amounts) = &fill.amounts {
+            amounts
+                .validate_projection(fill.qty, fill.px, fill.fee)
+                .map_err(|e| e.to_string())?;
+            if exact_qty.is_some_and(|qty| qty != &amounts.quantity.value) {
+                return Err("analytic quantity conflicts with execution amounts".into());
+            }
+        }
+        let exact_qty = fill
+            .amounts
+            .as_ref()
+            .map(|a| &a.quantity.value)
+            .or(exact_qty);
         if let Some(exact) = exact_qty {
             if !exact.is_positive() || exact.to_f64().map_err(|e| e.to_string())? != fill.qty {
                 return Err("analytic exact quantity disagrees with fill projection".into());
@@ -333,31 +517,17 @@ impl Lots {
                 .is_ok_and(|qty| qty.abs() < LEGACY_FLAT);
         let opposite =
             !lot.signed_qty.is_zero() && lot.signed_qty.is_negative() != (fill.side == Side::Sell);
-        let (closing, opening) = if exact {
-            let closing = if opposite {
-                quantity.clone().min(lot.signed_qty.abs())
-            } else {
-                Exact::zero()
-            };
-            let opening = &quantity - &closing;
-            (closing, opening)
+        let closing = if opposite {
+            quantity.clone().min(lot.signed_qty.abs())
         } else {
-            let closing = if opposite {
-                fill.qty
-                    .min(lot.signed_qty.to_f64().map_err(|e| e.to_string())?.abs())
-            } else {
-                0.0
-            };
-            (
-                Exact::from_legacy_f64(closing).map_err(|e| e.to_string())?,
-                Exact::from_legacy_f64(fill.qty - closing).map_err(|e| e.to_string())?,
-            )
+            Exact::zero()
         };
+        let opening = &quantity - &closing;
         let mut closed = None;
         if closing.is_positive() {
             lot.fold(fill, &closing, exact)?;
             if lot.flat() || legacy_flat_after {
-                closed = Some(lot.closed(&key.0, &key.1, fill.venue_ts_ms));
+                closed = Some(lot.closed(&key.0, &key.1, fill.venue_ts_ms)?);
                 lot = Lot::default();
             }
         }
@@ -484,6 +654,7 @@ mod tests {
 
     fn fill(side: Side, px: f64, qty: f64, fee: f64, ts_ms: i64) -> Fill {
         Fill {
+            amounts: None,
             client_order_id: "eng-1".into(),
             strategy: StrategyId(0),
             symbol: SymbolId(0),
@@ -778,6 +949,7 @@ mod migration_tests {
                 "owner",
                 "BTCUSDT",
                 &Fill {
+                    amounts: None,
                     client_order_id: "legacy".into(),
                     strategy: StrategyId(0),
                     symbol: SymbolId(0),
@@ -798,5 +970,233 @@ mod migration_tests {
         );
         assert_eq!(lots.closed().len(), 1);
         assert!(lots.closed()[0].round_trip.is_none());
+    }
+}
+
+#[cfg(test)]
+mod exact_money_tests {
+    use super::*;
+    use engine_types::numeric::{AssetAmount, ExactNumber, ExecutionAmounts};
+    use engine_types::{StrategyId, SymbolId};
+
+    fn fill(side: Side, qty: &str, price: &str, fee: &str) -> Fill {
+        let amounts = ExecutionAmounts {
+            settlement_asset: AssetId::Named("USDT".into()),
+            quantity: ExactNumber::venue_decimal(qty).unwrap(),
+            price: ExactNumber::venue_decimal(price).unwrap(),
+            fee: Some(AssetAmount {
+                asset: AssetId::Named("USDT".into()),
+                amount: ExactNumber::venue_decimal(fee).unwrap(),
+            }),
+        };
+        Fill {
+            qty: amounts.quantity.value.to_f64().unwrap(),
+            px: amounts.price.value.to_f64().unwrap(),
+            fee: Some(amounts.fee.as_ref().unwrap().amount.value.to_f64().unwrap()),
+            amounts: Some(Box::new(amounts)),
+            client_order_id: "precise".into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side,
+            is_maker: false,
+            arrival_mid: 0.0,
+            venue_ts_ms: 1,
+        }
+    }
+
+    #[test]
+    fn a_loss_smaller_than_one_price_ulp_reaches_the_loss_window_amount() {
+        let mut lots = Lots::default();
+        lots.on_fill(
+            "long",
+            "BTCUSDT",
+            &fill(Side::Buy, "1", "9007199254740993", "0"),
+        );
+        lots.on_fill(
+            "long",
+            "BTCUSDT",
+            &fill(Side::Sell, "1", "9007199254740992", "0"),
+        );
+        let trade = lots.closed()[0].round_trip.as_ref().unwrap();
+        assert_eq!(trade.net_usdt_exact, Exact::from_i64(-1));
+        assert_eq!(trade.net_usdt, -1.0);
+    }
+
+    #[test]
+    fn one_reversing_fill_splits_its_fee_exactly_once_across_two_trips() {
+        let mut lots = Lots::default();
+        lots.on_fill("maker", "BTCUSDT", &fill(Side::Buy, "1", "100", "0"));
+        lots.on_fill("maker", "BTCUSDT", &fill(Side::Sell, "3", "100", "0.1"));
+        lots.on_fill("maker", "BTCUSDT", &fill(Side::Buy, "2", "100", "0"));
+        let a = &lots.closed()[0].round_trip.as_ref().unwrap().net_usdt_exact;
+        let b = &lots.closed()[1].round_trip.as_ref().unwrap().net_usdt_exact;
+        assert_eq!(
+            *a,
+            Exact::from_i64(-1)
+                .checked_div(&Exact::from_i64(30))
+                .unwrap()
+        );
+        assert_eq!(a + b, Exact::parse_decimal("-0.1").unwrap());
+    }
+
+    #[test]
+    fn a_partial_trip_keeps_its_exact_basis_and_fees_through_serialized_restart() {
+        let mut lots = Lots::default();
+        lots.on_fill(
+            "long",
+            "BTCUSDT",
+            &fill(Side::Buy, "3", "9007199254740993", "0.1"),
+        );
+        lots.on_fill(
+            "long",
+            "BTCUSDT",
+            &fill(Side::Sell, "1", "9007199254740992", "0.1"),
+        );
+        let payload = serde_json::to_vec(&lots.checkpoint()).unwrap();
+        let mut restarted = Lots::default();
+        restarted
+            .restore(
+                &serde_json::from_slice::<Vec<engine_types::trade::OpenTradeLot>>(&payload)
+                    .unwrap(),
+            )
+            .unwrap();
+        let finish = fill(Side::Sell, "2", "9007199254740992", "0.1");
+        lots.on_fill("long", "BTCUSDT", &finish);
+        restarted.on_fill("long", "BTCUSDT", &finish);
+        assert_eq!(lots.closed(), restarted.closed());
+        assert_eq!(
+            restarted.closed()[0]
+                .round_trip
+                .as_ref()
+                .unwrap()
+                .net_usdt_exact,
+            Exact::parse_decimal("-3.3").unwrap()
+        );
+        assert!(restarted.checkpoint().is_empty());
+    }
+
+    #[test]
+    fn a_fee_in_another_asset_never_becomes_a_usdt_loss_amount() {
+        let mut lots = Lots::default();
+        lots.on_fill("long", "BTCUSDT", &fill(Side::Buy, "1", "100", "0"));
+        let mut close = fill(Side::Sell, "1", "101", "0.1");
+        close.amounts.as_mut().unwrap().fee.as_mut().unwrap().asset = AssetId::Named("BNB".into());
+        lots.on_fill("long", "BTCUSDT", &close);
+        assert_eq!(lots.closed()[0].gross_usdt, Some(1.0));
+        assert!(lots.closed()[0].round_trip.is_none());
+        assert!(lots.closed()[0].fees_usdt.is_none());
+    }
+
+    #[test]
+    fn derived_money_never_aborts_a_live_close_or_serialized_restart() {
+        for (quantity, entry, exit, expected) in [
+            ("1e-310", "1.0000000000000000001", "1", "-1e-329"),
+            ("1e-200", "1e-200", "2e-200", "1e-400"),
+            ("1e200", "1e200", "2e200", "1e400"),
+        ] {
+            let mut live = Lots::default();
+            live.on_fill_with_quantity(
+                "owner",
+                "BTCUSDT",
+                &fill(Side::Buy, quantity, entry, "0"),
+                None,
+            )
+            .unwrap();
+            let mut restored = Lots::default();
+            restored
+                .restore(
+                    &serde_json::from_slice::<Vec<engine_types::trade::OpenTradeLot>>(
+                        &serde_json::to_vec(&live.checkpoint()).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            for lots in [&mut live, &mut restored] {
+                lots.on_fill_with_quantity(
+                    "owner",
+                    "BTCUSDT",
+                    &fill(Side::Sell, quantity, exit, "0"),
+                    None,
+                )
+                .unwrap();
+                let row = lots.closed()[0].loss_row().unwrap();
+                assert_eq!(
+                    row.net().unwrap(),
+                    Some(Exact::parse_decimal(expected).unwrap())
+                );
+                let replay: engine_types::risk::ClosedTradeRow =
+                    serde_json::from_slice(&serde_json::to_vec(&row).unwrap()).unwrap();
+                assert_eq!(replay, row);
+                assert!(row.net_usdt.is_finite());
+            }
+            assert_eq!(live.closed(), restored.closed());
+        }
+    }
+
+    #[test]
+    fn unvalued_native_trips_retain_accounting_debt_after_restart() {
+        use engine_types::risk::UnpricedTradeReason;
+        for (unknown_settlement, expected) in [
+            (true, UnpricedTradeReason::SettlementAsset),
+            (false, UnpricedTradeReason::FeeValue),
+        ] {
+            let mut lots = Lots::default();
+            let mut entry = fill(Side::Buy, "1", "100", "0");
+            if unknown_settlement {
+                entry.amounts.as_mut().unwrap().settlement_asset = AssetId::Unknown;
+            }
+            lots.on_fill_with_quantity("owner", "BTCUSDT", &entry, None)
+                .unwrap();
+            let mut restored = Lots::default();
+            restored
+                .restore(
+                    &serde_json::from_slice::<Vec<engine_types::trade::OpenTradeLot>>(
+                        &serde_json::to_vec(&lots.checkpoint()).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let mut close = fill(Side::Sell, "1", "90", "0.1");
+            if unknown_settlement {
+                close.amounts.as_mut().unwrap().settlement_asset = AssetId::Unknown;
+            } else {
+                close.amounts.as_mut().unwrap().fee.as_mut().unwrap().asset =
+                    AssetId::Named("BNB".into());
+            }
+            for state in [&mut lots, &mut restored] {
+                state
+                    .on_fill_with_quantity("owner", "BTCUSDT", &close, None)
+                    .unwrap();
+                let row = state.closed()[0]
+                    .loss_row()
+                    .expect("native debt disappeared");
+                assert_eq!(row.unpriced, Some(expected));
+                assert_eq!(row.net().unwrap(), None);
+            }
+            assert_eq!(lots.closed(), restored.closed());
+        }
+    }
+
+    #[test]
+    fn legacy_missing_entry_basis_remains_explicitly_unpriced() {
+        let mut lots = Lots::default();
+        lots.restate_exact(&[("owner".into(), "BTCUSDT".into(), Exact::one())])
+            .unwrap();
+        lots.on_fill_with_quantity("owner", "BTCUSDT", &fill(Side::Sell, "1", "90", "0"), None)
+            .unwrap();
+        assert!(lots.closed()[0].loss_row().is_none());
+    }
+
+    #[test]
+    fn a_checkpoint_cannot_change_the_cash_implied_by_its_entry_and_exit_values() {
+        let mut lots = Lots::default();
+        lots.on_fill("owner", "BTCUSDT", &fill(Side::Buy, "2", "100", "0"));
+        lots.on_fill("owner", "BTCUSDT", &fill(Side::Sell, "1", "90", "0"));
+        let mut rows = lots.checkpoint();
+        rows[0].cash += Exact::one();
+        assert!(Lots::default()
+            .restore(&rows)
+            .unwrap_err()
+            .contains("cash disagrees"));
     }
 }

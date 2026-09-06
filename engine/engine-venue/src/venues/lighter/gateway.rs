@@ -31,8 +31,7 @@ use crate::RealmCredentials;
 
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
-    AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce,
-    VenueExecution, VenueOrder,
+    AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce, VenueOrder,
 };
 use engine_types::risk::AccountView;
 use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
@@ -876,7 +875,7 @@ impl VenueGateway for LighterGateway {
         &mut self,
         start_ms: i64,
         end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
         if self.markets.is_empty() {
             self.load_markets().await?;
         }

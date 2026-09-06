@@ -155,6 +155,9 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             names.strategy(process.strategy), transition.as_ref().map_or(0, |row| row.effects.len())
         ),
         WalRecord::InstrumentCatalogCheckpoint { checkpoint, .. } => format!("instrument catalog: {} exact instruments", checkpoint.specs.len()),
+        WalRecord::ExecutionPrecisionV1 => "execution precision: exact quantities and risk amounts".into(),
+        WalRecord::OrderIdEpoch { epoch_ms } => format!("order ID epoch {epoch_ms}"),
+        WalRecord::OrderLineageRestored { order } => format!("order lineage restored: {}", order.request.client_order_id),
         WalRecord::IdentityState { state, .. } => format!("identity registry: {} sleeves, {} instruments", state.sleeves.len(), state.instruments.len()),
         WalRecord::SignalProducerLifecycle { state, .. } => format!(
             "producer   {} retired through epoch {}", state.producer, state.retired_through

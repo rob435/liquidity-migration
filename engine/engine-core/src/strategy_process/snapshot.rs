@@ -33,7 +33,18 @@ impl Ctx<'_> {
                 position: self.position(id),
                 foreign_position: self.foreign_position(id),
                 my_position: self.my_position(id),
-                in_flight: self.in_flight(id),
+                exact_my_position: Some(Box::new(
+                    self.my_position_exact(id)
+                        .map_err(|error| error.to_string())?,
+                )),
+                in_flight: self
+                    .in_flight_exact(id)
+                    .and_then(|quantity| quantity.to_f64())
+                    .map_err(|error| error.to_string())?,
+                exact_in_flight: Some(Box::new(
+                    self.in_flight_exact(id)
+                        .map_err(|error| error.to_string())?,
+                )),
                 facts: self.my_position_facts(id),
                 checkpoint: self.strategy_checkpoint(id).cloned(),
             };

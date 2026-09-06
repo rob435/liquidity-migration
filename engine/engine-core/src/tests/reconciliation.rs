@@ -434,6 +434,7 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
         &log,
         Vec::new(),
         vec![engine_types::PositionView {
+            exact_amounts: None,
             exact_stop_px: None,
             symbol: SymbolId(0),
             side: Side::Buy,

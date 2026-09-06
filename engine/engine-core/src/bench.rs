@@ -27,8 +27,7 @@ use engine_types::{
     AccountIdentity, AccountView, AmendSpec, EngineEvent, Feed, FeedError, InstrumentRule, Intent,
     MarketEvent, MarketFeed, OrderAck, OrderFeed, OrderKind, OrderRequest, OrderUpdate, Quote,
     RiskKernel, RiskVerdict, Side, StopSpec, Strategy, StrategyCtx, StrategyId, Subscription,
-    Symbol, SymbolId, VenueCaps, VenueError, VenueExecution, VenueGateway, VenueOrder, Wal,
-    WalRecord,
+    Symbol, SymbolId, VenueCaps, VenueError, VenueGateway, VenueOrder, Wal, WalRecord,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -436,6 +435,8 @@ impl Strategy for BenchStrategy {
             return;
         }
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: *symbol,
             side: Side::Buy,
@@ -501,8 +502,8 @@ impl engine_types::orders::AccountRecoveryClient for HttpAccountRecovery {
         _symbols: &[Symbol],
         _start_ms: i64,
         _end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
-        Ok(Vec::new())
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
+        Ok(engine_types::ExecutionHistory::default())
     }
 }
 
@@ -519,6 +520,7 @@ fn signed_http_request(key: &[u8], path: &str, body: &str) -> String {
 
 fn bench_account_view(reply: &serde_json::Value, observed_ns: u64) -> AccountView {
     AccountView {
+        exact_amounts: None,
         equity_usdt: reply
             .pointer("/result/equity")
             .and_then(|value| value.as_f64())
@@ -732,8 +734,8 @@ impl VenueGateway for HttpVenue {
         &mut self,
         _start_ms: i64,
         _end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
-        Ok(Vec::new())
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
+        Ok(engine_types::ExecutionHistory::default())
     }
 
     async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {

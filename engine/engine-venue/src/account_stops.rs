@@ -37,6 +37,59 @@ impl Triggers {
         }
     }
 }
+#[derive(Default)]
+pub(crate) struct OrderStops {
+    orders: HashMap<u64, StopOrder>,
+}
+struct StopOrder {
+    position_side: Side,
+    quantity: Exact,
+    trigger: Exact,
+}
+impl OrderStops {
+    fn add(
+        &mut self,
+        id: u64,
+        position_side: Side,
+        quantity: Exact,
+        trigger: Exact,
+    ) -> Result<(), VenueError> {
+        if self
+            .orders
+            .insert(
+                id,
+                StopOrder {
+                    position_side,
+                    quantity,
+                    trigger,
+                },
+            )
+            .is_some()
+        {
+            return Err(bad("native stop order id appears twice"));
+        }
+        Ok(())
+    }
+    pub(crate) fn covering(&self, side: Side, quantity: &Exact) -> Option<&Exact> {
+        let mut orders: Vec<_> = self
+            .orders
+            .values()
+            .filter(|order| order.position_side == side)
+            .collect();
+        orders.sort_by(|a, b| match side {
+            Side::Buy => b.trigger.cmp(&a.trigger),
+            Side::Sell => a.trigger.cmp(&b.trigger),
+        });
+        let mut covered = Exact::zero();
+        for order in orders {
+            covered += &order.quantity;
+            if &covered >= quantity {
+                return Some(&order.trigger);
+            }
+        }
+        None
+    }
+}
 fn bad(error: impl std::fmt::Display) -> VenueError {
     VenueError::BadReply(error.to_string())
 }
@@ -143,11 +196,17 @@ pub(crate) fn binance(raw: &str) -> Result<HashMap<String, Triggers>, VenueError
     Ok(out)
 }
 
-pub(crate) fn hyperliquid(raw: &str) -> Result<HashMap<String, Triggers>, VenueError> {
+pub(crate) fn hyperliquid(raw: &str) -> Result<HashMap<String, OrderStops>, VenueError> {
     #[derive(Deserialize)]
     struct Row {
         #[serde(default)]
         coin: Field<String>,
+        #[serde(default)]
+        oid: Option<u64>,
+        #[serde(default)]
+        side: Field<String>,
+        #[serde(default)]
+        sz: DecimalField,
         #[serde(default, rename = "isTrigger")]
         trigger_order: Field<bool>,
         #[serde(default, rename = "reduceOnly")]
@@ -158,7 +217,7 @@ pub(crate) fn hyperliquid(raw: &str) -> Result<HashMap<String, Triggers>, VenueE
         trigger: DecimalField,
     }
     let rows: Vec<Row> = decode(raw)?;
-    let mut out = HashMap::<String, Triggers>::new();
+    let mut out = HashMap::<String, OrderStops>::new();
     for row in rows {
         if row.trigger_order.0 != Some(true)
             || row.reduce.0 != Some(true)
@@ -171,14 +230,25 @@ pub(crate) fn hyperliquid(raw: &str) -> Result<HashMap<String, Triggers>, VenueE
         let Some(price) = positive(&row.trigger, "triggerPx")? else {
             continue;
         };
+        let Some(quantity) = positive(&row.sz, "stop remaining size")? else {
+            continue;
+        };
+        let side = match row.side.text() {
+            "A" => Side::Buy,
+            "B" => Side::Sell,
+            _ => continue,
+        };
+        let Some(id) = row.oid else {
+            continue;
+        };
         out.entry(row.coin.required("coin")?.into())
             .or_default()
-            .add(price, None);
+            .add(id, side, quantity, price)?;
     }
     Ok(out)
 }
 
-pub(crate) fn lighter(raw: &str) -> Result<HashMap<i16, Triggers>, VenueError> {
+pub(crate) fn lighter(raw: &str) -> Result<HashMap<i16, OrderStops>, VenueError> {
     #[derive(Deserialize)]
     struct Reply {
         orders: Vec<Row>,
@@ -188,6 +258,12 @@ pub(crate) fn lighter(raw: &str) -> Result<HashMap<i16, Triggers>, VenueError> {
         #[serde(default)]
         market_index: IntegerField,
         #[serde(default)]
+        order_index: Option<u64>,
+        #[serde(default)]
+        is_ask: Field<bool>,
+        #[serde(default)]
+        remaining_base_amount: DecimalField,
+        #[serde(default)]
         reduce_only: Field<bool>,
         #[serde(default, rename = "type")]
         kind: Field<String>,
@@ -195,17 +271,39 @@ pub(crate) fn lighter(raw: &str) -> Result<HashMap<i16, Triggers>, VenueError> {
         trigger_price: DecimalField,
     }
     let reply: Reply = decode(raw)?;
-    let mut out = HashMap::<i16, Triggers>::new();
+    let mut out = HashMap::<i16, OrderStops>::new();
     for row in reply.orders {
-        if row.reduce_only.0 != Some(true) || !row.kind.text().to_ascii_lowercase().contains("stop")
+        if row.reduce_only.0 != Some(true)
+            || ![
+                "stop-loss",
+                "stop_loss",
+                "stop-loss-limit",
+                "stop_loss_limit",
+            ]
+            .iter()
+            .any(|kind| row.kind.text().eq_ignore_ascii_case(kind))
         {
             continue;
         }
         let Some(price) = positive(&row.trigger_price, "trigger_price")? else {
             continue;
         };
+        let Some(quantity) = positive(&row.remaining_base_amount, "stop remaining amount")? else {
+            continue;
+        };
+        let Some(is_ask) = row.is_ask.0 else {
+            continue;
+        };
+        let Some(id) = row.order_index else {
+            continue;
+        };
         let index = i16::try_from(row.market_index.required("market_index")?).map_err(bad)?;
-        out.entry(index).or_default().add(price, None);
+        out.entry(index).or_default().add(
+            id,
+            if is_ask { Side::Buy } else { Side::Sell },
+            quantity,
+            price,
+        )?;
     }
     Ok(out)
 }
@@ -262,16 +360,29 @@ mod tests {
         let low = "90.00000000000000000001";
         let high = "90.00000000000000000002";
         let raw = format!(
-            r#"[{{"coin":"BTC","isTrigger":true,"reduceOnly":true,"orderType":"Stop Market","triggerPx":{low}}},{{"coin":"BTC","isTrigger":true,"reduceOnly":true,"orderType":"Stop Market","triggerPx":"{high}"}}]"#
+            r#"[
+            {{"coin":"BTC","oid":1,"side":"A","sz":"1","isTrigger":true,"reduceOnly":true,"orderType":"Stop Market","triggerPx":{low}}},
+            {{"coin":"BTC","oid":2,"side":"A","sz":"1","isTrigger":true,"reduceOnly":true,"orderType":"Stop Market","triggerPx":"{high}"}},
+            {{"coin":"BTC","oid":3,"side":"B","sz":"1","isTrigger":true,"reduceOnly":true,"orderType":"Stop Market","triggerPx":{low}}},
+            {{"coin":"BTC","oid":4,"side":"B","sz":"1","isTrigger":true,"reduceOnly":true,"orderType":"Stop Market","triggerPx":"{high}"}}
+        ]"#
         );
         let stops = hyperliquid(&raw).unwrap();
         assert_eq!(
-            stops["BTC"].for_side(Side::Buy),
+            stops["BTC"].covering(Side::Buy, &Exact::one()),
             Some(&Exact::parse_decimal(high).unwrap())
         );
         assert_eq!(
-            stops["BTC"].for_side(Side::Sell),
+            stops["BTC"].covering(Side::Sell, &Exact::one()),
             Some(&Exact::parse_decimal(low).unwrap())
+        );
+        assert_eq!(
+            stops["BTC"].covering(Side::Buy, &Exact::from_u64(2)),
+            Some(&Exact::parse_decimal(low).unwrap())
+        );
+        assert_eq!(
+            stops["BTC"].covering(Side::Sell, &Exact::from_u64(2)),
+            Some(&Exact::parse_decimal(high).unwrap())
         );
     }
 

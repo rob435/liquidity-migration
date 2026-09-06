@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
     AccountInventory, AccountOrder, AccountPosition, AmendSpec, InstrumentRule, OrderAck,
-    OrderKind, OrderRequest, Side, TimeInForce, VenueExecution, VenueOrder,
+    OrderKind, OrderRequest, Side, TimeInForce, VenueOrder,
 };
 use engine_types::risk::AccountView;
 use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway, VenueMutationTiming};
@@ -1619,7 +1619,7 @@ impl VenueGateway for BybitGateway {
         &mut self,
         start_ms: i64,
         end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
         engine_types::orders::AccountRecoveryClient::executions(
             &recovery::RecoveryClient::new(self),
             self.symbols.names(),

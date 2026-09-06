@@ -25,9 +25,13 @@ pub(super) fn restore_order_reservations<R: RiskKernel>(
         if remaining_qty == 0.0 {
             continue;
         }
-        risk.register_order_price_range_with_account(
+        risk.register_order_exact_price_range_with_account(
             &request.client_order_id,
             &Intent {
+                exact_prices: request.canonical_intent_prices(),
+                exact_quantity: Some(Box::new(
+                    order.remaining_exact().map_err(EngineError::Boot)?,
+                )),
                 strategy: request.strategy,
                 symbol: request.symbol,
                 side: request.side,
@@ -43,8 +47,8 @@ pub(super) fn restore_order_reservations<R: RiskKernel>(
                 work: None,
                 leverage: None,
             },
-            remaining_qty,
-            (order.reservation_low_px, order.reservation_high_px),
+            &order.remaining_exact().map_err(EngineError::Boot)?,
+            (&order.exact_price_range.low, &order.exact_price_range.high),
             account,
         );
         if working.contains(&request.client_order_id) {
@@ -81,6 +85,8 @@ mod tests {
     }
     fn intent(qty: f64) -> Intent {
         Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: SymbolId(0),
             side: Side::Buy,
@@ -123,6 +129,7 @@ mod tests {
         let mut kernel = kernel();
         let orders = orders();
         let mut account = AccountView {
+            exact_amounts: None,
             equity_usdt: 1000.0,
             available_usdt: 0.5,
             positions: vec![],
@@ -150,6 +157,51 @@ mod tests {
                 RiskVerdict::Allow { .. }
             ),
             "the current scan already includes the venue-working reservation"
+        );
+    }
+    #[test]
+    fn restored_order_reservation_preserves_canonical_quantity_beyond_its_projection() {
+        use engine_types::numeric::Exact;
+        let quantity = Exact::parse_decimal("0.100000000000000001").unwrap();
+        let mut request = orders().orders["old-working"].request.clone();
+        engine_types::order_terms::ExactOrderTerms {
+            quantity: quantity.clone(),
+            limit_price: Some(Exact::from_u64(10)),
+            stop_trigger_price: Some(Exact::from_u64(9)),
+            physical_stop_trigger_price: Some(Exact::from_u64(9)),
+            input_policy: engine_types::order_terms::OrderInputPolicy::CanonicalPortfolio,
+        }
+        .apply_projection(&mut request)
+        .unwrap();
+        let orders = LedgerOfOrders::from_records(&[WalRecord::OrderSent {
+            dispatch: None,
+            request,
+            wire_ns: 1,
+            arrival_mid: 10.0,
+        }]);
+        let account = AccountView {
+            exact_amounts: None,
+            equity_usdt: 1000.0,
+            available_usdt: 1000.0,
+            positions: vec![],
+            observed_ns: 1,
+        };
+        let mut kernel = kernel();
+        restore_order_reservations(
+            &mut kernel,
+            &orders,
+            1,
+            &account,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
+        let interval = kernel
+            .physical_exposure_interval(SymbolId(0), &account)
+            .unwrap();
+        assert_eq!(
+            interval.high(),
+            &quantity,
+            "reboot reconstructed an order reservation from its rounded display quantity"
         );
     }
 }

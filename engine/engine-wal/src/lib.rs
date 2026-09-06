@@ -40,6 +40,7 @@ use std::time::Instant;
 pub use engine_types::wal::{PendingBarrier, Wal, WalError, WalRecord};
 
 mod callback_reader;
+mod order_lineage;
 
 /// Magic at offset 0. The trailing digits are the format version.
 const MAGIC: [u8; 8] = *b"EWAL0001";
@@ -305,7 +306,20 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
     }
     if matches!(record, WalRecord::SegmentBase { .. }) {
         let value: serde_json::Value = serde_json::from_slice(payload)?;
-        if value.get("kind").and_then(serde_json::Value::as_str) == Some("segment_base_v5") {
+        if value.get("kind").and_then(serde_json::Value::as_str) == Some("segment_base_v6")
+            && !value
+                .get("open_trade_lots")
+                .is_some_and(serde_json::Value::is_array)
+        {
+            return Err(serde_json::Error::io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "segment_base_v6 is missing required open trade cost basis",
+            )));
+        }
+        if matches!(
+            value.get("kind").and_then(serde_json::Value::as_str),
+            Some("segment_base_v5" | "segment_base_v6")
+        ) {
             for field in [
                 "strategy_callback_queues",
                 "strategy_callback_sources",
@@ -360,7 +374,7 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
         }
         if matches!(
             value.get("kind").and_then(serde_json::Value::as_str),
-            Some("segment_base_v4" | "segment_base_v5")
+            Some("segment_base_v4" | "segment_base_v5" | "segment_base_v6")
         ) {
             for field in [
                 "signal_producers",
@@ -388,7 +402,7 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
         }
         if matches!(
             value.get("kind").and_then(serde_json::Value::as_str),
-            Some("segment_base_v3" | "segment_base_v4" | "segment_base_v5")
+            Some("segment_base_v3" | "segment_base_v4" | "segment_base_v5" | "segment_base_v6")
         ) && value.get("strategy_effects").is_none()
         {
             return Err(serde_json::Error::io(io::Error::new(
@@ -398,7 +412,13 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
         }
         if matches!(
             value.get("kind").and_then(serde_json::Value::as_str),
-            Some("segment_base_v2" | "segment_base_v3" | "segment_base_v4" | "segment_base_v5")
+            Some(
+                "segment_base_v2"
+                    | "segment_base_v3"
+                    | "segment_base_v4"
+                    | "segment_base_v5"
+                    | "segment_base_v6"
+            )
         ) && value.get("signal_gaps").is_none()
         {
             return Err(serde_json::Error::io(io::Error::new(
@@ -720,7 +740,35 @@ impl Wal for WalWriter {
             file: self.file.try_clone()?,
             segment: self.segment_index,
             family: self.family.clone(),
+            cancel: None,
         })))
+    }
+
+    fn order_lineage_reader(
+        &mut self,
+        client_order_id: &str,
+    ) -> Result<Option<Box<dyn engine_types::wal::OrderLineageReader>>, WalError> {
+        self.push_to_os()?;
+        Ok(Some(Box::new(order_lineage::Reader::new(
+            self.file.try_clone()?,
+            self.segment_index,
+            self.family.clone(),
+            client_order_id.to_owned(),
+        )?)))
+    }
+    fn supports_order_lineage_archive(&self) -> bool {
+        true
+    }
+    fn order_epoch_reader(
+        &mut self,
+    ) -> Result<Option<Box<dyn engine_types::wal::OrderEpochReader>>, WalError> {
+        self.push_to_os()?;
+        Ok(Some(Box::new(order_lineage::Reader::new(
+            self.file.try_clone()?,
+            self.segment_index,
+            self.family.clone(),
+            String::new(),
+        )?)))
     }
 
     fn segment_size(&self) -> u64 {

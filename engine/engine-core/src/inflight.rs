@@ -20,17 +20,7 @@ const QTY_EPS: f64 = 1e-9;
 /// every order they ever wrote.
 pub const NEVER_SENT_PREFIX: &str = "no send: ";
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Ending {
-    Rejected {
-        code: i64,
-        reason: String,
-    },
-    Cancelled,
-    Filled,
-    /// Written down and never sent. Only ever read from an older log.
-    NeverSent,
-}
+pub use engine_types::wal::OrderEnding as Ending;
 
 #[derive(Clone, Debug)]
 pub struct OrderRec {
@@ -40,6 +30,7 @@ pub struct OrderRec {
     pub filled_qty: f64,
     pub fill_quantity: engine_types::wal::OrderFillQuantity,
     pub ending: Option<Ending>,
+    pub terminal_checkpoint_ms: Option<i64>,
     /// The midpoint when this order left, carried so a fill arriving a minute
     /// later can still be priced against it. Zero when the book could not be
     /// read then. Kept here rather than looked up because the order may have
@@ -50,11 +41,44 @@ pub struct OrderRec {
     /// unknown. Rotation persists both ends so restart cannot narrow risk.
     pub reservation_low_px: f64,
     pub reservation_high_px: f64,
+    pub exact_price_range: engine_types::wal::ExactPriceRange,
 }
 
 impl OrderRec {
     pub fn in_flight(&self) -> bool {
         self.ending.is_none()
+    }
+    pub fn price_is_ambiguous(&self) -> bool {
+        self.exact_price_range.low != self.exact_price_range.high
+    }
+    pub fn retain_at(&self, now_ms: i64, history_through_ms: i64) -> bool {
+        self.in_flight()
+            || self.terminal_checkpoint_ms.is_none_or(|ended| {
+                ended
+                    >= now_ms
+                        .min(history_through_ms)
+                        .saturating_sub(crate::execution_ids::RETENTION_MS)
+            })
+    }
+    pub fn snapshot(&self, now_ms: i64) -> engine_types::OpenOrderState {
+        engine_types::OpenOrderState {
+            request: self.request.clone(),
+            wire_ns: self.wire_ns,
+            arrival_mid: self.arrival_mid,
+            acked: self.acked,
+            filled_qty: self.filled_qty,
+            fill_quantity: Some(self.fill_quantity.clone()),
+            reservation_low_px: self.reservation_low_px,
+            reservation_high_px: self.reservation_high_px,
+            exact_price_range: Some(self.exact_price_range.clone()),
+            terminal: self
+                .ending
+                .clone()
+                .map(|ending| engine_types::wal::TerminalOrderState {
+                    ending,
+                    retained_since_ms: self.terminal_checkpoint_ms.unwrap_or(now_ms),
+                }),
+        }
     }
 }
 
@@ -88,6 +112,10 @@ impl Ord for StopPrice {
 #[derive(Default, Debug)]
 pub struct LedgerOfOrders {
     pub orders: BTreeMap<String, OrderRec>,
+    terminal_cache_dirty: bool,
+    terminal_cache_limits: Option<(usize, usize)>,
+    #[cfg(test)]
+    terminal_cache_scanned_rows: usize,
     pub boots: u32,
     /// Count of live opening orders per sleeve/symbol. Counts, rather than a
     /// set, ensure one terminal sibling cannot hide another still-live order.
@@ -114,6 +142,18 @@ impl LedgerOfOrders {
 
     pub fn try_apply(&mut self, record: &WalRecord) -> Result<(), String> {
         self.validate_record_quantities(record)?;
+        if matches!(
+            record,
+            WalRecord::OrderSent { .. }
+                | WalRecord::OrderLineageRestored { .. }
+                | WalRecord::OrderUpdate { .. }
+                | WalRecord::RecoveredFill { .. }
+                | WalRecord::AmendSent { .. }
+                | WalRecord::AmendResolved { .. }
+                | WalRecord::SegmentBase { .. }
+        ) {
+            self.terminal_cache_dirty = true;
+        }
         self.apply_validated(record);
         Ok(())
     }
@@ -141,9 +181,11 @@ impl LedgerOfOrders {
                         filled_qty: 0.0,
                         fill_quantity: quantities::initial(request),
                         ending: None,
+                        terminal_checkpoint_ms: None,
                         arrival_mid: *arrival_mid,
                         reservation_low_px: exact_px,
                         reservation_high_px: exact_px,
+                        exact_price_range: request_price_range(request),
                     },
                 );
             }
@@ -188,15 +230,33 @@ impl LedgerOfOrders {
                     (self.orders.get_mut(client_order_id), spec.px)
                 {
                     if rec.in_flight() {
-                        if let engine_types::OrderKind::Limit { px, .. } = rec.request.kind {
+                        if let engine_types::OrderKind::Limit { .. } = rec.request.kind {
                             // The request may have reached the venue even if
                             // the process died before its answer. Preserve the
                             // full plausible range: high prices dominate
                             // notional, low prices can dominate short-stop loss.
-                            let prior_low = positive_or(rec.reservation_low_px, px);
-                            let prior_high = positive_or(rec.reservation_high_px, px);
-                            rec.reservation_low_px = prior_low.min(requested_px);
-                            rec.reservation_high_px = prior_high.max(requested_px);
+                            let requested = spec
+                                .exact_terms
+                                .as_deref()
+                                .and_then(|terms| terms.limit_price.clone())
+                                .unwrap_or_else(|| {
+                                    engine_types::numeric::Exact::from_legacy_f64(requested_px)
+                                        .expect("validated amendment price")
+                                });
+                            rec.exact_price_range.low =
+                                rec.exact_price_range.low.clone().min(requested.clone());
+                            rec.exact_price_range.high =
+                                rec.exact_price_range.high.clone().max(requested);
+                            rec.reservation_low_px = rec
+                                .exact_price_range
+                                .low
+                                .to_f64()
+                                .expect("validated price range");
+                            rec.reservation_high_px = rec
+                                .exact_price_range
+                                .high
+                                .to_f64()
+                                .expect("validated price range");
                         }
                     }
                 }
@@ -228,6 +288,17 @@ impl LedgerOfOrders {
                             }
                             rec.reservation_low_px = *effective_px;
                             rec.reservation_high_px = *effective_px;
+                            let price = exact_effective_px
+                                .as_ref()
+                                .map(|number| number.value.clone())
+                                .unwrap_or_else(|| {
+                                    engine_types::numeric::Exact::from_legacy_f64(*effective_px)
+                                        .expect("validated effective price")
+                                });
+                            rec.exact_price_range = engine_types::wal::ExactPriceRange {
+                                low: price.clone(),
+                                high: price,
+                            };
                         }
                     }
                 }
@@ -254,29 +325,13 @@ impl LedgerOfOrders {
                     }
                 }
             }
-            // A rotation restated every order still in flight. Set, not add:
-            // in a chain read each row equals what this ledger already says
-            // at that point, and in a fresh segment it is all there is.
-            // Orders that ENDED before the rotation are not restated, so a
-            // very late fill for one of them reads as a stranger's after the
-            // next restart — charged to nobody, reconcile's to notice.
+            WalRecord::OrderLineageRestored { order } => self.restore_snapshot_order(order),
             WalRecord::SegmentBase { open_orders, .. } => {
+                self.orders.clear();
+                self.opening_symbols.clear();
+                self.opening_stop_levels.clear();
                 for open in open_orders {
-                    let exact_px = limit_px(&open.request);
-                    self.insert_live_order(
-                        open.request.client_order_id.clone(),
-                        OrderRec {
-                            request: open.request.clone(),
-                            wire_ns: open.wire_ns,
-                            acked: open.acked,
-                            filled_qty: open.filled_qty,
-                            fill_quantity: quantities::restore(open),
-                            ending: None,
-                            arrival_mid: open.arrival_mid,
-                            reservation_low_px: positive_or(open.reservation_low_px, exact_px),
-                            reservation_high_px: positive_or(open.reservation_high_px, exact_px),
-                        },
-                    );
+                    self.restore_snapshot_order(open);
                 }
             }
             _ => {}
@@ -303,12 +358,16 @@ impl LedgerOfOrders {
             match update {
                 OrderUpdate::Ack(_) => rec.acked = true,
                 OrderUpdate::Reject { code, reason, .. } => {
+                    rec.terminal_checkpoint_ms = None;
                     rec.ending = Some(Ending::Rejected {
                         code: *code,
                         reason: reason.clone(),
                     })
                 }
-                OrderUpdate::Cancelled { .. } => rec.ending = Some(Ending::Cancelled),
+                OrderUpdate::Cancelled { .. } => {
+                    rec.terminal_checkpoint_ms = None;
+                    rec.ending = Some(Ending::Cancelled);
+                }
                 OrderUpdate::Fill { qty, amounts, .. } => {
                     rec.commit_fill(*qty, amounts.as_deref());
                 }
@@ -333,9 +392,35 @@ impl LedgerOfOrders {
         }
     }
 
+    fn restore_snapshot_order(&mut self, open: &engine_types::OpenOrderState) {
+        let exact_px = limit_px(&open.request);
+        self.insert_live_order(
+            open.request.client_order_id.clone(),
+            OrderRec {
+                request: open.request.clone(),
+                wire_ns: open.wire_ns,
+                acked: open.acked,
+                filled_qty: open.filled_qty,
+                fill_quantity: quantities::restore(open),
+                ending: open.terminal.as_ref().map(|state| state.ending.clone()),
+                terminal_checkpoint_ms: open.terminal.as_ref().map(|state| state.retained_since_ms),
+                arrival_mid: open.arrival_mid,
+                reservation_low_px: positive_or(open.reservation_low_px, exact_px),
+                reservation_high_px: positive_or(open.reservation_high_px, exact_px),
+                exact_price_range: restored_price_range(open),
+            },
+        );
+    }
+
     fn insert_live_order(&mut self, id: String, record: OrderRec) {
-        let stop = opening_stop(&record.request);
-        let opening = opening_key(&record.request);
+        let stop = record
+            .in_flight()
+            .then(|| opening_stop(&record.request))
+            .flatten();
+        let opening = record
+            .in_flight()
+            .then(|| opening_key(&record.request))
+            .flatten();
         if let Some(previous) = self.orders.insert(id, record) {
             if previous.in_flight() {
                 if let Some(stop) = opening_stop(&previous.request) {
@@ -401,6 +486,57 @@ impl LedgerOfOrders {
         }
     }
 
+    pub(crate) fn trim_terminal_cache(
+        &mut self,
+        capacity: usize,
+        byte_capacity: usize,
+    ) -> Result<Vec<String>, String> {
+        if !self.terminal_cache_dirty
+            && self.terminal_cache_limits == Some((capacity, byte_capacity))
+        {
+            return Ok(Vec::new());
+        }
+        let mut terminals = self
+            .orders
+            .iter()
+            .filter(|(_, row)| !row.in_flight())
+            .map(|(id, row)| {
+                Ok((
+                    row.wire_ns,
+                    id.clone(),
+                    serde_json::to_vec(&row.snapshot(0))
+                        .map_err(|error| error.to_string())?
+                        .len(),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        #[cfg(test)]
+        {
+            self.terminal_cache_scanned_rows += terminals.len();
+        }
+        terminals.sort_unstable();
+        let mut bytes: usize = terminals.iter().map(|(_, _, size)| size).sum();
+        let mut count = terminals.len();
+        let mut removed = Vec::new();
+        for (_, id, size) in terminals {
+            if count <= capacity && bytes <= byte_capacity {
+                break;
+            }
+            self.orders.remove(&id);
+            count -= 1;
+            bytes -= size;
+            removed.push(id);
+        }
+        self.terminal_cache_dirty = false;
+        self.terminal_cache_limits = Some((capacity, byte_capacity));
+        Ok(removed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_cache_scanned_rows(&self) -> usize {
+        self.terminal_cache_scanned_rows
+    }
+
     pub fn contains(&self, client_order_id: &str) -> bool {
         self.orders.contains_key(client_order_id)
     }
@@ -437,6 +573,12 @@ impl LedgerOfOrders {
         }
 
         let Some(order) = self.orders.get(client_order_id) else {
+            if client_order_id.starts_with("eng-") {
+                return Err(
+                    "engine order lineage is archived or unavailable; execution requires recovery"
+                        .into(),
+                );
+            }
             return Ok(());
         };
         if order.request.symbol != symbol {
@@ -578,6 +720,9 @@ impl OrderRegistry {
     pub fn owner_of(&self, client_order_id: &str) -> Option<StrategyId> {
         self.owner.get(client_order_id).copied()
     }
+    pub(crate) fn forget(&mut self, client_order_id: &str) {
+        self.owner.remove(client_order_id);
+    }
 
     /// Build the boot prefix from a wall-clock stamp.
     ///
@@ -596,8 +741,46 @@ impl OrderRegistry {
         client_order_id.starts_with(&self.boot_prefix)
     }
 
+    pub(crate) fn set_boot_epoch(&mut self, epoch_ms: i64) {
+        self.boot_prefix = Self::boot_prefix(epoch_ms);
+    }
+
     pub fn prefix(&self) -> &str {
         &self.boot_prefix
+    }
+}
+
+fn request_price_range(request: &OrderRequest) -> engine_types::wal::ExactPriceRange {
+    let price = request
+        .exact_terms
+        .as_deref()
+        .and_then(|terms| terms.limit_price.clone())
+        .unwrap_or_else(|| {
+            engine_types::numeric::Exact::from_legacy_f64(limit_px(request))
+                .expect("validated limit price")
+        });
+    engine_types::wal::ExactPriceRange {
+        low: price.clone(),
+        high: price,
+    }
+}
+
+fn restored_price_range(open: &engine_types::OpenOrderState) -> engine_types::wal::ExactPriceRange {
+    if let Some(range) = &open.exact_price_range {
+        return range.clone();
+    }
+    let request = request_price_range(&open.request);
+    let restore = |value: f64, canonical: &engine_types::numeric::Exact| {
+        if value <= 0.0 || canonical.to_f64().ok() == Some(value) {
+            canonical.clone()
+        } else {
+            engine_types::numeric::Exact::from_legacy_f64(value)
+                .expect("validated legacy price range")
+        }
+    };
+    engine_types::wal::ExactPriceRange {
+        low: restore(open.reservation_low_px, &request.low),
+        high: restore(open.reservation_high_px, &request.high),
     }
 }
 
@@ -776,6 +959,8 @@ mod tests {
                 arrival_mid: order.arrival_mid,
                 reservation_low_px: order.reservation_low_px,
                 reservation_high_px: order.reservation_high_px,
+                exact_price_range: Some(order.exact_price_range.clone()),
+                terminal: None,
             });
         }
         let base: WalRecord = serde_json::from_slice(&serde_json::to_vec(&base).unwrap()).unwrap();
@@ -1097,6 +1282,140 @@ mod tests {
         ));
         assert_eq!(accepted.orders["a"].reservation_low_px, 1_000.0);
         assert_eq!(accepted.orders["a"].reservation_high_px, 1_000.0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canonical_amend_price_range_survives_rotation_and_rejects_false_bounds() {
+        use engine_types::numeric::{Exact, ExactNumber};
+        use engine_types::order_terms::{ExactAmendTerms, ExactOrderTerms, OrderInputPolicy};
+        let d = |value: &str| Exact::parse_decimal(value).unwrap();
+        let (engine, _) = crate::tests::lifecycle_test_fixture(vec![]).await;
+        let mut original = request("precise-amend", 1.0);
+        original.kind = OrderKind::Limit {
+            px: 100.0,
+            tif: TimeInForce::Gtc,
+        };
+        ExactOrderTerms {
+            quantity: Exact::one(),
+            limit_price: Some(d("100.000000000000000001")),
+            stop_trigger_price: None,
+            physical_stop_trigger_price: None,
+            input_policy: OrderInputPolicy::CanonicalPortfolio,
+        }
+        .apply_projection(&mut original)
+        .unwrap();
+        let sent = WalRecord::OrderSent {
+            dispatch: None,
+            request: original,
+            wire_ns: 1,
+            arrival_mid: 100.0,
+        };
+        let amended = WalRecord::AmendSent {
+            symbol: SymbolId(0),
+            client_order_id: "precise-amend".into(),
+            wire_ns: 2,
+            spec: AmendSpec {
+                qty: None,
+                px: Some(100.0),
+                exact_terms: Some(Box::new(ExactAmendTerms {
+                    quantity: None,
+                    limit_price: Some(d("100.000000000000000002")),
+                    input_policy: OrderInputPolicy::CanonicalPortfolio,
+                })),
+            },
+        };
+        let ledger = LedgerOfOrders::try_from_records(&[sent, amended]).unwrap();
+        let order = &ledger.orders["precise-amend"];
+        assert!(
+            order.price_is_ambiguous(),
+            "distinct wire prices collapsed into one compatibility value"
+        );
+        assert_eq!(order.exact_price_range.low, d("100.000000000000000001"));
+        assert_eq!(order.exact_price_range.high, d("100.000000000000000002"));
+        let mut base = engine.rotation_base(engine_types::clock::wall_ms());
+        if let WalRecord::SegmentBase { open_orders, .. } = &mut base {
+            open_orders.push(engine_types::OpenOrderState {
+                request: order.request.clone(),
+                wire_ns: order.wire_ns,
+                arrival_mid: order.arrival_mid,
+                acked: order.acked,
+                filled_qty: order.filled_qty,
+                fill_quantity: Some(order.fill_quantity.clone()),
+                reservation_low_px: order.reservation_low_px,
+                reservation_high_px: order.reservation_high_px,
+                exact_price_range: Some(order.exact_price_range.clone()),
+                terminal: None,
+            });
+        }
+        let base: WalRecord = serde_json::from_slice(&serde_json::to_vec(&base).unwrap()).unwrap();
+        let mut restored = LedgerOfOrders::try_from_records(std::slice::from_ref(&base)).unwrap();
+        assert_eq!(
+            restored.orders["precise-amend"].exact_price_range,
+            order.exact_price_range
+        );
+        restored
+            .try_apply(&WalRecord::AmendResolved {
+                client_order_id: "precise-amend".into(),
+                effective_px: 100.0,
+                exact_effective_px: Some(
+                    ExactNumber::venue_decimal("100.000000000000000002").unwrap(),
+                ),
+            })
+            .unwrap();
+        assert!(!restored.orders["precise-amend"].price_is_ambiguous());
+        assert_eq!(
+            restored.orders["precise-amend"].exact_price_range.low,
+            d("100.000000000000000002")
+        );
+        let mut corrupt = base;
+        if let WalRecord::SegmentBase { open_orders, .. } = &mut corrupt {
+            let range = open_orders[0].exact_price_range.as_mut().unwrap();
+            range.low = d("99.999999999999999999");
+            range.high = range.low.clone();
+        }
+        assert!(
+            LedgerOfOrders::try_from_records(&[corrupt]).is_err(),
+            "canonical bounds excluded the known request price"
+        );
+    }
+
+    #[test]
+    fn terminal_lineage_expires_only_after_the_history_window_and_missing_engine_ids_are_unresolved(
+    ) {
+        let mut ledger = LedgerOfOrders::try_from_records(&[sent("eng-terminal-1", 1.0)]).unwrap();
+        ledger
+            .try_apply_update(&OrderUpdate::Reject {
+                client_order_id: "eng-terminal-1".into(),
+                code: 1,
+                reason: "refused".into(),
+            })
+            .unwrap();
+        let row = ledger.orders.get_mut("eng-terminal-1").unwrap();
+        let retired = 1_000_000;
+        row.terminal_checkpoint_ms = Some(retired);
+        let after = retired + crate::execution_ids::RETENTION_MS + 1;
+        assert!(
+            row.retain_at(after, retired),
+            "history must cover retention before ownership expires"
+        );
+        assert!(
+            row.retain_at(retired, after),
+            "a future cursor cannot outrun wall time"
+        );
+        assert!(!row.retain_at(after, after));
+        let snapshot = row.snapshot(after);
+        assert_eq!(
+            snapshot.terminal.as_ref().unwrap().retained_since_ms,
+            retired
+        );
+        let empty = LedgerOfOrders::default();
+        assert!(empty
+            .validate_fill("eng-terminal-1", SymbolId(0), Side::Buy, 0.5, 100.0)
+            .unwrap_err()
+            .contains("lineage is archived or unavailable"));
+        assert!(empty
+            .validate_fill("manual-fill", SymbolId(0), Side::Buy, 0.5, 100.0)
+            .is_ok());
     }
 
     #[test]

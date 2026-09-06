@@ -19,7 +19,7 @@ use engine_types::orders::{OrderLookup, OrderLookupClient};
 use engine_types::{
     AccountIdentity, AccountInventory, AccountView, AmendSpec, Feed, FeedError, InstrumentRule,
     MarketEvent, MarketFeed, OrderAck, OrderFeed, OrderRequest, OrderUpdate, Symbol, SymbolId,
-    VenueCaps, VenueError, VenueExecution, VenueGateway, VenueMutationTiming, VenueOrder,
+    VenueCaps, VenueError, VenueGateway, VenueMutationTiming, VenueOrder,
 };
 
 use super::rng::Rng;
@@ -461,7 +461,7 @@ impl<G: VenueGateway> VenueGateway for FaultyGateway<G> {
         &mut self,
         start_ms: i64,
         end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
         self.inner.executions(start_ms, end_ms).await
     }
 }

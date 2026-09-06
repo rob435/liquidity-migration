@@ -89,6 +89,7 @@ pub(super) fn some_costs() -> Costs {
     let mut fills = crate::execution::Fills::default();
     fills.on_fill(
         &crate::execution::Fill {
+            amounts: None,
             client_order_id: "eng-1".into(),
             strategy: engine_types::StrategyId(0),
             symbol: engine_types::SymbolId(0),

@@ -13,6 +13,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(crate) async fn renew_execution_history(&mut self) -> Result<(), EngineError> {
         self.recovery.history_requested = true;
         loop {
+            self.service_order_lineage().await?;
             self.service_account_recovery().await?;
             if !self.recovery.history_requested && !self.recovery.uncommitted() {
                 break;
@@ -37,7 +38,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     ) -> Result<(), EngineError> {
         let now_ms = batch.query.history.expect("history batch interval").1;
         for _ in 0..HISTORY_ROWS_PER_TURN {
-            let Some(exec) = batch.rows.pop_front() else {
+            let next = match batch.resume.take() {
+                Some(exec) => Some(exec),
+                None => batch.rows.pop_front()?,
+            };
+            let Some(exec) = next else {
                 break;
             };
 
@@ -54,11 +59,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .iter()
                 .filter(|(id, ts, qty)| id == &key.0 && *ts == key.1 && qty.to_bits() == key.2)
                 .count();
-            let used = batch.delivered.entry(key).or_default();
-            let same_delivered = *used < delivered;
-            if same_delivered {
-                *used += 1;
-            }
+            let same_delivered = delivered > 0 && {
+                let used = batch.delivered.entry(key).or_default();
+                let same = *used < delivered;
+                if same {
+                    *used += 1;
+                }
+                same
+            };
             if same_delivered {
                 continue;
             }
@@ -81,6 +89,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 batch.recovered += 1;
                 continue;
             };
+            if !self.require_order_lineage(&exec.client_order_id, Some(symbol), None)? {
+                batch.resume = Some(exec);
+                self.recovery.phase = Phase::Applying(Box::new(batch));
+                return Ok(());
+            }
             if let Err(reason) = self
                 .books
                 .orders
@@ -251,6 +264,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     self.fills
                         .on_recovered_fill_with_quantity(
                             &execution::Fill {
+                                amounts: amounts.clone(),
                                 client_order_id: exec.client_order_id.clone(),
                                 strategy: sid,
                                 symbol,
@@ -309,7 +323,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             batch.recovered += 1;
         }
 
-        if !batch.rows.is_empty() {
+        if !batch.foreign.is_empty() {
+            batch.untrusted = true;
+            self.may_open = false;
+            self.wal.append(&WalRecord::Reconciled {
+                wall_ts_ms: now_ms,
+                findings: std::mem::take(&mut batch.foreign),
+                may_open: false,
+            })?;
+        }
+        if batch.resume.is_some() || !batch.rows.is_empty() {
             self.recovery.phase = Phase::Applying(Box::new(batch));
             return Ok(());
         }
@@ -319,18 +342,34 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 "recovered fills from execution history"
             );
         }
-        if !batch.foreign.is_empty() {
-            self.may_open = false;
-            self.wal.append(&WalRecord::Reconciled {
-                wall_ts_ms: now_ms,
-                findings: batch.foreign,
-                may_open: false,
+        let account_matches = match &batch.account {
+            Ok(account) => {
+                super::account_recovery::history_account_matches(account, &self.logged_exposure)?
+            }
+            Err(_) => false,
+        };
+        let through_ms = if account_matches
+            && !batch.untrusted
+            && self.may_open
+            && !self
+                .books
+                .orders
+                .orders
+                .values()
+                .any(|order| order.in_flight())
+            && self.dispatches.unresolved.is_empty()
+            && self.dispatches.orders.is_empty()
+        {
+            now_ms
+        } else {
+            self.recovered_until_ms
+        };
+        if through_ms > self.recovered_until_ms {
+            self.wal.append(&WalRecord::ExecutionHistoryCheckpoint {
+                through_wall_ts_ms: through_ms,
             })?;
         }
-        self.wal.append(&WalRecord::ExecutionHistoryCheckpoint {
-            through_wall_ts_ms: now_ms,
-        })?;
-        self.publish_history(batch.query, batch.account, Some(now_ms))
+        self.publish_history(batch.query, batch.account, Some(through_ms))
     }
 }
 
@@ -340,6 +379,365 @@ mod tests {
 
     use super::*;
     use crate::strategy_process::host::{CallbackExecution, CallbackHost};
+
+    #[tokio::test(start_paused = true)]
+    async fn empty_or_unrelated_history_cannot_move_past_a_delayed_known_fill_across_restart() {
+        for unrelated in [false, true] {
+            let (mut engine, records) = crate::tests::recovery_inventory_fixture().await;
+            let now = clock::wall_ms();
+            engine.recovered_until_ms = now - 600_000;
+            let before = engine.recovered_until_ms;
+            let mut request = engine
+                .books
+                .orders
+                .orders
+                .values()
+                .next()
+                .unwrap()
+                .request
+                .clone();
+            request.client_order_id = "delayed-known-exit".into();
+            request.qty = 0.001;
+            request.side = Side::Sell;
+            request.reduce_only = true;
+            request.stop = None;
+            let sent = WalRecord::OrderSent {
+                request,
+                dispatch: None,
+                arrival_mid: 30_000.0,
+                wire_ns: clock::now_ns(),
+            };
+            engine.wal.append(&sent).unwrap();
+            engine.books.orders.try_apply(&sent).unwrap();
+            let delayed = engine_types::VenueExecution {
+                exec_id: "late-known-fill".into(),
+                client_order_id: "delayed-known-exit".into(),
+                symbol: "BTCUSDT".into(),
+                side: Side::Sell,
+                qty: 0.001,
+                px: 30_000.0,
+                fee: Some(0.0),
+                amounts: None,
+                is_maker: false,
+                forced_close: None,
+                venue_ts_ms: now - 300_000,
+            };
+            let rows = if unrelated {
+                vec![engine_types::VenueExecution {
+                    symbol: "UNRELATEDUSDT".into(),
+                    exec_id: "unrelated-history-fill".into(),
+                    client_order_id: "manual-unrelated".into(),
+                    venue_ts_ms: now - 1,
+                    ..delayed.clone()
+                }]
+            } else {
+                Vec::new()
+            };
+            let query = super::account_recovery::Query {
+                started_ns: clock::now_ns(),
+                generation: engine.recovery.generation,
+                history: Some((before - RECOVERY_PAD_MS, now)),
+            };
+            engine
+                .apply_history_batch(HistoryBatch {
+                    resume: None,
+                    untrusted: false,
+                    query,
+                    account: Ok(engine.account().clone()),
+                    rows: engine_types::ExecutionHistory::from_rows(rows).unwrap(),
+                    delivered: HashMap::new(),
+                    recovered: 0,
+                    foreign: Vec::new(),
+                })
+                .unwrap();
+            let durable = engine.recovery.completed.recv().await.unwrap();
+            engine.on_recovery_completion(durable).await.unwrap();
+            assert_eq!(
+                engine.recovered_until_ms, before,
+                "a response with unrelated={unrelated} skipped an unresolved fill"
+            );
+            assert_eq!(
+                engine.next_history_checkpoint_ms,
+                now + HISTORY_CHECKPOINT_INTERVAL_MS
+            );
+
+            let base = engine.rotation_base(now);
+            let since = execution_history_through_ms(std::slice::from_ref(&base)).unwrap()
+                - RECOVERY_PAD_MS;
+            let rows = [delayed]
+                .into_iter()
+                .filter(|row| row.venue_ts_ms >= since && row.venue_ts_ms <= now)
+                .collect();
+            let mut venue = crate::tests::recovery_venue_fixture(rows);
+            let mut callbacks = CallbackHost::new(CallbackExecution::Embedded, &[], &[]).unwrap();
+            let mut ids = ExecutionIds::from_records(std::slice::from_ref(&base), now).unwrap();
+            let outcome = TestRecovery::recover_missed_fills(
+                &mut engine.wal,
+                &mut venue,
+                std::slice::from_ref(&base),
+                &crate::order_dispatch::OrderDispatches::replay(std::slice::from_ref(&base))
+                    .unwrap(),
+                &engine.books.market.table,
+                &mut ids,
+                now,
+                &mut callbacks,
+                &engine.books.account,
+                &mut engine.risk,
+            )
+            .await
+            .unwrap();
+            assert_eq!(records.lock().unwrap().iter().filter(|record| matches!(record, WalRecord::RecoveredFill { exec_id, .. } if exec_id == "late-known-fill")).count(), 1);
+            assert!(!outcome.orders.orders["delayed-known-exit"].in_flight());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quarantined_net_neutral_history_keeps_its_cursor_after_deduplication() {
+        let (mut engine, _) = crate::tests::lifecycle_test_fixture(vec![]).await;
+        let now = clock::wall_ms();
+        let before = now - 10_000;
+        engine.recovered_until_ms = before;
+        let mut rows = Vec::new();
+        for (side, exec_id) in [(Side::Buy, "unowned-buy"), (Side::Sell, "unowned-sell")] {
+            engine
+                .take_update(OrderUpdate::Fill {
+                    client_order_id: "eng-unknown-order".into(),
+                    exec_id: exec_id.into(),
+                    symbol: SymbolId(0),
+                    side,
+                    qty: 1.0,
+                    px: 100.0,
+                    fee: Some(0.0),
+                    amounts: None,
+                    allocation: None,
+                    is_maker: false,
+                    forced_close: None,
+                    venue_ts_ms: now,
+                    recv_ns: clock::now_ns(),
+                })
+                .await
+                .unwrap();
+            rows.push(engine_types::VenueExecution {
+                client_order_id: "eng-unknown-order".into(),
+                exec_id: exec_id.into(),
+                symbol: "BTCUSDT".into(),
+                side,
+                qty: 1.0,
+                px: 100.0,
+                fee: Some(0.0),
+                amounts: None,
+                is_maker: false,
+                forced_close: None,
+                venue_ts_ms: now,
+            });
+        }
+        assert!(!engine.may_open);
+        engine
+            .apply_history_batch(HistoryBatch {
+                resume: None,
+                untrusted: false,
+                query: super::account_recovery::Query {
+                    started_ns: clock::now_ns(),
+                    generation: engine.recovery.generation,
+                    history: Some((before, now)),
+                },
+                account: Ok(engine.account().clone()),
+                rows: engine_types::ExecutionHistory::from_rows(rows).unwrap(),
+                delivered: HashMap::new(),
+                recovered: 0,
+                foreign: Vec::new(),
+            })
+            .unwrap();
+        let durable = engine.recovery.completed.recv().await.unwrap();
+        engine.on_recovery_completion(durable).await.unwrap();
+        assert_eq!(
+            engine.recovered_until_ms, before,
+            "deduplication hid an unresolved net-neutral pair from history completeness"
+        );
+    }
+
+    type TestRecovery =
+        Engine<crate::tests::MockWal, crate::tests::MockRisk, crate::tests::MockVenue>;
+
+    const TERMINAL_DISPATCH_ID: &str = "eng-terminal-dispatch-cut";
+
+    async fn terminal_dispatch_crash_cut(
+        rotated: bool,
+    ) -> (TestRecovery, engine_wal::WalWriter, Vec<WalRecord>, i64) {
+        let params = toml::from_str("symbol = 'BTCUSDT'\nevery_s = 60\nenabled = false").unwrap();
+        let passive = engine_strategies::build_strategy("probe", StrategyId(0), &params).unwrap();
+        let (mut engine, _) = crate::tests::callback_test_fixture(vec![passive]).await;
+        assert_eq!(engine.host.strategies.len(), 1);
+        assert_eq!(engine.books.market.table.get("BTCUSDT"), Some(SymbolId(0)));
+        let now = clock::wall_ms();
+        let before = now - 10_000;
+        engine.recovered_until_ms = before;
+        assert!(engine.may_open);
+        assert!(engine.account().positions.is_empty());
+        let request = OrderRequest {
+            client_order_id: TERMINAL_DISPATCH_ID.into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 1.0,
+            kind: OrderKind::Market,
+            stop: Some(StopSpec { trigger_px: 90.0 }),
+            reduce_only: false,
+            close_position: false,
+            exact_terms: None,
+            sleeve_effect: None,
+        };
+        let intent = Intent {
+            exact_quantity: None,
+            exact_prices: None,
+            strategy: request.strategy,
+            symbol: request.symbol,
+            side: request.side,
+            qty: request.qty,
+            kind: request.kind,
+            stop: request.stop,
+            reduce_only: request.reduce_only,
+            tag: "terminal-dispatch-cut".into(),
+            decided_ns: clock::now_ns(),
+            work: None,
+            leverage: None,
+        };
+        let cut = vec![
+            engine.rotation_base(now),
+            WalRecord::OrderSent {
+                request,
+                dispatch: Some(Box::new(
+                    engine_types::order_dispatch::QueuedOrderDispatch {
+                        intent,
+                        origin_ns: clock::now_ns(),
+                    },
+                )),
+                wire_ns: clock::now_ns(),
+                arrival_mid: 100.0,
+            },
+            WalRecord::OrderDispatchAttempted {
+                client_order_id: TERMINAL_DISPATCH_ID.into(),
+            },
+            WalRecord::OrderUpdate {
+                callbacks: None,
+                update: OrderUpdate::Reject {
+                    client_order_id: TERMINAL_DISPATCH_ID.into(),
+                    code: 1,
+                    reason: "crash before dispatch completion".into(),
+                },
+            },
+        ];
+        engine.books.orders = LedgerOfOrders::try_from_records(&cut).unwrap();
+        engine.dispatches = crate::order_dispatch::OrderDispatches::replay(&cut).unwrap();
+        let path = crate::testpath::temp_path("terminal-dispatch-history-cut");
+        let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+        for row in cut {
+            wal.append(&row).unwrap();
+        }
+        wal.barrier().unwrap();
+        if rotated {
+            wal.rotate(&engine.rotation_base(now)).unwrap();
+        }
+        drop(wal);
+        let (wal, records) = engine_wal::open_current(&path).unwrap();
+        let records = records.into_iter().map(|(_, row)| row).collect::<Vec<_>>();
+        engine.books.orders = LedgerOfOrders::try_from_records(&records).unwrap();
+        engine.dispatches = crate::order_dispatch::OrderDispatches::replay(&records).unwrap();
+        assert!(!engine.books.orders.orders[TERMINAL_DISPATCH_ID].in_flight());
+        assert_eq!(engine.dispatches.orders.len(), 1);
+        assert!(engine.dispatches.unresolved.is_empty());
+        (engine, wal, records, before)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boot_history_waits_for_terminal_dispatch_completion_across_restart() {
+        for rotated in [false, true] {
+            let (mut engine, mut wal, mut replay, before) =
+                terminal_dispatch_crash_cut(rotated).await;
+            let now = clock::wall_ms();
+            let mut venue = crate::tests::recovery_venue_fixture(vec![]);
+            let mut callbacks = CallbackHost::new(CallbackExecution::Embedded, &[], &[]).unwrap();
+            let mut ids = ExecutionIds::from_records(&replay, now).unwrap();
+            for completed in [false, true] {
+                if completed {
+                    let record = WalRecord::OrderDispatchCompleted {
+                        client_order_id: TERMINAL_DISPATCH_ID.into(),
+                    };
+                    wal.append(&record).unwrap();
+                    wal.barrier().unwrap();
+                    replay.push(record);
+                    engine.dispatches =
+                        crate::order_dispatch::OrderDispatches::replay(&replay).unwrap();
+                }
+                let outcome = Engine::<
+                    engine_wal::WalWriter,
+                    crate::tests::MockRisk,
+                    crate::tests::MockVenue,
+                >::recover_missed_fills(
+                    &mut wal,
+                    &mut venue,
+                    &replay,
+                    &engine.dispatches,
+                    &engine.books.market.table,
+                    &mut ids,
+                    now,
+                    &mut callbacks,
+                    &engine.books.account,
+                    &mut engine.risk,
+                )
+                .await
+                .unwrap();
+                if completed {
+                    assert!(
+                        outcome.through_ms >= now,
+                        "completed dispatch prevented history progress after rotation={rotated}"
+                    );
+                } else {
+                    assert_eq!(outcome.through_ms, before, "terminal order hid a pending durable dispatch at boot after rotation={rotated}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runtime_history_waits_for_terminal_dispatch_completion_across_restart() {
+        for rotated in [false, true] {
+            let (mut engine, _wal, _replay, before) = terminal_dispatch_crash_cut(rotated).await;
+            let now = clock::wall_ms();
+            for completed in [false, true] {
+                if completed {
+                    engine
+                        .complete_order_dispatch(TERMINAL_DISPATCH_ID)
+                        .unwrap();
+                    engine.wal.barrier().unwrap();
+                    assert!(engine.dispatches.orders.is_empty());
+                }
+                engine
+                    .apply_history_batch(HistoryBatch {
+                        resume: None,
+                        untrusted: false,
+                        query: super::account_recovery::Query {
+                            started_ns: clock::now_ns(),
+                            generation: engine.recovery.generation,
+                            history: Some((before, now)),
+                        },
+                        account: Ok(engine.account().clone()),
+                        rows: engine_types::ExecutionHistory::from_rows(vec![]).unwrap(),
+                        delivered: HashMap::new(),
+                        recovered: 0,
+                        foreign: Vec::new(),
+                    })
+                    .unwrap();
+                let durable = engine.recovery.completed.recv().await.unwrap();
+                engine.on_recovery_completion(durable).await.unwrap();
+                if completed {
+                    assert_eq!(engine.recovered_until_ms, now, "completed dispatch prevented runtime history progress after rotation={rotated}");
+                } else {
+                    assert_eq!(engine.recovered_until_ms, before, "terminal order hid a pending durable dispatch at runtime after rotation={rotated}");
+                }
+            }
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn history_batches_yield_to_private_fills_and_restart_an_uncheckpointed_prefix_once() {
@@ -367,9 +765,11 @@ mod tests {
             history: Some((now - 100, now)),
         };
         let batch = HistoryBatch {
+            resume: None,
+            untrusted: false,
             query,
             account: Ok(engine.account().clone()),
-            rows: rows.clone().into(),
+            rows: engine_types::ExecutionHistory::from_rows(rows.clone()).unwrap(),
             delivered: HashMap::new(),
             recovered: 0,
             foreign: Vec::new(),
@@ -448,23 +848,34 @@ mod tests {
             &mut wal,
             &mut venue,
             &actual,
+            &crate::order_dispatch::OrderDispatches::replay(&actual).unwrap(),
             &engine.books.market.table,
             &mut ids,
             now,
             &mut callbacks,
+            &engine.books.account,
+            &mut engine.risk,
         )
         .await
         .unwrap();
+        let persisted = engine_wal::replay(&path).unwrap();
         assert_eq!(
-            outcome
-                .records
+            persisted
                 .iter()
-                .filter(|row| matches!(row, WalRecord::RecoveredFill { .. }))
+                .skip(actual.len())
+                .filter(|(_, row)| matches!(row, WalRecord::RecoveredFill { .. }))
                 .count(),
             64,
             "restart skipped or repeated an already committed prefix execution"
         );
-        cut.extend(outcome.records);
+        let cut = persisted
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcome.attribution.snapshot(),
+            Attribution::try_from_records(&cut).unwrap().snapshot()
+        );
         assert!(
             (Attribution::try_from_records(&cut)
                 .unwrap()

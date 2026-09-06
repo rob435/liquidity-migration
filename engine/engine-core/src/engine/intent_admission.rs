@@ -79,7 +79,7 @@ impl std::fmt::Display for OpeningRefusal {
 struct RiskApprovedIntent {
     intent: Intent,
     client_order_id: String,
-    allowed_qty: f64,
+    allowed_qty: engine_types::numeric::Exact,
     work: Option<WorkPolicy>,
 }
 struct LegalOrder {
@@ -158,6 +158,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         origin_ns: u64,
         batch_protection: &mut std::collections::HashMap<(SymbolId, Side), f64>,
     ) -> Result<Option<PreparedOrder>, EngineError> {
+        let mut intent = intent;
+        if intent.reduce_only
+            && intent.exact_quantity.is_none()
+            && self.instrument_specs.contains_key(&intent.symbol)
+        {
+            let held = self
+                .books
+                .attribution
+                .signed_exact(intent.strategy, intent.symbol);
+            // Legacy full-close requests carry only the projection of the owned lot.
+            if held.is_positive() == (intent.side == Side::Sell)
+                && held.abs().to_f64().ok() == Some(intent.qty)
+            {
+                intent.exact_quantity = Some(Box::new(held.abs()));
+            }
+        }
         let decided_ns = if intent.decided_ns > 0 {
             intent.decided_ns
         } else {
@@ -248,9 +264,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .physical_exposure_interval(request.symbol, &self.books.account),
         };
         if !interval.is_ok_and(|interval| {
-            interval.certainly_reduces(request.side, request.qty)
+            interval.certainly_reduces(request.side, &terms.quantity)
                 && (!request.close_position
-                    || (interval.low() == interval.high() && interval.low().abs() == request.qty))
+                    || (interval.low() == interval.high()
+                        && interval.low().abs() == terms.quantity))
         }) {
             return Some(
                 "emergency order no longer certainly reduces the physical position".into(),
@@ -314,19 +331,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         } else {
             Side::Buy
         };
-        let physical = if side == Side::Sell {
-            interval.low().max(0.0)
+        let physical_qty = if side == Side::Sell {
+            interval.low().clone().max(Exact::zero())
         } else {
-            (-interval.high()).max(0.0)
-        };
-        let journal_net = self.logged_exposure.get(&state.symbol);
-        let physical_qty = if let Some(journal_net) = journal_net.filter(|value| {
-            value.is_positive() == (side == Side::Sell)
-                && value.abs().to_f64().ok() == Some(physical)
-        }) {
-            journal_net.abs()
-        } else {
-            Exact::from_legacy_f64(physical).map_err(|e| EngineError::State(e.to_string()))?
+            (-interval.high()).max(Exact::zero())
         };
         let mut quantity = net.abs().min(physical_qty.clone());
         if !quantity.is_positive() {
@@ -391,6 +399,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         let decided_ns = clock::now_ns();
         let intent = Intent {
+            exact_prices: None,
+            exact_quantity: Some(Box::new(terms.quantity.clone())),
             strategy: owner,
             symbol: state.symbol,
             side,
@@ -411,7 +421,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             verdict: RiskVerdict::Allow { qty: request.qty },
         })?;
         let approval = RiskApprovedIntent {
-            allowed_qty: request.qty,
+            allowed_qty: request
+                .exact_terms
+                .as_ref()
+                .expect("canonical emergency terms")
+                .quantity
+                .clone(),
             intent,
             client_order_id,
             work: None,
@@ -442,6 +457,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             })?;
             tracing::error!(tag = %intent.tag, what, "intent carries an unreal number");
             self.tell_refused(intent, "unreal_number", client_order_id)?;
+            return Ok(false);
+        }
+
+        if intent.validate_price_projection().is_err() {
+            self.tell_refused(intent, "invalid_exact_prices", client_order_id)?;
+            return Ok(false);
+        }
+        if intent.exact_quantity.is_some() && intent.quantity().is_err() {
+            self.wal.append(&WalRecord::Note {
+                source: "engine".into(),
+                text: format!(
+                    "intent {} refused: invalid canonical quantity projection",
+                    intent.tag
+                ),
+            })?;
+            self.tell_refused(intent, "invalid_exact_quantity", client_order_id)?;
             return Ok(false);
         }
 
@@ -542,6 +573,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut intent = intent;
         let work = self.plan_resting_entry(&mut intent);
 
+        let mut canonical_allowed = None;
         let verdict = if self.instrument_specs.contains_key(&intent.symbol) {
             match self.risk.assess_portfolio(
                 &intent,
@@ -549,7 +581,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 &self.books.attribution.snapshot(),
             ) {
                 engine_types::risk::PortfolioRiskVerdict::Allow { qty, .. } => {
-                    RiskVerdict::Allow { qty }
+                    let permitted = intent
+                        .quantity()
+                        .is_ok_and(|requested| qty.is_positive() && qty <= requested);
+                    match qty.to_f64() {
+                        Ok(projection) if permitted => {
+                            canonical_allowed = Some(qty);
+                            RiskVerdict::Allow { qty: projection }
+                        }
+                        _ => RiskVerdict::Deny { reason: DenyReason::UnknownState {
+                            detail: "canonical risk quantity exceeds or cannot represent the request".into(),
+                        } },
+                    }
                 }
                 engine_types::risk::PortfolioRiskVerdict::Deny { reason } => {
                     RiskVerdict::Deny { reason }
@@ -560,7 +603,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         };
         let verdict = durable_risk_verdict(verdict, intent.qty, false);
         let allowed_qty = match &verdict {
-            RiskVerdict::Allow { qty } => *qty,
+            RiskVerdict::Allow { qty } => canonical_allowed.unwrap_or(
+                engine_types::numeric::Exact::from_legacy_f64(*qty)
+                    .map_err(|error| EngineError::State(error.to_string()))?,
+            ),
             RiskVerdict::Deny { reason } => {
                 let reason = format!("{reason:?}");
                 self.wal.append(&WalRecord::Verdict {
@@ -573,9 +619,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         };
 
-        // Minting the id here (not a log write) lets the verdict record name
-        // the order it approved; a refused intent never burns an id.
-        let client_order_id = client_order_id.unwrap_or_else(|| self.mint_id());
+        // A refused intent never consumes an order identity.
+        let client_order_id = match client_order_id {
+            Some(id) => id,
+            None => self.mint_id()?,
+        };
         self.wal.append(&WalRecord::Verdict {
             client_order_id: Some(client_order_id.clone()),
             verdict,
@@ -596,9 +644,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let RiskApprovedIntent {
             ref intent,
             ref client_order_id,
-            allowed_qty,
+            ref allowed_qty,
             ..
         } = approval;
+        let allowed_qty = allowed_qty
+            .to_f64()
+            .map_err(|error| EngineError::State(error.to_string()))?;
         // The risk kernel requires a position-opening intent to carry a stop.
         // A venue that keeps no stop of its own would leave that rule
         // unenforced without ever saying so: the order goes out, the log
@@ -751,7 +802,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         approval: RiskApprovedIntent,
         spec: &engine_types::numeric::ExactInstrumentSpec,
     ) -> Result<Option<LegalOrder>, EngineError> {
-        use engine_types::order_terms::{quantize_order, strategy_decimal, QuantityPolicy};
+        use engine_types::order_terms::{
+            quantize_with_exact_prices, strategy_decimal, OrderInputPolicy, QuantityPolicy,
+        };
         use engine_types::orders::SleeveOrderEffect;
         let intent = &approval.intent;
         let reference = self.reference_px(intent.symbol, &intent.kind);
@@ -760,11 +813,31 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         } else {
             intent.stop
         };
+        let mut quantity = approval.allowed_qty.clone();
+        if intent.reduce_only {
+            let maximum = if matches!(intent.kind, OrderKind::Market) {
+                &spec.max_market_qty
+            } else {
+                &spec.max_qty
+            };
+            if let Some(maximum) = maximum {
+                quantity = quantity.min(maximum.clone());
+            }
+        }
+        let input_policy = if intent.exact_quantity.is_some() {
+            OrderInputPolicy::CanonicalPortfolio
+        } else {
+            OrderInputPolicy::StrategyShortestDecimal
+        };
         let mut policy = QuantityPolicy::Normal;
-        let mut terms = quantize_order(
+        let mut terms = quantize_with_exact_prices(
             spec,
             intent.side,
-            approval.allowed_qty,
+            (
+                quantity.clone(),
+                input_policy,
+                intent.exact_prices.as_deref(),
+            ),
             intent.kind,
             stop,
             reference,
@@ -783,11 +856,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .filter(|p| p.symbol == intent.symbol)
                 .collect();
             if let [position] = held.as_slice() {
-                let exact_match = strategy_decimal(approval.allowed_qty)
-                    .ok()
-                    .zip(strategy_decimal(position.qty).ok())
-                    .is_some_and(|(a, b)| a == b);
-                let below_minimum = strategy_decimal(position.qty).ok().is_some_and(|qty| {
+                let exact_match = position.quantity().is_ok_and(|held| quantity == held);
+                let below_minimum = position.quantity().is_ok_and(|qty| {
                     spec.market_min_qty.as_ref().is_some_and(|min| &qty < min)
                         || reference
                             .and_then(|px| strategy_decimal(px).ok())
@@ -799,10 +869,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 });
                 if exact_match && below_minimum && position.side == intent.side.flipped() {
                     policy = QuantityPolicy::CloseEntirePosition;
-                    terms = quantize_order(
+                    terms = quantize_with_exact_prices(
                         spec,
                         intent.side,
-                        approval.allowed_qty,
+                        (quantity, input_policy, None),
                         intent.kind,
                         None,
                         reference,
@@ -827,7 +897,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             strategy: intent.strategy,
             symbol: intent.symbol,
             side: intent.side,
-            qty: approval.allowed_qty,
+            qty: approval
+                .allowed_qty
+                .to_f64()
+                .map_err(|error| EngineError::State(error.to_string()))?,
             kind: intent.kind,
             stop,
             reduce_only: intent.reduce_only,
@@ -842,7 +915,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         terms
             .apply_projection(&mut request)
             .map_err(|error| EngineError::State(error.to_string()))?;
-        if request.qty > approval.allowed_qty {
+        if request
+            .exact_terms
+            .as_ref()
+            .expect("canonical quantized order")
+            .quantity
+            > approval.allowed_qty
+        {
             return Err(EngineError::State(
                 "exact quantity projection enlarged the risk approval".into(),
             ));
@@ -1050,12 +1129,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     ) -> Result<PreparedOrder, EngineError> {
         let LegalOrder { request, approval } = protected.0;
         let RiskApprovedIntent {
-            intent,
+            mut intent,
             client_order_id,
             work,
             ..
         } = approval;
         let qty = request.qty;
+        intent.qty = request.qty;
+        intent.exact_quantity = request
+            .exact_terms
+            .as_ref()
+            .map(|terms| Box::new(terms.quantity.clone()));
+        intent.exact_prices = request.canonical_intent_prices();
+        intent.kind = request.kind;
+        intent.stop = request.sleeve_stop();
         // Appended before reservation and venue dispatch. One disk barrier
         // covers every accepted sibling in the group.
         let mut dispatch_intent = intent.clone();

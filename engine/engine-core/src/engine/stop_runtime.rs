@@ -182,11 +182,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .risk
             .physical_exposure_interval(symbol, &self.books.account)
             .map_err(|e| format!("physical exposure unavailable: {e:?}"))?;
-        let side = if interval.low() >= 0.0 && interval.high() > 0.0 {
+        let side = if !interval.low().is_negative() && interval.high().is_positive() {
             Side::Buy
-        } else if interval.high() <= 0.0 && interval.low() < 0.0 {
+        } else if !interval.high().is_positive() && interval.low().is_negative() {
             Side::Sell
-        } else if interval.low() == 0.0 && interval.high() == 0.0 {
+        } else if interval.low().is_zero() && interval.high().is_zero() {
             return Ok(NativeStopPlan::Satisfied);
         } else {
             return Ok(NativeStopPlan::Waiting);

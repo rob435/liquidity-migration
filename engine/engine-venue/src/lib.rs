@@ -50,5 +50,6 @@ mod stop_state;
 
 mod catalog_checkpoint;
 
+mod account_numbers;
 mod account_recovery;
 mod account_stops;

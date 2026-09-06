@@ -1,18 +1,16 @@
-//! The gate. Fixed evaluation order, documented on [`Kernel::assess`].
-
-use engine_types::ids::SymbolId;
-use engine_types::orders::{Intent, OrderKind, OrderUpdate, Side};
-use engine_types::risk::{
-    AccountView, ClosedTradeRow, DenyReason, RiskKernel, RiskVerdict, RollingLossView,
-};
-
+//! One capital owner; canonical quantities and money remain exact until reporting.
 use crate::config::{ConfigError, KernelConfig};
 use crate::envelope::Envelope;
 use crate::exposure::{Book, Pending};
 use crate::loss_window::LossWindow;
 use crate::margin::MarginBook;
 use crate::ROLLING_LOSS_WINDOW_MS;
-
+use engine_types::ids::SymbolId;
+use engine_types::numeric::Exact;
+use engine_types::orders::{Intent, OrderKind, OrderUpdate, Side};
+use engine_types::risk::{
+    AccountView, ClosedTradeRow, DenyReason, RiskKernel, RiskVerdict, RollingLossView,
+};
 mod portfolio;
 use portfolio::PortfolioFacts;
 
@@ -23,20 +21,47 @@ pub struct Kernel {
     loss_window: LossWindow,
     margin: MarginBook,
 }
-
 fn unknown(detail: impl Into<String>) -> DenyReason {
     DenyReason::UnknownState {
         detail: detail.into(),
     }
 }
-
-fn signed(side: Side, qty: f64) -> f64 {
-    match side {
-        Side::Buy => qty,
-        Side::Sell => -qty,
-    }
+fn exact(value: f64) -> Result<Exact, DenyReason> {
+    Exact::from_legacy_f64(value).map_err(|e| unknown(e.to_string()))
+}
+pub(crate) fn policy(value: f64) -> Exact {
+    Exact::parse_decimal(&value.to_string()).expect("validated finite risk configuration")
+}
+fn report(value: &Exact) -> f64 {
+    value.reporting_f64()
 }
 
+fn signed(side: Side, qty: &Exact) -> Exact {
+    if side == Side::Buy {
+        qty.clone()
+    } else {
+        -qty
+    }
+}
+fn max_price(a: Option<Exact>, b: Option<Exact>) -> Option<Exact> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+fn valid_price(value: f64) -> Option<Exact> {
+    exact(value).ok().filter(Exact::is_positive)
+}
+fn approved_quantity(intent: &Intent, qty: f64) -> Option<Exact> {
+    if !qty.is_finite() || qty <= 0.0 {
+        return None;
+    }
+    if qty == intent.qty {
+        intent.quantity().ok()
+    } else {
+        Exact::parse_decimal(&qty.to_string()).ok()
+    }
+}
 impl Kernel {
     pub fn new(cfg: KernelConfig) -> Result<Self, ConfigError> {
         cfg.validate()?;
@@ -49,75 +74,72 @@ impl Kernel {
             margin: MarginBook::default(),
         })
     }
-
-    /// A price the kernel may value exposure at. The engine feeds this from
-    /// market state; fills update it too.
     pub fn observe_price(&mut self, symbol: SymbolId, px: f64) {
         self.book.observe_px(symbol, px);
     }
-
-    /// Bind an approved intent to the client order id the engine minted for it,
-    /// before the order is sent. An unregistered order is exposure nothing has
-    /// reserved: it is invisible to every cap until its fill arrives.
-    pub fn register_order(&mut self, client_order_id: &str, intent: &Intent, approved_qty: f64) {
-        let quoted = match intent.kind {
-            OrderKind::Limit { px, .. } if px.is_finite() && px > 0.0 => px,
+    pub fn register_order(&mut self, id: &str, intent: &Intent, qty: f64) {
+        let px = match intent.kind {
+            OrderKind::Limit { px, .. } => px,
             _ => 0.0,
         };
-        self.register_order_price_range(client_order_id, intent, approved_qty, quoted, quoted);
+        self.register_order_price_range(id, intent, qty, px, px);
     }
-
-    /// Bind a reservation whose amend acknowledgement was lost. A single
-    /// worst price is insufficient: high prices dominate gross notional while
-    /// low prices can dominate a short's loss to its stop.
     pub fn register_order_price_range(
         &mut self,
-        client_order_id: &str,
+        id: &str,
         intent: &Intent,
-        approved_qty: f64,
-        quoted_low_px: f64,
-        quoted_high_px: f64,
+        qty: f64,
+        low: f64,
+        high: f64,
     ) {
-        let observed = self.book.px(intent.symbol).unwrap_or(0.0);
-        let first = positive(quoted_low_px);
-        let second = positive(quoted_high_px);
-        let (quoted_low_px, quoted_high_px) = match (first > 0.0, second > 0.0) {
-            (true, true) => (first.min(second), first.max(second)),
-            (true, false) => (first, first),
-            (false, true) => (second, second),
-            (false, false) => (0.0, 0.0),
-        };
-        let px = quoted_high_px.max(observed);
-        let low_px = match (quoted_low_px > 0.0, observed > 0.0) {
-            (true, true) => quoted_low_px.min(observed),
-            (true, false) => quoted_low_px,
-            (false, true) => observed,
-            (false, false) => 0.0,
-        };
-        let stop_fraction = if intent.reduce_only {
-            Some(0.0)
-        } else if low_px > 0.0 && px > 0.0 {
-            read_stop(intent, low_px, px)
-                .ok()
-                .filter(|fraction| fraction.is_finite())
+        self.register_prices(
+            id,
+            intent,
+            approved_quantity(intent, qty),
+            Self::reservation_price(intent, low),
+            Self::reservation_price(intent, high),
+        );
+    }
+    fn reservation_price(intent: &Intent, price: f64) -> Option<Exact> {
+        if matches!(intent.kind, OrderKind::Limit { px, .. } if px == price) {
+            intent.limit_price().ok().flatten()
         } else {
-            None
+            valid_price(price)
+        }
+    }
+    fn register_prices(
+        &mut self,
+        id: &str,
+        intent: &Intent,
+        quantity: Option<Exact>,
+        first: Option<Exact>,
+        second: Option<Exact>,
+    ) {
+        let observed = self.book.px(intent.symbol);
+        let high = max_price(max_price(first.clone(), second.clone()), observed.clone());
+        let low = first.into_iter().chain(second).chain(observed).min();
+        let fraction = if intent.reduce_only {
+            Some(Exact::zero())
+        } else {
+            low.as_ref()
+                .zip(high.as_ref())
+                .and_then(|(a, b)| read_stop(intent, a, b).ok())
         };
+        let quantity = quantity.filter(|_| intent.validate_price_projection().is_ok());
         self.margin
-            .register(client_order_id, intent.symbol, Some(approved_qty), px);
+            .register(id, intent.symbol, quantity.clone(), high.clone());
         self.book.register(
-            client_order_id,
+            id,
             Pending {
                 strategy: intent.strategy,
                 symbol: intent.symbol,
-                signed_qty: signed(intent.side, approved_qty),
+                signed_qty: quantity.map(|q| signed(intent.side, &q)),
                 reduce_only: intent.reduce_only,
-                px,
-                stop_fraction,
+                px: high,
+                stop_fraction: fraction,
             },
         );
     }
-
     pub fn register_order_with_account(
         &mut self,
         id: &str,
@@ -125,13 +147,12 @@ impl Kernel {
         qty: f64,
         account: &AccountView,
     ) {
-        let quoted = match intent.kind {
-            OrderKind::Limit { px, .. } if px.is_finite() && px > 0.0 => px,
+        let px = match intent.kind {
+            OrderKind::Limit { px, .. } => px,
             _ => 0.0,
         };
-        self.register_order_price_range_with_account(id, intent, qty, (quoted, quoted), account);
+        self.register_order_price_range_with_account(id, intent, qty, (px, px), account);
     }
-
     pub fn register_order_price_range_with_account(
         &mut self,
         id: &str,
@@ -140,456 +161,399 @@ impl Kernel {
         price_range: (f64, f64),
         account: &AccountView,
     ) {
+        self.register_owned_prices(
+            id,
+            intent,
+            approved_quantity(intent, qty),
+            (
+                Self::reservation_price(intent, price_range.0),
+                Self::reservation_price(intent, price_range.1),
+            ),
+            account,
+        );
+    }
+    pub fn register_order_exact_price_range_with_account(
+        &mut self,
+        id: &str,
+        intent: &Intent,
+        qty: &Exact,
+        price_range: (&Exact, &Exact),
+        account: &AccountView,
+    ) {
+        let quantity = intent.quantity().ok().filter(|value| value == qty);
+        self.register_owned_prices(
+            id,
+            intent,
+            quantity,
+            (
+                Some(price_range.0.clone()).filter(Exact::is_positive),
+                Some(price_range.1.clone()).filter(Exact::is_positive),
+            ),
+            account,
+        );
+    }
+    fn register_owned_prices(
+        &mut self,
+        id: &str,
+        intent: &Intent,
+        quantity: Option<Exact>,
+        price_range: (Option<Exact>, Option<Exact>),
+        account: &AccountView,
+    ) {
         self.book.forget(id);
-        let quantity = if intent.reduce_only {
-            ViewFacts::read(account, 0.0).ok().and_then(|view| {
-                let physical = view.net_qty(intent.symbol)
-                    + self
-                        .book
-                        .fills_after(account.observed_ns)
-                        .get(&intent.symbol.0)
-                        .map_or(0.0, |row| row.signed_qty);
-                self.incremental_physical_quantity(intent, qty, physical)
-                    .ok()
-            })
+        let margin_quantity = if intent.reduce_only {
+            ViewFacts::read(account, &Exact::zero())
+                .ok()
+                .and_then(|view| {
+                    let recent = self.book.fills_after(account.observed_ns).ok()?;
+                    let physical = view.net_qty(intent.symbol)
+                        + recent
+                            .get(&intent.symbol.0)
+                            .map_or_else(Exact::zero, |r| r.signed_qty.clone());
+                    self.incremental_physical_quantity(intent, quantity.as_ref()?, &physical)
+                        .ok()
+                })
         } else {
-            Some(qty)
+            quantity.clone()
         };
-        self.register_order_price_range(id, intent, qty, price_range.0, price_range.1);
-        self.margin.set_quantity(id, quantity);
+        self.register_prices(id, intent, quantity, price_range.0, price_range.1);
+        self.margin.set_quantity(id, margin_quantity);
     }
-
-    pub fn complete_order(&mut self, id: &str, confirmed_ns: u64) {
+    pub fn complete_order(&mut self, id: &str, ns: u64) {
         self.book.forget(id);
-        self.margin.retire(id, confirmed_ns);
+        self.margin.retire(id, ns);
     }
-
     pub fn mark_order_attempted(&mut self, id: &str) {
         self.margin.attempted(id);
     }
-
-    pub fn mark_order_accepted(&mut self, id: &str, confirmed_ns: u64) {
-        self.margin.accepted(id, confirmed_ns);
+    pub fn mark_order_accepted(&mut self, id: &str, ns: u64) {
+        self.margin.accepted(id, ns);
     }
-
     pub fn capital_reference_usdt(&self) -> f64 {
-        self.envelope.reference_usdt()
+        report(self.envelope.reference_usdt())
     }
-
-    /// Fold in one closed round trip of this engine's own, net of venue fees.
     pub fn observe_closed_trade(&mut self, row: ClosedTradeRow) {
         self.loss_window.observe(row);
     }
-
-    /// Age the rolling loss window on against the venue's wall clock, so a
-    /// losing day drops out even while nothing closes.
-    pub fn observe_wall_clock_ms(&mut self, wall_ms: i64) {
-        self.loss_window.observe_clock(wall_ms);
+    pub fn observe_wall_clock_ms(&mut self, ms: i64) {
+        self.loss_window.observe_clock(ms);
     }
-
     pub fn rolling_loss(&self) -> RollingLossView {
-        let limit_usdt = self.rolling_loss_limit_usdt();
-        let net_usdt = self.loss_window.net_usdt();
+        let limit = self.rolling_loss_limit();
+        let net = self.loss_window.net_usdt();
         RollingLossView {
             window_ms: ROLLING_LOSS_WINDOW_MS,
             trades: self.loss_window.trades(),
-            net_usdt: net_usdt.unwrap_or(0.0),
-            limit_usdt,
-            tripped: net_usdt.is_some_and(|net| net <= -limit_usdt),
+            net_usdt: net.map_or(0.0, report),
+            limit_usdt: report(&limit),
+            tripped: !self.loss_window.valid() || net.is_some_and(|net| net <= &-limit),
         }
     }
-
     pub fn rolling_loss_rows(&self) -> Vec<ClosedTradeRow> {
         self.loss_window.rows()
     }
-
-    /// Set the window's trades to these. A restart hands back what it closed
-    /// before it stopped, so a trip survives it.
     pub fn restore_rolling_loss_rows(&mut self, rows: &[ClosedTradeRow]) {
         self.loss_window.restore(rows);
     }
-
-    /// The most the window may lose, against the reference the envelope
-    /// stands at now — so it contracts as equity falls.
-    fn rolling_loss_limit_usdt(&self) -> f64 {
-        self.cfg.max_rolling_loss_fraction * self.envelope.reference_usdt()
+    fn rolling_loss_limit(&self) -> Exact {
+        policy(self.cfg.max_rolling_loss_fraction) * self.envelope.reference_usdt()
     }
-
-    fn price_for(&self, symbol: SymbolId, view: &ViewFacts) -> Option<f64> {
-        match (self.book.px(symbol), view.entry_px(symbol)) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        }
+    fn price_for(&self, symbol: SymbolId, view: &ViewFacts) -> Option<Exact> {
+        max_price(self.book.px(symbol), view.entry_px(symbol))
     }
-
-    fn held_stop_fraction(&self, symbol: SymbolId, view: &ViewFacts) -> Result<f64, DenyReason> {
-        let mut found = false;
-        let mut worst = 0.0_f64;
-        for (_, side, entry_px, stop_px) in view
+    fn held_stop_fraction(&self, symbol: SymbolId, view: &ViewFacts) -> Result<Exact, DenyReason> {
+        let mut worst = None;
+        for (_, side, entry, stop) in view
             .stops
             .iter()
             .filter(|(held, _, _, _)| *held == symbol.0)
         {
-            found = true;
-            let current = self.book.px(symbol).unwrap_or(*entry_px);
-            if !current.is_finite() || current <= 0.0 {
-                return Err(unknown("no price to measure a held position's stop"));
-            }
-            let low = current.min(*entry_px);
-            let high = current.max(*entry_px);
-            let fraction = match side {
-                Side::Buy if *stop_px < current => (high - *stop_px) / high,
-                Side::Sell if *stop_px > current => (*stop_px - low) / high,
+            let current = self.book.px(symbol).unwrap_or_else(|| entry.clone());
+            let low = current.clone().min(entry.clone());
+            let high = current.clone().max(entry.clone());
+            let distance = match side {
+                Side::Buy if *stop < current => &high - stop,
+                Side::Sell if *stop > current => stop - low,
                 _ => {
                     return Err(unknown(
                         "held position stop is not on the protective side of plausible prices",
-                    ));
+                    ))
                 }
             };
-            if !fraction.is_finite() || fraction < 0.0 {
-                return Err(unknown("held position stop distance is unreadable"));
-            }
-            worst = worst.max(fraction);
+            let fraction = distance
+                .checked_div(&high)
+                .map_err(|e| unknown(e.to_string()))?;
+            worst = Some(
+                worst.map_or_else(|| fraction.clone(), |old: Exact| old.max(fraction.clone())),
+            );
         }
-        if found {
-            Ok(worst)
-        } else {
-            Err(unknown("held position has no readable stop level"))
-        }
+        worst.ok_or_else(|| unknown("held position has no readable stop level"))
     }
-
-    fn evaluate(&mut self, intent: &Intent, account: &AccountView) -> Result<f64, DenyReason> {
+    fn evaluate(&mut self, intent: &Intent, account: &AccountView) -> Result<Exact, DenyReason> {
         self.evaluate_inventory(intent, account, None)
     }
-
     fn evaluate_inventory(
         &mut self,
         intent: &Intent,
         account: &AccountView,
         portfolio: Option<&PortfolioFacts>,
-    ) -> Result<f64, DenyReason> {
-        // 1. A view stamped after the decision is nonsense for everyone.
+    ) -> Result<Exact, DenyReason> {
         if account.observed_ns > intent.decided_ns {
             return Err(unknown("account view is newer than the decision it judges"));
         }
         let age_ns = intent.decided_ns - account.observed_ns;
-
-        // 2. Can the view and the intent be read at all? Exits need this
-        //    too: the clamp below sizes against the position rows.
-        let quantity_tolerance = if portfolio.is_some() {
-            0.0
+        let tolerance = if portfolio.is_some() {
+            Exact::zero()
         } else {
-            self.cfg.qty_tolerance
+            policy(self.cfg.qty_tolerance)
         };
-        let view = ViewFacts::read(account, quantity_tolerance)?;
-        let ask_qty = read_intent_qty(intent)?;
-
-        // 3. A genuine exit passes the staleness refusal below: risk-reducing
-        //    orders flow while blind, and the venue's reduce-only enforcement
-        //    bounds an exit sized from an old reading.
-        let recent = self.book.fills_after(account.observed_ns);
-        let physical_qty = view.net_qty(intent.symbol)
+        let view = ViewFacts::read(account, &tolerance)?;
+        if intent.exact_prices.is_some() {
+            intent
+                .validate_price_projection()
+                .map_err(|e| unknown(e.to_string()))?;
+        }
+        let ask = intent.quantity().map_err(|e| unknown(e.to_string()))?;
+        let recent = self
+            .book
+            .fills_after(account.observed_ns)
+            .map_err(unknown)?;
+        let physical = view.net_qty(intent.symbol)
             + recent
                 .get(&intent.symbol.0)
-                .map(|row| row.signed_qty)
-                .unwrap_or(0.0);
-        let settled_qty = portfolio.map_or(physical_qty, |portfolio| {
-            portfolio.owned(intent.strategy, intent.symbol)
-        });
-        let delta = signed(intent.side, ask_qty);
-        let reduces_settled = settled_qty.abs() > quantity_tolerance
-            && ((delta < 0.0 && settled_qty > 0.0) || (delta > 0.0 && settled_qty < 0.0));
+                .map_or_else(Exact::zero, |r| r.signed_qty.clone());
+        let settled = portfolio.map_or_else(
+            || physical.clone(),
+            |p| p.owned(intent.strategy, intent.symbol),
+        );
+        let delta = signed(intent.side, &ask);
+        let reduces = settled.abs() > tolerance
+            && !delta.is_zero()
+            && delta.is_negative() != settled.is_negative();
         if intent.reduce_only {
-            if !reduces_settled {
+            if !reduces {
                 return Err(unknown(
                     "reduce_only intent does not reduce the position it names",
                 ));
             }
             if let OrderKind::Limit { px, .. } = intent.kind {
-                if !px.is_finite() || px <= 0.0 {
+                if valid_price(px).is_none() {
                     return Err(unknown("exit limit price is not a positive number"));
                 }
             }
-            // The venue bounds ONE reduce-only order to the position, not a
-            // stack of them: what resting exits already cover is spoken for.
             let covered = if portfolio.is_some() {
                 self.book.owned_reduce_qty(intent.strategy, intent.symbol)
             } else {
                 self.book.pending_reduce_qty(intent.symbol)
-            };
-            let open = settled_qty.abs() - covered;
-            if open <= quantity_tolerance {
+            }
+            .map_err(unknown)?;
+            let open = settled.abs() - covered;
+            if open <= tolerance {
                 return Err(unknown(
                     "the position is already fully covered by resting exits",
                 ));
             }
-            let qty = ask_qty.min(open);
+            let qty = ask.min(open);
             if let Some(portfolio) = portfolio {
-                self.check_virtual_reduction(intent, qty, physical_qty, age_ns, &view, portfolio)?;
+                self.check_virtual_reduction(intent, &qty, &physical, age_ns, &view, portfolio)?;
             }
             return Ok(qty);
         }
-
-        // 4. Entries are judged only against evidence about the account now.
         if age_ns > self.cfg.max_account_view_age_ns {
             return Err(DenyReason::StaleAccountView {
                 age_ns,
                 max_age_ns: self.cfg.max_account_view_age_ns,
             });
         }
-
-        self.envelope.observe_equity(view.equity_usdt);
-
-        // 5. What this engine's own closed trades did inside the rolling
-        //    window. Genuine exits returned above and keep flowing.
-        let limit_usdt = self.rolling_loss_limit_usdt();
-        if let Some(window_net_usdt) = self
-            .loss_window
-            .net_usdt()
-            .filter(|net| *net <= -limit_usdt)
-        {
+        self.envelope.observe_equity(&view.equity_usdt);
+        if !self.loss_window.valid() {
+            return Err(unknown(
+                "closed-trade account-unit valuation is unavailable or invalid",
+            ));
+        }
+        let limit = self.rolling_loss_limit();
+        if let Some(net) = self.loss_window.net_usdt().filter(|net| *net <= &-&limit) {
             return Err(DenyReason::RollingLossTripped {
-                window_net_usdt,
-                limit_usdt,
+                window_net_usdt: report(net),
+                limit_usdt: report(&limit),
                 window_ms: ROLLING_LOSS_WINDOW_MS,
             });
         }
-
-        // An unflagged reduction is judged as an entry from here on, but must
-        // not cross through flat to the other side.
-        if reduces_settled {
-            let already_opposite = if portfolio.is_some() {
+        if reduces {
+            let opposite = if portfolio.is_some() {
                 self.book
                     .owned_open_qty(intent.strategy, intent.symbol, intent.side)
             } else {
                 self.book.pending_open_qty(intent.symbol, intent.side)
-            };
-            if already_opposite + ask_qty > settled_qty.abs() + quantity_tolerance {
+            }
+            .map_err(unknown)?;
+            if opposite + &ask > settled.abs() + tolerance {
                 return Err(unknown("intent crosses through flat to the other side"));
             }
         }
-
-        // 6. Stop discipline. Every position carries one: an entry without a
-        //    stop is refused before it reaches the venue, and a book already
-        //    holding an unprotected position takes no new risk.
         if view.unprotected || intent.stop.is_none() {
             return Err(DenyReason::MissingStop);
         }
-        let (low_px, px) = self.entry_prices(intent, &view)?;
-        let stop_fraction = read_stop(intent, low_px, px)?;
-
-        // The book this order leaves, walked once so the envelope and the
-        // account caps below can never disagree about what is on it.
-        let notional = ask_qty * px;
+        let (low, px) = self.entry_prices(intent, &view)?;
+        let fraction = read_stop(intent, &low, &px)?;
+        let notional = &ask * px;
         let projected = if let Some(portfolio) = portfolio {
-            self.projected_portfolio(notional, stop_fraction, account, &view, portfolio)?
+            self.projected_portfolio(&notional, &fraction, account, &view, portfolio)?
         } else {
-            self.projected_book(notional, stop_fraction, account, &view)?
+            self.projected_book(&notional, &fraction, account, &view)?
         };
-
-        // 7. The equity-anchored envelope.
-        let allowance_usdt = self.envelope.allowance_usdt();
-        if projected.worst_case_loss_usdt > allowance_usdt {
+        let allowance = self.envelope.allowance_usdt();
+        if projected.worst_case_loss_usdt > allowance {
             return Err(DenyReason::EnvelopeBreached {
-                worst_case_loss_usdt: projected.worst_case_loss_usdt,
-                allowance_usdt,
+                worst_case_loss_usdt: report(&projected.worst_case_loss_usdt),
+                allowance_usdt: report(&allowance),
             });
         }
-
-        // 8. The account-wide capital caps.
-        self.account_caps(notional, &projected, &view)?;
-        Ok(ask_qty)
+        self.account_caps(&notional, &projected, &view)?;
+        Ok(ask)
     }
-
-    /// Account-wide gross notional once this order is added, plus the
-    /// worst-case loss the envelope judges.
-    ///
-    /// Nothing here nets this order against the position it lands on: a book
-    /// that already holds 100 long and asks for 100 more short counts 200, not
-    /// zero. Both sides really are exposure until one of them closes, and the
-    /// Python kernel's own gross figure is summed the same way.
     fn projected_book(
         &mut self,
-        notional: f64,
-        stop_fraction: f64,
+        notional: &Exact,
+        fraction: &Exact,
         account: &AccountView,
         view: &ViewFacts,
     ) -> Result<Projected, DenyReason> {
-        // Fills newer than the view are in neither the view nor the
-        // reservations — fold them in so a just-filled position is never
-        // counted nowhere.
-        let mut recent = self.book.fills_after(account.observed_ns);
-        let mut projected = Projected::default();
-        projected.add(notional);
-        projected.worst_case_loss_usdt = self
-            .envelope
-            .position_worst_case_usdt(notional, stop_fraction);
+        let mut recent = self
+            .book
+            .fills_after(account.observed_ns)
+            .map_err(unknown)?;
+        let mut projected = Projected {
+            gross_usdt: notional.clone(),
+            worst_case_loss_usdt: self.envelope.position_worst_case_usdt(notional, fraction),
+        };
         for (symbol, qty) in view.exposures() {
-            let just_filled = recent.remove(&symbol.0);
-            let effective_qty = qty
-                + just_filled
-                    .map(|exposure| exposure.signed_qty)
-                    .unwrap_or(0.0);
-            if effective_qty.abs() <= self.cfg.qty_tolerance {
+            let fill = recent.remove(&symbol.0);
+            let effective = qty
+                + fill
+                    .as_ref()
+                    .map_or_else(Exact::zero, |r| r.signed_qty.clone());
+            if effective.abs() <= policy(self.cfg.qty_tolerance) {
                 continue;
             }
-            let recent_stop = match just_filled {
-                Some(exposure) => exposure.stop_fraction.ok_or_else(|| {
+            let recent_stop = match fill {
+                Some(row) => row.stop_fraction.ok_or_else(|| {
                     unknown("a fill newer than the account view has no readable stop distance")
                 })?,
-                None => 0.0,
+                None => Exact::zero(),
             };
-            let held_px = self
+            let price = self
                 .price_for(symbol, view)
                 .ok_or_else(|| unknown("no price for a held symbol"))?;
-            let held_usdt = effective_qty.abs() * held_px;
-            projected.add(held_usdt);
-            let held_stop = self.held_stop_fraction(symbol, view)?;
-            let combined_stop = held_stop.max(recent_stop);
-            projected.worst_case_loss_usdt += self
-                .envelope
-                .position_worst_case_usdt(held_usdt, combined_stop);
+            let notional = effective.abs() * price;
+            let stop = self.held_stop_fraction(symbol, view)?.max(recent_stop);
+            projected.add(&notional);
+            projected.worst_case_loss_usdt +=
+                self.envelope.position_worst_case_usdt(&notional, &stop);
         }
-        for (symbol, exposure) in recent {
-            if exposure.signed_qty.abs() <= self.cfg.qty_tolerance {
+        for (symbol, row) in recent {
+            if row.signed_qty.abs() <= policy(self.cfg.qty_tolerance) {
                 continue;
             }
-            let stop_fraction = exposure.stop_fraction.ok_or_else(|| {
+            let fraction = row.stop_fraction.ok_or_else(|| {
                 unknown("a fill newer than the account view has no readable stop distance")
             })?;
-            let held_px = self
+            let price = self
                 .price_for(SymbolId(symbol), view)
                 .ok_or_else(|| unknown("no price for a just-filled symbol"))?;
-            let held_usdt = exposure.signed_qty.abs() * held_px;
-            projected.add(held_usdt);
-            projected.worst_case_loss_usdt += self
-                .envelope
-                .position_worst_case_usdt(held_usdt, stop_fraction);
+            let notional = row.signed_qty.abs() * price;
+            projected.add(&notional);
+            projected.worst_case_loss_usdt +=
+                self.envelope.position_worst_case_usdt(&notional, &fraction);
         }
-        let in_flight = self
-            .book
-            .pending_risk_rows(|symbol| self.price_for(symbol, view))
-            .map_err(unknown)?;
-        for (_symbol, pending_usdt, pending_stop_fraction) in in_flight {
-            projected.add(pending_usdt);
-            projected.worst_case_loss_usdt += self
-                .envelope
-                .position_worst_case_usdt(pending_usdt, pending_stop_fraction);
-        }
+        self.add_pending(&mut projected, view)?;
         Ok(projected)
     }
-
-    /// The caps that bound the whole account rather than one strategy, in
-    /// order from the smallest thing an operator can change to the largest, so
-    /// the first refusal is the most actionable one.
-    ///
-    /// Every cap here was sized against the configured capital reference, so
-    /// each is multiplied by how far the reference has moved — the same
-    /// rescale `profile_at_capital_reference` does to the whole profile.
-    ///
-    /// These refuse rather than clamp, as the Python kernel refuses the whole
-    /// batch.
+    fn add_pending(&self, projected: &mut Projected, view: &ViewFacts) -> Result<(), DenyReason> {
+        for (_, notional, fraction) in self
+            .book
+            .pending_risk_rows(|symbol| self.price_for(symbol, view))
+            .map_err(unknown)?
+        {
+            projected.add(&notional);
+            projected.worst_case_loss_usdt +=
+                self.envelope.position_worst_case_usdt(&notional, &fraction);
+        }
+        Ok(())
+    }
     fn account_caps(
         &self,
-        notional: f64,
+        notional: &Exact,
         projected: &Projected,
         view: &ViewFacts,
     ) -> Result<(), DenyReason> {
         let caps = &self.cfg.envelope;
         let scale = self.envelope.scale();
-
-        let cap_usdt = caps.max_component_gross_notional_usdt * scale;
-        if projected.gross_usdt > cap_usdt {
+        let cap = policy(caps.max_component_gross_notional_usdt) * &scale;
+        if projected.gross_usdt > cap {
             return Err(DenyReason::ComponentGrossBreached {
-                gross_usdt: projected.gross_usdt,
-                cap_usdt,
+                gross_usdt: report(&projected.gross_usdt),
+                cap_usdt: report(&cap),
             });
         }
-
-        // The intent carries no leverage of its own, so the account leverage
-        // stands in.
-        let leverage = self.cfg.leverage;
-        let margin_usdt = projected.gross_usdt / leverage;
-        let cap_usdt = caps.max_initial_margin_usdt * scale;
-        if margin_usdt > cap_usdt {
+        let leverage = policy(self.cfg.leverage);
+        let margin = projected
+            .gross_usdt
+            .checked_div(&leverage)
+            .expect("positive leverage");
+        let cap = policy(caps.max_initial_margin_usdt) * scale;
+        if margin > cap {
             return Err(DenyReason::InitialMarginBreached {
-                margin_usdt,
-                cap_usdt,
+                margin_usdt: report(&margin),
+                cap_usdt: report(&cap),
             });
         }
-
-        let additional_margin_usdt = notional / leverage + self.unreflected_margin(view)?;
-        if !additional_margin_usdt.is_finite() {
-            return Err(unknown("required margin is unreadable"));
-        }
-        if additional_margin_usdt > view.available_usdt {
-            return Err(DenyReason::AvailableMarginExhausted {
-                additional_margin_usdt,
-                available_usdt: view.available_usdt,
-            });
-        }
-        Ok(())
+        let additional = notional.checked_div(&leverage).expect("positive leverage")
+            + self.unreflected_margin(view)?;
+        self.check_available(&additional, view)
     }
-
-    fn unreflected_margin(&self, view: &ViewFacts) -> Result<f64, DenyReason> {
+    fn check_available(&self, additional: &Exact, view: &ViewFacts) -> Result<(), DenyReason> {
+        if additional > &view.available_usdt {
+            Err(DenyReason::AvailableMarginExhausted {
+                additional_margin_usdt: report(additional),
+                available_usdt: report(&view.available_usdt),
+            })
+        } else {
+            Ok(())
+        }
+    }
+    fn unreflected_margin(&self, view: &ViewFacts) -> Result<Exact, DenyReason> {
         self.margin
-            .required(view.observed_ns, self.cfg.leverage, |symbol| {
+            .required(view.observed_ns, &policy(self.cfg.leverage), |symbol| {
                 self.price_for(symbol, view)
             })
             .map_err(unknown)
     }
-
-    /// The lowest and highest price this order could reasonably fill at, from
-    /// its own limit and from what the kernel last saw. Exposure is valued at
-    /// the higher one and the stop is judged against both.
-    fn entry_prices(&self, intent: &Intent, view: &ViewFacts) -> Result<(f64, f64), DenyReason> {
-        let quoted = match intent.kind {
-            OrderKind::Limit { px, .. } => {
-                if !px.is_finite() || px <= 0.0 {
-                    return Err(unknown("limit price is not a positive number"));
-                }
-                Some(px)
-            }
-            OrderKind::Market => None,
-        };
+    fn entry_prices(
+        &self,
+        intent: &Intent,
+        view: &ViewFacts,
+    ) -> Result<(Exact, Exact), DenyReason> {
+        let quoted = intent.limit_price().map_err(|_| {
+            unknown("limit price is not a positive number or disagrees with its canonical value")
+        })?;
         match (quoted, self.price_for(intent.symbol, view)) {
-            (Some(a), Some(b)) => Ok((a.min(b), a.max(b))),
-            (Some(a), None) => Ok((a, a)),
-            (None, Some(b)) => Ok((b, b)),
-            (None, None) => Err(unknown("no price to value this symbol")),
+            (Some(a), Some(b)) => Ok((a.clone().min(b.clone()), a.max(b))),
+            (Some(a), None) | (None, Some(a)) => Ok((a.clone(), a)),
+            _ => Err(unknown("no price to value this symbol")),
         }
     }
 }
-
 impl RiskKernel for Kernel {
-    /// Evaluated in this order, first refusal wins:
-    ///
-    /// 1. a view stamped after the decision — unknown state;
-    /// 2. readability of the view and the intent — anything unreadable is
-    ///    [`DenyReason::UnknownState`], before the age check, so a genuine
-    ///    exit can still be sized from a stale-but-readable view;
-    /// 3. exit or entry: a genuine exit is clamped to the position and stops
-    ///    here — risk-reducing orders flow even under a stale reading;
-    /// 4. entry freshness — too old is [`DenyReason::StaleAccountView`];
-    /// 5. the rolling loss window — this engine's own closed trades, net of
-    ///    venue fees, against a limit that follows the capital reference
-    ///    ([`DenyReason::RollingLossTripped`]);
-    /// 6. stop discipline — [`DenyReason::MissingStop`];
-    /// 7. the equity-anchored envelope — [`DenyReason::EnvelopeBreached`];
-    /// 8. the account-wide capital caps, smallest scope first: the whole
-    ///    book's gross ([`DenyReason::ComponentGrossBreached`]), the whole
-    ///    book's margin ([`DenyReason::InitialMarginBreached`]), and whether
-    ///    the account's spare margin funds the increase
-    ///    ([`DenyReason::AvailableMarginExhausted`]).
     fn assess(&mut self, intent: &Intent, account: &AccountView) -> RiskVerdict {
-        match self.evaluate(intent, account) {
+        match self
+            .evaluate(intent, account)
+            .and_then(|qty| qty.to_f64().map_err(|e| unknown(e.to_string())))
+        {
             Ok(qty) => RiskVerdict::Allow { qty },
             Err(reason) => RiskVerdict::Deny { reason },
         }
     }
-
     fn assess_portfolio(
         &mut self,
         intent: &Intent,
@@ -598,30 +562,20 @@ impl RiskKernel for Kernel {
     ) -> engine_types::risk::PortfolioRiskVerdict {
         use engine_types::risk::PortfolioRiskVerdict;
         let result = PortfolioFacts::read(portfolio)
-            .and_then(|portfolio| self.evaluate_inventory(intent, account, Some(&portfolio)));
+            .and_then(|p| self.evaluate_inventory(intent, account, Some(&p)))
+            .and_then(|qty| {
+                let interval = self.physical_interval_for(intent.symbol, account)?;
+                let reduce = intent.reduce_only && interval.certainly_reduces(intent.side, &qty);
+                Ok((qty, reduce))
+            });
         match result {
-            Ok(qty) => {
-                let physical = account
-                    .positions
-                    .iter()
-                    .filter(|p| p.symbol == intent.symbol)
-                    .map(|p| signed(p.side, p.qty))
-                    .sum::<f64>()
-                    + self
-                        .book
-                        .fills_after(account.observed_ns)
-                        .get(&intent.symbol.0)
-                        .map_or(0.0, |r| r.signed_qty);
-                PortfolioRiskVerdict::Allow {
-                    qty,
-                    venue_reduce_only: intent.reduce_only
-                        && self.physical_reduction(intent, qty, physical),
-                }
-            }
+            Ok((qty, venue_reduce_only)) => PortfolioRiskVerdict::Allow {
+                qty,
+                venue_reduce_only,
+            },
             Err(reason) => PortfolioRiskVerdict::Deny { reason },
         }
     }
-
     fn reassess_portfolio_order(
         &mut self,
         id: &str,
@@ -629,19 +583,23 @@ impl RiskKernel for Kernel {
         account: &AccountView,
         portfolio: &engine_types::portfolio::PortfolioState,
     ) -> engine_types::risk::PortfolioRiskVerdict {
+        use engine_types::risk::PortfolioRiskVerdict;
         let Some(previous) = self.book.take(id) else {
-            return engine_types::risk::PortfolioRiskVerdict::Deny {
+            return PortfolioRiskVerdict::Deny {
                 reason: unknown("portfolio reassessment has no matching reservation"),
             };
         };
         let margin = self.margin.take(id);
         let verdict = if previous.symbol == intent.symbol
             && previous.strategy == intent.strategy
-            && previous.signed_qty.is_sign_positive() == (intent.side == Side::Buy)
+            && previous
+                .signed_qty
+                .as_ref()
+                .is_some_and(|q| q.is_negative() == (intent.side == Side::Sell))
         {
             self.assess_portfolio(intent, account, portfolio)
         } else {
-            engine_types::risk::PortfolioRiskVerdict::Deny {
+            PortfolioRiskVerdict::Deny {
                 reason: unknown("portfolio reassessment names another order owner or direction"),
             }
         };
@@ -649,7 +607,6 @@ impl RiskKernel for Kernel {
         self.margin.restore(id, margin);
         verdict
     }
-
     fn physical_exposure_interval_excluding(
         &mut self,
         id: &str,
@@ -660,45 +617,45 @@ impl RiskKernel for Kernel {
             .book
             .take(id)
             .ok_or_else(|| unknown("physical interval exclusion has no matching reservation"))?;
-        let interval = if previous.symbol == symbol {
+        let result = if previous.symbol == symbol {
             self.physical_interval_for(symbol, account)
         } else {
             Err(unknown("physical interval exclusion names another symbol"))
         };
         self.book.register(id, previous);
-        interval
+        result
     }
-
     fn assess_price_amend(
         &mut self,
-        client_order_id: &str,
+        id: &str,
         intent: &Intent,
         account: &AccountView,
     ) -> RiskVerdict {
-        let Some(previous) = self.book.take(client_order_id) else {
+        let Some(previous) = self.book.take(id) else {
             return RiskVerdict::Deny {
                 reason: unknown("opening amend has no matching risk reservation"),
             };
         };
-        let previous_margin = self.margin.take(client_order_id);
-        // Judge the replacement, not old+replacement. Restore the old state
-        // before returning; the engine commits the conservative replacement
-        // only after its AmendSent record is durable.
-        let verdict = match self.evaluate(intent, account) {
-            Ok(qty) => RiskVerdict::Allow { qty },
-            Err(reason) => RiskVerdict::Deny { reason },
-        };
-        self.book.register(client_order_id, previous);
-        self.margin.restore(client_order_id, previous_margin);
+        let margin = self.margin.take(id);
+        let verdict = self.assess(intent, account);
+        self.book.register(id, previous);
+        self.margin.restore(id, margin);
         verdict
     }
-
     fn on_update_with_remaining(
         &mut self,
         update: &OrderUpdate,
-        remaining_qty: f64,
+        remaining: f64,
     ) -> Result<(), DenyReason> {
-        if !remaining_qty.is_finite() || remaining_qty < 0.0 {
+        let remaining = exact(remaining)?;
+        self.on_update_with_exact_remaining(update, &remaining)
+    }
+    fn on_update_with_exact_remaining(
+        &mut self,
+        update: &OrderUpdate,
+        remaining: &Exact,
+    ) -> Result<(), DenyReason> {
+        if remaining.is_negative() {
             return Err(unknown("canonical remaining quantity is invalid"));
         }
         let OrderUpdate::Fill {
@@ -707,6 +664,7 @@ impl RiskKernel for Kernel {
             side,
             qty,
             px,
+            amounts,
             recv_ns,
             ..
         } = update
@@ -714,16 +672,17 @@ impl RiskKernel for Kernel {
             self.on_update(update);
             return Ok(());
         };
-        if remaining_qty > 0.0 && !self.book.contains(client_order_id) {
+        if remaining.is_positive() && !self.book.contains(client_order_id) {
             return Err(unknown("canonical partial fill has no pending reservation"));
         }
-        self.book.observe_px(*symbol, *px);
+        let (quantity, price) = fill_amounts(*qty, *px, amounts.as_deref())?;
+        self.book.observe_exact_px(*symbol, price);
         self.book.on_fill_with_remaining(
             client_order_id,
             *symbol,
-            signed(*side, qty.abs()),
+            Some(signed(*side, &quantity)),
             *recv_ns,
-            Some(remaining_qty),
+            Some(remaining.clone()),
         );
         if self.book.contains(client_order_id) {
             self.margin.accepted(client_order_id, *recv_ns);
@@ -732,7 +691,6 @@ impl RiskKernel for Kernel {
         }
         Ok(())
     }
-
     fn on_update(&mut self, update: &OrderUpdate) {
         match update {
             OrderUpdate::Fill {
@@ -741,12 +699,21 @@ impl RiskKernel for Kernel {
                 side,
                 qty,
                 px,
+                amounts,
                 recv_ns,
                 ..
             } => {
-                self.book.observe_px(*symbol, *px);
-                self.book
-                    .on_fill(client_order_id, *symbol, signed(*side, qty.abs()), *recv_ns);
+                let values = fill_amounts(*qty, *px, amounts.as_deref()).ok();
+                if let Some((_, price)) = &values {
+                    self.book.observe_exact_px(*symbol, price.clone());
+                }
+                self.book.on_fill_with_remaining(
+                    client_order_id,
+                    *symbol,
+                    values.map(|(q, _)| signed(*side, &q)),
+                    *recv_ns,
+                    None,
+                );
                 if self.book.contains(client_order_id) {
                     self.margin.accepted(client_order_id, *recv_ns);
                 } else {
@@ -768,62 +735,37 @@ impl RiskKernel for Kernel {
                     .retire(client_order_id, engine_types::clock::mono_ns());
             }
             OrderUpdate::Ack(ack) => self.margin.accepted(&ack.client_order_id, ack.ack_ns),
-            OrderUpdate::FastFill { .. } | OrderUpdate::StopAttached { .. } => {}
-            // The reservation an amend widened is narrowed by the engine, in
-            // one call that names the price this news carried. Acting on the
-            // news here as well would register the order twice.
-            OrderUpdate::Amended { .. } => {}
-            // A private-stream gap loses nothing here: registered orders may
-            // still fill, and the engine refreshes the account view that
-            // `assess` judges against.
-            OrderUpdate::StreamReset { .. } => {}
+            _ => {}
         }
     }
-
-    // Forward the trait hooks to the inherent methods, so a caller generic
-    // over `RiskKernel` reaches the real accounting and not the no-op
-    // defaults.
     fn observe_price(&mut self, symbol: SymbolId, px: f64) {
         Kernel::observe_price(self, symbol, px);
     }
-
     fn observe_account_view(&mut self, account: &AccountView) {
-        // Refreshes happen independently of new intents. Prune fills the
-        // venue snapshot has caught up with here so a fill-heavy, entry-idle
-        // process does not retain its entire session until the next assess.
-        if ViewFacts::read(account, 0.0).is_ok() {
+        if let Ok(view) = ViewFacts::read(account, &Exact::zero()) {
+            self.book.prune_through(account.observed_ns);
             self.margin.observe(account.observed_ns);
-        }
-        self.book.prune_through(account.observed_ns);
-        if account.equity_usdt.is_finite() && account.equity_usdt > 0.0 {
-            self.envelope.observe_equity(account.equity_usdt);
+            self.envelope.observe_equity(&view.equity_usdt);
         }
     }
-
     fn observe_closed_trade(&mut self, row: ClosedTradeRow) {
         Kernel::observe_closed_trade(self, row);
     }
-
-    fn observe_wall_clock_ms(&mut self, wall_ms: i64) {
-        Kernel::observe_wall_clock_ms(self, wall_ms);
+    fn observe_wall_clock_ms(&mut self, ms: i64) {
+        Kernel::observe_wall_clock_ms(self, ms);
     }
-
     fn rolling_loss(&self) -> Option<RollingLossView> {
         Some(Kernel::rolling_loss(self))
     }
-
     fn rolling_loss_rows(&self) -> Vec<ClosedTradeRow> {
         Kernel::rolling_loss_rows(self)
     }
-
     fn restore_rolling_loss_rows(&mut self, rows: &[ClosedTradeRow]) {
         Kernel::restore_rolling_loss_rows(self, rows);
     }
-
-    fn register_order(&mut self, client_order_id: &str, intent: &Intent, approved_qty: f64) {
-        Kernel::register_order(self, client_order_id, intent, approved_qty);
+    fn register_order(&mut self, id: &str, intent: &Intent, qty: f64) {
+        Kernel::register_order(self, id, intent, qty);
     }
-
     fn physical_exposure_interval(
         &mut self,
         symbol: SymbolId,
@@ -845,10 +787,20 @@ impl RiskKernel for Kernel {
         id: &str,
         intent: &Intent,
         qty: f64,
-        price_range: (f64, f64),
+        range: (f64, f64),
         account: &AccountView,
     ) {
-        Kernel::register_order_price_range_with_account(
+        Kernel::register_order_price_range_with_account(self, id, intent, qty, range, account);
+    }
+    fn register_order_exact_price_range_with_account(
+        &mut self,
+        id: &str,
+        intent: &Intent,
+        qty: &Exact,
+        price_range: (&Exact, &Exact),
+        account: &AccountView,
+    ) {
+        Kernel::register_order_exact_price_range_with_account(
             self,
             id,
             intent,
@@ -857,8 +809,8 @@ impl RiskKernel for Kernel {
             account,
         );
     }
-    fn complete_order(&mut self, id: &str, confirmed_ns: u64) {
-        Kernel::complete_order(self, id, confirmed_ns);
+    fn complete_order(&mut self, id: &str, ns: u64) {
+        Kernel::complete_order(self, id, ns);
     }
     fn mark_order_attempted(&mut self, id: &str) {
         Kernel::mark_order_attempted(self, id);
@@ -866,187 +818,162 @@ impl RiskKernel for Kernel {
     fn mark_order_accepted(&mut self, id: &str, ns: u64) {
         Kernel::mark_order_accepted(self, id, ns);
     }
-
     fn register_order_price_range(
         &mut self,
-        client_order_id: &str,
+        id: &str,
         intent: &Intent,
-        approved_qty: f64,
-        low_px: f64,
-        high_px: f64,
+        qty: f64,
+        low: f64,
+        high: f64,
     ) {
-        Kernel::register_order_price_range(
-            self,
-            client_order_id,
-            intent,
-            approved_qty,
-            low_px,
-            high_px,
-        );
+        Kernel::register_order_price_range(self, id, intent, qty, low, high);
     }
 }
-
-fn read_intent_qty(intent: &Intent) -> Result<f64, DenyReason> {
-    if !intent.qty.is_finite() || intent.qty <= 0.0 {
-        return Err(unknown("intent quantity is not a positive number"));
-    }
-    Ok(intent.qty)
-}
-
-fn positive(value: f64) -> f64 {
-    if value.is_finite() && value > 0.0 {
-        value
+fn fill_amounts(
+    qty: f64,
+    px: f64,
+    amounts: Option<&engine_types::numeric::ExecutionAmounts>,
+) -> Result<(Exact, Exact), DenyReason> {
+    if let Some(amounts) = amounts {
+        amounts
+            .validate_projection(qty, px, None)
+            .map_err(|e| unknown(e.to_string()))?;
+        Ok((amounts.quantity.value.clone(), amounts.price.value.clone()))
     } else {
-        0.0
+        let qty = exact(qty)?;
+        let px = exact(px)?;
+        if !qty.is_positive() || !px.is_positive() {
+            return Err(unknown("execution quantity or price is invalid"));
+        }
+        Ok((qty, px))
     }
 }
-
-/// The worst stop distance, as a fraction of the notional. A stop that cannot
-/// protect — absent, unreadable, or on the wrong side of any price this order
-/// could fill at — is no stop.
-fn read_stop(intent: &Intent, low_px: f64, high_px: f64) -> Result<f64, DenyReason> {
-    let Some(stop) = intent.stop else {
-        return Err(DenyReason::MissingStop);
+fn read_stop(intent: &Intent, low: &Exact, high: &Exact) -> Result<Exact, DenyReason> {
+    let trigger = intent
+        .stop_price()
+        .map_err(|_| DenyReason::MissingStop)?
+        .ok_or(DenyReason::MissingStop)?;
+    let distance = match intent.side {
+        Side::Buy if trigger < *low => high - trigger,
+        Side::Sell if trigger > *high => trigger - low,
+        _ => return Err(DenyReason::MissingStop),
     };
-    let trigger = stop.trigger_px;
-    if !trigger.is_finite() || trigger <= 0.0 {
-        return Err(DenyReason::MissingStop);
-    }
-    match intent.side {
-        Side::Buy if trigger >= low_px => Err(DenyReason::MissingStop),
-        Side::Sell if trigger <= high_px => Err(DenyReason::MissingStop),
-        Side::Buy => Ok((high_px - trigger) / high_px),
-        Side::Sell => Ok((trigger - low_px) / high_px),
-    }
+    distance
+        .checked_div(high)
+        .map_err(|e| unknown(e.to_string()))
 }
-
-/// The book once this order is added, as every cap below the envelope sees it.
 #[derive(Default)]
 struct Projected {
-    gross_usdt: f64,
-    worst_case_loss_usdt: f64,
+    gross_usdt: Exact,
+    worst_case_loss_usdt: Exact,
 }
-
 impl Projected {
-    fn add(&mut self, notional_usdt: f64) {
-        self.gross_usdt += notional_usdt;
+    fn add(&mut self, notional: &Exact) {
+        self.gross_usdt += notional;
     }
 }
-
-/// What the kernel could read out of one account view.
 struct ViewFacts {
     observed_ns: u64,
-    equity_usdt: f64,
-    /// Spare margin the venue reports. Legitimately negative when the owner
-    /// hand-trades the account, which is a reading, not a fault.
-    available_usdt: f64,
-    /// Net signed quantity per symbol: positive long, negative short.
-    net: Vec<(u16, f64)>,
-    entry_px: Vec<(u16, f64)>,
-    /// Per-position stop facts. Bybit one-way mode yields one row per symbol;
-    /// retaining the row shape keeps the calculation fail-closed if another
-    /// adapter reports more than one.
-    stops: Vec<(u16, Side, f64, f64)>,
-    /// The book holds exposure with no stop attached. New risk waits until it
-    /// is protected again.
+    equity_usdt: Exact,
+    available_usdt: Exact,
+    net: Vec<(u16, Exact)>,
+    entry_px: Vec<(u16, Exact)>,
+    stops: Vec<(u16, Side, Exact, Exact)>,
     unprotected: bool,
 }
-
 impl ViewFacts {
-    fn read(account: &AccountView, qty_tolerance: f64) -> Result<Self, DenyReason> {
-        let equity_usdt = account.equity_usdt;
-        if !equity_usdt.is_finite() {
-            return Err(unknown("account equity is not a number"));
-        }
-        if equity_usdt <= 0.0 {
+    fn read(account: &AccountView, tolerance: &Exact) -> Result<Self, DenyReason> {
+        let equity = account.equity().map_err(|_| {
+            unknown("account equity is not a number or disagrees with its projection")
+        })?;
+        if !equity.is_positive() {
             return Err(unknown("account equity is not positive"));
         }
-        if !account.available_usdt.is_finite() {
-            return Err(unknown("available margin is not a number"));
-        }
-        let mut facts = ViewFacts {
+        let available = account.available().map_err(|_| {
+            unknown("available margin is not a number or disagrees with its projection")
+        })?;
+        let mut facts = Self {
             observed_ns: account.observed_ns,
-            equity_usdt,
-            available_usdt: account.available_usdt,
+            equity_usdt: equity,
+            available_usdt: available,
             net: Vec::new(),
             entry_px: Vec::new(),
             stops: Vec::new(),
             unprotected: false,
         };
         for position in &account.positions {
-            if position.validate_stop_projection().is_err() {
-                return Err(unknown(
-                    "native stop disagrees with its compatibility projection",
-                ));
-            }
-            if !position.qty.is_finite() || position.qty < 0.0 {
+            position
+                .validate_stop_projection()
+                .map_err(|_| unknown("native stop disagrees with its compatibility projection"))?;
+            let qty = position
+                .quantity()
+                .map_err(|_| unknown("position quantity is not a readable size"))?;
+            if qty.is_negative() {
                 return Err(unknown("position quantity is not a readable size"));
             }
-            if position.qty <= qty_tolerance {
+            if qty <= *tolerance {
                 continue;
             }
-            if !position.entry_px.is_finite() || position.entry_px <= 0.0 {
+            let entry = position
+                .entry_price()
+                .map_err(|_| unknown("position entry price is not a positive number"))?;
+            if !entry.is_positive() {
                 return Err(unknown("position entry price is not a positive number"));
             }
-            let signed_qty = signed(position.side, position.qty);
-            match facts
-                .net
-                .iter_mut()
-                .find(|(symbol, _)| *symbol == position.symbol.0)
-            {
+            let signed_qty = signed(position.side, &qty);
+            match facts.net.iter_mut().find(|(s, _)| *s == position.symbol.0) {
                 Some((_, running)) => {
-                    if (*running > 0.0 && signed_qty < 0.0) || (*running < 0.0 && signed_qty > 0.0)
-                    {
+                    if running.is_negative() != signed_qty.is_negative() {
                         return Err(unknown("account view holds both sides of one symbol"));
                     }
                     *running += signed_qty;
-                    if !running.is_finite() {
-                        return Err(unknown("account position total is unreadable"));
-                    }
                 }
                 None => facts.net.push((position.symbol.0, signed_qty)),
             }
-            if facts
-                .entry_px
-                .iter()
-                .all(|(symbol, _)| *symbol != position.symbol.0)
-            {
-                facts.entry_px.push((position.symbol.0, position.entry_px));
+            if facts.entry_px.iter().all(|(s, _)| *s != position.symbol.0) {
+                facts.entry_px.push((position.symbol.0, entry.clone()));
             }
             if !position.stop_attached {
                 facts.unprotected = true;
-            } else if !position.stop_px.is_finite() || position.stop_px <= 0.0 {
-                return Err(unknown("attached position stop has no positive price"));
             } else {
-                facts.stops.push((
-                    position.symbol.0,
-                    position.side,
-                    position.entry_px,
-                    position.stop_px,
-                ));
+                let stop = position
+                    .stop_price()
+                    .map_err(|_| unknown("attached position stop has no positive price"))?;
+                if !stop.is_positive() {
+                    return Err(unknown("attached position stop has no positive price"));
+                }
+                facts
+                    .stops
+                    .push((position.symbol.0, position.side, entry, stop));
             }
         }
         Ok(facts)
     }
-
-    fn net_qty(&self, symbol: SymbolId) -> f64 {
+    fn net_qty(&self, symbol: SymbolId) -> Exact {
         self.net
             .iter()
-            .find(|(held, _)| *held == symbol.0)
-            .map(|(_, qty)| *qty)
-            .unwrap_or(0.0)
+            .find(|(s, _)| *s == symbol.0)
+            .map_or_else(Exact::zero, |(_, q)| q.clone())
     }
-
-    fn entry_px(&self, symbol: SymbolId) -> Option<f64> {
+    fn entry_px(&self, symbol: SymbolId) -> Option<Exact> {
         self.entry_px
             .iter()
-            .find(|(held, _)| *held == symbol.0)
-            .map(|(_, px)| *px)
+            .find(|(s, _)| *s == symbol.0)
+            .map(|(_, px)| px.clone())
     }
+    fn exposures(&self) -> impl Iterator<Item = (SymbolId, &Exact)> {
+        self.net.iter().map(|(s, q)| (SymbolId(*s), q))
+    }
+}
 
-    fn exposures(&self) -> impl Iterator<Item = (SymbolId, f64)> + '_ {
-        self.net
-            .iter()
-            .map(|(symbol, qty)| (SymbolId(*symbol), *qty))
+#[cfg(test)]
+mod reporting_tests {
+    use super::*;
+    #[test]
+    fn an_underflowing_report_is_zero_instead_of_maximum_money() {
+        assert_eq!(report(&Exact::parse_decimal("1e-400").unwrap()), 0.0);
+        assert_eq!(report(&Exact::parse_decimal("-1e-400").unwrap()), 0.0);
+        assert_eq!(report(&Exact::parse_decimal("1e400").unwrap()), f64::MAX);
+        assert_eq!(report(&Exact::parse_decimal("-1e400").unwrap()), -f64::MAX);
     }
 }

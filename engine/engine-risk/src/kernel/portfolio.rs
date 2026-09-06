@@ -1,22 +1,18 @@
 use super::*;
 use engine_types::ids::StrategyId;
-use engine_types::numeric::Exact;
 use engine_types::portfolio::PortfolioState;
 use std::collections::{BTreeMap, BTreeSet};
-
 struct Held {
     strategy: StrategyId,
     symbol: SymbolId,
-    qty: f64,
-    entry_px: Option<f64>,
-    stop_px: Option<f64>,
+    qty: Exact,
+    entry_px: Option<Exact>,
+    stop_px: Option<Exact>,
 }
-
 pub(super) struct PortfolioFacts {
     positions: Vec<Held>,
-    net: BTreeMap<SymbolId, f64>,
+    net: BTreeMap<SymbolId, Exact>,
 }
-
 impl PortfolioFacts {
     pub(super) fn read(state: &PortfolioState) -> Result<Self, DenyReason> {
         if !matches!(state.schema_version, 1 | 2) {
@@ -24,8 +20,7 @@ impl PortfolioFacts {
         }
         let mut seen = BTreeSet::new();
         let mut positions = Vec::new();
-        let mut exact_net: BTreeMap<SymbolId, Exact> = BTreeMap::new();
-        let mut exact_gross: BTreeMap<SymbolId, Exact> = BTreeMap::new();
+        let mut net = BTreeMap::new();
         for row in &state.positions {
             if !seen.insert((row.strategy, row.symbol)) {
                 return Err(unknown("duplicate portfolio position"));
@@ -33,14 +28,8 @@ impl PortfolioFacts {
             row.signed_qty
                 .validate_storage()
                 .map_err(|e| unknown(e.to_string()))?;
-            let qty = row
-                .signed_qty
-                .to_f64()
-                .map_err(|e| unknown(e.to_string()))?;
-            if qty == 0.0 {
-                return Err(unknown(
-                    "portfolio position has zero or unprojectable quantity",
-                ));
+            if row.signed_qty.is_zero() {
+                return Err(unknown("portfolio position has zero quantity"));
             }
             let entry_px = row
                 .entry_value
@@ -52,7 +41,6 @@ impl PortfolioFacts {
                         return Err(unknown("portfolio cost is not positive"));
                     }
                     cost.checked_div(&row.signed_qty.abs())
-                        .and_then(|px| px.to_f64())
                         .map_err(|e| unknown(e.to_string()))
                 })
                 .transpose()?;
@@ -65,103 +53,88 @@ impl PortfolioFacts {
                     if !stop.is_positive() {
                         return Err(unknown("portfolio stop is not positive"));
                     }
-                    stop.to_f64().map_err(|e| unknown(e.to_string()))
+                    Ok(stop.clone())
                 })
                 .transpose()?;
-            *exact_net.entry(row.symbol).or_insert_with(Exact::zero) += &row.signed_qty;
-            *exact_gross.entry(row.symbol).or_insert_with(Exact::zero) += row.signed_qty.abs();
+            *net.entry(row.symbol).or_insert_with(Exact::zero) += &row.signed_qty;
             positions.push(Held {
                 strategy: row.strategy,
                 symbol: row.symbol,
-                qty,
+                qty: row.signed_qty.clone(),
                 entry_px,
                 stop_px,
             });
         }
-        for qty in exact_gross.values() {
-            qty.to_f64().map_err(|e| unknown(e.to_string()))?;
-        }
-        let net = exact_net
-            .into_iter()
-            .map(|(symbol, qty)| {
-                qty.to_f64()
-                    .map(|qty| (symbol, qty))
-                    .map_err(|e| unknown(e.to_string()))
-            })
-            .collect::<Result<_, _>>()?;
         Ok(Self { positions, net })
     }
-
-    pub(super) fn owned(&self, strategy: StrategyId, symbol: SymbolId) -> f64 {
+    pub(super) fn owned(&self, strategy: StrategyId, symbol: SymbolId) -> Exact {
         self.positions
             .iter()
             .find(|p| p.strategy == strategy && p.symbol == symbol)
-            .map_or(0.0, |p| p.qty)
+            .map_or_else(Exact::zero, |p| p.qty.clone())
     }
 }
-
 impl Kernel {
     pub(super) fn physical_interval_for(
         &mut self,
         symbol: SymbolId,
         account: &AccountView,
     ) -> Result<engine_types::risk::PhysicalExposureInterval, DenyReason> {
-        let view = ViewFacts::read(account, 0.0)?;
+        let view = ViewFacts::read(account, &Exact::zero())?;
+        let recent = self
+            .book
+            .fills_after(account.observed_ns)
+            .map_err(unknown)?;
         let physical = view.net_qty(symbol)
-            + self
-                .book
-                .fills_after(account.observed_ns)
+            + recent
                 .get(&symbol.0)
-                .map_or(0.0, |row| row.signed_qty);
-        let (low, high) = self.book.physical_interval(symbol, physical);
-        engine_types::risk::PhysicalExposureInterval::try_new(low, high)
+                .map_or_else(Exact::zero, |r| r.signed_qty.clone());
+        let (low, high) = self
+            .book
+            .physical_interval(symbol, &physical)
+            .map_err(unknown)?;
+        engine_types::risk::PhysicalExposureInterval::from_exact(low, high)
     }
-
-    pub(super) fn physical_reduction(&self, intent: &Intent, qty: f64, physical_qty: f64) -> bool {
-        let (low, high) = self.book.physical_interval(intent.symbol, physical_qty);
-        if !low.is_finite() || !high.is_finite() {
-            return false;
-        }
-        match intent.side {
-            Side::Sell => low >= qty,
-            Side::Buy => high <= -qty,
-        }
-    }
-
     pub(super) fn incremental_physical_quantity(
         &self,
         intent: &Intent,
-        qty: f64,
-        physical_qty: f64,
-    ) -> Result<f64, DenyReason> {
-        let delta = signed(intent.side, qty);
-        let (low, high) = self.book.physical_interval(intent.symbol, physical_qty);
-        if !qty.is_finite() || qty <= 0.0 || !low.is_finite() || !high.is_finite() {
+        qty: &Exact,
+        physical: &Exact,
+    ) -> Result<Exact, DenyReason> {
+        if !qty.is_positive() {
             return Err(unknown("unreadable physical margin reservation"));
         }
-        let endpoint = if delta < 0.0 { low } else { high };
-        // Maximize this order's increase over all earlier pending fill orderings.
+        let delta = signed(intent.side, qty);
+        let (low, high) = self
+            .book
+            .physical_interval(intent.symbol, physical)
+            .map_err(unknown)?;
+        let endpoint = if delta.is_negative() { low } else { high };
         Ok(
-            if endpoint == 0.0 || endpoint.is_sign_positive() == delta.is_sign_positive() {
+            if endpoint.is_zero() || endpoint.is_negative() == delta.is_negative() {
                 delta.abs()
-            } else if endpoint.abs() >= delta.abs() / 2.0 {
-                0.0
             } else {
-                delta.abs() - 2.0 * endpoint.abs()
+                (delta.abs() - endpoint.abs() * Exact::from_u64(2)).max(Exact::zero())
             },
         )
     }
-
     pub(super) fn check_virtual_reduction(
         &self,
         intent: &Intent,
-        qty: f64,
-        physical_qty: f64,
+        qty: &Exact,
+        physical: &Exact,
         age_ns: u64,
         view: &ViewFacts,
         portfolio: &PortfolioFacts,
     ) -> Result<(), DenyReason> {
-        if self.physical_reduction(intent, qty, physical_qty) {
+        let (low, high) = self
+            .book
+            .physical_interval(intent.symbol, physical)
+            .map_err(unknown)?;
+        if match intent.side {
+            Side::Sell => low >= *qty,
+            Side::Buy => high <= -qty,
+        } {
             return Ok(());
         }
         if age_ns > self.cfg.max_account_view_age_ns {
@@ -171,13 +144,7 @@ impl Kernel {
             });
         }
         let delta = signed(intent.side, qty);
-        let (low, high) = self.book.physical_interval(intent.symbol, physical_qty);
-        let after = (low + delta, high + delta);
-        if !after.0.is_finite() || !after.1.is_finite() {
-            return Err(unknown(
-                "portfolio reduction produces unreadable physical exposure",
-            ));
-        }
+        let after = (low + &delta, high + &delta);
         let price = self.price_for(intent.symbol, view).ok_or_else(|| {
             unknown("no price for physical exposure produced by a virtual reduction")
         })?;
@@ -186,77 +153,73 @@ impl Kernel {
             .px(intent.symbol)
             .or_else(|| view.entry_px(intent.symbol))
             .ok_or_else(|| unknown("no current reference for virtual reduction protection"))?;
-        // An exit may expose either side when other outstanding orders fill first.
         for row in portfolio
             .positions
             .iter()
             .filter(|p| p.symbol == intent.symbol)
         {
-            let remaining = row.qty
+            let remaining = &row.qty
                 + if row.strategy == intent.strategy {
-                    delta
+                    delta.clone()
                 } else {
-                    0.0
+                    Exact::zero()
                 };
-            let can_be_physical =
-                (remaining > 0.0 && after.1 > 0.0) || (remaining < 0.0 && after.0 < 0.0);
-            if !can_be_physical {
+            if !(remaining.is_positive() && after.1.is_positive()
+                || remaining.is_negative() && after.0.is_negative())
+            {
                 continue;
             }
-            let stop = row.stop_px.ok_or(DenyReason::MissingStop)?;
-            if (remaining > 0.0 && stop >= current) || (remaining < 0.0 && stop <= current) {
+            let stop = row.stop_px.as_ref().ok_or(DenyReason::MissingStop)?;
+            if remaining.is_positive() && *stop >= current
+                || remaining.is_negative() && *stop <= current
+            {
                 return Err(DenyReason::MissingStop);
             }
         }
-        let additional_margin_usdt =
-            self.incremental_physical_quantity(intent, qty, physical_qty)? * price
-                / self.cfg.leverage
-                + self.unreflected_margin(view)?;
-        if !additional_margin_usdt.is_finite() {
-            return Err(unknown("portfolio reduction produces unreadable margin"));
-        }
-        if additional_margin_usdt > view.available_usdt {
-            return Err(DenyReason::AvailableMarginExhausted {
-                additional_margin_usdt,
-                available_usdt: view.available_usdt,
-            });
-        }
-        Ok(())
+        let margin = (self.incremental_physical_quantity(intent, qty, physical)? * price)
+            .checked_div(&policy(self.cfg.leverage))
+            .expect("positive leverage")
+            + self.unreflected_margin(view)?;
+        self.check_available(&margin, view)
     }
-
     pub(super) fn projected_portfolio(
         &mut self,
-        notional: f64,
-        stop_fraction: f64,
+        notional: &Exact,
+        fraction: &Exact,
         account: &AccountView,
         view: &ViewFacts,
         portfolio: &PortfolioFacts,
     ) -> Result<Projected, DenyReason> {
         let mut projected = Projected {
-            gross_usdt: notional,
-            worst_case_loss_usdt: self
-                .envelope
-                .position_worst_case_usdt(notional, stop_fraction),
+            gross_usdt: notional.clone(),
+            worst_case_loss_usdt: self.envelope.position_worst_case_usdt(notional, fraction),
         };
         for row in &portfolio.positions {
             let entry = row
                 .entry_px
+                .as_ref()
                 .ok_or_else(|| unknown("portfolio position has unknown entry value"))?;
-            let current = self.book.px(row.symbol).unwrap_or(entry);
-            let price = current.max(entry);
-            let low = current.min(entry);
-            let stop = row.stop_px.ok_or(DenyReason::MissingStop)?;
-            let fraction = match row.qty.is_sign_positive() {
-                true if stop < current => (price - stop) / price,
-                false if stop > current => (stop - low) / price,
+            let current = self.book.px(row.symbol).unwrap_or_else(|| entry.clone());
+            let price = current.clone().max(entry.clone());
+            let low = current.clone().min(entry.clone());
+            let stop = row.stop_px.as_ref().ok_or(DenyReason::MissingStop)?;
+            let distance = match row.qty.is_positive() {
+                true if *stop < current => &price - stop,
+                false if *stop > current => stop - low,
                 _ => return Err(DenyReason::MissingStop),
             };
+            let fraction = distance
+                .checked_div(&price)
+                .map_err(|e| unknown(e.to_string()))?;
             let notional = row.qty.abs() * price;
-            projected.add(notional);
+            projected.add(&notional);
             projected.worst_case_loss_usdt +=
-                self.envelope.position_worst_case_usdt(notional, fraction);
+                self.envelope.position_worst_case_usdt(&notional, &fraction);
         }
-        let recent = self.book.fills_after(account.observed_ns);
+        let recent = self
+            .book
+            .fills_after(account.observed_ns)
+            .map_err(unknown)?;
         let symbols: BTreeSet<_> = view
             .exposures()
             .map(|(s, _)| s)
@@ -264,39 +227,33 @@ impl Kernel {
             .chain(portfolio.net.keys().copied())
             .collect();
         for symbol in symbols {
-            let pending_fill = recent.get(&symbol.0);
-            let physical = view.net_qty(symbol) + pending_fill.map_or(0.0, |p| p.signed_qty);
-            let residual = physical - portfolio.net.get(&symbol).copied().unwrap_or(0.0);
-            if residual == 0.0 {
+            let fill = recent.get(&symbol.0);
+            let physical =
+                view.net_qty(symbol) + fill.map_or_else(Exact::zero, |p| p.signed_qty.clone());
+            let residual = physical
+                - portfolio
+                    .net
+                    .get(&symbol)
+                    .cloned()
+                    .unwrap_or_else(Exact::zero);
+            if residual.is_zero() {
                 continue;
             }
             let price = self
                 .price_for(symbol, view)
                 .ok_or_else(|| unknown("no price for unallocated physical exposure"))?;
-            let stop = if view.net_qty(symbol) != 0.0 {
+            let stop = if !view.net_qty(symbol).is_zero() {
                 self.held_stop_fraction(symbol, view)?
             } else {
-                pending_fill
-                    .and_then(|p| p.stop_fraction)
+                fill.and_then(|p| p.stop_fraction.clone())
                     .ok_or_else(|| unknown("unallocated physical exposure has no readable stop"))?
             };
             let notional = residual.abs() * price;
-            projected.add(notional);
+            projected.add(&notional);
             projected.worst_case_loss_usdt +=
-                self.envelope.position_worst_case_usdt(notional, stop);
+                self.envelope.position_worst_case_usdt(&notional, &stop);
         }
-        for (_, notional, fraction) in self
-            .book
-            .pending_risk_rows(|symbol| self.price_for(symbol, view))
-            .map_err(unknown)?
-        {
-            projected.add(notional);
-            projected.worst_case_loss_usdt +=
-                self.envelope.position_worst_case_usdt(notional, fraction);
-        }
-        if !projected.gross_usdt.is_finite() || !projected.worst_case_loss_usdt.is_finite() {
-            return Err(unknown("portfolio risk total is unreadable"));
-        }
+        self.add_pending(&mut projected, view)?;
         Ok(projected)
     }
 }

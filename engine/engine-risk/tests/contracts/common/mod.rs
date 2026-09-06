@@ -63,6 +63,7 @@ pub fn equity_tracking_config() -> KernelConfig {
 
 pub fn view(equity_usdt: f64, positions: Vec<PositionView>, observed_ns: u64) -> AccountView {
     AccountView {
+        exact_amounts: None,
         equity_usdt,
         available_usdt: equity_usdt,
         positions,
@@ -82,6 +83,7 @@ pub fn position(
     stop_attached: bool,
 ) -> PositionView {
     PositionView {
+        exact_amounts: None,
         exact_stop_px: None,
         symbol,
         side,
@@ -111,6 +113,8 @@ pub fn entry(
     decided_ns: u64,
 ) -> Intent {
     Intent {
+        exact_prices: None,
+        exact_quantity: None,
         strategy,
         symbol,
         side,

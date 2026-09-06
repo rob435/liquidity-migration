@@ -135,12 +135,23 @@ impl Default for WorkPolicy {
 
 /// What a strategy asks for. Strategies never build venue payloads; they
 /// emit intents and the engine does the rest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntentPrices {
+    pub limit_price: Option<crate::numeric::Exact>,
+    pub stop_trigger_price: Option<crate::numeric::Exact>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Intent {
     pub strategy: StrategyId,
     pub symbol: SymbolId,
     pub side: Side,
     pub qty: f64,
+    /// Canonical units; `qty` is only the compatibility projection when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_quantity: Option<Box<crate::numeric::Exact>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_prices: Option<Box<IntentPrices>>,
     pub kind: OrderKind,
     pub stop: Option<StopSpec>,
     /// True for exits: the order may only reduce an existing position.
@@ -168,6 +179,80 @@ pub struct Intent {
     /// the wrong trade-off.
     #[serde(default)]
     pub leverage: Option<f64>,
+}
+
+impl Intent {
+    pub fn limit_price(&self) -> Result<Option<crate::numeric::Exact>, crate::numeric::ExactError> {
+        let canonical = self
+            .exact_prices
+            .as_ref()
+            .and_then(|prices| prices.limit_price.as_ref());
+        let projection = match self.kind {
+            OrderKind::Limit { px, .. } => Some(px),
+            OrderKind::Market => None,
+        };
+        Self::price(canonical, projection)
+    }
+
+    pub fn stop_price(&self) -> Result<Option<crate::numeric::Exact>, crate::numeric::ExactError> {
+        let canonical = self
+            .exact_prices
+            .as_ref()
+            .and_then(|prices| prices.stop_trigger_price.as_ref());
+        Self::price(canonical, self.stop.map(|stop| stop.trigger_px))
+    }
+
+    pub fn validate_price_projection(&self) -> Result<(), crate::numeric::ExactError> {
+        self.limit_price()?;
+        self.stop_price()?;
+        Ok(())
+    }
+
+    fn price(
+        canonical: Option<&crate::numeric::Exact>,
+        projection: Option<f64>,
+    ) -> Result<Option<crate::numeric::Exact>, crate::numeric::ExactError> {
+        use crate::numeric::{Exact, ExactError};
+        let Some(projection) = projection else {
+            return if canonical.is_some() {
+                Err(ExactError::InvalidProjection)
+            } else {
+                Ok(None)
+            };
+        };
+        let value = if let Some(canonical) = canonical {
+            canonical.validate_storage()?;
+            if canonical.to_f64()? != projection {
+                return Err(ExactError::InvalidProjection);
+            }
+            canonical.clone()
+        } else {
+            Exact::parse_decimal(&projection.to_string())?
+        };
+        if !value.is_positive() {
+            return Err(ExactError::InvalidProjection);
+        }
+        Ok(Some(value))
+    }
+
+    pub fn quantity(&self) -> Result<crate::numeric::Exact, crate::numeric::ExactError> {
+        use crate::numeric::{Exact, ExactError};
+        if !self.qty.is_finite() {
+            return Err(ExactError::NonFinite);
+        }
+        if self.qty <= 0.0 {
+            return Err(ExactError::InvalidProjection);
+        }
+        if let Some(quantity) = &self.exact_quantity {
+            quantity.validate_storage()?;
+            if !quantity.is_positive() || quantity.to_f64()? != self.qty {
+                return Err(ExactError::InvalidProjection);
+            }
+            Ok((**quantity).clone())
+        } else {
+            Exact::parse_decimal(&self.qty.to_string())
+        }
+    }
 }
 
 /// A new price and/or size for an order already resting at the venue.
@@ -367,7 +452,7 @@ impl AccountInventory {
 /// answer to "what traded on this account between these times", which is the
 /// only way the log can learn those fills after the fact. The symbol is the
 /// venue's own spelling for the same reason as [`VenueOrder`]'s.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VenueExecution {
     /// The venue's own id for this execution — unique per fill, and the
     /// dedup key against reading the same history twice.
@@ -460,6 +545,14 @@ pub struct OrderRequest {
 }
 
 impl OrderRequest {
+    pub fn canonical_intent_prices(&self) -> Option<Box<IntentPrices>> {
+        self.exact_terms.as_deref().map(|terms| {
+            Box::new(IntentPrices {
+                limit_price: terms.limit_price.clone(),
+                stop_trigger_price: terms.stop_trigger_price.clone(),
+            })
+        })
+    }
     pub fn is_portfolio_reduction(&self) -> bool {
         matches!(
             self.sleeve_effect,
@@ -755,6 +848,9 @@ pub enum OrderLookup {
 /// Account and execution reads have no ownership of the venue mutation path.
 #[crate::async_trait]
 pub trait AccountRecoveryClient: Send + Sync + 'static {
+    fn execution_history_progress(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicU64>> {
+        None
+    }
     fn install_instrument_catalog(
         &self,
         _catalog: &InstrumentCatalog,
@@ -770,7 +866,7 @@ pub trait AccountRecoveryClient: Send + Sync + 'static {
         symbols: &[crate::Symbol],
         start_ms: i64,
         end_ms: i64,
-    ) -> Result<Vec<crate::VenueExecution>, crate::VenueError>;
+    ) -> Result<crate::ExecutionHistory, crate::VenueError>;
 }
 
 /// Read-only client with no ownership of the serialized venue mutation path.

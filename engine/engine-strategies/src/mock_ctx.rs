@@ -66,6 +66,7 @@ pub struct MockCtx {
     /// test delivers, so a plug that reads its own inventory reads the same
     /// number here that it would live.
     mine: HashMap<SymbolId, f64>,
+    exact_mine: HashMap<SymbolId, engine_types::numeric::Exact>,
     allocated: HashMap<SymbolId, engine_types::strategy::StrategyAllocatedPosition>,
     /// What the engine's cover book would say this strategy has sent that
     /// the account reading has not absorbed yet, signed, positive long. The
@@ -107,6 +108,7 @@ impl MockCtx {
             positions: HashMap::new(),
             foreign: HashSet::new(),
             mine: HashMap::new(),
+            exact_mine: HashMap::new(),
             allocated: HashMap::new(),
             in_flight: HashMap::new(),
             rules: HashMap::new(),
@@ -177,6 +179,7 @@ impl MockCtx {
         self.positions.insert(
             id,
             PositionView {
+                exact_amounts: None,
                 exact_stop_px: None,
                 symbol: id,
                 side,
@@ -240,6 +243,12 @@ impl MockCtx {
     pub fn set_my_position(&mut self, symbol: &str, signed_qty: f64) {
         let id = self.add_symbol(symbol);
         self.mine.insert(id, signed_qty);
+    }
+
+    pub fn set_my_position_exact(&mut self, symbol: &str, quantity: engine_types::numeric::Exact) {
+        let id = self.add_symbol(symbol);
+        self.mine.insert(id, quantity.to_f64().unwrap());
+        self.exact_mine.insert(id, quantity);
     }
 
     /// Seed the venue's tick, step and minimums for a symbol.
@@ -311,6 +320,19 @@ impl StrategyCtx for MockCtx {
 
     fn my_position(&self, symbol: SymbolId) -> f64 {
         self.mine.get(&symbol).copied().unwrap_or(0.0)
+    }
+
+    fn my_position_exact(
+        &self,
+        symbol: SymbolId,
+    ) -> Result<engine_types::numeric::Exact, engine_types::numeric::ExactError> {
+        self.exact_mine
+            .get(&symbol)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| {
+                engine_types::numeric::Exact::from_legacy_f64(self.my_position(symbol))
+            })
     }
 
     fn my_position_names<'a>(&'a self, out: &mut Vec<&'a str>) {
@@ -746,6 +768,8 @@ mod tests {
         let mut ctx = MockCtx::new();
         ctx.add_symbol("BTCUSDT");
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(9),
             symbol: SymbolId(0),
             side: Side::Buy,

@@ -17,13 +17,33 @@ impl PortfolioControls {
             next_id: 1,
             ..Default::default()
         };
+        let mut orders = crate::inflight::LedgerOfOrders::default();
         for record in records {
             book.apply(record)?;
+            orders.try_apply(record)?;
+            book.retire_completed_orders(&orders);
         }
         book.retain_native_offsets(
             &crate::attribution::Attribution::try_from_records(records)?.snapshot(),
         );
         Ok(book)
+    }
+    pub(crate) fn retire_completed_orders(&mut self, orders: &crate::inflight::LedgerOfOrders) {
+        let completed = |id: &Option<String>| {
+            id.as_ref()
+                .and_then(|id| orders.orders.get(id))
+                .is_some_and(|order| !order.in_flight())
+        };
+        for exit in self.exits.values_mut() {
+            if completed(&exit.order_id) {
+                exit.order_id = None;
+            }
+        }
+        for emergency in self.emergencies.values_mut() {
+            if completed(&emergency.order_id) {
+                emergency.order_id = None;
+            }
+        }
     }
     pub fn retain_native_offsets(&mut self, portfolio: &engine_types::portfolio::PortfolioState) {
         self.native_pending.retain(|symbol, _| {
@@ -159,7 +179,41 @@ impl PortfolioControls {
                     }
                 }
                 for order in open_orders {
-                    next.validate_engine_order(&order.request)?;
+                    if order.terminal.is_none() {
+                        next.validate_engine_order(&order.request)?;
+                    } else if let Some(
+                        engine_types::orders::SleeveOrderEffect::EmergencyNetReduction {
+                            emergency_id,
+                        },
+                    ) = order.request.sleeve_effect
+                    {
+                        let prefix = format!("eng-pe-{emergency_id}-");
+                        if emergency_id == 0
+                            || emergency_id >= state.next_id
+                            || !(order
+                                .request
+                                .client_order_id
+                                .strip_prefix(&prefix)
+                                .is_some_and(|attempt| {
+                                    attempt.parse::<u32>().is_ok_and(|attempt| attempt > 0)
+                                })
+                                || numeric_engine_order_id(&order.request.client_order_id))
+                            || !order.request.reduce_only
+                            || order.request.stop.is_some()
+                            || !matches!(order.request.kind, engine_types::OrderKind::Market)
+                        {
+                            return Err(
+                                "terminal engine net order has invalid durable lineage".into()
+                            );
+                        }
+                        order
+                            .request
+                            .exact_terms
+                            .as_ref()
+                            .ok_or("terminal engine net order has no exact terms")?
+                            .validate_projection(&order.request)
+                            .map_err(|error| error.to_string())?;
+                    }
                 }
                 next.next_id = state.next_id;
                 *self = next;
@@ -370,6 +424,20 @@ pub(crate) fn validate_settlement(settlement: &PortfolioOffsetSettlement) -> Res
         return Err("internal settlement is not balanced in each asset".into());
     }
     Ok(())
+}
+
+fn numeric_engine_order_id(id: &str) -> bool {
+    let mut parts = id.split('-');
+    parts.next() == Some("eng")
+        && parts
+            .next()
+            .is_some_and(|epoch| epoch.parse::<u64>().is_ok())
+        && parts.next().is_some_and(|counter| {
+            counter
+                .parse::<u32>()
+                .is_ok_and(|counter| counter > 0 && counter < (1 << 18))
+        })
+        && parts.next().is_none()
 }
 
 #[cfg(test)]

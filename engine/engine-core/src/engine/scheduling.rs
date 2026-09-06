@@ -436,7 +436,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.take_venue_completion(completion).await?;
         let private_update = tokio::select! {
             biased;
-            update = order_feed.next_update() => Some(update),
+            update = order_feed.next_update(), if !self.order_lineage.waiting() => Some(update),
             _ = std::future::ready(()) => None,
         };
         match private_update {
@@ -896,6 +896,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     pub(super) async fn on_tick(&mut self) -> Result<(), EngineError> {
         self.wal.flush()?;
+        self.service_order_lineage().await?;
+        self.trim_order_lineage_cache()?;
         // A segment must not expose a queued callback or order disposition
         // before the barrier that owns its publication has completed.
         if self.rotate_after_bytes > 0
@@ -915,6 +917,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
             let base = self.rotation_base(clock::wall_ms());
             if self.wal.rotate(&base)? {
+                self.books
+                    .orders
+                    .try_apply(&base)
+                    .map_err(EngineError::State)?;
                 if self.host.callbacks.isolated() {
                     let reader = self.wal.callback_reader()?.ok_or_else(|| {
                         EngineError::State("rotated WAL lost its callback reader".into())
@@ -992,6 +998,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     pub(super) async fn drain(&mut self, origin_ns: u64) -> Result<(), EngineError> {
+        self.service_order_lineage().await?;
         self.service_order_dispatches().await?;
         self.service_portfolio_controls().await?;
         self.service_strategy_callbacks()?;

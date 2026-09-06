@@ -25,6 +25,8 @@ fn note(text: &str) -> WalRecord {
 /// replayed base from a replayed record.
 fn base(mark: &str) -> WalRecord {
     WalRecord::SegmentBase {
+        order_id_epoch_ms: None,
+        open_trade_lots: Some(Vec::new()),
         portfolio_control: Default::default(),
         pending_order_dispatches: Vec::new(),
         signal_producers: Vec::new(),
@@ -263,7 +265,7 @@ fn gap_record_and_rotation_keep_the_exact_missing_prefix() {
     assert_eq!(records[0].1, rotated);
     let bytes = fs::read(dir.path().join("engine.wal.000002")).unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&bytes[16..]).unwrap();
-    assert_eq!(payload["kind"], "segment_base_v5");
+    assert_eq!(payload["kind"], "segment_base_v6");
 }
 
 /// The crash test: a rotation cut off at ANY byte leaves boot replaying the
@@ -447,7 +449,7 @@ fn effect_rotation_requires_all_mandatory_state_without_truncating() {
         let dir = TempDir::new().unwrap();
         let path = log_path(&dir);
         let mut value = serde_json::to_value(base("required-effects")).unwrap();
-        assert_eq!(value["kind"], "segment_base_v5");
+        assert_eq!(value["kind"], "segment_base_v6");
         value.as_object_mut().unwrap().remove(missing);
         let bytes = write_raw_record(&path, &value);
         assert!(
@@ -566,6 +568,8 @@ fn v5_open_orders_require_typed_fill_progress_without_truncating() {
         }),
         reservation_low_px: 100.0,
         reservation_high_px: 100.0,
+        exact_price_range: None,
+        terminal: None,
     };
     let mut snapshot = base("fill-progress");
     let WalRecord::SegmentBase { open_orders, .. } = &mut snapshot else {
@@ -573,7 +577,7 @@ fn v5_open_orders_require_typed_fill_progress_without_truncating() {
     };
     open_orders.push(order);
     let complete = serde_json::to_value(snapshot).unwrap();
-    assert_eq!(complete["kind"], "segment_base_v5");
+    assert_eq!(complete["kind"], "segment_base_v6");
     for null in [false, true] {
         let mut value = complete.clone();
         if null {
@@ -695,4 +699,38 @@ fn callback_pages_read_legacy_arrays_and_refuse_damaged_archives_without_repair(
         "a checksum-corrupt callback was delivered"
     );
     assert_eq!(fs::read(&path).unwrap(), corrupt);
+}
+
+#[test]
+fn exact_rotation_requires_cost_basis_but_preserves_legacy_v5_bytes() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let mut value = serde_json::to_value(base("exact-cost-basis")).unwrap();
+    assert_eq!(value["kind"], "segment_base_v6");
+    value.as_object_mut().unwrap().remove("open_trade_lots");
+    let bytes = write_raw_record(&path, &value);
+    assert!(
+        WalWriter::open(&path).is_err(),
+        "current rotation discarded trade cost basis"
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    value["open_trade_lots"] = serde_json::Value::Null;
+    let bytes = write_raw_record(&path, &value);
+    assert!(
+        WalWriter::open(&path).is_err(),
+        "current rotation accepts legacy unknown cost basis"
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    value.as_object_mut().unwrap().remove("open_trade_lots");
+    value["kind"] = "segment_base_v5".into();
+    let bytes = write_raw_record(&path, &value);
+    let (_, rows) = WalWriter::open(&path).unwrap();
+    assert!(matches!(
+        &rows[0].1,
+        WalRecord::SegmentBase {
+            open_trade_lots: None,
+            ..
+        }
+    ));
+    assert_eq!(fs::read(&path).unwrap(), bytes);
 }

@@ -14,6 +14,8 @@ impl Strategy for ExitOnQuote {
     fn on_event(&mut self, event: &EngineEvent, ctx: &mut dyn StrategyCtx) {
         if let EngineEvent::Market(MarketEvent::Quote { symbol, .. }) = event {
             ctx.place(Intent {
+                exact_prices: None,
+                exact_quantity: None,
                 strategy: StrategyId(0),
                 symbol: *symbol,
                 side: Side::Sell,

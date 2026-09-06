@@ -56,6 +56,7 @@ fn bought_ten() -> Vec<WalRecord> {
 
 fn still_held() -> Vec<engine_types::PositionView> {
     vec![engine_types::PositionView {
+        exact_amounts: None,
         exact_stop_px: None,
         symbol: SymbolId(0),
         side: Side::Buy,
@@ -759,6 +760,7 @@ async fn exact_shared_close_after_rotation_keeps_reconciliation_in_step_with_inv
         "reconciliation must replay the exact allocation after rotation"
     );
     let account = AccountView {
+        exact_amounts: None,
         equity_usdt: 1000.0,
         available_usdt: 1000.0,
         positions: vec![],

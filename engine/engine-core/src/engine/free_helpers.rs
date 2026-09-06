@@ -302,6 +302,7 @@ pub(crate) fn forget_leverage_where_flat(
 /// Mint the next client order id, skipping any the log already knows: the
 /// boot prefix comes from a wall clock, and a clock stepped back must not
 /// let a new order overwrite a recovered one's ledger entry.
+#[cfg(test)]
 pub(crate) fn mint_unused(prefix: &str, next_n: &mut u64, taken: impl Fn(&str) -> bool) -> String {
     loop {
         *next_n += 1;

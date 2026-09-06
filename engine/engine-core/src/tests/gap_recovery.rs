@@ -722,7 +722,7 @@ async fn a_later_reconciliation_stamp_does_not_replace_a_history_checkpoint() {
     ));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn a_quiet_running_engine_renews_an_empty_checkpoint() {
     let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
     let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
@@ -733,6 +733,10 @@ async fn a_quiet_running_engine_renews_an_empty_checkpoint() {
         .iter()
         .filter(|record| matches!(record, WalRecord::ExecutionHistoryCheckpoint { .. }))
         .count();
+    let before_wall_ms = clock::wall_ms();
+    while clock::wall_ms() <= before_wall_ms {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
     engine.renew_execution_history().await.unwrap();
 
     let after = h
@@ -829,10 +833,52 @@ async fn a_fill_the_last_run_was_told_about_is_not_recovered_again() {
         allow_all(),
         vec![Box::new(buyer)],
         &["BTCUSDT"],
-        &[WalRecord::OrderUpdate {
-            callbacks: None,
-            update: already.clone(),
-        }],
+        &[
+            WalRecord::OrderSent {
+                dispatch: None,
+                request: OrderRequest {
+                    client_order_id: "eng-last-run-1".into(),
+                    strategy: StrategyId(0),
+                    symbol: SymbolId(0),
+                    side: Side::Buy,
+                    qty: 0.02,
+                    kind: OrderKind::Market,
+                    stop: Some(StopSpec {
+                        trigger_px: 29_000.0,
+                    }),
+                    reduce_only: false,
+                    exact_terms: None,
+                    sleeve_effect: None,
+                    close_position: false,
+                },
+                wire_ns: 1,
+                arrival_mid: 30_000.0,
+            },
+            WalRecord::OrderSent {
+                dispatch: None,
+                request: OrderRequest {
+                    client_order_id: "eng-never-seen".into(),
+                    strategy: StrategyId(0),
+                    symbol: SymbolId(0),
+                    side: Side::Buy,
+                    qty: 0.02,
+                    kind: OrderKind::Market,
+                    stop: Some(StopSpec {
+                        trigger_px: 29_000.0,
+                    }),
+                    reduce_only: false,
+                    exact_terms: None,
+                    sleeve_effect: None,
+                    close_position: false,
+                },
+                wire_ns: 1,
+                arrival_mid: 30_000.0,
+            },
+            WalRecord::OrderUpdate {
+                callbacks: None,
+                update: already.clone(),
+            },
+        ],
     )
     .await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();

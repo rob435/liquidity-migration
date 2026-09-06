@@ -75,8 +75,28 @@ async fn inactive_offset_inventory_retains_quote_depth_through_restart_settlemen
     engine.wal.append(&exit).unwrap();
     engine.wal.barrier().unwrap();
     engine.portfolio_controls.apply(&exit).unwrap();
+    engine
+        .start_portfolio_emergency(
+            SymbolId(0),
+            Exact::parse_decimal("100").unwrap(),
+            engine_types::portfolio_control::PortfolioEmergencyReason::ExitUnavailable,
+        )
+        .unwrap();
+    let mut emergency = engine.portfolio_controls.emergencies[&SymbolId(0)].clone();
+    emergency.phase = engine_types::portfolio_control::PortfolioEmergencyPhase::CloseNet;
+    engine
+        .append_portfolio_control(WalRecord::PortfolioEmergencyChanged {
+            state: emergency.clone(),
+        })
+        .unwrap();
+    emergency.phase = engine_types::portfolio_control::PortfolioEmergencyPhase::SettleOffsets;
+    engine
+        .append_portfolio_control(WalRecord::PortfolioEmergencyChanged {
+            state: emergency.clone(),
+        })
+        .unwrap();
     let settlement = PortfolioOffsetSettlement {
-        emergency_id: 1,
+        emergency_id: emergency.id,
         symbol: SymbolId(0),
         price: Exact::parse_decimal("100").unwrap(),
         settled_ms: 2,
@@ -93,21 +113,16 @@ async fn inactive_offset_inventory_retains_quote_depth_through_restart_settlemen
             },
         ],
     };
-    let prepared = engine
-        .books
-        .attribution
-        .prepare_internal_settlement(&settlement)
+    engine
+        .append_portfolio_control(WalRecord::PortfolioOffsetSettled { settlement })
         .unwrap();
     engine
-        .wal
-        .append(&WalRecord::PortfolioOffsetSettled { settlement })
+        .append_portfolio_control(WalRecord::PortfolioEmergencyCompleted {
+            id: emergency.id,
+            symbol: SymbolId(0),
+        })
         .unwrap();
     engine.wal.barrier().unwrap();
-    engine
-        .books
-        .attribution
-        .commit_internal_settlement(prepared)
-        .unwrap();
     engine.maintain_signal_routes(&mut feed).unwrap();
     assert!(
         feed.retired.is_empty(),

@@ -4,8 +4,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use engine_types::{
     AccountIdentity, AccountInventory, AccountView, AmendSpec, InstrumentRule, OrderAck,
-    OrderRequest, Symbol, SymbolId, VenueCaps, VenueError, VenueExecution, VenueGateway,
-    VenueMutationTiming, VenueOrder,
+    OrderRequest, Symbol, SymbolId, VenueCaps, VenueError, VenueGateway, VenueMutationTiming,
+    VenueOrder,
 };
 
 const COMMAND_CAPACITY: usize = 4096;
@@ -103,7 +103,7 @@ enum Command {
     Executions {
         start_ms: i64,
         end_ms: i64,
-        reply: oneshot::Sender<Result<Vec<VenueExecution>, VenueError>>,
+        reply: oneshot::Sender<Result<engine_types::ExecutionHistory, VenueError>>,
     },
 }
 
@@ -403,7 +403,7 @@ impl VenueGateway for VenueClient {
         &mut self,
         start_ms: i64,
         end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
         let (reply, receive) = oneshot::channel();
         self.send(Command::Executions {
             start_ms,

@@ -30,9 +30,16 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
     async fn account_view(&self, symbols: &[Symbol]) -> Result<AccountView, VenueError> {
         let (observed_ns, reply) = account_scan(async {
             let reservation = self.budget.reserve(WEIGHT_ACCOUNT).await;
-            let account = self.rest.get_signed(PATH_ACCOUNT, &[]).await;
+            let account = self
+                .rest
+                .get_signed_as::<Box<serde_json::value::RawValue>>(PATH_ACCOUNT, &[])
+                .await;
             drop(reservation);
-            let account = account?;
+            let raw_account = account?;
+            let (exact_amounts, exact_positions) =
+                crate::account_numbers::binance(raw_account.get())?;
+            let account = serde_json::from_str(raw_account.get())
+                .map_err(|e| VenueError::BadReply(e.to_string()))?;
             // The position rows say nothing about stops, so the stop book is
             // read beside them and joined in — one open-algo read per held
             // symbol, because "which symbols" is only known from the account.
@@ -43,6 +50,7 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
                 &crate::account_recovery::ids(symbols)?,
                 &HashMap::new(),
             )?;
+            crate::account_numbers::assign(&mut positions, exact_positions, symbols)?;
             for position in &mut positions {
                 let name = symbols
                     .get(position.symbol.idx())
@@ -59,11 +67,12 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
                         .and_then(|stop| stop.for_side(position.side)),
                 )?;
             }
-            Ok::<_, VenueError>((equity, available, positions))
+            Ok::<_, VenueError>((equity, available, positions, exact_amounts))
         })
         .await;
-        let (equity_usdt, available_usdt, positions) = reply?;
+        let (equity_usdt, available_usdt, positions, exact_amounts) = reply?;
         Ok(AccountView {
+            exact_amounts: Some(Box::new(exact_amounts)),
             equity_usdt,
             available_usdt,
             positions,
@@ -75,7 +84,7 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
         _symbols: &[Symbol],
         _start_ms: i64,
         _end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
         Err(VenueError::BadRequest(
             "Binance execution recovery is unavailable: account trades require a symbol, while \
              account-wide order discovery and order lookup can omit a fill from an ordinary GTC \

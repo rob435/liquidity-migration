@@ -35,6 +35,23 @@ fn projection(frontier: &OrderFillQuantity) -> Result<f64, String> {
 }
 
 impl OrderRec {
+    pub(crate) fn remaining_exact(&self) -> Result<Exact, String> {
+        match &self.fill_quantity {
+            OrderFillQuantity::Exact { quantity } => {
+                let requested = self
+                    .request
+                    .exact_terms
+                    .as_ref()
+                    .ok_or("exact fill frontier has no exact order terms")?;
+                Ok((&requested.quantity - quantity).max(Exact::zero()))
+            }
+            OrderFillQuantity::LegacyBinary64 { quantity } => {
+                Exact::from_legacy_f64((self.request.qty - quantity).max(0.0))
+                    .map_err(|error| error.to_string())
+            }
+        }
+    }
+
     pub(crate) fn remaining_qty(&self) -> Result<f64, String> {
         match &self.fill_quantity {
             OrderFillQuantity::Exact { quantity } => {
@@ -110,6 +127,7 @@ impl OrderRec {
         let (frontier, filled, done) = self.next_fill(qty, amounts).expect("validated order fill");
         self.fill_quantity = frontier;
         self.filled_qty = filled;
+        self.terminal_checkpoint_ms = None;
         if done {
             self.ending = Some(Ending::Filled);
         }
@@ -185,33 +203,25 @@ impl LedgerOfOrders {
             }
             WalRecord::SegmentBase { open_orders, .. } => {
                 for open in open_orders {
-                    if let Some(terms) = &open.request.exact_terms {
-                        terms
-                            .validate_projection(&open.request)
-                            .map_err(|e| e.to_string())?;
+                    validate_restored(open)?;
+                }
+            }
+            WalRecord::OrderLineageRestored { order } => {
+                if order.terminal.is_none() {
+                    return Err("reactivated order lineage is not terminal".into());
+                }
+                if let Some(known) = self.orders.get(&order.request.client_order_id) {
+                    let mut prior = known.snapshot(0);
+                    if let (Some(old), Some(restored)) = (&mut prior.terminal, &order.terminal) {
+                        old.retained_since_ms = restored.retained_since_ms;
                     }
-                    let frontier = restore(open);
-                    if projection(&frontier)? != open.filled_qty {
+                    if prior != *order {
                         return Err(
-                            "order fill frontier disagrees with its quantity projection".into()
+                            "reactivated order lineage changes resident canonical ownership".into(),
                         );
                     }
-                    if let OrderFillQuantity::Exact { quantity } = frontier {
-                        let requested = open
-                            .request
-                            .exact_terms
-                            .as_ref()
-                            .ok_or("exact fill frontier has no exact order terms")?;
-                        if quantity >= requested.quantity {
-                            return Err(
-                                "an exact completed order cannot be restated as open".into()
-                            );
-                        }
-                        (&requested.quantity - &quantity)
-                            .to_f64()
-                            .map_err(|e| e.to_string())?;
-                    }
                 }
+                validate_restored(order)?;
             }
             WalRecord::OrderUpdate {
                 update:
@@ -237,4 +247,59 @@ impl LedgerOfOrders {
         }
         Ok(())
     }
+}
+
+fn validate_restored(open: &engine_types::OpenOrderState) -> Result<(), String> {
+    for px in [open.reservation_low_px, open.reservation_high_px] {
+        if !px.is_finite() || px < 0.0 {
+            return Err("invalid legacy reservation price".into());
+        }
+    }
+    let range = super::restored_price_range(open);
+    range
+        .low
+        .validate_storage()
+        .map_err(|error| error.to_string())?;
+    range
+        .high
+        .validate_storage()
+        .map_err(|error| error.to_string())?;
+    if range.low.is_negative() || range.high < range.low {
+        return Err("invalid canonical reservation price range".into());
+    }
+    let current = super::request_price_range(&open.request);
+    if range.low > current.low || range.high < current.high {
+        return Err("reservation price range excludes the current request".into());
+    }
+    if open.exact_price_range.is_some()
+        && (range.low.to_f64().map_err(|e| e.to_string())? != open.reservation_low_px
+            || range.high.to_f64().map_err(|e| e.to_string())? != open.reservation_high_px)
+    {
+        return Err("canonical reservation price range disagrees with projection".into());
+    }
+    if let Some(terms) = &open.request.exact_terms {
+        terms
+            .validate_projection(&open.request)
+            .map_err(|e| e.to_string())?;
+    }
+    let frontier = restore(open);
+    if projection(&frontier)? != open.filled_qty {
+        return Err("order fill frontier disagrees with its quantity projection".into());
+    }
+    if let OrderFillQuantity::Exact { quantity } = frontier {
+        let requested = open
+            .request
+            .exact_terms
+            .as_ref()
+            .ok_or("exact fill frontier has no exact order terms")?;
+        if quantity > requested.quantity
+            || (quantity == requested.quantity && open.terminal.is_none())
+        {
+            return Err("an exact completed order cannot be restated as open".into());
+        }
+        (&requested.quantity - &quantity)
+            .to_f64()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }

@@ -541,6 +541,12 @@ pub trait StrategyCtx {
     /// belongs to nobody here and reads as zero, and where this and the
     /// account reading disagree the account reading is the fact.
     fn my_position(&self, symbol: SymbolId) -> f64;
+    fn my_position_exact(
+        &self,
+        symbol: SymbolId,
+    ) -> Result<crate::numeric::Exact, crate::numeric::ExactError> {
+        crate::numeric::Exact::from_legacy_f64(self.my_position(symbol))
+    }
     /// Names this strategy's fills still claim as open, appended to `out`.
     ///
     /// This is the restart-safe complement to [`StrategyCtx::my_position`]:
@@ -572,6 +578,12 @@ pub trait StrategyCtx {
     fn in_flight(&self, symbol: SymbolId) -> f64 {
         let _ = symbol;
         0.0
+    }
+    fn in_flight_exact(
+        &self,
+        symbol: SymbolId,
+    ) -> Result<crate::numeric::Exact, crate::numeric::ExactError> {
+        crate::numeric::Exact::from_legacy_f64(self.in_flight(symbol))
     }
     /// This strategy's position, venue row, and send-ahead cover joined in one
     /// typed fact. `None` means it has no attributed quantity or cover there.

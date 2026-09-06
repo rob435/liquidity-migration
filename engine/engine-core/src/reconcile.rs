@@ -259,6 +259,30 @@ pub fn reconcile(
     qty_step_of: impl Fn(SymbolId) -> Option<f64>,
     px_tick_of: impl Fn(SymbolId) -> Option<f64>,
 ) -> Result<Reconciliation, String> {
+    let positions = position_state(replayed)?;
+    reconcile_positions(
+        log,
+        replayed,
+        (&positions.0, &positions.1),
+        venue_orders,
+        account,
+        resolve,
+        qty_step_of,
+        px_tick_of,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reconcile_positions(
+    log: &LedgerOfOrders,
+    replayed: &[WalRecord],
+    positions: (&PhysicalExposure, &BTreeMap<SymbolId, IntendedPositionStop>),
+    venue_orders: &[VenueOrder],
+    account: &AccountView,
+    resolve: impl Fn(&str) -> Option<SymbolId>,
+    qty_step_of: impl Fn(SymbolId) -> Option<f64>,
+    px_tick_of: impl Fn(SymbolId) -> Option<f64>,
+) -> Result<Reconciliation, String> {
     let mut findings = Vec::new();
 
     // Orders the log still shows working, against the venue's own list.
@@ -290,7 +314,7 @@ pub fn reconcile(
 
     findings.extend(foreign_fills(replayed)?);
 
-    let (logged, intended) = position_state(replayed)?;
+    let (logged, intended) = positions;
 
     for position in &account.positions {
         let intended_px = intended
@@ -314,20 +338,26 @@ pub fn reconcile(
                 repair_px: intended_px,
             });
         }
-        let venue_qty = signed(position.side, position.qty);
-        let logged_qty = logged
+        let quantity = position.quantity().map_err(|error| error.to_string())?;
+        let venue_exact = if position.side == Side::Buy {
+            quantity
+        } else {
+            -quantity
+        };
+        let logged_exact = logged
             .get(&position.symbol)
-            .map(|qty| qty.to_f64())
-            .transpose()
-            .map_err(|e| e.to_string())?
-            .unwrap_or(0.0);
-        if (venue_qty != 0.0 && !logged.contains_key(&position.symbol))
-            || (venue_qty - logged_qty).abs() > tolerance(qty_step_of(position.symbol))
+            .cloned()
+            .unwrap_or_else(Exact::zero);
+        let difference = (&venue_exact - &logged_exact).abs();
+        let quantity_tolerance = Exact::from_legacy_f64(tolerance(qty_step_of(position.symbol)))
+            .map_err(|error| error.to_string())?;
+        if (!venue_exact.is_zero() && !logged.contains_key(&position.symbol))
+            || difference > quantity_tolerance
         {
             findings.push(Finding::UnaccountedExposure {
                 symbol: position.symbol,
-                venue_qty,
-                logged_qty,
+                venue_qty: venue_exact.to_f64().map_err(|error| error.to_string())?,
+                logged_qty: logged_exact.to_f64().map_err(|error| error.to_string())?,
             });
         }
     }
@@ -371,6 +401,9 @@ fn foreign_fills(replayed: &[WalRecord]) -> Result<Vec<Finding>, String> {
         match record {
             WalRecord::OrderSent { request, .. } => {
                 sent.insert(request.client_order_id.clone(), request.clone());
+            }
+            WalRecord::OrderLineageRestored { order } => {
+                sent.insert(order.request.client_order_id.clone(), order.request.clone());
             }
             WalRecord::OrderUpdate {
                 update:
@@ -642,6 +675,9 @@ fn position_state(replayed: &[WalRecord]) -> Result<PositionState, String> {
             WalRecord::OrderSent { request, .. } => {
                 sent.insert(request.client_order_id.clone(), request.clone());
             }
+            WalRecord::OrderLineageRestored { order } => {
+                sent.insert(order.request.client_order_id.clone(), order.request.clone());
+            }
             WalRecord::OrderUpdate {
                 update:
                     OrderUpdate::Fill {
@@ -797,13 +833,6 @@ pub(crate) fn intended_stops(
     Ok(position_state(replayed)?.1)
 }
 
-fn signed(side: Side, qty: f64) -> f64 {
-    match side {
-        Side::Buy => qty,
-        Side::Sell => -qty,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,6 +897,7 @@ mod tests {
 
     fn account(positions: Vec<PositionView>) -> AccountView {
         AccountView {
+            exact_amounts: None,
             equity_usdt: 1_000.0,
             available_usdt: 900.0,
             positions,
@@ -877,6 +907,7 @@ mod tests {
 
     fn held(symbol: u16, side: Side, qty: f64, stop_attached: bool) -> PositionView {
         PositionView {
+            exact_amounts: None,
             exact_stop_px: None,
             symbol: SymbolId(symbol),
             side,
@@ -1684,5 +1715,28 @@ mod tests {
             owned.snapshot().positions[0].signed_qty,
             Exact::parse_decimal("0.3").unwrap()
         );
+    }
+    #[test]
+    fn canonical_account_difference_cannot_disappear_inside_one_binary64_projection() {
+        let records = crate::tests::shared_sleeves::owned_records("1000000000000000000", "0");
+        let mut position = held(0, Side::Buy, 1e18, true);
+        position.exact_amounts = Some(Box::new(engine_types::risk::PositionAmounts {
+            quantity: engine_types::numeric::ExactNumber::venue_decimal("1000000000000000001")
+                .unwrap(),
+            entry_price: engine_types::numeric::ExactNumber::venue_decimal("100").unwrap(),
+        }));
+        assert_eq!(position.quantity().unwrap().to_f64().unwrap(), 1e18);
+        let result = run(&records, &[], &account(vec![position]));
+        assert!(
+            result.findings.iter().any(|finding| matches!(
+                finding,
+                Finding::UnaccountedExposure {
+                    symbol: SymbolId(0),
+                    ..
+                }
+            )),
+            "equal projections hid one whole unaccounted unit"
+        );
+        assert!(result.must_not_open());
     }
 }

@@ -489,6 +489,8 @@ pub fn emit_effects(
                     Step::Enter {
                         side, qty, stop_px, ..
                     } => ctx.place(Intent {
+                        exact_prices: None,
+                        exact_quantity: None,
                         strategy,
                         symbol,
                         side,
@@ -503,19 +505,32 @@ pub fn emit_effects(
                         work: entry_work,
                         leverage: order.leverage,
                     }),
-                    Step::Exit { side, qty, .. } => ctx.place(Intent {
-                        strategy,
-                        symbol,
-                        side,
-                        qty,
-                        kind: OrderKind::Market,
-                        stop: None,
-                        reduce_only: true,
-                        tag: order.tag.to_owned(),
-                        decided_ns,
-                        work: None,
-                        leverage: None,
-                    }),
+                    Step::Exit { side, .. } => {
+                        let held = ctx
+                            .my_position_exact(symbol)
+                            .map_err(|_| "native canonical quantity is unavailable")?;
+                        if held.is_zero() || held.is_positive() != (side == Side::Sell) {
+                            continue;
+                        }
+                        let quantity = held.abs();
+                        ctx.place(Intent {
+                            exact_prices: None,
+                            exact_quantity: Some(Box::new(quantity.clone())),
+                            strategy,
+                            symbol,
+                            side,
+                            qty: quantity
+                                .to_f64()
+                                .map_err(|_| "native exact exit has no quantity projection")?,
+                            kind: OrderKind::Market,
+                            stop: None,
+                            reduce_only: true,
+                            tag: order.tag.to_owned(),
+                            decided_ns,
+                            work: None,
+                            leverage: None,
+                        });
+                    }
                     Step::Resize {
                         side,
                         qty,
@@ -523,6 +538,15 @@ pub fn emit_effects(
                         stop_px,
                         ..
                     } => ctx.place(Intent {
+                        exact_prices: None,
+                        exact_quantity: if reduce_only {
+                            Some(Box::new(
+                                engine_types::order_terms::strategy_decimal(qty)
+                                    .map_err(|_| "native canonical quantity is unavailable")?,
+                            ))
+                        } else {
+                            None
+                        },
                         strategy,
                         symbol,
                         side,
@@ -643,7 +667,10 @@ pub fn planner_facts(ctx: &dyn StrategyCtx, symbols: &BTreeSet<String>) -> Plann
         // own fills are; the reading only caps them, and flat at the venue is
         // the fact whatever the fills sum to.
         let signed_qty = if allocation.is_some() {
-            ctx.my_position(symbol) + in_flight
+            ctx.my_position_exact(symbol)
+                .and_then(|held| ctx.in_flight_exact(symbol).map(|pending| held + pending))
+                .and_then(|quantity| quantity.to_f64())
+                .unwrap_or(f64::NAN)
         } else {
             match venue.as_ref() {
                 None => in_flight,
@@ -666,7 +693,11 @@ pub fn planner_facts(ctx: &dyn StrategyCtx, symbols: &BTreeSet<String>) -> Plann
                 }
             }
         };
-        if signed_qty.abs() <= f64::EPSILON {
+        if !signed_qty.is_finite() {
+            facts.foreign_owned.insert(name.clone());
+            continue;
+        }
+        if signed_qty == 0.0 || (allocation.is_none() && signed_qty.abs() <= f64::EPSILON) {
             continue;
         }
         let entry_px = allocation.map_or_else(
@@ -741,7 +772,9 @@ pub fn attributed_exposure_is_flat(ctx: &dyn StrategyCtx, symbols: &BTreeSet<Str
             .my_position_facts(symbol)
             .filter(|position| position.allocated.is_some())
         {
-            position.attributed_signed_qty == 0.0 && position.open_order_count == 0
+            ctx.my_position_exact(symbol)
+                .is_ok_and(|quantity| quantity.is_zero())
+                && position.open_order_count == 0
         } else {
             ctx.my_position(symbol).abs() <= f64::EPSILON
                 && ctx.in_flight(symbol).abs() <= f64::EPSILON
@@ -1190,5 +1223,58 @@ mod tests {
                 Effect::ConsumeRuntimeControl { request_id }
             ] if request_id == "flatten-1"
         ));
+    }
+    #[test]
+    fn native_full_exit_uses_the_canonical_sleeve_lot_and_partial_resize_keeps_its_decision() {
+        let (mut ctx, _) = pepe_ctx();
+        let quantity = engine_types::numeric::Exact::parse_decimal("0.100000000000000001").unwrap();
+        ctx.set_my_position_exact(PEPE, quantity.clone());
+        emit_effects(
+            vec![Effect::Order(OrderEffect {
+                step: Step::Exit {
+                    symbol: PEPE.into(),
+                    side: Side::Sell,
+                    qty: 0.1,
+                },
+                leverage: None,
+                tag: "exact-native-exit",
+            })],
+            StrategyId(0),
+            None,
+            None,
+            &mut ctx,
+        )
+        .unwrap();
+        let Action::Place(intent) = ctx.emitted.pop().unwrap() else {
+            panic!("missing native exit")
+        };
+        assert_eq!(intent.quantity().unwrap(), quantity);
+        assert!(intent.exact_quantity.is_some());
+        emit_effects(
+            vec![Effect::Order(OrderEffect {
+                step: Step::Resize {
+                    symbol: PEPE.into(),
+                    side: Side::Sell,
+                    qty: 0.1,
+                    reduce_only: true,
+                    stop_px: None,
+                },
+                leverage: None,
+                tag: "exact-native-resize",
+            })],
+            StrategyId(0),
+            None,
+            None,
+            &mut ctx,
+        )
+        .unwrap();
+        let Action::Place(intent) = ctx.emitted.pop().unwrap() else {
+            panic!("missing native resize")
+        };
+        assert_eq!(
+            intent.quantity().unwrap(),
+            engine_types::numeric::Exact::parse_decimal("0.1").unwrap()
+        );
+        assert!(intent.exact_quantity.is_some());
     }
 }

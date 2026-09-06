@@ -8,18 +8,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// grow for the life of a process nobody asked to report on itself. The
     /// kernel hears every priced trip for the same reason — the rolling loss
     /// window counts what this engine did, not what somebody chose to file.
-    /// An unpriced close carries no number to count.
+    /// A native close without valued net retains accounting debt in the window.
     pub(super) fn record_trades(&mut self) {
         let closed = self.fills.take_closed();
         if closed.is_empty() {
             return;
         }
         for trade in &closed {
-            if let Some(round_trip) = &trade.round_trip {
-                self.risk.observe_closed_trade(ClosedTradeRow {
-                    closed_ms: trade.closed_ms,
-                    net_usdt: round_trip.net_usdt,
-                });
+            if let Some(row) = trade.loss_row() {
+                self.risk.observe_closed_trade(row);
             }
         }
         if let Some(trades) = self.trades.as_mut() {

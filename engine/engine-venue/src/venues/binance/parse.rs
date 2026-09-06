@@ -492,6 +492,7 @@ pub(crate) fn parse_account(
             .and_then(|held| held.nearest(side))
             .unwrap_or(0.0);
         out.push(PositionView {
+            exact_amounts: None,
             exact_stop_px: None,
             symbol: id,
             side,

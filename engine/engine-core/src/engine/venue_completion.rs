@@ -573,9 +573,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .orders
                     .orders
                     .get(&client_order_id)
-                    .is_none_or(|row| {
-                        !row.in_flight() || row.reservation_low_px == row.reservation_high_px
-                    })
+                    .is_none_or(|row| !row.in_flight() || !row.price_is_ambiguous())
                 {
                     self.release_symbols([symbol]);
                     return Ok(());
@@ -696,6 +694,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             px: effective_px,
             tif,
         };
+        if let Some(order) = self.books.orders.orders.get(client_order_id) {
+            settled.qty = order.remaining_qty().map_err(EngineError::State)?;
+            settled.exact_quantity = Some(Box::new(
+                order.remaining_exact().map_err(EngineError::State)?,
+            ));
+            settled.exact_prices = order.request.canonical_intent_prices();
+        }
         let remaining_qty = self
             .books
             .orders
@@ -929,7 +934,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             })?;
             return Ok(false);
         }
-        if existing.reservation_low_px.to_bits() != existing.reservation_high_px.to_bits() {
+        if existing.price_is_ambiguous() {
             // An order whose working price is unknown cannot be moved: the
             // next reservation would have to cover the range of a range. If
             // an answer is still owed the wait is measured in milliseconds
@@ -1043,6 +1048,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
 
         let amended_intent = Intent {
+            exact_prices: Some(Box::new(engine_types::orders::IntentPrices {
+                limit_price: spec
+                    .exact_terms
+                    .as_deref()
+                    .and_then(|terms| terms.limit_price.clone()),
+                stop_trigger_price: existing
+                    .request
+                    .exact_terms
+                    .as_deref()
+                    .and_then(|terms| terms.stop_trigger_price.clone()),
+            })),
+            exact_quantity: Some(Box::new(
+                existing.remaining_exact().map_err(EngineError::State)?,
+            )),
             strategy: existing.request.strategy,
             symbol,
             side: existing.request.side,
@@ -1067,7 +1086,23 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     &self.books.attribution.snapshot(),
                 ) {
                     engine_types::risk::PortfolioRiskVerdict::Allow { qty, .. } => {
-                        RiskVerdict::Allow { qty }
+                        if amended_intent
+                            .quantity()
+                            .is_ok_and(|remaining| qty == remaining)
+                        {
+                            RiskVerdict::Allow {
+                                qty: qty
+                                    .to_f64()
+                                    .map_err(|error| EngineError::State(error.to_string()))?,
+                            }
+                        } else {
+                            RiskVerdict::Deny {
+                                reason: DenyReason::UnknownState {
+                                    detail: "price amendment changed canonical remaining quantity"
+                                        .into(),
+                                },
+                            }
+                        }
                     }
                     engine_types::risk::PortfolioRiskVerdict::Deny { reason } => {
                         RiskVerdict::Deny { reason }
@@ -1127,11 +1162,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .orders
             .try_apply(&sent)
             .map_err(EngineError::State)?;
-        self.risk.register_order_price_range_with_account(
+        let range = &self.books.orders.orders[client_order_id].exact_price_range;
+        self.risk.register_order_exact_price_range_with_account(
             client_order_id,
             &amended_intent,
-            remaining_qty,
-            (old_px.min(requested_px), old_px.max(requested_px)),
+            &existing.remaining_exact().map_err(EngineError::State)?,
+            (&range.low, &range.high),
             &self.books.account,
         );
         let barrier = self.wal.barrier_begin()?;
@@ -1177,8 +1213,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(());
         }
         let remaining_now = current.remaining_qty().map_err(EngineError::State)?;
-        let changed = remaining_now != remaining_qty
-            || current.reservation_low_px == current.reservation_high_px;
+        let changed = current.remaining_exact().map_err(EngineError::State)?
+            != amended_intent
+                .quantity()
+                .map_err(|error| EngineError::State(error.to_string()))?
+            || !current.price_is_ambiguous();
         let permission = existing.request.is_sleeve_reduction()
             || (self.may_open
                 && self.private_stream_ready
@@ -1186,14 +1225,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .opening_permission_reason(existing.request.strategy)
                     .is_none());
         let risk = if self.instrument_specs.contains_key(&symbol) {
-            matches!(self.risk.reassess_portfolio_order(&client_order_id, &amended_intent, &self.books.account, &self.books.attribution.snapshot()), engine_types::risk::PortfolioRiskVerdict::Allow { qty, .. } if qty == remaining_qty)
+            matches!(self.risk.reassess_portfolio_order(&client_order_id, &amended_intent, &self.books.account, &self.books.attribution.snapshot()), engine_types::risk::PortfolioRiskVerdict::Allow { qty, .. } if amended_intent.quantity().is_ok_and(|remaining| qty == remaining))
         } else if !existing.request.is_sleeve_reduction() {
             matches!(self.risk.assess_price_amend(&client_order_id, &amended_intent, &self.books.account), RiskVerdict::Allow { qty } if qty == remaining_qty)
         } else {
             true
         };
         if changed || !permission || !risk {
-            if current.reservation_low_px != current.reservation_high_px {
+            if current.price_is_ambiguous() {
                 self.resolve_amend(
                     &client_order_id,
                     &amended_intent,
@@ -1236,6 +1275,30 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     /// Every order update, wherever it came from, goes through here.
     pub(super) async fn take_update(&mut self, update: OrderUpdate) -> Result<(), EngineError> {
+        let duplicate = match &update {
+            OrderUpdate::Fill { exec_id, .. } => {
+                self.recovered_exec_ids.contains(exec_id, clock::wall_ms())
+            }
+            _ => false,
+        };
+        if !duplicate && !matches!(update, OrderUpdate::FastFill { .. }) {
+            if let Some(id) = inflight::client_order_id(&update) {
+                let symbol = match &update {
+                    OrderUpdate::Fill { symbol, .. } => Some(*symbol),
+                    _ => None,
+                };
+                if !self.require_order_lineage(id, symbol, Some(update.clone()))? {
+                    return Ok(());
+                }
+            }
+        }
+        self.take_update_ready(update).await
+    }
+
+    pub(super) async fn take_update_ready(
+        &mut self,
+        update: OrderUpdate,
+    ) -> Result<(), EngineError> {
         let callbacks = self
             .host
             .callbacks
@@ -1520,19 +1583,21 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         &mut self,
         update: &OrderUpdate,
     ) -> Result<(), EngineError> {
+        self.portfolio_controls
+            .retire_completed_orders(&self.books.orders);
         if let OrderUpdate::Fill {
             client_order_id, ..
         } = update
         {
             if let Some(order) = self.books.orders.orders.get(client_order_id) {
                 let remaining = if order.in_flight() {
-                    order.remaining_qty().map_err(EngineError::State)?
+                    order.remaining_exact().map_err(EngineError::State)?
                 } else {
-                    0.0
+                    engine_types::numeric::Exact::zero()
                 };
                 return self
                     .risk
-                    .on_update_with_remaining(update, remaining)
+                    .on_update_with_exact_remaining(update, &remaining)
                     .map_err(|e| EngineError::State(format!("{e:?}")));
             }
         }
@@ -1564,7 +1629,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .remove(&client_order_id)
                 .or_else(|| {
                     let row = self.books.orders.orders.get(&client_order_id)?;
-                    if !row.in_flight() || row.reservation_low_px == row.reservation_high_px {
+                    if !row.in_flight() || !row.price_is_ambiguous() {
                         return None;
                     }
                     let OrderKind::Limit { tif, .. } = row.request.kind else {
@@ -1573,6 +1638,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     Some(AwaitingAmend {
                         symbol: row.request.symbol,
                         amended_intent: Box::new(Intent {
+                            exact_prices: row.request.canonical_intent_prices(),
+                            exact_quantity: Some(Box::new(row.remaining_exact().ok()?)),
                             strategy: row.request.strategy,
                             symbol: row.request.symbol,
                             side: row.request.side,
@@ -1865,6 +1932,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.fills
             .on_fill_with_quantity(
                 &execution::Fill {
+                    amounts: amounts.clone(),
                     client_order_id: client_order_id.clone(),
                     strategy,
                     symbol: *symbol,

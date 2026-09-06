@@ -428,6 +428,43 @@ impl StrategyCtx for Ctx<'_> {
         self.books.attribution.signed(self.strategy, symbol)
     }
 
+    fn my_position_exact(
+        &self,
+        symbol: SymbolId,
+    ) -> Result<engine_types::numeric::Exact, engine_types::numeric::ExactError> {
+        Ok(self.books.attribution.signed_exact(self.strategy, symbol))
+    }
+
+    fn in_flight_exact(
+        &self,
+        symbol: SymbolId,
+    ) -> Result<engine_types::numeric::Exact, engine_types::numeric::ExactError> {
+        use engine_types::numeric::{Exact, ExactError};
+        if !self.books.portfolio_symbols.contains(&symbol) {
+            return Exact::from_legacy_f64(self.in_flight(symbol));
+        }
+        self.books
+            .orders
+            .orders
+            .values()
+            .filter(|order| {
+                order.request.sleeve_owner() == Some(self.strategy)
+                    && order.request.symbol == symbol
+                    && order.in_flight()
+            })
+            .try_fold(Exact::zero(), |sum, order| {
+                let quantity = order
+                    .remaining_exact()
+                    .map_err(|_| ExactError::InvalidProjection)?;
+                Ok(sum
+                    + if order.request.side == engine_types::Side::Buy {
+                        quantity
+                    } else {
+                        -quantity
+                    })
+            })
+    }
+
     fn my_position_names<'a>(&'a self, out: &mut Vec<&'a str>) {
         let start = out.len();
         out.extend(
@@ -631,6 +668,7 @@ mod tests {
     /// tests want the context to be sitting on.
     fn flat_account() -> AccountView {
         AccountView {
+            exact_amounts: None,
             equity_usdt: 1_000.0,
             available_usdt: 1_000.0,
             positions: Vec::new(),
@@ -906,6 +944,8 @@ mod tests {
         let books = books_over(market, orders, registry);
         let mut ctx = ctx_over(&books, &mut out, &mut timers, StrategyId(3));
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(9),
             symbol: SymbolId(0),
             side: Side::Buy,
@@ -1010,6 +1050,8 @@ mod tests {
                     fill_quantity: Some(row.fill_quantity.clone()),
                     reservation_low_px: row.reservation_low_px,
                     reservation_high_px: row.reservation_high_px,
+                    exact_price_range: Some(row.exact_price_range.clone()),
+                    terminal: None,
                 });
             }
             let base: WalRecord =
@@ -1139,6 +1181,7 @@ mod tests {
 
     fn holding(symbol: SymbolId, side: Side, qty: f64) -> PositionView {
         PositionView {
+            exact_amounts: None,
             exact_stop_px: None,
             symbol,
             side,
@@ -1158,6 +1201,7 @@ mod tests {
         let orders = LedgerOfOrders::default();
         let registry = OrderRegistry::default();
         let account = AccountView {
+            exact_amounts: None,
             positions: vec![holding(SymbolId(1), Side::Sell, 3.0)],
             ..flat_account()
         };
@@ -1268,6 +1312,7 @@ mod tests {
         let orders = LedgerOfOrders::default();
         let registry = OrderRegistry::default();
         let account = AccountView {
+            exact_amounts: None,
             positions: vec![holding(SymbolId(0), Side::Buy, 0.0)],
             ..flat_account()
         };

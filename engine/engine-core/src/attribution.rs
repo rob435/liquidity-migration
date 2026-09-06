@@ -96,6 +96,9 @@ impl Attribution {
                 WalRecord::OrderSent { request, .. } => {
                     sender.insert(request.client_order_id.as_str(), request);
                 }
+                WalRecord::OrderLineageRestored { order } => {
+                    sender.insert(order.request.client_order_id.as_str(), &order.request);
+                }
                 // A fill for an order this log never recorded sending belongs
                 // to somebody else on the account, unless the venue named it
                 // a close of a position one sleeve holds. Anything else is
@@ -647,6 +650,18 @@ impl Attribution {
                 .as_ref()
                 .and_then(|stop| stop.to_f64().ok()),
         })
+    }
+
+    pub fn signed_exact(
+        &self,
+        strategy: StrategyId,
+        symbol: SymbolId,
+    ) -> engine_types::numeric::Exact {
+        self.inventory
+            .position(strategy, symbol)
+            .map_or_else(engine_types::numeric::Exact::zero, |row| {
+                row.signed_qty.clone()
+            })
     }
 
     /// Signed quantity this strategy's own orders opened in this symbol.

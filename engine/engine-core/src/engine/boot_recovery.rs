@@ -7,6 +7,121 @@ use configuration::{restore_configuration, ConfiguredStrategies};
 use inputs::{restore_strategy_inputs, RecoveredStrategyInputs};
 use reservations::restore_order_reservations;
 
+fn recent_legacy_fills(records: &[WalRecord]) -> VecDeque<(String, i64, f64)> {
+    let mut recent: VecDeque<_> = records
+        .iter()
+        .rev()
+        .filter_map(|record| match record {
+            WalRecord::OrderUpdate {
+                update:
+                    OrderUpdate::Fill {
+                        exec_id,
+                        client_order_id,
+                        venue_ts_ms,
+                        qty,
+                        ..
+                    },
+                ..
+            } if exec_id.is_empty() => Some((client_order_id.clone(), *venue_ts_ms, *qty)),
+            _ => None,
+        })
+        .take(RECENT_FILLS_KEPT)
+        .collect();
+    recent.make_contiguous().reverse();
+    recent
+}
+
+type LegacyOverlapCounts<'a> =
+    std::collections::HashMap<&'a str, std::collections::HashMap<(i64, u64), usize>>;
+
+fn legacy_overlap_counts(records: &[WalRecord], since: i64) -> LegacyOverlapCounts<'_> {
+    let mut counts = LegacyOverlapCounts::new();
+    for record in records {
+        if let WalRecord::OrderUpdate {
+            update:
+                OrderUpdate::Fill {
+                    exec_id,
+                    client_order_id,
+                    venue_ts_ms,
+                    qty,
+                    ..
+                },
+            ..
+        } = record
+        {
+            if exec_id.is_empty() && *venue_ts_ms >= since {
+                *counts
+                    .entry(client_order_id.as_str())
+                    .or_default()
+                    .entry((*venue_ts_ms, qty.to_bits()))
+                    .or_default() += 1;
+            }
+        }
+    }
+    counts
+}
+
+pub(super) struct RecoveryOutcome {
+    pub(super) orders: LedgerOfOrders,
+    pub(super) attribution: Attribution,
+    fills: Fills,
+    portfolio_controls: crate::portfolio_control::PortfolioControls,
+    physical: reconcile::PhysicalExposure,
+    intended: BTreeMap<SymbolId, reconcile::IntendedPositionStop>,
+    latched: bool,
+    pub(super) through_ms: i64,
+}
+
+impl RecoveryOutcome {
+    fn replay<R: RiskKernel>(
+        records: &[WalRecord],
+        risk: &mut R,
+        through_ms: i64,
+    ) -> Result<Self, EngineError> {
+        let mut fills = Fills::default();
+        let closed = fills.try_seed_lots(records).map_err(EngineError::Boot)?;
+        if let Some(rows) = records.iter().rev().find_map(|record| match record {
+            WalRecord::SegmentBase {
+                rolling_loss_rows, ..
+            } => Some(rolling_loss_rows),
+            _ => None,
+        }) {
+            risk.restore_rolling_loss_rows(rows);
+        }
+        for trade in closed {
+            if let Some(row) = trade.loss_row() {
+                risk.observe_closed_trade(row);
+            }
+        }
+        Ok(Self {
+            orders: LedgerOfOrders::try_from_records(records).map_err(EngineError::Boot)?,
+            attribution: Attribution::try_from_records(records).map_err(EngineError::Boot)?,
+            fills,
+            portfolio_controls: crate::portfolio_control::PortfolioControls::replay(records)
+                .map_err(EngineError::Boot)?,
+            physical: reconcile::physical_exposure(records).map_err(EngineError::Boot)?,
+            intended: reconcile::intended_stops(records).map_err(EngineError::Boot)?,
+            latched: false,
+            through_ms,
+        })
+    }
+
+    fn reject<W: Wal>(
+        &mut self,
+        wal: &mut W,
+        now_ms: i64,
+        finding: String,
+    ) -> Result<(), EngineError> {
+        wal.append(&WalRecord::Reconciled {
+            wall_ts_ms: now_ms,
+            findings: vec![finding],
+            may_open: false,
+        })?;
+        self.latched = true;
+        Ok(())
+    }
+}
+
 struct ReconciledOrders {
     stop_repairs_pending: std::collections::BTreeSet<SymbolId>,
     may_open: bool,
@@ -152,6 +267,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let dispatches =
             crate::order_dispatch::OrderDispatches::replay(replayed).map_err(EngineError::Boot)?;
         let boot_ms = clock::wall_ms();
+        let order_id_epoch_ms =
+            super::order_epoch::select_boot_epoch(&mut wal, replayed, boot_ms).await?;
         let ConfiguredStrategies {
             market,
             mut routing,
@@ -182,6 +299,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         .map_err(|error| EngineError::Boot(error.to_string()))?;
         crate::identities::reserve_symbol_names(&mut reserved, &requested_symbols)
             .map_err(|error| EngineError::Boot(error.to_string()))?;
+        wal.append(&WalRecord::ExecutionPrecisionV1)?;
+        wal.append(&WalRecord::OrderIdEpoch {
+            epoch_ms: order_id_epoch_ms,
+        })?;
+        wal.barrier()?;
         if reserved.changed {
             wal.append(&WalRecord::IdentityState {
                 wall_ts_ms: boot_ms,
@@ -325,55 +447,26 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             &mut wal,
             &mut venue,
             replayed,
+            &dispatches,
             &market.table,
             &mut recovered_exec_ids,
             boot_ms,
             &mut callbacks,
+            &account,
+            &mut risk,
         )
         .await?;
-        let effective_owned: Vec<WalRecord>;
-        let effective: &[WalRecord] = if recovery.records.is_empty() {
-            replayed
-        } else {
-            effective_owned = replayed.iter().cloned().chain(recovery.records).collect();
-            &effective_owned
-        };
-
-        let mut orders = LedgerOfOrders::try_from_records(effective).map_err(EngineError::Boot)?;
-        // Same records, same join: a restart must not forget whose
-        // position is whose, or the other sleeve trades straight into it.
-        let mut attribution =
-            Attribution::try_from_records(effective).map_err(EngineError::Boot)?;
-        let mut fills = Fills::default();
-        let already_closed = fills.try_seed_lots(effective).map_err(EngineError::Boot)?;
-        // The rolling loss window, put back before anything can be assessed
-        // against it. The order is a contract with the kernel: the newest
-        // restatement SETS the window, this segment's own closes go on top,
-        // and the clock then drops whatever is older than the window.
-        if let Some(rows) = effective.iter().rev().find_map(|record| match record {
-            WalRecord::SegmentBase {
-                rolling_loss_rows, ..
-            } => Some(rolling_loss_rows),
-            _ => None,
-        }) {
-            risk.restore_rolling_loss_rows(rows);
-        }
-        for trade in &already_closed {
-            if let Some(round_trip) = &trade.round_trip {
-                risk.observe_closed_trade(engine_types::risk::ClosedTradeRow {
-                    closed_ms: trade.closed_ms,
-                    net_usdt: round_trip.net_usdt,
-                });
-            }
-        }
+        let RecoveryOutcome {
+            mut orders,
+            mut attribution,
+            mut fills,
+            mut portfolio_controls,
+            physical: logged_exposure,
+            intended: intended_stops,
+            latched: recovery_latched,
+            through_ms: recovered_through_ms,
+        } = recovery;
         risk.observe_wall_clock_ms(clock::wall_ms());
-        // Seeded by the same scans reconcile trusts and kept live from here
-        // on, because a rotation restates them into the new segment's first
-        // record and must say exactly what a replay would have said.
-        let logged_exposure =
-            crate::reconcile::physical_exposure(effective).map_err(EngineError::Boot)?;
-        let intended_stops =
-            crate::reconcile::intended_stops(effective).map_err(EngineError::Boot)?;
         let RecoveredStrategyInputs {
             strategy_checkpoints,
             strategy_global_checkpoints,
@@ -384,7 +477,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             runtime_entries_enabled,
             routes,
         } = restore_strategy_inputs(
-            effective,
+            replayed,
             &strategies,
             &names,
             &market.table,
@@ -397,26 +490,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
         // Legacy fills without an execution id retain their field-based overlap key.
-        let mut recent_fills: VecDeque<(String, i64, f64)> = effective
-            .iter()
-            .filter_map(|record| match record {
-                WalRecord::OrderUpdate {
-                    update:
-                        OrderUpdate::Fill {
-                            exec_id,
-                            client_order_id,
-                            venue_ts_ms,
-                            qty,
-                            ..
-                        },
-                    ..
-                } if exec_id.is_empty() => Some((client_order_id.clone(), *venue_ts_ms, *qty)),
-                _ => None,
-            })
-            .collect();
-        while recent_fills.len() > RECENT_FILLS_KEPT {
-            recent_fills.pop_front();
-        }
+        let recent_fills = recent_legacy_fills(replayed);
 
         // What the log believes against what the venue says. Boot is the one
         // moment the two can be compared: from here on the engine only ever
@@ -430,11 +504,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             &mut wal,
             &mut venue,
             &orders,
-            effective,
+            replayed,
             &account,
             &market.table,
             &rules,
             &instrument_specs,
+            (&logged_exposure, &intended_stops),
+            recovery_latched,
         )
         .await?;
 
@@ -474,6 +550,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .map_err(EngineError::State)?;
             }
             orders.try_apply(&ended).map_err(EngineError::State)?;
+            portfolio_controls.retire_completed_orders(&orders);
         }
         let recovered = orders.in_flight().len();
 
@@ -547,10 +624,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             wal.barrier()?;
         }
 
-        // Nothing is lost by the rounding `boot_prefix` does: the stamp only
-        // separates one boot's ids from another's, and `mint_unused` already
-        // refuses any id the replayed log has seen.
-        let registry = restore_order_reservations(&mut risk, &orders, boot_ms, &account, &working)?;
+        let registry =
+            restore_order_reservations(&mut risk, &orders, order_id_epoch_ms, &account, &working)?;
         if recovered > 0 {
             tracing::warn!(
                 count = recovered,
@@ -572,6 +647,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             recovery: recovery_reads,
             pending_mutations: BTreeMap::new(),
             busy_symbols: BTreeMap::new(),
+            order_lineage: order_lineage::OrderLineage::default(),
             deferred_actions: BTreeMap::new(),
             ready_actions: VecDeque::new(),
             _venue: std::marker::PhantomData,
@@ -624,8 +700,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             amends_pulled_unconfirmed: 0,
             stream_resets: 0,
             dispatches,
-            portfolio_controls: crate::portfolio_control::PortfolioControls::replay(effective)
-                .map_err(EngineError::Boot)?,
+            portfolio_controls,
             portfolio_dirty: false,
             portfolio_cursor: 0,
             portfolio_physical_after: BTreeMap::new(),
@@ -645,9 +720,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             stop_repairs_pending,
             confirmed_native_stops: std::collections::BTreeMap::new(),
             confirmed_stop_moves: std::collections::BTreeMap::new(),
-            recovered_until_ms: recovery.through_ms,
-            next_history_checkpoint_ms: recovery
-                .through_ms
+            recovered_until_ms: recovered_through_ms,
+            next_history_checkpoint_ms: recovered_through_ms
+                .max(boot_ms)
                 .saturating_add(HISTORY_CHECKPOINT_INTERVAL_MS),
             recovered_exec_ids,
             recent_fills,
@@ -667,6 +742,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             rotate_after_bytes: settings.wal_rotate_mb.saturating_mul(1024 * 1024),
             max_quote_age_ns: settings.max_quote_age_ms.saturating_mul(1_000_000),
             next_order_n: 0,
+            order_id_epoch_ms,
             orders_sent: 0,
             events_seen: 0,
             subscriptions,
@@ -693,14 +769,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Success is durable before the reconcile that would otherwise have
     /// read what actually traded as somebody else's trading. Failure aborts
     /// boot: without the missing interval the log cannot prove its exposure.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn recover_missed_fills(
         wal: &mut W,
         venue: &mut V,
         replayed: &[WalRecord],
+        dispatches: &crate::order_dispatch::OrderDispatches,
         table: &SymbolTable,
         execution_ids: &mut ExecutionIds,
         fresh_start_ms: i64,
         callbacks: &mut crate::strategy_process::host::CallbackHost,
+        account: &AccountView,
+        risk: &mut R,
     ) -> Result<RecoveryOutcome, EngineError> {
         let now_ms = clock::wall_ms();
         let newest = match execution_history_through_ms(replayed) {
@@ -712,6 +792,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 ))
             }
         };
+        let mut recovered_state = RecoveryOutcome::replay(replayed, risk, newest)?;
         let since = newest.saturating_sub(RECOVERY_PAD_MS);
         if since < now_ms - RECOVERY_REACH_MS {
             return Err(EngineError::Boot(format!(
@@ -721,46 +802,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             )));
         }
         if since >= now_ms {
-            return Ok(RecoveryOutcome {
-                records: Vec::new(),
-                through_ms: newest,
-            });
+            return Ok(recovered_state);
         }
-        let mut execs = venue.executions(since, now_ms).await.map_err(|e| {
+        let execs = venue.executions(since, now_ms).await.map_err(|e| {
             EngineError::Boot(format!(
                 "cannot read execution history for the recovery interval: {e}"
             ))
         })?;
-        let mut delivered: std::collections::HashMap<(String, i64, u64), usize> =
-            std::collections::HashMap::new();
-        for record in replayed {
-            if let WalRecord::OrderUpdate {
-                update:
-                    OrderUpdate::Fill {
-                        exec_id,
-                        client_order_id,
-                        venue_ts_ms,
-                        qty,
-                        ..
-                    },
-                ..
-            } = record
-            {
-                if exec_id.is_empty() && *venue_ts_ms >= since {
-                    *delivered
-                        .entry((client_order_id.clone(), *venue_ts_ms, qty.to_bits()))
-                        .or_default() += 1;
-                }
-            }
-        }
-        execs.sort_by_key(|exec| exec.venue_ts_ms);
-        let mut out = Vec::new();
+        let mut delivered = legacy_overlap_counts(replayed, since);
         let mut recovered = 0usize;
-        let mut unknown_findings = Vec::new();
-        let mut recovered_orders =
-            LedgerOfOrders::try_from_records(replayed).map_err(EngineError::Boot)?;
-        let mut recovered_attribution =
-            Attribution::try_from_records(replayed).map_err(EngineError::Boot)?;
         let strategy_names = replayed
             .iter()
             .rev()
@@ -772,22 +822,21 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             })
             .unwrap_or_default();
         for exec in execs {
+            let exec = exec?;
             if execution_ids.contains(&exec.exec_id, now_ms) {
                 continue;
             }
-            let key = (
-                exec.client_order_id.clone(),
-                exec.venue_ts_ms,
-                exec.qty.to_bits(),
-            );
-            let same_delivered = delivered.get_mut(&key).is_some_and(|count| {
-                if *count == 0 {
-                    false
-                } else {
-                    *count -= 1;
-                    true
-                }
-            });
+            let same_delivered = delivered
+                .get_mut(exec.client_order_id.as_str())
+                .and_then(|rows| rows.get_mut(&(exec.venue_ts_ms, exec.qty.to_bits())))
+                .is_some_and(|count| {
+                    if *count == 0 {
+                        false
+                    } else {
+                        *count -= 1;
+                        true
+                    }
+                });
             if same_delivered {
                 continue;
             }
@@ -810,15 +859,32 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 };
                 wal.append(&note)?;
                 execution_ids.insert(exec.exec_id, now_ms);
-                out.push(note);
-                unknown_findings.push(finding);
+                recovered_state.reject(wal, now_ms, finding)?;
                 continue;
             };
             let dedup_id = exec.exec_id.clone();
-            if let Err(reason) = recovered_orders
+            if !recovered_state.orders.contains(&exec.client_order_id)
+                && exec.client_order_id.starts_with("eng-")
+                && wal.supports_order_lineage_archive()
+            {
+                let reader = wal
+                    .order_lineage_reader(&exec.client_order_id)?
+                    .ok_or_else(|| {
+                        EngineError::Boot("order lineage archive reader is unavailable".into())
+                    })?;
+                let id = exec.client_order_id.clone();
+                let row = order_lineage::load_order_lineage(reader, id)
+                    .await
+                    .map_err(EngineError::Boot)?;
+                if let Some(row) = row {
+                    order_lineage::activate_order_lineage(wal, &mut recovered_state.orders, row)?;
+                }
+            }
+            if let Err(reason) = recovered_state
+                .orders
                 .validate_fill(&exec.client_order_id, symbol, exec.side, exec.qty, exec.px)
                 .and_then(|()| {
-                    recovered_orders.validate_fill_quantities(
+                    recovered_state.orders.validate_fill_quantities(
                         &exec.client_order_id,
                         exec.qty,
                         exec.amounts.as_ref(),
@@ -832,15 +898,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     })
                 })
             {
-                unknown_findings.push(Self::untrusted_fill_line(
-                    &exec.exec_id,
-                    &exec.client_order_id,
-                    symbol,
-                    exec.side,
-                    exec.qty,
-                    exec.px,
-                    &reason,
-                ));
+                recovered_state.reject(
+                    wal,
+                    now_ms,
+                    Self::untrusted_fill_line(
+                        &exec.exec_id,
+                        &exec.client_order_id,
+                        symbol,
+                        exec.side,
+                        exec.qty,
+                        exec.px,
+                        &reason,
+                    ),
+                )?;
                 execution_ids.insert(dedup_id, now_ms);
                 recovered += 1;
                 continue;
@@ -862,26 +932,33 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 venue_ts_ms: exec.venue_ts_ms,
                 recovered_wall_ts_ms: now_ms,
             };
-            let owner = recovered_orders.owner_of(&client_order_id);
-            let allocation = match recovered_attribution.prepare_portfolio_recovered_for_order(
-                recovered_orders
-                    .orders
-                    .get(&client_order_id)
-                    .map(|order| &order.request),
-                &strategy_names,
-                &record,
-            ) {
+            let owner = recovered_state.orders.owner_of(&client_order_id);
+            let allocation = match recovered_state
+                .attribution
+                .prepare_portfolio_recovered_for_order(
+                    recovered_state
+                        .orders
+                        .orders
+                        .get(&client_order_id)
+                        .map(|order| &order.request),
+                    &strategy_names,
+                    &record,
+                ) {
                 Ok(allocation) => allocation,
                 Err(reason) => {
-                    unknown_findings.push(Self::untrusted_fill_line(
-                        &dedup_id,
-                        &client_order_id,
-                        symbol,
-                        exec.side,
-                        exec.qty,
-                        exec.px,
-                        &reason,
-                    ));
+                    recovered_state.reject(
+                        wal,
+                        now_ms,
+                        Self::untrusted_fill_line(
+                            &dedup_id,
+                            &client_order_id,
+                            symbol,
+                            exec.side,
+                            exec.qty,
+                            exec.px,
+                            &reason,
+                        ),
+                    )?;
                     execution_ids.insert(dedup_id, now_ms);
                     recovered += 1;
                     continue;
@@ -937,31 +1014,124 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .record(sequence, &owners.owners)
                     .map_err(EngineError::State)?;
             }
+            let owned = allocation.is_some();
+            let analytic_owner = owner.or_else(|| {
+                allocation.as_ref().and_then(|prepared| {
+                    (prepared.allocation.slices.len() == 1)
+                        .then(|| prepared.allocation.slices[0].strategy)
+                })
+            });
             if let Some(allocation) = allocation {
-                recovered_attribution
+                recovered_state
+                    .attribution
                     .commit_portfolio_fill(allocation)
                     .map_err(EngineError::State)?;
             }
-            out.push(record.clone());
+            if owned {
+                let request = recovered_state
+                    .orders
+                    .orders
+                    .get(&client_order_id)
+                    .map(|order| &order.request);
+                reconcile::note_owned_fill(
+                    &mut recovered_state.physical,
+                    &mut recovered_state.intended,
+                    request,
+                    symbol,
+                    exec.side,
+                    &reconcile::fill_quantity(exec.qty, exec.amounts.as_ref())
+                        .map_err(EngineError::State)?,
+                )
+                .map_err(EngineError::State)?;
+                let update = crate::portfolio_allocation::recovered_update(&record, 0)
+                    .expect("recovered fill");
+                let slices = crate::portfolio_allocation::slice_updates(&update)
+                    .map_err(EngineError::State)?
+                    .unwrap_or_else(|| {
+                        analytic_owner
+                            .map(|id| vec![(id, update)])
+                            .unwrap_or_default()
+                    });
+                for (strategy, update) in slices {
+                    let OrderUpdate::Fill {
+                        amounts,
+                        qty,
+                        px,
+                        fee,
+                        side,
+                        venue_ts_ms,
+                        is_maker,
+                        ..
+                    } = update
+                    else {
+                        unreachable!()
+                    };
+                    let sleeve = strategy_names.get(strategy.idx()).ok_or_else(|| {
+                        EngineError::Boot("recovered lot has no durable sleeve name".into())
+                    })?;
+                    recovered_state
+                        .fills
+                        .lots()
+                        .on_fill_with_quantity(
+                            sleeve,
+                            table.name(symbol),
+                            &execution::Fill {
+                                amounts,
+                                qty,
+                                px,
+                                fee,
+                                side,
+                                venue_ts_ms,
+                                is_maker,
+                                client_order_id: client_order_id.clone(),
+                                strategy,
+                                symbol,
+                                arrival_mid: recovered_state
+                                    .orders
+                                    .orders
+                                    .get(&client_order_id)
+                                    .map_or(0.0, |order| order.arrival_mid),
+                            },
+                            None,
+                        )
+                        .map_err(EngineError::State)?;
+                    for trade in recovered_state.fills.take_closed() {
+                        if let Some(row) = trade.loss_row() {
+                            risk.observe_closed_trade(row);
+                        }
+                    }
+                }
+            } else {
+                recovered_state.reject(
+                    wal,
+                    now_ms,
+                    Self::foreign_fill_line(&client_order_id, symbol),
+                )?;
+            }
             execution_ids.insert(dedup_id, now_ms);
-            recovered_orders
+            recovered_state
+                .orders
                 .try_apply(&record)
                 .map_err(EngineError::State)?;
+            recovered_state
+                .portfolio_controls
+                .apply(&record)
+                .map_err(EngineError::State)?;
+            recovered_state
+                .portfolio_controls
+                .retire_completed_orders(&recovered_state.orders);
             if owner.is_some() {
-                if let Some(order) = recovered_orders.orders.get(&client_order_id) {
-                    recovered_attribution.remember_order_stop(&order.request);
+                if let Some(order) = recovered_state.orders.orders.get(&client_order_id) {
+                    recovered_state
+                        .attribution
+                        .remember_order_stop(&order.request);
                 }
             }
+            if wal.supports_order_lineage_archive() {
+                order_lineage::trim_boot_order_cache(&mut recovered_state.orders)
+                    .map_err(EngineError::Boot)?;
+            }
             recovered += 1;
-        }
-        if !unknown_findings.is_empty() {
-            let latch = WalRecord::Reconciled {
-                wall_ts_ms: now_ms,
-                findings: unknown_findings,
-                may_open: false,
-            };
-            wal.append(&latch)?;
-            out.push(latch);
         }
         if recovered > 0 {
             tracing::warn!(
@@ -969,16 +1139,29 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 "recovered fills the private stream never delivered"
             );
         }
+        let through_ms = if !recovered_state.latched
+            && dispatches.orders.is_empty()
+            && super::account_recovery::history_account_matches(account, &recovered_state.physical)?
+            && !recovered_state
+                .orders
+                .orders
+                .values()
+                .any(|order| order.in_flight())
+        {
+            now_ms
+        } else {
+            newest
+        };
         let checkpoint = WalRecord::ExecutionHistoryCheckpoint {
-            through_wall_ts_ms: now_ms,
+            through_wall_ts_ms: through_ms,
         };
         wal.append(&checkpoint)?;
-        out.push(checkpoint);
         wal.barrier()?;
-        Ok(RecoveryOutcome {
-            records: out,
-            through_ms: now_ms,
-        })
+        recovered_state.through_ms = through_ms;
+        recovered_state
+            .portfolio_controls
+            .retain_native_offsets(&recovered_state.attribution.snapshot());
+        Ok(recovered_state)
     }
 
     /// Compare the log against the venue, write down what was found, and say
@@ -1004,6 +1187,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         table: &SymbolTable,
         rules: &[Option<InstrumentRule>],
         specs: &std::collections::BTreeMap<SymbolId, engine_types::numeric::ExactInstrumentSpec>,
+        positions: (
+            &reconcile::PhysicalExposure,
+            &BTreeMap<SymbolId, reconcile::IntendedPositionStop>,
+        ),
+        recovery_latched: bool,
     ) -> Result<ReconciledOrders, EngineError> {
         let latched = replayed.iter().rev().find_map(|record| match record {
             WalRecord::Reconciled { may_open, .. } => Some(*may_open),
@@ -1031,9 +1219,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         };
 
-        let found = reconcile::reconcile(
+        let found = reconcile::reconcile_positions(
             orders,
             replayed,
+            positions,
             &working,
             account,
             |name| table.get(name),
@@ -1094,7 +1283,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
 
-        let may_open = latched.unwrap_or(true) && !found.must_not_open() && !repair_failed;
+        let may_open = !recovery_latched
+            && latched.unwrap_or(true)
+            && !found.must_not_open()
+            && !repair_failed;
         if latched == Some(false) && !found.must_not_open() {
             tracing::error!(
                 "an earlier boot stopped this engine opening new positions and nothing here \
@@ -1277,7 +1469,7 @@ mod callback_recovery_tests {
         let mut table = SymbolTable::default();
         table.intern("BTCUSDT");
         let mut ids = ExecutionIds::from_records(&replay, now).unwrap();
-        let outcome = Engine::<
+        let _outcome = Engine::<
             engine_wal::WalWriter,
             crate::tests::MockRisk,
             crate::tests::MockVenue,
@@ -1285,10 +1477,19 @@ mod callback_recovery_tests {
             &mut wal,
             &mut venue,
             &replay,
+            &crate::order_dispatch::OrderDispatches::replay(&replay).unwrap(),
             &table,
             &mut ids,
             now,
             &mut callbacks,
+            &AccountView {
+                exact_amounts: None,
+                equity_usdt: 10_000.0,
+                available_usdt: 10_000.0,
+                positions: Vec::new(),
+                observed_ns: clock::now_ns(),
+            },
+            &mut crate::tests::MockRisk::with(crate::tests::allow_all()).0,
         )
         .await
         .unwrap();
@@ -1297,7 +1498,7 @@ mod callback_recovery_tests {
             "initial recovery fill has no durable callback retry owner"
         );
         assert!(
-            matches!(&outcome.records[0], WalRecord::RecoveredFill { callbacks: Some(owners), .. } if owners.owners == [StrategyId(0)])
+            engine_wal::replay(&path).unwrap().iter().any(|(_, record)| matches!(record, WalRecord::RecoveredFill { callbacks: Some(owners), .. } if owners.owners == [StrategyId(0)]))
         );
         loop {
             callbacks.order_news.start_read();
@@ -1317,5 +1518,592 @@ mod callback_recovery_tests {
             }
             callbacks.order_news.advance(owner, record.next);
         }
+    }
+}
+
+// A child process gives this heap regression a private high-water measurement.
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    use crate::strategy_process::host::{CallbackExecution, CallbackHost};
+
+    #[tokio::test]
+    async fn boot_recovers_a_rejected_order_from_archives_before_charging_its_late_fill() {
+        use engine_types::numeric::{AssetAmount, AssetId, Exact, ExactNumber, ExecutionAmounts};
+        let prior = crate::tests::shared_sleeves::fragmented_engine().await;
+        let now = clock::wall_ms();
+        let mut base = prior.rotation_base(now);
+        let id = "eng-boot-archived-late-1";
+        let mut request = OrderRequest {
+            client_order_id: id.into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Sell,
+            qty: 0.4,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: true,
+            close_position: false,
+            exact_terms: None,
+            sleeve_effect: Some(engine_types::orders::SleeveOrderEffect::Reduce),
+        };
+        engine_types::order_terms::ExactOrderTerms {
+            quantity: Exact::parse_decimal("0.4").unwrap(),
+            limit_price: None,
+            stop_trigger_price: None,
+            physical_stop_trigger_price: None,
+            input_policy: engine_types::order_terms::OrderInputPolicy::CanonicalPortfolio,
+        }
+        .apply_projection(&mut request)
+        .unwrap();
+        let path = crate::testpath::temp_path("boot-archived-terminal-lineage");
+        let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+        wal.append(&base).unwrap();
+        wal.append(&WalRecord::OrderSent {
+            request,
+            dispatch: None,
+            wire_ns: clock::now_ns(),
+            arrival_mid: 100.0,
+        })
+        .unwrap();
+        wal.append(&WalRecord::OrderUpdate {
+            callbacks: None,
+            update: OrderUpdate::Reject {
+                client_order_id: id.into(),
+                code: 1,
+                reason: "late execution after rejection".into(),
+            },
+        })
+        .unwrap();
+        if let WalRecord::SegmentBase { open_orders, .. } = &mut base {
+            open_orders.clear();
+        }
+        wal.rotate(&base).unwrap();
+        drop(wal);
+        let (mut wal, records) = engine_wal::open_current(&path).unwrap();
+        let replay: Vec<_> = records.into_iter().map(|(_, row)| row).collect();
+        assert!(!LedgerOfOrders::try_from_records(&replay)
+            .unwrap()
+            .contains(id));
+        let execution = engine_types::VenueExecution {
+            client_order_id: id.into(),
+            exec_id: "boot-cold-fill".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Sell,
+            qty: 0.1,
+            px: 99.0,
+            fee: Some(0.001),
+            is_maker: false,
+            forced_close: None,
+            venue_ts_ms: now,
+            amounts: Some(ExecutionAmounts {
+                quantity: ExactNumber::venue_decimal("0.1").unwrap(),
+                price: ExactNumber::venue_decimal("99").unwrap(),
+                fee: Some(AssetAmount {
+                    asset: AssetId::Named("USDT".into()),
+                    amount: ExactNumber::venue_decimal("0.001").unwrap(),
+                }),
+                settlement_asset: AssetId::Named("USDT".into()),
+            }),
+        };
+        let mut venue = crate::tests::recovery_venue_fixture(vec![execution.clone()]);
+        let mut table = SymbolTable::default();
+        table.intern("BTCUSDT");
+        let mut ids = ExecutionIds::from_records(&replay, now).unwrap();
+        let mut callbacks = CallbackHost::new(CallbackExecution::Embedded, &[], &[]).unwrap();
+        let (mut risk, _) = crate::tests::MockRisk::with(crate::tests::allow_all());
+        let account = AccountView {
+            exact_amounts: None,
+            equity_usdt: 1000.0,
+            available_usdt: 1000.0,
+            positions: crate::tests::shared_sleeves::physical_long(0.9),
+            observed_ns: clock::now_ns(),
+        };
+        let recovered = Engine::<
+            engine_wal::WalWriter,
+            crate::tests::MockRisk,
+            crate::tests::MockVenue,
+        >::recover_missed_fills(
+            &mut wal,
+            &mut venue,
+            &replay,
+            &crate::order_dispatch::OrderDispatches::replay(&replay).unwrap(),
+            &table,
+            &mut ids,
+            now,
+            &mut callbacks,
+            &account,
+            &mut risk,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !recovered.latched,
+            "known archived order was charged to a stranger"
+        );
+        assert_eq!(
+            recovered
+                .attribution
+                .signed_exact(StrategyId(0), SymbolId(0)),
+            Exact::parse_decimal("0.3").unwrap()
+        );
+        assert_eq!(
+            recovered
+                .attribution
+                .signed_exact(StrategyId(1), SymbolId(0)),
+            Exact::parse_decimal("0.6").unwrap()
+        );
+        let current: Vec<_> = engine_wal::replay_current(&path)
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect();
+        let restored = current
+            .iter()
+            .position(|row| matches!(row, WalRecord::OrderLineageRestored { .. }))
+            .unwrap();
+        let filled = current
+            .iter()
+            .position(|row| matches!(row, WalRecord::RecoveredFill { .. }))
+            .unwrap();
+        assert!(restored < filled);
+        assert_eq!(
+            Attribution::try_from_records(&current).unwrap().snapshot(),
+            recovered.attribution.snapshot()
+        );
+        assert_eq!(
+            Fills::try_from_records(&current).unwrap().open_trade_lots(),
+            recovered.fills.open_trade_lots()
+        );
+        let mut ids = ExecutionIds::from_records(&current, now).unwrap();
+        let mut venue = crate::tests::recovery_venue_fixture(vec![execution]);
+        let repeated = Engine::<
+            engine_wal::WalWriter,
+            crate::tests::MockRisk,
+            crate::tests::MockVenue,
+        >::recover_missed_fills(
+            &mut wal,
+            &mut venue,
+            &current,
+            &crate::order_dispatch::OrderDispatches::replay(&current).unwrap(),
+            &table,
+            &mut ids,
+            now,
+            &mut callbacks,
+            &account,
+            &mut risk,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repeated.attribution.snapshot(),
+            recovered.attribution.snapshot()
+        );
+        assert_eq!(
+            engine_wal::replay_current(&path)
+                .unwrap()
+                .0
+                .iter()
+                .filter(|(_, row)| matches!(row, WalRecord::RecoveredFill { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_untrusted_net_neutral_history_page_cannot_advance_the_boot_checkpoint() {
+        let now = clock::wall_ms();
+        let through = now - 60_000;
+        let rows = [Side::Buy, Side::Sell]
+            .into_iter()
+            .enumerate()
+            .map(|(index, side)| engine_types::VenueExecution {
+                exec_id: format!("foreign-neutral-{index}"),
+                client_order_id: "manual".into(),
+                symbol: "BTCUSDT".into(),
+                side,
+                qty: 1.0,
+                px: 100.0,
+                fee: Some(0.0),
+                amounts: None,
+                is_maker: false,
+                forced_close: None,
+                venue_ts_ms: now - 1,
+            })
+            .collect();
+        let mut venue = crate::tests::recovery_venue_fixture(rows);
+        let path = crate::testpath::temp_path("untrusted-boot-history-boundary");
+        let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+        let mut table = SymbolTable::default();
+        table.intern("BTCUSDT");
+        let replay = [
+            WalRecord::Names {
+                strategies: Vec::new(),
+                symbols: vec!["BTCUSDT".into()],
+            },
+            WalRecord::ExecutionHistoryCheckpoint {
+                through_wall_ts_ms: through,
+            },
+        ];
+        let mut ids = ExecutionIds::from_records(&replay, now).unwrap();
+        let mut callbacks = CallbackHost::new(CallbackExecution::Embedded, &[], &[]).unwrap();
+        let (mut risk, _) = crate::tests::MockRisk::with(crate::tests::allow_all());
+        let account = AccountView {
+            exact_amounts: None,
+            equity_usdt: 1000.0,
+            available_usdt: 1000.0,
+            positions: Vec::new(),
+            observed_ns: clock::now_ns(),
+        };
+        let recovered = Engine::<
+            engine_wal::WalWriter,
+            crate::tests::MockRisk,
+            crate::tests::MockVenue,
+        >::recover_missed_fills(
+            &mut wal,
+            &mut venue,
+            &replay,
+            &crate::order_dispatch::OrderDispatches::replay(&replay).unwrap(),
+            &table,
+            &mut ids,
+            now,
+            &mut callbacks,
+            &account,
+            &mut risk,
+        )
+        .await
+        .unwrap();
+        assert!(recovered.latched);
+        assert!(recovered.physical.is_empty());
+        assert_eq!(recovered.through_ms, through);
+        let records = engine_wal::replay(&path)
+            .unwrap()
+            .into_iter()
+            .map(|(_, record)| record)
+            .collect::<Vec<_>>();
+        assert_eq!(execution_history_through_ms(&records), Some(through));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|row| matches!(row, WalRecord::RecoveredFill { .. }))
+                .count(),
+            2
+        );
+        assert!(records.iter().any(|row| matches!(
+            row,
+            WalRecord::Reconciled {
+                may_open: false,
+                ..
+            }
+        )));
+    }
+
+    fn peak_resident_bytes() -> u64 {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        // getrusage initializes the supplied rusage on success.
+        assert_eq!(
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+            0
+        );
+        let usage = unsafe { usage.assume_init() };
+        #[cfg(target_os = "macos")]
+        let scale = 1;
+        #[cfg(not(target_os = "macos"))]
+        let scale = 1024;
+        usage.ru_maxrss as u64 * scale
+    }
+
+    #[test]
+    fn recent_legacy_overlap_clones_only_the_retained_tail() {
+        const CHILD: &str = "TIER1_LEGACY_OVERLAP_MEMORY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "engine::boot_recovery::memory_tests::recent_legacy_overlap_clones_only_the_retained_tail", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let records: Vec<_> = (0..10_000)
+            .map(|index| WalRecord::OrderUpdate {
+                callbacks: None,
+                update: OrderUpdate::Fill {
+                    allocation: None,
+                    amounts: None,
+                    exec_id: String::new(),
+                    client_order_id: format!("{index:05}{}", "x".repeat(8192)),
+                    symbol: SymbolId(0),
+                    side: Side::Buy,
+                    qty: 1.0,
+                    px: 100.0,
+                    fee: None,
+                    is_maker: false,
+                    forced_close: None,
+                    venue_ts_ms: index,
+                    recv_ns: 0,
+                },
+            })
+            .collect();
+        let before = peak_resident_bytes();
+        let recent = recent_legacy_fills(&records);
+        let mut counts = legacy_overlap_counts(&records, 0);
+        let growth = peak_resident_bytes().saturating_sub(before);
+        assert_eq!(counts.len(), 10_000);
+        assert_eq!(
+            counts
+                .get_mut(recent.back().unwrap().0.as_str())
+                .unwrap()
+                .remove(&(9999, 1.0_f64.to_bits())),
+            Some(1)
+        );
+        assert_eq!(recent.len(), RECENT_FILLS_KEPT);
+        assert_eq!(recent.front().unwrap().1, 10_000 - RECENT_FILLS_KEPT as i64);
+        assert_eq!(recent.back().unwrap().1, 9999);
+        assert!(recent
+            .iter()
+            .zip(recent.iter().skip(1))
+            .all(|(a, b)| a.1 < b.1));
+        eprintln!(
+            "legacy-overlap rows=10000 retained={} peak_resident_growth_bytes={growth}",
+            recent.len()
+        );
+        assert!(
+            growth < 32 * 1024 * 1024,
+            "legacy overlap cloned the full source: peak grew {growth} bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn boot_history_memory_does_not_grow_with_recovered_wal_payload() {
+        const CHILD: &str = "TIER1_BOOT_RECOVERY_MEMORY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "engine::boot_recovery::memory_tests::boot_history_memory_does_not_grow_with_recovered_wal_payload", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let now = clock::wall_ms();
+        let mut history = engine_types::ExecutionHistoryBuilder::default();
+        for index in 0..2048 {
+            history
+                .push(engine_types::VenueExecution {
+                    exec_id: format!("memory-execution-{index}"),
+                    client_order_id: "x".repeat(32 * 1024),
+                    symbol: "BTCUSDT".into(),
+                    side: Side::Buy,
+                    qty: 1.0,
+                    px: 100.0,
+                    fee: Some(0.0),
+                    amounts: None,
+                    is_maker: false,
+                    forced_close: None,
+                    venue_ts_ms: now - 1,
+                })
+                .unwrap();
+        }
+        let mut venue = crate::tests::recovery_spool_fixture(history.finish().unwrap());
+        let path = crate::testpath::temp_path("bounded-boot-history");
+        let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+        let mut table = SymbolTable::default();
+        table.intern("BTCUSDT");
+        let replay = [
+            WalRecord::Names {
+                strategies: Vec::new(),
+                symbols: vec!["BTCUSDT".into()],
+            },
+            WalRecord::ExecutionHistoryCheckpoint {
+                through_wall_ts_ms: now - 60_000,
+            },
+        ];
+        let mut ids = ExecutionIds::from_records(&replay, now).unwrap();
+        let mut callbacks = CallbackHost::new(CallbackExecution::Embedded, &[], &[]).unwrap();
+        let (mut risk, _) = crate::tests::MockRisk::with(crate::tests::allow_all());
+        let account = AccountView {
+            exact_amounts: None,
+            equity_usdt: 1000.0,
+            available_usdt: 1000.0,
+            positions: Vec::new(),
+            observed_ns: clock::now_ns(),
+        };
+        let before = peak_resident_bytes();
+        let recovered = Engine::<
+            engine_wal::WalWriter,
+            crate::tests::MockRisk,
+            crate::tests::MockVenue,
+        >::recover_missed_fills(
+            &mut wal,
+            &mut venue,
+            &replay,
+            &crate::order_dispatch::OrderDispatches::replay(&replay).unwrap(),
+            &table,
+            &mut ids,
+            now,
+            &mut callbacks,
+            &account,
+            &mut risk,
+        )
+        .await
+        .unwrap();
+        let growth = peak_resident_bytes().saturating_sub(before);
+        assert!(
+            recovered.latched,
+            "foreign fills must remain a durable reconciliation finding"
+        );
+        assert!(recovered.orders.orders.is_empty());
+        assert_eq!(ids.len(), 2048);
+        assert!(std::fs::metadata(&path).unwrap().len() > 64 * 1024 * 1024);
+        eprintln!("boot-history rows=2048 payload=64MiB peak_resident_growth_bytes={growth}");
+        assert!(
+            growth < 32 * 1024 * 1024,
+            "boot retained recovered payloads: peak grew {growth} bytes"
+        );
+    }
+}
+
+#[cfg(test)]
+mod valuation_recovery_tests {
+    use super::*;
+    use crate::strategy_process::host::{CallbackExecution, CallbackHost};
+    use engine_types::numeric::{AssetAmount, AssetId, ExactNumber, ExecutionAmounts};
+    use engine_types::risk::UnpricedTradeReason;
+
+    #[tokio::test(start_paused = true)]
+    async fn streamed_unvalued_close_retains_identical_loss_debt_when_its_wal_replays() {
+        let now = clock::wall_ms();
+        let amounts = |price: &str| {
+            Box::new(ExecutionAmounts {
+                settlement_asset: AssetId::Unknown,
+                quantity: ExactNumber::venue_decimal("1").unwrap(),
+                price: ExactNumber::venue_decimal(price).unwrap(),
+                fee: Some(AssetAmount {
+                    asset: AssetId::Named("USDT".into()),
+                    amount: ExactNumber::venue_decimal("0").unwrap(),
+                }),
+            })
+        };
+        let replay = vec![
+            WalRecord::Names {
+                strategies: vec!["owner".into()],
+                symbols: vec!["BTCUSDT".into()],
+            },
+            WalRecord::OrderSent {
+                dispatch: None,
+                request: OrderRequest {
+                    client_order_id: "eng-native-open".into(),
+                    strategy: StrategyId(0),
+                    symbol: SymbolId(0),
+                    side: Side::Buy,
+                    qty: 1.0,
+                    kind: OrderKind::Market,
+                    stop: Some(StopSpec { trigger_px: 90.0 }),
+                    reduce_only: false,
+                    exact_terms: None,
+                    sleeve_effect: None,
+                    close_position: false,
+                },
+                wire_ns: 1,
+                arrival_mid: 100.0,
+            },
+            WalRecord::OrderUpdate {
+                callbacks: None,
+                update: OrderUpdate::Fill {
+                    allocation: None,
+                    amounts: Some(amounts("100")),
+                    exec_id: "native-open".into(),
+                    client_order_id: "eng-native-open".into(),
+                    symbol: SymbolId(0),
+                    side: Side::Buy,
+                    qty: 1.0,
+                    px: 100.0,
+                    fee: Some(0.0),
+                    is_maker: false,
+                    forced_close: None,
+                    venue_ts_ms: now - 10,
+                    recv_ns: 1,
+                },
+            },
+            WalRecord::ExecutionHistoryCheckpoint {
+                through_wall_ts_ms: now - 10,
+            },
+        ];
+        let mut venue = crate::tests::recovery_venue_fixture(vec![engine_types::VenueExecution {
+            exec_id: "native-close-during-recovery".into(),
+            client_order_id: String::new(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Sell,
+            qty: 1.0,
+            px: 90.0,
+            fee: Some(0.0),
+            amounts: Some(*amounts("90")),
+            is_maker: false,
+            forced_close: Some(engine_types::ForcedClose::StopLoss),
+            venue_ts_ms: now - 1,
+        }]);
+        let path = crate::testpath::temp_path("unvalued-recovery-loss");
+        let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+        for row in &replay {
+            wal.append(row).unwrap();
+        }
+        wal.barrier().unwrap();
+        let mut table = SymbolTable::default();
+        table.intern("BTCUSDT");
+        let mut ids = ExecutionIds::from_records(&replay, now).unwrap();
+        let mut callbacks = CallbackHost::new(CallbackExecution::Embedded, &[], &[]).unwrap();
+        let (mut risk, _) = crate::tests::MockRisk::with(crate::tests::allow_all());
+        let account = AccountView {
+            exact_amounts: None,
+            equity_usdt: 1000.0,
+            available_usdt: 1000.0,
+            positions: Vec::new(),
+            observed_ns: clock::now_ns(),
+        };
+        let recovered = Engine::<
+            engine_wal::WalWriter,
+            crate::tests::MockRisk,
+            crate::tests::MockVenue,
+        >::recover_missed_fills(
+            &mut wal,
+            &mut venue,
+            &replay,
+            &crate::order_dispatch::OrderDispatches::replay(&replay).unwrap(),
+            &table,
+            &mut ids,
+            now,
+            &mut callbacks,
+            &account,
+            &mut risk,
+        )
+        .await
+        .unwrap();
+        assert!(!recovered.latched);
+        let expected = engine_types::risk::ClosedTradeRow {
+            unpriced: Some(UnpricedTradeReason::SettlementAsset),
+            net_usdt_exact: None,
+            closed_ms: now - 1,
+            net_usdt: 0.0,
+        };
+        assert_eq!(risk.rolling_loss_rows(), vec![expected.clone()]);
+        let rows = engine_wal::replay(&path)
+            .unwrap()
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>();
+        assert!(rows.iter().any(|row| matches!(row, WalRecord::RecoveredFill { exec_id, .. } if exec_id == "native-close-during-recovery")));
+        let (mut restarted_risk, _) = crate::tests::MockRisk::with(crate::tests::allow_all());
+        RecoveryOutcome::replay(&rows, &mut restarted_risk, now).unwrap();
+        assert_eq!(restarted_risk.rolling_loss_rows(), vec![expected]);
     }
 }

@@ -1,11 +1,40 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{StrategyId, SymbolId};
+use crate::numeric::{Exact, ExactError, ExactNumber};
 use crate::orders::{Intent, OrderUpdate, Side};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PositionAmounts {
+    pub quantity: ExactNumber,
+    pub entry_price: ExactNumber,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountAmounts {
+    pub equity_usdt: ExactNumber,
+    pub available_usdt: ExactNumber,
+}
+
+fn canonical(number: Option<&ExactNumber>, projection: f64) -> Result<Exact, ExactError> {
+    match number {
+        Some(number) => {
+            number.validate_provenance()?;
+            number.value.validate_storage()?;
+            if number.value.to_f64()? != projection {
+                return Err(ExactError::InvalidProjection);
+            }
+            Ok(number.value.clone())
+        }
+        None => Exact::from_legacy_f64(projection),
+    }
+}
 
 /// One open position as the risk kernel sees it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PositionView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_amounts: Option<Box<PositionAmounts>>,
     pub symbol: SymbolId,
     pub side: Side,
     pub qty: f64,
@@ -28,8 +57,28 @@ pub struct PositionView {
 }
 
 impl PositionView {
+    pub fn quantity(&self) -> Result<Exact, ExactError> {
+        canonical(self.exact_amounts.as_ref().map(|a| &a.quantity), self.qty)
+    }
+
+    pub fn entry_price(&self) -> Result<Exact, ExactError> {
+        canonical(
+            self.exact_amounts.as_ref().map(|a| &a.entry_price),
+            self.entry_px,
+        )
+    }
+
+    pub fn stop_price(&self) -> Result<Exact, ExactError> {
+        self.validate_stop_projection()?;
+        self.exact_stop_px
+            .as_deref()
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| Exact::from_legacy_f64(self.stop_px))
+    }
     pub fn validate_stop_projection(&self) -> Result<(), crate::numeric::ExactError> {
         if let Some(exact) = &self.exact_stop_px {
+            exact.validate_storage()?;
             if !self.stop_attached || !exact.is_positive() || exact.to_f64()? != self.stop_px {
                 return Err(crate::numeric::ExactError::InvalidProjection);
             }
@@ -43,6 +92,8 @@ impl PositionView {
 /// stale view as unknown state and refuse.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AccountView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_amounts: Option<Box<AccountAmounts>>,
     pub equity_usdt: f64,
     pub available_usdt: f64,
     pub positions: Vec<PositionView>,
@@ -50,45 +101,69 @@ pub struct AccountView {
     pub observed_ns: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+impl AccountView {
+    pub fn equity(&self) -> Result<Exact, ExactError> {
+        canonical(
+            self.exact_amounts.as_ref().map(|a| &a.equity_usdt),
+            self.equity_usdt,
+        )
+    }
+
+    pub fn available(&self) -> Result<Exact, ExactError> {
+        canonical(
+            self.exact_amounts.as_ref().map(|a| &a.available_usdt),
+            self.available_usdt,
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct PhysicalExposureInterval {
-    low: f64,
-    high: f64,
+    low: Exact,
+    high: Exact,
 }
 
 impl PhysicalExposureInterval {
     pub fn try_new(low: f64, high: f64) -> Result<Self, DenyReason> {
-        if !low.is_finite() || !high.is_finite() || low > high {
+        let low = Exact::from_legacy_f64(low).map_err(|_| DenyReason::UnknownState {
+            detail: "physical exposure interval is unreadable".into(),
+        })?;
+        let high = Exact::from_legacy_f64(high).map_err(|_| DenyReason::UnknownState {
+            detail: "physical exposure interval is unreadable".into(),
+        })?;
+        Self::from_exact(low, high)
+    }
+    pub fn from_exact(low: Exact, high: Exact) -> Result<Self, DenyReason> {
+        if low > high || low.validate_storage().is_err() || high.validate_storage().is_err() {
             return Err(DenyReason::UnknownState {
                 detail: "physical exposure interval is unreadable".into(),
             });
         }
         Ok(Self { low, high })
     }
-    pub fn low(self) -> f64 {
-        self.low
+    pub fn low(&self) -> &Exact {
+        &self.low
     }
-    pub fn high(self) -> f64 {
-        self.high
+    pub fn high(&self) -> &Exact {
+        &self.high
     }
-    pub fn after(self, side: crate::orders::Side, qty: f64) -> Result<Self, DenyReason> {
-        if !qty.is_finite() || qty <= 0.0 {
+    pub fn after(&self, side: crate::orders::Side, qty: &Exact) -> Result<Self, DenyReason> {
+        if !qty.is_positive() {
             return Err(DenyReason::UnknownState {
                 detail: "physical interval delta is unreadable".into(),
             });
         }
         let delta = if side == crate::orders::Side::Buy {
-            qty
+            qty.clone()
         } else {
             -qty
         };
-        Self::try_new(self.low + delta, self.high + delta)
+        Self::from_exact(&self.low + &delta, &self.high + &delta)
     }
-    pub fn certainly_reduces(self, side: crate::orders::Side, qty: f64) -> bool {
-        qty.is_finite()
-            && qty > 0.0
+    pub fn certainly_reduces(&self, side: crate::orders::Side, qty: &Exact) -> bool {
+        qty.is_positive()
             && match side {
-                crate::orders::Side::Sell => self.low >= qty,
+                crate::orders::Side::Sell => &self.low >= qty,
                 crate::orders::Side::Buy => self.high <= -qty,
             }
     }
@@ -164,13 +239,67 @@ pub enum RiskVerdict {
     Deny { reason: DenyReason },
 }
 
-/// One closed round trip, as the rolling loss window keeps it. `closed_ms` is
-/// the venue's wall clock at the closing fill; `net_usdt` is gross minus the
-/// venue's fees, with no funding in it.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnpricedTradeReason {
+    SettlementAsset,
+    FeeValue,
+}
+
+/// A closed trade's exact net or native valuation debt within the rolling window.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ClosedTradeRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpriced: Option<UnpricedTradeReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_usdt_exact: Option<Exact>,
     pub closed_ms: i64,
     pub net_usdt: f64,
+}
+
+impl ClosedTradeRow {
+    pub fn net(&self) -> Result<Option<Exact>, ExactError> {
+        if self.unpriced.is_some() {
+            if self.net_usdt_exact.is_some() || self.net_usdt != 0.0 || self.closed_ms <= 0 {
+                return Err(ExactError::InvalidProjection);
+            }
+            return Ok(None);
+        }
+        if let Some(value) = &self.net_usdt_exact {
+            value.validate_storage()?;
+            if value.reporting_f64() != self.net_usdt {
+                return Err(ExactError::InvalidProjection);
+            }
+            Ok(Some(value.clone()))
+        } else {
+            Exact::from_legacy_f64(self.net_usdt).map(Some)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ClosedTradeRow {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Row {
+            closed_ms: i64,
+            net_usdt: f64,
+            #[serde(default)]
+            unpriced: Option<UnpricedTradeReason>,
+            #[serde(default)]
+            net_usdt_exact: Option<Exact>,
+        }
+        let row = Row::deserialize(deserializer)?;
+        let row = Self {
+            closed_ms: row.closed_ms,
+            net_usdt: row.net_usdt,
+            unpriced: row.unpriced,
+            net_usdt_exact: row.net_usdt_exact,
+        };
+        if row.net_usdt_exact.is_some() || row.unpriced.is_some() {
+            row.net().map_err(serde::de::Error::custom)?;
+        }
+        Ok(row)
+    }
 }
 
 /// What the rolling loss window holds right now, for the log and the operator.
@@ -185,7 +314,7 @@ pub struct RollingLossView {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PortfolioRiskVerdict {
-    Allow { qty: f64, venue_reduce_only: bool },
+    Allow { qty: Exact, venue_reduce_only: bool },
     Deny { reason: DenyReason },
 }
 
@@ -251,6 +380,18 @@ pub trait RiskKernel {
         self.on_update(update);
         Ok(())
     }
+    fn on_update_with_exact_remaining(
+        &mut self,
+        update: &OrderUpdate,
+        remaining_qty: &Exact,
+    ) -> Result<(), DenyReason> {
+        let quantity = remaining_qty
+            .to_f64()
+            .map_err(|e| DenyReason::UnknownState {
+                detail: e.to_string(),
+            })?;
+        self.on_update_with_remaining(update, quantity)
+    }
 
     /// Latest price for a symbol, for valuing exposure. Default: ignore.
     fn observe_price(&mut self, _symbol: SymbolId, _px: f64) {}
@@ -304,6 +445,25 @@ pub trait RiskKernel {
         _account: &AccountView,
     ) {
         self.register_order_price_range(id, intent, qty, price_range.0, price_range.1);
+    }
+    fn register_order_exact_price_range_with_account(
+        &mut self,
+        id: &str,
+        intent: &Intent,
+        qty: &Exact,
+        price_range: (&Exact, &Exact),
+        account: &AccountView,
+    ) {
+        self.register_order_price_range_with_account(
+            id,
+            intent,
+            qty.to_f64().unwrap_or(f64::NAN),
+            (
+                price_range.0.to_f64().unwrap_or(f64::NAN),
+                price_range.1.to_f64().unwrap_or(f64::NAN),
+            ),
+            account,
+        );
     }
     /// Canonical order ledger completion; does not synthesize or erase executions.
     fn complete_order(&mut self, _client_order_id: &str, _confirmed_ns: u64) {}

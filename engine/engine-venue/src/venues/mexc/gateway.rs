@@ -24,8 +24,7 @@ use std::collections::HashMap;
 
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
-    AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce,
-    VenueExecution, VenueOrder,
+    AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce, VenueOrder,
 };
 use engine_types::risk::AccountView;
 use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
@@ -95,11 +94,6 @@ fn execution_page_complete(symbol: &str, page: u32, raw_count: usize) -> Result<
     }
     if raw_count < PAGE_SIZE as usize {
         return Ok(true);
-    }
-    if page >= MAX_PAGES {
-        return Err(VenueError::BadReply(format!(
-            "execution history for {symbol} still had pages after {MAX_PAGES} full pages"
-        )));
     }
     Ok(false)
 }
@@ -678,7 +672,7 @@ impl VenueGateway for MexcGateway {
         &mut self,
         start_ms: i64,
         end_ms: i64,
-    ) -> Result<Vec<VenueExecution>, VenueError> {
+    ) -> Result<engine_types::ExecutionHistory, VenueError> {
         self.contracts().await?;
         engine_types::orders::AccountRecoveryClient::executions(
             &recovery::RecoveryClient::new(self),
@@ -797,7 +791,7 @@ mod tests {
     fn execution_pagination_needs_a_raw_short_page() {
         assert!(execution_page_complete("BTCUSDT", 1, 99).unwrap());
         assert!(!execution_page_complete("BTCUSDT", 1, 100).unwrap());
-        assert!(execution_page_complete("BTCUSDT", MAX_PAGES, 100).is_err());
+        assert!(!execution_page_complete("BTCUSDT", MAX_PAGES * 100, 100).unwrap());
         assert!(execution_page_complete("BTCUSDT", 1, 101).is_err());
     }
 

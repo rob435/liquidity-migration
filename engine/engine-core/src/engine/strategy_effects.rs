@@ -54,7 +54,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let id = transition.id;
         for (action, order_id) in transition.effects.iter().zip(&mut transition.order_ids) {
             if matches!(action, Action::Place(_)) {
-                let id = self.mint_id();
+                let id = self.mint_id()?;
                 *order_id = Some(id);
             }
         }

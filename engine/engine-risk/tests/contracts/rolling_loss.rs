@@ -21,6 +21,8 @@ fn kernel() -> Kernel {
 
 fn closed(closed_ms: i64, net_usdt: f64) -> ClosedTradeRow {
     ClosedTradeRow {
+        unpriced: None,
+        net_usdt_exact: None,
         closed_ms,
         net_usdt,
     }

@@ -681,6 +681,8 @@ impl Strategy for ScopedSignalBuyer {
             return;
         };
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(99),
             symbol: *symbol,
             side: if self.reduce_only {
@@ -934,6 +936,7 @@ async fn a_source_gap_cancels_only_affected_openings_and_keeps_exit_edits_live()
         &prior,
         working,
         vec![engine_types::PositionView {
+            exact_amounts: None,
             exact_stop_px: None,
             symbol: SymbolId(2),
             side: Side::Buy,
@@ -1024,6 +1027,7 @@ async fn a_source_gap_preserves_attributed_reduce_only_placements() {
         &prior,
         vec![],
         vec![engine_types::PositionView {
+            exact_amounts: None,
             exact_stop_px: None,
             symbol: SymbolId(2),
             side: Side::Buy,
@@ -1493,6 +1497,7 @@ async fn an_absent_producer_does_not_strand_attributed_reductions_or_protective_
         &prior,
         vec![],
         vec![engine_types::PositionView {
+            exact_amounts: None,
             exact_stop_px: None,
             symbol: SymbolId(0),
             side: Side::Buy,

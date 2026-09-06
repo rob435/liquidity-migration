@@ -1,318 +1,275 @@
-//! What the kernel has approved and not yet seen in an account view: orders in
-//! flight, and fills newer than the reading being judged against. The venue's
-//! view is the truth about everything older.
-
-use std::collections::{BTreeMap, HashMap};
-
+//! Reservations and fills newer than the causal account snapshot.
 use engine_types::ids::{StrategyId, SymbolId};
+use engine_types::numeric::Exact;
 use engine_types::orders::Side;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Pending {
     pub strategy: StrategyId,
     pub symbol: SymbolId,
-    pub signed_qty: f64,
+    pub signed_qty: Option<Exact>,
     pub reduce_only: bool,
-    /// The price the order was approved at. An order in flight is valued at
-    /// this or the current price, whichever is higher.
-    pub px: f64,
-    /// Worst distance from a plausible fill price to the order's own stop.
-    /// Persisted with the reservation so sibling and later admissions cannot
-    /// reprice a wide stop at only the generic disaster fraction. `None` is
-    /// unknown; `Some(0)` is a known reduction that adds no opening stop.
-    pub stop_fraction: Option<f64>,
+    pub px: Option<Exact>,
+    pub stop_fraction: Option<Exact>,
 }
-
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct RecentExposure {
-    pub signed_qty: f64,
-    pub stop_fraction: Option<f64>,
+    pub signed_qty: Exact,
+    pub stop_fraction: Option<Exact>,
 }
-
-fn pending_px(pending: &Pending, price: &impl Fn(SymbolId) -> Option<f64>) -> Option<f64> {
-    let now = price(pending.symbol).unwrap_or(0.0);
-    let px = now.max(pending.px);
-    if px.is_finite() && px > 0.0 {
-        Some(px)
-    } else {
-        None
-    }
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct Book {
-    px: HashMap<u16, f64>,
-    /// Ordered by client order id: the envelope sums these, and a sum in
-    /// hash order would make the kernel's verdict depend on the hash seed.
+    px: BTreeMap<u16, Exact>,
     pending: BTreeMap<String, Pending>,
-    /// Every fill with when it arrived. A fill newer than the account view
-    /// is in neither the view nor the reservations, and the envelope must
-    /// still see it; entries the view has caught up with are pruned.
-    recent_fills: Vec<(u64, u16, f64, Option<f64>)>,
+    recent_fills: Vec<(u64, u16, Option<Exact>, Option<Exact>)>,
 }
-
 impl Book {
     pub(crate) fn observe_px(&mut self, symbol: SymbolId, px: f64) {
-        if px.is_finite() && px > 0.0 {
+        if let Ok(px) = Exact::from_legacy_f64(px) {
+            self.observe_exact_px(symbol, px);
+        }
+    }
+    pub(crate) fn observe_exact_px(&mut self, symbol: SymbolId, px: Exact) {
+        if px.is_positive() {
             self.px.insert(symbol.0, px);
         }
     }
-
-    pub(crate) fn px(&self, symbol: SymbolId) -> Option<f64> {
-        self.px.get(&symbol.0).copied()
+    pub(crate) fn px(&self, symbol: SymbolId) -> Option<Exact> {
+        self.px.get(&symbol.0).cloned()
     }
-
-    pub(crate) fn register(&mut self, client_order_id: &str, pending: Pending) {
-        self.pending.insert(client_order_id.to_string(), pending);
+    pub(crate) fn register(&mut self, id: &str, pending: Pending) {
+        self.pending.insert(id.into(), pending);
     }
-
-    pub(crate) fn take(&mut self, client_order_id: &str) -> Option<Pending> {
-        self.pending.remove(client_order_id)
+    pub(crate) fn take(&mut self, id: &str) -> Option<Pending> {
+        self.pending.remove(id)
     }
-
     pub(crate) fn contains(&self, id: &str) -> bool {
         self.pending.contains_key(id)
     }
-
-    pub(crate) fn forget(&mut self, client_order_id: &str) {
-        self.pending.remove(client_order_id);
+    pub(crate) fn forget(&mut self, id: &str) {
+        self.pending.remove(id);
     }
-
-    pub(crate) fn on_fill(
-        &mut self,
-        client_order_id: &str,
-        symbol: SymbolId,
-        signed_qty: f64,
-        recv_ns: u64,
-    ) {
-        self.on_fill_with_remaining(client_order_id, symbol, signed_qty, recv_ns, None);
-    }
-
     pub(crate) fn on_fill_with_remaining(
         &mut self,
-        client_order_id: &str,
+        id: &str,
         symbol: SymbolId,
-        signed_qty: f64,
+        qty: Option<Exact>,
         recv_ns: u64,
-        remaining: Option<f64>,
+        remaining: Option<Exact>,
     ) {
-        let stop_fraction = self
-            .pending
-            .get(client_order_id)
-            .and_then(|pending| pending.stop_fraction);
+        let stop = self.pending.get(id).and_then(|p| p.stop_fraction.clone());
         self.recent_fills
-            .push((recv_ns, symbol.0, signed_qty, stop_fraction));
-        let Some(pending) = self.pending.get_mut(client_order_id) else {
-            // A fill for an order the kernel never reserved — a second writer
-            // on the account. The account view is what carries it.
+            .push((recv_ns, symbol.0, qty.clone(), stop));
+        let Some(pending) = self.pending.get_mut(id) else {
             return;
         };
-        // The reservation shrinks toward zero by what actually filled.
-        let left = remaining.unwrap_or_else(|| pending.signed_qty.abs() - signed_qty.abs());
-        pending.signed_qty = if left > 0.0 {
-            left * pending.signed_qty.signum()
-        } else {
-            0.0
-        };
-        // A used-up reservation is finished business. Kept, it grows this map
-        // — and every per-assessment scan of it — by one entry for each order
-        // the process ever fills.
-        if pending.signed_qty == 0.0 {
-            self.pending.remove(client_order_id);
+        pending.signed_qty = pending.signed_qty.as_ref().and_then(|old| {
+            let filled = qty.as_ref()?;
+            let left = remaining.unwrap_or_else(|| old.abs() - filled.abs());
+            Some(if left.is_positive() {
+                if old.is_negative() {
+                    -left
+                } else {
+                    left
+                }
+            } else {
+                Exact::zero()
+            })
+        });
+        if pending.signed_qty.as_ref().is_some_and(Exact::is_zero) {
+            self.pending.remove(id);
         }
     }
-
-    /// Quantity already spoken for by resting reduce-only orders on this
-    /// symbol. A second full-size exit on top of these is a stack, not a
-    /// retry — a rejected or cancelled exit is forgotten and frees it.
-    pub(crate) fn pending_reduce_qty(&self, symbol: SymbolId) -> f64 {
+    fn quantity(&self, filter: impl Fn(&Pending) -> bool) -> Result<Exact, &'static str> {
         self.pending
             .values()
-            .filter(|p| p.reduce_only && p.symbol == symbol)
-            .map(|p| p.signed_qty.abs())
-            .sum()
-    }
-
-    pub(crate) fn owned_reduce_qty(&self, strategy: StrategyId, symbol: SymbolId) -> f64 {
-        self.pending
-            .values()
-            .filter(|p| p.reduce_only && p.strategy == strategy && p.symbol == symbol)
-            .map(|p| p.signed_qty.abs())
-            .sum()
-    }
-
-    pub(crate) fn owned_open_qty(&self, strategy: StrategyId, symbol: SymbolId, side: Side) -> f64 {
-        let sign = if side == Side::Buy { 1.0 } else { -1.0 };
-        self.pending
-            .values()
-            .filter(|p| {
-                !p.reduce_only
-                    && p.strategy == strategy
-                    && p.symbol == symbol
-                    && p.signed_qty.signum() == sign
+            .filter(|p| filter(p))
+            .try_fold(Exact::zero(), |sum, p| {
+                Ok(sum
+                    + p.signed_qty
+                        .as_ref()
+                        .ok_or("pending order quantity is unknown")?
+                        .abs())
             })
-            .map(|p| p.signed_qty.abs())
-            .sum()
     }
-
-    pub(crate) fn physical_interval(&self, symbol: SymbolId, settled: f64) -> (f64, f64) {
+    pub(crate) fn pending_reduce_qty(&self, symbol: SymbolId) -> Result<Exact, &'static str> {
+        self.quantity(|p| p.reduce_only && p.symbol == symbol)
+    }
+    pub(crate) fn owned_reduce_qty(
+        &self,
+        strategy: StrategyId,
+        symbol: SymbolId,
+    ) -> Result<Exact, &'static str> {
+        self.quantity(|p| p.reduce_only && p.strategy == strategy && p.symbol == symbol)
+    }
+    pub(crate) fn owned_open_qty(
+        &self,
+        strategy: StrategyId,
+        symbol: SymbolId,
+        side: Side,
+    ) -> Result<Exact, &'static str> {
+        self.quantity(|p| {
+            !p.reduce_only
+                && p.strategy == strategy
+                && p.symbol == symbol
+                && p.signed_qty
+                    .as_ref()
+                    .is_none_or(|q| q.is_negative() == (side == Side::Sell))
+        })
+    }
+    pub(crate) fn pending_open_qty(
+        &self,
+        symbol: SymbolId,
+        side: Side,
+    ) -> Result<Exact, &'static str> {
+        self.quantity(|p| {
+            !p.reduce_only
+                && p.symbol == symbol
+                && p.signed_qty
+                    .as_ref()
+                    .is_none_or(|q| q.is_negative() == (side == Side::Sell))
+        })
+    }
+    pub(crate) fn physical_interval(
+        &self,
+        symbol: SymbolId,
+        settled: &Exact,
+    ) -> Result<(Exact, Exact), &'static str> {
         self.pending
             .values()
             .filter(|p| p.symbol == symbol)
-            .fold((settled, settled), |(low, high), p| {
-                (low + p.signed_qty.min(0.0), high + p.signed_qty.max(0.0))
-            })
+            .try_fold(
+                (settled.clone(), settled.clone()),
+                |(mut low, mut high), p| {
+                    let qty = p
+                        .signed_qty
+                        .as_ref()
+                        .ok_or("pending physical quantity is unknown")?;
+                    if qty.is_negative() {
+                        low += qty;
+                    } else {
+                        high += qty;
+                    }
+                    Ok((low, high))
+                },
+            )
     }
-
-    /// Non-reduce-only quantity already admitted on one side. Admission uses
-    /// the opposite-side total as a worst-case path: those orders may all fill
-    /// before any same-side reservation does, so netting them would hide a
-    /// possible cross through flat.
-    pub(crate) fn pending_open_qty(&self, symbol: SymbolId, side: Side) -> f64 {
-        let sign = match side {
-            Side::Buy => 1.0,
-            Side::Sell => -1.0,
-        };
-        self.pending
-            .values()
-            .filter(|pending| {
-                !pending.reduce_only
-                    && pending.symbol == symbol
-                    && pending.signed_qty.signum() == sign
-            })
-            .map(|pending| pending.signed_qty.abs())
-            .sum()
-    }
-
-    /// Per-symbol net quantity of fills newer than the account view, pruning
-    /// what the view has caught up with. The envelope adds these to the
-    /// view's positions so a just-filled order is never counted nowhere.
-    pub(crate) fn fills_after(&mut self, observed_ns: u64) -> BTreeMap<u16, RecentExposure> {
+    pub(crate) fn fills_after(
+        &mut self,
+        observed_ns: u64,
+    ) -> Result<BTreeMap<u16, RecentExposure>, &'static str> {
         self.prune_through(observed_ns);
-        let mut net: BTreeMap<u16, RecentExposure> = BTreeMap::new();
-        for (_, symbol, qty, stop_fraction) in &self.recent_fills {
-            let row = net.entry(*symbol).or_insert(RecentExposure {
-                signed_qty: 0.0,
-                stop_fraction: Some(0.0),
+        let mut net = BTreeMap::<u16, RecentExposure>::new();
+        for (_, symbol, qty, stop) in &self.recent_fills {
+            let qty = qty.as_ref().ok_or("recent execution quantity is unknown")?;
+            let row = net.entry(*symbol).or_insert_with(|| RecentExposure {
+                signed_qty: Exact::zero(),
+                stop_fraction: Some(Exact::zero()),
             });
             row.signed_qty += qty;
-            row.stop_fraction = match (row.stop_fraction, *stop_fraction) {
-                (Some(left), Some(right)) => Some(left.max(right)),
-                _ => None,
-            };
+            row.stop_fraction = row
+                .stop_fraction
+                .as_ref()
+                .zip(stop.as_ref())
+                .map(|(a, b)| a.max(b).clone());
         }
-        net
+        Ok(net)
     }
-
     pub(crate) fn prune_through(&mut self, observed_ns: u64) {
         self.recent_fills.retain(|(ns, _, _, _)| *ns > observed_ns);
     }
-
-    /// Notional in flight per symbol, not yet visible in the account view.
-    /// An error names the unreadable input before any unknown stop distance can
-    /// reach loss arithmetic. Per symbol rather than one total because the
-    /// per-symbol cap needs to know where it sits.
     pub(crate) fn pending_risk_rows(
         &self,
-        price: impl Fn(SymbolId) -> Option<f64>,
-    ) -> Result<Vec<(u16, f64, f64)>, &'static str> {
-        let mut out: Vec<(u16, f64, f64)> = Vec::new();
+        price: impl Fn(SymbolId) -> Option<Exact>,
+    ) -> Result<Vec<(u16, Exact, Exact)>, &'static str> {
+        let mut out = Vec::new();
         for pending in self.pending.values() {
-            if pending.reduce_only || pending.signed_qty == 0.0 {
+            let qty = pending
+                .signed_qty
+                .as_ref()
+                .ok_or("pending order quantity is unknown")?;
+            if pending.reduce_only || qty.is_zero() {
                 continue;
             }
-            let stop_fraction = pending
+            let fraction = pending
                 .stop_fraction
+                .clone()
                 .ok_or("an in-flight opening order has no readable stop distance")?;
-            let px =
-                pending_px(pending, &price).ok_or("no price for an in-flight opening order")?;
-            let notional = pending.signed_qty.abs() * px;
-            if !notional.is_finite() {
-                return Err("an in-flight opening order has unreadable notional");
-            }
-            out.push((pending.symbol.0, notional, stop_fraction));
+            let px = match (price(pending.symbol), pending.px.as_ref()) {
+                (Some(a), Some(b)) => a.max(b.clone()),
+                (Some(a), None) => a,
+                (None, Some(b)) => b.clone(),
+                (None, None) => return Err("no price for an in-flight opening order"),
+            };
+            out.push((pending.symbol.0, qty.abs() * px, fraction));
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn entry(symbol: u16, qty: f64) -> Pending {
+    fn entry(symbol: u16, qty: i64) -> Pending {
         Pending {
             strategy: StrategyId(0),
             symbol: SymbolId(symbol),
-            signed_qty: qty,
+            signed_qty: Some(Exact::from_i64(qty)),
             reduce_only: false,
-            px: 10.0,
-            stop_fraction: Some(0.1),
+            px: Some(Exact::from_u64(10)),
+            stop_fraction: Some(Exact::parse_decimal("0.1").unwrap()),
         }
     }
-
-    /// The envelope sums what these return. Floating-point addition is not
-    /// associative, so the order must be the keys', never the hash seed's.
     #[test]
     fn risk_rows_and_recent_fills_come_back_in_key_order() {
         let mut book = Book::default();
         for id in ["z-9", "a-1", "m-5", "b-2"] {
-            book.register(id, entry(7, 1.0));
+            book.register(id, entry(7, 1));
         }
-        let symbols: Vec<u16> = book
-            .pending_risk_rows(|_| Some(10.0))
-            .unwrap()
-            .into_iter()
-            .map(|(symbol, _, _)| symbol)
-            .collect();
-        assert_eq!(symbols.len(), 4);
-        let ids: Vec<&String> = book.pending.keys().collect();
-        assert_eq!(ids, ["a-1", "b-2", "m-5", "z-9"]);
-        for symbol in [9u16, 2, 5, 1] {
-            book.on_fill("unreserved", SymbolId(symbol), 1.0, 100);
+        assert_eq!(
+            book.pending.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["a-1", "b-2", "m-5", "z-9"]
+        );
+        assert_eq!(
+            book.pending_risk_rows(|_| Some(Exact::from_u64(10)))
+                .unwrap()
+                .len(),
+            4
+        );
+        for symbol in [9, 2, 5, 1] {
+            book.on_fill_with_remaining("unknown", SymbolId(symbol), Some(Exact::one()), 100, None);
         }
-        let order: Vec<u16> = book.fills_after(0).keys().copied().collect();
-        assert_eq!(order, [1, 2, 5, 9]);
+        assert_eq!(
+            book.fills_after(0)
+                .unwrap()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            [1, 2, 5, 9]
+        );
     }
-
     #[test]
     fn a_used_up_reservation_leaves_the_pending_map() {
         let mut book = Book::default();
-        book.register("a-1", entry(4, 3.0));
-        book.on_fill("a-1", SymbolId(4), 2.0, 1);
+        book.register("a-1", entry(4, 3));
+        book.on_fill_with_remaining("a-1", SymbolId(4), Some(Exact::from_u64(2)), 1, None);
+        assert_eq!(book.pending.len(), 1);
+        book.on_fill_with_remaining("a-1", SymbolId(4), Some(Exact::one()), 2, None);
+        assert!(book.pending.is_empty());
         assert_eq!(
-            book.pending.len(),
-            1,
-            "a partial fill keeps the reservation"
+            book.fills_after(0).unwrap()[&4].signed_qty,
+            Exact::from_u64(3)
         );
-        book.on_fill("a-1", SymbolId(4), 1.0, 2);
-        assert!(
-            book.pending.is_empty(),
-            "a fully filled order must not stay reserved"
-        );
-        // What filled is the account view's to carry from here.
-        assert_eq!(book.fills_after(0).get(&4).unwrap().signed_qty, 3.0);
     }
-
     #[test]
     fn a_fill_during_an_account_scan_survives_the_scan_start_stamp() {
-        let scan_started_ns = 100;
-        let fill_received_ns = 150;
-        let rest_completed_ns = 200;
         let mut book = Book::default();
-        book.register("race-1", entry(7, 2.0));
-        book.on_fill("race-1", SymbolId(7), 2.0, fill_received_ns);
-
-        // The gateway stamps the view at scan start. Stamping it at REST
-        // completion would prune this fill even though the venue generated
-        // the flat snapshot before the fill occurred.
+        book.register("race-1", entry(7, 2));
+        book.on_fill_with_remaining("race-1", SymbolId(7), Some(Exact::from_u64(2)), 150, None);
         assert_eq!(
-            book.fills_after(scan_started_ns)
-                .get(&7)
-                .unwrap()
-                .signed_qty,
-            2.0
+            book.fills_after(100).unwrap()[&7].signed_qty,
+            Exact::from_u64(2)
         );
-        assert!(book.fills_after(rest_completed_ns).is_empty());
+        assert!(book.fills_after(200).unwrap().is_empty());
     }
 }

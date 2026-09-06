@@ -197,6 +197,8 @@ impl Strategy for MixedBurst {
             self.fired = true;
             for _ in 0..self.entries {
                 ctx.place(Intent {
+                    exact_prices: None,
+                    exact_quantity: None,
                     strategy: StrategyId(0),
                     symbol: *symbol,
                     side: Side::Buy,
@@ -830,6 +832,8 @@ impl Strategy for Watcher {
         {
             self.placed = true;
             ctx.place(Intent {
+                exact_prices: None,
+                exact_quantity: None,
                 strategy: StrategyId(0),
                 symbol: *symbol,
                 side: Side::Buy,

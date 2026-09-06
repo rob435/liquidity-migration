@@ -432,6 +432,7 @@ pub(crate) fn parse_positions(
         // reads as unknown (cross-margin rows can blank it), never as a fact.
         let leverage = opt_num_field(row, "leverage")?.filter(|v| *v > 0.0);
         out.push(PositionView {
+            exact_amounts: None,
             exact_stop_px: None,
             symbol: id,
             side,

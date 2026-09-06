@@ -221,6 +221,8 @@ impl Probe {
             return;
         }
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: self.id,
             symbol,
             side: Side::Buy,
@@ -299,6 +301,8 @@ impl Probe {
         self.draining = true;
         self.skip(format!("{CLOSING} ({held} held)"));
         ctx.place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: self.id,
             symbol,
             side: if held > 0.0 { Side::Sell } else { Side::Buy },

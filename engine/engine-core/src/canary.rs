@@ -114,7 +114,9 @@ impl CanaryGateway for Venue {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<VenueExecution>, VenueError> {
-        VenueGateway::executions(self, start_ms, end_ms).await
+        VenueGateway::executions(self, start_ms, end_ms)
+            .await?
+            .collect()
     }
 
     async fn venue_time(&mut self) -> Result<i64, VenueError> {

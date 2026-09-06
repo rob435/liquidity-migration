@@ -77,6 +77,8 @@ async fn an_exit_is_sent_as_written_even_when_it_asks_to_be_worked() {
             }
             self.sent = true;
             ctx.place(Intent {
+                exact_prices: None,
+                exact_quantity: None,
                 strategy: StrategyId(0),
                 symbol: *symbol,
                 side: Side::Sell,

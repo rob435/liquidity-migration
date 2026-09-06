@@ -194,6 +194,8 @@ mod tests {
 
     fn order() -> OrderDispatchState {
         let intent = Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: SymbolId(0),
             side: Side::Sell,

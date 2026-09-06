@@ -355,6 +355,19 @@ impl Exact {
             .filter(|value| value.is_finite() && (*value != 0.0 || self.is_zero()))
             .ok_or(ExactError::RepresentationRange)
     }
+    /// Finite diagnostic projection for derived values; underflow is zero and overflow saturates.
+    /// Native quantities and prices must continue to use `to_f64` validation.
+    pub fn reporting_f64(&self) -> f64 {
+        self.to_f64().unwrap_or_else(|_| {
+            if self.abs() < Self::one() {
+                0.0
+            } else if self.is_negative() {
+                -f64::MAX
+            } else {
+                f64::MAX
+            }
+        })
+    }
     /// None means a repeating decimal; no silent display rounding occurs.
     pub fn to_decimal_string(&self) -> Option<String> {
         let mut denominator = self.0.denom().clone();

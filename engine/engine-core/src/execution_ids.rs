@@ -1,6 +1,6 @@
 //! Bounded memory of venue execution ids used by fill recovery.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use engine_types::{RecentExecutionId, WalRecord};
@@ -19,19 +19,21 @@ pub(crate) const RETENTION_MS: i64 = RECOVERY_REACH_MS + RECOVERY_PAD_MS;
 /// this stops the engine instead of evicting an id that could still prevent a
 /// duplicate fill.
 pub(crate) const CAPACITY: usize = 1 << 20;
+pub(crate) const ID_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Full {
     capacity: usize,
     retention_ms: i64,
+    byte_capacity: usize,
 }
 
 impl std::fmt::Display for Full {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "execution-id dedup reached its {}-id cap inside the {} ms recovery window",
-            self.capacity, self.retention_ms
+            "execution-id dedup reached its {}-id / {}-byte cap inside the {} ms recovery window",
+            self.capacity, self.byte_capacity, self.retention_ms
         )
     }
 }
@@ -43,29 +45,60 @@ pub(crate) struct ExecutionIds {
     newest_ms: i64,
     capacity: usize,
     retention_ms: i64,
+    byte_capacity: usize,
+    retained_bytes: usize,
 }
 
 impl ExecutionIds {
     pub(crate) fn from_records(records: &[WalRecord], now_ms: i64) -> Result<Self, Full> {
-        let mut entries = Vec::new();
-        for record in records {
+        Self::restore(records, now_ms, Self::with_limits(CAPACITY, RETENTION_MS))
+    }
+
+    fn restore(records: &[WalRecord], now_ms: i64, mut ids: Self) -> Result<Self, Full> {
+        let mut entries: HashMap<Arc<str>, (i64, usize)> = HashMap::new();
+        let mut ordinal = 0usize;
+        let cutoff = now_ms.saturating_sub(ids.retention_ms);
+        let mut remember = |exec_id: &str, seen_ms: i64| -> Result<(), Full> {
+            let position = ordinal;
+            ordinal += 1;
+            let seen_ms = seen_ms.min(now_ms);
+            if seen_ms < cutoff {
+                return Ok(());
+            }
+            if let Some(prior) = entries.get_mut(exec_id) {
+                if seen_ms < prior.0 {
+                    *prior = (seen_ms, position);
+                }
+            } else {
+                if entries.len() >= ids.capacity
+                    || exec_id.len() > ids.byte_capacity.saturating_sub(ids.retained_bytes)
+                {
+                    return Err(ids.full());
+                }
+                ids.retained_bytes += exec_id.len();
+                entries.insert(Arc::from(exec_id), (seen_ms, position));
+            }
+            Ok(())
+        };
+        let start = records
+            .iter()
+            .rposition(|record| matches!(record, WalRecord::SegmentBase { .. }))
+            .unwrap_or(0);
+        for record in &records[start..] {
             match record {
                 WalRecord::SegmentBase {
                     recent_execution_ids,
                     ..
                 } => {
-                    entries.clear();
-                    entries.extend(
-                        recent_execution_ids
-                            .iter()
-                            .map(|row| (row.seen_ms, row.exec_id.clone())),
-                    );
+                    for row in recent_execution_ids {
+                        remember(&row.exec_id, row.seen_ms)?;
+                    }
                 }
                 WalRecord::RecoveredFill {
                     exec_id,
                     recovered_wall_ts_ms,
                     ..
-                } if !exec_id.is_empty() => entries.push((*recovered_wall_ts_ms, exec_id.clone())),
+                } if !exec_id.is_empty() => remember(exec_id, *recovered_wall_ts_ms)?,
                 WalRecord::OrderUpdate {
                     update:
                         engine_types::OrderUpdate::Fill {
@@ -74,25 +107,17 @@ impl ExecutionIds {
                             ..
                         },
                     ..
-                } if !exec_id.is_empty() => entries.push((*venue_ts_ms, exec_id.clone())),
+                } if !exec_id.is_empty() => remember(exec_id, *venue_ts_ms)?,
                 _ => {}
             }
         }
-        entries.sort_by_key(|(seen_ms, _)| *seen_ms);
-
-        let mut ids = Self::with_limits(CAPACITY, RETENTION_MS);
-        let cutoff = now_ms.saturating_sub(ids.retention_ms);
-        for (seen_ms, exec_id) in entries {
-            let seen_ms = seen_ms.min(now_ms);
-            if seen_ms < cutoff || ids.ids.contains(exec_id.as_str()) {
-                continue;
-            }
-            if ids.ids.len() >= ids.capacity {
-                return Err(ids.full());
-            }
-            ids.insert_at(exec_id, seen_ms);
+        let mut entries: Vec<_> = entries.into_iter().collect();
+        entries.sort_unstable_by_key(|(_, key)| *key);
+        for (exec_id, (seen_ms, _)) in entries {
+            ids.ids.insert(Arc::clone(&exec_id));
+            ids.oldest_first.push_back((seen_ms, exec_id));
         }
-        ids.newest_ms = ids.newest_ms.max(now_ms);
+        ids.newest_ms = now_ms;
         Ok(ids)
     }
 
@@ -102,7 +127,9 @@ impl ExecutionIds {
         if self.contains(exec_id, now_ms) {
             return Ok(false);
         }
-        if self.ids.len() >= self.capacity {
+        if self.ids.len() >= self.capacity
+            || exec_id.len() > self.byte_capacity.saturating_sub(self.retained_bytes)
+        {
             return Err(self.full());
         }
         Ok(true)
@@ -133,6 +160,7 @@ impl ExecutionIds {
     }
 
     fn insert_at(&mut self, exec_id: String, seen_ms: i64) {
+        self.retained_bytes += exec_id.len();
         let exec_id: Arc<str> = Arc::from(exec_id);
         self.ids.insert(Arc::clone(&exec_id));
         self.oldest_first.push_back((seen_ms, exec_id));
@@ -148,6 +176,7 @@ impl ExecutionIds {
             .is_some_and(|(seen_ms, _)| *seen_ms < cutoff)
         {
             let (_, exec_id) = self.oldest_first.pop_front().expect("front exists");
+            self.retained_bytes -= exec_id.len();
             self.ids.remove(exec_id.as_ref());
         }
     }
@@ -156,6 +185,7 @@ impl ExecutionIds {
         Full {
             capacity: self.capacity,
             retention_ms: self.retention_ms,
+            byte_capacity: self.byte_capacity,
         }
     }
 
@@ -166,6 +196,8 @@ impl ExecutionIds {
             newest_ms: i64::MIN,
             capacity,
             retention_ms,
+            byte_capacity: ID_BYTES,
+            retained_bytes: 0,
         }
     }
 
@@ -192,6 +224,61 @@ mod tests {
         assert_eq!(remember(&mut ids, "a", 10), Ok(true));
         assert_eq!(remember(&mut ids, "a", 110), Ok(false));
         assert_eq!(ids.rows(110).len(), 1);
+    }
+
+    #[test]
+    fn variable_length_ids_cannot_exceed_the_resident_byte_budget() {
+        let mut ids = ExecutionIds::with_limits(1000, 100);
+        ids.byte_capacity = 16;
+        assert_eq!(remember(&mut ids, "123456789", 10), Ok(true));
+        assert_eq!(remember(&mut ids, "123456789", 20), Ok(false));
+        assert!(remember(&mut ids, "abcdefgh", 20).is_err());
+        assert_eq!(ids.retained_bytes, 9);
+        assert_eq!(remember(&mut ids, "abcdefgh", 111), Ok(true));
+        assert_eq!(ids.retained_bytes, 8);
+    }
+
+    #[test]
+    fn replay_bounds_only_live_ids_and_retains_earliest_duplicate_timestamp() {
+        let fill = |id: &str, time| WalRecord::OrderUpdate {
+            callbacks: None,
+            update: engine_types::OrderUpdate::Fill {
+                client_order_id: "order".into(),
+                exec_id: id.into(),
+                allocation: None,
+                symbol: engine_types::SymbolId(0),
+                side: engine_types::Side::Buy,
+                qty: 1.0,
+                px: 1.0,
+                fee: Some(0.0),
+                is_maker: false,
+                venue_ts_ms: time,
+                amounts: None,
+                forced_close: None,
+                recv_ns: 1,
+            },
+        };
+        let records = vec![
+            fill("expired enormous id", 0),
+            fill("b", 90),
+            fill("a", 95),
+            fill("a", 50),
+        ];
+        let mut limits = ExecutionIds::with_limits(2, 100);
+        limits.byte_capacity = 2;
+        let mut ids = ExecutionIds::restore(&records, 101, limits).unwrap();
+        assert_eq!(
+            ids.rows(101)
+                .iter()
+                .map(|row| (&*row.exec_id, row.seen_ms))
+                .collect::<Vec<_>>(),
+            vec![("a", 50), ("b", 90)]
+        );
+        assert!(!ids.contains("a", 151));
+        assert!(ids.contains("b", 151));
+        let mut limits = ExecutionIds::with_limits(1000, 100);
+        limits.byte_capacity = 1;
+        assert!(ExecutionIds::restore(&records, 101, limits).is_err());
     }
 
     #[test]
@@ -228,6 +315,8 @@ mod tests {
     #[test]
     fn a_rotation_base_restores_duplicate_memory() {
         let record = WalRecord::SegmentBase {
+            order_id_epoch_ms: None,
+            open_trade_lots: Some(Vec::new()),
             portfolio_control: Default::default(),
             pending_order_dispatches: Vec::new(),
             signal_producers: Vec::new(),

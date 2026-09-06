@@ -440,7 +440,12 @@ async fn a_busy_window_is_walked_rather_than_truncated() {
     })
     .await;
     let mut gw = gateway(&server);
-    let fills = gw.executions(0, 100_000).await.expect("a walked history");
+    let fills = gw
+        .executions(0, 100_000)
+        .await
+        .expect("a walked history")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(
         server.to_path("/api/v1/trades").len(),
         2,
@@ -469,6 +474,42 @@ async fn a_signed_read_carries_the_auth_token() {
     // No market named, so the venue answers for every market — the point of
     // this read is to find orders nobody here placed.
     assert!(!sent[0].query.contains("market_id"), "{}", sent[0].query);
+}
+
+#[tokio::test]
+async fn long_history_streams_past_twenty_pages_and_deduplicates_inclusive_boundaries() {
+    let page = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = page.clone();
+    let server = TestServer::start(move |request, _| {
+        if request.path != "/api/v1/trades" {
+            return answer(request);
+        }
+        let page = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let count = if page < 25 { 100 } else { 1 };
+        let rows: Vec<_> = (0..count)
+            .map(|offset| {
+                let id = page * 99 + offset;
+                serde_json::json!({"trade_id":id,"market_id":0,"size":"0.01","price":"95000",
+                "timestamp":1000+id,"fee":"0.01","is_maker_ask":true,
+                "ask_account_id":99,"bid_account_id":42,"bid_client_order_index":1,
+                "ask_client_order_index":2})
+            })
+            .collect();
+        (
+            200,
+            serde_json::json!({"code":200,"trades":rows}).to_string(),
+        )
+    })
+    .await;
+    let mut venue = gateway(&server);
+    let mut rows = venue.executions(0, 100_000).await.unwrap();
+    assert_eq!(page.load(std::sync::atomic::Ordering::SeqCst), 26);
+    for expected in 0..2476 {
+        let row = rows.pop_front().unwrap().unwrap();
+        assert_eq!(row.exec_id, expected.to_string());
+        assert_eq!(row.venue_ts_ms, 1000 + expected);
+    }
+    assert!(rows.pop_front().unwrap().is_none());
 }
 
 #[tokio::test]
@@ -582,7 +623,12 @@ async fn filtered_history_rows_do_not_make_a_full_wire_page_look_complete() {
     })
     .await;
     let mut venue = gateway(&server);
-    let rows = venue.executions(100, 300).await.unwrap();
+    let rows = venue
+        .executions(100, 300)
+        .await
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(
         rows.len(),
         2,
@@ -726,7 +772,12 @@ async fn recovery_catalog_install_refreshes_native_units_without_metadata_reads(
         (view.positions[0].symbol, view.positions[0].qty),
         (SymbolId(1), 0.01)
     );
-    let fills = client.executions(&names, 100, 200).await.unwrap();
+    let fills = client
+        .executions(&names, 100, 200)
+        .await
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(fills.len(), 1);
     assert_eq!(
         (fills[0].symbol.as_str(), fills[0].qty),

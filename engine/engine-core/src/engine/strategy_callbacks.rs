@@ -3,6 +3,10 @@ use crate::effects::EffectKey;
 use crate::strategy_process::host::{CallbackCompletion, CallbackWrite};
 use engine_types::strategy_process::{CallbackPreparation, StrategyProcessState};
 
+#[cfg(test)]
+#[path = "strategy_callbacks/market_tests.rs"]
+mod market_tests;
+
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) fn service_strategy_callbacks(&mut self) -> Result<(), EngineError> {
         if !self.host.callbacks.isolated() {
@@ -34,8 +38,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         self.host.callbacks.start_page_load();
         if !self.host.callbacks.unwritten.is_empty() {
-            let mut cursors = Vec::new();
-            for input in &self.host.callbacks.unwritten {
+            let mut accepted = Vec::new();
+            for input in std::mem::take(&mut self.host.callbacks.unwritten) {
+                if matches!(
+                    input.event,
+                    engine_types::strategy_process::CallbackEvent::Quote { .. }
+                        | engine_types::strategy_process::CallbackEvent::Depth { .. }
+                        | engine_types::strategy_process::CallbackEvent::Trades { .. }
+                        | engine_types::strategy_process::CallbackEvent::Ticker { .. }
+                        | engine_types::strategy_process::CallbackEvent::FeedReset { .. }
+                ) {
+                    self.host
+                        .callbacks
+                        .accept_volatile(input)
+                        .map_err(EngineError::State)?;
+                    continue;
+                }
                 let sequence = self.wal.append(&WalRecord::StrategyCallbackQueued {
                     input: input.clone(),
                 })?;
@@ -45,24 +63,28 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .order_news
                     .origin(sequence)
                     .map_err(EngineError::State)?;
-                cursors.push(engine_types::strategy_process::CallbackWalCursor {
-                    segment: origin.segment,
-                    sequence,
-                    offset: 0,
-                });
+                accepted.push((
+                    input,
+                    engine_types::strategy_process::CallbackWalCursor {
+                        segment: origin.segment,
+                        sequence,
+                        offset: 0,
+                    },
+                ));
             }
-            let barrier = self.wal.barrier_begin()?;
-            let inputs = self
-                .host
-                .callbacks
-                .unwritten
-                .drain(..)
-                .zip(cursors)
-                .collect();
-            self.host
-                .callbacks
-                .begin_write(CallbackWrite::Accept(inputs), barrier);
-            return Ok(());
+            if !accepted.is_empty() {
+                let barrier = self.wal.barrier_begin()?;
+                self.host
+                    .callbacks
+                    .begin_write(CallbackWrite::Accept(accepted), barrier);
+                return Ok(());
+            }
+        }
+        if let Some(completion) = self.host.callbacks.deferred_completions.pop_front() {
+            self.on_strategy_callback(Some(completion))?;
+            if self.host.callbacks.write.is_some() {
+                return Ok(());
+            }
         }
         let mut strategies: Vec<_> = self
             .host
@@ -106,6 +128,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 prepared.preparation = CallbackPreparation::Prepared { snapshot };
                 if let Err(error) = self.host.callbacks.state.can_prepare(&prepared) {
                     self.fail_strategy_callback(strategy, error)?;
+                    continue;
+                }
+                if self.host.callbacks.volatile.contains(&prepared.callback_id) {
+                    self.host
+                        .callbacks
+                        .state
+                        .prepared(prepared)
+                        .map_err(EngineError::State)?;
+                    if let Err(error) = self.host.callbacks.launch(strategy) {
+                        self.fail_strategy_callback(strategy, error)?;
+                    }
                     continue;
                 }
                 let sequence = self.wal.append(&WalRecord::StrategyCallbackPrepared {
@@ -415,6 +448,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             task: EngineTask::StrategyHost,
             detail: "",
         })?;
+        if self.host.callbacks.volatile.contains(&completion.input_id)
+            && !self.host.callbacks.unwritten.is_empty()
+        {
+            self.host
+                .callbacks
+                .deferred_completions
+                .push_back(completion);
+            return Ok(());
+        }
         self.host
             .callbacks
             .completed(completion.strategy, completion.input_id)
@@ -439,11 +481,43 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 EngineError::State("callback completed without a prepared invocation".into())
             })?
             .now_ns;
-        let actions: Vec<_> = proposal
+        let mut actions: Vec<_> = proposal
             .actions
             .into_iter()
             .map(|action| crate::ctx::bind_action(completion.strategy, now_ns, action))
             .collect();
+        if self.host.callbacks.volatile.contains(&completion.input_id) {
+            let mut global = self
+                .host
+                .global_checkpoints
+                .get(&completion.strategy)
+                .map(|state| state.checkpoint.clone());
+            let mut symbols = std::collections::BTreeMap::new();
+            actions.retain(|action| match action {
+                Action::SetStrategyGlobalCheckpoint { checkpoint, .. } => {
+                    if global.as_ref() == Some(checkpoint) {
+                        false
+                    } else {
+                        global = Some(checkpoint.clone());
+                        true
+                    }
+                }
+                Action::SetStrategyCheckpoint {
+                    symbol, checkpoint, ..
+                } => {
+                    let prior = symbols
+                        .get(symbol)
+                        .or_else(|| self.host.checkpoints.get(&(completion.strategy, *symbol)));
+                    if prior == Some(checkpoint) {
+                        false
+                    } else {
+                        symbols.insert(*symbol, checkpoint.clone());
+                        true
+                    }
+                }
+                _ => true,
+            });
+        }
         if let Err(error) = self.validate_callback_actions(completion.strategy, &actions) {
             return self.fail_strategy_callback(completion.strategy, error);
         }
@@ -455,23 +529,93 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .get(&completion.strategy)
             .map(|state| state.timers.clone())
             .unwrap_or_default();
-        for timer in proposal.timers {
+        for mut timer in proposal.timers {
+            if let Some(prior) = timers.iter().find(|prior| {
+                prior.id == timer.id && prior.deadline_wall_ms == timer.deadline_wall_ms
+            }) {
+                timer.deadline_ns = prior.deadline_ns;
+            }
             timers.retain(|previous| previous.id != timer.id);
             timers.push(timer);
         }
         timers.sort_by_key(|timer| timer.id.0);
-        let process = StrategyProcessState {
+        let mut input_id = completion.input_id;
+        let mut process = StrategyProcessState {
             strategy: completion.strategy,
             last_callback_id: completion.input_id,
             runtime: proposal.state,
             timers,
             retained_signal_subscriptions: proposal.retained_signal_subscriptions,
         };
-        if let Err(error) = self
-            .host
-            .callbacks
-            .can_commit(completion.input_id, &process)
-        {
+        if self.host.callbacks.volatile.contains(&input_id) {
+            if actions.is_empty() && self.host.callbacks.unchanged(&process) {
+                self.host
+                    .callbacks
+                    .state
+                    .discard(input_id)
+                    .map_err(EngineError::State)?;
+                self.host.callbacks.volatile.remove(&input_id);
+                self.host.callbacks.recycle(completion.strategy, worker);
+                return Ok(());
+            }
+            self.host.callbacks.volatile.remove(&input_id);
+            input_id = self
+                .host
+                .callbacks
+                .state
+                .promote_volatile(input_id)
+                .map_err(EngineError::State)?;
+            process.last_callback_id = input_id;
+            let prepared = self
+                .host
+                .callbacks
+                .state
+                .inputs
+                .get(&input_id)
+                .expect("promoted input");
+            let mut queued = prepared.clone();
+            queued.preparation = CallbackPreparation::Queued;
+            let queued_sequence = self.wal.append(&WalRecord::StrategyCallbackQueued {
+                input: queued.clone(),
+            })?;
+            let prepared_sequence = self.wal.append(&WalRecord::StrategyCallbackPrepared {
+                input: prepared.clone(),
+            })?;
+            if self.host.callbacks.pages.enabled() {
+                let segment = self
+                    .host
+                    .callbacks
+                    .order_news
+                    .origin(queued_sequence)
+                    .map_err(EngineError::State)?
+                    .segment;
+                self.host
+                    .callbacks
+                    .pages
+                    .queued(
+                        &queued,
+                        engine_types::strategy_process::CallbackWalCursor {
+                            segment,
+                            sequence: queued_sequence,
+                            offset: 0,
+                        },
+                    )
+                    .map_err(EngineError::State)?;
+                self.host
+                    .callbacks
+                    .pages
+                    .prepared(
+                        prepared,
+                        engine_types::strategy_process::CallbackWalCursor {
+                            segment,
+                            sequence: prepared_sequence,
+                            offset: 0,
+                        },
+                    )
+                    .map_err(EngineError::State)?;
+            }
+        }
+        if let Err(error) = self.host.callbacks.can_commit(input_id, &process) {
             return self.fail_strategy_callback(completion.strategy, error);
         }
         let transition = if actions.is_empty() {
@@ -483,7 +627,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .ok_or_else(|| EngineError::State("strategy transition id exhausted".into()))?;
             let transition = engine_types::StrategyTransitionState {
                 origin: engine_types::wal::StrategyTransitionOrigin::Process {
-                    callback_id: completion.input_id,
+                    callback_id: input_id,
                 },
                 id,
                 strategy: completion.strategy,
@@ -500,14 +644,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         };
         self.wal
             .append(&WalRecord::StrategyProcessTransitionQueued {
-                input_id: completion.input_id,
+                input_id,
                 transition: transition.clone(),
                 process: process.clone(),
             })?;
         let barrier = self.wal.barrier_begin()?;
         self.host.callbacks.begin_write(
             CallbackWrite::Commit {
-                input_id: completion.input_id,
+                input_id,
                 transition,
                 process,
                 worker,
@@ -1043,6 +1187,8 @@ mod tests {
         use engine_types::strategy_process::CallbackEvent;
         let (mut engine, records) = full_inbox().await;
         let intent = Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: SymbolId(0),
             side: Side::Buy,
@@ -1071,7 +1217,7 @@ mod tests {
                 },
             };
             engine.books.market.apply(&event);
-            assert!(!engine.feed_one_strategy(
+            assert!(engine.feed_one_strategy(
                 StrategyId(0),
                 &EngineEvent::Market(event),
                 clock::now_ns()
@@ -1115,16 +1261,58 @@ mod tests {
             }
         }
         engine.retry_callback_inputs();
-        assert!(engine.host.callbacks.retry_inputs.market.is_empty());
+        assert_eq!(engine.host.callbacks.retry_inputs.market.len(), 1);
         let inputs: Vec<_> = engine.host.callbacks.unwritten.iter().collect();
-        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs.len(), 1);
         assert!(
             matches!(&inputs[0].event, CallbackEvent::IntentRefused { reason, .. } if reason == "test refusal")
         );
-        assert!(
-            matches!(inputs[1].event, CallbackEvent::Quote { quote, .. } if quote.bid_px == 199.0)
-        );
         assert!(inputs[0].order_origin.is_some());
+        let mut refusal = engine.host.callbacks.unwritten.pop_front().unwrap();
+        engine
+            .host
+            .callbacks
+            .accepted(
+                refusal.clone(),
+                engine_types::strategy_process::CallbackWalCursor {
+                    segment: 0,
+                    sequence: 1,
+                    offset: 0,
+                },
+            )
+            .unwrap();
+        refusal.preparation = CallbackPreparation::Prepared {
+            snapshot: engine
+                .host
+                .snapshot(&engine.books, StrategyId(0), clock::now_ns())
+                .unwrap(),
+        };
+        engine
+            .host
+            .callbacks
+            .state
+            .prepared(refusal.clone())
+            .unwrap();
+        engine
+            .host
+            .callbacks
+            .state
+            .commit(
+                refusal.callback_id,
+                StrategyProcessState {
+                    strategy: StrategyId(0),
+                    last_callback_id: refusal.callback_id,
+                    runtime: engine.host.strategies[0].runtime_state().unwrap().unwrap(),
+                    timers: Vec::new(),
+                    retained_signal_subscriptions: None,
+                },
+            )
+            .unwrap();
+        engine.retry_callback_inputs();
+        assert!(engine.host.callbacks.retry_inputs.market.is_empty());
+        assert!(
+            matches!(engine.host.callbacks.unwritten[0].event, CallbackEvent::Quote { quote, .. } if quote.bid_px == 199.0)
+        );
         let rows = records.lock().unwrap().clone();
         let mut restored = crate::strategy_process::order_news::OrderNews::default();
         restored
@@ -1143,6 +1331,8 @@ mod tests {
         let (mut engine, records, input_id) = prepared().await;
         let mut completion = proposal_completion(&mut engine, input_id);
         completion.result.as_mut().unwrap().1.actions = vec![Action::Place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: SymbolId(0),
             side: Side::Buy,
@@ -1452,6 +1642,8 @@ mod tests {
         ));
         let mut completion = proposal_completion(&mut engine, input_id);
         completion.result.as_mut().unwrap().1.actions = vec![Action::Place(Intent {
+            exact_prices: None,
+            exact_quantity: None,
             strategy: StrategyId(0),
             symbol: SymbolId(0),
             side: Side::Buy,

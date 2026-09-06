@@ -18,20 +18,26 @@ pub(crate) fn plan(
     reference: &Exact,
     other_stops: impl IntoIterator<Item = (Side, Exact)>,
 ) -> Result<ProtectionPlan, String> {
-    if before.certainly_reduces(request.side, request.qty) {
+    let quantity = request
+        .exact_terms
+        .as_ref()
+        .map(|terms| Ok(terms.quantity.clone()))
+        .unwrap_or_else(|| Exact::from_legacy_f64(request.qty))
+        .map_err(|e| e.to_string())?;
+    if before.certainly_reduces(request.side, &quantity) {
         return Ok(ProtectionPlan {
             reduce_only: true,
             native_stop: None,
         });
     }
     let after = before
-        .after(request.side, request.qty)
+        .after(request.side, &quantity)
         .map_err(|e| format!("{e:?}"))?;
-    let side = if after.low() >= 0.0 && after.high() > 0.0 {
+    let side = if !after.low().is_negative() && after.high().is_positive() {
         Side::Buy
-    } else if after.high() <= 0.0 && after.low() < 0.0 {
+    } else if !after.high().is_positive() && after.low().is_negative() {
         Side::Sell
-    } else if after.low() == 0.0 && after.high() == 0.0 {
+    } else if after.low().is_zero() && after.high().is_zero() {
         return Ok(ProtectionPlan {
             reduce_only: true,
             native_stop: None,
@@ -42,12 +48,6 @@ pub(crate) fn plan(
     if side != request.side {
         return Err("a physical growth order must protect the direction it can create".into());
     }
-    let quantity = request
-        .exact_terms
-        .as_ref()
-        .map(|terms| Ok(terms.quantity.clone()))
-        .unwrap_or_else(|| Exact::from_legacy_f64(request.qty))
-        .map_err(|e| e.to_string())?;
     let delta = if request.side == Side::Buy {
         quantity
     } else {

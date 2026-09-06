@@ -62,6 +62,8 @@ fn buying(px: f64, now_ns: u64) -> WorkState {
 
 fn intent(kind: OrderKind, reduce_only: bool, work: Option<WorkPolicy>) -> Intent {
     Intent {
+        exact_prices: None,
+        exact_quantity: None,
         strategy: StrategyId(0),
         symbol: SymbolId(0),
         side: Side::Buy,

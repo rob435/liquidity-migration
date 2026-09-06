@@ -177,6 +177,8 @@ async fn recovery_catalog_install_refreshes_native_units_without_metadata_reads(
     let fills = client
         .executions(&["BTCUSDT".into()], 100, 200)
         .await
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(fills.len(), 1);
     assert_eq!(

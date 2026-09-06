@@ -28,7 +28,6 @@ use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::time::Duration;
 
-use engine_types::risk::ClosedTradeRow;
 use engine_types::{
     quantize, AccountView, Action, AmendSpec, DenyReason, EngineEvent, Feed, FeedError,
     InstrumentRule, Intent, MarketEvent, MarketFeed, MarketState, OrderFeed, OrderKind,
@@ -104,12 +103,16 @@ const AMEND_CONFIRM_NS: u64 = 2_000_000_000;
 #[cfg(test)]
 const AMEND_CONFIRM_NS: u64 = 25_000_000;
 
+mod order_epoch;
+#[cfg(test)]
+pub(crate) use free_helpers::mint_unused;
+
 mod free_helpers;
 mod portfolio_runtime;
 use free_helpers::*;
 pub(crate) use free_helpers::{
-    durable_risk_verdict, forget_leverage_where_flat, mint_unused, named_entry_blockers,
-    named_strategy_errors, venue_minus_local_ms,
+    durable_risk_verdict, forget_leverage_where_flat, named_entry_blockers, named_strategy_errors,
+    venue_minus_local_ms,
 };
 
 pub const ENGINE_VERSION: &str = concat!("engine-core ", env!("CARGO_PKG_VERSION"));
@@ -124,11 +127,6 @@ const RECENT_FILLS_KEPT: usize = 2048;
 /// A quiet account renews its execution-history proof daily, well inside the
 /// shortest supported venue history window.
 const HISTORY_CHECKPOINT_INTERVAL_MS: i64 = 86_400_000;
-
-struct RecoveryOutcome {
-    records: Vec<WalRecord>,
-    through_ms: i64,
-}
 
 /// Why a run ended without being asked to. The supervisor restarts the
 /// unit on any of these; the class says what a restart can settle.
@@ -382,6 +380,7 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     // never decide the order of two records.
     pending_mutations: BTreeMap<u64, PendingMutation>,
     busy_symbols: BTreeMap<SymbolId, usize>,
+    order_lineage: order_lineage::OrderLineage,
     /// The last refusal recorded for each strategy, symbol and tag. A
     /// strategy that re-proposes a doomed order on every quote refuses just
     /// the same; only the record of it is collapsed, so one stuck position
@@ -537,6 +536,7 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// Refuse entries decided against a quote older than this. Exits flow.
     max_quote_age_ns: u64,
     next_order_n: u64,
+    order_id_epoch_ms: i64,
     orders_sent: u64,
     /// Counted for the whole run. The ledger's own count clears every minute.
     events_seen: u64,
@@ -549,6 +549,7 @@ mod boot_recovery;
 mod history_recovery;
 mod intent_admission;
 mod order_dispatch;
+mod order_lineage;
 #[cfg(test)]
 mod physical_exposure_tests;
 mod portfolio_routes;
@@ -746,15 +747,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 tokio::select! {
                     biased;
                     _ = &mut shutdown, if self.drain_progress.is_none() => break StopReason::Shutdown,
-                    update = order_feed.next_update() => {
+                    update = order_feed.next_update(), if !self.order_lineage.waiting() => {
                         if let Turn::Stop(reason) = self.on_order_feed(update, true, &timer).await? {
                             break reason;
                         }
                     }
+                    lineage = self.order_lineage.completed.recv(), if self.order_lineage.running() => {
+                        self.on_order_lineage(lineage.ok_or_else(|| EngineError::State("order lineage reader stopped".into()))?).await?;
+                    }
                     recovery = self.recovery.completed.recv(), if self.recovery.waiting() => {
                         self.on_recovery_completion(recovery.ok_or_else(|| EngineError::State("recovery task stopped".into()))?).await?;
                     }
-                    _ = std::future::ready(()), if self.recovery.applying() => { self.service_account_recovery().await?; }
+                    _ = std::future::ready(()), if self.recovery.applying() && !self.order_lineage.waiting() => { self.service_account_recovery().await?; }
                     lookup = self.dispatches.lookups.recv(), if !self.dispatches.lookup_pending.is_empty() => {
                         if let Some((id, result)) = lookup { self.on_order_lookup(id, result).await?; }
                     }
@@ -812,10 +816,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             if self.drain_progress.is_some() {
                 tokio::select! {
                     biased;
+                    lineage = self.order_lineage.completed.recv(), if self.order_lineage.running() => {
+                        self.on_order_lineage(lineage.ok_or_else(|| EngineError::State("order lineage reader stopped".into()))?).await?;
+                    }
                     recovery = self.recovery.completed.recv(), if self.recovery.waiting() => {
                         self.on_recovery_completion(recovery.ok_or_else(|| EngineError::State("recovery task stopped".into()))?).await?;
                     }
-                    _ = std::future::ready(()), if self.recovery.applying() => { self.service_account_recovery().await?; }
+                    _ = std::future::ready(()), if self.recovery.applying() && !self.order_lineage.waiting() => { self.service_account_recovery().await?; }
                     lookup = self.dispatches.lookups.recv(), if !self.dispatches.lookup_pending.is_empty() => {
                         if let Some((id, result)) = lookup { self.on_order_lookup(id, result).await?; }
                     }
@@ -847,7 +854,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 // cannot hide a simultaneously due account refresh.
                 let private_update = tokio::select! {
                     biased;
-                    update = order_feed.next_update() => Some(update),
+                    update = order_feed.next_update(), if !self.order_lineage.waiting() => Some(update),
                     _ = std::future::ready(()) => None,
                 };
                 if let Some(update) = private_update {
@@ -886,15 +893,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             tokio::select! {
                 biased;
                 _ = &mut shutdown => break StopReason::Shutdown,
-                update = order_feed.next_update() => {
+                update = order_feed.next_update(), if !self.order_lineage.waiting() => {
                     if let Turn::Stop(reason) = self.on_order_feed(update, true, &timer).await? {
                         break reason;
                     }
                 }
+                    lineage = self.order_lineage.completed.recv(), if self.order_lineage.running() => {
+                        self.on_order_lineage(lineage.ok_or_else(|| EngineError::State("order lineage reader stopped".into()))?).await?;
+                    }
                     recovery = self.recovery.completed.recv(), if self.recovery.waiting() => {
                         self.on_recovery_completion(recovery.ok_or_else(|| EngineError::State("recovery task stopped".into()))?).await?;
                     }
-                    _ = std::future::ready(()), if self.recovery.applying() => { self.service_account_recovery().await?; }
+                    _ = std::future::ready(()), if self.recovery.applying() && !self.order_lineage.waiting() => { self.service_account_recovery().await?; }
                 lookup = self.dispatches.lookups.recv(), if !self.dispatches.lookup_pending.is_empty() => {
                         if let Some((id, result)) = lookup { self.on_order_lookup(id, result).await?; }
                     }
@@ -1100,7 +1110,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         O: OrderFeed,
         F: SignalFeed,
     {
+        self.service_order_lineage().await?;
         self.service_account_recovery().await?;
+        self.trim_order_lineage_cache()?;
         if !self.wanted_symbols.is_empty() || self.symbol_admission.busy() {
             self.admit_wanted(market_feed, order_feed).await?;
         }
@@ -1123,7 +1135,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// tells the next boot's audit a lie.
     pub async fn finish(&mut self) -> Result<(), EngineError> {
         self.recovery.stop_read();
-        while self.recovery.uncommitted() {
+        while self.recovery.uncommitted() || self.order_lineage.waiting() {
+            if self.order_lineage.waiting() {
+                self.settle_order_lineage().await?;
+                continue;
+            }
             if self.recovery.applying() {
                 let account_recovery::Phase::Applying(batch) =
                     std::mem::replace(&mut self.recovery.phase, account_recovery::Phase::Idle)
@@ -1326,16 +1342,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
     }
 
-    fn mint_id(&mut self) -> String {
-        let orders = &self.books.orders;
-        let registry = &self.books.registry;
-        mint_unused(
-            self.books.registry.prefix(),
-            &mut self.next_order_n,
-            |candidate| orders.contains(candidate) || registry.owner_of(candidate).is_some(),
-        )
-    }
-
     /// Everything a fresh log segment must restate: the state boot rebuilds
     /// from the log, as this engine holds it right now.
     ///
@@ -1355,6 +1361,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// ends those; the marks written so far are in the archived segments).
     pub(crate) fn rotation_base(&self, wall_ts_ms: i64) -> WalRecord {
         WalRecord::SegmentBase {
+            order_id_epoch_ms: Some(self.order_id_epoch_ms),
+            open_trade_lots: Some(self.fills.open_trade_lots()),
             portfolio_control: self.portfolio_controls.snapshot(),
             strategy_processes: self
                 .host
@@ -1370,7 +1378,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             strategy_callbacks: if self.host.callbacks.pages.enabled() {
                 Vec::new()
             } else {
-                self.host.callbacks.state.inputs.values().cloned().collect()
+                self.host
+                    .callbacks
+                    .state
+                    .inputs
+                    .values()
+                    .filter(|input| !self.host.callbacks.volatile.contains(&input.callback_id))
+                    .cloned()
+                    .collect()
             },
             portfolio: Some(self.books.attribution.snapshot()),
             wall_ts_ms,
@@ -1435,18 +1450,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             open_orders: self
                 .books
                 .orders
-                .in_flight()
-                .into_iter()
-                .map(|order| engine_types::OpenOrderState {
-                    request: order.request.clone(),
-                    wire_ns: order.wire_ns,
-                    arrival_mid: order.arrival_mid,
-                    acked: order.acked,
-                    filled_qty: order.filled_qty,
-                    fill_quantity: Some(order.fill_quantity.clone()),
-                    reservation_low_px: order.reservation_low_px,
-                    reservation_high_px: order.reservation_high_px,
-                })
+                .orders
+                .values()
+                .filter(|order| order.retain_at(wall_ts_ms, self.recovered_until_ms))
+                .map(|order| order.snapshot(wall_ts_ms))
                 .collect(),
             rolling_loss_rows: self.risk.rolling_loss_rows(),
         }
