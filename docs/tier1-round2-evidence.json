@@ -8,11 +8,11 @@
   },
   "qualified_content": {
     "files": 662,
-    "sha256": "52c6706aa06cc2a000d44a5419f2ea6d9afbb818a0a7f6a0983fe1718213a46c",
+    "sha256": "07e44b61e0b53e77a702c8670932197d953162febac969e38acc23701681cd50",
     "manifest_encoding": "SHA256 of the sorted file-to-SHA256 JSON object with compact separators",
     "scope": "Engine, scripts, tests, deployment, workflow and dependency files; documentation is excluded. Full file hashes and command logs remain in the private evidence archive.",
     "unchanged_through_suite": true,
-    "basis": "Combined callback cursor/timer, LONG executed inventory, callback health and owned-stop recording/recovery corrections. Source manifest binds committed content independently of build commit labels."
+    "basis": "Same f6 runtime source; two cfg(test) ownership fixtures corrected after actual Linux failure. Scope and profile evidence are explicit in the follow-up receipt."
   },
   "local_checks": {
     "toolchain": "rustc 1.90.0 (1159e78c4 2025-09-14)",
@@ -43,7 +43,14 @@
       "scope": "Deterministic embedded-engine crash/restart/replay simulation; these are not operating-system process kills."
     },
     "debug_and_developer_gate": {
-      "status": "pending required push hook on the committed correction"
+      "commit": "f6c71460bbfa2b3fbe5a3a0d35e96a06776dcb50",
+      "status": "pass",
+      "regular_debug_passed": 2425,
+      "python_passed": 1608,
+      "ignored": 6,
+      "evidence": "/tmp/tier1-round2-integration/push-callback-inventory.json",
+      "log_sha256": "3f0a066fc86843a0734ee09b235ed46dc8815378338149a10138bac64ec11ce9",
+      "scope": "Mandatory developer pre-push gate; separate all-targets suite also runs one example."
     },
     "qualified_utc": "2026-09-06T19:14:21.776743+00:00",
     "evidence": "/tmp/tier1-round2-integration/callback-inventory-qualification/suite.json",
@@ -208,19 +215,24 @@
   ],
   "private_evidence_directory": "/tmp/tier1-round2-integration",
   "measurements": {
-    "evidence": "/tmp/tier1-round2-integration/measurements-timer-fix/summary.json",
-    "sha256": "396ccfb32a42d38f4baf2ebc94d19282f7432bae522a814b9cb655ddf3abe807",
+    "evidence": "/tmp/tier1-round2-integration/measurements-callback-inventory/summary.json",
+    "sha256": "85c42656a555096cff138c6ef5ad2ef5baa285fbcaa0527a6133374ca912b785",
     "seconds_per_cell": 60,
     "completed_submits": [
       299,
-      581,
-      581
+      587,
+      584
+    ],
+    "missing_durable_opportunities": [
+      1,
+      13,
+      16
     ],
     "risk_refusals": 0,
     "barrier_failures": 0,
     "compiler_processes_observed": false,
-    "basis_commit": "af09aab53fc13cf53f66c393931c0ecccd765598",
-    "scope": "Previous qualified correction; fresh measurement results are separate until executed."
+    "basis_commit": "f6c71460bbfa2b3fbe5a3a0d35e96a06776dcb50",
+    "scope": "Current combined runtime source; local precommit binary label is separately bound by the 662-file source manifest and byte hashes."
   },
   "test_only_followup": {
     "path": "engine/engine-core/src/tests/venue_boundary.rs",
@@ -267,6 +279,14 @@
         "signal-worker": "e45ff96d68559c6f0ed11b17cfab3926c00bd952cad9d7ff4b9b3e9825759634"
       },
       "evidence": "/tmp/tier1-deploy-observation/run-34049060363/observation.json"
+    },
+    {
+      "run_id": 34054719567,
+      "commit": "f6c71460bbfa2b3fbe5a3a0d35e96a06776dcb50",
+      "result": "Linux timer-fixture ownership collision; two tests fail at duplicate mock completion registration. VPS job skipped; no deployment.",
+      "url": "https://github.com/rob435/liquidity-migration/actions/runs/34054719567",
+      "evidence": "/tmp/tier1-deploy-observation/run-34054719567/observation.json",
+      "rust_log_sha256": "a666e7cffd734fa6c56e1583f4fd0b82619d68aaa63a264b65d4d425a02bcd39"
     }
   ],
   "linux_checks": {
@@ -556,7 +576,25 @@
       ],
       "risk_refusals": 0,
       "barrier_failures": 0,
-      "compiler_processes_observed": false
+      "compiler_processes_observed": false,
+      "basis_commit": "af09aab53fc13cf53f66c393931c0ecccd765598",
+      "scope": "Previous qualified correction; fresh measurement results are separate until executed."
     }
+  },
+  "runtime_qualified_content": {
+    "files": 662,
+    "sha256": "52c6706aa06cc2a000d44a5419f2ea6d9afbb818a0a7f6a0983fe1718213a46c",
+    "manifest_encoding": "SHA256 of the sorted file-to-SHA256 JSON object with compact separators",
+    "scope": "Engine, scripts, tests, deployment, workflow and dependency files; documentation is excluded. Full file hashes and command logs remain in the private evidence archive.",
+    "unchanged_through_suite": true,
+    "basis": "Combined callback cursor/timer, LONG executed inventory, callback health and owned-stop recording/recovery corrections. Source manifest binds committed content independently of build commit labels."
+  },
+  "qualification_followup": {
+    "scope": "Runtime source is unchanged from the full debug/release, doctest, strict Clippy, heavy replay, copied-WAL and measured f6 qualification. Two cfg(test) fixture ownership setups change; six affected timer tests pass in both profiles plus targeted strict Clippy. Mandatory full developer gate and Linux results are separately recorded, not inferred here.",
+    "evidence": "/tmp/tier1-round2-integration/callback-inventory-qualification-timer-fixture/suite.json",
+    "proof": "/tmp/tier1-callback-timer-fixture-proof/proof.json",
+    "proof_sha256": "2663f2d218b6bd48768f413ae578a92add420f541d2998c8156a0c929a3651b7",
+    "runtime_commit": "f6c71460bbfa2b3fbe5a3a0d35e96a06776dcb50",
+    "source_manifest_sha256": "07e44b61e0b53e77a702c8670932197d953162febac969e38acc23701681cd50"
   }
 }

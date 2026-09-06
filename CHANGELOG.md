@@ -103,6 +103,15 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     Clippy, both doctest profiles, six repeated heavy fault seeds and the
     historical copied-WAL boot/rotation/reboot rehearsal. The source manifest
     contains 662 unchanged implementation and check files.
+  - Workflow `34054719567` stops before handover on two Linux timer fixtures:
+    their unreserved prepared callback starts during `on_timers`, then the
+    mocked completion double-registers the owner. The fixtures reserve that
+    completion before the first drain; deadline, private-source priority,
+    timer replacement and replay assertions remain unchanged. Runtime source
+    stays at `f6c71460`; its full local debug/release suites pass 2,426 tests
+    each and the required push gate passes 2,425 regular debug and 1,608 Python
+    tests. Fresh measured workloads complete 299/587/584 submits with no risk
+    refusal or barrier failure.
 
 - **2026-09-06 08:07 UTC — Worker recovery, recorder finalization and rollback repair.**
   - Both workers on `cece1d9f` remain alive but degraded: hourly source pruning

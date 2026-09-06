@@ -407,6 +407,8 @@ async fn overdue_timer_waits_for_retained_order_news_then_precedes_market() {
             retained_signal_subscriptions: None,
         },
     );
+    let proposal = worker_proposal(&engine, &input);
+    let completed = completion(&mut engine, input.callback_id, proposal);
     assert!(engine.feed_one_strategy(StrategyId(0), &quote(0, now), now));
     engine
         .take_update(OrderUpdate::Ack(engine_types::OrderAck {
@@ -419,7 +421,12 @@ async fn overdue_timer_waits_for_retained_order_news_then_precedes_market() {
         .unwrap();
     engine.on_timers().await.unwrap();
     assert!(engine.host.callbacks.order_news.unread_for(StrategyId(0)));
-    accept(&mut engine, input).await;
+    engine.on_strategy_callback(Some(completed)).unwrap();
+    if engine.host.callbacks.write.is_some() {
+        let durable = engine.host.callbacks.durable.recv().await;
+        engine.on_callback_durable(durable).unwrap();
+        engine.drain(clock::now_ns()).await.unwrap();
+    }
     let delivered = deliver_next_retained_input(&mut engine).await;
     assert!(matches!(
         delivered.event,
@@ -457,13 +464,6 @@ async fn overdue_timer_wake_skips_busy_owners_and_respects_replacement() {
     let timer = engine_types::TimerId(77);
     engine.host.timers = Timers::default();
     engine.host.timers.arm(StrategyId(0), timer, now);
-    assert_eq!(
-        engine.host.next_timer_deadline(),
-        None,
-        "busy owner advertised an immediately ready timer wake"
-    );
-    engine.on_timers().await.unwrap();
-    assert_eq!(engine.host.timers.next_deadline(), Some(now));
     let mut proposal = worker_proposal(&engine, &input);
     proposal
         .timers
@@ -473,6 +473,13 @@ async fn overdue_timer_wake_skips_busy_owners_and_respects_replacement() {
             deadline_wall_ms: clock::wall_ms() + 20,
         });
     let completed = completion(&mut engine, input.callback_id, proposal);
+    assert_eq!(
+        engine.host.next_timer_deadline(),
+        None,
+        "busy owner advertised an immediately ready timer wake"
+    );
+    engine.on_timers().await.unwrap();
+    assert_eq!(engine.host.timers.next_deadline(), Some(now));
     engine.on_strategy_callback(Some(completed)).unwrap();
     let durable = engine.host.callbacks.durable.recv().await;
     engine.on_callback_durable(durable).unwrap();
