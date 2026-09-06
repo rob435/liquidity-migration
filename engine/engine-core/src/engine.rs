@@ -26,6 +26,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
+use std::task::Poll;
 use std::time::Duration;
 
 use engine_types::{
@@ -61,6 +62,49 @@ use crate::working::{self, WorkingOrders};
 pub const MAX_INTENTS_PER_WAKE: usize = 64;
 
 pub(crate) const MAX_TIMER_CALLBACKS_PER_TURN: usize = 64;
+
+#[derive(Clone, Copy)]
+enum OrdinaryLane {
+    Tick,
+    Timer,
+    Control,
+    Signal,
+    Market,
+}
+
+impl OrdinaryLane {
+    fn next(self) -> Self {
+        match self {
+            Self::Tick => Self::Timer,
+            Self::Timer => Self::Control,
+            Self::Control => Self::Signal,
+            Self::Signal => Self::Market,
+            Self::Market => Self::Tick,
+        }
+    }
+}
+
+// Keep the bounded market payload inline; boxing would allocate for every market event.
+#[allow(clippy::large_enum_variant)]
+enum OrdinaryInput {
+    Tick,
+    Timer,
+    Control(Result<RuntimeControlRequest, RuntimeControlError>),
+    Signal(Result<engine_types::SignalFeedEvent, SignalError>),
+    Market(Result<MarketEvent, FeedError>),
+}
+
+impl OrdinaryInput {
+    fn lane(&self) -> OrdinaryLane {
+        match self {
+            Self::Tick => OrdinaryLane::Tick,
+            Self::Timer => OrdinaryLane::Timer,
+            Self::Control(_) => OrdinaryLane::Control,
+            Self::Signal(_) => OrdinaryLane::Signal,
+            Self::Market(_) => OrdinaryLane::Market,
+        }
+    }
+}
 
 const MUTATION_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -702,6 +746,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut flush_tick = timer.interval(self.group_flush);
         let mut signals_open = true;
         let mut controls_open = true;
+        let mut ordinary_lane = OrdinaryLane::Tick;
         if self.signals.readiness_required() {
             if self.identities.scope.is_some() {
                 signal_feed
@@ -723,10 +768,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.drain(clock::now_ns()).await?;
 
         let stopped_by = loop {
-            let timer_wait = self
-                .host
-                .timers
-                .next_deadline()
+            let timer_deadline = self.host.timers.next_deadline();
+            let timer_wait = timer_deadline
                 .map(|deadline| Duration::from_nanos(deadline.saturating_sub(clock::now_ns())));
 
             let halt_confirmation_pending = self.halt_cancels.values().any(|state| {
@@ -753,6 +796,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             } else {
                 (None, Some(&mut flush_tick))
             };
+            let signals_enabled = signals_open && self.pending_signal_deliveries.is_empty();
             tokio::select! {
                 biased;
                 _ = &mut shutdown, if self.drain_progress.is_none() => break StopReason::Shutdown,
@@ -814,21 +858,80 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     self.drain(clock::now_ns()).await?;
                 }
                 _ = std::future::ready(()), if drain_mode => {}
-                event = market_feed.next_event(), if !drain_mode => {
-                    if let Turn::Stop(reason) = self.on_market_feed(&event, order_feed, &timer).await? {
-                        break reason;
+                ordinary = async {
+                    let market = market_feed.next_event();
+                    let signal = signal_feed.next_event();
+                    let control = control_feed.next_request();
+                    let tick = async {
+                        if let Some(tick) = ordinary_tick {
+                            tick.tick().await;
+                        } else {
+                            std::future::pending().await
+                        }
+                    };
+                    let sleep = async {
+                        if let Some(sleep) = ordinary_sleep {
+                            sleep.await;
+                        } else {
+                            std::future::pending().await
+                        }
+                    };
+                    tokio::pin!(market, signal, control, tick, sleep);
+                    std::future::poll_fn(|cx| {
+                        let mut lane = ordinary_lane;
+                        for _ in 0..5 {
+                            match lane {
+                                OrdinaryLane::Tick if !halt_mode => {
+                                    if tick.as_mut().poll(cx).is_ready() {
+                                        return Poll::Ready(OrdinaryInput::Tick);
+                                    }
+                                }
+                                OrdinaryLane::Timer if !halt_mode => {
+                                    if timer_deadline.is_some_and(|at| at <= clock::now_ns())
+                                        || (timer_wait.is_some() && sleep.as_mut().poll(cx).is_ready())
+                                    {
+                                        return Poll::Ready(OrdinaryInput::Timer);
+                                    }
+                                }
+                                OrdinaryLane::Control if controls_open => {
+                                    if let Poll::Ready(request) = control.as_mut().poll(cx) {
+                                        return Poll::Ready(OrdinaryInput::Control(request));
+                                    }
+                                }
+                                OrdinaryLane::Signal if signals_enabled => {
+                                    if let Poll::Ready(event) = signal.as_mut().poll(cx) {
+                                        return Poll::Ready(OrdinaryInput::Signal(event));
+                                    }
+                                }
+                                OrdinaryLane::Market => {
+                                    if let Poll::Ready(event) = market.as_mut().poll(cx) {
+                                        return Poll::Ready(OrdinaryInput::Market(event));
+                                    }
+                                }
+                                _ => {}
+                            }
+                            lane = lane.next();
+                        }
+                        Poll::Pending
+                    }).await
+                }, if !drain_mode => {
+                    ordinary_lane = ordinary.lane().next();
+                    match ordinary {
+                        OrdinaryInput::Market(event) => {
+                            if let Turn::Stop(reason) = self.on_market_feed(&event, order_feed, &timer).await? {
+                                break reason;
+                            }
+                        }
+                        OrdinaryInput::Signal(observation) => {
+                            self.on_signal_feed(observation, signal_feed, &mut signals_open)?;
+                        }
+                        OrdinaryInput::Control(request) => {
+                            self.on_control_feed(request, control_feed, &mut controls_open).await?;
+                        }
+                        OrdinaryInput::Tick => self.on_tick().await?,
+                        OrdinaryInput::Timer => self.on_timers().await?,
                     }
                 }
-                observation = signal_feed.next_event(), if !drain_mode && signals_open && self.pending_signal_deliveries.is_empty() => {
-                    self.on_signal_feed(observation, signal_feed, &mut signals_open)?;
-                }
-                request = control_feed.next_request(), if !drain_mode && controls_open => {
-                    self.on_control_feed(request, control_feed, &mut controls_open).await?;
-                }
-                _ = async { if let Some(sleep) = ordinary_sleep { sleep.await; } }, if !halt_mode && !drain_mode && timer_wait.is_some() => {
-                    self.on_timers().await?;
-                }
-                _ = async { if let Some(tick) = ordinary_tick { tick.tick().await; } }, if !halt_mode && !drain_mode => self.on_tick().await?,
             }
             if drain_mode {
                 // A completed venue mutation is the cooperative boundary.

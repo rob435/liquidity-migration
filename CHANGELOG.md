@@ -34,15 +34,41 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
   - Local qualification passes 2,395 release tests, strict Clippy, both doctest
     profiles, six repeated heavy fault seeds and copied-WAL boot/rotation/reboot.
     Three 60-second isolated workloads complete 299/580/576 submits with zero
-    risk refusals or barrier failures. The mandatory pre-push debug/developer
-    gate and combined rollout remain pending; full-day replay and broader
-    resource measurements retain explicit scope limits.
+    risk refusals or barrier failures. The mandatory pre-push gate passes
+    2,394 regular debug tests and 1,608 Python tests; the separate debug example
+    adds one pass. Full-day replay and broader resource measurements retain
+    explicit scope limits.
   - The first combined workflow stops before VPS installation: a real-socket
     test races its 25 ms in-memory-test cancellation deadline on Linux. A
     controlled 100 ms delivery delay reproduces the failure. Only that test
     freezes its engine clock; HTTP timeouts and fill/cancel/replay assertions
     remain, with six venue tests passing in both profiles and four existing
     cancellation-deadline controls passing. Production code is unchanged.
+  - Cleanup lands in `8f96e603`; the test-only follow-up `93404ff6` passes the
+    mandatory developer gate and both Linux runs (2,399 passed, zero failed,
+    six ignored). Workflow `34043450919` deploys the exact three-binary artifact
+    successfully at 16:02:06 UTC. Demo/funded engines restart at 16:01:07/16:01:37;
+    native positions and protective stops survive the handover.
+  - At 16:05:32/16:05:56 UTC, LONG closes NEAR and ZEC in demo/funded accounts.
+    Exact owned quantities match the fills, including two distinct 0.01 funded
+    ZEC executions. The remaining four positions per realm have exact full-size
+    native stops. Persistent CARRY/LONG children exceed the former CPU limit
+    without replacement; workers finish repair with no stream faults.
+  - The natural 16:15 demo probe is admitted and cancelled without a fill,
+    removing the old unknown-cost refusal. Its PULL timer fires 5.323 seconds
+    late; cancellation itself takes 9.049 ms. The biased event loop can starve
+    ordinary timers, maintenance, signals and controls behind continuously
+    ready market input. Five ordinary lanes now rotate, with one handler per
+    outer private/recovery priority check. The control spool retains one IO
+    operation and its poll deadline across cancelled reads, including already
+    elapsed deadlines. Eight actual old-code assertion failures pass after the
+    corrections; rejection, retirement errors and immutable restart bytes are
+    covered. The heartbeat fixture waits for its observed market count instead
+    of a fixed virtual stop; the first integrated failure remains in evidence.
+    The copied-WAL stop rehearsal also pins its clock to the authenticated
+    capture time: current wall time correctly triggers the captured LONG
+    holding expiries and violates that fixture's stop-repair-only scope. All
+    seven exact repairs, zero-order and accounting/replay assertions remain.
 
 - **2026-09-06 08:07 UTC — Worker recovery, recorder finalization and rollback repair.**
   - Both workers on `cece1d9f` remain alive but degraded: hourly source pruning

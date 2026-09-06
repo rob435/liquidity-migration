@@ -280,7 +280,8 @@ async fn verify_rotated_stop_repair(
         )
         .await
         .unwrap();
-    assert!(sends.lock().unwrap().is_empty(), "restoring portfolio protection must not place an opening or reduction order after accepted stop repairs");
+    let actual_orders = sends.lock().unwrap().clone();
+    assert!(actual_orders.is_empty(), "restoring portfolio protection must not place an opening or reduction order after accepted stop repairs; orders: {actual_orders:?}");
     let repairs = stops.lock().unwrap();
     let before = Attribution::try_from_records(std::slice::from_ref(snapshot))
         .unwrap()
@@ -338,6 +339,11 @@ async fn full_live_legacy_quantity_boot_replay_rotation_and_reboot() {
             .unwrap();
     let venue: Value =
         serde_json::from_slice(&std::fs::read(root.join("venue.json")).unwrap()).unwrap();
+    let fixture_wall_ns = venue["finished_ns"]
+        .as_u64()
+        .expect("venue capture completion time");
+    // Captured strategy holding deadlines and captured market/account facts share this instant.
+    let _clock = engine_types::clock::install_virtual(fixture_wall_ns, 1_000_000_000).unwrap();
     let out = root.join(format!(
         "candidate-rehearsal-{}-{}",
         std::process::id(),
@@ -552,7 +558,7 @@ async fn full_live_legacy_quantity_boot_replay_rotation_and_reboot() {
         }
         reports.push(report);
     }
-    let report = json!({"scope":"Full copied WAL prefixes, actual configured strategies with embedded callbacks, record-backed mock WAL at boot, real WalWriter serialization/rotation, mocked venue transport and collateral balances; no network or venue mutations. Captured native positions, instrument decimals, and working stops retained.","archive_boundary":"Direct actual-WalWriter boot required uncopied retained order-lineage source segment1; archive preservation is not assessed by this current-prefix bundle. No captured callback or other WAL records are filtered.","realms":reports});
+    let report = json!({"scope":"Full copied WAL prefixes, actual configured strategies with embedded callbacks, record-backed mock WAL at boot, real WalWriter serialization/rotation, mocked venue transport and collateral balances; no network or venue mutations. Captured native positions, instrument decimals, and working stops retained.","clock":{"wall_ns":fixture_wall_ns,"source":"venue.json finished_ns","scope":"captured-data instant; no replay beyond native strategy holding deadlines"},"archive_boundary":"Direct actual-WalWriter boot required uncopied retained order-lineage source segment1; archive preservation is not assessed by this current-prefix bundle. No captured callback or other WAL records are filtered.","realms":reports});
     std::fs::write(
         out.join("report.json"),
         serde_json::to_vec_pretty(&report).unwrap(),

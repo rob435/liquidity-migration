@@ -63,7 +63,24 @@ impl RuntimeControlFeed for NoControls {
 pub struct SpoolRuntimeControlFeed {
     directory: PathBuf,
     returned_path: Option<PathBuf>,
+    pending: Option<SpoolIo>,
+    next_scan: Option<tokio::time::Instant>,
     poll: Duration,
+}
+
+type IoTask<T> = tokio::task::JoinHandle<Result<T, RuntimeControlError>>;
+type SpoolRequest = (PathBuf, RuntimeControlRequest);
+
+enum SpoolIo {
+    Scan(IoTask<Option<SpoolRequest>>),
+    Retire(IoTask<()>),
+    Reject(IoTask<()>),
+}
+
+enum SpoolOutcome {
+    Scanned(Option<SpoolRequest>),
+    Retired,
+    Rejected,
 }
 
 impl SpoolRuntimeControlFeed {
@@ -71,6 +88,8 @@ impl SpoolRuntimeControlFeed {
         Self {
             directory: directory.into(),
             returned_path: None,
+            pending: None,
+            next_scan: None,
             poll: Duration::from_millis(100),
         }
     }
@@ -78,6 +97,58 @@ impl SpoolRuntimeControlFeed {
     pub fn with_poll_interval(mut self, poll: Duration) -> Self {
         self.poll = poll.max(Duration::from_millis(1));
         self
+    }
+
+    fn scan(directory: &Path) -> Result<Option<SpoolRequest>, RuntimeControlError> {
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(directory).map_err(|error| {
+            RuntimeControlError::Source(format!(
+                "cannot scan runtime control spool {}: {error}",
+                directory.display()
+            ))
+        })? {
+            let path = entry
+                .map_err(|error| RuntimeControlError::Source(error.to_string()))?
+                .path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        for path in paths {
+            match Self::read_one(&path) {
+                Ok(request) => return Ok(Some((path, request))),
+                Err(error) => Self::quarantine(&path, &error.to_string())?,
+            }
+        }
+        Ok(None)
+    }
+
+    async fn finish_pending(&mut self) -> Result<SpoolOutcome, RuntimeControlError> {
+        // Await the retained handle by reference: select cancellation must not detach its result.
+        let (operation, result) = match self.pending.as_mut().expect("pending runtime control IO") {
+            SpoolIo::Scan(task) => (
+                "scan",
+                task.await.map(|result| result.map(SpoolOutcome::Scanned)),
+            ),
+            SpoolIo::Retire(task) => (
+                "retire",
+                task.await
+                    .map(|result| result.map(|()| SpoolOutcome::Retired)),
+            ),
+            SpoolIo::Reject(task) => (
+                "reject",
+                task.await
+                    .map(|result| result.map(|()| SpoolOutcome::Rejected)),
+            ),
+        };
+        self.pending = None;
+        result.map_err(|error| {
+            RuntimeControlError::Source(format!("runtime control {operation} task failed: {error}"))
+        })?
     }
 
     fn read_one(path: &Path) -> Result<RuntimeControlRequest, RuntimeControlError> {
@@ -165,90 +236,55 @@ fn rejected_path(path: &Path) -> PathBuf {
 
 impl RuntimeControlFeed for SpoolRuntimeControlFeed {
     async fn next_request(&mut self) -> Result<RuntimeControlRequest, RuntimeControlError> {
-        if let Some(path) = self.returned_path.take() {
-            tokio::task::spawn_blocking(move || match std::fs::remove_file(&path) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(RuntimeControlError::Source(format!(
-                    "cannot retire durable runtime control file {}: {error}",
-                    path.display()
-                ))),
-            })
-            .await
-            .map_err(|error| {
-                RuntimeControlError::Source(format!("runtime control retire task failed: {error}"))
-            })??;
-        }
         loop {
-            let directory = self.directory.clone();
-            let paths = tokio::task::spawn_blocking(move || {
-                let mut paths = Vec::new();
-                for entry in std::fs::read_dir(&directory).map_err(|error| {
-                    RuntimeControlError::Source(format!(
-                        "cannot scan runtime control spool {}: {error}",
-                        directory.display()
-                    ))
-                })? {
-                    let path = entry
-                        .map_err(|error| RuntimeControlError::Source(error.to_string()))?
-                        .path();
-                    if path
-                        .extension()
-                        .is_some_and(|extension| extension == "json")
-                    {
-                        paths.push(path);
-                    }
-                }
-                paths.sort();
-                Ok::<_, RuntimeControlError>(paths)
-            })
-            .await
-            .map_err(|error| {
-                RuntimeControlError::Source(format!("runtime control spool task failed: {error}"))
-            })??;
-            for path in paths {
-                let read_path = path.clone();
-                let outcome = tokio::task::spawn_blocking(move || Self::read_one(&read_path))
-                    .await
-                    .map_err(|error| {
-                        RuntimeControlError::Source(format!(
-                            "runtime control read task failed: {error}"
-                        ))
-                    })?;
-                match outcome {
-                    Ok(request) => {
+            if self.pending.is_some() {
+                match self.finish_pending().await? {
+                    SpoolOutcome::Scanned(Some((path, request))) => {
                         self.returned_path = Some(path);
                         return Ok(request);
                     }
-                    // An unreadable file can never be served: a garbled write,
-                    // or a request from another generation surviving an
-                    // upgrade. Left in place it would fail identically on
-                    // every poll and every supervised restart.
-                    Err(error) => {
-                        let reason = error.to_string();
-                        tokio::task::spawn_blocking(move || Self::quarantine(&path, &reason))
-                            .await
-                            .map_err(|error| {
-                                RuntimeControlError::Source(format!(
-                                    "runtime control quarantine task failed: {error}"
-                                ))
-                            })??;
+                    SpoolOutcome::Scanned(None) => {
+                        self.next_scan = Some(tokio::time::Instant::now() + self.poll);
                     }
+                    SpoolOutcome::Retired | SpoolOutcome::Rejected => self.next_scan = None,
                 }
             }
-            tokio::time::sleep(self.poll).await;
+            if let Some(path) = self.returned_path.take() {
+                self.pending = Some(SpoolIo::Retire(tokio::task::spawn_blocking(move || {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => Ok(()),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        Err(error) => Err(RuntimeControlError::Source(format!(
+                            "cannot retire durable runtime control file {}: {error}",
+                            path.display()
+                        ))),
+                    }
+                })));
+                continue;
+            }
+            if let Some(deadline) = self.next_scan {
+                if deadline > tokio::time::Instant::now() {
+                    tokio::time::sleep_until(deadline).await;
+                }
+                self.next_scan = None;
+            }
+            let directory = self.directory.clone();
+            self.pending = Some(SpoolIo::Scan(tokio::task::spawn_blocking(move || {
+                Self::scan(&directory)
+            })));
         }
     }
 
     async fn reject_last(&mut self) -> Result<(), RuntimeControlError> {
-        let Some(path) = self.returned_path.take() else {
-            return Ok(());
-        };
-        tokio::task::spawn_blocking(move || Self::quarantine(&path, "refused by the engine core"))
-            .await
-            .map_err(|error| {
-                RuntimeControlError::Source(format!("runtime control reject task failed: {error}"))
-            })?
+        if let Some(path) = self.returned_path.take() {
+            self.pending = Some(SpoolIo::Reject(tokio::task::spawn_blocking(move || {
+                Self::quarantine(&path, "refused by the engine core")
+            })));
+        }
+        if matches!(self.pending, Some(SpoolIo::Reject(_))) {
+            self.finish_pending().await?;
+        }
+        Ok(())
     }
 }
 
@@ -379,6 +415,215 @@ mod tests {
         };
         request.content_sha256 = content_sha256(&request);
         request
+    }
+
+    struct BlockingGate {
+        release: Option<std::sync::mpsc::Sender<()>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl BlockingGate {
+        async fn hold() -> Self {
+            let (release, wait) = std::sync::mpsc::channel();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let task = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let _ = wait.recv();
+            });
+            ready.await.unwrap();
+            Self {
+                release: Some(release),
+                task,
+            }
+        }
+
+        async fn finish(mut self) {
+            self.release.take().unwrap().send(()).unwrap();
+            (&mut self.task).await.unwrap();
+            // With one blocking worker, this drains work queued by the cancelled poll.
+            tokio::task::spawn_blocking(|| {}).await.unwrap();
+        }
+    }
+
+    impl Drop for BlockingGate {
+        fn drop(&mut self) {
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+        }
+    }
+
+    fn blocking_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn cancelled_spool_polls_progress_under_ready_input_and_preserve_restart() {
+        blocking_runtime().block_on(async {
+            let directory = crate::testpath::temp_path("runtime-control-cancel-flood");
+            std::fs::create_dir(directory.path()).unwrap();
+            let expected = request("pause-under-feed-flood", false);
+            let path = submit(directory.path(), &expected).unwrap();
+            let raw = std::fs::read(&path).unwrap();
+            let mut feed = SpoolRuntimeControlFeed::new(directory.path());
+            let mut delivered = None;
+            for _ in 0..16 {
+                let gate = BlockingGate::hold().await;
+                delivered = tokio::select! {
+                    biased;
+                    result = feed.next_request() => Some(result.unwrap()),
+                    () = std::future::ready(()) => None,
+                };
+                gate.finish().await;
+                if delivered.is_some() {
+                    break;
+                }
+            }
+            assert_eq!(
+                delivered,
+                Some(expected.clone()),
+                "a ready competing input must not discard completed spool IO on every turn"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), raw);
+            drop(feed);
+            let mut restarted = SpoolRuntimeControlFeed::new(directory.path());
+            assert_eq!(restarted.next_request().await.unwrap(), expected);
+            assert_eq!(std::fs::read(&path).unwrap(), raw);
+            restarted.reject_last().await.unwrap();
+            assert_eq!(std::fs::read(rejected_path(&path)).unwrap(), raw);
+            assert!(!path.exists());
+        });
+    }
+
+    #[test]
+    fn cancelled_empty_spool_sleep_keeps_its_original_scan_deadline() {
+        blocking_runtime().block_on(async {
+            tokio::time::pause();
+            let directory = crate::testpath::temp_path("runtime-control-cancel-sleep");
+            std::fs::create_dir(directory.path()).unwrap();
+            let mut feed = SpoolRuntimeControlFeed::new(directory.path());
+            let mut empty = Box::pin(feed.next_request());
+            let gate = BlockingGate::hold().await;
+            assert!(poll_once(&mut empty).await.is_none());
+            gate.finish().await;
+            assert!(poll_once(&mut empty).await.is_none());
+            drop(empty);
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+            let expected = request("arrived-during-poll-sleep", false);
+            let path = submit(directory.path(), &expected).unwrap();
+            for _ in 0..4 {
+                tokio::time::advance(Duration::from_millis(20)).await;
+                let mut waiting = Box::pin(feed.next_request());
+                for _ in 0..3 {
+                    let gate = BlockingGate::hold().await;
+                    let outcome = poll_once(&mut waiting).await;
+                    gate.finish().await;
+                    assert!(
+                        outcome.is_none(),
+                        "cancelling a poll sleep must not rescan before its deadline"
+                    );
+                }
+                drop(waiting);
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::advance(deadline - tokio::time::Instant::now()).await;
+            let mut delivered = None;
+            for _ in 0..3 {
+                let gate = BlockingGate::hold().await;
+                delivered = poll_once(feed.next_request()).await;
+                gate.finish().await;
+                if delivered.is_some() {
+                    break;
+                }
+            }
+            assert_eq!(
+                delivered.unwrap().unwrap(),
+                expected,
+                "cancelled sleeps must not postpone the original scan deadline"
+            );
+            assert!(path.exists());
+        });
+    }
+
+    async fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
+        tokio::select! {
+            biased;
+            result = future => Some(result),
+            () = std::future::ready(()) => None,
+        }
+    }
+
+    #[test]
+    fn cancelled_spool_rejection_preserves_the_pending_io_error() {
+        blocking_runtime().block_on(async {
+            let directory = crate::testpath::temp_path("runtime-control-cancel-reject");
+            std::fs::create_dir(directory.path()).unwrap();
+            let expected = request("refused-request", false);
+            let path = submit(directory.path(), &expected).unwrap();
+            let raw = std::fs::read(&path).unwrap();
+            let mut feed = SpoolRuntimeControlFeed::new(directory.path());
+            assert_eq!(feed.next_request().await.unwrap(), expected);
+            let marker = rejected_path(&path);
+            std::fs::create_dir(&marker).unwrap();
+            std::fs::write(marker.join("occupied"), b"occupied").unwrap();
+            let gate = BlockingGate::hold().await;
+            tokio::select! {
+                biased;
+                result = feed.reject_last() => panic!("blocked IO completed: {result:?}"),
+                () = std::future::ready(()) => {},
+            }
+            gate.finish().await;
+            let error = feed
+                .reject_last()
+                .await
+                .expect_err("cancelled rejection must retain its IO outcome");
+            assert!(error.to_string().contains("cannot quarantine"), "{error}");
+            assert_eq!(std::fs::read(&path).unwrap(), raw);
+            std::fs::remove_dir_all(&marker).unwrap();
+            let mut restarted = SpoolRuntimeControlFeed::new(directory.path());
+            assert_eq!(restarted.next_request().await.unwrap(), expected);
+            restarted.reject_last().await.unwrap();
+            assert_eq!(std::fs::read(&marker).unwrap(), raw);
+        });
+    }
+
+    #[test]
+    fn cancelled_spool_retirement_preserves_the_pending_io_error() {
+        blocking_runtime().block_on(async {
+            let directory = crate::testpath::temp_path("runtime-control-cancel-retire");
+            std::fs::create_dir(directory.path()).unwrap();
+            let expected = request("durable-request", false);
+            let path = submit(directory.path(), &expected).unwrap();
+            let mut feed = SpoolRuntimeControlFeed::new(directory.path());
+            assert_eq!(feed.next_request().await.unwrap(), expected);
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+            let gate = BlockingGate::hold().await;
+            tokio::select! {
+                biased;
+                result = feed.next_request() => panic!("blocked IO completed: {result:?}"),
+                () = std::future::ready(()) => {},
+            }
+            gate.finish().await;
+            let gate = BlockingGate::hold().await;
+            let outcome = tokio::select! {
+                biased;
+                result = feed.next_request() => Some(result),
+                () = std::future::ready(()) => None,
+            };
+            gate.finish().await;
+            let error = outcome
+                .expect("cancelled retirement must retain its IO outcome")
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("cannot retire durable"),
+                "{error}"
+            );
+        });
     }
 
     #[tokio::test(start_paused = true)]

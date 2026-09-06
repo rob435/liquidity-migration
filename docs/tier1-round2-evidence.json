@@ -8,17 +8,17 @@
   },
   "qualified_content": {
     "files": 659,
-    "sha256": "86ed033d796a12c14a8910c392b5cf21c0135bb011610ea5f3950857fa141e3b",
+    "sha256": "11971ad674db5ad5e65978b14b2940b7e041a657dd511b903e38c240e262dbbb",
     "manifest_encoding": "SHA256 of the sorted file-to-SHA256 JSON object with compact separators",
-    "scope": "Tracked and new engine, scripts, tests, deployment, workflow and dependency files; documentation is excluded. Full hashes and command logs are retained in the private evidence archive.",
+    "scope": "Engine, scripts, tests, deployment, workflow and dependency files; documentation is excluded. Full file hashes and command logs remain in the private evidence archive.",
     "unchanged_through_suite": true,
-    "basis_commit": "8f96e60366b753245ed448cfe5405f7681433a0c"
+    "basis": "Combined scheduler and control-spool correction; source manifest binds the subsequently committed content independently of build commit labels."
   },
   "local_checks": {
     "toolchain": "rustc 1.90.0 (1159e78c4 2025-09-14)",
     "incremental": false,
     "release": {
-      "passed": 2395,
+      "passed": 2404,
       "failed": 0,
       "ignored": 6
     },
@@ -36,19 +36,17 @@
         12
       ],
       "seconds_per_run": 300,
-      "process_deaths": 2,
       "repetitions": 2,
       "failed": 0,
-      "byte_identical_replay": true
+      "byte_identical_replay": true,
+      "engine_instance_crashes_per_run": 2,
+      "scope": "Deterministic embedded-engine crash/restart/replay simulation; these are not operating-system process kills."
     },
     "debug_and_developer_gate": {
-      "basis_commit": "8f96e60366b753245ed448cfe5405f7681433a0c",
-      "regular_debug_passed": 2394,
-      "additional_debug_example_passed": 1,
-      "python_passed": 1608,
-      "passed": true
+      "status": "Required pre-push gate runs on the committed correction; prior gate remains in the93404 rollout archive."
     },
-    "qualified_utc": "2026-09-06T15:13:49.579332+00:00"
+    "qualified_utc": "2026-09-06T17:27:41.787081+00:00",
+    "evidence": "/tmp/tier1-round2-integration/timer-qualification/suite.json"
   },
   "regression_evidence": [
     {
@@ -105,6 +103,30 @@
       "area": "Process-local replay telemetry",
       "evidence": "/tmp/tier1-round2-replay-timing-proof/source-freeze.json",
       "result": "Former timestamp inference compiles and creates false histogram samples for restored effects, queued orders and callback inputs. Three assertions fail; restoring the implementation passes all four cases, including a live timing control. Rotation, reduction identity and current command-local timings are preserved."
+    },
+    {
+      "area": "Ordinary input fairness",
+      "evidence": "/tmp/tier1-ordinary-fairness-proof/proof.json",
+      "sha256": "34c578716505157d3752f74ea57137bba491715030cb21d496a2dffae7e7dc1c",
+      "result": "Four actual old-code assertion failures; ten final scheduler tests and five existing halt/drain controls pass. Final fixtures are identical before/after. The rejected combined tick/timer draft fails the private-ready-during-flush control; initial fixture setup errors do not count."
+    },
+    {
+      "area": "Cancelled runtime-control spool operations",
+      "evidence": "/tmp/tier1-control-cancellation-proof/proof.json",
+      "sha256": "170dc473152396bfdcdc7cd120f8be2233cda3ea8743bb5ed59746e542603f3b",
+      "result": "Four actual old-code assertion failures; all nine control tests pass. Real spool files retain request identity/bytes across restart, rejection and cancellation. The rejected first sleep draft fails delivery at the original deadline; elapsed-deadline handling passes the same test."
+    },
+    {
+      "area": "Heartbeat fixture scheduling",
+      "evidence": "/tmp/tier1-heartbeat-scheduling-proof/proof.json",
+      "sha256": "7490f6300237cf57e85d623575e77dc81d3fe3a1ff73a3a64cbb66ac12d48108",
+      "result": "The first integrated release run fails the heartbeat market-count assertion because its fixed virtual stop can fire before a quote is processed. The fixture now waits for the actual heartbeat market count; no-order and entry-blocked assertions remain unchanged. Focused debug and final integrated release pass."
+    },
+    {
+      "area": "Historical copied-WAL fixture clock",
+      "evidence": "/tmp/tier1-copied-wal-stop-repair-proof/proof.json",
+      "sha256": "6340b34905e9920dbeaf0a7860f328cc4f8e0337342f91f6e7408003b862d699",
+      "result": "The real captured-data rehearsal fails its no-order assertion when current wall time triggers historical LONG expiries. Pinning the fixture to authenticated capture time preserves every strategy/checkpoint, exact stop repair, quantity and accounting assertion. Actual repeated sends use unconditional MockRisk; existing real-Kernel reservation controls pass."
     }
   ],
   "copied_wal_rehearsal": {
@@ -115,12 +137,13 @@
       "--exact",
       "--nocapture"
     ],
-    "binary_sha256": "ae32c512a3733913d15de6bf8d8988a5f1ca630b42fd88873d194e828c29f50a",
+    "binary_sha256": "e8ba4fd21a22c958420806a59dac14a23ec9c38968f02c9ab3e1a1343f4c72b0",
     "fixture": "/tmp/tier1-legacy-quantity-proof/live-fixtures/cover-refresh-20260906T125343Z",
-    "started_utc": "2026-09-06T15:12:31.422069+00:00",
+    "started_utc": "2026-09-06T17:24:03.349636+00:00",
     "exit_code": 0,
-    "finished_utc": "2026-09-06T15:12:34.724741+00:00",
-    "log_sha256": "71ac0c51b53e680138cb50b325db311e3de1019864964ff3e89ac7c6e41d9ca5"
+    "finished_utc": "2026-09-06T17:24:06.300811+00:00",
+    "log_sha256": "74de3ce1304c8cb60d4cea0e93e3e39713abfbbdd2a367b93cb058a83c09996e",
+    "report_sha256": "4ad393360a4082f419acbe77be5d0d27e54dc236691f5d802a586418e87fadbd"
   },
   "measurement_contract": "docs/execution-performance.md",
   "audit_boundaries": [
@@ -130,13 +153,13 @@
   ],
   "private_evidence_directory": "/tmp/tier1-round2-integration",
   "measurements": {
-    "evidence": "/tmp/tier1-round2-integration/measurements-final/summary.json",
-    "sha256": "fe08c416f0705635b9643411cb7134605ae442effd282cc4de97b37865175920",
+    "evidence": "/tmp/tier1-round2-integration/measurements-timer-fix/summary.json",
+    "sha256": "396ccfb32a42d38f4baf2ebc94d19282f7432bae522a814b9cb655ddf3abe807",
     "seconds_per_cell": 60,
     "completed_submits": [
       299,
-      580,
-      576
+      581,
+      581
     ],
     "risk_refusals": 0,
     "barrier_failures": 0,
@@ -151,13 +174,63 @@
     "debug_venue_tests": 6,
     "debug_deadline_controls": 4,
     "release_venue_tests": 6,
-    "full_debug_developer_gate": "pending after fixture correction"
+    "full_debug_developer_gate": "pass:2394 regular debug tests,1608 Python tests, lint/type/format checks",
+    "comparison": "Production unchanged only between8f96e603 and93404ff6; the current manifest also includes the subsequent scheduler and spool repair."
   },
   "deployment_attempts": [
     {
       "run_id": 34042301279,
       "commit": "8f96e60366b753245ed448cfe5405f7681433a0c",
       "result": "Linux test-fixture scheduling failure; VPS job skipped; no deployment."
+    },
+    {
+      "run_id": 34043450919,
+      "commit": "93404ff666dd3fc13957c7918dbcbe7e195f5caf",
+      "result": "success",
+      "completed_utc": "2026-09-06T16:02:06Z",
+      "url": "https://github.com/rob435/liquidity-migration/actions/runs/34043450919",
+      "artifact_sha256": "bc3bab2a7ab8cec9c19c844813bb96670f3c14b2971c76d18f478cf85292ac5d",
+      "binary_sha256": {
+        "engine": "4936d848262be3156b6aabe23f411ccf6ee62c43156b3d40d19136f03b21d694",
+        "engine-tools": "fc22983ccd3c4cc2b1cf846add8d8d61b98f5874e82d20903874ec0559d6ed1c",
+        "signal-worker": "e45ff96d68559c6f0ed11b17cfab3926c00bd952cad9d7ff4b9b3e9825759634"
+      },
+      "evidence": "/tmp/tier1-deploy-observation/run-34043450919/observation.json"
     }
-  ]
+  ],
+  "linux_checks": {
+    "commit": "93404ff666dd3fc13957c7918dbcbe7e195f5caf",
+    "run_id": 34043450919,
+    "debug_all_targets": {
+      "passed": 2399,
+      "failed": 0,
+      "ignored": 6
+    },
+    "scope": "Linux-only tests change the target count relative to the local macOS suite.",
+    "rustfmt": "pass",
+    "clippy_warnings_denied": "pass",
+    "python_passed": 1608,
+    "release_artifact": "three exact-commit binaries built, verified and staged",
+    "rust_log_sha256": "8aacdb9063e437840f6ee29042531c3766296d89bce36d1527c88ff307a99936"
+  },
+  "private_archives": {
+    "base": "/var/lib/liquidity-migration-wal-quarantine/tier1-round2-20260906/final-proofs-8f96e603.tar.gz",
+    "base_sha256": "c91ce9206bef1596a953cafb296af74541f1db7aa058fe1bb0adbdcbca33b116",
+    "rollout_supplement": "/var/lib/liquidity-migration-wal-quarantine/tier1-round2-20260906/rollout-proofs-93404ff6.tar.gz",
+    "manifest_contract": "Archives contain a per-file SHA256 manifest; private native-account observations remain outside Git."
+  },
+  "post_deploy_timer_fault": {
+    "deployed_commit": "93404ff666dd3fc13957c7918dbcbe7e195f5caf",
+    "wal_path": "/var/lib/liquidity-migration-engine/engine.wal.000036",
+    "trace_sha256": "85513637cb4d0b8d80d7ccc37e1295e31525dd7661819a476fbd9047280d6243",
+    "configured_rest_ms": 2000,
+    "pull_deadline_ns": 827772238825,
+    "timer_event_now_ns": 833094976043,
+    "timer_lateness_ns": 5322737218,
+    "entry_record_to_cancel_record_ns": 7319161134,
+    "cancel_task_ns": 9049056,
+    "scope": "Single naturally scheduled demo probe; canonical trace proves delayed timer dispatch, not slow venue cancellation. No position or unmatched order remains.",
+    "implementation_fault": "Biased ordinary market input can starve strategy timers and maintenance ticks.",
+    "correction": "Five ordinary lanes rotate with separate private-priority checks; one spool operation and its empty-scan deadline survive cancellation. Local qualification passes; corrective deployment and natural-probe observation are pending."
+  }
 }

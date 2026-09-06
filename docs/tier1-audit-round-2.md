@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Track verified gaps and architecture decisions for a modular execution engine with interchangeable strategy and venue implementations.
+Define retained architecture decisions and the remaining qualification scope for the deployed Round-2 engine.
 
 ## Spec Tables
 
@@ -11,7 +11,7 @@ Track verified gaps and architecture decisions for a modular execution engine wi
 | Item | Contract |
 | --- | --- |
 | Product | Durable execution, exact accounting, deterministic strategy decisions, independent sleeves and pluggable venues |
-| Working tree | Round-2 cleanup is integrated with the funded repairs through `16689a98`; combined qualification and deployment are in progress |
+| Working tree | `93404ff6` integrates Round-2 cleanup with the funded repairs; [deployment run 34043450919](https://github.com/rob435/liquidity-migration/actions/runs/34043450919) succeeds |
 | Runtime specification | [engine.md](engine.md); source and behavior tests take precedence over ratings or audit assertions |
 | Implementation checkpoint | [tier1-round-handoff.md](tier1-round-handoff.md); [compact qualification evidence](tier1-round2-evidence.json) |
 | Operational authority | [STATE.md](../STATE.md) records a dated host observation; local tests do not update that observation |
@@ -32,43 +32,37 @@ Track verified gaps and architecture decisions for a modular execution engine wi
 | Demo probe and disabled maker | Preserve stable strategy identity and the enabled demo measurement probe; suppress unnecessary work only when state/holdings permit | Deleting template blocks changes persisted IDs and removes an enabled demo function |
 | Legacy state | Remove import/migration writers only after both realms and the retained rollback/replay contract no longer need them | A local migration test does not establish completed host migration |
 
-### Verified open work
+### Open qualification
 
-| ID | Area | Required outcome | Current scope |
-| --- | --- | --- | --- |
-| R2-01 | Production qualification | Bench and dedicated qualification exercise real child processes and disclose coalescing, samples, callback mode and clock | Bench uses the real child executable and risk kernel; engine-run regressions count WAL records for no-op callbacks. Sustained benchmark and combined Linux qualification remain required; sim/backtest are embedded reducer diagnostics |
-| R2-02 | Callback timing | Decision and end-to-end timing include child execution and durability; admission uses current quote age | Deferred effects retain source and parent-completion clocks; unchanged-state and stale-quote regressions pass locally. Replayed effects carry no fabricated monotonic timing. Later exact physical-growth checks already use the current clock; a funded stale-wire bypass is not established |
-| R2-03 | Callback cost | Remove redundant state decode and snapshot sizing while preserving atomic effects and bounds | Changed child state is decoded once and retained through commit; unchanged proposals skip restore. Snapshot byte sizing avoids a second full serialization. The complete declared context still crosses the process boundary |
-| R2-04 | WAL encoding | Preserve record meaning, legacy tags and partial-frame recovery with fewer allocations | Nonfinite fees are refused before append; borrowed tag encoding and seeded semantic round-trip tests pass locally. Rotation/reopen also preserves ordinals above six digits and refuses exhaustion before writing. Supported record readers and unknown-fee meaning remain unchanged; integration is pending |
-| R2-05 | Durability cost | Measure callback, dispatch and attempted-send barriers separately on the deployed execution mode; simplify only redundant obligations | Three barriers are a measured design question, not permission to publish unjournaled order effects |
-| R2-06 | Runtime/tool boundary | Separate simulation, backtest, benchmark and operational CLI code from the funded runtime without changing command or recovery behavior | `engine-tools` owns tools and companion CLI; lean `engine` owns runtime and child protocol. Three-binary packaging, command forwarding and install tests pass locally; integrated deployment remains required |
-| R2-07 | Exact quantity boundary | Verify all real wire constructors and replace redundant live quantity stores without weakening legacy readers | Canary entry/cleanup and terminal lookup use exact terms. `OrderRec` holds one fill frontier; compatibility snapshots remain byte-identical after scalar-cache removal. Sleeve ownership, physical baselines, reservations and cash accounting retain distinct responsibilities |
-| R2-08 | Signal worker | Derive removals from actual consumers; consolidate duplicated protocol/feature code while preserving gap repair, generation and replay | HTTP job scheduling shares one request budget and endpoint implementation. Confirmed candles, ticker coverage and persistence formats remain. Research/worker feature populations are independently constructed; full cross-environment feature parity is not claimed |
-| R2-09 | Deploy pipeline | One consistent artifact contract from build through local staging and remote install; lint the actual remote program | The extracted remote program is linted; SSH setup is shared; recovery verbs and three-binary staging pass local tests. Checksummed-only and optionally qualified artifacts remain valid |
-| R2-10 | CI | Run ordinary checks on main pushes and keep costly release workloads explicit | Workflow and regression updated locally; final workflow validation and integration required |
-| R2-11 | Runtime dependencies | Install only dependencies imported by deployed Python entrypoints | Python capture imports websocket-client; stdlib-only claim is false. Minimal runtime lock and clean-environment import test pass locally |
-| R2-12 | Supervision and alerting | Exercise bounded restart behavior, stalled-loop detection and alerts for sustained WAL/error load through current owners | Engine/worker units allow five starts per 300 seconds. Sleeve errors page independently of admission; stale observer data emits `up=0`. Host liveness warns on projected disk-floor crossing within its next 195-second observation interval, with WAL metadata attribution. Host verification remains required |
-| R2-13 | Recovery operations | Rehearse one-command recovery on compatible state and explicit forward repair across incompatible WAL changes | A predecessor refusing precision-era WAL cannot be made a valid rollback by renaming a command; demo/funded timing and host verification remain operational work |
-| R2-14 | Venue boundaries | Test signed rejection, real timeout then late fill, cancel/fill race, quota accounting and malformed stream recovery through engine ownership | Constructed protocol fixtures exercise real local HTTP/WebSocket boundaries, including a delayed create with responsive cancellation. They are not authenticated private-stream captures |
-| R2-15 | Recorded-day replay | Run off-host replay on a redistributable, sanitized real WAL/tape fixture with explicit accounting scope | The real private-prefix boot/rotation/reboot test runs locally. A 123-second public tape replays byte-identically with zero fills; neither establishes a complete production day. Full retained-family acquisition remains required |
-| R2-16 | Resource and latency envelope | Publish workload, platform, sample count and measured quantiles; run declared CPU/memory/disk/IO workload through the production mode | Existing memory tests and embedded timings do not establish a universal resource ceiling or a latency SLO |
-| R2-17 | Documentation | One compact host snapshot, one implementation handoff, one open audit; archive history and eliminate duplicated receipts | STATE is compact and dated; historical receipts and the original audit remain in Git; CHANGELOG history is archived. Final combined qualification and host observation remain pending |
-| R2-18 | Peripheral cleanup | Remove unused Rust recorder and proven orphan wrappers, retain reusable research and dashboards, relocate historical config fixtures only after checking CLI consumers | The unused Rust recorder, old Python current-universe builder, orphan pack wrapper and dead deploy function are removed. Research lab, registered config files, all venues, Grafana and the enabled demo probe retain real consumers |
-| R2-19 | Callback contention | Defer source-owned callbacks during a busy invocation without recording a strategy failure or losing order | Typed deferral preserves order events, timers and controls without a false fault; real callback failures retain their existing handling. Source regressions and the formerly failing 20-second release benchmark pass locally; combined qualification remains required |
+| ID | Required outcome | Current evidence and remaining work |
+| --- | --- | --- |
+| R2-20 | Verify the corrective deployment and naturally scheduled probe after ordinary-input and spool cancellation repairs | Eight actual baseline assertion failures now pass; integrated release, replay and workload qualification pass. Deployment and authenticated observation remain pending. |
+| R2-15 | Replay a sanitized, complete recorded production day with matched input and accounting scope | Copied private-prefix boot/rotation/reboot passes; the 123-second public tape replays byte-identically with zero fills. Neither establishes a complete production day. Full retained-family acquisition and replay remain incomplete qualification. |
 
-### Boundary corrections that constrain the work
+### Implemented contracts
 
-| Audit claim | Source-grounded constraint |
+| Area | Current contract | Evidence authority |
+| --- | --- | --- |
+| Callback execution | Real isolated children run production and the benchmark. Unchanged proposals avoid WAL amplification; changed state decodes once. Busy callbacks defer source-owned work without false strategy failures. | [Engine ownership](engine.md); [combined qualification](tier1-round2-evidence.json) |
+| Clocks | Current admission time judges account and quote freshness. Durable decision identity remains unchanged; process-local optional timing prevents fabricated replay latency. | Five admission controls and three failing-before replay timing assertions in [regression evidence](tier1-round2-evidence.json) |
+| WAL and quantities | Borrowed encoding retains semantic validation and supported readers; one exact in-flight frontier preserves compatibility snapshots. Canary entry/cleanup keep canonical wire terms. | WAL nonfinite/ordinal controls, canary regression and byte-identical snapshot comparisons in [evidence](tier1-round2-evidence.json) |
+| Runtime and tools | `engine` owns runtime and child protocol; `engine-tools` owns operational tools, benchmark, simulation and backtest. The release installs both with `signal-worker`. | Exact installed and loaded hashes in [STATE](../STATE.md); [release workflow](https://github.com/rob435/liquidity-migration/actions/runs/34043450919) |
+| Worker and dependencies | One public HTTP request budget and shared endpoint implementation retain gap repair and persistence. The runtime Python lock includes the actual websocket-client consumer. | Combined Rust/Python checks; isolated service import test; deployed recorder and worker observations |
+| Supervision | systemd owns services and timers; engine/worker start limits are five per 300 seconds. Stale observations publish unavailable health; sleeve failures are independent of entry permission; disk-floor forecasts use measured growth. | Behavioral script regressions and dated unit/liveness observations in [STATE](../STATE.md) |
+| Recovery | Tool instructions use supported verbs. Compatible state can use retained recovery paths; incompatible predecessors require forward repair. | Failing-before CLI controls, copied-WAL rehearsal and the executed exact-SHA forward handover |
+| Venue ownership | Real local HTTP/WebSocket fixtures exercise signed clock/quota rejection, timeout then late fill, cancel/fill ordering and malformed account envelopes. | Current Linux suite and the test-only socket scheduling control in [evidence](tier1-round2-evidence.json) |
+| Cleanup | Unused Rust recorder, redundant Python current-universe builder, orphan pack wrapper and dead deploy function are absent. Research, all venues, registered configs, Grafana and the enabled demo probe retain their consumers. | Source at `93404ff6`; original audit retained by tag `codex/round2-audit-input` |
+
+### Evidence boundaries
+
+| Boundary | Supported conclusion |
 | --- | --- |
-| Four production OrderRequest constructors lack exact terms | The cited order_dispatch and portfolio_protection constructors are test code; portfolio_protection applies exact terms. working constructs a price-only AmendSpec that admission quantizes. Canary entry and cleanup are the real tool defects |
-| No isolated no-op WAL-volume test | Callback market tests already run the framed worker over 270-symbol native snapshots and assert no WAL growth. The missing combination is engine.run plus a real child executable plus a volume assertion |
-| No clock-skew tests | Bybit gateway contains validate_server_clock and a signing-window boundary test. An actual signed 10002 response through core is separate missing coverage |
-| No timeout representation | Public HTTP has a timeout error; the venue boundary classifies it as ambiguous Transport. The missing case is the late fill through the engine after that real timeout |
-| No private-position test means missing account ownership | Position messages are deliberately not a second fill source; authenticated snapshots and execution history own reconciliation. Tests must preserve that distinction |
-| No property tests because no proptest dependency | WAL tests already exercise every partial-frame and rotation cut. Dependency names do not determine whether a property is tested; parser and semantic round-trip coverage still need expansion |
-| Every deletion candidate is unreachable from deployed units | Demo probe is enabled; Grafana has an operator consumer; Python capture requires websocket-client |
-| Configs v1-v5 have no consumers | Python rule/backtest/scoring tests and research commands use these files; moving them needs matching callers and preservation of registered research inputs |
-| Committed Grafana pyc | git ls-files reports no tracked pyc file in the baseline |
+| R2-05 durability cost | Callback, queued-dispatch and attempted-send barriers serve distinct recovery obligations. Measured workloads report each cost and zero barrier failures; no redundant obligation is demonstrated. |
+| R2-16 capacity | [Three 60-second workloads](execution-performance.md) report platform, quantiles, sampled CPU/RSS and WAL bytes. One child over 270 symbols is not 270 workers; no-fill growth is not steady-state disk usage. Missing source opportunities remain explicit. No universal memory ceiling, many-worker capacity or unloaded latency SLO follows. |
+| Production evidence | Last deployed Linux checks pass 2,399 tests on93404ff6; current local macOS release passes 2,404. Authenticated snapshots establish the dated account/protection state, not a full-day execution or latency claim. |
+| Constructed venue fixtures | Signed protocol responses establish engine handling; they are not authenticated private-stream captures. Position topics remain separate from the authenticated snapshot/history accounting authority. |
+| Research parity | Research and live-worker populations are independently constructed; shared protocol code does not establish full cross-environment feature parity. |
+| Operational fault exercise | A successful handover and advancing health establish the observed path. Unperformed funded rollback, crash/stall injections and external on-call delivery remain unverified. |
 
 ### Legacy removal conditions
 

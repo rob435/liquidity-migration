@@ -19,31 +19,31 @@ State the measured execution workloads, timing boundaries and resource limits of
 | Resources | Parent, child and time wrapper sampled approximately every 50 ms; short peaks and final CPU increments can be missed |
 | Disk | Complete final WAL with rotation disabled, including boot and report; not a steady-state byte rate or storage quota |
 | Interference | No compiler processes observed during these cells; other desktop work is not excluded |
-| Private evidence | `/tmp/tier1-round2-integration/measurements-final/summary.json`; raw logs, WALs and hashes are retained in the deployment evidence archive |
+| Private evidence | `/tmp/tier1-round2-integration/measurements-timer-fix/summary.json`; raw logs, WALs and hashes are retained beside this receipt |
 
 | Executable | SHA256 |
 | --- | --- |
-| `engine` | `77d6d9abb7ebd2b14c41a6c7b1ca0083004e7819374995580dd9b60fa48880f8` |
-| `engine-tools` | `4cf389eb7d253be1247b0a411b12ff6098660ba5e049d4ff25d2875e31b18c31` |
+| `engine` | `9eba0d53d0c7dbc0c23cb46f93f86aa4abcffcb303fe4749b930aa519fb0247f` |
+| `engine-tools` | `81fc876b17e85a5c355d5ae5ef31d1d8bf1782e639c66510fb3ceefb975f9b1f` |
 
 Latency cells are milliseconds, `p50 / p99 / p99.9`; MiB means 1,048,576 bytes.
 
 | Symbols / quotes / total rate / venue delay | Submits / opportunities | Source → decision | Source → submit result | Sampled tree / child MiB | Final WAL MiB |
 | --- | --- | --- | --- | --- | --- |
-| 1 / 6,000 / 100 Hz / 0 ms | 299 / 300 | 0.612 / 1.153 / 1.204 | 14.123 / 18.514 / 21.955 | 24.20 / 6.30 | 16.21 |
-| 270 / 12,000 / 200 Hz / 0 ms | 580 / 600 | 3.191 / 205.259 / 230.556 | 21.234 / 225.706 / 251.396 | 64.56 / 29.39 | 294.80 |
-| 270 / 12,000 / 200 Hz / 20 ms | 576 / 600 | 3.584 / 222.036 / 301.990 | 46.170 / 266.076 / 344.982 | 66.53 / 30.12 | 292.40 |
+| 1 / 6,000 / 100 Hz / 0 ms | 299 / 300 | 0.665 / 1.241 / 1.434 | 14.377 / 20.136 / 21.660 | 24.67 / 6.53 | 16.21 |
+| 270 / 12,000 / 200 Hz / 0 ms | 581 / 600 | 3.158 / 201.064 / 241.566 | 20.087 / 218.628 / 261.489 | 68.48 / 30.47 | 295.40 |
+| 270 / 12,000 / 200 Hz / 20 ms | 581 / 600 | 3.342 / 200.147 / 228.590 | 42.992 / 242.745 / 272.892 | 66.41 / 31.58 | 295.41 |
 
 | Cell | Callback / queue / attempt barrier median ms | Barrier confirmations / failures | Sampled CPU seconds | Outer elapsed seconds |
 | --- | --- | --- | --- | --- |
-| single | 3.415 / 3.194 / 3.648 | 1803 / 0 | 4.96 | 60.333 |
-| wide | 3.601 / 3.155 / 3.836 | 3489 / 0 | 46.66 | 60.068 |
-| wide-delayed | 3.851 / 3.643 / 3.832 | 3465 / 0 | 46.88 | 60.150 |
+| single | 3.684 / 3.505 / 3.681 | 1803 / 0 | 5.04 | 60.319 |
+| wide | 3.631 / 3.360 / 3.383 | 3495 / 0 | 46.52 | 60.101 |
+| wide-delayed | 3.758 / 3.582 / 3.212 | 3495 / 0 | 46.64 | 60.149 |
 
 | Outcome | Observation |
 | --- | --- |
 | Admission and completion | Each durable intent reaches a completed submit; no risk refusals, callback faults or barrier failures occur in these cells |
-| Missing source opportunities | 1 / 20 / 24 opportunities have no durable intent; WAL records do not separate coalescing from shutdown for this residual |
+| Missing source opportunities | 1 / 19 / 19 opportunities have no durable intent; WAL records do not separate coalescing from shutdown for this residual |
 | Readback | All three final WALs validate through the rebuilt `engine latency` command |
 | Durability decision | Retain callback commit, queued dispatch and attempted-send barriers; each owns a distinct recovery obligation |
 | Scope limit | One active child over 270 symbols is not 270 workers; a 60-second no-fill run does not establish a universal resource ceiling, production-day accounting or a latency SLO |

@@ -28,7 +28,7 @@ The engine workspace is under `engine/`:
 
 | Module (repository path) | Owns |
 | :--- | :--- |
-| `engine/engine-core/src/engine.rs` | `Engine`, the `select!` loop, one handler per loop arm, the `StopReason` |
+| `engine/engine-core/src/engine.rs` | `Engine`, the priority loop, rotating ordinary inputs, one handler per turn, the `StopReason` |
 | `engine/engine-core/src/engine/boot_recovery.rs` | `Engine::boot`, WAL replay into engine state, missed-fill recovery, venue reconciliation at boot |
 | `engine/engine-core/src/engine/scheduling.rs` | Strategy wakes, at most 64 due timer callbacks per turn, durable actions, the per-wake drain |
 | `engine/engine-core/src/engine/signal_intake.rs` | Durable signal admission: cursor and availability checks, symbol admission across the four id tables, barrier, delivery, acknowledgement |
@@ -271,6 +271,8 @@ The risk kernel (`engine-risk`) gates every order before it reaches the venue ad
 | General exits | Exact retained targets survive partial fills, market maximum chunks and restart. Native full exits use the canonical owned lot; explicit partial reductions retain their chosen amount even when its `f64` projection equals the full lot. Legacy scalar full-close projection matching is a compatibility rule only. |
 | Legacy quantity adoption | Required durable grid context resolves aggregate legacy units within 64 ULPs per input before canonical fill reduction and at the adoption boundary. Contextual replay preserves raw legacy cash/fees, native exact totals and real close timestamps. Validated legacy-dependent automatic FIFO and internal full-close allocations are reconstructed; internal settlement retains its recorded price, time and zero-net contract. Canonical-only allocations and explicit native partial amounts remain exact. Canonical inventory never uses legacy dust deletion. |
 | Runtime controls | Resolve durable sleeve IDs from the newest trusted WAL segment, matching engine boot; reject a torn current tail before writing the control request. Retained archive volume does not accumulate in control-command memory. |
+| Ordinary input scheduling | Tick, timer, control, signal and market lanes rotate after each selected ordinary input. Each continuously ready enabled lane wins within five ordinary turns. Private updates, recovery, halt and mutation-drain priorities remain outside that rotation; they prevent a universal wall-time bound. |
+| Control spool cancellation | The feed owns one pending scan, retirement or rejection operation and the next empty-scan deadline across cancelled polls. A delivered file remains until the core records its outcome; restart rereads retained immutable requests. IO errors remain observable. |
 | Retained archive readers | Epoch recovery distinguishes WAL tags from nested order kinds and permits null client IDs on verdicts. Callback payloads are decoded only for their record kind; source CRCs and pinned byte boundaries remain enforced. |
 | Terminal order recovery | Exact cumulative fills must be covered by durable execution history before terminal retirement; legacy fill frontiers retain their binary64 value. |
 | Callback contention | Busy market invocations defer order news, timers and controls without marking the strategy failed. Durable source cursors advance only after acceptance. |

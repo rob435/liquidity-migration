@@ -54,10 +54,10 @@ Define the execution ownership model, the current qualification checkpoint and t
 | Qualification | Result and scope |
 | --- | --- |
 | Accounting baseline `2422be0d` | 2,333 release tests, six ignored, six repeated heavy fault seeds and real copied-WAL accounting fixtures; full historical evidence is retained in that Git revision |
-| Current combined source | Production source retains the 2,395-pass release qualification, Clippy, doctests, repeated fault/replay and measured workloads from `8f96e603`. A subsequent socket-test clock correction passes six venue tests in debug/release and four deadline controls; the full developer/debug gate is rerun before push. [Evidence](tier1-round2-evidence.json) |
+| Current combined source | 2,404 release tests pass with strict Clippy, both doctest profiles, six repeated heavy fault seeds, copied-WAL boot/rotation/reboot and three measured process workloads. The committed correction must also pass the mandatory pre-push developer gate. [Evidence](tier1-round2-evidence.json) |
 | Regression controls | Actual assertion failures exist for callback timing/freshness, nonfinite fee preservation, canary exact terms, malformed private stream recovery and broken recovery CLI verbs; setup and compile failures add no count |
 | Production mode | Bench and child-worker integration exercise isolated callbacks; virtual-clock simulation and backtests declare embedded reducers |
-| Host evidence | [STATE.md](../STATE.md) owns dated observations; both realms run `420c7347` at the 14:25:52 UTC native capture; combined Round-2 rollout is pending |
+| Host evidence | [STATE.md](../STATE.md) owns dated observations; both realms run `93404ff6` after successful workflow `34043450919`; exact installed/loaded hashes, native protection and continuing worker observations are recorded there |
 
 ## Invariants
 
