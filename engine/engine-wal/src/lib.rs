@@ -161,13 +161,26 @@ fn write_record<W: Write>(writer: &mut W, record: &WalRecord) -> Result<(), WalE
         return serde_json::to_writer(writer, &value).map_err(json_error);
     }
 
-    if matches!(
-        record,
-        WalRecord::OrderUpdate {
-            callbacks: None,
-            ..
+    if let WalRecord::OrderUpdate {
+        callbacks: None,
+        update,
+    } = record
+    {
+        if !matches!(update, engine_types::OrderUpdate::Fill { fee: None, .. }) {
+            #[derive(serde::Serialize)]
+            struct LegacyUpdate<'a> {
+                kind: &'static str,
+                update: &'a engine_types::OrderUpdate,
+            }
+            return serde_json::to_writer(
+                writer,
+                &LegacyUpdate {
+                    kind: "order_update",
+                    update,
+                },
+            )
+            .map_err(json_error);
         }
-    ) {
         let mut value = serde_json::to_value(record).map_err(json_error)?;
         value["kind"] = "order_update".into();
         if matches!(
@@ -212,13 +225,22 @@ fn write_record<W: Write>(writer: &mut W, record: &WalRecord) -> Result<(), WalE
     serde_json::to_writer(writer, &value).map_err(json_error)
 }
 
+fn record_kind(payload: &[u8]) -> Result<std::borrow::Cow<'_, str>, serde_json::Error> {
+    #[derive(serde::Deserialize)]
+    struct Tag<'a> {
+        #[serde(borrow)]
+        kind: std::borrow::Cow<'a, str>,
+    }
+    serde_json::from_slice::<Tag<'_>>(payload).map(|tag| tag.kind)
+}
+
 fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
     let record = read_compatible_record(payload)?;
     if matches!(
         record,
         WalRecord::AmendResolved { .. } | WalRecord::AmendSent { .. }
     ) {
-        let value: serde_json::Value = serde_json::from_slice(payload)?;
+        let kind = record_kind(payload)?;
         let missing = match &record {
             WalRecord::AmendResolved {
                 effective_px,
@@ -241,7 +263,7 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
                         )));
                     }
                 }
-                value["kind"] == "amend_resolved_v2" && exact_effective_px.is_none()
+                kind == "amend_resolved_v2" && exact_effective_px.is_none()
             }
             WalRecord::AmendSent { spec, .. } => {
                 if spec
@@ -254,7 +276,7 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
                         "contradictory exact amendment terms",
                     )));
                 }
-                value["kind"] == "amend_sent_v2" && spec.exact_terms.is_none()
+                kind == "amend_sent_v2" && spec.exact_terms.is_none()
             }
             _ => false,
         };
@@ -271,14 +293,12 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
             callbacks: None,
             ..
         }
-    ) {
-        let value: serde_json::Value = serde_json::from_slice(payload)?;
-        if value.get("kind").and_then(serde_json::Value::as_str) == Some("recovered_fill_v2") {
-            return Err(serde_json::Error::io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "recovered_fill_v2 is missing required callback ownership",
-            )));
-        }
+    ) && record_kind(payload)? == "recovered_fill_v2"
+    {
+        return Err(serde_json::Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "recovered_fill_v2 is missing required callback ownership",
+        )));
     }
     if matches!(
         record,
@@ -286,23 +306,20 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
             callbacks: None,
             ..
         }
-    ) {
-        let value: serde_json::Value = serde_json::from_slice(payload)?;
-        if value.get("kind").and_then(serde_json::Value::as_str) == Some("order_update_v2") {
-            return Err(serde_json::Error::io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "order_update_v2 is missing required callback ownership",
-            )));
-        }
+    ) && record_kind(payload)? == "order_update_v2"
+    {
+        return Err(serde_json::Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "order_update_v2 is missing required callback ownership",
+        )));
     }
-    if matches!(record, WalRecord::OrderSent { dispatch: None, .. }) {
-        let value: serde_json::Value = serde_json::from_slice(payload)?;
-        if value.get("kind").and_then(serde_json::Value::as_str) == Some("order_sent_v2") {
-            return Err(serde_json::Error::io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "order_sent_v2 is missing required dispatch authority",
-            )));
-        }
+    if matches!(record, WalRecord::OrderSent { dispatch: None, .. })
+        && record_kind(payload)? == "order_sent_v2"
+    {
+        return Err(serde_json::Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "order_sent_v2 is missing required dispatch authority",
+        )));
     }
     if matches!(record, WalRecord::SegmentBase { .. }) {
         let value: serde_json::Value = serde_json::from_slice(payload)?;
@@ -660,18 +677,9 @@ impl WalWriter {
     }
 }
 
-/// A frame the log could not read back is not a frame.
-///
-/// An `f64` that is not a number is written as `null` — serde_json's own answer
-/// for one — and then no reader can turn that record back into a record.
-/// Nothing else this log holds can do that, so a payload with no `null` in it
-/// needs no check; one with a `null` in it may be an absent `Option` and may be
-/// a number that is not a number, and reading it back is the only way to tell.
-///
-/// It matters because the reader refuses rather than truncates: bytes that pass
-/// their checksum are real data, and deleting them is not the log's call. So one
-/// such record makes the whole log unopenable, at the next boot, for good.
-fn reads_back(payload: &[u8]) -> Result<(), WalError> {
+/// JSON maps nonfinite floats to null, including Some(NaN) to None. The
+/// compatible reader must preserve the record, not merely accept its bytes.
+fn reads_back(record: &WalRecord, payload: &[u8]) -> Result<(), WalError> {
     let has_null = payload.windows(4).any(|window| window == b"null");
     let has_compat_marker = payload
         .windows(FEE_KNOWN_FIELD.len())
@@ -682,12 +690,19 @@ fn reads_back(payload: &[u8]) -> Result<(), WalError> {
     if !has_null && !has_compat_marker {
         return Ok(());
     }
-    read_record(payload).map(|_: WalRecord| ()).map_err(|e| {
+    let restored = read_record(payload).map_err(|e| {
         WalError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("this record does not read back, so it is not written: {e}"),
         ))
-    })
+    })?;
+    if restored != *record {
+        return Err(WalError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "this record does not read back unchanged, so it is not written",
+        )));
+    }
+    Ok(())
 }
 
 impl Wal for WalWriter {
@@ -700,7 +715,7 @@ impl Wal for WalWriter {
             return Err(e);
         }
 
-        if let Err(e) = reads_back(&self.buf[start + FRAME_HEADER_LEN..]) {
+        if let Err(e) = reads_back(record, &self.buf[start + FRAME_HEADER_LEN..]) {
             self.buf.truncate(start);
             return Err(e);
         }
@@ -823,6 +838,12 @@ impl Wal for WalWriter {
     ///    append after that, the new segment is the one with unique records,
     ///    and it is already the one boot picks.
     fn rotate(&mut self, base: &WalRecord) -> Result<bool, WalError> {
+        let next_index = segments(&self.family)?
+            .last()
+            .map_or(1, |(index, _)| *index)
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("WAL segment ordinal exhausted"))?;
+
         // 1. Finish the archive.
         self.push_to_os()?;
         if self.durable {
@@ -830,11 +851,6 @@ impl Wal for WalWriter {
         }
 
         // 2. The next unused number, torn leftovers included.
-        let next_index = segments(&self.family)?
-            .last()
-            .map(|(index, _)| index + 1)
-            .unwrap_or(2)
-            .max(2);
         let path = segment_path(&self.family, next_index);
         let mut file = OpenOptions::new()
             .read(true)
@@ -845,7 +861,7 @@ impl Wal for WalWriter {
         let mut frame: Vec<u8> = Vec::with_capacity(BUFFER_HIGH_WATER);
         frame.extend_from_slice(&[0u8; FRAME_HEADER_LEN]);
         write_record(&mut frame, base)?;
-        reads_back(&frame[FRAME_HEADER_LEN..])?;
+        reads_back(base, &frame[FRAME_HEADER_LEN..])?;
         let payload = &frame[FRAME_HEADER_LEN..];
         let payload_len = payload.len() as u32;
         let crc = crc32c::crc32c(payload);
@@ -1086,11 +1102,9 @@ pub fn segments(family: &Path) -> Result<Vec<(u64, PathBuf)>, WalError> {
         let Some(suffix) = name.strip_prefix(&prefix) else {
             continue;
         };
-        if suffix.len() == 6 && suffix.bytes().all(|b| b.is_ascii_digit()) {
-            if let Ok(index) = suffix.parse::<u64>() {
-                if index >= 2 {
-                    found.push((index, entry.path()));
-                }
+        if let Ok(index) = suffix.parse::<u64>() {
+            if index >= 2 && suffix == format!("{index:06}") {
+                found.push((index, entry.path()));
             }
         }
     }
@@ -1426,6 +1440,100 @@ fn sample_record() -> WalRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ordinal_test_base() -> WalRecord {
+        serde_json::from_value(serde_json::json!({
+            "kind": "segment_base", "wall_ts_ms": 0,
+            "strategies": [], "symbols": [], "may_open": true,
+            "control_anchors": [], "attribution": [], "logged_exposure": [],
+            "intended_stops": [], "open_orders": [], "open_trade_lots": [],
+            "portfolio": engine_types::portfolio::PortfolioState::default(),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn segment_ordinals_above_six_digits_rotate_and_reopen() {
+        for highest in [999_999, u64::MAX - 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let family = dir.path().join("engine.wal");
+            let (mut wal, _) = open_current(&family).unwrap();
+            std::fs::write(segment_path(&family, highest), []).unwrap();
+            let base = ordinal_test_base();
+            let last = WalRecord::Note {
+                source: "ordinal-test".into(),
+                text: highest.to_string(),
+            };
+            wal.rotate(&base).unwrap();
+            wal.append(&last).unwrap();
+            wal.barrier().unwrap();
+            drop(wal);
+
+            let (reopened, records) = open_current(&family).unwrap();
+            assert_eq!(
+                records,
+                vec![(1, base), (2, last)],
+                "reopen lost the records after ordinal {highest}"
+            );
+            assert_eq!(reopened.segment_index, highest + 1);
+        }
+    }
+
+    #[test]
+    fn segment_ordinal_exhaustion_refuses_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let family = dir.path().join("engine.wal");
+        let (mut wal, _) = open_current(&family).unwrap();
+        wal.append(&WalRecord::Note {
+            source: "ordinal-test".into(),
+            text: "pending tail".into(),
+        })
+        .unwrap();
+        let exhausted = segment_path(&family, u64::MAX);
+        std::fs::write(&exhausted, []).unwrap();
+        let original = std::fs::read(&family).unwrap();
+        let pending = wal.buf.clone();
+        let result = wal.rotate(&ordinal_test_base());
+        assert!(
+            result.is_err(),
+            "exhausted ordinals must not wrap or restart"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("segment ordinal exhausted"));
+        assert_eq!(std::fs::read(&family).unwrap(), original);
+        assert_eq!(wal.buf, pending);
+        assert_eq!(wal.segment_index, 1);
+        assert_eq!(std::fs::read(exhausted).unwrap(), Vec::<u8>::new());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn segment_discovery_accepts_only_the_writers_canonical_ordinals() {
+        let dir = tempfile::tempdir().unwrap();
+        let family = dir.path().join("engine.wal");
+        for suffix in [
+            "000002",
+            "999999",
+            "1000000",
+            "18446744073709551615",
+            "000001",
+            "0000002",
+            "01000000",
+            "18446744073709551616",
+            "+00002",
+            "000002.tmp",
+        ] {
+            std::fs::write(dir.path().join(format!("engine.wal.{suffix}")), []).unwrap();
+        }
+        let ordinals: Vec<_> = segments(&family)
+            .unwrap()
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(ordinals, [2, 999_999, 1_000_000, u64::MAX]);
+    }
 
     #[test]
     fn a_bare_filename_syncs_the_working_directory_not_an_empty_path() {

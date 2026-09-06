@@ -1,45 +1,68 @@
-# Fleet Systemd Units & Lifecycle Specification
+# Fleet systemd units
 
-Systemd service topologies, daemon identities, security sandboxing, and execution lifecycle.
+## Purpose
 
----
+Describe the fleet's service identities, activation, and lifecycle from [the manifest](../fleet_manifest.tsv) and the unit files in this directory.
 
-## 1. Systemd Fleet Unit Inventory
+## Spec Tables
 
-Defined canonically in [`deploy/fleet_manifest.tsv`](../fleet_manifest.tsv):
+All family names below have the `liquidity-migration-` prefix; the group is `liquidity-migration` unless shown otherwise.
 
-| Unit Family | Realm | Systemd Target / Activation | User / Group | Authority & Role |
-| :--- | :--- | :--- | :--- | :--- |
-| `liquidity-migration-signal-worker-demo` | Demo | `multi-user.target` | `liquidity-signal-worker:liquidity-migration` | Public market data ingestion & observation streaming. |
-| `liquidity-migration-signal-worker-mainnet` | Mainnet | `multi-user.target` | `liquidity-signal-worker:liquidity-migration` | Public market data ingestion & observation streaming. |
-| `liquidity-migration-engine` | Demo | `multi-user.target` | `liquidity-engine-demo:liquidity-migration` | Demo execution engine & order authority. |
-| `liquidity-migration-engine-mainnet` | Mainnet | `manual` (needs `REAL_MONEY`) | `liquidity-engine-mainnet:liquidity-migration` | Funded execution engine & order authority. |
-| `liquidity-migration-forward-capture` | Global | `independent` (boot) | `liquidity-capture:liquidity-migration` | Bybit tick, book, and L2 market tape recorder. |
-| `liquidity-migration-forward-capture-binance` | Global | `independent` (boot) | `liquidity-capture:liquidity-migration` | Binance tick, book, and L2 market tape recorder. |
-| `liquidity-migration-market-tape-upload` | Global | Timer (hourly at :10) | `root:root` | Tar & rclone sync to Google Drive. |
-| `liquidity-migration-backup` | Global | Timer (every 6h) | `root:root` | Off-box mirror of engine state & WAL to Google Drive. |
-| `liquidity-migration-trade-notify` | Global | Timer (every 5m) | `liquidity-observer:liquidity-migration` | Monospace HTML trade alerts to Telegram. |
-| `liquidity-migration-telegram-controls` | Global | `multi-user.target` | `liquidity-controls:liquidity-controls` | Long-polling Telegram bot helper. |
-| `liquidity-migration-demo-liveness` | Demo | Timer (periodic) | `liquidity-observer:liquidity-migration` | Realm-level SLA & heartbeat monitoring. |
-| `liquidity-migration-mainnet-liveness` | Mainnet | Timer (periodic) | `liquidity-observer:liquidity-migration` | Realm-level SLA & heartbeat monitoring. |
-| `liquidity-migration-host-liveness` | Global | Timer (periodic) | `liquidity-observer:liquidity-migration` | Host, recorder, realm-watchdog supervision, and the one external dead-man ping. |
-| `liquidity-migration-chaos-drill` | Demo | Timer (weekly) | `root:root` | Automated demo restart & state recovery drill. |
+| Family | Realm | Lifecycle | Activation / cadence | User | Role |
+| --- | --- | --- | --- | --- | --- |
+| `signal-worker-demo` | Demo | Downstream | Boot | `liquidity-signal-worker` | Public observations and signal spool |
+| `signal-worker-mainnet` | Mainnet | Downstream | Funded activation | `liquidity-signal-worker` | Public observations and signal spool |
+| `engine` | Demo | Owner | Boot, after worker | `liquidity-engine-demo` | Account execution and WAL |
+| `engine-mainnet` | Mainnet | Owner | Funded activation, after worker | `liquidity-engine-mainnet` | Account execution and WAL |
+| `forward-capture` | Shared | Independent | Boot | `liquidity-capture` | Bybit market tape |
+| `forward-capture-binance` | Shared | Independent | Boot | `liquidity-capture` | Binance market tape |
+| `market-tape-upload` | Shared | Independent | Hourly, minute 10 UTC | `root:root` | Pack and upload market tape |
+| `backup` | Shared | Independent | 03:17, 09:17, 15:17, 21:17 UTC | `root:root` | State and WAL backup |
+| `equity-recorder` | Shared | Independent | Every minute, second 20 | `liquidity-observer` | Append fleet metrics and push configured remote metrics |
+| `host-liveness` | Shared | Independent | Every 180 s | `liquidity-observer` | Host, independent units, watchdog plane, external dead-man |
+| `demo-liveness` | Demo | Downstream | Every 180 s | `liquidity-observer` | Demo and shared downstream health |
+| `mainnet-liveness` | Mainnet | Downstream | Every 180 s while funded activation is enabled | `liquidity-observer` | Mainnet health |
+| `trade-notify` | Shared | Downstream | Every 5 minutes, second 30 | `liquidity-observer` | Attributed entries and realized exits to Telegram |
+| `telegram-controls` | Shared | Downstream | Boot | `liquidity-controls:liquidity-controls` | Control requests through the account owner |
+| `llm-ledger` | Shared | Downstream | Hourly, minute 05 | `liquidity-llm` | Public research nominations and judgments |
+| `chaos-drill` | Demo | Downstream | Sunday 09:13 UTC | `root:root` | Demo restart and recovery drill |
 
----
+| Contract | Source / value |
+| --- | --- |
+| Fleet membership, lifecycle, realm, operator policy | [fleet_manifest.tsv](../fleet_manifest.tsv) |
+| Unit installation and manifest helpers | [lib_sleeves.sh](../lib_sleeves.sh) |
+| Deploy launcher / remote implementation | [deploy_vps_live.sh](../../scripts/deploy_vps_live.sh) / [deploy_remote.sh](../../scripts/vps/deploy_remote.sh) |
+| Independent families | Six: both captures, upload, backup, equity-recorder, host-liveness |
+| Capture restart | Only when its unit, capture configuration, symbol file, Python package, or runtime dependency input changes |
+| Engine / worker restart | `Restart=always`, `RestartSec=5`, at most five starts per 300 seconds; exhaustion leaves the service failed until an explicit restart/reset, with no automatic flatten |
+| Engine liveness | The engine writes its heartbeat from the event loop every five seconds; realm liveness detects age over 60 seconds on its three-minute timer. No systemd watchdog notification protocol is implemented |
+| Engine state | Separate `StateDirectory` per realm; mainnet and demo never share a WAL |
+| Funded switch | `REAL_MONEY=true` in `/etc/liquidity-migration/bybit-mainnet.env`; explicit disarm rewrites it to false |
+| Observer credentials | Notification units use `notifications.env`; liveness also uses `oncall.env`; equity uses optional `observability.env` |
+| Research credentials | LLM ledger uses optional `llm-ledger.env`; venue credentials are unset |
+| Host Python dependencies | [requirements-runtime.lock](../../requirements-runtime.lock): `websocket-client` for live capture; development and CI use [requirements.lock](../../requirements.lock) |
 
-## 2. Independent Units (Host-Level Daemons)
+## Invariants
 
-The 5 unit families marked `independent` (`forward-capture`, `forward-capture-binance`, `market-tape-upload`, `backup`, `host-liveness`):
-* **Never Stopped**: Fleet deploys, safety stops, and disarm actions never terminate independent units.
-* **Boot Activation**: Start automatically on machine boot.
-* **Conditional Restart**: Deploy restarts capture services only if `deploy/capture/`, `market_tape/`, or dependencies changed.
+- Must preserve independent units through realm handover, stop, and disarm; changed capture inputs restart only the affected recorder.
+- Must start each realm's signal worker before its engine and verify the new processes' heartbeats during handover.
+- Must keep writes inside each unit's declared writable paths and state directories.
+- Must keep venue credentials out of public workers, recorders, observers, controls, and research units.
+- Must never infer funded authorization from a unit being installed or enabled.
 
----
+## Operational Recipes
 
-## 3. Sandboxing & Linux Security Invariants
+```sh
+# Read the canonical lifecycle inventory from the repository root.
+awk -F '|' '!/^#/ {print $1, $3, $4, $6}' deploy/fleet_manifest.tsv
 
-1. **State Directory Isolation**: Each service writes strictly to its declared `StateDirectory` in `/var/lib/` (`0750` / `0770`).
-2. **Environment Scrubbing**: Signal worker units explicitly unset venue API credentials, real-money switches, and Telegram tokens.
-3. **No Private Leaks in Backups**: Off-box backup scripts strictly ignore `*.env` files to prevent credentials from leaving the host.
-4. **Arming Protection**: `engine-mainnet.service` requires `REAL_MONEY=true` in `/etc/liquidity-migration/bybit-mainnet.env` to start.
-5. **Notification Isolation**: Observer and control units load `/etc/liquidity-migration/notifications.env`; liveness units additionally load `/etc/liquidity-migration/oncall.env`. They never load venue credential files.
+# On the host: inspect active units and timer schedules without changing them.
+systemctl list-units --all 'liquidity-migration-*' --no-pager
+systemctl list-timers --all 'liquidity-migration-*' --no-pager
+systemctl show liquidity-migration-engine-mainnet.service \
+  --property=ActiveState,MainPID,NRestarts,Restart,RestartUSec,StartLimitIntervalUSec,StartLimitBurst,WatchdogUSec
+
+# After fixing a crash-loop cause, on the host, for the affected unit.
+systemctl reset-failed liquidity-migration-engine.service
+systemctl start liquidity-migration-engine.service
+```

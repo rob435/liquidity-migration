@@ -85,7 +85,7 @@ fn view_with_available(
 fn one_symbol_may_carry_the_whole_book() {
     let mut k = kernel(mainnet_config());
     assert_eq!(
-        k.assess(&buy(17.5), &flat(100.0, NOW)),
+        k.assess(&buy(17.5), &flat(100.0, NOW), buy(17.5).decided_ns),
         RiskVerdict::Allow { qty: 17.5 }
     );
 }
@@ -97,7 +97,7 @@ fn one_symbol_may_carry_the_whole_book() {
 fn what_bounds_one_symbol_is_a_whole_book_control() {
     let mut k = kernel(mainnet_config());
     assert!(matches!(
-        k.assess(&buy(17.6), &flat(100.0, NOW)),
+        k.assess(&buy(17.6), &flat(100.0, NOW), buy(17.6).decided_ns),
         RiskVerdict::Deny {
             reason: DenyReason::EnvelopeBreached { .. }
         }
@@ -115,7 +115,7 @@ fn what_a_symbol_already_holds_counts_only_toward_the_book() {
         NOW,
     );
     assert!(matches!(
-        deny(k.assess(&buy(9.0), &held)),
+        deny(k.assess(&buy(9.0), &held, buy(9.0).decided_ns)),
         DenyReason::EnvelopeBreached { .. }
     ));
 }
@@ -143,7 +143,7 @@ fn a_book_exactly_at_the_second_gross_ceiling_is_allowed() {
         NOW,
     );
     assert_eq!(
-        k.assess(&buy(3.5), &held),
+        k.assess(&buy(3.5), &held, buy(3.5).decided_ns),
         RiskVerdict::Allow { qty: 3.5 },
         "45 held plus 35 asked is exactly the 80 ceiling"
     );
@@ -157,7 +157,7 @@ fn a_book_one_step_over_the_second_gross_ceiling_is_refused() {
         vec![position(CUSDT, Side::Buy, 4.5, 10.0, true)],
         NOW,
     );
-    match deny(k.assess(&buy(4.0), &held)) {
+    match deny(k.assess(&buy(4.0), &held, buy(4.0).decided_ns)) {
         DenyReason::ComponentGrossBreached {
             gross_usdt,
             cap_usdt,
@@ -178,7 +178,7 @@ fn the_second_gross_ceiling_follows_the_capital_reference() {
         NOW,
     );
     assert!(matches!(
-        deny(small.assess(&buy(4.0), &held_at_100)),
+        deny(small.assess(&buy(4.0), &held_at_100, buy(4.0).decided_ns)),
         DenyReason::ComponentGrossBreached { .. }
     ));
 
@@ -189,7 +189,7 @@ fn the_second_gross_ceiling_follows_the_capital_reference() {
         NOW,
     );
     assert_eq!(
-        doubled.assess(&buy(4.0), &held_at_200),
+        doubled.assess(&buy(4.0), &held_at_200, buy(4.0).decided_ns),
         RiskVerdict::Allow { qty: 4.0 },
         "at a 200 reference the same 85 USDT sits inside a 160 ceiling"
     );
@@ -212,7 +212,7 @@ fn margin_capped_config() -> KernelConfig {
 fn a_book_exactly_at_the_account_margin_cap_is_allowed() {
     let mut k = kernel(margin_capped_config());
     assert_eq!(
-        k.assess(&buy(8.0), &flat(100.0, NOW)),
+        k.assess(&buy(8.0), &flat(100.0, NOW), buy(8.0).decided_ns),
         RiskVerdict::Allow { qty: 8.0 }
     );
 }
@@ -220,7 +220,7 @@ fn a_book_exactly_at_the_account_margin_cap_is_allowed() {
 #[test]
 fn a_book_one_step_over_the_account_margin_cap_is_refused() {
     let mut k = kernel(margin_capped_config());
-    match deny(k.assess(&buy(8.2), &flat(100.0, NOW))) {
+    match deny(k.assess(&buy(8.2), &flat(100.0, NOW), buy(8.2).decided_ns)) {
         DenyReason::InitialMarginBreached {
             margin_usdt,
             cap_usdt,
@@ -236,13 +236,13 @@ fn a_book_one_step_over_the_account_margin_cap_is_refused() {
 fn the_account_margin_cap_follows_the_capital_reference() {
     let mut small = kernel(margin_capped_config());
     assert!(matches!(
-        deny(small.assess(&buy(8.2), &flat(100.0, NOW))),
+        deny(small.assess(&buy(8.2), &flat(100.0, NOW), buy(8.2).decided_ns)),
         DenyReason::InitialMarginBreached { .. }
     ));
 
     let mut doubled = kernel(margin_capped_config());
     assert_eq!(
-        doubled.assess(&buy(8.2), &flat(200.0, NOW)),
+        doubled.assess(&buy(8.2), &flat(200.0, NOW), buy(8.2).decided_ns),
         RiskVerdict::Allow { qty: 8.2 },
         "at a 200 reference the same 41 of margin sits inside an 80 cap"
     );
@@ -257,7 +257,11 @@ fn the_account_margin_cap_follows_the_capital_reference() {
 fn an_increase_the_spare_margin_exactly_covers_is_allowed() {
     let mut k = kernel(mainnet_config());
     assert_eq!(
-        k.assess(&buy(4.0), &view_with_available(100.0, 20.0, Vec::new())),
+        k.assess(
+            &buy(4.0),
+            &view_with_available(100.0, 20.0, Vec::new()),
+            buy(4.0).decided_ns
+        ),
         RiskVerdict::Allow { qty: 4.0 }
     );
 }
@@ -265,7 +269,11 @@ fn an_increase_the_spare_margin_exactly_covers_is_allowed() {
 #[test]
 fn an_increase_larger_than_the_spare_margin_is_refused() {
     let mut k = kernel(mainnet_config());
-    match deny(k.assess(&buy(4.002), &view_with_available(100.0, 20.0, Vec::new()))) {
+    match deny(k.assess(
+        &buy(4.002),
+        &view_with_available(100.0, 20.0, Vec::new()),
+        buy(4.002).decided_ns,
+    )) {
         DenyReason::AvailableMarginExhausted {
             additional_margin_usdt,
             available_usdt,
@@ -286,7 +294,11 @@ fn an_increase_larger_than_the_spare_margin_is_refused() {
 // always positive, so the increase test above already refuses it.
 fn a_negative_spare_margin_refuses_every_entry() {
     let mut k = kernel(mainnet_config());
-    match deny(k.assess(&buy(1.0), &view_with_available(100.0, -5.0, Vec::new()))) {
+    match deny(k.assess(
+        &buy(1.0),
+        &view_with_available(100.0, -5.0, Vec::new()),
+        buy(1.0).decided_ns,
+    )) {
         DenyReason::AvailableMarginExhausted {
             additional_margin_usdt,
             available_usdt,
@@ -309,7 +321,7 @@ fn a_negative_spare_margin_still_lets_an_exit_through() {
         vec![position(BUSDT, Side::Buy, 2.0, 10.0, true)],
     );
     assert_eq!(
-        k.assess(&exit(CARRY, BUSDT, Side::Sell, 2.0, 10.0, NOW), &held),
+        k.assess(&exit(CARRY, BUSDT, Side::Sell, 2.0, 10.0, NOW), &held, NOW),
         RiskVerdict::Allow { qty: 2.0 }
     );
 }
@@ -328,13 +340,13 @@ fn only_the_increase_is_charged_against_spare_margin_not_the_whole_book() {
         vec![position(CUSDT, Side::Buy, 4.5, 10.0, true)],
     );
     assert_eq!(
-        k.assess(&buy(4.0), &held),
+        k.assess(&buy(4.0), &held, buy(4.0).decided_ns),
         RiskVerdict::Allow { qty: 4.0 },
         "the standing book is already paid for"
     );
 
     // And one step more is refused for the order's own margin, not the book's.
-    match deny(k.assess(&buy(4.002), &held)) {
+    match deny(k.assess(&buy(4.002), &held, buy(4.002).decided_ns)) {
         DenyReason::AvailableMarginExhausted {
             additional_margin_usdt,
             ..
@@ -359,7 +371,7 @@ fn an_envelope_breach_is_reported_before_the_account_caps() {
     // case against a 61.25 allowance, while the symbol cap is only 50.
     let wide = entry(CARRY, BUSDT, Side::Buy, 10.0, 10.0, 0.01, NOW);
     assert!(matches!(
-        deny(k.assess(&wide, &flat(100.0, NOW))),
+        deny(k.assess(&wide, &flat(100.0, NOW), wide.decided_ns)),
         DenyReason::EnvelopeBreached { .. }
     ));
 }
@@ -376,7 +388,7 @@ fn an_account_cap_is_reported_before_the_partition_clamps() {
     // and the book's 60 ceiling will not.
     let over = entry(LONG, BUSDT, Side::Buy, 7.0, 10.0, 6.5, NOW);
     assert!(matches!(
-        deny(k.assess(&over, &flat(100.0, NOW))),
+        deny(k.assess(&over, &flat(100.0, NOW), over.decided_ns)),
         DenyReason::ComponentGrossBreached { .. }
     ));
 }
@@ -395,7 +407,7 @@ fn an_exit_is_never_blocked_by_the_account_caps() {
         vec![position(BUSDT, Side::Buy, 6.0, 10.0, true)],
     );
     assert_eq!(
-        k.assess(&exit(CARRY, BUSDT, Side::Sell, 6.0, 10.0, NOW), &held),
+        k.assess(&exit(CARRY, BUSDT, Side::Sell, 6.0, 10.0, NOW), &held, NOW),
         RiskVerdict::Allow { qty: 6.0 }
     );
 }

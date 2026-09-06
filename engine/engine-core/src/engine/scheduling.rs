@@ -1100,6 +1100,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     action,
                     effect,
                     callback_id,
+                    timing,
                 } = pending;
                 let process_committed = effect.is_some_and(|key| {
                     self.host
@@ -1155,6 +1156,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             action,
                             effect,
                             callback_id,
+                            timing,
                         },
                         progress.origin_ns,
                     );
@@ -1163,7 +1165,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
                 match action {
                     Action::Place(intent) => {
-                        placements.push((intent, effect));
+                        placements.push((intent, effect, timing));
                         if placements.len() == MAX_ORDERS_PER_BATCH {
                             let sent = self
                                 .flush_placements(
@@ -1537,6 +1539,7 @@ mod dispatch_budget_tests {
                     action: Action::SetStop { symbol, trigger_px },
                     effect: None,
                     callback_id: None,
+                    timing: None,
                 },
                 1,
             );

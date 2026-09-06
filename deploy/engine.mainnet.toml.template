@@ -159,6 +159,5 @@ flow_max_score = 4.0
 queue_reprice_edge_bps = 1.5
 # END GENERATED MAKER CANARY RULE
 
-# If two sleeves want one venue symbol, its current attributed owner keeps it
-# and the other waits for a proven flat handoff. The venue stop belongs to that
-# attributed position and cannot be shared across sleeves.
+# Sleeve inventories and stops remain independent; the engine translates their
+# exact quantities into one physical net and maintains its native protection.

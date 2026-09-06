@@ -27,9 +27,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -52,6 +54,8 @@ from liquidity_migration.policy.oncall_environment import (  # noqa: E402
 _MANIFEST = _REPO_ROOT / "deploy" / "fleet_manifest.tsv"
 _DEPLOY_LOCK = Path("/run/liquidity-migration/deploy.lock")
 _MAX_DEPLOY_AGE_SEC = 1_800.0
+_DISK_FORECAST_SEC = 195.0  # Host timer: 180-second cadence plus 15-second accuracy.
+_BOOT_ID_FILE = Path("/proc/sys/kernel/random/boot_id")
 _ACCOUNT_SCOPES = ("demo", "mainnet", "host")
 _SIGNAL_WORKER_HEARTBEAT_KIND = "liquidity_migration_signal_worker_heartbeat"
 _DEPLOY_TRANSITIONAL_ALERT_PREFIXES = (
@@ -61,6 +65,7 @@ _DEPLOY_TRANSITIONAL_ALERT_PREFIXES = (
     "heartbeat-contract:",
     "may-open:",
     "rolling-loss:",
+    "strategy-errors:",
     "worker-status:",
     "worker-spool:",
     "capture-",
@@ -366,6 +371,20 @@ def evaluate_engine_heartbeat(unit: str, path: Path, *, now: float | None = None
                 f"{unit} rolling-loss trip is on: {_rolling_loss_detail(payload)}; entries refused",
             )
         )
+    strategy_errors = payload.get("strategy_errors")
+    if unit in _ENGINE_UNITS and isinstance(strategy_errors, list) and strategy_errors:
+        detail = "; ".join(
+            f"{row.get('strategy', 'unknown')}: {row.get('error', 'unspecified')}"
+            for row in strategy_errors
+            if isinstance(row, dict)
+        )
+        alerts.append(
+            Alert(
+                f"strategy-errors:{unit}",
+                "CRITICAL",
+                f"{unit} reports strategy errors: {detail or str(strategy_errors)}",
+            )
+        )
     return alerts
 
 
@@ -485,17 +504,121 @@ def evaluate_capture_status(
     return alerts, next_counters
 
 
-def evaluate_disk(*, path: str = "/var/lib", min_free_gb: float = 5.0) -> list[Alert]:
-    free_gb = shutil.disk_usage(path).free / 1e9
+def _sample_number(value: object) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+        return float(value)
+    return None
+
+
+def _wal_files(family: Path) -> dict[str, float] | None:
+    files = {}
+    try:
+        for entry in family.parent.iterdir():
+            suffix = entry.name.removeprefix(f"{family.name}.")
+            numbered = (
+                entry.name.startswith(f"{family.name}.")
+                and 6 <= len(suffix) <= 20
+                and suffix.isascii()
+                and suffix.isdigit()
+                and 2 <= int(suffix) <= 2**64 - 1
+                and suffix == f"{int(suffix):06}"
+            )
+            if entry.name != family.name and not numbered:
+                continue
+            metadata = entry.stat(follow_symlinks=False)
+            if stat.S_ISREG(metadata.st_mode):
+                files[f"{metadata.st_dev}:{metadata.st_ino}"] = float(metadata.st_size)
+    except OSError:
+        return None
+    return files or None
+
+
+def _wal_attribution(rows: list[FleetUnit], previous: dict[str, float], counters: dict[str, float]) -> str:
+    details = []
+    seen = set()
+    for row in rows:
+        if row.unit not in _ENGINE_UNITS or not Path(row.output_artifact).is_absolute():
+            continue
+        # Fleet templates place engine.wal beside the manifest heartbeat.
+        # This describes those canonical files, not arbitrary config overrides.
+        family = Path(row.output_artifact).with_name("engine.wal")
+        if family in seen:
+            continue
+        seen.add(family)
+        files = _wal_files(family)
+        if files is None:
+            details.append(f"{row.realm}=unavailable")
+            continue
+        prefix = f"wal:{row.realm}:"
+        current = {f"{prefix}{identity}": size for identity, size in files.items()}
+        prior = {key: value for key, value in previous.items() if key.startswith(prefix)}
+        counters.update(current)
+        total = sum(current.values())
+        if prior and all(
+            key in current and _sample_number(size) is not None and current[key] >= size for key, size in prior.items()
+        ):
+            delta = f"+{total - sum(prior.values()):.0f}"
+        else:
+            delta = "unavailable"
+        details.append(f"{row.realm}={total:.0f} bytes (delta {delta})")
+    return "canonical WAL logical bytes: " + (", ".join(details) or "unavailable")
+
+
+def evaluate_disk(
+    *,
+    path: str = "/var/lib",
+    min_free_gb: float = 5.0,
+    counters: dict[str, float] | None = None,
+    rows: list[FleetUnit] | None = None,
+) -> list[Alert]:
+    free_bytes = shutil.disk_usage(path).free
+    free_gb = free_bytes / 1e9
+    alerts = []
     if free_gb < min_free_gb:
-        return [
+        alerts.append(
             Alert(
                 "disk",
                 "CRITICAL",
                 f"{path} has {free_gb:.1f} GB free (limit {min_free_gb:.0f} GB)",
             )
-        ]
-    return []
+        )
+    if counters is None:
+        return alerts
+    previous = dict(counters)
+    for key in previous:
+        if key.startswith(("disk:", "wal:")):
+            del counters[key]
+    counters["disk:forecast_valid"] = float(bool(alerts))
+    try:
+        boot = _BOOT_ID_FILE.read_text(encoding="utf-8").strip()
+        device = Path(path).stat().st_dev
+    except OSError:
+        return alerts
+    observed = _sample_number(time.monotonic())
+    if not boot or observed is None or _sample_number(free_bytes) is None:
+        return alerts
+    prefix = f"disk:{boot}:{device}:"
+    counters.update({f"{prefix}time": observed, f"{prefix}free": float(free_bytes)})
+    prior_time = _sample_number(previous.get(f"{prefix}time"))
+    prior_free = _sample_number(previous.get(f"{prefix}free"))
+    elapsed = None if prior_time is None else observed - prior_time
+    current_interval = elapsed is not None and 0 < elapsed <= _DISK_FORECAST_SEC and prior_free is not None
+    counters["disk:forecast_valid"] = float(bool(alerts) or current_interval)
+    attribution = _wal_attribution(rows or [], previous if current_interval else {}, counters)
+    if current_interval and prior_free is not None and elapsed is not None and prior_free > free_bytes and not alerts:
+        rate = (prior_free - free_bytes) / elapsed
+        seconds = (free_bytes - min_free_gb * 1e9) / rate
+        if seconds < _DISK_FORECAST_SEC:
+            alerts.append(
+                Alert(
+                    "disk-growth",
+                    "WARNING",
+                    f"{path} has {free_gb:.1f} GB free; observed consumption {rate / 1e6:.2f} MB/s "
+                    f"projects the {min_free_gb:.0f} GB floor in {seconds:.0f}s, before the next "
+                    f"{_DISK_FORECAST_SEC:.0f}s observation; {attribution}",
+                )
+            )
+    return alerts
 
 
 def evaluate_host_clock() -> list[Alert]:
@@ -817,6 +940,7 @@ def _incident_units(scope: str, alerts: list[Alert]) -> list[str]:
         "heartbeat-contract:",
         "may-open:",
         "rolling-loss:",
+        "strategy-errors:",
         "worker-status:",
         "worker-spool:",
     )
@@ -1076,8 +1200,8 @@ def main() -> int:
         return run_delivery_drill(scope, deadman_url)
     now = time.time()
     # Every scope consults the lock. The transitional keys held below —
-    # worker-status, worker-spool, may-open, rolling-loss, and the fleet's own
-    # unit and heartbeat keys — are produced by the realm scopes alone; host
+    # worker-status, worker-spool, may-open, rolling-loss, strategy-errors,
+    # and the fleet's unit and heartbeat keys — come from realm scopes; host
     # watches the independent units. A lock held past _MAX_DEPLOY_AGE_SEC still
     # pages, through the host scope's deploy-lock check.
     try:
@@ -1087,17 +1211,20 @@ def main() -> int:
     deploy_maintenance = deploy_age is not None and deploy_age <= _MAX_DEPLOY_AGE_SEC
     state_file = args.state_file or (_REPO_ROOT / "data" / ".cache" / f"liveness-{scope}.json")
     counters_file = state_file.with_name(state_file.stem + ".counters.json")
+    counters = load_state(counters_file)
 
     alerts: list[Alert] = []
+    fleet_rows: list[FleetUnit] = []
     if not deploy_maintenance:
         try:
-            rows = scope_units(scope, load_fleet_manifest())
+            fleet_rows = load_fleet_manifest()
+            rows = scope_units(scope, fleet_rows)
             alerts.extend(evaluate_units(scope, rows))
             alerts.extend(evaluate_heartbeats(rows, now=now, max_age_sec=args.max_heartbeat_age_sec))
         except (OSError, ValueError) as error:
             alerts.append(Alert("manifest", "CRITICAL", f"cannot read the fleet manifest: {error}"))
     if scope == "host":
-        alerts.extend(evaluate_disk())
+        alerts.extend(evaluate_disk(counters=counters, rows=fleet_rows))
         alerts.extend(evaluate_watchdog_chain())
     if args.host_clock_check:
         alerts.extend(evaluate_host_clock())
@@ -1113,7 +1240,6 @@ def main() -> int:
         [os.environ["LIVENESS_CAPTURE_STATUS_FILE"]] if os.environ.get("LIVENESS_CAPTURE_STATUS_FILE") else []
     )
     if capture_status_files and not deploy_maintenance:
-        counters = load_state(counters_file)
         for index, status_file in enumerate(capture_status_files):
             # The first recorder keeps the bare alert keys; later ones are
             # told apart by their state directory's name.
@@ -1126,6 +1252,7 @@ def main() -> int:
                 label=label,
             )
             alerts.extend(capture_alerts)
+    if scope == "host" or (capture_status_files and not deploy_maintenance):
         save_state(counters_file, counters)
     if args.upload_stamp_file:
         alerts.extend(
@@ -1153,6 +1280,8 @@ def main() -> int:
     preserved_alert_keys = (
         {key for key in state if key.startswith(_DEPLOY_TRANSITIONAL_ALERT_PREFIXES)} if deploy_maintenance else set()
     )
+    if scope == "host" and not counters.get("disk:forecast_valid") and "disk-growth" in state:
+        preserved_alert_keys.add("disk-growth")
     lines, next_state = select_alerts_to_send(
         alerts,
         state=state,

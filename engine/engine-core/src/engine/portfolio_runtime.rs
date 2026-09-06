@@ -420,6 +420,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return self.append_portfolio_control(WalRecord::PortfolioExitChanged { state: exit });
         }
         self.portfolio_controls.attempted(exit.id, exit.attempt);
+        let origin_ns = clock::now_ns();
         let intent = self.portfolio_exit_intent(
             exit.strategy,
             exit.symbol,
@@ -431,7 +432,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .prepare_intent(
                 intent,
                 exit.order_id.clone(),
-                clock::now_ns(),
+                origin_ns,
+                Some(crate::ctx::CallbackTiming {
+                    origin_ns: Some(origin_ns),
+                    decided_ns: clock::now_ns(),
+                }),
                 &mut protection,
             )
             .await?
@@ -1100,6 +1105,7 @@ mod tests {
                 },
                 None,
                 clock::now_ns(),
+                None,
                 &mut HashMap::new(),
             )
             .await
@@ -1314,7 +1320,7 @@ mod tests {
                 leverage: None,
             };
             let prepared = engine
-                .prepare_intent(intent, None, clock::now_ns(), &mut HashMap::new())
+                .prepare_intent(intent, None, clock::now_ns(), None, &mut HashMap::new())
                 .await
                 .unwrap()
                 .unwrap();
@@ -1359,7 +1365,7 @@ mod tests {
             leverage: None,
         };
         let prepared = engine
-            .prepare_intent(intent, None, clock::now_ns(), &mut HashMap::new())
+            .prepare_intent(intent, None, clock::now_ns(), None, &mut HashMap::new())
             .await
             .unwrap()
             .unwrap();
@@ -1396,7 +1402,7 @@ mod tests {
             leverage: None,
         };
         assert!(engine
-            .prepare_intent(intent, None, clock::now_ns(), &mut HashMap::new())
+            .prepare_intent(intent, None, clock::now_ns(), None, &mut HashMap::new())
             .await
             .unwrap()
             .is_none());

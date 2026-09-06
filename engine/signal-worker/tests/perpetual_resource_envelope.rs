@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use signal_worker::live::{FUNDING_FETCH_CHUNK_SIZE, KLINE_FETCH_CHUNK_SIZE};
 use signal_worker::model::{
     BinanceWhaleWire, BootstrapCoverage, BybitFundingWire, BybitInstrumentWire, BybitTickerWire,
     SourceCoverage, UniverseIdentity, UniverseMode, WireEvent,
@@ -31,8 +30,6 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 #[test]
 #[ignore = "release-only 270-symbol cold-start, outage, and restart resource envelope"]
 fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
-    assert_eq!(KLINE_FETCH_CHUNK_SIZE, 1);
-    assert_eq!(FUNDING_FETCH_CHUNK_SIZE, 1);
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let config = SignalWorkerConfig::load(
         repo.join("configs/signal-worker.mainnet.json"),
@@ -105,11 +102,10 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
             },
         )?;
     }
-    for (chunk_index, chunk) in carry_symbols.chunks(FUNDING_FETCH_CHUNK_SIZE).enumerate() {
-        let events = chunk
-            .iter()
-            .enumerate()
-            .map(|(offset, symbol)| WireEvent::BybitFundingBatch {
+    for (index, symbol) in carry_symbols.iter().enumerate() {
+        commit_batch(
+            &mut durable,
+            vec![WireEvent::BybitFundingBatch {
                 schema_version: SCHEMA_VERSION,
                 sequence: 0,
                 symbol: symbol.clone(),
@@ -118,14 +114,9 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
                 checked_through_ms: Some(end_ms),
                 replace_coverage: false,
                 emit_lifecycle: false,
-                rows: funding_rows(
-                    start_ms,
-                    end_ms,
-                    chunk_index * FUNDING_FETCH_CHUNK_SIZE + offset,
-                ),
-            })
-            .collect();
-        commit_batch(&mut durable, events)?;
+                rows: funding_rows(start_ms, end_ms, index),
+            }],
+        )?;
     }
     let (coverage, rows) = whale_rows(&carry_symbols, start_ms, end_ms);
     commit(

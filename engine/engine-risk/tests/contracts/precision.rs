@@ -49,7 +49,11 @@ fn canonical_available_margin_rejects_the_order_binary64_would_fund_after_restar
     for account in [account, replay] {
         let mut kernel = Kernel::new(permissive()).unwrap();
         assert!(matches!(
-            kernel.assess(&canonical_entry("1"), &account),
+            kernel.assess(
+                &canonical_entry("1"),
+                &account,
+                canonical_entry("1").decided_ns
+            ),
             RiskVerdict::Deny {
                 reason: DenyReason::AvailableMarginExhausted { .. }
             }
@@ -62,19 +66,27 @@ fn two_sub_ulp_margin_reservations_cannot_spend_the_same_balance() {
     let mut kernel = Kernel::new(permissive()).unwrap();
     let first = canonical_entry("0.5000000000000000001");
     assert!(matches!(
-        kernel.assess(&first, &account),
+        kernel.assess(&first, &account, first.decided_ns),
         RiskVerdict::Allow { .. }
     ));
     kernel.register_order_with_account("first", &first, first.qty, &account);
     assert!(matches!(
-        kernel.assess(&canonical_entry("0.5"), &account),
+        kernel.assess(
+            &canonical_entry("0.5"),
+            &account,
+            canonical_entry("0.5").decided_ns
+        ),
         RiskVerdict::Deny {
             reason: DenyReason::AvailableMarginExhausted { .. }
         }
     ));
     kernel.complete_order("first", 2 * SEC);
     assert!(matches!(
-        kernel.assess(&canonical_entry("0.5"), &account),
+        kernel.assess(
+            &canonical_entry("0.5"),
+            &account,
+            canonical_entry("0.5").decided_ns
+        ),
         RiskVerdict::Deny {
             reason: DenyReason::AvailableMarginExhausted { .. }
         }
@@ -85,7 +97,7 @@ fn two_sub_ulp_margin_reservations_cannot_spend_the_same_balance() {
     second.decided_ns = 3 * SEC;
     kernel.observe_account_view(&refreshed);
     assert!(matches!(
-        kernel.assess(&second, &refreshed),
+        kernel.assess(&second, &refreshed, second.decided_ns),
         RiskVerdict::Allow { .. }
     ));
 }
@@ -102,7 +114,11 @@ fn canonical_held_notional_cannot_round_down_onto_the_gross_cap() {
     account.positions.push(held);
     let mut kernel = Kernel::new(cfg).unwrap();
     assert!(matches!(
-        kernel.assess(&canonical_entry("0.0000000000000000001"), &account),
+        kernel.assess(
+            &canonical_entry("0.0000000000000000001"),
+            &account,
+            canonical_entry("0.0000000000000000001").decided_ns
+        ),
         RiskVerdict::Deny {
             reason: DenyReason::ComponentGrossBreached { .. }
         }
@@ -136,7 +152,7 @@ fn exact_sleeve_exit_and_private_partial_fill_keep_the_last_native_unit() {
     intent.stop = None;
     let mut kernel = Kernel::new(permissive()).unwrap();
     assert_eq!(
-        kernel.assess_portfolio(&intent, &account, &state),
+        kernel.assess_portfolio(&intent, &account, &state, intent.decided_ns),
         PortfolioRiskVerdict::Allow {
             qty: quantity.clone(),
             venue_reduce_only: true
@@ -184,13 +200,21 @@ fn malformed_canonical_account_cannot_release_a_held_reservation() {
     malformed.exact_amounts.as_mut().unwrap().available_usdt = number("2");
     kernel.observe_account_view(&malformed);
     assert!(matches!(
-        kernel.assess(&canonical_entry("0.5"), &account),
+        kernel.assess(
+            &canonical_entry("0.5"),
+            &account,
+            canonical_entry("0.5").decided_ns
+        ),
         RiskVerdict::Deny {
             reason: DenyReason::AvailableMarginExhausted { .. }
         }
     ));
     assert!(matches!(
-        kernel.assess(&canonical_entry("0.5"), &malformed),
+        kernel.assess(
+            &canonical_entry("0.5"),
+            &malformed,
+            canonical_entry("0.5").decided_ns
+        ),
         RiskVerdict::Deny { .. }
     ));
 }
@@ -227,7 +251,11 @@ fn exact_rolling_loss_sum_survives_cancellation_and_restart() {
     let mut restarted = Kernel::new(permissive()).unwrap();
     restarted.restore_rolling_loss_rows(&replay);
     assert!(matches!(
-        restarted.assess(&canonical_entry("1"), &canonical_account("100")),
+        restarted.assess(
+            &canonical_entry("1"),
+            &canonical_account("100"),
+            canonical_entry("1").decided_ns
+        ),
         RiskVerdict::Deny {
             reason: DenyReason::RollingLossTripped { .. }
         }
@@ -268,12 +296,20 @@ fn malformed_canonical_loss_never_disappears_from_a_live_window_or_replay() {
         .positions
         .push(position(BUSDT, Side::Buy, 1.0, 1.0, true));
     assert!(matches!(
-        kernel.assess(&exit(CARRY, BUSDT, Side::Sell, 1.0, 1.0, SEC), &account),
+        kernel.assess(
+            &exit(CARRY, BUSDT, Side::Sell, 1.0, 1.0, SEC),
+            &account,
+            SEC
+        ),
         RiskVerdict::Allow { .. }
     ));
     assert!(kernel.rolling_loss().tripped);
     assert!(matches!(
-        kernel.assess(&canonical_entry("1"), &canonical_account("100")),
+        kernel.assess(
+            &canonical_entry("1"),
+            &canonical_account("100"),
+            canonical_entry("1").decided_ns
+        ),
         RiskVerdict::Deny {
             reason: DenyReason::UnknownState { .. }
         }
@@ -314,7 +350,9 @@ fn canonical_order_price_changes_margin_admission_and_replayed_reservations() {
     let account = canonical_account("1");
     let order = with_prices(canonical_entry("1"), "1.0000000000000000001", "0.5");
     assert!(matches!(
-        Kernel::new(permissive()).unwrap().assess(&order, &account),
+        Kernel::new(permissive())
+            .unwrap()
+            .assess(&order, &account, order.decided_ns),
         RiskVerdict::Deny {
             reason: DenyReason::AvailableMarginExhausted { .. }
         }
@@ -325,7 +363,11 @@ fn canonical_order_price_changes_margin_admission_and_replayed_reservations() {
         let mut kernel = Kernel::new(permissive()).unwrap();
         kernel.register_order_with_account("known-native-price", &order, order.qty, &account);
         assert!(matches!(
-            kernel.assess(&canonical_entry("0.5"), &account),
+            kernel.assess(
+                &canonical_entry("0.5"),
+                &account,
+                canonical_entry("0.5").decided_ns
+            ),
             RiskVerdict::Deny {
                 reason: DenyReason::AvailableMarginExhausted { .. }
             }
@@ -341,9 +383,11 @@ fn canonical_short_stop_remains_protective_when_its_projection_equals_the_limit(
     let replay = serde_json::from_slice(&serde_json::to_vec(&intent).unwrap()).unwrap();
     for intent in [intent, replay] {
         assert_eq!(
-            Kernel::new(permissive())
-                .unwrap()
-                .assess(&intent, &canonical_account("10")),
+            Kernel::new(permissive()).unwrap().assess(
+                &intent,
+                &canonical_account("10"),
+                intent.decided_ns
+            ),
             RiskVerdict::Allow { qty: 1.0 }
         );
     }
@@ -362,7 +406,11 @@ fn canonical_ambiguous_price_range_reserves_the_higher_possible_native_tick() {
         &account,
     );
     assert!(matches!(
-        kernel.assess(&canonical_entry("0.5"), &account),
+        kernel.assess(
+            &canonical_entry("0.5"),
+            &account,
+            canonical_entry("0.5").decided_ns
+        ),
         RiskVerdict::Deny {
             reason: DenyReason::AvailableMarginExhausted { .. }
         }
@@ -378,9 +426,11 @@ fn contradictory_canonical_order_price_or_stop_cannot_authorize_an_order() {
             stop_trigger_price: Some(dec(stop)),
         }));
         assert!(matches!(
-            Kernel::new(permissive())
-                .unwrap()
-                .assess(&intent, &canonical_account("10")),
+            Kernel::new(permissive()).unwrap().assess(
+                &intent,
+                &canonical_account("10"),
+                intent.decided_ns
+            ),
             RiskVerdict::Deny {
                 reason: DenyReason::UnknownState { .. }
             }
@@ -395,7 +445,7 @@ fn scalar_strategy_prices_use_the_same_decimal_units_as_the_outbound_wire() {
     assert_eq!(intent.stop_price().unwrap(), Some(dec("0.05")));
     let mut kernel = Kernel::new(permissive()).unwrap();
     assert_eq!(
-        kernel.assess(&intent, &canonical_account("0.3")),
+        kernel.assess(&intent, &canonical_account("0.3"), intent.decided_ns),
         RiskVerdict::Allow { qty: 3.0 }
     );
 }
@@ -441,7 +491,11 @@ fn native_valuation_debt_blocks_entries_through_rotation_but_keeps_reductions_an
         for kernel in [&mut kernel, &mut restored] {
             assert!(kernel.rolling_loss().tripped);
             assert!(matches!(
-                kernel.assess(&canonical_entry("1"), &account),
+                kernel.assess(
+                    &canonical_entry("1"),
+                    &account,
+                    canonical_entry("1").decided_ns
+                ),
                 RiskVerdict::Deny {
                     reason: DenyReason::UnknownState { .. }
                 }
@@ -454,7 +508,7 @@ fn native_valuation_debt_blocks_entries_through_rotation_but_keeps_reductions_an
             exit.stop = None;
             exit.reduce_only = true;
             assert!(matches!(
-                kernel.assess(&exit, &held),
+                kernel.assess(&exit, &held, exit.decided_ns),
                 RiskVerdict::Allow { .. }
             ));
             kernel.observe_wall_clock_ms(999 + engine_risk::ROLLING_LOSS_WINDOW_MS);
@@ -462,7 +516,11 @@ fn native_valuation_debt_blocks_entries_through_rotation_but_keeps_reductions_an
             kernel.observe_wall_clock_ms(1000 + engine_risk::ROLLING_LOSS_WINDOW_MS);
             assert!(!kernel.rolling_loss().tripped);
             assert!(matches!(
-                kernel.assess(&canonical_entry("1"), &account),
+                kernel.assess(
+                    &canonical_entry("1"),
+                    &account,
+                    canonical_entry("1").decided_ns
+                ),
                 RiskVerdict::Allow { .. }
             ));
         }

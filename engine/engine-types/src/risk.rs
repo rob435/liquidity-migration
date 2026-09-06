@@ -319,13 +319,16 @@ pub enum PortfolioRiskVerdict {
 }
 
 /// The account-level capital controls. Unknown state refuses the order.
+/// Assessment `now_ns` is current monotonic admission time; persisted decision
+/// timestamps can belong to a previous process.
 pub trait RiskKernel {
-    fn assess(&mut self, intent: &Intent, account: &AccountView) -> RiskVerdict;
+    fn assess(&mut self, intent: &Intent, account: &AccountView, now_ns: u64) -> RiskVerdict;
     fn assess_portfolio(
         &mut self,
         _intent: &Intent,
         _account: &AccountView,
         _portfolio: &crate::portfolio::PortfolioState,
+        _now_ns: u64,
     ) -> PortfolioRiskVerdict {
         PortfolioRiskVerdict::Deny {
             reason: DenyReason::UnknownState {
@@ -340,6 +343,7 @@ pub trait RiskKernel {
         _intent: &Intent,
         _account: &AccountView,
         _portfolio: &crate::portfolio::PortfolioState,
+        _now_ns: u64,
     ) -> PortfolioRiskVerdict {
         PortfolioRiskVerdict::Deny {
             reason: DenyReason::UnknownState {
@@ -367,8 +371,9 @@ pub trait RiskKernel {
         _client_order_id: &str,
         intent: &Intent,
         account: &AccountView,
+        now_ns: u64,
     ) -> RiskVerdict {
-        self.assess(intent, account)
+        self.assess(intent, account, now_ns)
     }
     /// Keep internal exposure/fill accounting current.
     fn on_update(&mut self, update: &OrderUpdate);

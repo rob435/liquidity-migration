@@ -1,7 +1,11 @@
 use super::*;
 use crate::effects::EffectKey;
 
-type PlacementEffect = (Intent, Option<EffectKey>);
+type PlacementEffect = (
+    Intent,
+    Option<EffectKey>,
+    Option<crate::ctx::CallbackTiming>,
+);
 type CancellationEffect = (SymbolId, String, Option<EffectKey>);
 
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
@@ -106,7 +110,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         let mut intents = Vec::with_capacity(pending.len());
         let mut completed = Vec::with_capacity(pending.len());
-        for (intent, effect) in pending {
+        for (intent, effect, timing) in pending {
             let order_id = effect.and_then(|key| {
                 self.host
                     .effects
@@ -122,7 +126,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.complete_effect(effect)?;
                 continue;
             }
-            intents.push((intent, order_id));
+            intents.push((intent, order_id, timing));
             completed.push(effect);
         }
         let sent = self.process_intents(intents, origin_ns).await?;
@@ -165,6 +169,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             index,
                         }),
                         callback_id: Some(transition.id),
+                        timing: None,
                     });
                 }
             }

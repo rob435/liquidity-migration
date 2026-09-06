@@ -2781,36 +2781,6 @@ async fn boot_reads_the_rules_and_the_account_before_anything_else() {
     assert_eq!(steps[9], Step::ReadAccount);
 }
 
-#[tokio::test]
-async fn the_bench_runs_the_real_loop_and_fills_the_histograms() {
-    let path = temp_path("bench-smoke");
-    let options = BenchOptions {
-        events: 300,
-        rate: 0,
-        every_nth: 10,
-        symbols: vec!["BTCUSDT".to_string()],
-        wal_path: path.path().to_path_buf(),
-        fills: false,
-        venue_delay: std::time::Duration::ZERO,
-    };
-    let result = bench::run(&options).await.expect("bench");
-    assert_eq!(result.events, 300);
-    assert_eq!(result.orders, 30, "one order every tenth quote");
-    for (segment, q) in &result.segments {
-        assert!(q.count > 0, "{segment:?} recorded nothing");
-        if *segment != crate::ledger::Segment::Decide {
-            assert!(q.p50_ns > 0, "{segment:?} p50 is zero");
-        }
-        assert!(q.max_ns >= q.p50_ns);
-    }
-    // The log is real and reads back.
-    let report = crate::replay::read(path.path()).unwrap();
-    assert!(report.records > 30, "records: {}", report.records);
-    assert!(!report.torn_tail);
-    assert!(result.table().contains("write it down"));
-    assert!(result.as_json().contains("\"orders\":30"));
-}
-
 #[tokio::test(start_paused = true)]
 async fn a_flooded_sleeve_cannot_discard_another_sleeves_exit() {
     let burst = BurstEmitter {

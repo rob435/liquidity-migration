@@ -2,7 +2,7 @@
 # unit|kind|realm|lifecycle|stop_order|activation|operator|depends_on|health|output_artifact|timer_service|first_delay_s|cadence_s|accuracy_s|runtime_s|input_artifact
 liquidity-migration-market-tape-upload.timer|timer|shared|independent|10|always|direct|liquidity-migration-market-tape-upload.service|timer|-|liquidity-migration-market-tape-upload.service|600|3600|60|1800|-
 liquidity-migration-market-tape-upload.service|service|shared|independent|20|job|direct|liquidity-migration-forward-capture.service|none|-|-|-|-|-|-|-
-liquidity-migration-backup.timer|timer|shared|independent|30|always|none|liquidity-migration-backup.service|timer|-|liquidity-migration-backup.service|21600|21600|300|900|-
+liquidity-migration-backup.timer|timer|shared|independent|30|always|none|liquidity-migration-backup.service|timer|-|liquidity-migration-backup.service|21600|21600|300|3600|-
 liquidity-migration-backup.service|service|shared|independent|40|job|none|-|none|-|-|-|-|-|-|-
 liquidity-migration-equity-recorder.timer|timer|shared|independent|70|always|direct|liquidity-migration-equity-recorder.service|timer|-|liquidity-migration-equity-recorder.service|60|60|5|30|-
 liquidity-migration-equity-recorder.service|service|shared|independent|80|job|direct|-|none|-|-|-|-|-|-|-

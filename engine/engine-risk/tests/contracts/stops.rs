@@ -28,9 +28,11 @@ fn denied_for_missing_stop(verdict: RiskVerdict) -> bool {
 fn a_naked_entry_is_refused() {
     let mut kernel = kernel();
     let intent = naked_entry(CARRY, BUSDT, Side::Buy, 0.1, 10.0, NOW);
-    assert!(denied_for_missing_stop(
-        kernel.assess(&intent, &flat(250_000.0, NOW))
-    ));
+    assert!(denied_for_missing_stop(kernel.assess(
+        &intent,
+        &flat(250_000.0, NOW),
+        intent.decided_ns
+    )));
 }
 
 #[test]
@@ -39,13 +41,13 @@ fn an_entry_carrying_its_stop_is_allowed_on_both_sides() {
     let mut kernel = kernel();
     let long = entry(CARRY, BUSDT, Side::Buy, 2.0, 10.0, 9.3, NOW);
     assert_eq!(
-        kernel.assess(&long, &flat(250_000.0, NOW)),
+        kernel.assess(&long, &flat(250_000.0, NOW), long.decided_ns),
         RiskVerdict::Allow { qty: 2.0 }
     );
 
     let short = entry(CARRY, CUSDT, Side::Sell, 2.0, 10.0, 10.7, NOW);
     assert_eq!(
-        kernel.assess(&short, &flat(250_000.0, NOW)),
+        kernel.assess(&short, &flat(250_000.0, NOW), short.decided_ns),
         RiskVerdict::Allow { qty: 2.0 }
     );
 }
@@ -59,14 +61,22 @@ fn a_stop_on_the_wrong_side_of_the_entry_is_no_stop() {
     for trigger in [11.0, 10.0] {
         let intent = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, trigger, NOW);
         assert!(
-            denied_for_missing_stop(kernel.assess(&intent, &flat(250_000.0, NOW))),
+            denied_for_missing_stop(kernel.assess(
+                &intent,
+                &flat(250_000.0, NOW),
+                intent.decided_ns
+            )),
             "long stop at {trigger} must be refused"
         );
     }
     for trigger in [9.0, 10.0] {
         let intent = entry(CARRY, BUSDT, Side::Sell, 1.0, 10.0, trigger, NOW);
         assert!(
-            denied_for_missing_stop(kernel.assess(&intent, &flat(250_000.0, NOW))),
+            denied_for_missing_stop(kernel.assess(
+                &intent,
+                &flat(250_000.0, NOW),
+                intent.decided_ns
+            )),
             "short stop at {trigger} must be refused"
         );
     }
@@ -83,7 +93,11 @@ fn a_stop_that_is_not_a_positive_price_reads_as_absent() {
             trigger_px: trigger,
         });
         assert!(
-            denied_for_missing_stop(kernel.assess(&intent, &flat(250_000.0, NOW))),
+            denied_for_missing_stop(kernel.assess(
+                &intent,
+                &flat(250_000.0, NOW),
+                intent.decided_ns
+            )),
             "stop {trigger} must read as absent"
         );
     }
@@ -99,7 +113,10 @@ fn an_exit_carries_no_stop_and_is_allowed_without_one() {
         NOW,
     );
     let out = exit(CARRY, BUSDT, Side::Sell, 2.0, 10.0, NOW);
-    assert_eq!(kernel.assess(&out, &held), RiskVerdict::Allow { qty: 2.0 });
+    assert_eq!(
+        kernel.assess(&out, &held, out.decided_ns),
+        RiskVerdict::Allow { qty: 2.0 }
+    );
 }
 
 #[test]
@@ -113,16 +130,20 @@ fn no_new_risk_while_a_held_position_has_no_stop() {
         NOW,
     );
     let scale_in = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.3, NOW);
-    assert!(denied_for_missing_stop(
-        kernel.assess(&scale_in, &unprotected)
-    ));
+    assert!(denied_for_missing_stop(kernel.assess(
+        &scale_in,
+        &unprotected,
+        scale_in.decided_ns
+    )));
 
     // Another symbol entirely is refused too: the account-level health chain
     // blocks the book, not just the symbol.
     let elsewhere = entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.3, NOW);
-    assert!(denied_for_missing_stop(
-        kernel.assess(&elsewhere, &unprotected)
-    ));
+    assert!(denied_for_missing_stop(kernel.assess(
+        &elsewhere,
+        &unprotected,
+        elsewhere.decided_ns
+    )));
 }
 
 #[test]
@@ -136,7 +157,7 @@ fn an_exit_is_allowed_while_the_book_is_unprotected() {
     );
     let out = exit(CARRY, BUSDT, Side::Sell, 2.0, 10.0, NOW);
     assert_eq!(
-        kernel.assess(&out, &unprotected),
+        kernel.assess(&out, &unprotected, out.decided_ns),
         RiskVerdict::Allow { qty: 2.0 }
     );
 }
@@ -151,13 +172,15 @@ fn a_stop_must_clear_every_price_the_order_could_fill_at() {
     // A stop at 11.0 is below the last price but not below the limit this
     // order may fill at.
     let intent = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 11.0, NOW);
-    assert!(denied_for_missing_stop(
-        kernel.assess(&intent, &flat(250_000.0, NOW))
-    ));
+    assert!(denied_for_missing_stop(kernel.assess(
+        &intent,
+        &flat(250_000.0, NOW),
+        intent.decided_ns
+    )));
 
     let clear = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.3, NOW);
     assert_eq!(
-        kernel.assess(&clear, &flat(250_000.0, NOW)),
+        kernel.assess(&clear, &flat(250_000.0, NOW), clear.decided_ns),
         RiskVerdict::Allow { qty: 1.0 }
     );
 }
@@ -170,12 +193,14 @@ fn a_market_entry_is_judged_against_the_last_known_price() {
     kernel.observe_price(BUSDT, 10.0);
     let good = market_entry(CARRY, BUSDT, Side::Buy, 1.0, 9.3, NOW);
     assert_eq!(
-        kernel.assess(&good, &flat(250_000.0, NOW)),
+        kernel.assess(&good, &flat(250_000.0, NOW), good.decided_ns),
         RiskVerdict::Allow { qty: 1.0 }
     );
 
     let crossed = market_entry(CARRY, BUSDT, Side::Buy, 1.0, 10.7, NOW);
-    assert!(denied_for_missing_stop(
-        kernel.assess(&crossed, &flat(250_000.0, NOW))
-    ));
+    assert!(denied_for_missing_stop(kernel.assess(
+        &crossed,
+        &flat(250_000.0, NOW),
+        crossed.decided_ns
+    )));
 }

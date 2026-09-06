@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import configparser
 import importlib.util
 import io
 import json
@@ -10,6 +11,7 @@ import sys
 import time
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +23,281 @@ assert spec is not None and spec.loader is not None
 liveness = importlib.util.module_from_spec(spec)
 sys.modules["check_fleet_liveness"] = liveness
 spec.loader.exec_module(liveness)
+
+
+def test_host_forecasts_disk_floor_before_next_observation(tmp_path: Path, monkeypatch, capsys) -> None:
+    boot_id = tmp_path / "boot_id"
+    boot_id.write_text("test-boot\n")
+    monkeypatch.setattr(liveness, "_BOOT_ID_FILE", boot_id, raising=False)
+    observed = {"time": 1_000.0, "free": 9_000_000_000}
+    monkeypatch.setattr(liveness.time, "time", lambda: observed["time"])
+    monkeypatch.setattr(liveness.time, "monotonic", lambda: observed["time"])
+    monkeypatch.setattr(liveness.shutil, "disk_usage", lambda _path: SimpleNamespace(free=observed["free"]))
+    monkeypatch.setattr(liveness, "load_fleet_manifest", lambda: [])
+    monkeypatch.setattr(liveness, "evaluate_units", lambda *_args: [])
+    monkeypatch.setattr(liveness, "evaluate_heartbeats", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(liveness, "evaluate_watchdog_chain", lambda: [])
+    monkeypatch.setattr(liveness, "active_deploy_age", lambda *_args, **_kwargs: None)
+    monkeypatch.delenv("ONCALL_DEADMAN_URL", raising=False)
+    monkeypatch.delenv("LIVENESS_CAPTURE_STATUS_FILE", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["check_fleet_liveness.py", "--account-scope", "host", "--state-file", str(tmp_path / "state.json")],
+    )
+    assert liveness.main() == 0
+    assert "disk-growth" not in capsys.readouterr().out
+
+    observed.update(time=1_180.0, free=6_000_000_000)
+    assert liveness.main() == 0
+    output = capsys.readouterr().out
+    assert "WARNING disk-growth" in output
+    assert "60s" in output and "195s" in output
+
+    observed.update(time=1_580.0)
+    assert liveness.main() == 0
+    assert "RESOLVED disk-growth" not in capsys.readouterr().out, "a missed sample is not recovery"
+    observed.update(time=1_760.0)
+    assert liveness.main() == 0
+    assert "RESOLVED disk-growth" in capsys.readouterr().out
+
+
+def test_backup_manifest_runtime_matches_existing_service_timeout() -> None:
+    unit = configparser.ConfigParser(interpolation=None, strict=False)
+    unit.read(ROOT / "deploy/systemd/liquidity-migration-backup.service")
+    rows = (ROOT / "deploy/fleet_manifest.tsv").read_text().splitlines()
+    backup = next(row.split("|") for row in rows if row.startswith("liquidity-migration-backup.timer|"))
+    assert int(backup[14]) == unit.getint("Service", "TimeoutStartSec") == 3_600
+
+
+@pytest.fixture
+def disk_sampler(tmp_path: Path, monkeypatch):
+    observed = {"time": 1_000.0, "free": 9_000_000_000}
+    boot = tmp_path / "boot_id"
+    boot.write_text("first-boot\n")
+    monkeypatch.setattr(liveness, "_BOOT_ID_FILE", boot)
+    monkeypatch.setattr(liveness.time, "monotonic", lambda: observed["time"])
+    monkeypatch.setattr(liveness.shutil, "disk_usage", lambda _path: SimpleNamespace(free=observed["free"]))
+    counters = {"dropped_frames": 7.0}
+
+    def sample(rows=()):
+        return liveness.evaluate_disk(path=str(tmp_path), rows=list(rows), counters=counters)
+
+    return observed, counters, sample
+
+
+def _engine_row(root: Path, realm: str = "demo"):
+    root.mkdir(exist_ok=True)
+    return liveness.FleetUnit(
+        unit=f"liquidity-migration-engine{'-mainnet' if realm == 'mainnet' else ''}.service",
+        kind="service",
+        realm=realm,
+        activation="always" if realm == "demo" else "mainnet",
+        health="active",
+        output_artifact=str(root / "heartbeat.json"),
+        lifecycle="owner",
+    )
+
+
+@pytest.mark.parametrize("free", [8_900_000_000, 9_000_000_000, 10_000_000_000])
+def test_disk_forecast_allows_ordinary_growth_flat_space_and_pruning(disk_sampler, free) -> None:
+    observed, counters, sample = disk_sampler
+    assert sample() == []
+    observed.update(time=1_180.0, free=free)
+    assert sample() == []
+    assert counters["disk:forecast_valid"] == 1.0
+    assert counters["dropped_frames"] == 7.0
+
+
+@pytest.mark.parametrize("consumer", ["tape", "backup", "wal"])
+def test_disk_forecast_uses_host_consumption_without_double_counting_wal(
+    tmp_path: Path, disk_sampler, consumer
+) -> None:
+    observed, counters, sample = disk_sampler
+    row = _engine_row(tmp_path / "demo")
+    wal = Path(row.output_artifact).with_name("engine.wal")
+    wal.write_bytes(b"x" * 100)
+    assert sample([row]) == []
+    observed.update(time=1_180.0, free=6_000_000_000)
+    if consumer == "wal":
+        with wal.open("ab") as handle:
+            handle.truncate(3_000_000_100)
+    else:
+        (tmp_path / consumer).write_bytes(b"unrelated data")
+    alerts = sample([row])
+    assert [(alert.key, alert.severity) for alert in alerts] == [("disk-growth", "WARNING")]
+    assert "16.67 MB/s" in alerts[0].message and "60s" in alerts[0].message
+    expected = "demo=3000000100 bytes (delta +3000000000)" if consumer == "wal" else "demo=100 bytes (delta +0)"
+    assert expected in alerts[0].message
+    assert counters["dropped_frames"] == 7.0
+    due, _ = liveness.select_incidents_to_fire(alerts, state={}, now=1_180.0)
+    assert due == [], "a capacity warning uses the existing warning route"
+
+
+def test_disk_floor_remains_critical_even_without_a_rate(disk_sampler) -> None:
+    observed, counters, sample = disk_sampler
+    observed["free"] = 4_999_999_999
+    alerts = sample()
+    assert [(alert.key, alert.severity) for alert in alerts] == [("disk", "CRITICAL")]
+    assert counters["disk:forecast_valid"] == 1.0
+
+
+@pytest.mark.parametrize("elapsed", [0.0, -1.0, 196.0, float("nan"), float("inf")])
+def test_disk_forecast_restarts_after_invalid_or_stale_sample_time(disk_sampler, elapsed) -> None:
+    observed, counters, sample = disk_sampler
+    sample()
+    observed.update(time=1_000.0 + elapsed, free=6_000_000_000)
+    assert sample() == []
+    assert counters["disk:forecast_valid"] == 0.0
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -1.0, None, True])
+def test_disk_forecast_refuses_invalid_previous_free_space(disk_sampler, value) -> None:
+    observed, counters, sample = disk_sampler
+    sample()
+    key = next(key for key in counters if key.startswith("disk:") and key.endswith(":free"))
+    counters[key] = value
+    observed.update(time=1_180.0, free=6_000_000_000)
+    assert sample() == []
+    assert counters["disk:forecast_valid"] == 0.0
+
+
+@pytest.mark.parametrize("boot_state", ["reboot", "missing", "empty"])
+def test_disk_forecast_does_not_bridge_host_boots_or_missing_boot_identity(
+    tmp_path: Path, disk_sampler, boot_state
+) -> None:
+    observed, counters, sample = disk_sampler
+    sample()
+    boot = tmp_path / "boot_id"
+    if boot_state == "missing":
+        boot.unlink()
+    else:
+        boot.write_text("second-boot" if boot_state == "reboot" else "")
+    observed.update(time=1_180.0, free=6_000_000_000)
+    assert sample() == []
+    assert counters["disk:forecast_valid"] == 0.0
+    assert not any("first-boot" in key for key in counters)
+
+
+def test_wal_metadata_counts_only_family_files_and_deduplicates_inodes(
+    tmp_path: Path, disk_sampler, monkeypatch
+) -> None:
+    _, counters, sample = disk_sampler
+    row = _engine_row(tmp_path / "demo")
+    directory = Path(row.output_artifact).parent
+    family = directory / "engine.wal"
+    family.write_bytes(b"x" * 100)
+    (directory / "engine.wal.000002").write_bytes(b"x" * 200)
+    (directory / "engine.wal.1000000").write_bytes(b"x" * 300)
+    (directory / "engine.wal.18446744073709551615").write_bytes(b"x" * 400)
+    os.link(family, directory / "engine.wal.000003")
+    (directory / "engine.wal.000004").symlink_to(family)
+    (directory / "engine.wal.000005").mkdir()
+    for name in [
+        "engine.wal.000001",
+        "engine.wal.0002",
+        "engine.wal.0000002",
+        "engine.wal.01000000",
+        "engine.wal.18446744073709551616",
+        "engine.wal.000002.tmp",
+        "engine.wal.１２３４５６",
+        "other.wal",
+    ]:
+        (directory / name).write_bytes(b"not this WAL")
+    monkeypatch.setattr(Path, "read_bytes", lambda _path: pytest.fail("WAL content must never be read"))
+    assert sample([row, row]) == []
+    files = {key: value for key, value in counters.items() if key.startswith("wal:demo:")}
+    assert len(files) == 4 and sum(files.values()) == 1_000
+
+
+@pytest.mark.parametrize("mutation", ["rotate", "remove", "truncate", "replace"])
+def test_wal_attribution_handles_rotation_and_rebaselines_changed_family(
+    tmp_path: Path, disk_sampler, mutation
+) -> None:
+    observed, counters, sample = disk_sampler
+    row = _engine_row(tmp_path / "demo")
+    wal = Path(row.output_artifact).with_name("engine.wal")
+    wal.write_bytes(b"x" * 100)
+    sample([row])
+    segment = wal.with_name("engine.wal.000002")
+    segment.write_bytes(b"x" * 200)
+    if mutation == "remove":
+        wal.unlink()
+    elif mutation == "truncate":
+        wal.write_bytes(b"x" * 50)
+    elif mutation == "replace":
+        replacement = wal.with_name("replacement")
+        replacement.write_bytes(b"x" * 100)
+        replacement.replace(wal)
+    observed.update(time=1_180.0, free=6_000_000_000)
+    alerts = sample([row])
+    assert len(alerts) == 1
+    assert ("delta +200" if mutation == "rotate" else "delta unavailable") in alerts[0].message
+    assert len([key for key in counters if key.startswith("wal:")]) == (1 if mutation == "remove" else 2)
+
+
+def test_missing_wal_is_unavailable_and_does_not_silence_host_forecast(tmp_path: Path, disk_sampler) -> None:
+    observed, counters, sample = disk_sampler
+    rows = [_engine_row(tmp_path / "demo"), _engine_row(tmp_path / "mainnet", "mainnet")]
+    sample(rows)
+    observed.update(time=1_180.0, free=6_000_000_000)
+    alerts = sample(rows)
+    assert "demo=unavailable, mainnet=unavailable" in alerts[0].message
+    assert not any(key.startswith("wal:") for key in counters)
+
+
+def test_wal_attribution_keeps_realms_separate_and_unreadable_sizes_unknown(
+    tmp_path: Path, disk_sampler, monkeypatch
+) -> None:
+    observed, counters, sample = disk_sampler
+    rows = [_engine_row(tmp_path / "demo"), _engine_row(tmp_path / "mainnet", "mainnet")]
+    for row in rows:
+        Path(row.output_artifact).with_name("engine.wal").write_bytes(b"x" * 100)
+    sample(rows)
+    funded = Path(rows[1].output_artifact).with_name("engine.wal")
+    funded.write_bytes(b"x" * 150)
+    original_stat = Path.stat
+
+    def stat_with_unreadable_demo(path, **kwargs):
+        if path == Path(rows[0].output_artifact).with_name("engine.wal"):
+            raise PermissionError("metadata unavailable")
+        return original_stat(path, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_with_unreadable_demo)
+    observed.update(time=1_180.0, free=6_000_000_000)
+    alerts = sample(rows)
+    assert "demo=unavailable, mainnet=150 bytes (delta +50)" in alerts[0].message
+    assert not any(key.startswith("wal:demo:") for key in counters)
+
+
+def test_disk_forecast_rebaselines_filesystem_replacement(tmp_path: Path, disk_sampler, monkeypatch) -> None:
+    observed, counters, sample = disk_sampler
+    sample()
+    original_stat = Path.stat
+    device = tmp_path.stat().st_dev
+
+    def replaced_filesystem(path, **kwargs):
+        return SimpleNamespace(st_dev=device + 1) if path == tmp_path else original_stat(path, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", replaced_filesystem)
+    observed.update(time=1_180.0, free=6_000_000_000)
+    assert sample() == []
+    assert counters["disk:forecast_valid"] == 0.0
+
+
+def test_canonical_wal_paths_and_forecast_horizon_match_deployed_sources() -> None:
+    import tomllib
+
+    for row in liveness.load_fleet_manifest():
+        if row.unit in liveness._ENGINE_UNITS:
+            config = tomllib.loads((ROOT / f"deploy/engine.{row.realm}.toml.template").read_text())
+            assert config["engine"]["heartbeat_path"] == row.output_artifact
+            assert Path(config["engine"]["wal_path"]) == Path(row.output_artifact).with_name("engine.wal")
+    timer = configparser.ConfigParser(interpolation=None, strict=False)
+    timer.read(ROOT / "deploy/systemd/liquidity-migration-host-liveness.timer")
+    assert timer.get("Timer", "OnUnitActiveSec") == "3min"
+    assert timer.get("Timer", "AccuracySec") == "15s"
+    assert liveness._DISK_FORECAST_SEC == 3 * 60 + 15
 
 
 def test_manifest_loads_and_scopes_are_disjoint() -> None:
@@ -373,6 +650,66 @@ def test_a_latched_engine_and_a_trip_page_under_separate_keys(tmp_path: Path) ->
     alerts = liveness.evaluate_engine_heartbeat("engine", heartbeat)
     assert sorted(alert.key for alert in alerts) == ["may-open:engine", "rolling-loss:engine"]
     assert {alert.severity for alert in alerts} == {"CRITICAL"}
+
+
+def test_strategy_errors_page_while_entries_remain_open_and_use_existing_incident_lifetime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    payload = {
+        "may_open": True,
+        "rolling_loss_tripped": False,
+        "strategy_errors": [
+            {"strategy": "long", "error": "checkpoint persist failed"},
+            {"strategy": "carry", "error": "producer frontier mismatch"},
+        ],
+    }
+    monkeypatch.setattr(liveness, "unit_journal_tail", lambda unit: f"journal for {unit}")
+    for unit in sorted(liveness._ENGINE_UNITS):
+        heartbeat.write_text(json.dumps(payload))
+        key = f"strategy-errors:{unit}"
+        alerts = liveness.evaluate_engine_heartbeat(unit, heartbeat)
+        assert [alert.key for alert in alerts] == [key]
+        assert alerts[0].severity == "CRITICAL"
+        assert "long: checkpoint persist failed" in alerts[0].message
+        assert "carry: producer frontier mismatch" in alerts[0].message
+        lines, state = liveness.select_alerts_to_send(alerts, state={}, now=1_000, cooldown_sec=1_800)
+        due, incidents = liveness.select_incidents_to_fire(alerts, state={}, now=1_000)
+        assert len(lines) == len(due) == 1
+        scope = "mainnet" if "-mainnet" in unit else "demo"
+        assert f"journal for {unit}" in liveness.incident_text(scope, lines, alerts, due)
+        assert liveness.select_alerts_to_send(alerts, state=state, now=1_060, cooldown_sec=1_800) == ([], state)
+        assert liveness.select_incidents_to_fire(alerts, state=incidents, now=1_060) == ([], incidents)
+
+        preserved = {key for key in state if key.startswith(liveness._DEPLOY_TRANSITIONAL_ALERT_PREFIXES)}
+        assert liveness.select_alerts_to_send(
+            [], state=state, now=1_070, cooldown_sec=1_800, preserve_keys=preserved
+        ) == ([], state)
+        assert liveness.select_incidents_to_fire([], state=incidents, now=1_070, preserve_keys=preserved) == (
+            [],
+            incidents,
+        )
+
+        heartbeat.write_text(json.dumps({**payload, "strategy_errors": []}))
+        healthy = liveness.evaluate_engine_heartbeat(unit, heartbeat)
+        assert healthy == []
+        assert liveness.select_alerts_to_send(healthy, state=state, now=1_080, cooldown_sec=1_800) == (
+            [f"RESOLVED {key}"],
+            {},
+        )
+        assert liveness.select_incidents_to_fire(healthy, state=incidents, now=1_080) == ([], {})
+        assert liveness.select_incidents_to_fire(alerts, state={}, now=1_090)[0] == alerts
+
+
+def test_trading_services_bound_repeated_starts_without_a_watchdog_protocol() -> None:
+    for name in ("engine", "engine-mainnet", "signal-worker-demo", "signal-worker-mainnet"):
+        config = configparser.ConfigParser(interpolation=None, strict=False)
+        config.read(ROOT / "deploy" / "systemd" / f"liquidity-migration-{name}.service")
+        assert config.getint("Unit", "StartLimitIntervalSec") == 300
+        assert config.getint("Unit", "StartLimitBurst") == 5
+        assert config.get("Service", "Restart") == "always"
+        assert config.getint("Service", "RestartSec") == 5
+        assert not config.has_option("Service", "WatchdogSec")
 
 
 def test_cooldown_suppresses_repeats_and_reports_resolution() -> None:
@@ -837,7 +1174,7 @@ def test_host_scope_suppresses_transitional_checks_during_a_sanctioned_deploy(
         "evaluate_capture_status",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("capture status queried during deploy")),
     )
-    monkeypatch.setattr(liveness, "evaluate_disk", lambda: [])
+    monkeypatch.setattr(liveness, "evaluate_disk", lambda **_kwargs: [])
     state_file = tmp_path / "state.json"
     state_file.write_text('{"capture-silent": 123.0}', encoding="utf-8")
     monkeypatch.setattr(

@@ -35,6 +35,10 @@ fn projection(frontier: &OrderFillQuantity) -> Result<f64, String> {
 }
 
 impl OrderRec {
+    pub(crate) fn filled_qty(&self) -> Result<f64, String> {
+        projection(&self.fill_quantity)
+    }
+
     pub(crate) fn filled_exact(&self) -> Result<Exact, String> {
         match &self.fill_quantity {
             OrderFillQuantity::Exact { quantity } => Ok(quantity.clone()),
@@ -84,7 +88,7 @@ impl OrderRec {
         &self,
         qty: f64,
         amounts: Option<&ExecutionAmounts>,
-    ) -> Result<(OrderFillQuantity, f64, bool), String> {
+    ) -> Result<(OrderFillQuantity, bool), String> {
         if !qty.is_finite() || qty <= 0.0 {
             return Err("invalid order fill quantity".into());
         }
@@ -129,13 +133,12 @@ impl OrderRec {
             }
             OrderFillQuantity::LegacyBinary64 { .. } => filled + QTY_EPS >= self.request.qty,
         };
-        Ok((frontier, filled, done))
+        Ok((frontier, done))
     }
 
     pub(super) fn commit_fill(&mut self, qty: f64, amounts: Option<&ExecutionAmounts>) {
-        let (frontier, filled, done) = self.next_fill(qty, amounts).expect("validated order fill");
+        let (frontier, done) = self.next_fill(qty, amounts).expect("validated order fill");
         self.fill_quantity = frontier;
-        self.filled_qty = filled;
         self.terminal_checkpoint_ms = None;
         if done {
             self.ending = Some(Ending::Filled);

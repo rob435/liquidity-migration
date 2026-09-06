@@ -1,17 +1,16 @@
 use super::LaneContext;
 use super::{
     bounded_instrument_source_ranges, carry_required_lanes_pending, closed_kline_end,
-    complete_funding_coverage, complete_whale_coverage, funding_job_chunks, heartbeat_status,
-    kline_job_chunks, runtime_status, send_repair_chunk_and_wait, send_whale_chunk_and_wait,
-    source_grid_slots, startup_runtime_status, stream_transport_healthy, trading_intervals_contain,
+    complete_funding_coverage, complete_whale_coverage, heartbeat_status, runtime_status,
+    send_repair_chunk_and_wait, send_whale_chunk_and_wait, source_grid_slots,
+    startup_runtime_status, stream_transport_healthy, trading_intervals_contain,
     transient_recovery_acceptable, validate_funding_source_against_state,
     validate_instrument_source_against_state, validate_source_grid_timestamp,
-    validate_source_page_rows, whale_fetch_bounds, whale_job_chunks, FetchedFunding,
-    FetchedFundingBatch, FetchedInstruments, FetchedKlineBatch, FetchedKlineJobs, FetchedTickers,
-    FetchedUniverseInputs, FetchedWhales, LaneCompletion, LaneState, LiveRunOptions, LiveRunner,
-    StreamEvent, StreamHealth, TickerSample, FUNDING_FETCH_CHUNK_SIZE, KLINE_FETCH_CHUNK_SIZE,
-    LANE_COMPLETION_QUEUE_CAPACITY, STARTUP_MAX_MS, TRANSIENT_RECOVERY_MAX_MS,
-    WHALE_FETCH_CHUNK_SIZE,
+    validate_source_page_rows, whale_fetch_bounds, FetchedFunding, FetchedFundingBatch,
+    FetchedInstruments, FetchedKlineBatch, FetchedKlineJobs, FetchedTickers, FetchedUniverseInputs,
+    FetchedWhales, LaneCompletion, LaneState, LiveRunOptions, LiveRunner, StreamEvent,
+    StreamHealth, TickerSample, LANE_COMPLETION_QUEUE_CAPACITY, STARTUP_MAX_MS,
+    TRANSIENT_RECOVERY_MAX_MS,
 };
 use crate::bybit_ws::{BybitPublicStream, StreamContinuity};
 use crate::config::SignalWorkerConfig;
@@ -500,30 +499,6 @@ fn optional_whale_lane_never_blocks_a_carry_cycle() {
 }
 
 #[test]
-fn funding_fetch_chunks_bound_retained_results_independently_of_population() {
-    let jobs = (0..10_003)
-        .map(|index| (format!("S{index:05}USDT"), 1, 2, false))
-        .collect::<Vec<_>>();
-    let sizes = funding_job_chunks(&jobs)
-        .map(|chunk| chunk.len())
-        .collect::<Vec<_>>();
-
-    assert_eq!(sizes.iter().sum::<usize>(), jobs.len());
-    assert_eq!(sizes.iter().copied().max(), Some(FUNDING_FETCH_CHUNK_SIZE));
-    assert!(sizes
-        .iter()
-        .all(|size| *size > 0 && *size <= FUNDING_FETCH_CHUNK_SIZE));
-    assert_eq!(sizes.last(), Some(&1));
-    let retained_order = funding_job_chunks(&jobs)
-        .flat_map(|chunk| chunk.iter().map(|job| job.0.as_str()))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        retained_order,
-        jobs.iter().map(|job| job.0.as_str()).collect::<Vec<_>>()
-    );
-}
-
-#[test]
 fn source_pagination_grids_have_exact_per_job_row_ceilings() {
     let start = 100 * DAY_MS;
     let carry_end = start + crate::config::MAX_CARRY_SOURCE_HISTORY_HOURS * HOUR_MS;
@@ -589,13 +564,7 @@ fn unaligned_cold_bootstrap_whale_bounds_keep_the_floor_point_fetchable() {
 
 #[tokio::test]
 async fn repair_fetch_waits_for_commit_ack_before_retaining_the_next_result() {
-    assert_eq!(KLINE_FETCH_CHUNK_SIZE, 1);
     assert_eq!(LANE_COMPLETION_QUEUE_CAPACITY, 1);
-    let jobs = (0..10_003)
-        .map(|index| (format!("S{index:05}USDT"), 1, 2))
-        .collect::<Vec<_>>();
-    assert_eq!(kline_job_chunks(&jobs).count(), jobs.len());
-    assert!(kline_job_chunks(&jobs).all(|chunk| chunk.len() == 1));
 
     let (lane_tx, mut lane_rx) = tokio::sync::mpsc::channel(1);
     let producer = tokio::spawn(async move {
@@ -641,13 +610,7 @@ async fn repair_fetch_waits_for_commit_ack_before_retaining_the_next_result() {
 
 #[tokio::test]
 async fn whale_fetch_waits_for_commit_ack_before_retaining_the_next_result() {
-    assert_eq!(WHALE_FETCH_CHUNK_SIZE, 1);
     assert_eq!(LANE_COMPLETION_QUEUE_CAPACITY, 1);
-    let jobs = (0..10_003)
-        .map(|index| (format!("S{index:05}USDT"), 1, 2))
-        .collect::<Vec<_>>();
-    assert_eq!(whale_job_chunks(&jobs).count(), jobs.len());
-    assert!(whale_job_chunks(&jobs).all(|chunk| chunk.len() == 1));
 
     let (lane_tx, mut lane_rx) = tokio::sync::mpsc::channel(1);
     let producer = tokio::spawn(async move {

@@ -12,6 +12,7 @@ fn observe(kernel: &mut Kernel, equity: f64) -> RiskVerdict {
     kernel.assess(
         &entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, now),
         &flat(equity, now),
+        now,
     )
 }
 
@@ -52,7 +53,7 @@ fn a_fill_newer_than_the_view_still_counts_against_the_envelope() {
     let next = entry(CARRY, CUSDT, Side::Buy, 15_000.0, 10.0, 9.0, 3 * SEC);
     let stale_view = flat(250_000.0, SEC);
     assert!(matches!(
-        kernel.assess(&next, &stale_view),
+        kernel.assess(&next, &stale_view, next.decided_ns),
         RiskVerdict::Deny {
             reason: DenyReason::EnvelopeBreached { .. }
         }
@@ -67,7 +68,7 @@ fn a_fill_newer_than_the_view_still_counts_against_the_envelope() {
     );
     let small = entry(CARRY, CUSDT, Side::Buy, 5_000.0, 10.0, 9.0, 4 * SEC);
     assert_eq!(
-        kernel.assess(&small, &caught_up),
+        kernel.assess(&small, &caught_up, small.decided_ns),
         RiskVerdict::Allow { qty: 5_000.0 },
         "the caught-up view must not be double-counted"
     );
@@ -183,7 +184,7 @@ fn a_book_exactly_at_the_allowance_is_allowed() {
     // 500_000 notional * 0.35 = 175_000 = 250_000 * 2.0 * 0.35.
     let intent = entry(CARRY, BUSDT, Side::Buy, 50_000.0, 10.0, 9.0, now);
     assert_eq!(
-        kernel.assess(&intent, &flat(250_000.0, now)),
+        kernel.assess(&intent, &flat(250_000.0, now), intent.decided_ns),
         RiskVerdict::Allow { qty: 50_000.0 }
     );
 }
@@ -193,7 +194,7 @@ fn a_book_one_step_over_the_allowance_is_refused() {
     let mut kernel = Kernel::new(equity_tracking_config()).expect("config");
     let now = SEC;
     let intent = entry(CARRY, BUSDT, Side::Buy, 50_001.0, 10.0, 9.0, now);
-    match kernel.assess(&intent, &flat(250_000.0, now)) {
+    match kernel.assess(&intent, &flat(250_000.0, now), intent.decided_ns) {
         RiskVerdict::Deny {
             reason:
                 DenyReason::EnvelopeBreached {
@@ -220,7 +221,7 @@ fn the_positions_already_held_count_against_the_allowance() {
     // 400_000 held + 110_000 asked is over the 500_000 the allowance funds.
     let intent = entry(CARRY, BUSDT, Side::Buy, 11_000.0, 10.0, 9.0, now);
     assert!(matches!(
-        kernel.assess(&intent, &held),
+        kernel.assess(&intent, &held, intent.decided_ns),
         RiskVerdict::Deny {
             reason: DenyReason::EnvelopeBreached { .. }
         }
@@ -228,7 +229,7 @@ fn the_positions_already_held_count_against_the_allowance() {
 
     let smaller = entry(CARRY, BUSDT, Side::Buy, 10_000.0, 10.0, 9.0, now);
     assert_eq!(
-        kernel.assess(&smaller, &held),
+        kernel.assess(&smaller, &held, smaller.decided_ns),
         RiskVerdict::Allow { qty: 10_000.0 }
     );
 }
@@ -241,12 +242,12 @@ fn a_stop_wider_than_the_disaster_stop_is_charged_at_its_own_distance() {
     // order's own stop half the entry price away.
     let tight = entry(CARRY, BUSDT, Side::Buy, 40_000.0, 10.0, 9.0, now);
     assert_eq!(
-        kernel.assess(&tight, &flat(250_000.0, now)),
+        kernel.assess(&tight, &flat(250_000.0, now), tight.decided_ns),
         RiskVerdict::Allow { qty: 40_000.0 }
     );
 
     let wide = entry(CARRY, BUSDT, Side::Buy, 40_000.0, 10.0, 5.0, now);
-    match kernel.assess(&wide, &flat(250_000.0, now)) {
+    match kernel.assess(&wide, &flat(250_000.0, now), wide.decided_ns) {
         RiskVerdict::Deny {
             reason:
                 DenyReason::EnvelopeBreached {
@@ -264,14 +265,14 @@ fn the_allowance_follows_equity_down() {
     let now = SEC;
     let intent = entry(CARRY, BUSDT, Side::Buy, 50_000.0, 10.0, 9.0, now);
     assert_eq!(
-        kernel.assess(&intent, &flat(250_000.0, now)),
+        kernel.assess(&intent, &flat(250_000.0, now), intent.decided_ns),
         RiskVerdict::Allow { qty: 50_000.0 }
     );
 
     // The same order against a wallet that contracted 1%: the allowance is now
     // 173_250 and 175_000 of worst case no longer fits.
     assert!(matches!(
-        kernel.assess(&intent, &flat(247_500.0, now)),
+        kernel.assess(&intent, &flat(247_500.0, now), intent.decided_ns),
         RiskVerdict::Deny {
             reason: DenyReason::EnvelopeBreached { .. }
         }
@@ -291,7 +292,7 @@ fn an_exit_is_never_blocked_by_the_envelope() {
     );
     let out = exit(CARRY, BUSDT, Side::Sell, 60_000.0, 10.0, now);
     assert_eq!(
-        kernel.assess(&out, &held),
+        kernel.assess(&out, &held, out.decided_ns),
         RiskVerdict::Allow { qty: 60_000.0 }
     );
 }

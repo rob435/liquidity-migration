@@ -6,7 +6,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, Semaphore};
-use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 
 use crate::bybit_ws::{
@@ -34,9 +33,6 @@ const FUNDING_PUBLICATION_LAG_MS: i64 = 5 * 60_000;
 const CARRY_CATCHUP_CHUNK_DAYS: i64 = 1;
 const STARTUP_MAX_MS: i64 = 120 * 60_000;
 const TRANSIENT_RECOVERY_MAX_MS: i64 = 2 * 60_000;
-pub const KLINE_FETCH_CHUNK_SIZE: usize = 1;
-pub const FUNDING_FETCH_CHUNK_SIZE: usize = 1;
-pub const WHALE_FETCH_CHUNK_SIZE: usize = 1;
 const LANE_COMPLETION_QUEUE_CAPACITY: usize = 1;
 
 #[derive(Clone, Debug)]
@@ -256,18 +252,6 @@ struct FetchedFunding {
 type FundingJob = (String, i64, i64, bool);
 type KlineJob = (String, i64, i64);
 type WhaleJob = (String, i64, i64);
-
-fn funding_job_chunks(jobs: &[FundingJob]) -> std::slice::Chunks<'_, FundingJob> {
-    jobs.chunks(FUNDING_FETCH_CHUNK_SIZE)
-}
-
-fn kline_job_chunks(jobs: &[KlineJob]) -> std::slice::Chunks<'_, KlineJob> {
-    jobs.chunks(KLINE_FETCH_CHUNK_SIZE)
-}
-
-fn whale_job_chunks(jobs: &[WhaleJob]) -> std::slice::Chunks<'_, WhaleJob> {
-    jobs.chunks(WHALE_FETCH_CHUNK_SIZE)
-}
 
 fn lane_source_failure(label: &str, error: WorkerError) -> Result<(), WorkerError> {
     if !error.is_lane_local_source_failure() {
@@ -1266,7 +1250,6 @@ impl LiveRunner {
             self.bybit.clone(),
             self.config.sources.bybit_category.clone(),
             self.config.live.kline_page_limit,
-            self.config.live.max_parallel_requests,
             jobs,
             end_ms,
             lanes.repair_epoch,
@@ -1411,10 +1394,7 @@ impl LiveRunner {
         let client = self.bybit.clone();
         let category = self.config.sources.bybit_category.clone();
         let page_limit = self.config.live.funding_page_limit;
-        let parallel = self.config.live.max_parallel_requests;
-        spawn_funding_fetch_lane(
-            lane_tx, client, category, page_limit, parallel, jobs, intervals,
-        );
+        spawn_funding_fetch_lane(lane_tx, client, category, page_limit, jobs, intervals);
         Ok(())
     }
 
@@ -1470,8 +1450,7 @@ impl LiveRunner {
         }
         let client = self.binance.clone();
         let page_limit = self.config.live.whale_page_limit;
-        let parallel = self.config.live.max_parallel_requests;
-        spawn_whale_fetch_lane(lane_tx, client, page_limit, parallel, jobs);
+        spawn_whale_fetch_lane(lane_tx, client, page_limit, jobs);
         Ok(())
     }
 
@@ -1610,8 +1589,8 @@ impl LiveRunner {
             })
             .filter(|(_, symbol_start, symbol_end)| symbol_start < symbol_end)
             .collect::<Vec<_>>();
-        for chunk in kline_job_chunks(&jobs) {
-            let fetched = self.fetch_kline_jobs(chunk.to_vec()).await?;
+        for job in jobs {
+            let fetched = self.fetch_kline_job(job).await?;
             if !self.commit_kline_batches(fetched.batches)? {
                 return Err(WorkerError::state(
                     "cold kline hydration paused by signal spool backpressure",
@@ -1634,16 +1613,12 @@ impl LiveRunner {
         Ok(())
     }
 
-    async fn fetch_kline_jobs(
-        &self,
-        jobs: Vec<(String, i64, i64)>,
-    ) -> Result<FetchedKlineJobs, WorkerError> {
-        fetch_kline_jobs_bounded(
+    async fn fetch_kline_job(&self, job: KlineJob) -> Result<FetchedKlineJobs, WorkerError> {
+        fetch_kline_job(
             self.bybit.clone(),
             self.config.sources.bybit_category.clone(),
             self.config.live.kline_page_limit,
-            self.config.live.max_parallel_requests,
-            jobs,
+            job,
         )
         .await
     }
@@ -1661,14 +1636,13 @@ impl LiveRunner {
             .map(|symbol| (symbol.clone(), start, end, false))
             .collect::<Vec<_>>();
         let mut failures = Vec::new();
-        for chunk in funding_job_chunks(&jobs) {
-            let fetched = fetch_funding_batches(
+        for job in jobs {
+            let fetched = fetch_funding_job(
                 self.bybit.clone(),
                 self.config.sources.bybit_category.clone(),
                 self.config.live.funding_page_limit,
-                self.config.live.max_parallel_requests,
-                chunk.to_vec(),
-                Arc::clone(&instruments),
+                job,
+                &instruments,
             )
             .await?;
             if !self.commit_funding_batches(fetched.batches)? {
@@ -1703,14 +1677,10 @@ impl LiveRunner {
             .iter()
             .map(|symbol| (symbol.clone(), start, end))
             .collect::<Vec<_>>();
-        for chunk in whale_job_chunks(&jobs) {
-            let fetched = fetch_whale_batch(
-                self.binance.clone(),
-                self.config.live.whale_page_limit,
-                self.config.live.max_parallel_requests,
-                chunk.to_vec(),
-            )
-            .await?;
+        for job in jobs {
+            let fetched =
+                fetch_whale_job(self.binance.clone(), self.config.live.whale_page_limit, job)
+                    .await?;
             self.commit_whale_batch(fetched)?;
         }
         Ok(())

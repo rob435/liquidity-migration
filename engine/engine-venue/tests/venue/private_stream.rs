@@ -391,6 +391,36 @@ async fn demo_does_not_request_the_mainnet_only_fast_execution_topic() {
 }
 
 #[tokio::test]
+async fn malformed_account_envelope_redials_and_marks_the_gap_before_more_news() {
+    let server = serve(|connection| {
+        Conn::serving(if connection == 0 {
+            vec![r#"{"topic":"execution","data":null}"#.into()]
+        } else {
+            vec![ack_frame("after-recovery")]
+        })
+    })
+    .await;
+    let mut feed = feed(&server.url);
+    assert!(matches!(
+        read(&mut feed, Duration::from_secs(3), "initial subscription").await,
+        OrderUpdate::StreamReset { .. }
+    ));
+    assert!(
+        matches!(tokio::time::timeout(Duration::from_secs(3), feed.next_update()).await.unwrap(),
+        Err(FeedError::BadMessage(message)) if message.contains("non-array data"))
+    );
+    assert!(matches!(
+        read(&mut feed, Duration::from_secs(3), "recovery watermark").await,
+        OrderUpdate::StreamReset { .. }
+    ));
+    assert!(
+        matches!(read(&mut feed, Duration::from_secs(3), "post-recovery news").await,
+        OrderUpdate::Ack(ack) if ack.client_order_id == "after-recovery")
+    );
+    assert_eq!(server.connections(), 2);
+}
+
+#[tokio::test]
 async fn a_refused_auth_is_reported_not_swallowed() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

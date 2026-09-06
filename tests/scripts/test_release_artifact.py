@@ -22,11 +22,12 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts" / "release_artifact.py"
 COMMIT = "a" * 40
-BINARIES = ("engine", "signal-worker", "market-tape")
+BINARIES = ("engine", "engine-tools", "signal-worker")
 
 
 def _remote_function(name: str) -> str:
-    remote = (ROOT / "scripts" / "deploy_vps_live.sh").read_text()
+    script = "deploy_vps_live.sh" if name == "stage_release_binaries" else "vps/deploy_remote.sh"
+    remote = (ROOT / "scripts" / script).read_text()
     body = remote[remote.index(f"{name}() {{") :]
     return body[: body.index("\n}\n") + 3]
 
@@ -64,8 +65,8 @@ build_engine
             "CARGO_TARGET_ROOT": str(target),
             "RUST_TOOLCHAIN_DIR": str(tmp_path / "rust"),
             "ENGINE_BINARY": str(release / "bin" / "engine"),
+            "ENGINE_TOOLS_BINARY": str(release / "bin" / "engine-tools"),
             "SIGNAL_WORKER_BINARY": str(release / "bin" / "signal-worker"),
-            "MARKET_TAPE_BINARY": str(release / "bin" / "market-tape"),
             "DEPLOYED_COMMIT_FILE": str(release / "deployed-commit"),
             "CARGO_CALLED": str(tmp_path / "cargo-called"),
             "QUALIFIED_RELEASE_DIR": "",
@@ -165,7 +166,7 @@ def qualification_workspace(
                 binary.chmod(0o755)
         if phase == behavior.get("fail"):
             raise subprocess.CalledProcessError(7, command)
-        if phase == "market-tape":
+        if phase == "signal-worker":
             if behavior.get("mutate") == "binary":
                 (release / "engine").write_bytes(b"replaced after tests")
             elif behavior.get("mutate") == "source":
@@ -241,7 +242,7 @@ def test_verifier_refuses_mismatched_or_incomplete_artifacts(
         manifest["wal_compatibility"] = "certified"
         files["qualification.json"] = json.dumps(manifest).encode()
     else:
-        del files["market-tape"]
+        del files["signal-worker"]
     bundle = tmp_path / "release.tar.gz"
     _write_tar(bundle, files)
     output = tmp_path / "unpacked"
@@ -330,8 +331,8 @@ def test_qualification_preflight_runs_before_remote_checkout_or_install() -> Non
     assert deploy.index("build_engine") < deploy.index("install_release")
     install = _remote_function("install_release")
     assert "$QUALIFIED_RELEASE_DIR/engine" in install
+    assert "$QUALIFIED_RELEASE_DIR/engine-tools" in install
     assert "$QUALIFIED_RELEASE_DIR/signal-worker" in install
-    assert "$QUALIFIED_RELEASE_DIR/market-tape" in install
     assert ".previous" not in install
 
 
@@ -361,7 +362,7 @@ def test_qualification_packages_the_tested_native_bytes_without_rebuilding(
         assert (tmp_path / "verified" / name).read_bytes() == (release / name).read_bytes()
 
 
-@pytest.mark.parametrize("phase", ["test", "account_state_soak", "engine", "signal-worker", "market-tape"])
+@pytest.mark.parametrize("phase", ["test", "account_state_soak", "engine", "engine-tools", "signal-worker"])
 def test_failed_qualification_cannot_publish_an_artifact(
     tmp_path: Path,
     artifact_module: ModuleType,
@@ -473,8 +474,8 @@ gh() {
     esac
 }
 """
-        + _remote_function("stage_qualified_binaries")
-        + '\nstage_qualified_binaries "$COMMIT" fixture-host',
+        + _remote_function("stage_release_binaries")
+        + '\nstage_release_binaries "$COMMIT" fixture-host',
         env={
             **os.environ,
             "LOCAL_REPOSITORY": str(ROOT),

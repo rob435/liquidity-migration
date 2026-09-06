@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
 import sys
 import time
@@ -43,6 +44,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MANIFEST = _REPO_ROOT / "deploy" / "fleet_manifest.tsv"
 _DEFAULT_STATE_DIR = Path("/var/lib/liquidity-migration/equity")
 _PUSH_TIMEOUT_S = 10.0
+# Realm heartbeats and host recorder status use the fleet liveness limits.
+_HEARTBEAT_MAX_AGE_MS = 60_000
+_RECORDER_MAX_AGE_MS = 120_000
 
 # One append is one line, well under PIPE_BUF, and this is the only writer.
 _MAX_LINE_BYTES = 4096
@@ -126,21 +130,57 @@ def _count(value: Any) -> int:
     return len(value) if isinstance(value, (list, dict)) else 0
 
 
-def engine_sample(realm: str, path: Path, now_ms: int) -> dict[str, Any]:
+def _read_source(path: Path, now_ms: int | None) -> tuple[int, Any, OSError | ValueError | None]:
+    payload, error = None, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as caught:
+        error = caught
+    # A producer may update while this observer reads the previous source.
+    return time.time_ns() // 1_000_000 if now_ms is None else now_ms, payload, error
+
+
+def _unavailable_source(
+    sample: dict[str, Any],
+    timestamp: Any,
+    *,
+    units_per_ms: int = 1,
+    max_age_ms: int,
+    age_key: str,
+) -> dict[str, Any] | None:
+    now_ms = sample["ts_ms"]
+    if (
+        isinstance(timestamp, bool)
+        or not isinstance(timestamp, (int, float))
+        or timestamp <= 0
+        or (isinstance(timestamp, float) and not math.isfinite(timestamp))
+        or timestamp // units_per_ms > now_ms
+    ):
+        return {**sample, "state": "unreadable", "error": "source timestamp is missing, invalid, or in the future"}
+    # Compare source and observation at the JSONL's millisecond precision.
+    age_ms = now_ms - timestamp // units_per_ms
+    if age_ms > max_age_ms:
+        return {**sample, "state": "stale", age_key: round(age_ms)}
+    return None
+
+
+def engine_sample(realm: str, path: Path, now_ms: int | None = None) -> dict[str, Any]:
     """The heartbeat's numbers, or a line saying why there are none."""
+    now_ms, beat, error = _read_source(path, now_ms)
     sample: dict[str, Any] = {"ts_ms": now_ms, "realm": realm, "kind": "engine"}
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    if isinstance(error, FileNotFoundError):
         return {**sample, "state": "absent"}
-    except OSError as error:
+    if isinstance(error, OSError):
         return {**sample, "state": "unreadable", "error": str(error)}
-    try:
-        beat = json.loads(raw)
-    except ValueError as error:
+    if error is not None:
         return {**sample, "state": "unparsable", "error": str(error)}
     if not isinstance(beat, dict):
         return {**sample, "state": "unparsable", "error": "heartbeat is not an object"}
+    unavailable = _unavailable_source(
+        sample, beat.get("wall_ts_ms"), max_age_ms=_HEARTBEAT_MAX_AGE_MS, age_key="heartbeat_age_ms"
+    )
+    if unavailable is not None:
+        return unavailable
 
     written_ms = _number(beat.get("wall_ts_ms"))
     observed_ms = _number(beat.get("account_observed_wall_ts_ms"))
@@ -226,17 +266,21 @@ def _sleeve_key(strategy: Any) -> str:
     return strategy if isinstance(strategy, str) and strategy else "unattributed"
 
 
-def worker_sample(realm: str, path: Path, now_ms: int) -> dict[str, Any]:
+def worker_sample(realm: str, path: Path, now_ms: int | None = None) -> dict[str, Any]:
     """The decision producer's own health verdict and its supporting facts."""
+    now_ms, beat, error = _read_source(path, now_ms)
     sample: dict[str, Any] = {"ts_ms": now_ms, "realm": realm, "kind": "worker"}
-    try:
-        beat = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    if isinstance(error, FileNotFoundError):
         return {**sample, "state": "absent"}
-    except (OSError, ValueError) as error:
+    if error is not None:
         return {**sample, "state": "unreadable", "error": str(error)}
     if not isinstance(beat, dict):
         return {**sample, "state": "unreadable", "error": "heartbeat is not an object"}
+    unavailable = _unavailable_source(
+        sample, beat.get("updated_at_ms"), max_age_ms=_HEARTBEAT_MAX_AGE_MS, age_key="heartbeat_age_ms"
+    )
+    if unavailable is not None:
+        return unavailable
 
     written_ms = _number(beat.get("updated_at_ms"))
     last_frame_ms = _number(beat.get("bybit_ws_last_frame_ts_ms"))
@@ -290,16 +334,24 @@ def _age_ms(now_ms: int, then_ms: float | None) -> float | None:
     return None if then_ms is None else max(0.0, now_ms - then_ms)
 
 
-def recorder_sample(name: str, path: Path, now_ms: int) -> dict[str, Any]:
+def recorder_sample(name: str, path: Path, now_ms: int | None = None) -> dict[str, Any]:
     """What the tape recorder took in, and how close it is to its allowance."""
+    now_ms, status, error = _read_source(path, now_ms)
     sample: dict[str, Any] = {"ts_ms": now_ms, "realm": name, "kind": "recorder"}
-    try:
-        status = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
+    if error is not None:
         state = "absent" if isinstance(error, FileNotFoundError) else "unreadable"
         return {**sample, "state": state, "error": str(error)}
     if not isinstance(status, dict):
         return {**sample, "state": "unreadable", "error": "status is not an object"}
+    unavailable = _unavailable_source(
+        sample,
+        status.get("recorded_at_ns"),
+        units_per_ms=1_000_000,
+        max_age_ms=_RECORDER_MAX_AGE_MS,
+        age_key="status_age_ms",
+    )
+    if unavailable is not None:
+        return unavailable
     raw_budget = status.get("budget")
     budget: dict[str, Any] = raw_budget if isinstance(raw_budget, dict) else {}
     raw_shards = status.get("shards")
@@ -500,15 +552,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     args.state_dir.mkdir(parents=True, exist_ok=True)
-    now_ms = time.time_ns() // 1_000_000
     lines: list[str] = []
     for source in read_sources(args.manifest):
         if source.kind == "engine":
-            sample = engine_sample(source.realm, source.path, now_ms)
+            sample = engine_sample(source.realm, source.path)
         elif source.kind == "worker":
-            sample = worker_sample(source.realm, source.path, now_ms)
+            sample = worker_sample(source.realm, source.path)
         else:
-            sample = recorder_sample(source.realm, source.path, now_ms)
+            sample = recorder_sample(source.realm, source.path)
         append(args.state_dir, sample)
         lines.append(line_protocol(sample))
 

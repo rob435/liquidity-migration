@@ -531,7 +531,7 @@ impl Strategy for SoakStrategy {
 struct PermitAll;
 
 impl RiskKernel for PermitAll {
-    fn assess(&mut self, intent: &Intent, _account: &AccountView) -> RiskVerdict {
+    fn assess(&mut self, intent: &Intent, _account: &AccountView, _now_ns: u64) -> RiskVerdict {
         RiskVerdict::Allow { qty: intent.qty }
     }
 

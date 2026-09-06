@@ -922,7 +922,7 @@ pub(crate) fn position_state_with_adoption(
 /// Foreign fills remain durable records but never become trusted engine
 /// exposure. A segment restatement is "set", not "add": at its place in the
 /// stream it is exactly what the records before it added up to.
-pub(crate) fn logged_exposure(replayed: &[WalRecord]) -> Result<BTreeMap<SymbolId, f64>, String> {
+pub fn logged_exposure(replayed: &[WalRecord]) -> Result<BTreeMap<SymbolId, f64>, String> {
     physical_exposure(replayed)?
         .into_iter()
         .map(|(symbol, quantity)| {

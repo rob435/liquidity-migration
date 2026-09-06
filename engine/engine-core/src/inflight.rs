@@ -27,7 +27,6 @@ pub struct OrderRec {
     pub request: OrderRequest,
     pub wire_ns: u64,
     pub acked: bool,
-    pub filled_qty: f64,
     pub fill_quantity: engine_types::wal::OrderFillQuantity,
     pub ending: Option<Ending>,
     pub terminal_checkpoint_ms: Option<i64>,
@@ -66,7 +65,7 @@ impl OrderRec {
             wire_ns: self.wire_ns,
             arrival_mid: self.arrival_mid,
             acked: self.acked,
-            filled_qty: self.filled_qty,
+            filled_qty: self.filled_qty().expect("validated order fill projection"),
             fill_quantity: Some(self.fill_quantity.clone()),
             reservation_low_px: self.reservation_low_px,
             reservation_high_px: self.reservation_high_px,
@@ -178,7 +177,6 @@ impl LedgerOfOrders {
                         request: request.clone(),
                         wire_ns: *wire_ns,
                         acked: false,
-                        filled_qty: 0.0,
                         fill_quantity: quantities::initial(request),
                         ending: None,
                         terminal_checkpoint_ms: None,
@@ -400,7 +398,6 @@ impl LedgerOfOrders {
                 request: open.request.clone(),
                 wire_ns: open.wire_ns,
                 acked: open.acked,
-                filled_qty: open.filled_qty,
                 fill_quantity: quantities::restore(open),
                 ending: open.terminal.as_ref().map(|state| state.ending.clone()),
                 terminal_checkpoint_ms: open.terminal.as_ref().map(|state| state.retained_since_ms),
@@ -593,10 +590,7 @@ impl LedgerOfOrders {
                 order.request.side
             ));
         }
-        if !order.request.qty.is_finite()
-            || order.request.qty <= 0.0
-            || !order.filled_qty.is_finite()
-            || order.filled_qty < 0.0
+        if !order.request.qty.is_finite() || order.request.qty <= 0.0 || order.filled_qty().is_err()
         {
             return Err("the sent order carries invalid quantity state".to_string());
         }
@@ -923,6 +917,71 @@ mod tests {
     }
 
     #[test]
+    fn mixed_fill_frontiers_preserve_snapshot_projection_and_nan_rejection() {
+        for (first_exact, second_exact, expected) in [
+            (true, true, 0.3_f64),
+            (true, false, 0.1_f64 + 0.2),
+            (false, true, 0.1_f64 + 0.2),
+            (false, false, 0.1_f64 + 0.2),
+        ] {
+            let (mut order, exact_first) = exact_order_and_fill("1", "0.1", false);
+            if !first_exact {
+                let WalRecord::OrderSent { request, .. } = &mut order else {
+                    unreachable!()
+                };
+                request.exact_terms = None;
+            }
+            let first = if first_exact {
+                exact_first
+            } else {
+                fill("exact", 0.1)
+            };
+            let second = if second_exact {
+                exact_order_and_fill("1", "0.2", true).1
+            } else {
+                recovered("exact", 0.2)
+            };
+            let mut ledger = LedgerOfOrders::try_from_records(&[order, first, second]).unwrap();
+            ledger
+                .try_apply(&WalRecord::OrderUpdate {
+                    callbacks: None,
+                    update: OrderUpdate::Cancelled {
+                        client_order_id: "exact".into(),
+                        recv_ns: 7,
+                    },
+                })
+                .unwrap();
+            let snapshot = ledger.orders["exact"].snapshot(42);
+            assert_eq!(snapshot.filled_qty.to_bits(), expected.to_bits());
+            assert!(
+                matches!(snapshot.terminal.as_ref(), Some(row) if row.ending == Ending::Cancelled)
+            );
+            let encoded = serde_json::to_string(&snapshot).unwrap();
+            println!("projection-{first_exact}-{second_exact}: {encoded}");
+            let decoded = serde_json::from_str(&encoded).unwrap();
+            let restored = LedgerOfOrders::try_from_records(&[WalRecord::OrderLineageRestored {
+                order: decoded,
+            }])
+            .unwrap();
+            assert_eq!(restored.orders["exact"].snapshot(42), snapshot);
+            for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut corrupt = snapshot.clone();
+                corrupt.filled_qty = invalid;
+                corrupt.fill_quantity =
+                    Some(engine_types::wal::OrderFillQuantity::LegacyBinary64 {
+                        quantity: invalid,
+                    });
+                assert!(
+                    LedgerOfOrders::try_from_records(&[WalRecord::OrderLineageRestored {
+                        order: corrupt
+                    }])
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn exact_partial_fills_do_not_finish_a_small_order_at_the_legacy_epsilon() {
         for recovery in [false, true] {
             let (order, part) = exact_order_and_fill("0.0000000001", "0.00000000004", recovery);
@@ -954,7 +1013,7 @@ mod tests {
                 request: order.request.clone(),
                 wire_ns: order.wire_ns,
                 acked: order.acked,
-                filled_qty: order.filled_qty,
+                filled_qty: order.filled_qty().unwrap(),
                 fill_quantity: Some(order.fill_quantity.clone()),
                 arrival_mid: order.arrival_mid,
                 reservation_low_px: order.reservation_low_px,
@@ -1339,7 +1398,7 @@ mod tests {
                 wire_ns: order.wire_ns,
                 arrival_mid: order.arrival_mid,
                 acked: order.acked,
-                filled_qty: order.filled_qty,
+                filled_qty: order.filled_qty().unwrap(),
                 fill_quantity: Some(order.fill_quantity.clone()),
                 reservation_low_px: order.reservation_low_px,
                 reservation_high_px: order.reservation_high_px,

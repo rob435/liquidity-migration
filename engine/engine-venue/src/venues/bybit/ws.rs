@@ -404,7 +404,15 @@ impl Decoder {
             }
             return Ok(matches!(frame.op.0.as_deref(), Some("ping" | "pong")));
         };
-        let rows = frame.data.0.as_deref().unwrap_or(&[]);
+        let rows = match frame.data.0.as_deref() {
+            Some(rows) => rows,
+            None if topic.starts_with("order") || topic.starts_with("execution") => {
+                return Err(FeedError::BadMessage(format!(
+                    "{topic} frame has missing or non-array data"
+                )));
+            }
+            None => &[],
+        };
         let recv_ns = mono_ns();
         let fast_topic = topic.starts_with("execution.fast");
         let execution_topic = topic.starts_with("execution") && !fast_topic;
@@ -1434,6 +1442,97 @@ mod tests {
 #[cfg(test)]
 mod tier1_private_contract {
     use super::*;
+
+    fn decoder() -> Decoder {
+        Decoder::new(Arc::new(RwLock::new(HashMap::from([(
+            "BTCUSDT".into(),
+            SymbolId(0),
+        )]))))
+    }
+
+    #[test]
+    fn account_topics_with_missing_or_non_array_data_require_recovery() {
+        for topic in ["order", "execution", "execution.fast"] {
+            for data in [
+                Value::Null,
+                Value::Bool(true),
+                Value::from("broken"),
+                serde_json::json!({}),
+            ] {
+                let mut decoder = decoder();
+                let frame = serde_json::json!({"topic":topic,"data":data}).to_string();
+                assert!(decoder.ingest(&frame).is_err(), "silently ignored {frame}");
+            }
+            let mut decoder = decoder();
+            assert!(decoder
+                .ingest(&serde_json::json!({"topic":topic}).to_string())
+                .is_err());
+            decoder
+                .ingest(&serde_json::json!({"topic":topic,"data":[]}).to_string())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn truncated_frames_never_emit_partial_executions() {
+        let frame = r#"{"topic":"execution","data":[{"symbol":"BTCUSDT","orderId":"v","orderLinkId":"c","side":"Buy","execId":"e","execPrice":"30000","execQty":"0.004","execFee":"0.066","execTime":"1750000000000","execType":"Trade"}]}"#;
+        for cut in 0..frame.len() {
+            let mut decoder = decoder();
+            assert!(decoder.ingest(&frame[..cut]).is_err(), "truncation {cut}");
+            assert!(
+                decoder.pending.is_empty(),
+                "partial execution at truncation {cut}"
+            );
+        }
+        let mut decoder = decoder();
+        decoder.ingest(frame).unwrap();
+        assert!(matches!(
+            decoder.pending.pop_front(),
+            Some(OrderUpdate::Fill { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_numeric_rows_preserve_valid_siblings_and_request_recovery() {
+        let good = serde_json::json!({"symbol":"BTCUSDT","orderId":"v","orderLinkId":"c","side":"Buy","execId":"good","execPrice":"30000","execQty":"0.004","execFee":"0.066","execTime":"1750000000000","execType":"Trade"});
+        let invalid = [
+            Value::Null,
+            Value::Bool(true),
+            serde_json::json!({}),
+            serde_json::json!([]),
+            Value::from(""),
+            Value::from("NaN"),
+            Value::from("Infinity"),
+            Value::from("1e100000"),
+            Value::from("-1"),
+            Value::from("0"),
+        ];
+        for field in ["execQty", "execPrice", "execTime"] {
+            for value in &invalid {
+                for bad_first in [false, true] {
+                    let mut bad = good.clone();
+                    bad["execId"] = "bad".into();
+                    bad[field] = value.clone();
+                    let rows = if bad_first {
+                        vec![bad, good.clone()]
+                    } else {
+                        vec![good.clone(), bad]
+                    };
+                    let frame = serde_json::json!({"topic":"execution","data":rows}).to_string();
+                    let mut decoder = decoder();
+                    assert!(decoder.ingest(&frame).is_err(), "{field}={value}");
+                    assert!(
+                        matches!(decoder.pending.pop_front(), Some(OrderUpdate::Fill { exec_id, .. }) if exec_id == "good")
+                    );
+                    assert!(matches!(
+                        decoder.pending.pop_front(),
+                        Some(OrderUpdate::StreamReset { .. })
+                    ));
+                    assert!(decoder.pending.is_empty());
+                }
+            }
+        }
+    }
     #[test]
     fn escaped_private_envelopes_preserve_control_and_event_disposition() {
         let mut decoder = Decoder::new(Arc::new(RwLock::new(HashMap::new())));

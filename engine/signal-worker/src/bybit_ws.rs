@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -20,10 +20,13 @@ const TOPICS_PER_MESSAGE: usize = 100;
 const MAX_STREAM_EVENTS: usize = 1_024;
 const MAX_SUBSCRIPTION_STAGED_BYTES: usize = 8 * 1024 * 1024;
 const PING_PAYLOAD: &str = r#"{"op":"ping"}"#;
-const PUBLIC_LINEAR_URL: &str = "wss://stream.bybit.com/v5/public/linear";
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+fn public_linear_url() -> &'static str {
+    engine_public::VenueRealm::Demo.public_ws()
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfirmedKline {
@@ -132,7 +135,7 @@ impl BybitPublicStream {
         continuity: StreamContinuity,
     ) -> Result<Self, WorkerError> {
         Self::with_url_continuing(
-            PUBLIC_LINEAR_URL,
+            public_linear_url(),
             symbols,
             StreamOptions::production(request_timeout_ms, retry_base_ms),
             continuity,
@@ -815,7 +818,7 @@ impl StreamWorker {
     }
 
     async fn dial(&self) -> Result<Socket, String> {
-        install_crypto_provider();
+        engine_public::tls::install_crypto_provider();
         let connected = tokio::time::timeout(
             self.options.connect_timeout,
             connect_async_with_config(
@@ -1478,13 +1481,6 @@ fn topics(symbols: &BTreeSet<String>) -> Vec<String> {
 
 fn stream_event_capacity(symbols: usize) -> usize {
     symbols.saturating_mul(2).clamp(64, MAX_STREAM_EVENTS)
-}
-
-fn install_crypto_provider() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
 }
 
 #[cfg(test)]

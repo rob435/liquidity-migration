@@ -22,8 +22,28 @@ pub(crate) struct DurableAmend {
     pub tif: engine_types::TimeInForce,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeDispatch {
+    pub state: OrderDispatchState,
+    pub timing: Option<crate::ctx::CallbackTiming>,
+}
+
+impl std::ops::Deref for RuntimeDispatch {
+    type Target = OrderDispatchState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for RuntimeDispatch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
 pub(crate) struct OrderDispatches {
-    pub orders: BTreeMap<String, OrderDispatchState>,
+    pub orders: BTreeMap<String, RuntimeDispatch>,
     pub write: Option<DispatchWrite>,
     pub barrier_started_ns: u64,
     pub durable: tokio::sync::mpsc::Receiver<Result<(), WalError>>,
@@ -123,7 +143,18 @@ impl OrderDispatches {
             lookup_after: BTreeMap::new(),
             lookups,
             lookup_results,
-            orders,
+            orders: orders
+                .into_iter()
+                .map(|(id, state)| {
+                    (
+                        id,
+                        RuntimeDispatch {
+                            state,
+                            timing: None,
+                        },
+                    )
+                })
+                .collect(),
             write: None,
             barrier_started_ns: 0,
             durable,

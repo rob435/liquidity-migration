@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Print credential-free, exact-commit SSH recovery material and staged next steps.
+# Print credential-free, exact-commit SSH recovery material and deploy next steps.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -41,12 +41,11 @@ $restore
 # Rescue system, as root:
 $rescue
 
-# After SSH is restored, run from this trusted local checkout. Install requires
-# the whole liquidity-migration fleet to be stopped and never starts a unit.
-SSH_TARGET=$ssh_target_q EXPECTED_COMMIT="$commit" scripts/deploy_vps_live.sh install
+# After SSH is restored, inspect the host from this trusted local checkout:
+SSH_TARGET=$ssh_target_q EXPECTED_COMMIT="$commit" scripts/deploy_vps_live.sh verify
 
-# Issue a new exact-head authorization only after configuring and reviewing the
-# stopped host. Then activate and verify without another checkout/config edit:
-SSH_TARGET=$ssh_target_q EXPECTED_COMMIT="$commit" scripts/deploy_vps_live.sh activate
+# Deploy requires this commit's release artifact and restarts changed units.
+# Review the host configuration and current funded authorization before running it.
+SSH_TARGET=$ssh_target_q EXPECTED_COMMIT="$commit" scripts/deploy_vps_live.sh deploy
 SSH_TARGET=$ssh_target_q EXPECTED_COMMIT="$commit" scripts/deploy_vps_live.sh verify
 EOF

@@ -34,6 +34,7 @@ fn assess_entry(kernel: &mut Kernel, equity_usdt: f64) -> RiskVerdict {
     kernel.assess(
         &entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW),
         &flat(equity_usdt, NOW),
+        NOW,
     )
 }
 
@@ -104,7 +105,7 @@ fn a_genuine_exit_still_passes_while_the_window_is_tripped() {
         NOW,
     );
     assert_eq!(
-        kernel.assess(&exit(CARRY, BUSDT, Side::Sell, 5.0, 10.0, NOW), &held),
+        kernel.assess(&exit(CARRY, BUSDT, Side::Sell, 5.0, 10.0, NOW), &held, NOW),
         RiskVerdict::Allow { qty: 5.0 },
         "taking risk off must not wait on the loss window"
     );

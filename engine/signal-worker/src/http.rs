@@ -1,4 +1,3 @@
-use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +13,7 @@ use serde_json::Value;
 use tokio::sync::Semaphore;
 
 use crate::worker::WorkerError;
+pub use engine_public::http::percent_encode;
 
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -28,6 +28,19 @@ pub struct PublicHttpClient {
 }
 
 impl PublicHttpClient {
+    #[cfg(test)]
+    pub(crate) fn for_http_test(base: String, budget: Arc<Semaphore>) -> Self {
+        let mut client = Self::new("example.invalid", 1_000, 1, 1, budget).unwrap();
+        let connector = HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .build();
+        client.client = Client::builder(TokioExecutor::new()).build(connector);
+        client.base = base;
+        client
+    }
+
     pub fn new(
         host: &str,
         timeout_ms: u64,
@@ -35,7 +48,7 @@ impl PublicHttpClient {
         retry_base_ms: u64,
         request_budget: Arc<Semaphore>,
     ) -> Result<Self, WorkerError> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        engine_public::tls::install_crypto_provider();
         if host.is_empty() || host.contains('/') {
             return Err(WorkerError::config("public HTTP host is invalid"));
         }
@@ -157,21 +170,6 @@ where
     }
     serde_json::from_slice(&bytes)
         .map_err(|error| WorkerError::network(format!("parse public response: {error}")))
-}
-
-pub fn percent_encode(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for byte in raw.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            other => {
-                let _ = write!(out, "%{other:02X}");
-            }
-        }
-    }
-    out
 }
 
 pub fn wall_ms() -> Result<i64, WorkerError> {

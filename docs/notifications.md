@@ -25,11 +25,14 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Realm | Signal worker | `starting` is allowed for at most 120 min during cold fill; `recovering` is allowed for at most 2 min for a live gap, repair, or coverage miss. Both require a connected, fresh stream with every topic accepted and none refused. Disconnected, stale, mismatched, or quarantined transport is immediately `degraded`; `degraded`, `stopped`, an unknown verdict, or spool backpressure is `CRITICAL` |
 | Realm | Admission | Engine reports `may_open != true` |
 | Realm | Circuit breaker | Engine reports `rolling_loss_tripped=true` |
+| Realm | Strategy errors | A nonempty engine `strategy_errors` list is `CRITICAL`, including when `may_open=true`; one reference per realm includes the sleeve details and engine journal |
 | Host | Recorders | Status unreadable, no frames for 2 min, complete connection loss, blocked storage, or new drops are immediate. Partial shard loss warns after two consecutive 3-min readings, so a dynamic tier's sub-second socket start does not page and resolve. Startup silence and connection loss use `started_at_ns`, so a restarted recorder reads as starting up for its first 2 min |
 | Host | Tape budget | Projected monthly ingress exceeds the recorder budget |
 | Host | Upload | Receipt exceeds 3 h or destination has less than 200 GB free |
 | Host | Backup | Receipt exceeds 8 h |
-| Host | Machine | `/var/lib` has less than 25 GB free or NTP is unsynchronised |
+| Host | Machine | `/var/lib` has less than 5 GB free (`evaluate_disk` default, decimal GB) or NTP is unsynchronised; deployed overrides require a separate host observation |
+| Host | Disk consumption | `WARNING` when positive observed filesystem consumption projects the 5 GB floor within 195 seconds, the host timer's 180-second cadence plus 15-second accuracy. A fresh same-boot/device interval is required; this is a forecast, not an IO limit |
+| Host | WAL attribution | Metadata-only totals/deltas for canonical `engine.wal` families beside manifest heartbeats; arbitrary runtime path overrides are outside this attribution. WAL bytes are not added to filesystem consumption a second time; missing/replaced/truncated files make their delta unavailable |
 | Host | Watchdog plane | Demo watchdog is required; funded watchdog is required while enabled or while its engine runs; a disabled/inactive timer or failed last run is `CRITICAL` outside a deploy |
 | Host | Deployment | The existing exclusive deploy lock suppresses transition-prone unit, heartbeat, recorder, and realm-watchdog checks for 30 min; delivery state is preserved, while disk, clock, upload, backup, and dead-man checks continue; a longer-held or unreadable lock is `CRITICAL` |
 | External | Host watchdog | `ONCALL_DEADMAN_URL` receives no healthy host-scope ping |

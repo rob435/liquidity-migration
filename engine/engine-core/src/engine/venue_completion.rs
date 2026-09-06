@@ -15,7 +15,7 @@ struct CompletionClocks {
 struct CompletedOrders {
     clocks: CompletionClocks,
     requests: Vec<OrderRequest>,
-    timings: Vec<(u64, u64)>,
+    timings: Vec<Option<crate::ctx::CallbackTiming>>,
     replies: Vec<Result<OrderAck, VenueError>>,
 }
 
@@ -338,9 +338,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         );
         let symbols: Vec<_> = requests.iter().map(|request| request.symbol).collect();
         let mut replies = replies.into_iter();
-        for (request, (decided_ns, origin_ns)) in requests.into_iter().zip(timings) {
-            self.ledger
-                .record(Segment::Wire, completed_ns.saturating_sub(decided_ns));
+        for (request, timing) in requests.into_iter().zip(timings) {
+            if let Some(timing) = timing {
+                self.ledger.record(
+                    Segment::Wire,
+                    completed_ns.saturating_sub(timing.decided_ns),
+                );
+            }
             let reply = replies.next().unwrap_or_else(|| {
                 Err(VenueError::BadReply(
                     "the venue omitted this order from its batch reply".to_string(),
@@ -402,8 +406,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     None
                 }
             };
-            self.ledger
-                .record(Segment::EndToEnd, clock::now_ns().saturating_sub(origin_ns));
+            if let Some(origin_ns) = timing.and_then(|timing| timing.origin_ns) {
+                self.ledger
+                    .record(Segment::EndToEnd, clock::now_ns().saturating_sub(origin_ns));
+            }
             if let Some(update) = update {
                 self.take_update(update).await?;
             }
@@ -1084,6 +1090,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     &amended_intent,
                     &self.books.account,
                     &self.books.attribution.snapshot(),
+                    clock::now_ns(),
                 ) {
                     engine_types::risk::PortfolioRiskVerdict::Allow { qty, .. } => {
                         if amended_intent
@@ -1115,8 +1122,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     },
                 }
             } else {
-                self.risk
-                    .assess_price_amend(client_order_id, &amended_intent, &self.books.account)
+                self.risk.assess_price_amend(
+                    client_order_id,
+                    &amended_intent,
+                    &self.books.account,
+                    clock::now_ns(),
+                )
             };
             let verdict = durable_risk_verdict(verdict, remaining_qty, true);
             self.wal.append(&WalRecord::Verdict {
@@ -1225,9 +1236,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .opening_permission_reason(existing.request.strategy)
                     .is_none());
         let risk = if self.instrument_specs.contains_key(&symbol) {
-            matches!(self.risk.reassess_portfolio_order(&client_order_id, &amended_intent, &self.books.account, &self.books.attribution.snapshot()), engine_types::risk::PortfolioRiskVerdict::Allow { qty, .. } if amended_intent.quantity().is_ok_and(|remaining| qty == remaining))
+            matches!(self.risk.reassess_portfolio_order(&client_order_id, &amended_intent, &self.books.account, &self.books.attribution.snapshot(), clock::now_ns()), engine_types::risk::PortfolioRiskVerdict::Allow { qty, .. } if amended_intent.quantity().is_ok_and(|remaining| qty == remaining))
         } else if !existing.request.is_sleeve_reduction() {
-            matches!(self.risk.assess_price_amend(&client_order_id, &amended_intent, &self.books.account), RiskVerdict::Allow { qty } if qty == remaining_qty)
+            matches!(self.risk.assess_price_amend(&client_order_id, &amended_intent, &self.books.account, clock::now_ns()), RiskVerdict::Allow { qty } if qty == remaining_qty)
         } else {
             true
         };

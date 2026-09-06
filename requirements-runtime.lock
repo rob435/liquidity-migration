@@ -1,0 +1,3 @@
+# Host Python services and deployment support; development uses requirements.lock.
+# websocket-client has no mandatory dependencies. Capture imports it in market_tape.record.
+websocket-client==1.9.1

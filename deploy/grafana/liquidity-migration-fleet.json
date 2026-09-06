@@ -257,7 +257,7 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_engine_may_open{realm=~\"$realm\"}",
+          "expr": "lm_engine_may_open{realm=~\"$realm\"} and on(realm) (lm_engine_up{realm=~\"$realm\"} == 1)",
           "instant": true,
           "legendFormat": "{{realm}}",
           "range": false,
@@ -387,7 +387,7 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_worker_status_healthy{realm=~\"$realm\"}",
+          "expr": "lm_worker_status_healthy{realm=~\"$realm\"} * on(realm) lm_worker_up{realm=~\"$realm\"}",
           "instant": true,
           "legendFormat": "{{realm}} verdict",
           "range": false,
@@ -399,7 +399,7 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_worker_ticker_coverage_complete{realm=~\"$realm\"}",
+          "expr": "lm_worker_ticker_coverage_complete{realm=~\"$realm\"} * on(realm) lm_worker_up{realm=~\"$realm\"}",
           "instant": true,
           "legendFormat": "{{realm}} coverage",
           "range": false,
@@ -543,7 +543,18 @@
             ]
           },
           "unit": "currencyUSD",
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null+nan",
+                "result": {
+                  "text": "STALE",
+                  "color": "orange"
+                }
+              }
+            }
+          ],
           "decimals": 2
         },
         "overrides": [
@@ -581,7 +592,7 @@
         "wideLayout": true,
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -594,7 +605,7 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_engine_equity_usdt{realm=\"demo\",realm=~\"$realm\"}",
+          "expr": "(lm_engine_equity_usdt{realm=\"demo\",realm=~\"$realm\"} and on(realm) (lm_engine_up{realm=\"demo\",realm=~\"$realm\"} == 1)) or on(realm) ((lm_engine_up{realm=\"demo\",realm=~\"$realm\"} == 0) / 0)",
           "instant": false,
           "legendFormat": "D \u00b7 Equity",
           "range": true,
@@ -700,7 +711,18 @@
             ]
           },
           "unit": "currencyUSD",
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null+nan",
+                "result": {
+                  "text": "STALE",
+                  "color": "orange"
+                }
+              }
+            }
+          ],
           "decimals": 2
         },
         "overrides": [
@@ -738,7 +760,7 @@
         "wideLayout": true,
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -751,7 +773,7 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_engine_equity_usdt{realm=\"mainnet\",realm=~\"$realm\"}",
+          "expr": "(lm_engine_equity_usdt{realm=\"mainnet\",realm=~\"$realm\"} and on(realm) (lm_engine_up{realm=\"mainnet\",realm=~\"$realm\"} == 1)) or on(realm) ((lm_engine_up{realm=\"mainnet\",realm=~\"$realm\"} == 0) / 0)",
           "instant": false,
           "legendFormat": "M \u00b7 Equity",
           "range": true,
@@ -857,7 +879,18 @@
             ]
           },
           "unit": "currencyUSD",
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null+nan",
+                "result": {
+                  "text": "STALE",
+                  "color": "orange"
+                }
+              }
+            }
+          ],
           "decimals": 2
         },
         "overrides": [
@@ -895,7 +928,7 @@
         "wideLayout": true,
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -908,7 +941,7 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_engine_position_entry_notional_usdt{realm=\"demo\",realm=~\"$realm\"}",
+          "expr": "(lm_engine_position_entry_notional_usdt{realm=\"demo\",realm=~\"$realm\"} and on(realm) (lm_engine_up{realm=\"demo\",realm=~\"$realm\"} == 1)) or on(realm) ((lm_engine_up{realm=\"demo\",realm=~\"$realm\"} == 0) / 0)",
           "instant": false,
           "legendFormat": "D \u00b7 OI",
           "range": true,
@@ -1014,7 +1047,18 @@
             ]
           },
           "unit": "currencyUSD",
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null+nan",
+                "result": {
+                  "text": "STALE",
+                  "color": "orange"
+                }
+              }
+            }
+          ],
           "decimals": 2
         },
         "overrides": [
@@ -1052,7 +1096,7 @@
         "wideLayout": true,
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -1065,7 +1109,7 @@
             "uid": "${DS_METRICS}"
           },
           "editorMode": "code",
-          "expr": "lm_engine_position_entry_notional_usdt{realm=\"mainnet\",realm=~\"$realm\"}",
+          "expr": "(lm_engine_position_entry_notional_usdt{realm=\"mainnet\",realm=~\"$realm\"} and on(realm) (lm_engine_up{realm=\"mainnet\",realm=~\"$realm\"} == 1)) or on(realm) ((lm_engine_up{realm=\"mainnet\",realm=~\"$realm\"} == 0) / 0)",
           "instant": false,
           "legendFormat": "M \u00b7 OI",
           "range": true,

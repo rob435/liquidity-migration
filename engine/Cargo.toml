@@ -9,8 +9,8 @@ members = [
     "engine-risk",
     "engine-strategies",
     "engine-core",
+    "engine-tools",
     "signal-worker",
-    "market-tape",
 ]
 
 [workspace.dependencies]

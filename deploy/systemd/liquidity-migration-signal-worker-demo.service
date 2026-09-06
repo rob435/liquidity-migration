@@ -1,4 +1,6 @@
 [Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=5
 Description=liquidity-migration credential-free Rust directional signal worker (demo)
 Wants=network-online.target
 Before=liquidity-migration-engine.service

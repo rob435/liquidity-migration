@@ -105,5 +105,9 @@ if [ "$mounted_here" = "1" ]; then
 fi
 
 echo "rescue-ssh-restore-ok"
-echo "Reboot the VPS from local disk, then run the checked deploy from your local checkout:"
-echo 'SSH_TARGET=root@YOUR_VPS_HOST EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh install'
+echo "Reboot the VPS from local disk, then inspect it from your trusted local checkout:"
+echo 'SSH_TARGET=root@YOUR_VPS_HOST EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh verify'
+echo "Deploy requires the commit's release artifact and restarts changed units."
+echo "Review the host configuration and current funded authorization before running it:"
+echo 'SSH_TARGET=root@YOUR_VPS_HOST EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh deploy'
+echo 'SSH_TARGET=root@YOUR_VPS_HOST EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh verify'

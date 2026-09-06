@@ -153,7 +153,7 @@ def test_activation_unit_sets_and_immediate_jobs_are_manifest_derived() -> None:
             and row.activation == "job-now"
         ]
 
-    deploy = (ROOT / "scripts" / "deploy_vps_live.sh").read_text(encoding="utf-8")
+    deploy = (ROOT / "scripts" / "vps" / "deploy_remote.sh").read_text(encoding="utf-8")
     start_realm = deploy[deploy.index("start_realm()") : deploy.index("\nverify_mode()")]
     assert 'lm_activation_units "$realm" start' in start_realm
     assert 'lm_immediate_timer_jobs "$realm"' in start_realm
@@ -163,7 +163,7 @@ def test_realm_units_cover_the_funded_stop_surface() -> None:
     rows = _manifest()
     mainnet_units = set(_helper("lm_realm_units mainnet"))
     assert mainnet_units == {row.unit for row in rows if row.realm == "mainnet"}
-    deploy = (ROOT / "scripts" / "deploy_vps_live.sh").read_text(encoding="utf-8")
+    deploy = (ROOT / "scripts" / "vps" / "deploy_remote.sh").read_text(encoding="utf-8")
     assert "lm_realm_units mainnet" in deploy
 
 

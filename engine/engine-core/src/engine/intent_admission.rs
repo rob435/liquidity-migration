@@ -156,6 +156,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         intent: Intent,
         client_order_id: Option<String>,
         origin_ns: u64,
+        timing: Option<crate::ctx::CallbackTiming>,
         batch_protection: &mut std::collections::HashMap<(SymbolId, Side), f64>,
     ) -> Result<Option<PreparedOrder>, EngineError> {
         let mut intent = intent;
@@ -179,10 +180,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         } else {
             clock::now_ns()
         };
-        self.ledger
-            .record(Segment::Decide, decided_ns.saturating_sub(origin_ns));
+        if let Some(timing) = timing {
+            if let Some(origin_ns) = timing.origin_ns {
+                self.ledger
+                    .record(Segment::Decide, timing.decided_ns.saturating_sub(origin_ns));
+            }
+        }
 
-        if !self.journal_and_admit_intent(&intent, decided_ns, client_order_id.as_deref())? {
+        if !self.journal_and_admit_intent(&intent, client_order_id.as_deref())? {
             return Ok(None);
         }
         self.retain_portfolio_reduction(&intent)?;
@@ -205,7 +210,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         else {
             return Ok(None);
         };
-        self.commit_prepared_order(protected, decided_ns, origin_ns)
+        self.commit_prepared_order(protected, decided_ns, origin_ns, timing)
             .map(Some)
     }
 
@@ -435,6 +440,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             ProtectedOrder(LegalOrder { request, approval }),
             decided_ns,
             decided_ns,
+            Some(crate::ctx::CallbackTiming {
+                origin_ns: Some(decided_ns),
+                decided_ns,
+            }),
         )
         .map(Some)
     }
@@ -442,7 +451,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     fn journal_and_admit_intent(
         &mut self,
         intent: &Intent,
-        decided_ns: u64,
         client_order_id: Option<&str>,
     ) -> Result<bool, EngineError> {
         // A non-finite number would be written to the log as null and stop
@@ -533,7 +541,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .get(intent.symbol.0 as usize)
                 .map(|quote| quote.recv_ns)
                 .unwrap_or(0);
-            let age_ns = decided_ns.saturating_sub(quote_ns);
+            let age_ns = clock::now_ns().saturating_sub(quote_ns);
             if quote_ns == 0 || age_ns > self.max_quote_age_ns {
                 let verdict = RiskVerdict::Deny {
                     reason: DenyReason::StaleQuote {
@@ -579,6 +587,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 &intent,
                 &self.books.account,
                 &self.books.attribution.snapshot(),
+                clock::now_ns(),
             ) {
                 engine_types::risk::PortfolioRiskVerdict::Allow { qty, .. } => {
                     let permitted = intent
@@ -599,7 +608,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 }
             }
         } else {
-            self.risk.assess(&intent, &self.books.account)
+            self.risk
+                .assess(&intent, &self.books.account, clock::now_ns())
         };
         let verdict = durable_risk_verdict(verdict, intent.qty, false);
         let allowed_qty = match &verdict {
@@ -1126,6 +1136,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         protected: ProtectedOrder,
         decided_ns: u64,
         origin_ns: u64,
+        timing: Option<crate::ctx::CallbackTiming>,
     ) -> Result<PreparedOrder, EngineError> {
         let LegalOrder { request, approval } = protected.0;
         let RiskApprovedIntent {
@@ -1168,11 +1179,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.wal.append(&sent_record)?;
         self.dispatches.orders.insert(
             client_order_id.clone(),
-            engine_types::order_dispatch::OrderDispatchState {
-                request: request.clone(),
-                intent: dispatch_intent,
-                origin_ns,
-                phase: engine_types::order_dispatch::OrderDispatchPhase::Queued,
+            crate::order_dispatch::RuntimeDispatch {
+                state: engine_types::order_dispatch::OrderDispatchState {
+                    request: request.clone(),
+                    intent: dispatch_intent,
+                    origin_ns,
+                    phase: engine_types::order_dispatch::OrderDispatchPhase::Queued,
+                },
+                timing,
             },
         );
         self.books
@@ -1227,7 +1241,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     pub(super) async fn process_intents(
         &mut self,
-        intents: Vec<(Intent, Option<String>)>,
+        intents: Vec<(Intent, Option<String>, Option<crate::ctx::CallbackTiming>)>,
         origin_ns: u64,
     ) -> Result<bool, EngineError> {
         if intents.len() > MAX_ORDERS_PER_BATCH {
@@ -1244,7 +1258,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // that symbol. Reduce-only exits still flow and never change leverage.
         let mut leverage_by_symbol = std::collections::HashMap::new();
         let mut leverage_conflicts = std::collections::HashSet::new();
-        for (intent, _) in &intents {
+        for (intent, _, _) in &intents {
             let Some(want) = intent
                 .leverage
                 .filter(|value| value.is_finite() && *value > 0.0)
@@ -1286,7 +1300,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 })
                 .or_insert(position.stop_px);
         }
-        for (intent, client_order_id) in intents {
+        for (mut intent, client_order_id, timing) in intents {
+            let origin_ns = if let Some(timing) = timing {
+                intent.decided_ns = timing.decided_ns;
+                timing.origin_ns.unwrap_or(origin_ns)
+            } else {
+                origin_ns
+            };
             if !intent.reduce_only
                 && leverage_conflicts.contains(&intent.symbol)
                 // Keep non-finite values out of the WAL. `prepare_intent`
@@ -1314,7 +1334,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 continue;
             }
             if let Some(order) = self
-                .prepare_intent(intent, client_order_id, origin_ns, &mut batch_protection)
+                .prepare_intent(
+                    intent,
+                    client_order_id,
+                    origin_ns,
+                    timing,
+                    &mut batch_protection,
+                )
                 .await?
             {
                 prepared.push(order);

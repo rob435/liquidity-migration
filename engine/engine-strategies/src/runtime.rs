@@ -46,6 +46,7 @@ pub fn restore(state: &StrategyRuntimeState) -> Result<Box<dyn Strategy>, String
         }};
     }
     let strategy = match state.kind.as_str() {
+        "bench" => decode!(crate::bench::BenchStrategy),
         crate::native_carry::plug::NAME => decode_native!(crate::native_carry::plug::NativeCarry),
         crate::native_long::plug::NAME => decode_native!(crate::native_long::plug::NativeLong),
         crate::native_exodus::plug::NAME => {

@@ -1,7 +1,5 @@
-# Exact-pinned dependency contract for CI, initial VPS deploy, and same-commit
-# activated recovery. Deploy paths install every entry with --no-deps and do
-# not run an editable install or pip upgrade, so pyproject range resolution and
-# unpinned build isolation cannot silently alter an authorized runtime.
+# Exact-pinned development and CI dependencies; VPS services use requirements-runtime.lock.
+# Install with --no-deps; no editable project install or pip upgrade is required.
 # This file pins versions, not distribution hashes; regenerating it therefore
 # requires review and a new authorized commit.
 #

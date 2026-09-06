@@ -1,4 +1,6 @@
 [Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=5
 Description=liquidity-migration Rust execution engine on the fleet's demo account
 Wants=network-online.target liquidity-migration-signal-worker-demo.service
 # The worker publishes durable public observations before this account owner

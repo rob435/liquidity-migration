@@ -1,10 +1,12 @@
 # Operations Runbook
 
-Production host specifications, deployment procedures, safety controls, and incident runbooks.
+## Purpose
 
----
+Define host configuration, deployment behavior and incident recovery commands.
 
-## 1. Production Host Specification
+## Spec Tables
+
+### Production Host Specification
 
 | Property | Value | Notes |
 | :--- | :--- | :--- |
@@ -18,7 +20,7 @@ Production host specifications, deployment procedures, safety controls, and inci
 
 ---
 
-## 2. Operator Command Reference (`scripts/ops.sh`)
+### Operator Command Reference (`scripts/ops.sh`)
 
 Entry-point wrapper for all operational workflows. Prefix `liquidity-migration-` is added automatically to unit names.
 
@@ -55,7 +57,7 @@ python scripts/research/reconcile_venue_wal.py \
 
 ---
 
-## 3. Fleet Manifest & Systemd Unit Inventory
+### Fleet Manifest & Systemd Unit Inventory
 
 | Systemd Unit | Realm | User / Group | Activation Policy | Role |
 | :--- | :--- | :--- | :--- | :--- |
@@ -70,11 +72,13 @@ python scripts/research/reconcile_venue_wal.py \
 | `liquidity-migration-market-tape-upload.timer` | Global | `root:root` | Timer (hourly at :10) | Ships finished tape archives to Google Drive, then deletes shipped hours older than `--keep-hours 24` from both tape roots. |
 | `liquidity-migration-backup.timer` | Global | `root:root` | Timer (every 6h) | Ships engine state & WAL to Google Drive. |
 
-* **Independent Units**: `forward-capture`, `forward-capture-binance`, `market-tape-upload`, `backup`, and `host-liveness` are never stopped by fleet deploys or safety stops.
+| Independent families | Deploy behavior |
+| --- | --- |
+| `forward-capture`, `forward-capture-binance`, `market-tape-upload`, `backup`, `equity-recorder`, `host-liveness` | Remain running through realm handover and disarm; a recorder restarts when its own unit, configuration or runtime inputs change |
 
 ---
 
-## 4. Deployment & Rollback Protocol
+### Deployment & Rollback Protocol
 
 Deployments run via SSH using `scripts/deploy_vps_live.sh`:
 
@@ -88,13 +92,13 @@ EXPECTED_COMMIT=<40-hex-commit> scripts/ops.sh deploy
 | :--- | :--- | :--- |
 | Pull request, code change | Python and Rust debug gates | None |
 | Pull request, docs only | None | None |
-| Push to `main` | None | None; the local pre-push gate remains required |
+| Push to `main` | Python and Rust debug gates | None; the local pre-push gate remains required |
 | Dispatch `deploy` | Python gate, Rust debug gate, release artifact, VPS deploy | Installs the exact `main` SHA after every gate succeeds |
 | Dispatch `qualify` | Rust debug gate, release tests, soak, benchmark | None |
 | Dispatch `verify`, `rollback` | No build | Reads or restores production through the pinned VPS job |
 | Dispatch `diagnose`, `disarm-mainnet` | No build | Reads incident state or persistently disarms funded trading |
 
-- **Must** keep the repository private.
+- **Must** keep account state, credentials and private operational evidence outside the public repository.
 - **Must** run `scripts/dev.sh check` before a direct push to `main`.
 - **Must** use `deploy` only for a release candidate; ordinary commits do not
   create deployments.
@@ -130,7 +134,7 @@ gh workflow run vps-deploy.yml --ref main -f mode=diagnose
 
 ---
 
-## 5. Emergency Safety Controls
+### Emergency Safety Controls
 
 ### 1. Strategic Pause (Soft Stop)
 Stops new risk while leaving exits, stops, and settlement clocks active:
@@ -162,7 +166,7 @@ scripts/ops.sh deploy disarm-mainnet
 
 ---
 
-## 6. Real-Money Configuration Dials
+### Real-Money Configuration Dials
 
 Configured in `/etc/liquidity-migration/bybit-mainnet.env` (`0600`, root-owned):
 
@@ -174,7 +178,7 @@ Configured in `/etc/liquidity-migration/bybit-mainnet.env` (`0600`, root-owned):
 
 ---
 
-## 7. Off-Box Google Drive Backups
+### Off-Box Google Drive Backups
 
 Configured via `/etc/liquidity-migration/rclone.conf`:
 
@@ -186,12 +190,15 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 
 ---
 
-## 8. Incident Recovery Matrix
+### Incident Recovery Matrix
 
 | Symptom | Probable Cause | Immediate Action |
 | :--- | :--- | :--- |
-| **Engine Heartbeat Stale ($> 30\text{s}$)** | Process crashed or deadlock | Check `scripts/ops.sh logs engine-mainnet 100`. Inspect WAL lock. |
+| **Engine Heartbeat Stale (>60 s)** | Process crashed or deadlock | Check `scripts/ops.sh logs engine-mainnet 100`. Inspect WAL lock. |
 | **Signal Worker Stale** | WebSocket disconnect or gap | Inspect `logs signal-worker-mainnet`. Engine continues exits independently. |
+| **Engine `strategy_errors` is nonempty** | A sleeve reports a callback, checkpoint or source fault, even if other entries remain permitted | Inspect the named sleeve errors and engine journal; the existing realm incident route pages independently of `may_open`. |
+| **Engine or worker reaches `start-limit-hit`** | Five starts within 300 seconds exhaust the unit's restart budget | Fix the cause, then reset and start the affected unit using [systemd recovery commands](../deploy/systemd/README.md). Exhaustion does not flatten holdings or automatically retry when the window expires. |
+| **Host `disk-growth` warning** | Recent filesystem consumption projects the existing 5 GB free-space floor before the next normal liveness observation | Inspect the reported canonical WAL delta, tape usage and local backup stage. Retained WAL supports late-order recovery; preserve its family. Rotation is not a storage quota. |
 | **Rolling Loss Tripped** | 24h loss ceiling breached | Entries halted automatically. Exits permitted. Inspect `heartbeat.json`. |
 | **Capture Dropping Frames** | CPU/disk saturation | Check `journalctl -u liquidity-migration-forward-capture`. Budget shedding will activate. |
 | **Recorder logs `over budget with every sheddable feed shed`** (hourly) | The feeds `budget.shed` cannot reach project more than `monthly_gb` on their own (`status.json` → `budget.projected_month_gb`, `bytes.by_feed_24h`). The controller has nothing left to give up. | A config decision, not a restart: extend `shed`, shrink a tier's universe, or move allowance between the recorders (`deploy/capture/*.toml`, `[budget]`). |
@@ -200,8 +207,8 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | **Engine exits with `signal source … rewrote durable sequence N`** and loops under `Restart=always` | A worker republishes an accepted sequence with different bytes; common causes include an older checkpoint or two workers sharing one spool. The cursor is durable. | Reconcile producer ownership/checkpoint and the exact accepted hash before recovery. A new generation does not clear an older gap; do not delete pending rows or reset sequence state as a shortcut. |
 | **Engine logs a signal-doorbell error** | The socket is only a wake notification; the immutable row remains authoritative and periodic spool scanning continues. | Check the socket owner and permissions if wake latency remains high; inspect spool delivery independently. |
 | **Worker exits with `spool class preflight underestimated an emitted observation batch`** | A `WireEvent` arm is missing from `projected_spool_files` (`engine/signal-worker/src/worker.rs`) for an event that emits a spool row. Every restart replays the same input and exits again. | Add the arm; the fix is a deploy. Nothing on the host needs cleaning. |
-| **Worker logs `instrument lane: …` every hour** | One venue row failed a check and the whole snapshot was refused; the worker's instrument table stops refreshing (`instruments` in `checkpoint.json` stays stale or empty). | Read the exact message. Fix the check to the venue's real shape (see 2026-09-03 in CHANGELOG); never let one row cost the table. |
-| **Any `CRITICAL` on the funded realm** | — | The watchdog pages the on-call agent ([docs/notifications.md](notifications.md) §On-call agent). The owner reads the run's PR. |
+| **Worker logs `instrument lane: …` every hour** | One venue row failed a check and the whole snapshot was refused; the worker's instrument table stops refreshing (`instruments` in `checkpoint.json` stays stale or empty). | Read the exact message. Fix the check to the venue's real shape ; never let one row cost the table. |
+| **Any `CRITICAL` on the funded realm** | — | The watchdog pages the on-call agent ([docs/notifications.md](notifications.md) §On-call agent). The owner reads the on-call result. |
 
 ### Signal-prefix recovery
 
@@ -262,4 +269,21 @@ engine retire-legacy-signal-sources \
 engine retire-legacy-signal-sources \
   --config /etc/liquidity-migration/engine-mainnet.toml \
   --plan /etc/liquidity-migration/legacy-signal-retirements.mainnet.json --execute
+```
+
+## Invariants
+
+- Must preserve current WAL, signal prefixes and native protection during recovery.
+- Must validate the exact release artifact before installation and verify each realm after handover.
+- Must keep account credentials and private evidence outside the public checkout.
+- Must treat incompatible-reader rollback as forward repair; never replace newer durable state with a backup merely to boot an old binary.
+
+## Operational Recipes
+
+```sh
+scripts/ops.sh status
+scripts/ops.sh --help
+scripts/dev.sh check
+# Select the full intended source SHA before dispatching deployment.
+gh workflow run vps-deploy.yml --ref main -f mode=deploy
 ```

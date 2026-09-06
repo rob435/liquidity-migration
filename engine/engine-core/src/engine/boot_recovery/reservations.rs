@@ -19,7 +19,9 @@ pub(super) fn restore_order_reservations<R: RiskKernel>(
         if !remaining_qty.is_finite() || remaining_qty < -1e-9 {
             return Err(EngineError::Boot(format!(
                 "in-flight order {} has impossible remaining quantity: request {}, filled {}",
-                request.client_order_id, request.qty, order.filled_qty
+                request.client_order_id,
+                request.qty,
+                order.filled_qty().map_err(EngineError::Boot)?
             )));
         }
         if remaining_qty == 0.0 {
@@ -144,7 +146,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            kernel.assess(&intent(0.01), &account),
+            kernel.assess(&intent(0.01), &account, intent(0.01).decided_ns),
             RiskVerdict::Deny {
                 reason: DenyReason::AvailableMarginExhausted { .. }
             }
@@ -153,7 +155,7 @@ mod tests {
         kernel.observe_account_view(&account);
         assert!(
             matches!(
-                kernel.assess(&intent(0.01), &account),
+                kernel.assess(&intent(0.01), &account, intent(0.01).decided_ns),
                 RiskVerdict::Allow { .. }
             ),
             "the current scan already includes the venue-working reservation"

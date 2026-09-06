@@ -3,6 +3,8 @@ run-name: >-
   ${{ github.event_name == 'workflow_dispatch' && format('{0} {1}@{2}', inputs.mode, github.ref_name, github.sha) || format('checks {0}@{1}', github.ref_name, github.sha) }}
 
 on:
+  push:
+    branches: [main]
   pull_request:
     paths-ignore:
       - "**/*.md"
@@ -21,11 +23,13 @@ permissions:
 
 concurrency:
   # Mutating VPS operations share one queue per ref, so two deploys never
-  # interleave. PR checks and qualifications cancel an older run for the same
-  # ref. Diagnosis gets its own slot and never waits behind build work.
+  # interleave. Commit checks and qualifications cancel an older run for the
+  # same ref. Diagnosis never waits behind build work.
   group: >-
     ${{ github.event_name == 'pull_request'
         && format('liquidity-migration-pr-{0}', github.event.pull_request.number)
+        || github.event_name == 'push'
+        && format('liquidity-migration-checks-{0}', github.ref)
         || github.event_name == 'workflow_dispatch' && inputs.mode == 'qualify'
         && format('liquidity-migration-qualify-{0}', github.ref)
         || github.event_name == 'workflow_dispatch' && inputs.mode == 'diagnose'
@@ -37,13 +41,14 @@ concurrency:
   # disarm is still pending behind cancellation of the previous run.
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request'
+        || github.event_name == 'push'
         || github.event_name == 'workflow_dispatch' && inputs.mode == 'qualify'
         || github.event_name == 'workflow_dispatch' && inputs.mode == 'disarm-mainnet' }}
 
 jobs:
   ci:
     if: >-
-      github.event_name == 'pull_request' ||
+      github.event_name == 'push' || github.event_name == 'pull_request' ||
       (github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy')
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -74,7 +79,7 @@ jobs:
   # hide an engine failure, or the other way round.
   rust:
     if: >-
-      github.event_name == 'pull_request' ||
+      github.event_name == 'push' || github.event_name == 'pull_request' ||
       (github.event_name == 'workflow_dispatch' &&
        (inputs.mode == 'deploy' || inputs.mode == 'qualify'))
     runs-on: ubuntu-latest
@@ -125,11 +130,11 @@ jobs:
           cargo build --release --locked --workspace --bins
           (
             cd target/release
-            sha256sum engine signal-worker market-tape > binaries.sha256
+            sha256sum engine engine-tools signal-worker > binaries.sha256
             ./engine --help >/dev/null
+            ./engine-tools --help >/dev/null
             ./signal-worker --help >/dev/null
-            ./market-tape help >/dev/null 2>&1 || true
-            tar -czf "$RUNNER_TEMP/engine-binaries-${GITHUB_SHA}.tar.gz" engine signal-worker market-tape binaries.sha256
+            tar -czf "$RUNNER_TEMP/engine-binaries-${GITHUB_SHA}.tar.gz" engine engine-tools signal-worker binaries.sha256
           )
         working-directory: engine
       - name: Upload release binaries
@@ -190,20 +195,7 @@ jobs:
       - name: Configure pinned SSH identity
         env:
           VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-        run: |
-          test -n "$VPS_SSH_PRIVATE_KEY"
-          install -d -m 700 ~/.ssh
-          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/vps_deploy_key
-          chmod 600 ~/.ssh/vps_deploy_key
-          ssh-keygen -y -f ~/.ssh/vps_deploy_key > ~/.ssh/vps_deploy_key.pub
-          ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256 |
-            grep -F "$GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT"
-          ssh-keyscan -T 10 -t ed25519 -- "$VPS_HOST" > ~/.ssh/known_hosts.candidate
-          test -s ~/.ssh/known_hosts.candidate
-          host_fingerprints="$(ssh-keygen -lf ~/.ssh/known_hosts.candidate -E sha256 | awk '{print $2}' | sort -u)"
-          test "$host_fingerprints" = "$VPS_ED25519_FINGERPRINT"
-          mv ~/.ssh/known_hosts.candidate ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
+        run: bash scripts/vps/configure_ci_ssh.sh
       - name: Stop and persistently disarm mainnet
         run: |
           set -euo pipefail
@@ -234,20 +226,7 @@ jobs:
       - name: Configure pinned SSH identity
         env:
           VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-        run: |
-          test -n "$VPS_SSH_PRIVATE_KEY"
-          install -d -m 700 ~/.ssh
-          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/vps_deploy_key
-          chmod 600 ~/.ssh/vps_deploy_key
-          ssh-keygen -y -f ~/.ssh/vps_deploy_key > ~/.ssh/vps_deploy_key.pub
-          ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256 |
-            grep -F "$GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT"
-          ssh-keyscan -T 10 -t ed25519 -- "$VPS_HOST" > ~/.ssh/known_hosts.candidate
-          test -s ~/.ssh/known_hosts.candidate
-          host_fingerprints="$(ssh-keygen -lf ~/.ssh/known_hosts.candidate -E sha256 | awk '{print $2}' | sort -u)"
-          test "$host_fingerprints" = "$VPS_ED25519_FINGERPRINT"
-          mv ~/.ssh/known_hosts.candidate ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
+        run: bash scripts/vps/configure_ci_ssh.sh
       - name: Read fleet and watchdog state
         run: |
           set -euo pipefail
@@ -289,20 +268,7 @@ jobs:
       - name: Configure pinned SSH identity
         env:
           VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-        run: |
-          test -n "$VPS_SSH_PRIVATE_KEY"
-          install -d -m 700 ~/.ssh
-          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/vps_deploy_key
-          chmod 600 ~/.ssh/vps_deploy_key
-          ssh-keygen -y -f ~/.ssh/vps_deploy_key > ~/.ssh/vps_deploy_key.pub
-          ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256 |
-            grep -F "$GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT"
-          ssh-keyscan -T 10 -t ed25519 -- "$VPS_HOST" > ~/.ssh/known_hosts.candidate
-          test -s ~/.ssh/known_hosts.candidate
-          host_fingerprints="$(ssh-keygen -lf ~/.ssh/known_hosts.candidate -E sha256 | awk '{print $2}' | sort -u)"
-          test "$host_fingerprints" = "$VPS_ED25519_FINGERPRINT"
-          mv ~/.ssh/known_hosts.candidate ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
+        run: bash scripts/vps/configure_ci_ssh.sh
       - name: Download release binaries
         if: inputs.mode == 'deploy'
         uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
@@ -321,7 +287,7 @@ jobs:
       - name: Run VPS mode
         env:
           DEPLOY_MODE_INPUT: ${{ inputs.mode }}
-          # The host fetches the exact commit from a private repository. Its own
+          # The host fetches the exact repository commit. Its own
           # https credential is not provisioned by anything here, so the deploy
           # carries this run's contents:read token to the host, which spends it
           # on one fetch in a 0600 config it then deletes. Without it the fetch

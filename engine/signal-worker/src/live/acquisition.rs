@@ -127,26 +127,23 @@ pub(super) async fn fetch_ticker_page(
     Ok(fetched)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_funding_fetch_lane(
     lane_tx: mpsc::Sender<LaneCompletion>,
     client: PublicHttpClient,
     category: String,
     page_limit: usize,
-    max_parallel: usize,
     jobs: Vec<FundingJob>,
     instruments: Arc<BTreeMap<String, crate::model::InstrumentObservation>>,
 ) {
     tokio::spawn(async move {
         let mut succeeded = true;
-        for chunk in funding_job_chunks(&jobs) {
-            let result = fetch_funding_batches(
+        for job in jobs {
+            let result = fetch_funding_job(
                 client.clone(),
                 category.clone(),
                 page_limit,
-                max_parallel,
-                chunk.to_vec(),
-                Arc::clone(&instruments),
+                job,
+                &instruments,
             )
             .await;
             let fetched_without_failures = result
@@ -185,13 +182,11 @@ pub(super) fn spawn_whale_fetch_lane(
     lane_tx: mpsc::Sender<LaneCompletion>,
     client: PublicHttpClient,
     page_limit: usize,
-    max_parallel: usize,
     jobs: Vec<WhaleJob>,
 ) {
     tokio::spawn(async move {
-        for chunk in whale_job_chunks(&jobs) {
-            let result =
-                fetch_whale_batch(client.clone(), page_limit, max_parallel, chunk.to_vec()).await;
+        for job in jobs {
+            let result = fetch_whale_job(client.clone(), page_limit, job).await;
             if !send_whale_chunk_and_wait(&lane_tx, result).await {
                 break;
             }
@@ -218,27 +213,18 @@ pub(super) async fn send_whale_chunk_and_wait(
     resume_rx.await == Ok(true)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_repair_lane(
     lane_tx: mpsc::Sender<LaneCompletion>,
     client: PublicHttpClient,
     category: String,
     page_limit: usize,
-    max_parallel: usize,
     jobs: Vec<(String, i64, i64)>,
     end_ms: i64,
     epoch: Option<u64>,
 ) {
     tokio::spawn(async move {
-        for chunk in kline_job_chunks(&jobs) {
-            let result = fetch_kline_jobs_bounded(
-                client.clone(),
-                category.clone(),
-                page_limit,
-                max_parallel,
-                chunk.to_vec(),
-            )
-            .await;
+        for job in jobs {
+            let result = fetch_kline_job(client.clone(), category.clone(), page_limit, job).await;
             if !send_repair_chunk_and_wait(&lane_tx, result).await {
                 break;
             }
@@ -352,183 +338,108 @@ pub(super) async fn fetch_ticker_snapshot(
     Ok(fetched)
 }
 
-pub(super) async fn fetch_kline_jobs_bounded(
+pub(super) async fn fetch_kline_job(
     client: PublicHttpClient,
     category: String,
     page_limit: usize,
-    max_parallel: usize,
-    jobs: Vec<(String, i64, i64)>,
+    (symbol, start, end): KlineJob,
 ) -> Result<FetchedKlineJobs, WorkerError> {
-    if jobs.len() > KLINE_FETCH_CHUNK_SIZE {
-        return Err(WorkerError::state(format!(
-            "kline fetch retained {} jobs; maximum chunk is {KLINE_FETCH_CHUNK_SIZE}",
-            jobs.len()
-        )));
+    let result = fetch_klines(client, &category, page_limit, &symbol, start, end).await;
+    match result {
+        Ok((rows, available_at_ms)) => Ok(FetchedKlineJobs {
+            batches: vec![(
+                symbol,
+                FetchedKlineBatch {
+                    rows,
+                    available_at_ms,
+                    checked_from_ms: Some(start),
+                    checked_through_ms: Some(end),
+                },
+            )],
+            failures: Vec::new(),
+        }),
+        Err(error) if error.is_lane_local_source_failure() => Ok(FetchedKlineJobs {
+            batches: Vec::new(),
+            failures: vec![(symbol, error.to_string())],
+        }),
+        Err(error) => Err(error),
     }
-    let limiter = Arc::new(Semaphore::new(max_parallel));
-    let mut tasks = JoinSet::new();
-    for (symbol, start, end) in jobs {
-        let limiter = Arc::clone(&limiter);
-        let client = client.clone();
-        let category = category.clone();
-        tasks.spawn(async move {
-            let result = match limiter.acquire_owned().await {
-                Ok(_permit) => {
-                    fetch_klines(client, &category, page_limit, &symbol, start, end).await
-                }
-                Err(_) => Err(WorkerError::state(
-                    "public request concurrency limiter closed",
-                )),
-            };
-            (symbol, start, end, result)
-        });
-    }
-    let mut fetched = Vec::new();
-    let mut failures = Vec::new();
-    while let Some(joined) = tasks.join_next().await {
-        let (symbol, start, end, result) = joined
-            .map_err(|error| WorkerError::state(format!("public fetch task failed: {error}")))?;
-        match result {
-            Ok((rows, available_at_ms)) => {
-                fetched.push((
-                    symbol,
-                    FetchedKlineBatch {
-                        rows,
-                        available_at_ms,
-                        checked_from_ms: Some(start),
-                        checked_through_ms: Some(end),
-                    },
-                ));
-            }
-            Err(error) if error.is_lane_local_source_failure() => {
-                failures.push((symbol, error.to_string()));
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    fetched.sort_by(|left, right| {
-        (&left.0, left.1.checked_from_ms).cmp(&(&right.0, right.1.checked_from_ms))
-    });
-    failures.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(FetchedKlineJobs {
-        batches: fetched,
-        failures,
-    })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn fetch_funding_batches(
+pub(super) async fn fetch_funding_job(
     client: PublicHttpClient,
     category: String,
     page_limit: usize,
-    max_parallel: usize,
-    jobs: Vec<FundingJob>,
-    instruments: Arc<BTreeMap<String, crate::model::InstrumentObservation>>,
+    (symbol, checked_from_ms, checked_through_ms, emit_lifecycle): FundingJob,
+    instruments: &BTreeMap<String, crate::model::InstrumentObservation>,
 ) -> Result<FetchedFunding, WorkerError> {
-    if jobs.len() > FUNDING_FETCH_CHUNK_SIZE {
-        return Err(WorkerError::state(format!(
-            "funding fetch retained {} jobs; maximum chunk is {FUNDING_FETCH_CHUNK_SIZE}",
-            jobs.len()
-        )));
-    }
-    let limiter = Arc::new(Semaphore::new(max_parallel));
-    let mut tasks = JoinSet::new();
-    for (symbol, start_ms, end_ms, emit_lifecycle) in jobs {
-        let interval_hours = instruments
-            .get(&symbol)
-            .and_then(|row| row.funding_interval_min)
-            .filter(|minutes| *minutes > 0 && *minutes % 60 == 0)
-            .map(|minutes| minutes / 60);
-        let limiter = Arc::clone(&limiter);
-        let client = client.clone();
-        let category = category.clone();
-        tasks.spawn(async move {
-            let result = match limiter.acquire_owned().await {
-                Ok(_permit) => {
-                    fetch_funding(
-                        client,
-                        &category,
-                        page_limit,
-                        &symbol,
-                        start_ms,
-                        end_ms,
-                        interval_hours,
-                    )
-                    .await
-                }
-                Err(_) => Err(WorkerError::state(
-                    "public request concurrency limiter closed",
-                )),
-            };
-            (
-                symbol,
-                start_ms,
-                end_ms,
-                emit_lifecycle,
-                interval_hours,
-                result,
-            )
-        });
-    }
-    let mut batches = Vec::new();
-    let mut failures = Vec::new();
-    while let Some(joined) = tasks.join_next().await {
-        let (symbol, checked_from_ms, checked_through_ms, emit_lifecycle, interval_hours, result) =
-            joined
-                .map_err(|error| WorkerError::state(format!("public fetch task failed: {error}")))?;
-        match result {
-            Ok((rows, available_at_ms)) => {
-                let intervals = interval_hours
-                    .map(|hours| hours.saturating_mul(HOUR_MS))
-                    .filter(|interval_ms| *interval_ms > 0)
-                    .map(|interval_ms| {
-                        complete_funding_coverage(
-                            checked_from_ms,
-                            checked_through_ms,
-                            interval_ms,
-                            &rows,
-                        )
-                    })
-                    .transpose()?
-                    .unwrap_or_default();
-                if intervals.is_empty() {
-                    batches.push((
-                        symbol,
-                        FetchedFundingBatch {
-                            rows,
-                            available_at_ms,
-                            checked_from_ms: None,
-                            checked_through_ms: None,
-                            emit_lifecycle,
-                        },
-                    ));
-                } else {
-                    let mut rows = Some(rows);
-                    for (index, (from, through)) in intervals.into_iter().enumerate() {
-                        batches.push((
-                            symbol.clone(),
-                            FetchedFundingBatch {
-                                rows: rows.take().unwrap_or_default(),
-                                available_at_ms,
-                                checked_from_ms: Some(from),
-                                checked_through_ms: Some(through),
-                                emit_lifecycle: emit_lifecycle && index == 0,
-                            },
-                        ));
-                    }
-                }
-            }
-            Err(error) if error.is_lane_local_source_failure() => {
-                failures.push((symbol, error.to_string()));
-            }
-            Err(error) => return Err(error),
+    let interval_hours = instruments
+        .get(&symbol)
+        .and_then(|row| row.funding_interval_min)
+        .filter(|minutes| *minutes > 0 && *minutes % 60 == 0)
+        .map(|minutes| minutes / 60);
+    let result = fetch_funding(
+        client,
+        &category,
+        page_limit,
+        &symbol,
+        checked_from_ms,
+        checked_through_ms,
+        interval_hours,
+    )
+    .await;
+    let (rows, available_at_ms) = match result {
+        Ok(fetched) => fetched,
+        Err(error) if error.is_lane_local_source_failure() => {
+            return Ok(FetchedFunding {
+                batches: Vec::new(),
+                failures: vec![(symbol, error.to_string())],
+            });
         }
-    }
-    batches.sort_by(|left, right| {
-        (&left.0, left.1.checked_from_ms).cmp(&(&right.0, right.1.checked_from_ms))
-    });
-    failures.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(FetchedFunding { batches, failures })
+        Err(error) => return Err(error),
+    };
+    let intervals = interval_hours
+        .map(|hours| hours.saturating_mul(HOUR_MS))
+        .filter(|interval_ms| *interval_ms > 0)
+        .map(|interval_ms| {
+            complete_funding_coverage(checked_from_ms, checked_through_ms, interval_ms, &rows)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let batches = if intervals.is_empty() {
+        vec![(
+            symbol,
+            FetchedFundingBatch {
+                rows,
+                available_at_ms,
+                checked_from_ms: None,
+                checked_through_ms: None,
+                emit_lifecycle,
+            },
+        )]
+    } else {
+        let mut rows = Some(rows);
+        intervals
+            .into_iter()
+            .enumerate()
+            .map(|(index, (from, through))| {
+                (
+                    symbol.clone(),
+                    FetchedFundingBatch {
+                        rows: rows.take().unwrap_or_default(),
+                        available_at_ms,
+                        checked_from_ms: Some(from),
+                        checked_through_ms: Some(through),
+                        emit_lifecycle: emit_lifecycle && index == 0,
+                    },
+                )
+            })
+            .collect()
+    };
+    Ok(FetchedFunding {
+        batches,
+        failures: Vec::new(),
+    })
 }
 
 pub(super) fn complete_funding_coverage(
@@ -580,51 +491,14 @@ pub(super) fn complete_funding_coverage(
         .collect())
 }
 
-pub(super) async fn fetch_whale_batch(
+pub(super) async fn fetch_whale_job(
     client: PublicHttpClient,
     page_limit: usize,
-    max_parallel: usize,
-    jobs: Vec<(String, i64, i64)>,
+    (symbol, start_ms, end_ms): WhaleJob,
 ) -> Result<FetchedWhales, WorkerError> {
-    if jobs.len() > WHALE_FETCH_CHUNK_SIZE {
-        return Err(WorkerError::state(format!(
-            "whale fetch retained {} jobs; maximum chunk is {WHALE_FETCH_CHUNK_SIZE}",
-            jobs.len()
-        )));
-    }
-    let limiter = Arc::new(Semaphore::new(max_parallel));
-    let mut tasks = JoinSet::new();
-    let mut available_at_ms = 0;
-    for (symbol, start_ms, end_ms) in jobs {
-        available_at_ms = available_at_ms.max(end_ms);
-        let limiter = Arc::clone(&limiter);
-        let client = client.clone();
-        tasks.spawn(async move {
-            let result = match limiter.acquire_owned().await {
-                Ok(_permit) => {
-                    fetch_whale_symbol(client, page_limit, &symbol, start_ms, end_ms).await
-                }
-                Err(_) => Err(WorkerError::state(
-                    "public request concurrency limiter closed",
-                )),
-            };
-            (symbol, start_ms, end_ms, result)
-        });
-    }
-    let mut rows = Vec::new();
-    let mut coverage = Vec::new();
-    while let Some(joined) = tasks.join_next().await {
-        let (symbol, start_ms, end_ms, result) = joined
-            .map_err(|error| WorkerError::state(format!("public fetch task failed: {error}")))?;
-        match result {
-            Ok((mut found, received)) => {
-                coverage.extend(complete_whale_coverage(&symbol, start_ms, end_ms, &found)?);
-                rows.append(&mut found);
-                available_at_ms = available_at_ms.max(received);
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    let (mut rows, received) =
+        fetch_whale_symbol(client, page_limit, &symbol, start_ms, end_ms).await?;
+    let coverage = complete_whale_coverage(&symbol, start_ms, end_ms, &rows)?;
     rows.sort_by(|left, right| {
         let left_ts =
             wire_i64(Some(&left.day_end_ms), "Binance whale timestamp").unwrap_or(i64::MAX);
@@ -633,7 +507,7 @@ pub(super) async fn fetch_whale_batch(
         (&left.symbol, left_ts).cmp(&(&right.symbol, right_ts))
     });
     Ok(FetchedWhales {
-        available_at_ms,
+        available_at_ms: end_ms.max(received),
         rows,
         coverage,
     })
@@ -1186,3 +1060,6 @@ pub(super) fn wire_i64(value: Option<&Value>, label: &str) -> Result<i64, Worker
     }
     .ok_or_else(|| WorkerError::network(format!("{label} is not an integer")))
 }
+
+#[cfg(test)]
+mod tests;

@@ -2,15 +2,15 @@
 
 ## Purpose
 
-Define the completed Tier-1 ownership model, its local qualification evidence and the operational boundaries of the candidate engine.
+Define the execution ownership model, the current qualification checkpoint and the operational boundaries of the candidate engine.
 
 ## Spec Tables
 
 | Contract | Authority |
 | --- | --- |
-| Accepted findings | [tier1-audit.md](tier1-audit.md): all 56 accepted IDs, implementation references and retained decisions |
-| Qualification | [tier1-round-evidence.json](tier1-round-evidence.json): commands, counts, source hashes, assertion failures and restored passes |
-| Deployment supplement | [tier1-deployment-evidence.json](tier1-deployment-evidence.json): integrated deployment repairs, retirement rehearsal and host observations; the original qualification remains bound to its recorded source hashes |
+| Open work and retained decisions | [tier1-audit-round-2.md](tier1-audit-round-2.md) |
+| Baseline audit and qualification | Git revision `2422be0d`: original audit and regression evidence; [deployment and observed-fault qualification at `16689a98`](https://github.com/rob435/liquidity-migration/blob/16689a981c100632a1277567fb312e89a49c5309/docs/tier1-deployment-evidence.json); historical counts do not qualify current source |
+| Round-2 audit input | Git revision `1b742d06`, retained by tag `codex/round2-audit-input`: original Claude audit, including disputed claims |
 | Runtime design | [engine.md](engine.md); implemented code and tests take precedence |
 | Deployment state | [STATE.md](../STATE.md); local qualification does not update the funded host |
 | History | [CHANGELOG.md](../CHANGELOG.md); accepted baseline evidence remains in Git |
@@ -51,13 +51,13 @@ Define the completed Tier-1 ownership model, its local qualification evidence an
 | Allocation | `EmergencyNetFifo` is versioned stable sleeve-key contributor order, not arrival-time FIFO. |
 | Operational scope | No funded deploy, live account parity, capital change or strategy promotion follows from the local test results. |
 
-| Qualification | Result |
+| Qualification | Result and scope |
 | --- | --- |
-| Final integrated debug / release | Each: 27 binaries, 2,300 passed, 0 failed, 5 expected ignores; all 108 fault-case tests pass in both profiles |
-| Strict Clippy, format and developer gate | Rust 1.90.0 clean; debug/release doctests pass (empty targets). Doctor, Ruff, ShellCheck and mypy over 100 files pass; 1,514 pytest pass. The final Rust suites cover the two fixes after the developer-gate run. |
-| Fail-before / pass-after regressions | 108 isolated assertion-failure/restored-pass cases, 106 distinct controls; 273 retained artifacts rehashed independently. Earlier bundles and failed setup runs add no proof count. |
-| Linux process and worker envelopes | 13 process tests passed; 270-symbol worker cold start, 12-hour outage frontier, overload and restart passed |
-| Deterministic fault simulation and reader probes | 48 seed runs, each repeated: faultless 1, light 1–6, heavy 7 and heavy 1–40; all evaluated checks pass and every WAL replay is identical. Cash and closed-ledger comparisons run for the 36 flat endings; 12 open endings explicitly leave those comparisons unjudged. Old reader refuses the precision marker; candidate reads legacy and marked fixtures without byte changes. |
+| Accounting baseline `2422be0d` | 2,333 release tests, six ignored, six repeated heavy fault seeds and real copied-WAL accounting fixtures; full historical evidence is retained in that Git revision |
+| Current combined source | 2,395 release tests pass, 6 expected ignores; strict Clippy, both doctest profiles and six repeated heavy-fault seeds pass with 659 source files unchanged. Current binary copied-WAL boot/rotation/reboot passes. Mandatory pre-push developer/debug gate remains pending; [evidence](tier1-round2-evidence.json) |
+| Regression controls | Actual assertion failures exist for callback timing/freshness, nonfinite fee preservation, canary exact terms, malformed private stream recovery and broken recovery CLI verbs; setup and compile failures add no count |
+| Production mode | Bench and child-worker integration exercise isolated callbacks; virtual-clock simulation and backtests declare embedded reducers |
+| Host evidence | [STATE.md](../STATE.md) owns dated observations; both realms run `420c7347` at the 14:25:52 UTC native capture; combined Round-2 rollout is pending |
 
 ## Invariants
 
@@ -85,15 +85,16 @@ scripts/dev.sh check
 
 ```sh
 cd engine
-cargo run --bin engine --release --locked -- sim --seed 1 --seconds 300 --symbols 2 --crashes 0 --faults none --twice
-cargo run --bin engine --release --locked -- sim --seed 1 --seeds 6 --seconds 300 --symbols 2 --faults light --twice
-cargo run --bin engine --release --locked -- sim --seed 7 --seconds 300 --symbols 2 --crashes 2 --faults heavy --twice
-cargo run --bin engine --release --locked -- sim --seed 1 --seeds 40 --seconds 300 --symbols 2 --crashes 2 --faults heavy --twice --keep --out /tmp/tier1-sim-heavy
+cargo build --release --locked -p engine-tools --bins
+./target/release/engine-tools sim --seed 1 --seconds 300 --symbols 2 --crashes 0 --faults none --twice
+./target/release/engine-tools sim --seed 1 --seeds 6 --seconds 300 --symbols 2 --faults light --twice
+./target/release/engine-tools sim --seed 7 --seconds 300 --symbols 2 --crashes 2 --faults heavy --twice
+./target/release/engine-tools sim --seed 1 --seeds 40 --seconds 300 --symbols 2 --crashes 2 --faults heavy --twice --keep --out /tmp/tier1-sim-heavy
 ```
 
 ```sh
 # Linux, with the same pinned compiler.
 cd engine
-cargo test --locked --release -p engine-core --test integration strategy_process -- --nocapture
+cargo test --locked --release -p engine-tools --test integration strategy_process -- --nocapture
 cargo test --locked --release -p signal-worker full_population_outage_resource_envelope_is_bounded -- --ignored --nocapture
 ```

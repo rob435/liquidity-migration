@@ -25,7 +25,6 @@ use engine_types::{
     WalError, WalRecord, WorkPolicy,
 };
 
-use crate::bench::{self, BenchOptions};
 use crate::clock;
 use crate::config::EngineSection;
 use crate::engine::{durable_risk_verdict, Engine, EngineError, StopReason, ENGINE_VERSION};
@@ -909,8 +908,9 @@ impl RiskKernel for MockRisk {
         intent: &Intent,
         account: &AccountView,
         _portfolio: &engine_types::portfolio::PortfolioState,
+        now_ns: u64,
     ) -> engine_types::risk::PortfolioRiskVerdict {
-        match self.assess(intent, account) {
+        match self.assess(intent, account, now_ns) {
             RiskVerdict::Allow { qty } => match engine_types::order_terms::strategy_decimal(qty) {
                 Ok(quantity) => engine_types::risk::PortfolioRiskVerdict::Allow {
                     qty: if qty == intent.qty {
@@ -937,8 +937,9 @@ impl RiskKernel for MockRisk {
         intent: &Intent,
         account: &AccountView,
         portfolio: &engine_types::portfolio::PortfolioState,
+        now_ns: u64,
     ) -> engine_types::risk::PortfolioRiskVerdict {
-        self.assess_portfolio(intent, account, portfolio)
+        self.assess_portfolio(intent, account, portfolio, now_ns)
     }
     fn physical_exposure_interval_excluding(
         &mut self,
@@ -968,7 +969,7 @@ impl RiskKernel for MockRisk {
         engine_types::risk::PhysicalExposureInterval::try_new(net, net)
     }
 
-    fn assess(&mut self, intent: &Intent, _account: &AccountView) -> RiskVerdict {
+    fn assess(&mut self, intent: &Intent, _account: &AccountView, _now_ns: u64) -> RiskVerdict {
         match &self.verdict {
             RiskVerdict::Allow { qty } if qty.is_nan() => RiskVerdict::Allow { qty: intent.qty },
             other => other.clone(),
@@ -984,10 +985,11 @@ impl RiskKernel for MockRisk {
         _client_order_id: &str,
         intent: &Intent,
         account: &AccountView,
+        now_ns: u64,
     ) -> RiskVerdict {
         self.amend_verdict
             .clone()
-            .unwrap_or_else(|| self.assess(intent, account))
+            .unwrap_or_else(|| self.assess(intent, account, now_ns))
     }
 
     fn register_order(&mut self, client_order_id: &str, _intent: &Intent, approved_qty: f64) {
@@ -1824,6 +1826,7 @@ mod standalone_stops;
 mod strategy_checkpoints;
 mod strategy_events;
 mod update_contract;
+mod venue_boundary;
 mod worked_entries;
 
 pub(crate) async fn lifecycle_test_fixture(
@@ -1844,6 +1847,29 @@ pub(crate) async fn callback_test_fixture(
 ) {
     let (engine, harness) = build(allow_all(), strategies, &["BTCUSDT"], &[]).await;
     (engine, harness.records)
+}
+
+pub(crate) async fn callback_kernel_fixture(
+    strategies: Vec<Box<dyn Strategy>>,
+) -> (
+    Engine<MockWal, engine_risk::Kernel, MockVenue>,
+    Arc<Mutex<Vec<WalRecord>>>,
+) {
+    let tape = tape();
+    let (wal, records) = MockWal::new(tape.clone());
+    let (venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
+    let engine = Engine::boot(
+        &settings(),
+        "0",
+        wal,
+        shared_sleeves::kernel(),
+        venue,
+        strategies,
+        &[],
+    )
+    .await
+    .unwrap();
+    (engine, records)
 }
 
 impl MockWal {

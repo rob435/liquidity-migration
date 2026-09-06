@@ -276,7 +276,7 @@ enum PendingMutation {
     },
     Orders {
         requests: Vec<OrderRequest>,
-        timings: Vec<(u64, u64)>,
+        timings: Vec<Option<crate::ctx::CallbackTiming>>,
         queued_ns: u64,
     },
     Cancels {
@@ -738,115 +738,99 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             let halt_wake = self
                 .next_halt_wake_ns(clock::now_ns())
                 .map(|at| Duration::from_nanos(at.saturating_sub(clock::now_ns())));
-            if !self.halt_cancel_queue.is_empty() || halt_confirmation_pending {
-                // During a halt, consume every already-ready private update
-                // before the next cancel group or a confirmation-deadline
-                // tick. Keep this priority until the final accepted cancel
-                // is terminal: if its update and deadline are ready together,
-                // observing the update first avoids a false timeout.
-                tokio::select! {
-                    biased;
-                    _ = &mut shutdown, if self.drain_progress.is_none() => break StopReason::Shutdown,
-                    update = order_feed.next_update(), if !self.order_lineage.waiting() => {
-                        if let Turn::Stop(reason) = self.on_order_feed(update, true, &timer).await? {
-                            break reason;
-                        }
-                    }
-                    lineage = self.order_lineage.completed.recv(), if self.order_lineage.running() => {
-                        self.on_order_lineage(lineage.ok_or_else(|| EngineError::State("order lineage reader stopped".into()))?).await?;
-                    }
-                    recovery = self.recovery.completed.recv(), if self.recovery.waiting() => {
-                        self.on_recovery_completion(recovery.ok_or_else(|| EngineError::State("recovery task stopped".into()))?).await?;
-                    }
-                    _ = std::future::ready(()), if self.recovery.applying() && !self.order_lineage.waiting() => { self.service_account_recovery().await?; }
-                    lookup = self.dispatches.lookups.recv(), if !self.dispatches.lookup_pending.is_empty() => {
-                        if let Some((id, result)) = lookup { self.on_order_lookup(id, result).await?; }
-                    }
-                    dispatch = self.dispatches.durable.recv(), if self.dispatches.write.is_some() => {
-                        self.on_order_dispatch_durable(dispatch).await?;
-                    }
-                    durable = self.host.callbacks.durable.recv(), if self.host.callbacks.write.is_some() => {
-                        self.on_callback_durable(durable)?;
-                    }
-                    callback_page = self.host.callbacks.pages.completed.recv(), if self.host.callbacks.pages.loading() && self.host.callbacks.write.is_none() => {
-                        self.on_callback_page(callback_page.ok_or_else(|| EngineError::State("callback page reader stopped".into()))?)?;
-                    }
-                    order_source = self.host.callbacks.order_news.completed.recv(), if self.host.callbacks.order_news.pending() => {
-                        self.on_order_callback_source(order_source.ok_or_else(|| EngineError::State("order callback reader stopped".into()))?)?;
-                    }
-                    callback = self.host.callbacks.completions.recv(), if self.host.callbacks.running() && self.host.callbacks.write.is_none() => {
-                        self.on_strategy_callback(callback)?;
-                    }
-                    completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
-                        self.on_completion(completion, order_feed).await?;
-                    }
-                    _ = flush_tick.tick() => self.on_tick().await?,
-                    _ = timer.sleep(timer_wait.unwrap_or(Duration::MAX)), if timer_wait.is_some() => {
-                        self.on_timers().await?;
-                    }
-                    _ = std::future::ready(()), if !self.halt_cancel_queue.is_empty() => {
-                        self.dispatch_halt_cancel_group().await?;
-                    }
-                    _ = std::future::ready(()), if self.halt_lookup_due(clock::now_ns()) => {
-                        self.start_halt_lookup(clock::now_ns())?;
-                    }
-                    _ = timer.sleep(halt_wake.unwrap_or(Duration::MAX)), if halt_wake.is_some() => {
-                        self.queue_halted_entry_cancels()?;
-                    }
-                    _ = std::future::ready(()), if self.drain_progress.is_some() => {
-                        self.drain(clock::now_ns()).await?;
-                    }
-                    event = market_feed.next_event() => {
-                        if let Turn::Stop(reason) = self.on_market_feed(&event, order_feed, &timer).await? {
-                            break reason;
-                        }
-                    }
-                    observation = signal_feed.next_event(), if signals_open && self.pending_signal_deliveries.is_empty() => {
-                        self.on_signal_feed(observation, signal_feed, &mut signals_open)?;
-                    }
-                    request = control_feed.next_request(), if controls_open => {
-                        self.on_control_feed(request, control_feed, &mut controls_open).await?;
+            let halt_mode = !self.halt_cancel_queue.is_empty() || halt_confirmation_pending;
+            let drain_mode = !halt_mode && self.drain_progress.is_some();
+            let strategy_sleep =
+                (!drain_mode).then(|| timer.sleep(timer_wait.unwrap_or(Duration::MAX)));
+            let (halt_sleep, ordinary_sleep) = if halt_mode {
+                (strategy_sleep, None)
+            } else {
+                (None, strategy_sleep)
+            };
+            let halt_deadline = halt_mode.then(|| timer.sleep(halt_wake.unwrap_or(Duration::MAX)));
+            let (halt_tick, ordinary_tick) = if halt_mode {
+                (Some(&mut flush_tick), None)
+            } else {
+                (None, Some(&mut flush_tick))
+            };
+            tokio::select! {
+                biased;
+                _ = &mut shutdown, if self.drain_progress.is_none() => break StopReason::Shutdown,
+                update = order_feed.next_update(), if !drain_mode && !self.order_lineage.waiting() => {
+                    if let Turn::Stop(reason) = self.on_order_feed(update, true, &timer).await? {
+                        break reason;
                     }
                 }
-                self.after_turn(market_feed, order_feed, signal_feed)
-                    .await?;
-                continue;
-            }
-
-            if self.drain_progress.is_some() {
-                tokio::select! {
-                    biased;
-                    lineage = self.order_lineage.completed.recv(), if self.order_lineage.running() => {
-                        self.on_order_lineage(lineage.ok_or_else(|| EngineError::State("order lineage reader stopped".into()))?).await?;
-                    }
-                    recovery = self.recovery.completed.recv(), if self.recovery.waiting() => {
-                        self.on_recovery_completion(recovery.ok_or_else(|| EngineError::State("recovery task stopped".into()))?).await?;
-                    }
-                    _ = std::future::ready(()), if self.recovery.applying() && !self.order_lineage.waiting() => { self.service_account_recovery().await?; }
-                    lookup = self.dispatches.lookups.recv(), if !self.dispatches.lookup_pending.is_empty() => {
-                        if let Some((id, result)) = lookup { self.on_order_lookup(id, result).await?; }
-                    }
-                    dispatch = self.dispatches.durable.recv(), if self.dispatches.write.is_some() => {
-                        self.on_order_dispatch_durable(dispatch).await?;
-                    }
-                    durable = self.host.callbacks.durable.recv(), if self.host.callbacks.write.is_some() => {
-                        self.on_callback_durable(durable)?;
-                    }
-                    callback_page = self.host.callbacks.pages.completed.recv(), if self.host.callbacks.pages.loading() && self.host.callbacks.write.is_none() => {
-                        self.on_callback_page(callback_page.ok_or_else(|| EngineError::State("callback page reader stopped".into()))?)?;
-                    }
-                    order_source = self.host.callbacks.order_news.completed.recv(), if self.host.callbacks.order_news.pending() => {
-                        self.on_order_callback_source(order_source.ok_or_else(|| EngineError::State("order callback reader stopped".into()))?)?;
-                    }
-                    callback = self.host.callbacks.completions.recv(), if self.host.callbacks.running() && self.host.callbacks.write.is_none() => {
-                        self.on_strategy_callback(callback)?;
-                    }
-                    completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
+                lineage = self.order_lineage.completed.recv(), if self.order_lineage.running() => {
+                    self.on_order_lineage(lineage.ok_or_else(|| EngineError::State("order lineage reader stopped".into()))?).await?;
+                }
+                recovery = self.recovery.completed.recv(), if self.recovery.waiting() => {
+                    self.on_recovery_completion(recovery.ok_or_else(|| EngineError::State("recovery task stopped".into()))?).await?;
+                }
+                _ = std::future::ready(()), if self.recovery.applying() && !self.order_lineage.waiting() => {
+                    self.service_account_recovery().await?;
+                }
+                lookup = self.dispatches.lookups.recv(), if !self.dispatches.lookup_pending.is_empty() => {
+                    if let Some((id, result)) = lookup { self.on_order_lookup(id, result).await?; }
+                }
+                dispatch = self.dispatches.durable.recv(), if self.dispatches.write.is_some() => {
+                    self.on_order_dispatch_durable(dispatch).await?;
+                }
+                durable = self.host.callbacks.durable.recv(), if self.host.callbacks.write.is_some() => {
+                    self.on_callback_durable(durable)?;
+                }
+                callback_page = self.host.callbacks.pages.completed.recv(), if self.host.callbacks.pages.loading() && self.host.callbacks.write.is_none() => {
+                    self.on_callback_page(callback_page.ok_or_else(|| EngineError::State("callback page reader stopped".into()))?)?;
+                }
+                order_source = self.host.callbacks.order_news.completed.recv(), if self.host.callbacks.order_news.pending() => {
+                    self.on_order_callback_source(order_source.ok_or_else(|| EngineError::State("order callback reader stopped".into()))?)?;
+                }
+                callback = self.host.callbacks.completions.recv(), if self.host.callbacks.running() && self.host.callbacks.write.is_none() => {
+                    self.on_strategy_callback(callback)?;
+                }
+                completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
+                    if drain_mode {
                         let completion = completion.ok_or(EngineError::TaskStopped { task: EngineTask::Venue, detail: "with mutations outstanding" })?;
                         self.take_venue_completion(completion).await?;
+                    } else {
+                        self.on_completion(completion, order_feed).await?;
                     }
-                    _ = std::future::ready(()) => {}
                 }
+                // Halt deadlines follow ready private updates and precede new market input.
+                _ = async { if let Some(tick) = halt_tick { tick.tick().await; } }, if halt_mode => self.on_tick().await?,
+                _ = async { if let Some(sleep) = halt_sleep { sleep.await; } }, if halt_mode && timer_wait.is_some() => {
+                    self.on_timers().await?;
+                }
+                _ = std::future::ready(()), if halt_mode && !self.halt_cancel_queue.is_empty() => {
+                    self.dispatch_halt_cancel_group().await?;
+                }
+                _ = std::future::ready(()), if halt_mode && self.halt_lookup_due(clock::now_ns()) => {
+                    self.start_halt_lookup(clock::now_ns())?;
+                }
+                _ = async { if let Some(sleep) = halt_deadline { sleep.await; } }, if halt_mode && halt_wake.is_some() => {
+                    self.queue_halted_entry_cancels()?;
+                }
+                _ = std::future::ready(()), if halt_mode && self.drain_progress.is_some() => {
+                    self.drain(clock::now_ns()).await?;
+                }
+                _ = std::future::ready(()), if drain_mode => {}
+                event = market_feed.next_event(), if !drain_mode => {
+                    if let Turn::Stop(reason) = self.on_market_feed(&event, order_feed, &timer).await? {
+                        break reason;
+                    }
+                }
+                observation = signal_feed.next_event(), if !drain_mode && signals_open && self.pending_signal_deliveries.is_empty() => {
+                    self.on_signal_feed(observation, signal_feed, &mut signals_open)?;
+                }
+                request = control_feed.next_request(), if !drain_mode && controls_open => {
+                    self.on_control_feed(request, control_feed, &mut controls_open).await?;
+                }
+                _ = async { if let Some(sleep) = ordinary_sleep { sleep.await; } }, if !halt_mode && !drain_mode && timer_wait.is_some() => {
+                    self.on_timers().await?;
+                }
+                _ = async { if let Some(tick) = ordinary_tick { tick.tick().await; } }, if !halt_mode && !drain_mode => self.on_tick().await?,
+            }
+            if drain_mode {
                 // A completed venue mutation is the cooperative boundary.
                 // Poll one private update without waiting, then independently
                 // refresh a stale account view, and only then resume the wake.
@@ -885,63 +869,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     _ = flush_tick.tick() => self.on_tick().await?,
                     _ = std::future::ready(()) => self.drain(now).await?,
                 }
-                self.after_turn(market_feed, order_feed, signal_feed)
-                    .await?;
-                continue;
             }
 
-            tokio::select! {
-                biased;
-                _ = &mut shutdown => break StopReason::Shutdown,
-                update = order_feed.next_update(), if !self.order_lineage.waiting() => {
-                    if let Turn::Stop(reason) = self.on_order_feed(update, true, &timer).await? {
-                        break reason;
-                    }
-                }
-                    lineage = self.order_lineage.completed.recv(), if self.order_lineage.running() => {
-                        self.on_order_lineage(lineage.ok_or_else(|| EngineError::State("order lineage reader stopped".into()))?).await?;
-                    }
-                    recovery = self.recovery.completed.recv(), if self.recovery.waiting() => {
-                        self.on_recovery_completion(recovery.ok_or_else(|| EngineError::State("recovery task stopped".into()))?).await?;
-                    }
-                    _ = std::future::ready(()), if self.recovery.applying() && !self.order_lineage.waiting() => { self.service_account_recovery().await?; }
-                lookup = self.dispatches.lookups.recv(), if !self.dispatches.lookup_pending.is_empty() => {
-                        if let Some((id, result)) = lookup { self.on_order_lookup(id, result).await?; }
-                    }
-                    dispatch = self.dispatches.durable.recv(), if self.dispatches.write.is_some() => {
-                        self.on_order_dispatch_durable(dispatch).await?;
-                    }
-                    durable = self.host.callbacks.durable.recv(), if self.host.callbacks.write.is_some() => {
-                        self.on_callback_durable(durable)?;
-                    }
-                    callback_page = self.host.callbacks.pages.completed.recv(), if self.host.callbacks.pages.loading() && self.host.callbacks.write.is_none() => {
-                        self.on_callback_page(callback_page.ok_or_else(|| EngineError::State("callback page reader stopped".into()))?)?;
-                    }
-                    order_source = self.host.callbacks.order_news.completed.recv(), if self.host.callbacks.order_news.pending() => {
-                        self.on_order_callback_source(order_source.ok_or_else(|| EngineError::State("order callback reader stopped".into()))?)?;
-                    }
-                    callback = self.host.callbacks.completions.recv(), if self.host.callbacks.running() && self.host.callbacks.write.is_none() => {
-                    self.on_strategy_callback(callback)?;
-                }
-                completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
-                    self.on_completion(completion, order_feed).await?;
-                }
-                event = market_feed.next_event() => {
-                    if let Turn::Stop(reason) = self.on_market_feed(&event, order_feed, &timer).await? {
-                        break reason;
-                    }
-                }
-                observation = signal_feed.next_event(), if signals_open && self.pending_signal_deliveries.is_empty() => {
-                    self.on_signal_feed(observation, signal_feed, &mut signals_open)?;
-                }
-                request = control_feed.next_request(), if controls_open => {
-                    self.on_control_feed(request, control_feed, &mut controls_open).await?;
-                }
-                _ = timer.sleep(timer_wait.unwrap_or(Duration::MAX)), if timer_wait.is_some() => {
-                    self.on_timers().await?;
-                }
-                _ = flush_tick.tick() => self.on_tick().await?,
-            }
             // Outside the select!, where the feeds are borrowable again.
             self.after_turn(market_feed, order_feed, signal_feed)
                 .await?;
@@ -1444,7 +1373,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             signal_cursors: self.signals.cursors().cloned().collect(),
             signal_subscriptions: self.signals.subscriptions().cloned().collect(),
             signal_gaps: self.signals.gaps().cloned().collect(),
-            pending_order_dispatches: self.dispatches.orders.values().cloned().collect(),
+            pending_order_dispatches: self
+                .dispatches
+                .orders
+                .values()
+                .map(|order| order.state.clone())
+                .collect(),
             signal_producers: self.signals.producers().cloned().collect(),
             identities: Some(self.identities.clone()),
             instrument_catalog: self.symbol_admission.checkpoint.clone(),

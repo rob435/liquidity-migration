@@ -470,9 +470,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             Ok(result) => result,
             Err(error) => return self.fail_strategy_callback(completion.strategy, error),
         };
-        if let Err(error) = engine_strategies::runtime::restore(&proposal.state) {
-            return self.fail_strategy_callback(completion.strategy, error);
-        }
         let input = self
             .host
             .callbacks
@@ -486,6 +483,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 EngineError::State("callback completed without a prepared invocation".into())
             })?
             .now_ns;
+        use engine_types::strategy_process::CallbackEvent;
+        let source_ns = match &input.event {
+            CallbackEvent::Quote { quote, .. } => quote.recv_ns,
+            CallbackEvent::Depth { depth, .. } => depth.recv_ns,
+            CallbackEvent::Trades { trades, .. } => trades.recv_ns,
+            CallbackEvent::Ticker { ticker, .. } => ticker.recv_ns,
+            CallbackEvent::FeedReset { recv_ns } => *recv_ns,
+            _ => now_ns,
+        };
+        let timing = crate::ctx::CallbackTiming {
+            origin_ns: (completion.input_id >= self.host.callbacks.replayed_before)
+                .then_some(if source_ns == 0 { now_ns } else { source_ns }),
+            decided_ns: clock::now_ns(),
+        };
         let mut actions: Vec<_> = proposal
             .actions
             .into_iter()
@@ -552,17 +563,24 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             timers,
             retained_signal_subscriptions: proposal.retained_signal_subscriptions,
         };
+        if self.host.callbacks.volatile.contains(&input_id)
+            && actions.is_empty()
+            && self.host.callbacks.unchanged(&process)
+        {
+            self.host
+                .callbacks
+                .state
+                .discard(input_id)
+                .map_err(EngineError::State)?;
+            self.host.callbacks.volatile.remove(&input_id);
+            self.host.callbacks.recycle(completion.strategy, worker);
+            return Ok(());
+        }
+        let strategy = match engine_strategies::runtime::restore(&process.runtime) {
+            Ok(strategy) => strategy,
+            Err(error) => return self.fail_strategy_callback(completion.strategy, error),
+        };
         if self.host.callbacks.volatile.contains(&input_id) {
-            if actions.is_empty() && self.host.callbacks.unchanged(&process) {
-                self.host
-                    .callbacks
-                    .state
-                    .discard(input_id)
-                    .map_err(EngineError::State)?;
-                self.host.callbacks.volatile.remove(&input_id);
-                self.host.callbacks.recycle(completion.strategy, worker);
-                return Ok(());
-            }
             self.host.callbacks.volatile.remove(&input_id);
             input_id = self
                 .host
@@ -659,6 +677,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 input_id,
                 transition,
                 process,
+                strategy,
+                timing,
                 worker,
             },
             barrier,
@@ -793,6 +813,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 input_id,
                 transition,
                 process,
+                strategy,
+                timing,
                 worker,
             } => {
                 self.host
@@ -801,9 +823,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .commit(input_id, process.clone())
                     .map_err(EngineError::State)?;
                 self.host.callbacks.pages.remove(input_id);
-                self.host.strategies[process.strategy.idx()] =
-                    engine_strategies::runtime::restore(&process.runtime)
-                        .map_err(EngineError::State)?;
+                self.host.strategies[process.strategy.idx()] = strategy;
                 self.host.timers.restore(
                     process.strategy,
                     &process.timers,
@@ -824,6 +844,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                                 index,
                             }),
                             callback_id: Some(transition.id),
+                            timing: Some(timing),
                         });
                     }
                     self.host
@@ -1390,6 +1411,7 @@ mod tests {
                         transition_id: transition.id,
                         index: 0,
                     }),
+                    None,
                 )],
                 clock::now_ns(),
             )

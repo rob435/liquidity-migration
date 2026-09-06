@@ -56,11 +56,14 @@ pub enum CallbackWrite {
         input_id: u64,
         transition: Option<engine_types::StrategyTransitionState>,
         process: engine_types::strategy_process::StrategyProcessState,
+        strategy: Box<dyn Strategy>,
+        timing: crate::ctx::CallbackTiming,
         worker: StrategyProcess,
     },
 }
 
 pub struct CallbackHost {
+    pub replayed_before: u64,
     pub state: CallbackState,
     pub pages: super::paging::CallbackPages,
     pub order_news: super::order_news::OrderNews,
@@ -201,6 +204,7 @@ impl CallbackHost {
         let (completed, completions) = tokio::sync::mpsc::channel(strategies.len().max(1));
         let (durability_result, durable) = tokio::sync::mpsc::channel(1);
         Ok(Self {
+            replayed_before: state.next_id,
             last_launched: None,
             closing: false,
             write: None,

@@ -9,7 +9,21 @@ use super::state::CallbackState;
 
 impl Ctx<'_> {
     pub(crate) fn callback_snapshot(&self) -> Result<CallbackSnapshot, String> {
-        let mut bytes = 0_usize;
+        let mut snapshot = CallbackSnapshot {
+            strategy: self.strategy,
+            now_ns: self.now_ns,
+            wall_ms: self.wall_ms(),
+            entries_enabled: self.entries_enabled(true),
+            account: self.account_summary(),
+            symbols: Vec::new(),
+            orders: Vec::new(),
+            global_checkpoint: self.strategy_global_checkpoint().cloned(),
+            strategy_names: self.strategy_names.to_vec(),
+            strategy_events: Vec::new(),
+        };
+        // Empty arrays include their brackets; each inserted row adds its
+        // encoded bytes and, after the first, one comma.
+        let mut bytes = CallbackState::encoded_size(&snapshot)?;
         let mut account_bytes = |value: usize| -> Result<(), String> {
             bytes = bytes
                 .checked_add(value)
@@ -17,11 +31,13 @@ impl Ctx<'_> {
                 .ok_or("strategy callback snapshot exceeds its byte budget")?;
             Ok(())
         };
-        let mut symbols = Vec::new();
         for index in 0..self.books.market.table.len() {
             let id = SymbolId(
                 u16::try_from(index).map_err(|_| "strategy snapshot symbol overflows its id")?,
             );
+            let in_flight = self
+                .in_flight_exact(id)
+                .map_err(|error| error.to_string())?;
             let row = SymbolSnapshot {
                 id,
                 name: self.books.market.table.name(id).to_owned(),
@@ -37,21 +53,16 @@ impl Ctx<'_> {
                     self.my_position_exact(id)
                         .map_err(|error| error.to_string())?,
                 )),
-                in_flight: self
-                    .in_flight_exact(id)
-                    .and_then(|quantity| quantity.to_f64())
-                    .map_err(|error| error.to_string())?,
-                exact_in_flight: Some(Box::new(
-                    self.in_flight_exact(id)
-                        .map_err(|error| error.to_string())?,
-                )),
+                in_flight: in_flight.to_f64().map_err(|error| error.to_string())?,
+                exact_in_flight: Some(Box::new(in_flight)),
                 facts: self.my_position_facts(id),
                 checkpoint: self.strategy_checkpoint(id).cloned(),
             };
-            account_bytes(CallbackState::encoded_size(&row)?)?;
-            symbols.push(row);
+            account_bytes(
+                CallbackState::encoded_size(&row)? + usize::from(!snapshot.symbols.is_empty()),
+            )?;
+            snapshot.symbols.push(row);
         }
-        let mut orders = Vec::new();
         for (id, order) in &self.books.orders.orders {
             if order.request.sleeve_owner() != Some(self.strategy) {
                 continue;
@@ -63,38 +74,29 @@ impl Ctx<'_> {
                 side: request.side,
                 kind: request.kind,
                 qty: request.qty,
-                filled_qty: order.filled_qty,
+                filled_qty: order.filled_qty()?,
                 remaining_qty: Some(order.remaining_qty()?),
                 reduce_only: request.is_sleeve_reduction(),
                 acked: order.acked,
                 resting: order.in_flight()
                     && self.books.registry.owner_of(id) == Some(self.strategy),
             };
-            account_bytes(CallbackState::encoded_size(&row)?)?;
-            orders.push(row);
+            account_bytes(
+                CallbackState::encoded_size(&row)? + usize::from(!snapshot.orders.is_empty()),
+            )?;
+            snapshot.orders.push(row);
         }
-        let mut strategy_events = Vec::new();
         for event in self
             .strategy_events
             .values()
             .filter(|event| event.source == self.strategy || event.destination == self.strategy)
         {
-            account_bytes(CallbackState::encoded_size(event)?)?;
-            strategy_events.push(event.clone());
+            account_bytes(
+                CallbackState::encoded_size(event)?
+                    + usize::from(!snapshot.strategy_events.is_empty()),
+            )?;
+            snapshot.strategy_events.push(event.clone());
         }
-        let snapshot = CallbackSnapshot {
-            strategy: self.strategy,
-            now_ns: self.now_ns,
-            wall_ms: self.wall_ms(),
-            entries_enabled: self.entries_enabled(true),
-            account: self.account_summary(),
-            symbols,
-            orders,
-            global_checkpoint: self.strategy_global_checkpoint().cloned(),
-            strategy_names: self.strategy_names.to_vec(),
-            strategy_events,
-        };
-        CallbackState::encoded_size(&snapshot)?;
         Ok(snapshot)
     }
 }

@@ -20,10 +20,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "vps-deploy.yml"
 
 
 def _remote_script() -> str:
-    text = DEPLOY.read_text(encoding="utf-8")
-    start = text.index("cat <<'REMOTE_SCRIPT'\n") + len("cat <<'REMOTE_SCRIPT'\n")
-    end = text.index("\nREMOTE_SCRIPT\n")
-    return text[start:end]
+    return (ROOT / "scripts/vps/deploy_remote.sh").read_text(encoding="utf-8")
 
 
 def _bash_ok(script: str) -> None:
@@ -35,6 +32,41 @@ def test_deploy_local_and_remote_scripts_parse() -> None:
     _bash_ok(_remote_script())
 
 
+def test_deploy_launcher_transmits_remote_file_and_literal_variables(tmp_path: Path) -> None:
+    ssh = tmp_path / "ssh"
+    captured = tmp_path / "remote.sh"
+    ssh.write_text('#!/bin/sh\ncat > "$REMOTE_CAPTURE"\n', encoding="utf-8")
+    ssh.chmod(0o755)
+    value = "literal ' space $HOME $(false); `false`"
+    result = subprocess.run(
+        ["bash", str(DEPLOY), "verify"],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "REMOTE_CAPTURE": str(captured),
+            "REPO_DIR": value,
+            "GITHUB_TOKEN": "",
+            "EXPECTED_COMMIT": "a" * 40,
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    transmitted = captured.read_text(encoding="utf-8")
+    remote = _remote_script()
+    assert transmitted.endswith(remote)
+    _bash_ok(transmitted)
+    variables = transmitted[: -len(remote)]
+    decoded = subprocess.run(
+        ["bash", "-c", variables + 'printf "%s" "$REPO_DIR"'],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert decoded.stdout == value
+
+
 def test_deployed_shell_entrypoints_are_executable() -> None:
     for relative in (
         "scripts/ops.sh",
@@ -42,7 +74,6 @@ def test_deployed_shell_entrypoints_are_executable() -> None:
         "deploy/telegram_control_helper.sh",
         "scripts/runtime/backup_state.sh",
         "scripts/runtime/chaos_drill.sh",
-        "scripts/runtime/pack_market_tape.py",
         "scripts/vps/flatten_account.sh",
     ):
         path = ROOT / relative
@@ -244,7 +275,7 @@ def test_a_realm_that_does_not_come_up_rolls_back_to_the_last_finished_deploy() 
     assert 'rollback_after_failure "$realm"' in handover
     assert handover.index('rollback_after_failure "$realm"') < handover.index("return 1")
     assert handover.index("return 1") < handover.index('record_realm_fingerprint "$realm"')
-    rollback = remote[remote.index("rollback_after_failure()") : remote.index("# Every liquidity-migration unit")]
+    rollback = _function_body(remote, "rollback_after_failure")
     # A rolled-back generation that also fails stops the fleet instead of looping.
     assert 'if [ "${AUTO_ROLLBACK:-0}" = 1 ]; then' in rollback
     assert 'AUTO_ROLLBACK=1 EXPECTED_COMMIT="$target" deploy_mode' in rollback
@@ -280,18 +311,23 @@ def test_a_realm_whose_inputs_did_not_change_is_left_running() -> None:
     assert "handover_realm demo" not in deploy_body[: deploy_body.index("prepare_demo_inputs")]
 
 
-def test_ci_runs_only_for_pull_requests_and_explicit_release_operations() -> None:
+def test_ci_checks_main_pushes_and_keeps_release_work_explicit() -> None:
     workflow = (ROOT / ".github" / "workflows" / "vps-deploy.yml").read_text(encoding="utf-8")
     triggers = workflow[workflow.index("\non:\n") : workflow.index("\npermissions:\n")]
     assert "pull_request:" in triggers
-    assert "push:" not in triggers
+    assert "push:" in triggers
+    assert "branches: [main]" in triggers
+    push = triggers[triggers.index("  push:") : triggers.index("  pull_request:")]
+    assert "paths-ignore" not in push
     assert '"**/*.md"' in triggers and '"docs/**"' in triggers
 
     ci = workflow[workflow.index("\n  ci:\n") : workflow.index("\n  rust:\n")]
     assert "github.event_name == 'pull_request'" in ci
+    assert "github.event_name == 'push'" in ci
     assert "inputs.mode == 'deploy'" in ci
 
     rust = workflow[workflow.index("\n  rust:\n") : workflow.index("\n  rust-artifact:\n")]
+    assert "github.event_name == 'push'" in rust
     assert "cargo test --workspace --all-targets --locked" in rust
     assert "--release" not in rust and "--profile" not in rust
     assert "inputs.mode == 'deploy' || inputs.mode == 'qualify'" in rust
@@ -316,6 +352,7 @@ def test_ci_runs_only_for_pull_requests_and_explicit_release_operations() -> Non
 
     concurrency = workflow[workflow.index("concurrency:") : workflow.index("\njobs:\n")]
     assert "format('liquidity-migration-pr-{0}', github.event.pull_request.number)" in concurrency
+    assert "format('liquidity-migration-checks-{0}', github.ref)" in concurrency
     assert "format('liquidity-migration-qualify-{0}', github.ref)" in concurrency
     assert "format('liquidity-migration-diagnose-{0}', github.run_id)" in concurrency
     assert "format('liquidity-migration-vps-{0}', github.ref)" in concurrency
@@ -323,12 +360,8 @@ def test_ci_runs_only_for_pull_requests_and_explicit_release_operations() -> Non
     assert "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in vps[vps.index("Run VPS mode") :]
 
 
-def test_deploy_never_stops_an_independent_unit() -> None:
+def test_deploy_preserves_unchanged_independent_units() -> None:
     remote = _remote_script()
-    stop_fleet = remote[remote.index("stop_fleet()") : remote.index("install_units()")]
-    assert "lm_independent_units" in stop_fleet
-    assert "lm_host_liqmig_units" in stop_fleet
-    assert "list-unit-files" not in stop_fleet
     deploy_body = remote[remote.index("deploy_mode()") : remote.index("rollback_mode()")]
     assert "start_independent_units" in deploy_body
     independent = remote[
@@ -347,12 +380,42 @@ def _function_body(remote: str, name: str) -> str:
 
 def test_remote_deploy_enters_the_checkout_before_it_imports_the_package() -> None:
     # The remote body runs from the ssh login directory, and the venv installs
-    # requirements.lock without the project, so every
+    # the runtime lock without the project, so every
     # `python -m liquidity_migration.*` resolves from the working directory.
     remote = _remote_script()
     assert 'cd "$REPO_DIR"' in _function_body(remote, "fetch_exact_commit")
     order = _function_body(remote, "deploy_mode")
     assert order.index("fetch_exact_commit") < order.index("install_python_environment")
+
+
+@pytest.mark.parametrize("runtime_lock", [True, False])
+def test_deploy_selects_host_dependencies_and_supports_older_checkouts(
+    tmp_path: Path, runtime_lock: bool
+) -> None:
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / "requirements.lock").write_text("pytest==1\n", encoding="utf-8")
+    if runtime_lock:
+        (tmp_path / "requirements-runtime.lock").write_text("websocket-client==1\n", encoding="utf-8")
+    python = tmp_path / "python"
+    python.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+    python.chmod(0o755)
+    remote = _remote_script()
+    result = subprocess.run(
+        ["bash", "-c", "\n".join([
+            "set -euo pipefail",
+            _function_body(remote, "python_requirements_path"),
+            _function_body(remote, "install_python_environment"),
+            "install_python_environment",
+        ])],
+        env={**os.environ, "REPO_DIR": str(tmp_path), "PYTHON": str(python)},
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    arguments = result.stdout.splitlines()
+    expected = "requirements-runtime.lock" if runtime_lock else "requirements.lock"
+    assert arguments[arguments.index("-r") + 1] == str(tmp_path / expected)
+    assert "--no-deps" in arguments
 
 
 def test_mainnet_takeover_reloads_the_owner_arming_switch() -> None:
@@ -406,7 +469,7 @@ printf '%s\\n' "$*" >> "$SYSTEMCTL_TRACE"
     )
     systemctl.chmod(0o755)
 
-    deploy = DEPLOY.read_text(encoding="utf-8")
+    deploy = _remote_script()
     harness = "\n".join(
         [
             "set -euo pipefail",
@@ -450,7 +513,7 @@ printf '%s\\n' "$*" >> "$SYSTEMCTL_TRACE"
     )
     systemctl.chmod(0o755)
 
-    deploy = DEPLOY.read_text(encoding="utf-8")
+    deploy = _remote_script()
     harness = "\n".join(
         [
             "set -euo pipefail",
@@ -487,7 +550,7 @@ def _trace_handover_realm(
     clear_status: int = 0,
 ) -> tuple[int, list[str]]:
     trace = tmp_path / f"handover-{import_status}-{start_status}-{retirement_status}-{clear_status}.trace"
-    deploy = DEPLOY.read_text(encoding="utf-8")
+    deploy = _remote_script()
     harness = "\n".join(
         [
             "set -uo pipefail",
@@ -573,7 +636,7 @@ def test_reconciliation_clear_failure_prevents_start_after_verified_import(tmp_p
 def test_legacy_retirement_uses_the_realms_optional_plan_and_preserves_failure(
     tmp_path: Path, realm: str
 ) -> None:
-    helper = _function(DEPLOY.read_text(encoding="utf-8"), "retire_legacy_signal_sources")
+    helper = _function(_remote_script(), "retire_legacy_signal_sources")
     helper = helper.replace("/etc/liquidity-migration/", f"{tmp_path}/")
     harness = "\n".join(
         [
@@ -597,7 +660,7 @@ def test_legacy_retirement_uses_the_realms_optional_plan_and_preserves_failure(
 
 
 def _run_reconciliation_clear(tmp_path: Path, realm: str, status: int) -> subprocess.CompletedProcess[str]:
-    helper = _function(DEPLOY.read_text(encoding="utf-8"), "clear_reconciliation_if_requested")
+    helper = _function(_remote_script(), "clear_reconciliation_if_requested")
     helper = helper.replace("/etc/liquidity-migration/", f"{tmp_path}/")
     harness = "\n".join(
         [
@@ -673,7 +736,7 @@ def test_empty_reconciliation_note_is_retained_without_running_a_clear(tmp_path:
 
 @pytest.mark.parametrize("realm", ["demo", "mainnet"])
 def test_pending_reconciliation_note_prevents_unchanged_realm_skip(tmp_path: Path, realm: str) -> None:
-    helper = _function(DEPLOY.read_text(encoding="utf-8"), "realm_unchanged")
+    helper = _function(_remote_script(), "realm_unchanged")
     helper = helper.replace("/etc/liquidity-migration/", f"{tmp_path}/")
     (tmp_path / f"{realm}.fingerprint").write_text("unchanged\n", encoding="utf-8")
     harness = "\n".join(

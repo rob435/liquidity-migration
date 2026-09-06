@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 bytes = { workspace = true }
 engine-types = { workspace = true }
+engine-public = { workspace = true }
 engine-strategies = { workspace = true }
 futures-util = { workspace = true }
 getrandom = { workspace = true }

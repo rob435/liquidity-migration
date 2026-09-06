@@ -198,12 +198,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         .expect("authorized dispatch");
                     order.phase = OrderDispatchPhase::Attempted;
                     self.risk.mark_order_attempted(&id);
-                    self.ledger.record(
-                        Segment::Durable,
-                        clock::now_ns().saturating_sub(order.intent.decided_ns),
-                    );
+                    if let Some(timing) = order.timing {
+                        self.ledger.record(
+                            Segment::Durable,
+                            clock::now_ns().saturating_sub(timing.decided_ns),
+                        );
+                    }
                     requests.push(order.request.clone());
-                    timings.push((order.intent.decided_ns, order.origin_ns));
+                    timings.push(order.timing);
                 }
                 if !requests.is_empty() {
                     let queued_ns = clock::now_ns();
@@ -285,6 +287,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 &intent,
                 &self.books.account,
                 &self.books.attribution.snapshot(),
+                clock::now_ns(),
             ) {
                 engine_types::risk::PortfolioRiskVerdict::Allow { qty, .. }
                     if intent.quantity().is_ok_and(|requested| qty == requested) =>
@@ -494,7 +497,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 let mut queued = order;
                 queued.phase = OrderDispatchPhase::Queued;
                 self.wal.append(&WalRecord::OrderDispatchQueued {
-                    order: queued.clone(),
+                    order: queued.state.clone(),
                 })?;
                 self.dispatches.orders.insert(id.into(), queued);
                 self.dispatches.unresolved.remove(id);
@@ -530,7 +533,8 @@ mod tests {
     type TestEngine =
         Engine<crate::tests::MockWal, crate::tests::MockRisk, crate::tests::MockVenue>;
 
-    async fn fixture() -> (TestEngine, std::sync::Arc<std::sync::Mutex<Vec<WalRecord>>>) {
+    pub(super) async fn fixture() -> (TestEngine, std::sync::Arc<std::sync::Mutex<Vec<WalRecord>>>)
+    {
         let params = toml::from_str("symbol = 'BTCUSDT'\nevery_s = 60\nenabled = false").unwrap();
         let strategy = engine_strategies::build_strategy("probe", StrategyId(0), &params).unwrap();
         let (mut engine, records) = crate::tests::callback_test_fixture(vec![strategy]).await;
@@ -541,7 +545,7 @@ mod tests {
         (engine, records)
     }
 
-    fn prepared_order(engine: &mut TestEngine, id: &str) -> PreparedOrder {
+    pub(super) fn prepared_order(engine: &mut TestEngine, id: &str) -> PreparedOrder {
         prepared_order_with_terms(engine, id, false)
     }
 
@@ -601,11 +605,17 @@ mod tests {
         engine.books.orders.apply(&record);
         engine.dispatches.orders.insert(
             id.into(),
-            OrderDispatchState {
-                request: request.clone(),
-                intent: intent.clone(),
-                phase: OrderDispatchPhase::Queued,
-                origin_ns: intent.decided_ns,
+            crate::order_dispatch::RuntimeDispatch {
+                state: OrderDispatchState {
+                    request: request.clone(),
+                    intent: intent.clone(),
+                    phase: OrderDispatchPhase::Queued,
+                    origin_ns: intent.decided_ns,
+                },
+                timing: Some(crate::ctx::CallbackTiming {
+                    origin_ns: Some(intent.decided_ns),
+                    decided_ns: intent.decided_ns,
+                }),
             },
         );
         PreparedOrder {
@@ -884,7 +894,7 @@ mod tests {
         };
         engine
             .process_intents(
-                vec![(intent, Some("atomic-unsent".into()))],
+                vec![(intent, Some("atomic-unsent".into()), None)],
                 clock::now_ns(),
             )
             .await
@@ -1060,8 +1070,8 @@ mod portfolio_tests {
     use super::*;
     use engine_types::Quote;
 
-    async fn fixture() -> Engine<crate::tests::MockWal, engine_risk::Kernel, crate::tests::MockVenue>
-    {
+    pub(super) async fn fixture(
+    ) -> Engine<crate::tests::MockWal, engine_risk::Kernel, crate::tests::MockVenue> {
         let mut engine = crate::tests::shared_sleeves::balanced_engine().await;
         engine.books.market.apply(&MarketEvent::Quote {
             symbol: SymbolId(0),
@@ -1100,6 +1110,7 @@ mod portfolio_tests {
                 },
                 Some("eng-exit-recheck".into()),
                 clock::now_ns(),
+                None,
                 &mut HashMap::new(),
             )
             .await
@@ -1156,3 +1167,6 @@ mod portfolio_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod replay_timing_tests;

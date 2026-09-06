@@ -1,10 +1,12 @@
 # Observability Specification
 
-What the fleet records about itself, where it lands, and how to see it.
+## Purpose
 
----
+Define the fleet telemetry sources, freshness rules and operator views.
 
-## 1. Surfaces
+## Spec Tables
+
+### Surfaces
 
 | Surface | Unit | Cadence | Output | Authority |
 | :--- | :--- | :--- | :--- | :--- |
@@ -20,7 +22,7 @@ another: the heartbeat says how the engine is **now**, `trades.jsonl` says what
 was **realized**, and the equity samples say what the account was **worth over
 time**, including the minutes it lost money without closing anything.
 
-## 2. Sample Schema
+### Sample Schema
 
 `scripts/runtime/record_equity.py` reads every artifact the fleet manifest
 declares and appends one line per artifact per run.
@@ -38,7 +40,8 @@ noise, and the history is the point.
 | Field | Meaning |
 | :--- | :--- |
 | `ts_ms` | When the sample was taken, wall clock |
-| `state` | `live`, or `absent` / `unreadable` / `unparsable` with an `error` |
+| `state` | `live`, `stale`, or `absent` / `unreadable` / `unparsable` with an `error`; stale sources emit `up=0` and omit previous values |
+| Freshness | Engine and worker source timestamps expire after 60 seconds; recorder after 120 seconds. Each source is read before its observation time is sampled. Invalid or future source timestamps are unreadable |
 | `equity_usdt`, `available_usdt` | The venue's own reading, from the heartbeat |
 | `heartbeat_age_ms`, `account_age_ms` | Age of the heartbeat, and of the venue reading inside it |
 | `position_count`, `position_entry_notional_usdt`, `sleeve_positions` | Holdings, and how many each **configured** sleeve owns, zero included; `unattributed` is the owner's hand exposure |
@@ -59,39 +62,7 @@ noise, and the history is the point.
 | `shards`, `shards_connected`, `reconnects`, `bytes_24h`, `free_disk_bytes`, `snapshot_failures` | Recorder rows only: the connections and the disk. `reconnects` is since boot, summed over shards |
 | `started_at_ns`, `pid` | Recorder status only: startup grace and process identity used by liveness and deploy readiness checks |
 
-## 3. Invariants
-
-* **Must**: a realm with no readable heartbeat still get a line, and still push
-  `up=0`. A curve that stops cannot be told from a sampler that stopped.
-* **Must**: the local append happen before the push, and a failed push exit 0
-  with a `WARNING` on the journal. The file is the record; the remote is a view.
-* **Must**: realms and artifact paths come from `deploy/fleet_manifest.tsv`, so
-  the sampler cannot drift from the fleet the deploy installs.
-* **Must**: every sleeve the heartbeat lists in `strategies` be a series, zero
-  included. A sleeve that has held nothing since the sampler started is a line
-  at zero, not a missing line.
-* **Must Never**: an empty latency window be pushed as zero. The ledger's null
-  is absent from the line; the dashboard plots the order path as points.
-* **Must Never**: substitute p99 or the maximum for a missing p99.9 field, or
-  aggregate per-window quantiles as if they were the underlying samples.
-* **Must Never**: the probe page or message anybody. It reports through
-  `entry_blockers`, never `strategy_errors`, and `notify_book_changes.py` hides
-  its sleeve.
-* **Must Never**: the probe place on a symbol another sleeve holds. A Bybit
-  entry carries `stopLoss` with `tpslMode: Full`, so the stop it names belongs
-  to the whole position, and the probe's stop is deliberately far away.
-* **Must Never**: this unit load a venue credential file. It reads published
-  artifacts and pushes numbers; its credential surface is empty by construction.
-* **Must Never**: a missed minute be replayed. `Persistent=false`; the gap is
-  the fact worth keeping.
-* **Must Never**: Grafana be the only pager. It is a remote view fed by this
-  host; Telegram, the incident routine, and the watchdog-plane dead-man are
-  independent delivery paths defined in [notifications.md](notifications.md).
-* **Must**: the imported dashboard default to the fleet Prometheus datasource.
-  This stack also has ML and usage Prometheus sources; either one renders a
-  dashboard shell without the fleet series.
-
-## 4. Reading the Curve on the Host
+### Reading the Curve on the Host
 
 ```bash
 # Last 240 minutes of the funded account: sparkline, range, gaps, last 20 rows
@@ -108,7 +79,7 @@ scripts/ops.sh curve demo 1440
 tail -3 /var/lib/liquidity-migration/equity/engine-mainnet-$(date -u +%Y-%m).jsonl | jq .
 ```
 
-## 5. Grafana Cloud
+### Grafana Cloud
 
 The free tier is enough: it holds 10k active series and this fleet pushes about
 220. Metrics retention there is 14 days, which is why the host files are the
@@ -157,7 +128,7 @@ the script renders.
 
 | Section | Panels | Reads |
 | :--- | :--- | :--- |
-| **Status** | engine, entry permission, worker verdict and coverage, recorder state | `lm_engine_{up,may_open}`, `lm_worker_{status_healthy,ticker_coverage_complete}`, `lm_recorder_up` |
+| **Status** | engine, entry permission, worker verdict and coverage, recorder state; current values require source `up=1` | `lm_engine_{up,may_open}`, `lm_worker_{up,status_healthy,ticker_coverage_complete}`, `lm_recorder_up` |
 | **Account** | current equity and OI with one locally scaled sparkline per metric and realm | `equity_usdt`, `position_entry_notional_usdt` |
 | **Execution** | current orders, fills, and stream resets over 15 minutes with isolated sparklines; p99 and p99.9 order-path latency with end-to-end emphasized | `increase({orders_sent,fills,stream_resets}[15m])`, `{end_to_end,ack,durable,decide}_{p99,p999}_ns` |
 | **Data pipeline** | current market-data age; worker, recorder, and byte-budget load; five-minute Bybit/Binance tape loss and reconnect gaps | engine, worker, and recorder ages; worker and recorder fill ratios; recorder drop and reconnect increases |
@@ -203,7 +174,7 @@ Confirm the names the sink actually chose before trusting an empty panel:
 in `deploy/grafana/liquidity-migration-fleet.json`, not a change to the
 sampler.
 
-## 6. Diagnostic Commands
+### Diagnostic Commands
 
 ```bash
 scripts/ops.sh curve mainnet
@@ -215,5 +186,45 @@ scripts/ops.sh units | grep equity-recorder
 scripts/ops.sh logs engine.service 400 | grep -i probe
 
 # The dashboard JSON is what the renderer says it is
+python deploy/grafana/render_dashboard.py --check
+```
+
+## Invariants
+
+* **Must**: a realm with no fresh readable heartbeat still get a line, and still push
+  `up=0`. A curve that stops cannot be told from a sampler that stopped.
+* **Must**: the local append happen before the push, and a failed push exit 0
+  with a `WARNING` on the journal. The file is the record; the remote is a view.
+* **Must**: realms and artifact paths come from `deploy/fleet_manifest.tsv`, so
+  the sampler cannot drift from the fleet the deploy installs.
+* **Must**: every sleeve the heartbeat lists in `strategies` be a series, zero
+  included. A sleeve that has held nothing since the sampler started is a line
+  at zero, not a missing line.
+* **Must Never**: an empty latency window be pushed as zero. The ledger's null
+  is absent from the line; the dashboard plots the order path as points.
+* **Must Never**: substitute p99 or the maximum for a missing p99.9 field, or
+  aggregate per-window quantiles as if they were the underlying samples.
+* **Must Never**: the probe page or message anybody. It reports through
+  `entry_blockers`, never `strategy_errors`, and `notify_book_changes.py` hides
+  its sleeve.
+* **Must Never**: the probe place on a symbol another sleeve holds. A Bybit
+  entry carries `stopLoss` with `tpslMode: Full`, so the stop it names belongs
+  to the whole position, and the probe's stop is deliberately far away.
+* **Must Never**: this unit load a venue credential file. It reads published
+  artifacts and pushes numbers; only telemetry and notification credentials belong to this unit.
+* **Must Never**: a missed minute be replayed. `Persistent=false`; the gap is
+  the fact worth keeping.
+* **Must Never**: Grafana be the only pager. It is a remote view fed by this
+  host; Telegram, the incident routine, and the watchdog-plane dead-man are
+  independent delivery paths defined in [notifications.md](notifications.md).
+* **Must**: the imported dashboard default to the fleet Prometheus datasource.
+  This stack also has ML and usage Prometheus sources; either one renders a
+  dashboard shell without the fleet series.
+
+## Operational Recipes
+
+```sh
+scripts/ops.sh curve mainnet
+scripts/ops.sh logs equity-recorder.service 50
 python deploy/grafana/render_dashboard.py --check
 ```

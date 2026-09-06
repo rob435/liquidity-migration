@@ -56,7 +56,11 @@ _REPO_PATH = re.compile(
     r"^(?:configs|data|deploy|docs|engine|liquidity_migration|market_tape|scripts|tests)"
     r"/[A-Za-z0-9_./@-]+$"
 )
-_PATH_CLAIM_EXEMPT = frozenset({"CHANGELOG.md"})
+_PATH_CLAIM_EXEMPT = frozenset({
+    "CHANGELOG.md",
+    "docs/history/CHANGELOG-2026-08.md",
+    "docs/history/CHANGELOG-2026-09-01-through-05.md",
+})
 
 
 def test_every_repo_path_a_doc_names_exists() -> None:

@@ -138,7 +138,7 @@ _ENV_KEY_PATTERN = re.compile(r"^([A-Z][A-Z0-9_]*)=", re.MULTILINE)
 _DEPLOY_ENV_KEYS_READ_ELSEWHERE = {
     "RUST_LOG": (
         "read inside the engine binary by the tracing library "
-        "(engine-core/src/main.rs), never as a literal in our source"
+        "(engine-tools/src/engine.rs), never as a literal in our source"
     ),
 }
 

@@ -125,12 +125,19 @@ pub struct Books {
     pub covers: CoverBook,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct CallbackTiming {
+    pub origin_ns: Option<u64>,
+    pub decided_ns: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct PendingAction {
     pub caller: Option<StrategyId>,
     pub action: Action,
     pub(crate) effect: Option<crate::effects::EffectKey>,
     pub(crate) callback_id: Option<u64>,
+    pub(crate) timing: Option<CallbackTiming>,
 }
 
 impl From<Action> for PendingAction {
@@ -140,6 +147,7 @@ impl From<Action> for PendingAction {
             action,
             effect: None,
             callback_id: None,
+            timing: None,
         }
     }
 }
@@ -230,6 +238,10 @@ impl StrategyHost {
             runtime_entries_enabled: self.entries_enabled.get(&sid).copied(),
         };
         strategy.on_event(event, &mut ctx);
+        let timing = Some(CallbackTiming {
+            origin_ns: Some(now_ns),
+            decided_ns: crate::clock::now_ns(),
+        });
         if actions.is_empty() {
             return true;
         }
@@ -257,6 +269,7 @@ impl StrategyHost {
                     action,
                     effect: None,
                     callback_id: Some(callback_id),
+                    timing,
                 }));
             return true;
         }
@@ -273,6 +286,7 @@ impl StrategyHost {
                         index,
                     }),
                     callback_id: Some(transition_id),
+                    timing,
                 }),
         );
         true
@@ -573,7 +587,7 @@ impl StrategyCtx for Ctx<'_> {
                 side: request.side,
                 kind: request.kind,
                 qty: request.qty,
-                filled_qty: order.filled_qty,
+                filled_qty: order.filled_qty().expect("validated order fill projection"),
                 remaining_qty: Some(
                     order
                         .remaining_qty()
@@ -598,7 +612,7 @@ impl StrategyCtx for Ctx<'_> {
             symbol: order.request.symbol,
             side: order.request.side,
             qty: order.request.qty,
-            filled_qty: order.filled_qty,
+            filled_qty: order.filled_qty().expect("validated order fill projection"),
             remaining_qty: Some(
                 order
                     .remaining_qty()
@@ -1049,7 +1063,7 @@ mod tests {
                     wire_ns: row.wire_ns,
                     arrival_mid: row.arrival_mid,
                     acked: row.acked,
-                    filled_qty: row.filled_qty,
+                    filled_qty: row.filled_qty().unwrap(),
                     fill_quantity: Some(row.fill_quantity.clone()),
                     reservation_low_px: row.reservation_low_px,
                     reservation_high_px: row.reservation_high_px,

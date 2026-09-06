@@ -1,0 +1,138 @@
+{
+  "schema": 1,
+  "integration": {
+    "base_commit": "16689a981c100632a1277567fb312e89a49c5309",
+    "round2_snapshot": "7af6eba849dfb5836e01126bcd9fcd37d144a2b7",
+    "original_audit_commit": "1b742d066c5fee4dc00ececa1d098ef9cac08ab7",
+    "original_audit_tag": "codex/round2-audit-input"
+  },
+  "qualified_content": {
+    "files": 659,
+    "sha256": "86ed033d796a12c14a8910c392b5cf21c0135bb011610ea5f3950857fa141e3b",
+    "manifest_encoding": "SHA256 of the sorted file-to-SHA256 JSON object with compact separators",
+    "scope": "Tracked and new engine, scripts, tests, deployment, workflow and dependency files; documentation is excluded. Full hashes and command logs are retained in the private evidence archive.",
+    "unchanged_through_suite": true
+  },
+  "local_checks": {
+    "toolchain": "rustc 1.90.0 (1159e78c4 2025-09-14)",
+    "incremental": false,
+    "release": {
+      "passed": 2395,
+      "failed": 0,
+      "ignored": 6
+    },
+    "format": "pass",
+    "clippy_workspace_all_targets_warnings_denied": "pass",
+    "debug_doctests": "pass",
+    "release_doctests": "pass",
+    "heavy_fault_replay": {
+      "seeds": [
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "seconds_per_run": 300,
+      "process_deaths": 2,
+      "repetitions": 2,
+      "failed": 0,
+      "byte_identical_replay": true
+    },
+    "debug_and_developer_gate": "Mandatory pre-push developer/debug gate pending; final release source is frozen.",
+    "qualified_utc": "2026-09-06T15:13:49.579332+00:00"
+  },
+  "regression_evidence": [
+    {
+      "area": "Callback timing and current quote age",
+      "evidence": "/tmp/tier1-round2-integration/saved-receipt-review.json",
+      "result": "Two actual assertion failures and matching restored passes; local admission evidence, not an authenticated stale-wire incident."
+    },
+    {
+      "area": "Lossy nonfinite WAL fees",
+      "evidence": "/tmp/tier1-round2-wal-fee-before.log",
+      "result": "Known NaN fee is incorrectly accepted before; restored semantic encoding test passes."
+    },
+    {
+      "area": "Single in-flight quantity frontier",
+      "evidence": "/tmp/tier1-round2-projection-equivalence.json",
+      "result": "Four snapshots are byte-identical; refactor equivalence, not a bug failure."
+    },
+    {
+      "area": "Canary exact entry/cleanup and WAL ordinal width/exhaustion",
+      "evidence": "/tmp/tier1-round2-integration/missing-controls/summary.json",
+      "result": "Four compiled behavioral failures; restored canary and three ordinal tests pass."
+    },
+    {
+      "area": "Malformed Bybit account envelopes",
+      "evidence": "/tmp/tier1-bybit-envelope-regression-20260906T140759Z/proof.json",
+      "result": "Old parser silently ignores null order data; assertion fails before and passes after."
+    },
+    {
+      "area": "Recovery instructions",
+      "evidence": "/tmp/tier1-round2-integration/recovery-cli-proof/proof.json",
+      "result": "Both old instruction generators emit unsupported verbs; two assertions fail before and pass after."
+    },
+    {
+      "area": "Observer timestamps and disabled-sleeve faults",
+      "evidence": "/tmp/tier1-round2-python-proof/proof.json",
+      "result": "Previous scripts fail correctness assertions and nonfinite timestamp conversions; current scripts pass. Disk runway warning is a new capability, not a formerly broken absolute-floor alarm."
+    },
+    {
+      "area": "Benchmark histogram smoke",
+      "evidence": "/tmp/tier1-round2-bench-readiness/proof.json",
+      "result": "Initial parallel run fails with zero orders. Test waits for an actual isolated submit before timed smoke pacing; focused pass and final integrated qualification are distinct."
+    },
+    {
+      "area": "Retained production repairs",
+      "evidence": "/tmp/tier1-round2-integration/hotfix-retention.json",
+      "result": "Nine hotfix files and the moved runtime-control regression remain byte-identical to16689. Portfolio-risk assertions retain their checks with explicit admission-time arguments; current combined qualification covers the integration."
+    },
+    {
+      "area": "Account admission clock",
+      "evidence": "/tmp/tier1-admission-clock-proof/summary.json",
+      "result": "Four compiled risk cases and one real-Kernel callback fail with old comparisons; all pass after restoration. The restored callback test also exercises serialized queued effects. All four risk entry points run in each passing matrix case."
+    },
+    {
+      "area": "Process-local replay telemetry",
+      "evidence": "/tmp/tier1-round2-replay-timing-proof/source-freeze.json",
+      "result": "Former timestamp inference compiles and creates false histogram samples for restored effects, queued orders and callback inputs. Three assertions fail; restoring the implementation passes all four cases, including a live timing control. Rotation, reduction identity and current command-local timings are preserved."
+    }
+  ],
+  "copied_wal_rehearsal": {
+    "command": [
+      "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/engine/target/release/deps/engine_core-b9ac51a50d2f39af",
+      "tests::live_legacy_fixture::full_live_legacy_quantity_boot_replay_rotation_and_reboot",
+      "--ignored",
+      "--exact",
+      "--nocapture"
+    ],
+    "binary_sha256": "ae32c512a3733913d15de6bf8d8988a5f1ca630b42fd88873d194e828c29f50a",
+    "fixture": "/tmp/tier1-legacy-quantity-proof/live-fixtures/cover-refresh-20260906T125343Z",
+    "started_utc": "2026-09-06T15:12:31.422069+00:00",
+    "exit_code": 0,
+    "finished_utc": "2026-09-06T15:12:34.724741+00:00",
+    "log_sha256": "71ac0c51b53e680138cb50b325db311e3de1019864964ff3e89ac7c6e41d9ca5"
+  },
+  "measurement_contract": "docs/execution-performance.md",
+  "audit_boundaries": [
+    "Local synthetic process measurements do not establish an unloaded latency SLO or a universal memory ceiling.",
+    "Copied private-prefix recovery and short public tape replay do not establish a full production day.",
+    "Current deployment and authenticated account observations belong to STATE.md."
+  ],
+  "private_evidence_directory": "/tmp/tier1-round2-integration",
+  "measurements": {
+    "evidence": "/tmp/tier1-round2-integration/measurements-final/summary.json",
+    "sha256": "fe08c416f0705635b9643411cb7134605ae442effd282cc4de97b37865175920",
+    "seconds_per_cell": 60,
+    "completed_submits": [
+      299,
+      580,
+      576
+    ],
+    "risk_refusals": 0,
+    "barrier_failures": 0,
+    "compiler_processes_observed": false
+  }
+}

@@ -41,11 +41,11 @@ fn queued_and_attempted_orders_cannot_share_the_same_cached_free_margin() {
     let account = five_free();
     let mut kernel = Kernel::new(demo_config()).unwrap();
     reserve(&mut kernel, &account);
-    denied_margin(kernel.assess(&second(), &account));
+    denied_margin(kernel.assess(&second(), &account, second().decided_ns));
     kernel.mark_order_attempted("first");
     let mut later = account.clone();
     later.observed_ns = 3 * SEC;
-    denied_margin(kernel.assess(&second(), &later));
+    denied_margin(kernel.assess(&second(), &later, second().decided_ns));
 }
 
 #[test]
@@ -61,11 +61,11 @@ fn a_scan_started_before_acceptance_cannot_release_margin_when_it_finishes_later
     }));
     account.observed_ns = SEC + SEC / 2;
     kernel.observe_account_view(&account);
-    denied_margin(kernel.assess(&second(), &account));
+    denied_margin(kernel.assess(&second(), &account, second().decided_ns));
     account.observed_ns = 3 * SEC;
     kernel.observe_account_view(&account);
     assert_eq!(
-        kernel.assess(&second(), &account),
+        kernel.assess(&second(), &account, second().decided_ns),
         RiskVerdict::Allow { qty: 0.1 }
     );
 }
@@ -79,11 +79,11 @@ fn a_terminal_order_retains_its_unreflected_margin_until_a_post_change_scan() {
         client_order_id: "first".into(),
         recv_ns: 2 * SEC,
     });
-    denied_margin(kernel.assess(&second(), &account));
+    denied_margin(kernel.assess(&second(), &account, second().decided_ns));
     account.observed_ns = 3 * SEC;
     kernel.observe_account_view(&account);
     assert_eq!(
-        kernel.assess(&second(), &account),
+        kernel.assess(&second(), &account, second().decided_ns),
         RiskVerdict::Allow { qty: 0.1 }
     );
 }
@@ -108,14 +108,14 @@ fn a_complete_fill_retains_unreflected_margin_until_a_post_fill_scan() {
         venue_ts_ms: 1,
         recv_ns: 2 * SEC,
     });
-    denied_margin(kernel.assess(&second(), &account));
+    denied_margin(kernel.assess(&second(), &account, second().decided_ns));
     account
         .positions
         .push(position(BUSDT, Side::Buy, 1.0, 10.0, true));
     account.observed_ns = 3 * SEC;
     kernel.observe_account_view(&account);
     assert_eq!(
-        kernel.assess(&second(), &account),
+        kernel.assess(&second(), &account, second().decided_ns),
         RiskVerdict::Allow { qty: 0.1 }
     );
 }
@@ -126,11 +126,11 @@ fn restored_working_order_requires_confirmation_and_a_new_query_in_this_epoch() 
     let mut kernel = Kernel::new(demo_config()).unwrap();
     reserve(&mut kernel, &account);
     kernel.mark_order_accepted("first", 2 * SEC);
-    denied_margin(kernel.assess(&second(), &account));
+    denied_margin(kernel.assess(&second(), &account, second().decided_ns));
     account.observed_ns = 3 * SEC;
     kernel.observe_account_view(&account);
     assert_eq!(
-        kernel.assess(&second(), &account),
+        kernel.assess(&second(), &account, second().decided_ns),
         RiskVerdict::Allow { qty: 0.1 }
     );
 }
@@ -163,14 +163,14 @@ fn pending_virtual_exits_reserve_cumulative_physical_margin_before_any_fill() {
     kernel.observe_price(BUSDT, 10.0);
     let intent = exit(CARRY, BUSDT, Side::Sell, 1.0, 10.0, SEC);
     assert_eq!(
-        kernel.assess_portfolio(&intent, &account, &state),
+        kernel.assess_portfolio(&intent, &account, &state, intent.decided_ns),
         PortfolioRiskVerdict::Allow {
             qty: engine_types::numeric::Exact::parse_decimal("1.0").unwrap(),
             venue_reduce_only: false
         }
     );
     kernel.register_order_with_account("first", &intent, 1.0, &account);
-    let verdict = kernel.assess_portfolio(&intent, &account, &state);
+    let verdict = kernel.assess_portfolio(&intent, &account, &state, intent.decided_ns);
     assert!(
         matches!(
             verdict,
@@ -212,11 +212,11 @@ fn a_partial_fill_and_late_ack_keep_the_newest_margin_confirmation() {
         .positions
         .push(position(BUSDT, Side::Buy, 0.5, 10.0, true));
     account.observed_ns = 2 * SEC;
-    denied_margin(kernel.assess(&second(), &account));
+    denied_margin(kernel.assess(&second(), &account, second().decided_ns));
     account.observed_ns = 4 * SEC;
     kernel.observe_account_view(&account);
     assert_eq!(
-        kernel.assess(&second(), &account),
+        kernel.assess(&second(), &account, second().decided_ns),
         RiskVerdict::Allow { qty: 0.1 }
     );
 }
@@ -234,7 +234,7 @@ fn a_stale_response_cannot_reuse_margin_released_by_a_newer_scan() {
     kernel.observe_account_view(&account);
     account.observed_ns = SEC;
     assert!(matches!(
-        kernel.assess(&second(), &account),
+        kernel.assess(&second(), &account, second().decided_ns),
         RiskVerdict::Deny {
             reason: DenyReason::UnknownState { .. }
         }
@@ -251,7 +251,7 @@ fn a_proven_native_reduction_flows_while_unreflected_margin_is_exhausted() {
         .push(position(CUSDT, Side::Buy, 1.0, 10.0, true));
     let intent = exit(LONG, CUSDT, Side::Sell, 1.0, 10.0, 4 * SEC);
     assert_eq!(
-        kernel.assess(&intent, &account),
+        kernel.assess(&intent, &account, intent.decided_ns),
         RiskVerdict::Allow { qty: 1.0 }
     );
     kernel.register_order_with_account("exit", &intent, 1.0, &account);
@@ -264,10 +264,10 @@ fn assessing_a_price_amend_does_not_count_its_own_margin_twice_or_release_it() {
     reserve(&mut kernel, &account);
     let amend = entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, 4 * SEC);
     assert_eq!(
-        kernel.assess_price_amend("first", &amend, &account),
+        kernel.assess_price_amend("first", &amend, &account, amend.decided_ns),
         RiskVerdict::Allow { qty: 1.0 }
     );
-    denied_margin(kernel.assess(&second(), &account));
+    denied_margin(kernel.assess(&second(), &account, second().decided_ns));
 }
 
 #[test]
@@ -286,7 +286,7 @@ fn a_certain_native_exit_keeps_zero_margin_when_restored_with_a_price_range() {
         &account,
     );
     assert_eq!(
-        kernel.assess(&second(), &account),
+        kernel.assess(&second(), &account, second().decided_ns),
         RiskVerdict::Allow { qty: 0.1 }
     );
 }
@@ -400,10 +400,10 @@ fn dispatch_reassessment_excludes_only_its_pending_order_and_restores_the_hold()
     );
     let state = PortfolioState::default();
     assert!(matches!(
-        kernel.reassess_portfolio_order("first", &intent, &account, &state),
+        kernel.reassess_portfolio_order("first", &intent, &account, &state, intent.decided_ns),
         PortfolioRiskVerdict::Allow { qty, .. } if qty == Exact::one()
     ));
-    denied_margin(kernel.assess(&second(), &account));
+    denied_margin(kernel.assess(&second(), &account, second().decided_ns));
     assert_eq!(
         kernel.physical_exposure_interval(BUSDT, &account).unwrap(),
         before
@@ -418,12 +418,12 @@ fn dispatch_reassessment_excludes_only_its_pending_order_and_restores_the_hold()
     let mut foreign = intent.clone();
     foreign.strategy = LONG;
     assert!(matches!(
-        kernel.reassess_portfolio_order("first", &foreign, &account, &state),
+        kernel.reassess_portfolio_order("first", &foreign, &account, &state, foreign.decided_ns),
         PortfolioRiskVerdict::Deny {
             reason: DenyReason::UnknownState { .. }
         }
     ));
-    denied_margin(kernel.assess(&second(), &account));
+    denied_margin(kernel.assess(&second(), &account, second().decided_ns));
 }
 
 #[test]
@@ -453,6 +453,7 @@ fn canonical_partial_quantity_replaces_subtraction_drift_without_losing_fill_or_
     denied_margin(kernel.assess(
         &entry(LONG, CUSDT, Side::Buy, 0.5, 10.0, 9.0, 3 * SEC),
         &account,
+        3 * SEC,
     ));
     let mut caught_up = account.clone();
     caught_up.observed_ns = 3 * SEC;

@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 from typing import TextIO
 
-BINARIES = ("engine", "signal-worker", "market-tape")
+BINARIES = ("engine", "engine-tools", "signal-worker")
 CHECKS = ("release-tests", "account-state-soak", "engine-bench", "binary-smoke")
 METADATA = ("binaries.sha256", "qualification.json", "qualification.log")
 
@@ -165,8 +165,8 @@ def qualify(repo: Path, commit: str, output: Path, target: Path) -> None:
             )
             for command in (
                 [str(release / "engine"), "--help"],
+                [str(release / "engine-tools"), "--help"],
                 [str(release / "signal-worker"), "--help"],
-                [str(release / "market-tape"), "check", "--config", "deploy/capture/bybit-linear.toml"],
             ):
                 _run(command, repo, log, commit)
         _check_source(repo, commit)

@@ -283,6 +283,7 @@ dependencies = [
  "engine-types",
  "engine-venue",
  "engine-wal",
+ "futures-util",
  "hdrhistogram",
  "hex",
  "libc",
@@ -291,9 +292,9 @@ dependencies = [
  "sha2",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
  "toml",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -346,6 +347,30 @@ dependencies = [
  "sha2",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "engine-tools"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "engine-marketdata",
+ "engine-risk",
+ "engine-strategies",
+ "engine-types",
+ "engine-venue",
+ "engine-wal",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -733,22 +758,6 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
-
-[[package]]
-name = "market-tape"
-version = "0.1.0"
-dependencies = [
- "engine-marketdata",
- "engine-types",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "matchers"
@@ -1175,6 +1184,7 @@ name = "signal-worker"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "engine-public",
  "engine-strategies",
  "engine-types",
  "futures-util",

@@ -1,7 +1,7 @@
 //! One monotonic clock for the whole engine.
 //!
-//! Every `*_ns` stamp in the log and in the latency ledger comes from here, so
-//! they are all comparable to each other. They are not wall-clock times; use
+//! Monotonic stamps from the same process share this origin. Persisted stamps
+//! from a previous process cannot measure this run's latency. They are not wall-clock times; use
 //! [`wall_ms`] when a record needs a human date.
 
 /// Nanoseconds since the engine's clock origin (the shared one in

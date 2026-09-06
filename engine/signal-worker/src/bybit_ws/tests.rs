@@ -241,7 +241,10 @@ fn event_queue_has_a_hard_cap() {
 
 #[test]
 fn public_stream_url_is_the_credential_free_linear_endpoint() {
-    assert_eq!(PUBLIC_LINEAR_URL, "wss://stream.bybit.com/v5/public/linear");
+    assert_eq!(
+        public_linear_url(),
+        "wss://stream.bybit.com/v5/public/linear"
+    );
 }
 
 async fn serve_epoch(listener: &tokio::net::TcpListener, start: i64, mark: &str, hold_open: bool) {

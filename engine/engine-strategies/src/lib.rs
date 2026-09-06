@@ -7,6 +7,7 @@
 //! not reach out for data, a clock, or a socket: they translate engine events
 //! and context into reducer input and apply the reducer's ordered effects.
 
+pub mod bench;
 pub mod native_carry;
 pub mod native_common;
 pub mod native_config;

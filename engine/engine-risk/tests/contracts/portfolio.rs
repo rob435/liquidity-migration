@@ -54,6 +54,7 @@ fn unknown_legacy_cost_uses_current_exposure_without_inventing_accounting_after_
                 &entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC),
                 &view(250_000.0, positions, SEC),
                 &state,
+                SEC,
             );
             assert_eq!(
                 verdict,
@@ -78,7 +79,7 @@ fn unknown_legacy_cost_still_counts_opposing_gross_and_requires_price_and_protec
     kernel.observe_price(BUSDT, 10.0);
     let intent = entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC);
     let account = flat(250_000.0, SEC);
-    let verdict = kernel.assess_portfolio(&intent, &account, &state);
+    let verdict = kernel.assess_portfolio(&intent, &account, &state, intent.decided_ns);
     assert!(
         matches!(
             verdict,
@@ -97,7 +98,7 @@ fn unknown_legacy_cost_still_counts_opposing_gross_and_requires_price_and_protec
     }
     let mut no_price = Kernel::new(demo_config()).unwrap();
     assert!(matches!(
-        no_price.assess_portfolio(&intent, &account, &state),
+        no_price.assess_portfolio(&intent, &account, &state, intent.decided_ns),
         PortfolioRiskVerdict::Deny {
             reason: DenyReason::UnknownState { .. }
         }
@@ -107,7 +108,7 @@ fn unknown_legacy_cost_still_counts_opposing_gross_and_requires_price_and_protec
         let mut kernel = Kernel::new(demo_config()).unwrap();
         kernel.observe_price(BUSDT, 10.0);
         assert_eq!(
-            kernel.assess_portfolio(&intent, &account, &state),
+            kernel.assess_portfolio(&intent, &account, &state, intent.decided_ns),
             PortfolioRiskVerdict::Deny {
                 reason: DenyReason::MissingStop
             }
@@ -126,6 +127,7 @@ fn opposing_virtual_inventory_counts_against_gross_after_physical_flat_and_resta
             &entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC),
             &flat(250_000.0, SEC),
             &state,
+            SEC,
         );
         assert!(
             matches!(
@@ -146,7 +148,7 @@ fn virtual_exit_clamps_to_owner_and_survives_physical_flatness() {
     kernel.observe_price(BUSDT, 10.0);
     let intent = exit(CARRY, BUSDT, Side::Sell, 10.0, 10.0, SEC);
     assert_eq!(
-        kernel.assess_portfolio(&intent, &flat(250_000.0, SEC), &state),
+        kernel.assess_portfolio(&intent, &flat(250_000.0, SEC), &state, intent.decided_ns),
         PortfolioRiskVerdict::Allow {
             qty: engine_types::numeric::Exact::parse_decimal("2.0").unwrap(),
             venue_reduce_only: false
@@ -173,7 +175,8 @@ fn sibling_exit_reservations_cannot_consume_another_sleeves_exit_capacity() {
         kernel.assess_portfolio(
             &exit(LONG, BUSDT, Side::Sell, 9.0, 10.0, SEC),
             &account,
-            &state
+            &state,
+            SEC
         ),
         PortfolioRiskVerdict::Allow {
             qty: engine_types::numeric::Exact::parse_decimal("3.0").unwrap(),
@@ -184,7 +187,8 @@ fn sibling_exit_reservations_cannot_consume_another_sleeves_exit_capacity() {
         kernel.assess_portfolio(
             &exit(CARRY, BUSDT, Side::Sell, 1.0, 10.0, SEC),
             &account,
-            &state
+            &state,
+            SEC
         ),
         PortfolioRiskVerdict::Deny { .. }
     ));
@@ -204,7 +208,8 @@ fn a_new_opposing_sleeve_may_cross_physical_flat_within_existing_gross_caps() {
         kernel.assess_portfolio(
             &entry(LONG, BUSDT, Side::Sell, 3.0, 10.0, 11.0, SEC),
             &account,
-            &state
+            &state,
+            SEC
         ),
         PortfolioRiskVerdict::Allow {
             qty: engine_types::numeric::Exact::parse_decimal("3.0").unwrap(),
@@ -238,7 +243,8 @@ fn a_legal_exact_position_below_legacy_dust_tolerance_can_reduce() {
         kernel.assess_portfolio(
             &exit(CARRY, BUSDT, Side::Sell, 1e-13, 10.0, SEC),
             &account,
-            &state
+            &state,
+            SEC
         ),
         PortfolioRiskVerdict::Allow {
             qty: engine_types::numeric::Exact::parse_decimal("1e-13").unwrap(),
@@ -266,7 +272,8 @@ fn reduction_direction_does_not_multiply_tiny_quantities_to_zero() {
         kernel.assess_portfolio(
             &exit(CARRY, BUSDT, Side::Sell, 1e-200, 10.0, SEC),
             &account,
-            &state
+            &state,
+            SEC
         ),
         PortfolioRiskVerdict::Allow {
             qty: engine_types::numeric::Exact::parse_decimal("1e-200").unwrap(),
@@ -289,7 +296,8 @@ fn virtual_exit_accepts_a_profit_locking_stop_on_the_surviving_short() {
         kernel.assess_portfolio(
             &exit(CARRY, BUSDT, Side::Sell, 3.0, 8.0, SEC),
             &account,
-            &state
+            &state,
+            SEC
         ),
         PortfolioRiskVerdict::Allow {
             qty: engine_types::numeric::Exact::parse_decimal("3.0").unwrap(),
@@ -308,6 +316,7 @@ fn a_stop_already_crossed_by_current_price_cannot_authorize_more_portfolio_risk(
             &entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC),
             &flat(250_000.0, SEC),
             &state,
+            SEC,
         );
         assert!(
             matches!(verdict, PortfolioRiskVerdict::Deny { .. }),
@@ -333,6 +342,7 @@ fn pending_opposite_order_does_not_hide_margin_when_a_virtual_exit_fills_first()
         &exit(CARRY, BUSDT, Side::Sell, 1.0, 10.0, SEC),
         &account,
         &state,
+        SEC,
     );
     assert!(
         matches!(
@@ -351,7 +361,8 @@ fn pending_opposite_order_does_not_hide_margin_when_a_virtual_exit_fills_first()
         kernel.assess_portfolio(
             &exit(CARRY, BUSDT, Side::Sell, 1.0, 10.0, SEC),
             &account,
-            &state
+            &state,
+            SEC
         ),
         PortfolioRiskVerdict::Allow {
             qty: engine_types::numeric::Exact::parse_decimal("1.0").unwrap(),
@@ -376,6 +387,7 @@ fn a_tiny_unallocated_quantity_with_material_notional_counts_against_portfolio_c
         &entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC),
         &account,
         &portfolio(vec![]),
+        SEC,
     );
     assert!(
         matches!(
@@ -398,6 +410,7 @@ fn native_position_stop_must_still_be_executable_at_current_price() {
         let verdict = kernel.assess(
             &entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC),
             &account,
+            SEC,
         );
         assert!(
             matches!(verdict, RiskVerdict::Deny { .. }),
@@ -423,6 +436,7 @@ fn tiny_opposing_native_rows_do_not_hide_the_one_way_account_violation() {
         &entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, SEC),
         &account,
         &portfolio(vec![]),
+        SEC,
     );
     assert!(
         matches!(verdict, PortfolioRiskVerdict::Deny { .. }),
@@ -445,6 +459,7 @@ fn native_position_totals_beyond_binary64_keep_their_exact_direction() {
         &exit(CARRY, BUSDT, Side::Sell, 1.0, 10.0, SEC),
         &account,
         &portfolio(vec![held(CARRY, BUSDT, 1)]),
+        SEC,
     );
     assert!(matches!(
         verdict,

@@ -41,6 +41,7 @@ impl Recorded {
 /// Answers a request. The second argument is how many requests this path has
 /// already had, which is how the pagination test serves two pages.
 pub type Handler = Arc<dyn Fn(&Recorded, usize) -> (u16, String) + Send + Sync>;
+type ResponseDelay = Arc<dyn Fn(&Recorded, usize) -> Duration + Send + Sync>;
 
 pub struct TestServer {
     pub addr: SocketAddr,
@@ -64,10 +65,19 @@ impl TestServer {
     where
         F: Fn(&Recorded, usize) -> (u16, String) + Send + Sync + 'static,
     {
+        Self::start_with_delay(handler, move |_, _| response_delay).await
+    }
+
+    pub async fn start_with_delay<F, D>(handler: F, response_delay: D) -> TestServer
+    where
+        F: Fn(&Recorded, usize) -> (u16, String) + Send + Sync + 'static,
+        D: Fn(&Recorded, usize) -> Duration + Send + Sync + 'static,
+    {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let seen: Arc<Mutex<Vec<Recorded>>> = Arc::new(Mutex::new(Vec::new()));
         let handler: Handler = Arc::new(handler);
+        let response_delay: ResponseDelay = Arc::new(response_delay);
 
         let accepted = seen.clone();
         let connections = Arc::new(AtomicUsize::new(0));
@@ -81,6 +91,7 @@ impl TestServer {
                 counted.fetch_add(1, Ordering::SeqCst);
                 let seen = accepted.clone();
                 let handler = handler.clone();
+                let response_delay = response_delay.clone();
                 let in_flight = active.clone();
                 let peak_in_flight = peak.clone();
                 tokio::spawn(async move {
@@ -147,7 +158,7 @@ async fn serve(
     mut stream: TcpStream,
     seen: Arc<Mutex<Vec<Recorded>>>,
     handler: Handler,
-    response_delay: Duration,
+    response_delay: ResponseDelay,
     in_flight: Arc<AtomicUsize>,
     peak_in_flight: Arc<AtomicUsize>,
 ) {
@@ -180,12 +191,13 @@ async fn serve(
             .filter(|r| r.path == request.path)
             .count();
         let (status, reply) = handler(&request, prior);
+        let delay = response_delay(&request, prior);
         seen.lock().unwrap().push(request);
 
         let active = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         peak_in_flight.fetch_max(active, Ordering::SeqCst);
-        if !response_delay.is_zero() {
-            tokio::time::sleep(response_delay).await;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
         }
 
         let response = format!(

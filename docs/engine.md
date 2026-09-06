@@ -20,9 +20,8 @@ The engine workspace is under `engine/`:
 | **`engine-marketdata`**| Lib | Public market feeds and book rebuild per venue: quotes, trades, level-50 books, funding. |
 | **`engine-strategies`**| Lib | Pure strategy reducers (`LONG`, `CARRY`, `EXODUS`, `MAKER`) and runtime plugs, plus the `PROBE` order-path plug ([trading_logic.md](trading_logic.md) §1). |
 | **`engine-core`** | Lib | Event loop, boot recovery, command execution, controls, heartbeat, and trade reporting. |
-| **`engine`** | Binary (`bin`) | Production engine runner, takeover tools, and config renderer. |
+| **`engine-tools`** | Lib and two binaries | `engine` runs the core and child strategy protocol; `engine-tools` owns simulation, backtest, benchmark, takeover, canary, configuration and reports. Both ship together. |
 | **`signal-worker`** | Binary (`bin`) | Credential-free public market collector and observation streamer. |
-| **`market-tape`** | Binary (`bin`) | High-throughput market data capture engine and zstd segment writer. |
 
 
 #### `engine-core` Module Map
@@ -52,12 +51,14 @@ The engine workspace is under `engine/`:
 | `engine/engine-core/src/signal_state.rs` | Accepted input ownership, consumer backpressure, source cursors/gaps/subscriptions and current boot producer frontiers |
 | `engine/engine-core/src/signals/` | Signal feeds: validation, availability deadlines, in-process channel, spool, socket doorbell |
 | `engine/engine-core/src/venue_runtime.rs` | The venue task that owns blocking venue I/O |
-| `engine/engine-core/src/ledger.rs`, `engine/engine-core/src/timing.rs` | Latency segments live, and read back from the log |
+| `engine/engine-core/src/ledger.rs`, `engine/engine-tools/src/timing.rs` | Latency segments live, and read back from the log |
 | `engine/engine-core/src/execution.rs`, `engine/engine-core/src/trades.rs` | Fill costs and closed round trips |
 | `engine/engine-core/src/assembly.rs`, `engine/engine-core/src/runner.rs`, `engine/engine-core/src/config.rs` | Wiring feeds, venue, risk and strategies into one process |
-| `engine/engine-core/src/replay.rs`, `engine/engine-core/src/takeover.rs`, `engine/engine-core/src/clear.rs`, `engine/engine-core/src/canary.rs`, `engine/engine-core/src/controls.rs` | Operator commands over a WAL or a live engine |
-| `engine/engine-core/src/backtest/` | The live loop on a recorded tape against a simulated venue |
-| `engine/engine-core/src/sim/` | `engine sim`: the live loop on a seeded synthetic market with injected venue, private-stream and market-feed faults and process deaths; the end-of-run invariants |
+| `engine/engine-core/src/replay.rs`, `engine/engine-tools/src/takeover.rs`, `engine/engine-core/src/clear.rs`, `engine/engine-tools/src/canary.rs`, `engine/engine-core/src/controls.rs` | Operator commands over a WAL or a live engine |
+| `engine/engine-tools/src/backtest/` | Core loop with embedded reducers and virtual-clock recorded tape against a simulated venue |
+| `engine/engine-tools/src/sim/` | `engine sim`: the live loop on a seeded synthetic market with injected venue, private-stream and market-feed faults and process deaths; the end-of-run invariants |
+| `engine/engine-tools/src/engine.rs`, `engine/engine-tools/src/main.rs`, `engine/engine-tools/src/cli.rs` | Lean runtime executable plus companion operator CLI; existing `engine COMMAND` calls execute the companion |
+| `engine/engine-tools/src/bench.rs` | Real-clock core run with a registered child strategy, durable WAL and synthetic venue; reports workload and sample scope |
 
 #### Worker ownership
 
@@ -274,8 +275,11 @@ The risk kernel (`engine-risk`) gates every order before it reaches the venue ad
 | Terminal order recovery | Exact cumulative fills must be covered by durable execution history before terminal retirement; legacy fill frontiers retain their binary64 value. |
 | Callback contention | Busy market invocations defer order news, timers and controls without marking the strategy failed. Durable source cursors advance only after acceptance. |
 | Missing closes | A native flat reading cannot erase owned inventory. Unmatched physical exposure blocks openings until history or explicit operator reconciliation resolves it. Historical `ClaimsDropped` records remain readable. |
+| Terminal order lookup | Native cumulative fill quantities are compared exactly with the durable per-order frontier. Unseen fills retain the unresolved order and request history; repeated terminal status alone cannot retire it. |
 | Wire legality | Exact instrument steps, minima/maxima, notional bounds and directional price rounding determine `ExactOrderTerms`; canonical terms flow through dispatch, amendment and risk reassessment. |
 | Account / Risk | Canonical venue decimals and provenance determine equity, available balance, position quantity/entry/stop, reservations and risk comparisons. Legacy numeric inputs retain explicit binary64 semantics; display projections do not replace known exact values. |
+| Admission clock | New orders, queued dispatches and price amendments assess account freshness against the current parent clock supplied to `RiskKernel`; an intent's persisted decision timestamp never supplies account age. |
+| Replay timing | Persisted monotonic stamps do not enter a new process's latency samples. Restored effects and dispatches have no runtime source timing; a callback executed after restart retains its new completion time, with its prior-process input origin absent. Current-process queue, venue and barrier timing remains measurable. |
 | Ambiguous amendments | Exact reservation lower/upper prices retain both possible wire outcomes until resolved. Replay refuses a persisted range that excludes the current canonical request. |
 | Native account stops | Hyperliquid/Lighter protection is derived from uniquely identified, correctly directed stop orders and their canonical remaining quantities. The aggregate trigger is the first price covering the full position; partial or opposite-side orders leave uncovered quantity for repair/reduction. |
 | Fill ownership | One execution ID applies once to canonical order progress, physical exposure and sleeve allocation. An aggregate emergency fill carries deterministic exact allocation slices; fees split by the same quantities and sum to the original fee. |
@@ -283,6 +287,16 @@ The risk kernel (`engine-risk`) gates every order before it reaches the venue ad
 | Client order identity | Normal, general-exit and emergency orders use `eng-<whole-second-ms>-<counter>`. A durable logical boot epoch advances beyond prior epochs even if wall time moves backward; the 18-bit counter remains reversible through Lighter’s native client index. |
 | Cost basis / Loss | Exact open trade lots, entry cash and proportional fees survive rotation. Closed canonical net amounts feed the exact rolling-loss sum. Missing cost basis or an unvalued settlement/fee asset produces an unpriced row, never a fabricated zero or USDT value. Funding is outside this closed-fill loss calculation. |
 | Prospective portfolio risk | A sleeve with unknown historical cost uses the latest accepted market price for gross exposure and stop distance; the accounting basis remains unknown. Known cost retains conservative entry/current-price valuation. Missing both market price and basis, missing/crossed stops, and breached gross limits refuse openings. Shared and opposing sleeves count separately. |
+
+| State owner | Key / purpose |
+| --- | --- |
+| `OrderRec.fill_quantity` | Client order ID; completion and remaining quantity. Legacy/display scalars are derived at boundaries; serialized legacy fields remain readable |
+| `Inventory.positions` | Sleeve and symbol; owned quantity, basis and stops. Physical owned net is derived, preserving opposing holdings |
+| `ExecutionAccounting` | Sleeve, symbol and asset; cash, fees and unresolved valuation, including after positions close |
+| Risk exposure book | Outstanding orders and fills newer than the account snapshot; reservations are separate from settled positions |
+| `logged_exposure` | Symbol; trusted physical reconciliation baseline, including accepted external positions |
+| `Fills.by_key` / `Fills.lots` | Execution-cost aggregates / round-trip lifecycle and closed-trade output; neither authorizes inventory changes |
+| Execution ID / legacy overlap caches | Exact execution identity / multiplicity for old fills without an execution ID |
 
 #### Rolling-Loss Circuit Breaker Invariant
 
@@ -399,7 +413,8 @@ python scripts/research/run_engine_backtest.py --config engine/engine.demo.toml 
   --out-dir var/backtests/2026-09-02
 
 # The engine alone
-cd engine && cargo run --bin engine --release -- backtest --config CONFIG --tape TAPE \
+cargo build --manifest-path engine/Cargo.toml --release --locked -p engine-tools --bins
+engine/target/release/engine-tools backtest --config CONFIG --tape TAPE \
   --instruments INSTRUMENTS --wal run.wal --trades trades.jsonl --report report.json
 ```
 
@@ -407,7 +422,7 @@ cd engine && cargo run --bin engine --release -- backtest --config CONFIG --tape
 
 ### 10. Deterministic Simulation (`engine sim`)
 
-The live loop on a seeded synthetic market against the backtest's simulated venue, with faults on every boundary the engine has with the world and process deaths at seeded instants. One seed is one run: two runs of one seed write byte-identical logs, so a failing seed reproduces on any machine.
+The core loop with embedded strategy reducers and a virtual clock on a seeded synthetic market against the backtest's simulated venue, with faults on every boundary the engine has with the world and process deaths at seeded instants. Repeated runs compare log bytes under the declared execution conditions. This qualifies reducer/accounting fault behavior; it does not measure the isolated production callback protocol.
 
 | Flag | Default | Meaning |
 | :--- | :--- | :--- |
@@ -415,7 +430,7 @@ The live loop on a seeded synthetic market against the backtest's simulated venu
 | `--seconds S` | 600 | Tape length in virtual seconds; one ticker, one book delta and one print per symbol per second |
 | `--symbols M` | 2 | Symbols the quoter trades, from `BTCUSDT`, `ETHUSDT`, `SOLUSDT` |
 | `--crashes C` | 1 | Process deaths; the private socket dies with the process and the next boot recovers from the log and the venue's fill history |
-| `--faults none\|light\|heavy` | `light` | Per-call fault rates (`engine/engine-core/src/sim/faults.rs`); `light` is one command in fifty going wrong |
+| `--faults none\|light\|heavy` | `light` | Per-call fault rates (`engine/engine-tools/src/sim/faults.rs`); `light` is one command in fifty going wrong |
 | `--twice` | off | Run every seed twice and compare the logs byte for byte |
 | `--out DIR`, `--keep` | temp dir, off | Where the tape, config, log and trades go; kept only with `--keep` |
 | `--report PATH` | none | The sweep as JSON (`SweepReport`) |
@@ -438,7 +453,7 @@ The live loop on a seeded synthetic market against the backtest's simulated venu
 | `ledger_agrees_when_flat` | with no position open, the round trips the log closes (as `engine fills` reads them) net to the venue's realized P&L net of closed fees |
 | `numbers_finite` | no NaN or infinity in the venue's books or the engine's account view |
 
-The `cfg(test)` build shortens the engine's confirmation windows, so the simulator's own tests run as an integration test against the library as shipped (`engine/engine-core/tests/integration/sim.rs`).
+The `cfg(test)` build shortens the engine's confirmation windows, so the simulator's own tests run as an integration test against the library as shipped (`engine/engine-tools/tests/integration/sim.rs`).
 
 The engine retains real-clock deadlines beside virtual-clock waits: `MUTATION_DRAIN_TIMEOUT` and `strategy_process::CALLBACK_TIMEOUT` are 10 s, and dispatch confirmation has its own deadline. Host scheduling can therefore affect fault timing; byte-identity comparisons require matching input, configuration and execution conditions.
 
@@ -466,8 +481,9 @@ export RUSTC="$audit_rust_bin/rustc"
 export RUSTDOC="$audit_rust_bin/rustdoc"
 
 # One simulated seed, kept, with its report; then a sweep with the byte-identity check
-cargo run --bin engine --manifest-path engine/Cargo.toml --release -- sim --seed 4 --seconds 300 --crashes 1 --faults light --keep --out /tmp/sim --report /tmp/sim/report.json
-cargo run --bin engine --manifest-path engine/Cargo.toml --release -- sim --seed 100 --seeds 24 --faults light --twice
+cargo build --manifest-path engine/Cargo.toml --release --locked -p engine-tools --bins
+engine/target/release/engine-tools sim --seed 4 --seconds 300 --crashes 1 --faults light --keep --out /tmp/sim --report /tmp/sim/report.json
+engine/target/release/engine-tools sim --seed 100 --seeds 24 --faults light --twice
 
 # Style formatting check
 cargo fmt --manifest-path engine/Cargo.toml --all -- --check

@@ -903,6 +903,57 @@ fn an_absent_optional_number_is_still_written() {
 }
 
 #[test]
+fn a_nonfinite_known_fee_cannot_be_replayed_as_an_unknown_fee() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let (mut wal, _) = WalWriter::open(&path).unwrap();
+    wal.append(&note("before")).unwrap();
+    for callbacks in [None, Some(vec![StrategyId(0)])] {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut record = every_variant()
+                .into_iter()
+                .find(|record| matches!(record, WalRecord::OrderUpdate { .. }))
+                .unwrap();
+            let WalRecord::OrderUpdate {
+                callbacks: owners,
+                update: OrderUpdate::Fill { fee, .. },
+            } = &mut record
+            else {
+                unreachable!()
+            };
+            *owners = callbacks.clone();
+            *fee = Some(bad);
+            assert!(wal.append(&record).is_err(), "known fee {bad} was accepted");
+        }
+    }
+    for legacy in [false, true] {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut record = recovered_callback_record();
+            let WalRecord::RecoveredFill { callbacks, fee, .. } = &mut record else {
+                unreachable!()
+            };
+            if legacy {
+                *callbacks = None;
+            }
+            *fee = Some(bad);
+            assert!(
+                wal.append(&record).is_err(),
+                "recovered fee {bad} was accepted"
+            );
+        }
+    }
+    wal.append(&note("after")).unwrap();
+    wal.barrier().unwrap();
+    drop(wal);
+    let (wal, records) = WalWriter::open(&path).unwrap();
+    assert_eq!(wal.next_seq(), 3);
+    assert_eq!(
+        records.into_iter().map(|(_, row)| row).collect::<Vec<_>>(),
+        [note("before"), note("after")]
+    );
+}
+
+#[test]
 fn a_record_written_before_a_field_existed_still_replays() {
     // The shape of a `work` policy as the engine wrote it before
     // `hold_decision_px` and `give_up_instead_of_crossing` were added. A
@@ -1436,4 +1487,54 @@ fn callback_projection_rejects_malformed_relevant_fields_and_bad_unrelated_check
         assert!(reader.next(reader.start()).is_err());
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
+}
+
+#[test]
+fn finite_fill_fields_round_trip_for_seeded_binary64_values() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let (mut wal, _) = WalWriter::open(&path).unwrap();
+    let mut expected = Vec::new();
+    let mut seed = 0x6a09_e667_f3bc_c909_u64;
+    for index in 0..1024 {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let value = f64::from_bits(seed);
+        if !value.is_finite() {
+            continue;
+        }
+        let mut record = every_variant()
+            .into_iter()
+            .find(|record| matches!(record, WalRecord::OrderUpdate { .. }))
+            .unwrap();
+        let WalRecord::OrderUpdate {
+            callbacks,
+            update:
+                OrderUpdate::Fill {
+                    qty,
+                    px,
+                    fee,
+                    exec_id,
+                    ..
+                },
+        } = &mut record
+        else {
+            unreachable!()
+        };
+        *callbacks = (index % 2 == 0).then(|| vec![StrategyId(2)]);
+        *qty = value.abs();
+        *px = value.abs();
+        *fee = (index % 3 != 0).then_some(value);
+        *exec_id = format!("property-{index}-null-fee_known");
+        wal.append(&record).unwrap();
+        expected.push(record);
+    }
+    wal.barrier().unwrap();
+    drop(wal);
+    let (_, records) = WalWriter::open(&path).unwrap();
+    assert_eq!(
+        records.into_iter().map(|(_, row)| row).collect::<Vec<_>>(),
+        expected
+    );
 }

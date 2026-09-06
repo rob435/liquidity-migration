@@ -22,6 +22,7 @@ in the token-efficient, Spec-First structured format without narrative padding.
 | Producers, account owner, journals, how a target becomes an order | [docs/architecture.md](docs/architecture.md) |
 | The Rust execution engine: contracts, latency budget, safety posture | [docs/engine.md](docs/engine.md) |
 | The engine audit round: what is implemented, what is verified on this tree, what is open | [docs/tier1-round-handoff.md](docs/tier1-round-handoff.md) |
+| The round-2 audit: rating, the hot path as it runs, what to delete, simplify, and the Tier-1 gap | [docs/tier1-audit-round-2.md](docs/tier1-audit-round-2.md) |
 | What each sleeve trades and where its evidence stops | [docs/trading_logic.md](docs/trading_logic.md) |
 | Operator commands, deploy modes, unit topology | [docs/operations.md](docs/operations.md) |
 | Telegram channels, watchdog alerts, heartbeat dead-man's switch | [docs/notifications.md](docs/notifications.md) |
@@ -50,13 +51,14 @@ never copy sleeve status or thresholds here.
 | `scripts/dev.sh check` | doctor, then Ruff, ShellCheck, mypy, pytest, and the engine's rustfmt, clippy, and tests |
 | `.venv/bin/python -m pytest -q` | tests |
 | `.venv/bin/python -m ruff check liquidity_migration scripts tests` | lint |
-| `cd engine && cargo test` | engine tests |
-| `cd engine && cargo run --release -- bench` | the real loop on this box against a local stand-in venue: decide, durable, wire, ack and end-to-end at p50/p99. Our side of the wire, not the venue's |
-| `cd engine && cargo run --release -- wal-cost --wal PATH` | what one append and one durability barrier cost on the filesystem holding PATH: the storage's share of the order path |
-| `cd engine && cargo run --release -- latency --wal PATH` | how long each step of the order path took, per operation, at p50/p90/p99/p99.9: the venue's round trip, the engine's own work, and the time it held a command back to stay inside the request quota, as separate numbers |
-| `cd engine && cargo run --release -- fills --wal PATH` | what the trading cost and what the positions made: maker share, fee, arrival shortfall, markouts, and closed round trips with their P&L |
-| `cd engine && cargo run --release -- backtest --config PATH --tape PATH --instruments PATH --wal PATH` | the live loop on a recorded `market_tape`, in the tape's time, on a simulated venue: [docs/engine.md](docs/engine.md) §9 |
-| `cd engine && cargo run --release -- sim --seed N [--seeds K] [--crashes C] [--faults light] [--twice]` | the live loop on a seeded synthetic market with venue, private-stream and feed faults and process deaths, judged against the venue's books and the log at the end; one seed is one run, byte for byte: [docs/engine.md](docs/engine.md) §10 |
+| `cargo test --manifest-path engine/Cargo.toml --workspace --locked` | engine tests |
+| `cargo build --manifest-path engine/Cargo.toml --release --locked -p engine-tools --bins` | build the runtime and companion tools used below |
+| `engine/target/release/engine-tools bench` | the real loop on this box against a local stand-in venue: decide, durable, wire, ack and end-to-end at p50/p99. Our side of the wire, not the venue's |
+| `engine/target/release/engine-tools wal-cost --wal PATH` | what one append and one durability barrier cost on the filesystem holding PATH: the storage's share of the order path |
+| `engine/target/release/engine-tools latency --wal PATH` | how long each step of the order path took, per operation, at p50/p90/p99/p99.9: the venue's round trip, the engine's own work, and the time it held a command back to stay inside the request quota, as separate numbers |
+| `engine/target/release/engine-tools fills --wal PATH` | what the trading cost and what the positions made: maker share, fee, arrival shortfall, markouts, and closed round trips with their P&L |
+| `engine/target/release/engine-tools backtest --config PATH --tape PATH --instruments PATH --wal PATH` | embedded reducers on a recorded `market_tape`, in the tape's time, on a simulated venue: [docs/engine.md](docs/engine.md) §9 |
+| `engine/target/release/engine-tools sim --seed N [--seeds K] [--crashes C] [--faults light] [--twice]` | embedded reducers on a seeded synthetic market with venue, private-stream and feed faults and process deaths, judged against the venue's books and the log at the end; one seed is one run, byte for byte: [docs/engine.md](docs/engine.md) §10 |
 | `python scripts/research/run_engine_backtest.py --config PATH --tape PATH --instruments PATH --out-dir DIR` | runs `engine backtest` and reads its report, trades, and equity back as research metrics |
 | `scripts/ops.sh curve [REALM] [SAMPLES]` | the live account's recorded equity curve, read on the host: [docs/observability.md](docs/observability.md) |
 | `scripts/ops.sh help` | operator router: status, units, logs, restart/stop/start, flatten, attest-flat, real-money, deploy |

@@ -1,4 +1,6 @@
 [Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=5
 Description=liquidity-migration Rust execution engine on the FUNDED account (runs only while REAL_MONEY is armed)
 Wants=network-online.target liquidity-migration-signal-worker-mainnet.service
 After=network-online.target liquidity-migration-signal-worker-mainnet.service

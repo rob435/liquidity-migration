@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shlex
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "runtime" / "record_equity.py"
@@ -208,6 +211,111 @@ def test_a_realm_with_no_heartbeat_is_recorded_and_pushed_as_down(tmp_path: Path
     line = record_equity.line_protocol(sample)
     assert line.startswith("lm_engine,realm=demo up=0")
     assert line.endswith(str(now_ms * 1_000_000))
+
+
+@pytest.mark.parametrize(
+    ("sampler", "stamp_key", "scale", "limit_ms", "age_key", "value_key"),
+    [
+        ("engine_sample", "wall_ts_ms", 1, 60_000, "heartbeat_age_ms", "account_equity_usdt"),
+        ("worker_sample", "updated_at_ms", 1, 60_000, "heartbeat_age_ms", "status"),
+        ("recorder_sample", "recorded_at_ns", 1_000_000, 120_000, "status_age_ms", "written_rows"),
+    ],
+)
+def test_stopped_source_is_down_without_republishing_old_values(
+    tmp_path: Path, sampler: str, stamp_key: str, scale: int, limit_ms: int, age_key: str, value_key: str
+) -> None:
+    now_ms = 1_788_000_000_000
+    path = tmp_path / "source.json"
+    payload = {stamp_key: (now_ms - limit_ms) * scale, value_key: "ready" if value_key == "status" else 130.28}
+    path.write_text(json.dumps(payload))
+    sample_source = getattr(record_equity, sampler)
+
+    assert sample_source("mainnet", path, now_ms)["state"] == "live"
+    stale = sample_source("mainnet", path, now_ms + 1)
+
+    assert stale["state"] == "stale"
+    assert stale[age_key] == limit_ms + 1
+    assert set(stale) == {"ts_ms", "realm", "kind", "state", age_key}
+    fields = record_equity.line_protocol(stale).split(" ")[1]
+    assert set(fields.split(",")) == {"up=0.0", f"{age_key}={float(limit_ms + 1)}"}
+    record_equity.append(tmp_path, stale)
+    if sampler == "engine_sample":
+        curve = record_equity.render_curve(tmp_path, "mainnet", samples=1)
+        assert "1 of 1 samples had no live heartbeat" in curve
+        assert "130.28" not in curve
+
+
+@pytest.mark.parametrize("stamp", [None, True, "1788000000000", float("nan"), float("inf"), -1, 1_788_000_000_001])
+@pytest.mark.parametrize(
+    ("sampler", "stamp_key", "scale"),
+    [
+        ("engine_sample", "wall_ts_ms", 1),
+        ("worker_sample", "updated_at_ms", 1),
+        ("recorder_sample", "recorded_at_ns", 1_000_000),
+    ],
+)
+def test_source_without_valid_timestamp_is_not_online(
+    tmp_path: Path, sampler: str, stamp_key: str, scale: int, stamp: Any
+) -> None:
+    path = tmp_path / "source.json"
+    if type(stamp) in (int, float):
+        stamp *= scale
+    path.write_text(json.dumps({stamp_key: stamp}))
+
+    sample = getattr(record_equity, sampler)("mainnet", path, 1_788_000_000_000)
+
+    assert sample["state"] == "unreadable"
+    assert "timestamp" in sample["error"]
+    assert record_equity.line_protocol(sample).split(" ")[1] == "up=0.0"
+
+
+def test_sample_freshness_uses_the_deployed_liveness_limits() -> None:
+    spec = importlib.util.spec_from_file_location("equity_liveness", SCRIPT.with_name("check_fleet_liveness.py"))
+    assert spec and spec.loader
+    liveness = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = liveness
+    spec.loader.exec_module(liveness)
+    defaults = liveness.build_arg_parser().parse_args([])
+    assert record_equity._HEARTBEAT_MAX_AGE_MS == defaults.max_heartbeat_age_sec * 1_000
+    unit = (SYSTEMD / "liquidity-migration-host-liveness.service").read_text().replace("\\\n", " ")
+    command = next(line.removeprefix("ExecStart=") for line in unit.splitlines() if line.startswith("ExecStart="))
+    args = liveness.build_arg_parser().parse_args(shlex.split(command)[2:])
+    assert record_equity._RECORDER_MAX_AGE_MS == args.max_heartbeat_age_sec * 1_000
+
+
+def test_main_observes_each_source_after_reading_it(tmp_path: Path, monkeypatch) -> None:
+    now_ms = 1_788_000_000_000
+    clock_ms = [now_ms]
+    sources = []
+    payloads = {}
+    for kind, key, scale in (
+        ("engine", "wall_ts_ms", 1),
+        ("worker", "updated_at_ms", 1),
+        ("recorder", "recorded_at_ns", 1_000_000),
+    ):
+        path = tmp_path / f"{kind}.json"
+        sources.append(record_equity.Source(realm="mainnet", kind=kind, path=path))
+        payloads[path] = (key, scale)
+    read_text = Path.read_text
+
+    def read_updated_source(path, *args, **kwargs):
+        if path in payloads:
+            clock_ms[0] += 1
+            key, scale = payloads[path]
+            path.write_text(json.dumps({key: clock_ms[0] * scale + (scale // 4 if scale > 1 else 0)}))
+        return read_text(path, *args, **kwargs)
+
+    samples = []
+    monkeypatch.setattr(Path, "read_text", read_updated_source)
+    monkeypatch.setattr(record_equity.time, "time_ns", lambda: clock_ms[0] * 1_000_000 + 500_000)
+    monkeypatch.setattr(record_equity, "read_sources", lambda _path: sources)
+    monkeypatch.setattr(record_equity, "append", lambda _path, sample: samples.append(sample))
+    for key in ("METRICS_PUSH_URL", "METRICS_PUSH_USER", "METRICS_PUSH_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+
+    assert record_equity.main(["--state-dir", str(tmp_path)]) == 0
+    assert [sample["state"] for sample in samples] == ["live"] * 3
+    assert [sample["ts_ms"] for sample in samples] == [now_ms + 1, now_ms + 2, now_ms + 3]
 
 
 def test_p999_preserves_old_missing_empty_and_measured_zero_windows(tmp_path: Path) -> None:
@@ -567,6 +675,28 @@ def test_the_dashboard_defaults_to_the_fleet_prometheus_source() -> None:
         "text": "grafanacloud-proudtortoise1017-prom",
         "value": "grafanacloud-prom",
     }
+
+
+def test_worker_health_display_requires_a_live_source() -> None:
+    panel = next(panel for panel in _dashboard()["panels"] if panel["title"] == "Signal workers")
+    expressions = [target["expr"] for target in panel["targets"]]
+    assert len(expressions) == 2
+    assert all('* on(realm) lm_worker_up{realm=~"$realm"}' in expression for expression in expressions)
+
+
+def test_account_cards_show_stale_instead_of_last_known_account_values() -> None:
+    panels = {panel["id"]: panel for panel in _dashboard()["panels"]}
+    for panel_id, realm in ((11, "demo"), (12, "demo"), (13, "mainnet"), (14, "mainnet")):
+        panel = panels[panel_id]
+        up = f'lm_engine_up{{realm="{realm}",realm=~"$realm"}}'
+        expression = panel["targets"][0]["expr"]
+        assert f"and on(realm) ({up} == 1)" in expression
+        assert expression.endswith(f"or on(realm) (({up} == 0) / 0)")
+        assert panel["options"]["reduceOptions"]["calcs"] == ["last"]
+        assert panel["fieldConfig"]["defaults"]["mappings"] == [
+            {"type": "special", "options": {"match": "null+nan", "result": {"text": "STALE", "color": "orange"}}}
+        ]
+    assert 'and on(realm) (lm_engine_up{realm=~"$realm"} == 1)' in panels[2]["targets"][0]["expr"]
 
 
 def test_the_dashboard_charts_only_fields_the_sampler_actually_pushes(tmp_path: Path) -> None:

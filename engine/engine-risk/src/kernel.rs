@@ -289,19 +289,25 @@ impl Kernel {
         }
         worst.ok_or_else(|| unknown("held position has no readable stop level"))
     }
-    fn evaluate(&mut self, intent: &Intent, account: &AccountView) -> Result<Exact, DenyReason> {
-        self.evaluate_inventory(intent, account, None)
+    fn evaluate(
+        &mut self,
+        intent: &Intent,
+        account: &AccountView,
+        now_ns: u64,
+    ) -> Result<Exact, DenyReason> {
+        self.evaluate_inventory(intent, account, None, now_ns)
     }
     fn evaluate_inventory(
         &mut self,
         intent: &Intent,
         account: &AccountView,
         portfolio: Option<&PortfolioFacts>,
+        now_ns: u64,
     ) -> Result<Exact, DenyReason> {
-        if account.observed_ns > intent.decided_ns {
-            return Err(unknown("account view is newer than the decision it judges"));
+        if account.observed_ns > now_ns {
+            return Err(unknown("account view is newer than its admission time"));
         }
-        let age_ns = intent.decided_ns - account.observed_ns;
+        let age_ns = now_ns - account.observed_ns;
         let tolerance = if portfolio.is_some() {
             Exact::zero()
         } else {
@@ -545,9 +551,9 @@ impl Kernel {
     }
 }
 impl RiskKernel for Kernel {
-    fn assess(&mut self, intent: &Intent, account: &AccountView) -> RiskVerdict {
+    fn assess(&mut self, intent: &Intent, account: &AccountView, now_ns: u64) -> RiskVerdict {
         match self
-            .evaluate(intent, account)
+            .evaluate(intent, account, now_ns)
             .and_then(|qty| qty.to_f64().map_err(|e| unknown(e.to_string())))
         {
             Ok(qty) => RiskVerdict::Allow { qty },
@@ -559,10 +565,11 @@ impl RiskKernel for Kernel {
         intent: &Intent,
         account: &AccountView,
         portfolio: &engine_types::portfolio::PortfolioState,
+        now_ns: u64,
     ) -> engine_types::risk::PortfolioRiskVerdict {
         use engine_types::risk::PortfolioRiskVerdict;
         let result = PortfolioFacts::read(portfolio)
-            .and_then(|p| self.evaluate_inventory(intent, account, Some(&p)))
+            .and_then(|p| self.evaluate_inventory(intent, account, Some(&p), now_ns))
             .and_then(|qty| {
                 let interval = self.physical_interval_for(intent.symbol, account)?;
                 let reduce = intent.reduce_only && interval.certainly_reduces(intent.side, &qty);
@@ -582,6 +589,7 @@ impl RiskKernel for Kernel {
         intent: &Intent,
         account: &AccountView,
         portfolio: &engine_types::portfolio::PortfolioState,
+        now_ns: u64,
     ) -> engine_types::risk::PortfolioRiskVerdict {
         use engine_types::risk::PortfolioRiskVerdict;
         let Some(previous) = self.book.take(id) else {
@@ -597,7 +605,7 @@ impl RiskKernel for Kernel {
                 .as_ref()
                 .is_some_and(|q| q.is_negative() == (intent.side == Side::Sell))
         {
-            self.assess_portfolio(intent, account, portfolio)
+            self.assess_portfolio(intent, account, portfolio, now_ns)
         } else {
             PortfolioRiskVerdict::Deny {
                 reason: unknown("portfolio reassessment names another order owner or direction"),
@@ -630,6 +638,7 @@ impl RiskKernel for Kernel {
         id: &str,
         intent: &Intent,
         account: &AccountView,
+        now_ns: u64,
     ) -> RiskVerdict {
         let Some(previous) = self.book.take(id) else {
             return RiskVerdict::Deny {
@@ -637,7 +646,7 @@ impl RiskKernel for Kernel {
             };
         };
         let margin = self.margin.take(id);
-        let verdict = self.assess(intent, account);
+        let verdict = self.assess(intent, account, now_ns);
         self.book.register(id, previous);
         self.margin.restore(id, margin);
         verdict

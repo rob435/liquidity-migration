@@ -43,7 +43,7 @@ const MAX_SIGNAL_FILE_BYTES: u64 = 80 * 1024 * 1024;
 const FIELD_BYTES_MAX: usize = 256;
 pub(crate) const SYMBOL_BYTES_MAX: usize = 128;
 
-pub(crate) fn ordered_gap_requests(
+pub fn ordered_gap_requests(
     gaps: &[SignalGapRequest],
 ) -> Result<Vec<SignalGapRequest>, SignalError> {
     if gaps.len() > MAX_SIGNAL_GAP_REQUESTS {
@@ -70,7 +70,7 @@ fn requested_sequence(gaps: &[SignalGapRequest], source: &str) -> Option<u64> {
         .map(|index| gaps[index].next_sequence)
 }
 
-pub(crate) fn ordered_blocked_destinations(
+pub fn ordered_blocked_destinations(
     destinations: &[StrategyId],
 ) -> Result<Vec<StrategyId>, SignalError> {
     if destinations.len() > u16::MAX as usize + 1 {
@@ -99,7 +99,7 @@ fn identity_eligible(
     }
 }
 
-pub(crate) fn signal_eligible(
+pub fn signal_eligible(
     gaps: &[SignalGapRequest],
     blocked: &[StrategyId],
     observation: &SignalObservation,
@@ -113,7 +113,7 @@ pub(crate) fn signal_eligible(
     )
 }
 
-pub(crate) fn signal_requested(gaps: &[SignalGapRequest], observation: &SignalObservation) -> bool {
+pub fn signal_requested(gaps: &[SignalGapRequest], observation: &SignalObservation) -> bool {
     requested_sequence(gaps, &observation.source) == Some(observation.sequence)
 }
 

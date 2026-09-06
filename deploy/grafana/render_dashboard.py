@@ -282,7 +282,7 @@ def panels() -> list[Panel]:
             "New orders",
             "Entry gate.",
             _grid(6, y, 6, 5),
-            [(f"lm_engine_may_open{{{REALM}}}", "{{realm}}")],
+            [(f"lm_engine_may_open{{{REALM}}} and on(realm) (lm_engine_up{{{REALM}}} == 1)", "{{realm}}")],
             mappings={"0": ("PAUSED", "orange"), "1": ("OPEN", "green")},
             overrides=_names([("demo", "D"), ("mainnet", "M")]),
         )
@@ -294,8 +294,11 @@ def panels() -> list[Panel]:
             "Health and coverage.",
             _grid(12, y, 6, 5),
             [
-                (f"lm_worker_status_healthy{{{REALM}}}", "{{realm}} verdict"),
-                (f"lm_worker_ticker_coverage_complete{{{REALM}}}", "{{realm}} coverage"),
+                (f"lm_worker_status_healthy{{{REALM}}} * on(realm) lm_worker_up{{{REALM}}}", "{{realm}} verdict"),
+                (
+                    f"lm_worker_ticker_coverage_complete{{{REALM}}} * on(realm) lm_worker_up{{{REALM}}}",
+                    "{{realm}} coverage",
+                ),
             ],
             mappings={"0": ("ATTENTION", "red"), "1": ("HEALTHY", "green")},
             overrides=_names(
@@ -355,13 +358,17 @@ def panels() -> list[Panel]:
         ),
     ):
         selector = f'{metric}{{realm="{realm}",{REALM}}}'
+        up = f'lm_engine_up{{realm="{realm}",{REALM}}}'
+        # Explicit NaN on down keeps the last stat value stale after the old
+        # account series leaves Prometheus lookback; earlier sparkline values remain.
+        current = f"({selector} and on(realm) ({up} == 1)) or on(realm) (({up} == 0) / 0)"
         lower, upper = _padded_sparkline_bounds(selector)
         panel = stat(
             panel_id,
             "",
             description,
             _grid(x, panel_y, 12, 4),
-            [(selector, label)],
+            [(current, label)],
             unit="currencyUSD",
             decimals=2,
             sparkline=True,
@@ -372,6 +379,10 @@ def panels() -> list[Panel]:
             color_mode="value",
             overrides=_name_colors([(label, label, color)]),
         )
+        panel["options"]["reduceOptions"]["calcs"] = ["last"]
+        panel["fieldConfig"]["defaults"]["mappings"] = [
+            {"type": "special", "options": {"match": "null+nan", "result": {"text": "STALE", "color": "orange"}}}
+        ]
         panel["targets"].extend(
             [
                 _target(lower, "Min", instant=True, ref="B"),
