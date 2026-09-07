@@ -344,6 +344,7 @@ When performing rollouts or cold starts, state is seeded or verified while units
 | `retire-legacy-signal-sources` | Records an operator-selected terminal outcome for stopped legacy sources without rewriting accepted cursors. | WAL lock; full plan validation; explicit `--execute`; no accepted pending observations. |
 | `reconcile-clear` | Restates canonical authenticated physical quantities and records the operator's historical evidence note; currently owned net quantities must agree first. | WAL lock; exact native quantities; explicit `--execute`; identical interrupted clear retries append nothing. |
 | `verify-native-strategy-state` | Verifies WAL checkpoint identity, frame CRC, and state provenance from the newest trusted segment, the records boot replays (`engine_wal::replay_current`). | Run before restarting units on deploy. |
+| `wal-convert-v5 --wal FAMILY --output-dir NEW_DIRECTORY` | Copies a complete family while upgrading v5 bases to v7, retaining source frames and sequence identity; existing replay materializes unknown or recorded cost basis. Callback offsets use segment/sequence lookup after relocation. | Offline input; family path, not a numbered suffix; new output directory. Original files remain unchanged. Missing, corrupt or incomplete sources are refused. |
 
 #### Handover Invariants
 
@@ -355,6 +356,8 @@ When performing rollouts or cold starts, state is seeded or verified while units
 * **Must Never** reinterpret an unsupported required record as a torn tail or
   truncate it. `ExecutionPrecisionV1` and `segment_base_v7` require a compatible
   reader; an older reader’s explicit refusal is the compatibility behavior.
+* **Must** use converter output only after successful command completion;
+  interruption can leave a partial directory, which a rerun refuses.
 
 #### Strategy Table Invariants
 
@@ -496,6 +499,10 @@ export RUSTDOC="$audit_rust_bin/rustdoc"
 cargo build --manifest-path engine/Cargo.toml --release --locked -p engine-tools --bins
 engine/target/release/engine-tools sim --seed 4 --seconds 300 --crashes 1 --faults light --keep --out /tmp/sim --report /tmp/sim/report.json
 engine/target/release/engine-tools sim --seed 100 --seeds 24 --faults light --twice
+
+# Convert a stopped, complete copied WAL family into a new directory.
+engine/target/release/engine-tools wal-convert-v5 \
+  --wal /tmp/copied-family/engine.wal --output-dir /tmp/converted-family
 
 # Style formatting check
 cargo fmt --manifest-path engine/Cargo.toml --all -- --check

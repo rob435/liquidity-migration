@@ -30,6 +30,34 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     covered StopSet. Uncovered and legacy repairs retain their write. The
     failing-barrier fixture targets SleeveStopSet and still prevents the
     native call. No retained host reader is deleted.
+    Add `wal-convert-v5` for an offline complete family copied into a new
+    directory. Reuse the checksum/record scanner, preserve frame sequence
+    identity and retained source payloads, materialize existing v5 priced or
+    unpriced lot semantics, and relocate callback offsets by segment/sequence.
+    Eight focused fixtures cover exact state, retirement outcomes, callbacks,
+    archived orders, repeat conversion and damaged/incomplete inputs; 19 WAL
+    unit tests, both CLI entry points and scoped strict Clippy pass. The
+    numbered-suffix fixture fails against the initial converter and passes
+    after refusing to relabel an archive segment as a whole family. Returned
+    errors remove the new directory; interruption can leave partial output.
+    Assemble copied quarantine families at retained append boundaries: demo
+    has 39 segments / 2,253,351 records and mainnet 38 / 851,734. Conversion
+    upgrades 14 / 13 bases. Independent full CRC/source-hash checks preserve
+    every other payload byte and exact owned quantities with unpriced lots;
+    all 27 affected segment fills reports match before/after. The two spliced
+    prefix files are reconstructed from retained frames and boot ordering,
+    not an unavailable original whole-family checksum. Originals and readers
+    remain intact; no host family is converted. Same-Mac before/after narrow
+    decision p50 is 17.007 / 17.263 µs, both missing 10 µs, while narrow
+    submit is 4.886527 / 4.968447 ms. Wide decision p99 is 35.551 / 23.711 µs.
+    All 700 opportunities per pair complete with one barrier and zero failures.
+    Reopen R3-13 before a fixed A B B A control on the same frozen images.
+    Both B cells pass narrow decision 7.751 / 8.631 µs and submit
+    4.718591 / 4.968447 ms; all 400 orders complete with one barrier.
+    Both A decisions also return below 10 µs, while the final A submit
+    misses at 5.324799 ms. Current point targets pass with the preceding
+    wide cell; no converter regression or scheduling cause is established.
+    Retain all misses and the separate stored CI budget.
   - Add registered-plug conformance, Exact/WAL properties and authenticated
     demo private frames. The corpus includes LINK Buy 53.9 at 13.329 with
     0.39513821 USDT fee; its replay uses the real WebSocket parser. Convert
@@ -170,8 +198,18 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     median limits. Three individual decision cells still fail the absolute
     limit; one baseline barrier maximum is 137.93 ms. Retain all cells and
     prior failures. Downloaded candidate binaries and the embedded log verify.
-    Delete the completed R3-06 row. The CI helper change has no engine runtime
-    change or VPS redeploy; the two retained-WAL removals remain open.
+    The completion audit reopens R3-06: relative-only acceptance does not meet
+    the original stored-budget requirement. Restore absolute failure as a
+    publication error alongside the paired comparison, keeping both verdicts,
+    all eight cells and unchanged limits. Both absolute-fail/relative-pass
+    regressions fail before with `DID NOT RAISE` and pass afterward; 81 qualifier
+    tests and three doc-link tests pass. The verified eight-cell recorded log
+    passes the corrected checker; doubling either metric for B or for both
+    images fails. This replay is not fresh hosted qualification. The unchanged
+    Mac executable measures narrow submit 5.136383 ms before and 5.058559 ms
+    after; both miss 5 ms. Each pair completes all 700 orders with one barrier
+    each and zero failures. The CI helper change has no engine runtime change
+    or VPS redeploy; retained-WAL conversion and removals remain open.
     The final qualified-source Mac remeasurement records narrow decision
     p50 4.751 µs, submit p50 4.997119 ms and wide decision p99 15.047 µs.
     All 700 opportunities complete with one barrier each and zero failures.

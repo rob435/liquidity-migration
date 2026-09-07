@@ -232,29 +232,53 @@ def _latency_cell(decision: int, submit: int, *, decision_scale: int = 1, submit
 
 
 @pytest.mark.parametrize("qualification_workspace", [(9300, 1090000, True)], indirect=True)
-def test_paired_source_qualifies_a_slow_host_without_claiming_an_absolute_pass(
+@pytest.mark.parametrize("metric", ["decision_p99_ns", "submit_p50_ns"])
+def test_relative_pass_cannot_publish_after_an_absolute_median_miss(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]], metric: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, commit, target, calls, behavior = qualification_workspace
+    behavior["bench-A"] = _latency_cell(20000, 2000000)
+    behavior["bench-B"] = _latency_cell(20000 if metric == "decision_p99_ns" else 9300,
+                                      2000000 if metric == "submit_p50_ns" else 1090000)
+    output = tmp_path / "unqualified.tar.gz"
+    with pytest.raises(ValueError, match=f"latency budget failed: {metric}="):
+        artifact_module.qualify(repo, commit, output, target, runner_class="linux-x86_64")
+    assert not output.exists()
+    benches = [command for command in calls if len(command) > 1 and command[1] == "bench"]
+    assert len(benches) == 8
+    summary = next(line.removeprefix("latency budget: ") for line in capsys.readouterr().out.splitlines()
+                   if line.startswith("latency budget: "))
+    verdict = json.loads(summary)
+    assert verdict["absolute_passed"] is False and verdict["relative_passed"] is True
+    assert [cell["image"] for cell in verdict["runs"]] == list("ABBABAAB")
+
+
+@pytest.mark.parametrize("qualification_workspace", [(9300, 1090000, True)], indirect=True)
+def test_paired_source_keeps_a_slow_reference_and_packages_a_passing_candidate(
     tmp_path: Path, artifact_module: ModuleType,
     qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]],
 ) -> None:
     repo, commit, target, calls, behavior = qualification_workspace
     behavior["bench-A"] = _latency_cell(30000, 1090000)
-    for index, (decision, submit) in enumerate(zip((32000, 28900, 15500, 15700), (1090000, 1040000, 1030000, 1070000)), 1):
+    for index, (decision, submit) in enumerate(zip((14300, 8600, 9400, 8000), (1090000, 1040000, 1030000, 1070000)), 1):
         behavior[f"bench-B-{index}"] = _latency_cell(decision, submit)
     output = tmp_path / "qualified.tar.gz"
     artifact_module.qualify(repo, commit, output, target, runner_class="linux-x86_64")
     extracted = tmp_path / "verified"
     manifest = artifact_module.verify(output, commit, extracted)
     latency = manifest["latency_budget"]
-    assert latency["contract"] == "paired_source_relative"
-    assert latency["measured_ns"] == {"decision_p99_ns": 22300, "submit_p50_ns": 1055000}
+    assert latency["contract"] == "absolute_and_paired_source_relative"
+    assert latency["measured_ns"] == {"decision_p99_ns": 9000, "submit_p50_ns": 1055000}
     assert latency["reference_measured_ns"] == {"decision_p99_ns": 30000, "submit_p50_ns": 1090000}
     assert latency["limits_ns"] == {"decision_p99_ns": 13950, "submit_p50_ns": 1635000}
     assert latency["relative_limits_ns"] == {"decision_p99_ns": 45000, "submit_p50_ns": 1635000}
-    assert latency["relative_passed"] is True and latency["absolute_passed"] is False
+    assert latency["relative_passed"] is True and latency["absolute_passed"] is True
     assert latency["reference_absolute_passed"] is False
     assert latency["aggregation"] == "median_of_run_metrics" and "samples" not in latency
     assert [cell["image"] for cell in latency["runs"]] == list("ABBABAAB")
-    assert all(not cell["budget_passed"] for cell in latency["runs"])
+    assert [cell["budget_passed"] for cell in latency["runs"]] == [False, False, True, False, True, False, False, True]
     benches = [command for command in calls if len(command) > 1 and command[1] == "bench"]
     assert len(benches) == len({command[command.index("--wal") + 1] for command in benches}) == 8
     assert calls[-8:] == benches
@@ -281,7 +305,7 @@ def test_paired_source_qualifies_a_slow_host_without_claiming_an_absolute_pass(
     assert all(behavior[f"bench-B-{index}"] in log for index in range(1, 5))
     assert log.count(behavior["bench-A"]) == 4
     assert log.index("latency images:") < log.index("latency qualification:")
-    assert '"absolute_passed": false' in log and '"relative_passed": true' in log
+    assert '"absolute_passed": true' in log and '"reference_absolute_passed": false' in log
 
 
 @pytest.mark.parametrize("qualification_workspace", [(9300, 1090000, True)], indirect=True)
@@ -292,8 +316,8 @@ def test_twice_the_same_worker_reference_fails_either_relative_metric_after_all_
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     repo, commit, target, calls, behavior = qualification_workspace
-    behavior["bench-A"] = _latency_cell(10000, 1000000)
-    behavior["bench-B"] = _latency_cell(10000, 1000000, decision_scale=2 if metric == "decision_p99_ns" else 1,
+    behavior["bench-A"] = _latency_cell(5000, 500000)
+    behavior["bench-B"] = _latency_cell(5000, 500000, decision_scale=2 if metric == "decision_p99_ns" else 1,
                                       submit_scale=2 if metric == "submit_p50_ns" else 1)
     output = tmp_path / "unqualified.tar.gz"
     with pytest.raises(ValueError, match=f"relative latency budget failed: {metric}="):
@@ -304,23 +328,23 @@ def test_twice_the_same_worker_reference_fails_either_relative_metric_after_all_
     summary = next(line.removeprefix("latency budget: ") for line in capsys.readouterr().out.splitlines()
                    if line.startswith("latency budget: "))
     verdict = json.loads(summary)
-    assert verdict["relative_passed"] is False
+    assert verdict["relative_passed"] is False and verdict["absolute_passed"] is True
     assert len(verdict["runs"]) == 8
 
 
 @pytest.mark.parametrize("qualification_workspace", [(9300, 1090000, True)], indirect=True)
-def test_doubling_an_already_fast_candidate_can_remain_within_the_relative_contract(
+def test_doubling_an_already_fast_candidate_can_remain_within_both_budgets(
     tmp_path: Path, artifact_module: ModuleType,
     qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]],
 ) -> None:
     repo, commit, target, _, behavior = qualification_workspace
-    behavior["bench-A"] = _latency_cell(20000, 2000000)
-    behavior["bench-B"] = _latency_cell(10000, 1000000, decision_scale=2, submit_scale=2)
+    behavior["bench-A"] = _latency_cell(12000, 1200000)
+    behavior["bench-B"] = _latency_cell(6000, 600000, decision_scale=2, submit_scale=2)
     output = tmp_path / "qualified.tar.gz"
     artifact_module.qualify(repo, commit, output, target, runner_class="linux-x86_64")
     latency = artifact_module.verify(output, commit)["latency_budget"]
     assert latency["measured_ns"] == latency["reference_measured_ns"]
-    assert latency["relative_passed"] is True and latency["absolute_passed"] is False
+    assert latency["relative_passed"] is True and latency["absolute_passed"] is True
 
 
 @pytest.mark.parametrize("qualification_workspace", [(9300, 1090000, True)], indirect=True)
@@ -389,7 +413,7 @@ def test_registered_linux_source_and_absolute_darwin_contracts(
     artifact_module: ModuleType, capsys: pytest.CaptureFixture[str],
 ) -> None:
     linux = artifact_module._latency_budget(ROOT, "linux-x86_64")
-    assert linux["contract"] == "paired_source_relative"
+    assert linux["contract"] == "absolute_and_paired_source_relative"
     assert linux["reference_commit"] == "a4189a4897409e65acba7a2078b964986ceea928"
     assert linux["limits_ns"] == {"decision_p99_ns": 13950, "submit_p50_ns": 1635000}
     darwin = artifact_module._latency_budget(ROOT, "darwin-arm64")

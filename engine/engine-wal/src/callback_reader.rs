@@ -168,7 +168,10 @@ impl Reader {
         Ok(())
     }
 
-    fn locate(&mut self, mut cursor: CallbackWalCursor) -> Result<CallbackWalCursor, WalError> {
+    pub(crate) fn locate(
+        &mut self,
+        mut cursor: CallbackWalCursor,
+    ) -> Result<CallbackWalCursor, WalError> {
         self.select(cursor.segment)?;
         if cursor.sequence == 0 {
             return Err(WalError::Corrupt {

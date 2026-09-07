@@ -59,7 +59,7 @@ def _latency_budget(repo: Path, runner_class: str | None) -> dict[str, Any]:
         reference = baseline["reference_commit"]
         if not isinstance(reference, str):
             raise ValueError("latency reference commit must be a full SHA")
-        result.update(contract="paired_source_relative", reference_commit=_commit(reference))
+        result.update(contract="absolute_and_paired_source_relative", reference_commit=_commit(reference))
     return result
 
 
@@ -200,8 +200,9 @@ def _qualify_latency(
         metric: statistics.median(cell["measured_ns"][metric] for cell in runs if cell["image"] == "B")
         for metric in budget["limits_ns"]
     })
-    failures = _latency_failures(result)
-    result.update(absolute_passed=not failures, absolute_failures=failures)
+    absolute_failures = _latency_failures(result)
+    result.update(absolute_passed=not absolute_failures, absolute_failures=absolute_failures)
+    relative_failures = []
     if reference is not None:
         reference_measured = {
             metric: statistics.median(cell["measured_ns"][metric] for cell in runs if cell["image"] == "A")
@@ -209,16 +210,17 @@ def _qualify_latency(
         }
         relative_limits = {metric: value * budget["maximum_baseline_ratio"] for metric, value in reference_measured.items()}
         reference_failures = _latency_failures({**budget, "measured_ns": reference_measured})
-        failures = _latency_failures({**result, "limits_ns": relative_limits})
+        relative_failures = _latency_failures({**result, "limits_ns": relative_limits})
         result.update(reference_measured_ns=reference_measured, relative_limits_ns=relative_limits,
                       reference_absolute_passed=not reference_failures, reference_absolute_failures=reference_failures,
-                      relative_passed=not failures, relative_failures=failures, images=images)
+                      relative_passed=not relative_failures, relative_failures=relative_failures, images=images)
     line = "latency budget: " + json.dumps(result, sort_keys=True) + "\n"
     print(line, end="", flush=True)
     log.write(line)
-    if failures:
-        prefix = "relative latency budget failed: " if reference is not None else "latency budget failed: "
-        raise ValueError(prefix + "; ".join(failures))
+    if absolute_failures:
+        raise ValueError("latency budget failed: " + "; ".join(absolute_failures))
+    if relative_failures:
+        raise ValueError("relative latency budget failed: " + "; ".join(relative_failures))
     return result
 
 
@@ -247,7 +249,7 @@ def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: s
         with (evidence / "qualification.log").open("w") as log:
             reference = None
             images: dict[str, Any] = {}
-            if budget["contract"] == "paired_source_relative":
+            if budget["contract"] == "absolute_and_paired_source_relative":
                 reference_commit = budget["reference_commit"]
                 line = f"latency reference source: {reference_commit}; fresh build with the candidate compiler, target and build command\n"
                 print(line, end="", flush=True)

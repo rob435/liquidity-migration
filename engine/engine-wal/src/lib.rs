@@ -40,6 +40,7 @@ use std::time::Instant;
 pub use engine_types::wal::{PendingBarrier, Wal, WalError, WalRecord};
 
 mod callback_reader;
+pub mod conversion;
 mod order_lineage;
 mod record_value;
 
@@ -1179,6 +1180,19 @@ struct Scan {
 }
 
 fn scan_file(file: &mut File, len: u64) -> Result<Scan, WalError> {
+    let mut records = Vec::new();
+    let good_end = scan_frames(file, len, |sequence, _, _, record| {
+        records.push((sequence, record));
+        Ok(())
+    })?;
+    Ok(Scan { records, good_end })
+}
+
+fn scan_frames(
+    file: &mut File,
+    len: u64,
+    mut visit: impl FnMut(u64, u64, &[u8], WalRecord) -> Result<(), WalError>,
+) -> Result<u64, WalError> {
     file.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(file);
 
@@ -1197,7 +1211,7 @@ fn scan_file(file: &mut File, len: u64) -> Result<Scan, WalError> {
         });
     }
 
-    let mut records: Vec<(u64, WalRecord)> = Vec::new();
+    let mut sequence = 1;
     let mut payload: Vec<u8> = Vec::new();
     let mut offset = HEADER_LEN;
 
@@ -1248,15 +1262,12 @@ fn scan_file(file: &mut File, len: u64) -> Result<Scan, WalError> {
             detail: format!("frame passed its checksum but is not a readable record: {e}"),
         })?;
 
+        visit(sequence, offset, &payload, record)?;
         offset += FRAME_HEADER_LEN as u64 + payload_len;
-        let seq = records.len() as u64 + 1;
-        records.push((seq, record));
+        sequence += 1;
     }
 
-    Ok(Scan {
-        records,
-        good_end: offset,
-    })
+    Ok(offset)
 }
 
 /// What one buffered append and one durability barrier cost, in microseconds.

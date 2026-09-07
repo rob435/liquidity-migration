@@ -9,6 +9,7 @@ pub mod backtest;
 pub mod bench;
 pub mod sim;
 pub mod timing;
+pub mod wal_conversion;
 
 #[cfg(test)]
 mod testpath;

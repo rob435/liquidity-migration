@@ -11,7 +11,7 @@ symbols = ["BTCUSDT"]
 # Decision: median of four fixed-archive runs in 34084393881. Submit: 34074530152.
 # These are run-level reference statistics; execution-performance.md owns every cell.
 status = "measured-hosted-fixed-archive-decision-median"
-# Linux qualifies against 1.5x this source's same-worker median; ns fields remain absolute diagnostics.
+# Linux requires both the stored absolute limits and 1.5x this source's same-worker medians to pass.
 reference_commit = "a4189a4897409e65acba7a2078b964986ceea928"
 decision_p99_ns = 9300
 submit_p50_ns = 1090000

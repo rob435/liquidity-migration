@@ -11,6 +11,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
         "sim" => sim(args),
         "bench" => bench(args),
         "wal-cost" => wal_cost(args),
+        "wal-convert-v5" => wal_convert_v5(args),
         "venue-key" => venue_key(args),
         "venues" => venues(args),
         "strategies" => strategies(args),
@@ -95,6 +96,23 @@ fn wal_cost(args: &[String]) -> Result<(), Box<dyn Error>> {
     println!("{costs}");
     println!("  the barrier measures synchronous fsync; engine bench separates callback, queued-dispatch and attempted-send barriers.");
     println!("  compare against a memory-backed path to bound what faster storage buys.");
+    Ok(())
+}
+
+fn wal_convert_v5(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let input = PathBuf::from(value(args, "--wal").ok_or("wal-convert-v5 needs --wal PATH")?);
+    let output = PathBuf::from(
+        value(args, "--output-dir").ok_or("wal-convert-v5 needs --output-dir NEW_DIRECTORY")?,
+    );
+    let result = engine_tools::wal_conversion::convert(&input, &output)?;
+    println!(
+        "family={} segments={} records={} upgraded_bases={} relocated_bases={}",
+        result.family.display(),
+        result.segments,
+        result.records,
+        result.upgraded_bases,
+        result.relocated_bases,
+    );
     Ok(())
 }
 

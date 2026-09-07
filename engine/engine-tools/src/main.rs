@@ -46,6 +46,11 @@ engine — the execution loop
   engine replay --wal PATH
       Print the log in words, and what was still in flight at each point.
 
+  engine wal-convert-v5 --wal PATH --output-dir NEW_DIRECTORY
+      Convert v5 restatements into a separate WAL family with explicit v7
+      cost-basis and source-retirement state. The input must be stopped.
+      Preserve unknown cost basis and all historical source records.
+
   engine fills --wal PATH
       What the trading cost: maker share, fee, how far each fill landed from
       the price on the screen when its order left, and where the market went
