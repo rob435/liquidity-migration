@@ -122,7 +122,10 @@ gh workflow run vps-deploy.yml --ref main -f mode=diagnose
 | Installation | Binaries and units land while both realms run. Independent recorders restart only when their own inputs change. |
 | Realm handover | Compare the engine source tree, systemd units, fleet manifest, worker config and rendered realm inputs with the retained fingerprint. Unchanged active realms keep running; changed realms stop, apply any explicit legacy retirement plan, verify/import native state, apply any explicit reconciliation note, then restart. |
 | Readiness | Require a fresh heartbeat and the same active main PID/restart counter throughout the 12-second settle window before recording the realm fingerprint. |
-| Failed handover or manual rollback | A predecessor must have identical Rust, dependency, toolchain and build inputs to the current checkout and recorded deployed generation. Incompatible or unavailable inputs leave the installed candidate and durable state in place for forward repair. The worker has no read-only state compatibility command, so a changed-runtime rollback is not inferred safe. |
+| Failed handover or fleet rollback | A predecessor must have identical Rust, dependency, toolchain and build inputs to the current checkout and recorded deployed generation. Incompatible or unavailable inputs leave the installed candidate and durable state in place for forward repair. The worker has no read-only state compatibility command, so a changed-runtime rollback is not inferred safe. |
+| Default demo rollback/drill | `scripts/runtime/chaos_drill.sh rollback\|drill` selects the recorded previous generation under the deployment lock and requires identical runtime inputs. `restore` selects the completed current generation without requiring a predecessor |
+| Selected demo pair | `rollback\|drill --qualified-pair EXPECTED_CURRENT_SHA PREDECESSOR_SHA` selects a retained archive independently of `previous-commit`. The caller must qualify the specific runtime/state compatibility before using this input. The helper requires the completed deployment to equal the supplied current SHA under the lock; a failed predecessor startup restores that current release. `restore` rejects pair arguments |
+| Pair qualification scope | Full-SHA pair selection permits its reviewed source difference; it does not suppress archive, WAL or worker-state errors. A copied-WAL read establishes record readability only. Loaded images, fresh process/account readiness and successful restoration require an actual demo drill |
 | Durable state | Rollback never restores old WAL or worker files over newer state; required record refusal remains explicit. |
 
 ### Native State Takeover Sources
@@ -286,4 +289,23 @@ scripts/ops.sh --help
 scripts/dev.sh check
 # Select the full intended source SHA before dispatching deployment.
 gh workflow run vps-deploy.yml --ref main -f mode=deploy
+```
+
+Run a specifically qualified demo pair as root on the host; set both full SHAs from the completed compatibility review. Systemd reads the existing drill environment files.
+
+```sh
+: "${TASK_CURRENT_SHA:?Set the reviewed completed deployment SHA}"
+: "${TASK_PREDECESSOR_SHA:?Set the reviewed retained predecessor SHA}"
+systemd-run --quiet --wait --pipe --collect --service-type=oneshot \
+  --unit="liquidity-migration-demo-drill-manual-$$" \
+  --property=WorkingDirectory=/opt/liquidity-migration \
+  --property=EnvironmentFile=/etc/liquidity-migration/engine.env \
+  --property=EnvironmentFile=/etc/liquidity-migration/notifications.env \
+  --property=EnvironmentFile=/etc/liquidity-migration/oncall.env \
+  --property='Environment=TELEGRAM_ENABLED=1 PYTHONDONTWRITEBYTECODE=1' \
+  --property='UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY' \
+  --property=NoNewPrivileges=true --property=PrivateTmp=true \
+  --property=MemoryMax=256M --property=TimeoutStartSec=900 \
+  /opt/liquidity-migration/scripts/runtime/chaos_drill.sh drill \
+  --qualified-pair "$TASK_CURRENT_SHA" "$TASK_PREDECESSOR_SHA"
 ```

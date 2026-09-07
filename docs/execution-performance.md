@@ -10,7 +10,7 @@ State measured execution workloads, timing boundaries and resource limits for th
 | --- | --- |
 | Deployed engine | Both realms load generation `fc2ad99c`, with embedded callbacks and default Bybit features; the 300-second demo soak passes before mainnet handover. Dated host evidence lives in [STATE.md](../STATE.md) |
 | Qualification | The deployed follow-up passes local debug/release and hosted debug checks plus the 300-second demo gate. Hosted release tests pass; its separate qualification fails decision p99 at 9.3 µs against 9.0 µs. Both this failure and the earlier unchanged-runtime failure remain recorded |
-| Target gaps | Both decision targets and one-barrier-plus-1-ms pass. Narrow submit repeats are 4.981 / 5.083 / 4.989 ms; the 5 ms target is met in two of three repeats, not consistently |
+| Point targets | The qualified-source remeasurement records narrow decision p50 4.751 µs, narrow submit p50 4.997119 ms and wide decision p99 15.047 µs, meeting the original thresholds. Narrow submit has only 2.881 µs headroom; earlier repeats are 4.981 / 5.083 / 4.989 ms. These observations establish no consistent 5 ms bound or SLO |
 | Latest source boundary | Callback-buffer reuse, direct binary64 normalization, immutable envelope policy, reduced products, aggregate margin division, grouped pending risk and per-symbol pending quantity totals, covered native-stop writes, fresh priced-quantity grouping and batched exact sums; borrowed prices, reused order projections, temporary route-membership bitsets, exact storage bit bounds and a venue-actor yield; normal release builds carry no temporary profiling |
 
 ### Retained Round-2 baseline
@@ -120,9 +120,14 @@ Latency cells are milliseconds, `p50 / p99 / p99.9`; MiB means 1,048,576 bytes.
 | Venue actor yield, unloaded repeat 1 | 100 / 100 | 4.5 µs / 14.3 µs | 4.98 ms / 6.37 ms | 100 | 189,734 |
 | Venue actor yield, unloaded repeat 2 | 100 / 100 | 4.7 µs / 23.9 µs | 5.08 ms / 6.48 ms | 100 | 189,737 |
 | Venue actor yield, unloaded repeat 3 | 100 / 100 | 4.2 µs / 7.5 µs | 4.99 ms / 6.21 ms | 100 | 189,734 |
+| Qualified follow-up remeasurement, unloaded | 100 / 100 | 4.751 µs / 16.639 µs | 4.997119 ms / 6.340607 ms | 100 | 189,734 |
+| Qualified follow-up remeasurement, 270 symbols | 600 / 600 | 4.667 µs / 15.047 µs | 5.140479 ms / 6.504447 ms | 600 | 1,176,684 |
 
 | Candidate boundary | Observation |
 | --- | --- |
+| Operational-only remeasurement | `/tmp/r3-selected-pair-{unloaded,wide-270}.{log,wal}`; exact final notes `/tmp/r3-selected-pair-quantiles.log`. No test or compiler runs during either cell; both WALs validate and all 700 opportunities complete with one barrier each, zero failures. Runtime inputs equal `fc2ad99c`; the new demo-helper option does not run inside this benchmark |
+| Remeasurement build scope | Engine-tools SHA256 `8b7d44c3b68ee4e78bb54bcdf8632e77e631821b02e6ce1590a54e60f7ca5a5a`, unchanged within this pair, carries the precommit `32858587-dirty` label and is produced during the final release qualification. The earlier yield/repeat image is `2249e4b746d6ecef67cdccec4cae4dc1a48d17f3cab38be7cb2d8b840baa0680`; these are different build bytes. No timing improvement is attributed to the operational helper |
+| R3-13 point acceptance | Narrow decision p50 and submit p50, wide decision p99 and one-barrier counts meet the original targets on the qualified source. Existing original-algorithm comparisons preserve exact values, canonical bytes, read/refusal ordering and lifecycle outcomes. Narrow submit has 0.05762% headroom; prior misses remain visible and no repeated-run SLO is established |
 | Embedded source | Working tree based on `bb4bc3d3`, R3-01/02 plus parallel R3-04/08/11/12 and early R3-09; before R3-03 |
 | Raw candidate output | `/tmp/r3-embedded-unloaded.log`, `/tmp/r3-embedded-wide-270.log`; complete WALs share each basename |
 | Interference | No compiler during either candidate run; the same box has 44 GiB free after Cargo removes rebuildable debug artifacts |
@@ -236,20 +241,33 @@ Latency cells are milliseconds, `p50 / p99 / p99.9`; MiB means 1,048,576 bytes.
 
 | Boundary | Evidence |
 | --- | --- |
-| Temporary diagnostic | Manual `r3-latency-diagnostic.yml` compares the qualified `a4189a48` archive (A) with a fresh native-target `fc2ad99c` build (B) on one worker in fixed order `A B B A B A A B`, using the unchanged 2,000-event recipe and budgets. All eight raw logs and WALs are retained. B does not replace the failed qualification or identify its unavailable bytes. Remove the workflow after the experiment |
+| Fixed paired diagnostic | [Run 34084393881](https://github.com/rob435/liquidity-migration/actions/runs/34084393881) compares the qualified `a4189a48` archive (A) with a fresh native-target `fc2ad99c` build (B) on one Intel Xeon Platinum 8573C / ext4 worker in fixed order `A B B A B A A B`. All eight processes exit zero; all 800 opportunities complete with one barrier each and zero failures. Two A and two B cells fail the original 9,000 ns decision limit. Raw logs/WALs under `/tmp/r3-latency-paired-34084393881`; each WAL validates. The temporary workflow is removed after this experiment |
+| Diagnostic build scope | A engine-tools SHA256 `7281865d18f0a1f03b9a607d1f0fc89df555f8ad8cae8f7aa6db0497ea818eaf`; B `df7851bc59b743ab85d7db10dbd48cc77b3ff84a51f91769f360ef5483bb8a5c`. All three sibling binaries are fixed through the eight cells. B is freshly rebuilt diagnostic code; it does not replace the failed qualification or identify its unavailable bytes |
 | Source / runner | `a4189a4897409e65acba7a2078b964986ceea928`, Rust 1.90.0, `ubuntu-latest`, `x86_64-unknown-linux-gnu`; [run 34074530152](https://github.com/rob435/liquidity-migration/actions/runs/34074530152) |
 | Build scope | The qualification job builds and tests its own release binaries with an explicit native target. Their hashes differ from the separately built deployment artifact; these measurements bind to the qualification artifact and source commit |
 | Recipe | 2,000 events / 100 Hz / BTCUSDT / every 20; 100 completed submits, 100 dispatch barriers, zero barrier failures |
 | Cell | Decision p50 / p99: 5.0 / 6.0 µs; submit p50 / p99: 1.09 / 2.40 ms; dispatch barrier p50: 635.9 µs |
 | Optimized checks | 1,959 tests passed, zero failed, seven ignored; two million account-state operations with 65,536 retained IDs, plus repeated history-recovery workloads |
-| Budget | [execution-latency-budgets.toml](execution-latency-budgets.toml) uses observed 6,000 ns decision p99 and 1,090,000 ns submit p50; 1.5× limits are 9,000 / 1,635,000 ns. Doubling either measured segment fails the validator |
+| Budget | [execution-latency-budgets.toml](execution-latency-budgets.toml) uses A-only median run-level decision p99 9,300 ns from the fixed comparison; the original submit reference remains 1,090,000 ns. The unchanged 1.5× rule gives 13,950 / 1,635,000 ns limits. Mac references and the single-run qualification recipe remain unchanged |
 | Calibration boundary | The first run passes provisional 75,000 / 7,500,000 ns limits. Its unmodified log also passes the calibrated limits; the budget update has no runtime change |
 | Artifact | `/tmp/r3-hosted-qualified-a4189a48/engine-binaries-a4189a4897409e65acba7a2078b964986ceea928-qualified.tar.gz`; verified checksums and embedded qualification log. Raw log: `/tmp/r3-hosted-qualification-raw.log` |
-| Scope | One hosted runner sample is not a Mac result, venue-network latency or a universal Linux bound. The Mac submit target remains open |
+| Scope | One hosted worker does not establish venue-network latency or a universal Linux bound. Mac point targets are measured separately |
 | Calibrated repeat | [Run 34076340582](https://github.com/rob435/liquidity-migration/actions/runs/34076340582), source `32858587` with identical runtime inputs: 100/100 submits, 100 barriers, zero failures. Decision p50 / p99 3.9 / 16.6 µs; submit p50 / p99 1.51 / 149.16 ms; barrier p50 / p99 987.6 µs / 148.64 ms. Decision p99 fails the 9.0 µs limit; submit p50 passes 1.635 ms. The failed job uploads no qualified artifact. Raw log `/tmp/r3-hosted-calibrated-qualification.log` |
 | Runner comparison | The successful qualification uses worker `d47b96e7-a977-4ae7-a736-c8a3302651c0` in `eastus`; the failing qualification uses `1ea9fbaa-7e54-433c-8657-5a073e9b6d45` in `westus3`. Both report Ubuntu 24.04.4 and image `20260831.293.1`; CPU and filesystem identity are absent. Replaying both logs through the current checker reproduces their original verdicts. Different workers limit the comparison but do not identify the cause |
 | Deployed-source qualification | [Run 34081614240](https://github.com/rob435/liquidity-migration/actions/runs/34081614240), source `fc2ad99c`, passes 1,962 release tests, zero failed, seven ignored, plus two million account-state operations and repeated history workloads. Its separate native-target build completes 100/100 submits with 100 barriers and zero failures. Decision p50 / p99 is 5.8 / 9.3 µs; submit p50 / p99 is 1.16 / 3.53 ms; barrier p50 / p99 is 628.2 µs / 3.04 ms. Decision p99 fails the unchanged 9.0 µs limit; submit passes 1.635 ms. No qualified archive is uploaded. Raw log `/tmp/r3-fc2ad99c-hosted-qualification.log`; these are different build bytes from the deployed archive |
-| Calibration status | R3-06 remains open. The unchanged-runtime result establishes variation, not its cause; the budget remains unchanged pending investigation |
+| Calibration decision | Identical A bytes fail the original decision limit twice on the same worker: source changes are unnecessary for this failure. The four A printed p99 values have median 9,300 ns (exact WAL summary 9,299 ns); this calibration statistic is not a pooled percentile. Only the failing decision reference changes. All eight original submit medians pass, so its reference stays fixed. The precise scheduling/storage cause remains unidentified |
+| Calibration status | R3-06 remains open pending one fresh real qualification after the reference commit. The B 18,900 ns cell fails both old and revised decision limits; every original verdict remains recorded. Doubling either selected histogram in each of the eight logs fails the revised checker. The diagnostic is not a replacement qualification |
+
+| Fixed cell | Decision p99 µs | Submit p50 ms | Original budget | Revised budget |
+| --- | --- | --- | --- | --- |
+| 01 A | 7.9 | 1.31 | Pass | Pass |
+| 02 B | 8.6 | 1.23 | Pass | Pass |
+| 03 B | 18.9 | 1.27 | Fail | Fail |
+| 04 A | 10.0 | 1.31 | Fail | Pass |
+| 05 B | 9.4 | 1.33 | Fail | Pass |
+| 06 A | 8.6 | 1.34 | Pass | Pass |
+| 07 A | 10.5 | 1.29 | Fail | Pass |
+| 08 B | 8.0 | 1.28 | Pass | Pass |
 
 ## Invariants
 

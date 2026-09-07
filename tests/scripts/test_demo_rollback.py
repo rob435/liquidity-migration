@@ -31,6 +31,10 @@ def runtime(tmp_path: Path, monkeypatch):
     git("config", "user.email", "rollback@example.invalid")
     git("config", "user.name", "Rollback test")
     (repo / "engine").mkdir()
+    (repo / "engine/code").write_text("older compatible runtime\n")
+    git("add", ".")
+    git("commit", "-qm", "selected predecessor")
+    selected = git("rev-parse", "HEAD")
     (repo / "engine/code").write_text("same runtime\n")
     git("add", ".")
     git("commit", "-qm", "previous")
@@ -45,7 +49,7 @@ def runtime(tmp_path: Path, monkeypatch):
     (releases / "deployed-commit").write_text(current)
     (releases / "previous-commit").write_text(previous)
     artifacts = {}
-    for commit in (previous, current):
+    for commit in (selected, previous, current):
         directory = tmp_path / commit
         directory.mkdir()
         for name in ("engine", "engine-tools", "signal-worker"):
@@ -69,7 +73,7 @@ def runtime(tmp_path: Path, monkeypatch):
         path.write_text("current durable content " + path.name)
     operation = rollback.DemoRollback(repo, releases, tmp_path / "units", tmp_path / "proc", tmp_path / "deploy.lock",
                                       tmp_path / "heartbeat.json", tmp_path / "worker-heartbeat.json", "555899665")
-    records = {"calls": [], "loaded": [], "counter": 10, "fail": None, "clock": 0.0}
+    records = {"calls": [], "loaded": [], "counter": 10, "fail": None, "clock": 0.0, "selected": selected}
     identities = {}
     original_command = rollback.command
 
@@ -132,6 +136,128 @@ def test_drill_loads_real_prior_and_current_artifact_bytes_and_retains_all_state
     assert (operation.releases / "deployed-commit").read_text() == current
     assert (operation.releases / "previous-commit").read_text() == previous
     assert all(not (operation.units / f"{unit}.d" / rollback.OVERRIDE).exists() for unit in rollback.BINARIES)
+
+
+def test_qualified_pair_drills_selected_older_release_and_retains_markers_and_state(runtime) -> None:
+    operation, current, previous, records, state_files, git = runtime
+    selected = records["selected"]
+    retained = [*state_files, operation.releases / "deployed-commit", operation.releases / "previous-commit"]
+    before = {path: path.read_bytes() for path in retained}
+    operation.run("drill", qualified_pair=(current, selected))
+    assert records["loaded"] == [(rollback.WORKER, selected), (rollback.ENGINE, selected),
+                                 (rollback.WORKER, current), (rollback.ENGINE, current)]
+    assert selected != previous
+    assert {path: path.read_bytes() for path in retained} == before
+    assert git("rev-parse", "HEAD") == current
+    assert all(not (operation.units / f"{unit}.d" / rollback.OVERRIDE).exists() for unit in rollback.BINARIES)
+
+
+def test_qualified_rollback_ignores_previous_marker_and_restore_uses_current(runtime) -> None:
+    operation, current, _previous, records, *_ = runtime
+    selected = records["selected"]
+    (operation.releases / "previous-commit").unlink()
+    operation.run("rollback", qualified_pair=(current, selected))
+    assert records["loaded"] == [(rollback.WORKER, selected), (rollback.ENGINE, selected)]
+    operation.run("restore")
+    assert records["loaded"][-2:] == [(rollback.WORKER, current), (rollback.ENGINE, current)]
+    assert (operation.releases / "deployed-commit").read_text() == current
+    assert not (operation.releases / "previous-commit").exists()
+
+
+@pytest.mark.parametrize("fault", ["stale-current", "same-commit", "invalid-predecessor", "missing", "corrupt"])
+def test_invalid_qualified_pair_refuses_before_any_service_mutation(runtime, fault) -> None:
+    operation, current, previous, records, state_files, _git = runtime
+    selected = records["selected"]
+    pair = (current, selected)
+    if fault == "stale-current":
+        pair = (previous, selected)
+    elif fault == "same-commit":
+        pair = (current, current)
+    elif fault == "invalid-predecessor":
+        pair = (current, "../not-a-commit")
+    else:
+        archive = operation.releases / "staged" / f"{selected}.tar.gz"
+        if fault == "missing":
+            archive.unlink()
+        else:
+            archive.write_bytes(b"not an archive")
+    retained = [*state_files, operation.releases / "deployed-commit", operation.releases / "previous-commit"]
+    before = {path: path.read_bytes() for path in retained}
+    with pytest.raises((ValueError, OSError, tarfile.TarError)):
+        operation.run("drill", qualified_pair=pair)
+    assert records["calls"] == []
+    assert records["loaded"] == []
+    assert {path: path.read_bytes() for path in retained} == before
+
+
+def test_qualified_pair_checks_fresh_deployment_after_acquiring_lock(runtime, monkeypatch) -> None:
+    operation, current, previous, records, _state, git = runtime
+    original_flock = rollback.fcntl.flock
+
+    def complete_deployment(lock, flags):
+        original_flock(lock, flags)
+        git("checkout", "-q", previous)
+        (operation.releases / "deployed-commit").write_text(previous)
+
+    monkeypatch.setattr(rollback.fcntl, "flock", complete_deployment)
+    with pytest.raises(ValueError, match="qualified current commit differs from the completed deployment"):
+        operation.run("drill", qualified_pair=(current, records["selected"]))
+    assert records["calls"] == []
+    assert records["loaded"] == []
+
+
+def test_default_drill_still_refuses_selected_changed_runtime(runtime) -> None:
+    operation, _current, _previous, records, *_ = runtime
+    (operation.releases / "previous-commit").write_text(records["selected"])
+    with pytest.raises(ValueError, match="previous runtime inputs differ or are unavailable"):
+        operation.run("drill")
+    assert records["calls"] == []
+    assert records["loaded"] == []
+
+
+@pytest.mark.parametrize("mode", ["drill", "rollback"])
+def test_failed_qualified_predecessor_restores_current_without_changing_markers_or_state(runtime, mode) -> None:
+    operation, current, _previous, records, state_files, _git = runtime
+    selected = records["selected"]
+    records["fail"] = selected
+    retained = [*state_files, operation.releases / "deployed-commit", operation.releases / "previous-commit"]
+    before = {path: path.read_bytes() for path in retained}
+    with pytest.raises(RuntimeError, match="rollback failed; current demo release restored"):
+        operation.run(mode, qualified_pair=(current, selected))
+    assert records["loaded"] == [(rollback.WORKER, selected), (rollback.ENGINE, selected),
+                                 (rollback.WORKER, current), (rollback.ENGINE, current)]
+    assert {path: path.read_bytes() for path in retained} == before
+
+
+def test_restore_refuses_qualified_pair_before_any_service_mutation(runtime) -> None:
+    operation, current, _previous, records, *_ = runtime
+    with pytest.raises(ValueError, match="qualified pair cannot be used with restore"):
+        operation.run("restore", qualified_pair=(current, records["selected"]))
+    assert records["calls"] == []
+    assert records["loaded"] == []
+
+
+@pytest.mark.parametrize("mode", ["drill", "rollback"])
+def test_cli_passes_explicit_qualified_pair(runtime, monkeypatch, mode) -> None:
+    operation, current, _previous, records, *_ = runtime
+    monkeypatch.setattr(rollback, "DemoRollback", lambda *args: operation)
+    monkeypatch.setattr(sys, "argv", ["demo_rollback.py", mode, "--qualified-pair", current, records["selected"]])
+    monkeypatch.setenv("EXPECTED_ENGINE_ACCOUNT_USER_ID", operation.account)
+    monkeypatch.setenv("EXPECTED_ENGINE_REALM", "demo")
+    monkeypatch.setenv("EXPECTED_ENGINE_VENUE", "bybit")
+    monkeypatch.setenv("LIVENESS_ENGINE_HEARTBEAT_FILE", str(operation.heartbeats[rollback.ENGINE]))
+    monkeypatch.setenv("TELEGRAM_ENABLED", "0")
+    assert rollback.main() == 0
+    assert records["loaded"][:2] == [(rollback.WORKER, records["selected"]), (rollback.ENGINE, records["selected"])]
+
+
+def test_cli_refuses_qualified_pair_with_restore_before_operation_construction(runtime, monkeypatch) -> None:
+    operation, current, _previous, records, *_ = runtime
+    monkeypatch.setattr(sys, "argv", ["demo_rollback.py", "restore", "--qualified-pair", current, records["selected"]])
+    monkeypatch.setattr(rollback, "DemoRollback", lambda *args: pytest.fail("restore pair constructed an operation"))
+    with pytest.raises(SystemExit) as error:
+        rollback.main()
+    assert error.value.code == 2
 
 
 def test_one_command_rollback_and_restore_use_the_same_release_switch(runtime) -> None:

@@ -94,6 +94,14 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `a4189a48`/`32858587` success does not qualify the changed `fc2ad99c`/
     `32858587` pair. Reopen changed-runtime rollback acceptance without
     attempting the known-refused drill or altering mainnet.
+    Add an explicit full-SHA pair to the existing demo helper. It selects a
+    reviewed retained predecessor independently of `previous-commit`, checks
+    the current deployment under the existing lock and restores that current
+    release after predecessor failure. Default weekly equality checks remain.
+    The selected-pair regression fails at the original runtime-equality check
+    before the change; all 29 helper tests pass afterward. The old reader also
+    parses all 4,466 records of a captured current demo segment without a torn
+    or corrupt tail; actual selected-pair startup acceptance remains pending.
     Hosted qualification `34081614240` passes 1,962 release tests and
     account-state workloads, then fails decision p99 at 9.3 µs against
     9.0 µs. Submit p50 1.16 ms passes; all 100 opportunities complete with
@@ -102,6 +110,19 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     Add a temporary manual eight-cell same-worker comparison of the qualified
     baseline archive and a fresh candidate build to investigate calibration;
     retain raw measurements and remove the workflow after the experiment.
+    Run `34084393881` completes all eight fixed cells and 800 orders with
+    one barrier each and zero failures. Identical baseline bytes fail the
+    original 9 µs decision limit twice, as does the fresh candidate. Replace
+    only the 6 µs decision reference with the A-only median run-level p99 of
+    9.3 µs; keep the 1.09 ms submit reference and 1.5× rule. The decision
+    limit becomes 13.95 µs; B at 18.9 µs remains a failure. Keep all original
+    verdicts and remove the temporary workflow. Fresh qualification follows
+    the reference commit; no repetition-based acceptance is added.
+    The final qualified-source Mac remeasurement records narrow decision
+    p50 4.751 µs, submit p50 4.997119 ms and wide decision p99 15.047 µs.
+    All 700 opportunities complete with one barrier each and zero failures.
+    Delete R3-13 after its parity and point targets pass; record the 2.881 µs
+    narrow headroom, earlier misses and different measurement-build hashes.
   - Add the accepted demo soak, watchdog, rollback and runtime-only Python
     deployment changes. Workflow `34074541111` deploys `a4189a48` on
     2026-09-07: demo passes all 300 seconds from 02:06:41 to 02:11:41 UTC

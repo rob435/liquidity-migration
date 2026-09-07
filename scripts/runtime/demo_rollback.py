@@ -52,25 +52,33 @@ class DemoRollback:
         self.heartbeats = {ENGINE: heartbeat, WORKER: worker_heartbeat}
         self.account = account
 
-    def generations(self, restore: bool = False) -> tuple[str, str]:
+    def generations(
+        self, restore: bool = False, *, qualified_pair: tuple[str, str] | None = None,
+    ) -> tuple[str, str]:
+        if restore and qualified_pair is not None:
+            raise ValueError("qualified pair cannot be used with restore")
         current = (self.releases / "deployed-commit").read_text().strip()
-        previous = ""
-        if not restore:
-            previous = (self.releases / "previous-commit").read_text().strip()
         if re.fullmatch(r"[0-9a-f]{40}", current) is None:
             raise ValueError("completed release commit is invalid")
         head = command("git", "-C", str(self.repo), "rev-parse", "HEAD")
         if head != current:
             raise ValueError("rollback not exercised: checkout differs from the completed deployment")
         if restore:
-            return current, previous
+            return current, ""
+        if qualified_pair is None:
+            previous = (self.releases / "previous-commit").read_text().strip()
+        else:
+            expected_current, previous = qualified_pair
+            if expected_current != current:
+                raise ValueError("rollback not exercised: qualified current commit differs from the completed deployment")
         if re.fullmatch(r"[0-9a-f]{40}", previous) is None or current == previous:
             raise ValueError("rollback not exercised: two distinct completed release commits are required")
-        try:
-            command("git", "-C", str(self.repo), "diff", "--exit-code", "--quiet", current, previous, "--",
-                    "engine", "rust-toolchain.toml", ".cargo", ".github/workflows/vps-deploy.yml")
-        except subprocess.CalledProcessError as error:
-            raise ValueError("rollback not exercised: previous runtime inputs differ or are unavailable; repair forward") from error
+        if qualified_pair is None:
+            try:
+                command("git", "-C", str(self.repo), "diff", "--exit-code", "--quiet", current, previous, "--",
+                        "engine", "rust-toolchain.toml", ".cargo", ".github/workflows/vps-deploy.yml")
+            except subprocess.CalledProcessError as error:
+                raise ValueError("rollback not exercised: previous runtime inputs differ or are unavailable; repair forward") from error
         return current, previous
 
     def prepare(self, commit: str) -> tuple[Path, dict[str, str]]:
@@ -181,14 +189,14 @@ class DemoRollback:
             time.sleep(1)
         raise RuntimeError(f"demo release {release.name} did not become stable and healthy: {problem}")
 
-    def run(self, mode: str) -> None:
+    def run(self, mode: str, *, qualified_pair: tuple[str, str] | None = None) -> None:
         self.lock.parent.mkdir(parents=True, exist_ok=True)
         with self.lock.open("a") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:
                 raise DeploymentBusy("rollback not exercised: deployment lock is held") from error
-            current, previous = self.generations(restore=mode == "restore")
+            current, previous = self.generations(restore=mode == "restore", qualified_pair=qualified_pair)
             current_release, current_hashes = self.prepare(current)
             if mode == "restore":
                 self.switch(current_release, current_hashes)
@@ -218,7 +226,12 @@ class DemoRollback:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("rollback", "restore", "drill"), default="drill", nargs="?")
+    parser.add_argument("--qualified-pair", nargs=2, metavar=("EXPECTED_CURRENT", "SELECTED_PREDECESSOR"),
+                        help="use an explicitly qualified pair instead of requiring identical runtime inputs")
     args = parser.parse_args()
+    if args.mode == "restore" and args.qualified_pair is not None:
+        parser.error("--qualified-pair cannot be used with restore")
+    qualified_pair = (args.qualified_pair[0], args.qualified_pair[1]) if args.qualified_pair is not None else None
     account = os.environ.get("EXPECTED_ENGINE_ACCOUNT_USER_ID", "")
     if not account or os.environ.get("EXPECTED_ENGINE_REALM") != "demo" or os.environ.get("EXPECTED_ENGINE_VENUE") != "bybit":
         print("demo rollback requires the exact Bybit demo account identity", file=sys.stderr)
@@ -230,7 +243,7 @@ def main() -> int:
         Path("/var/lib/liquidity-migration-signal-worker-demo/heartbeat.json"), account,
     )
     try:
-        operation.run(args.mode)
+        operation.run(args.mode, qualified_pair=qualified_pair)
         status, message = 0, f"DEMO {args.mode}: compatible executable rollback completed with current configuration and state."
     except DeploymentBusy as error:
         print(str(error), flush=True)
