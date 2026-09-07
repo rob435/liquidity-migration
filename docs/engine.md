@@ -29,7 +29,7 @@ The engine workspace is under `engine/`:
 | Module (repository path) | Owns |
 | :--- | :--- |
 | `engine/engine-core/src/engine.rs` | `Engine`, the priority loop, rotating ordinary inputs, one handler per turn, the `StopReason` |
-| `engine/engine-core/src/engine/boot_recovery.rs` | `Engine::boot`, WAL replay into engine state, missed-fill recovery, venue reconciliation at boot |
+| `engine/engine-core/src/engine/boot_recovery.rs` | `Engine::boot_as_exact`, WAL replay into engine state, missed-fill recovery, venue reconciliation at boot; optional scalar boot is test-only |
 | `engine/engine-core/src/engine/scheduling.rs` | Strategy wakes, at most 64 due timer callbacks per turn, durable actions, the per-wake drain |
 | `engine/engine-core/src/engine/signal_intake.rs` | Durable signal admission: cursor and availability checks, symbol admission across the four id tables, barrier, delivery, acknowledgement |
 | `engine/engine-core/src/engine/intent_admission.rs` | `prepare_intent`, `OpeningRefusal` codes, risk verdicts, order minting and placement groups |

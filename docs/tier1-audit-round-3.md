@@ -31,12 +31,11 @@ Measured with `engine/target/release/engine-tools bench --events 2000 --rate 100
 
 ### 3. Work items
 
-Status: every item is **Decided** by the owner on 2026-09-06; **Mechanical** marks items that change no behaviour. Acceptance is what the bench, tests or `cargo tree` show afterwards.
+Every item is accepted by the owner; a stopped item retains its acceptance until the stated dependency changes. Acceptance is what the bench, tests or `cargo tree` show afterwards.
 
 | ID | Item | Change | Acceptance | Status |
 | --- | --- | --- | --- | --- |
-| R3-08 | Legacy exit | Retire remaining binary64 writers and grid adoption only after rotation and the retained WAL/rollback conditions in [tier1-audit-round-2.md](tier1-audit-round-2.md). Current archive reactivation can restore scalar order frontiers; supported legacy inventory and simulated binary64 fills still need normalization. Exact native repair can still require uncovered StopSet. R3-23 separately removes unreachable ordinary admission constructors | `grep 'exact_terms: None'` in non-test engine-core is zero; the legacy modules are gone. The retained-input and protection conditions must hold before removal | Decided; conditional on retained inputs and recovery/protection contracts |
-| R3-13 | Mac point latency | Meet the point targets on final source with the unchanged workload and timing/durability boundaries. Retain every fixed-control and before/after cell, including the reader-stage narrow-decision miss. Remove unrelated full attribution snapshots from virtual-stop observation and split empty stop/control discovery from asynchronous work without changing pending-work servicing | Narrow decision p50 ≤ 10 µs, wide decision p99 ≤ 50 µs, narrow submit p50 ≤ 5 ms; all opportunities complete with one barrier each. Retain every before/after cell and qualify current source; compare ordered stop/exit decisions and durable records exactly, including empty positions with pending native closes, emergencies, exits and dirty barriers | Decided |
+| R3-08 | Legacy exit | Retire remaining binary64 writers and grid adoption only after rotation and the retained WAL/rollback conditions in [tier1-audit-round-2.md](tier1-audit-round-2.md). Archive reactivation restores scalar frontiers; supported legacy inventory and simulated binary64 fills need normalization. Missing-catalog repair and uncovered StopSet preserve protection durability. Ordinary admission constructors are exact-only. [STATE.md](../STATE.md) records seven protected longs in each realm | `grep 'exact_terms: None'` in non-test engine-core is zero; the legacy modules are gone. The retained-input and protection conditions must hold before removal; cache expiry alone does not establish them | Stopped under the owner's funded-account exception; deletion breaks supported recovery and protection |
 
 ### 4. Round-2 retained forks: recommendation per row
 

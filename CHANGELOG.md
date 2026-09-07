@@ -220,8 +220,30 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     26.431 µs and narrow submit p50 4.882431 ms. All 1,400 comparison orders
     complete with one barrier and valid unchanged readbacks. The comparison
     does not establish a stable bound or attribute the submit difference solely
-    to code. Remove completed R3-21, R3-22 and R3-23 rows; final integration and
-    R3-13 hosted qualification remain pending.
+    to code. Remove completed R3-21, R3-22 and R3-23 rows. Commit `70f4c557`
+    passes the pinned developer gate with 1,981 Rust tests, zero failed, eight
+    ignored, and 1,718 Python tests, then pushes directly to main. All seven
+    venue-feature jobs pass on that SHA. Qualification `34128439094` and
+    deployment `34128449431` target the same source; the normal release archive
+    verifies. The 13:36:56 predeploy read verifies fourteen full-size exact native
+    stops, ready workers, may_open=true and zero restarts/OOMs; all four compatible
+    Stage A files remain unchanged. Deployment completes at 13:55:11 after all
+    31 demo observations pass through 13:54:35; mainnet handover follows at
+    13:54:36. Both native-state checks report already-complete. The 13:56:11
+    host read verifies loaded archive hashes, ready workers, may_open=true,
+    fourteen unchanged exact full-size stops and zero restarts/OOMs. All earlier
+    WAL paths remain without shrinking; compatible Stage A files remain unchanged.
+    A journal read through 13:57:23 finds zero errors across all four services.
+    Optimized qualification `34128439094` passes 1,981 release tests, zero failed,
+    eight ignored, account/history workloads and all eight fixed cells. Candidate
+    median decision p99 / submit p50 is 2,000 / 721,150 ns, within absolute and
+    same-worker relative limits. The qualified archive and embedded log verify;
+    its bytes differ from the ordinary deployed release. Retain the candidate's
+    23.22 ms submit p99 / 86.05 ms maximum. Remove the completed R3-13 row.
+    Stop the remaining R3-08 deletion under the owner's funded-account exception:
+    archived scalar frontiers, legacy inventory, simulated fills and
+    protective repair still need it. Current full stops and cache expiry do not
+    retire those contracts; keep the original acceptance unmet.
   - Add R3-20 before fixing nondeterministic portfolio retry timing. Heavy seed 7
     reconciles twice but first differs at WAL index 3816: emergency 46 and a deferred
     quote change order after identical cancel completion. Retry deadlines use real
