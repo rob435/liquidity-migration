@@ -35,8 +35,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     zero failures and eight Rust ignores. The 29 saved Python cases match
     JSON bytes, metric lines and filenames exactly. A compiled-command check
     also matches all six fresh host artifacts, Influx bytes and both curves;
-    the local HTTP fixture uses no production push credentials. Deployment
-    verification remains pending at this source checkpoint.
+    the local HTTP fixture uses no production push credentials.
   - Workflow `34145183215` stops at CI with `fatal: invalid object name
     '29366d3a'`: the handover fixture reads history absent from a shallow
     checkout. Define the old unit's execution contract inside the fixture.
@@ -44,6 +43,16 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     passes all five cases afterward; all 99 focused deployment tests pass.
     The unchanged deployment implementation still fails both deleted-script
     regressions. No host deployment starts in this refused run.
+  - Retry [workflow `34146148488`](https://github.com/rob435/liquidity-migration/actions/runs/34146148488)
+    passes 2,005 hosted Rust / 1,675 Python tests and deploys `76ad13ae`
+    after 31 healthy demo observations over 300 seconds. At 17:24:28 UTC,
+    both realms load the verified archive, all four services are healthy and
+    all fourteen native stops match their full position quantities; quantities
+    and stop levels match the 16:40:27 UTC predeploy read. Rust sampling pushes
+    all six records during the soak and after global installation; both curve
+    commands read the existing history. The temporary recorder override clears,
+    all retained reader hashes match and every predeploy WAL path remains
+    without shrinking. The prior latency qualification remains bound to `70f4c557`.
 
 - **2026-09-06 — Round-3 embedded execution.**
   - Replace child strategy execution with one embedded path for production,
