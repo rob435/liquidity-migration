@@ -190,9 +190,14 @@ submit_p50_ns = {submit_baseline}
             expected_source = "# candidate source\n" if paired and role == "B" else "# fixture source\n"
             assert (cwd / "Cargo.toml").read_text() == expected_source
             behavior[f"build-{role}-cwd"] = str(cwd)
-            release.mkdir(parents=True, exist_ok=True)
+            build_target = Path(command[command.index("--target-dir") + 1])
+            behavior[f"build-{role}-target"] = str(build_target)
+            if paired and role == "B":
+                assert not Path(behavior["build-A-target"]).exists()
+            build_release = build_target / "fixture-host" / "release"
+            build_release.mkdir(parents=True, exist_ok=True)
             for name in BINARIES:
-                binary = release / name
+                binary = build_release / name
                 binary.write_bytes(f"{name} at {source_commit}\n".encode())
                 binary.chmod(0o755)
         if len(command) > 1 and command[1] == "bench":
@@ -229,6 +234,96 @@ def _latency_cell(decision: int, submit: int, *, decision_scale: int = 1, submit
     )
     return "".join(f"{name} 100 " + " ".join(f"{value * scale}ns" for value in values) + "\n"
                    for name, values, scale in rows)
+
+
+def test_real_cargo_candidate_links_its_own_library_after_reference_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, artifact_module: ModuleType,
+) -> None:
+    compiler = subprocess.check_output(
+        [os.environ.get("RUSTC", "rustc"), "--version"], text=True,
+    ).split()[1]
+    repo = tmp_path / "source"
+    engine = repo / "engine"
+    library = engine / "fixture-lib" / "src" / "lib.rs"
+    library.parent.mkdir(parents=True)
+    (engine / "tools" / "src").mkdir(parents=True)
+    (repo / "docs").mkdir()
+    (repo / "rust-toolchain.toml").write_text(f'[toolchain]\nchannel = "{compiler}"\n')
+    (engine / "Cargo.toml").write_text('[workspace]\nmembers = ["fixture-lib", "tools"]\nresolver = "2"\n')
+    (library.parent.parent / "Cargo.toml").write_text(
+        '[package]\nname = "fixture-lib"\nversion = "0.1.0"\nedition = "2021"\n',
+    )
+    library.write_text('pub fn identity() -> &\'static str { "A" }\n')
+    (engine / "tools" / "Cargo.toml").write_text(
+        '[package]\nname = "fixture-tools"\nversion = "0.1.0"\nedition = "2021"\n'
+        '[dependencies]\nfixture-lib = { path = "../fixture-lib" }\n'
+        + ''.join(f'[[bin]]\nname = "{name}"\npath = "src/main.rs"\n' for name in BINARIES),
+    )
+    (engine / "tools" / "src" / "main.rs").write_text(
+        'fn main() { let _commit = env!("ENGINE_GIT_COMMIT"); println!("{}", fixture_lib::identity()); }\n',
+    )
+    config = repo / "docs" / "execution-latency-budgets.toml"
+    config.write_text('''schema_version = 1
+maximum_baseline_ratio = 1.5
+[bench]
+events = 2000
+rate = 100
+every = 20
+symbols = ["BTCUSDT"]
+[runners.linux-x86_64]
+status = "real-cargo-fixture"
+decision_p99_ns = 9300
+submit_p50_ns = 1090000
+''')
+    subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=engine, check=True, capture_output=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+
+    def commit_source(timestamp: int) -> str:
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-qm", "Source fixture"],
+            cwd=repo, check=True, capture_output=True,
+            env={**os.environ, "GIT_AUTHOR_DATE": f"{timestamp} +0000", "GIT_COMMITTER_DATE": f"{timestamp} +0000"},
+        )
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    reference_commit = commit_source(1700000000)
+    library.write_text('pub fn identity() -> &\'static str { "B" }\n')
+    config.write_text(config.read_text() + f'reference_commit = "{reference_commit}"\n')
+    commit = commit_source(1700000010)
+    # Both checkouts predate compilation; git archive supplies the reference commit's mtimes.
+    for path in engine.rglob("*"):
+        if path.is_file():
+            os.utime(path, (1700000010, 1700000010))
+    real_run = artifact_module._run
+    builds: list[tuple[list[str], str]] = []
+
+    def run(command: list[str], cwd: Path, log: TextIO, source_commit: str) -> None:
+        if command[:2] == ["cargo", "build"]:
+            real_run(command, cwd, log, source_commit)
+            release = Path(command[command.index("--target-dir") + 1]) / command[-1] / "release"
+            actual = subprocess.check_output([str(release / "engine")], text=True).strip()
+            builds.append((command, actual))
+            print(f"real Cargo build {source_commit}: library identity {actual}", flush=True)
+        else:
+            log.write(f"fixture substitutes non-build workload: {shlex.join(command)}\n")
+            if len(command) > 1 and command[1] == "bench":
+                wal = Path(command[command.index("--wal") + 1])
+                assert not wal.exists()
+                wal.write_bytes(b"fixture workload\n")
+                log.write(_latency_cell(9300, 1090000))
+
+    monkeypatch.setattr(artifact_module, "_run", run)
+    output = tmp_path / "qualified.tar.gz"
+    artifact_module.qualify(repo, commit, output, tmp_path / "target", runner_class="linux-x86_64")
+    assert len(builds) == 2 and builds[0][1] == "A"
+    assert builds[1][1] == "B", "candidate binary linked the reference checkout's library"
+    assert (tmp_path / "target").is_dir()
+    extracted = tmp_path / "verified"
+    artifact_module.verify(output, commit, extracted)
+    for name in BINARIES:
+        assert subprocess.check_output([str(extracted / name)], text=True).strip() == "B"
 
 
 @pytest.mark.parametrize("qualification_workspace", [(9300, 1090000, True)], indirect=True)
@@ -284,8 +379,10 @@ def test_paired_source_keeps_a_slow_reference_and_packages_a_passing_candidate(
     assert calls[-8:] == benches
     assert [command[1] for command in calls if command[0] == "cargo"] == ["build", "build", "test"]
     builds = [command for command in calls if command[:2] == ["cargo", "build"]]
-    assert builds[0] == builds[1]
-    assert builds[0][-4:] == ["--target-dir", str(target), "--target", "fixture-host"]
+    assert builds[0][:-3] == builds[1][:-3]
+    assert builds[0][-2:] == builds[1][-2:] == ["--target", "fixture-host"]
+    assert builds[1][-4:] == ["--target-dir", str(target), "--target", "fixture-host"]
+    assert Path(builds[0][-3]) != target and not Path(builds[0][-3]).exists()
     reference_commit = behavior["reference_commit"]
     assert reference_commit != commit
     assert latency["images"]["A"] == {

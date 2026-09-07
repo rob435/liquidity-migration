@@ -22,14 +22,23 @@ pub(crate) enum Event<'a> {
 
 pub(crate) enum Record<'a> {
     Borrowed(&'a WalRecord),
-    Owned(Box<WalRecord>),
+    Owned(&'a WalRecord, Box<WalRecord>),
 }
 
 impl AsRef<WalRecord> for Record<'_> {
     fn as_ref(&self) -> &WalRecord {
         match self {
             Self::Borrowed(record) => record,
-            Self::Owned(record) => record,
+            Self::Owned(_, record) => record,
+        }
+    }
+}
+
+impl Record<'_> {
+    pub(crate) fn original(&self) -> Option<&WalRecord> {
+        match self {
+            Self::Borrowed(_) => None,
+            Self::Owned(record, _) => Some(record),
         }
     }
 }
@@ -252,9 +261,10 @@ impl<'a> Replay<'a> {
                 return Ok(None);
             }
             crate::portfolio_control::validate_settlement(&next)?;
-            return Ok(Some(Record::Owned(Box::new(
-                WalRecord::PortfolioOffsetSettled { settlement: next },
-            ))));
+            return Ok(Some(Record::Owned(
+                record,
+                Box::new(WalRecord::PortfolioOffsetSettled { settlement: next }),
+            )));
         }
         use engine_types::execution_allocation::AllocationPolicy;
         let (client, allocation) = match record {
@@ -278,21 +288,38 @@ impl<'a> Replay<'a> {
             return Ok(Some(Record::Borrowed(record)));
         }
         let request = self.sender.get(client.as_str()).copied();
+        let symbol = canonical_symbol(record).ok_or("FIFO record has no symbol")?;
+        let legacy_step = match self.context {
+            Some(WalRecord::LegacyQuantityGridAdopted { sleeves, .. }) => {
+                let mut rows = sleeves.iter().filter(|row| row.symbol == symbol);
+                let step = rows.next().map(|row| &row.step);
+                if rows.any(|row| Some(&row.step) != step) {
+                    return Err("legacy FIFO owners disagree on the quantity grid".into());
+                }
+                step
+            }
+            _ => None,
+        };
         let mut next = record.clone();
         let prepared = match &mut next {
             WalRecord::OrderUpdate { update, .. } => {
                 if let OrderUpdate::Fill { allocation, .. } = update {
                     *allocation = None;
                 }
-                self.normalized
-                    .prepare_portfolio_update_for_order(request, &self.names, update)?
+                self.normalized.prepare_portfolio_update_on_grid(
+                    request,
+                    &self.names,
+                    update,
+                    legacy_step,
+                )?
             }
             WalRecord::RecoveredFill { allocation, .. } => {
                 *allocation = None;
-                self.normalized.prepare_portfolio_recovered_for_order(
+                self.normalized.prepare_portfolio_recovered_on_grid(
                     request,
                     &self.names,
                     &next,
+                    legacy_step,
                 )?
             }
             _ => unreachable!(),
@@ -308,7 +335,7 @@ impl<'a> Replay<'a> {
             }
             _ => unreachable!(),
         }
-        Ok(Some(Record::Owned(Box::new(next))))
+        Ok(Some(Record::Owned(record, Box::new(next))))
     }
 
     pub(crate) fn next(&mut self) -> Result<Option<Event<'a>>, String> {

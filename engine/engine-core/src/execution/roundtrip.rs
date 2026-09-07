@@ -159,7 +159,13 @@ impl Default for Lot {
 impl Lot {
     /// Fold in `qty` of a fill — all of it, or the part of it that belongs to
     /// this lot when one fill takes a position through zero.
-    fn fold(&mut self, fill: &Fill, quantity: &Exact, exact: bool) -> Result<(), String> {
+    fn fold(
+        &mut self,
+        fill: &Fill,
+        quantity: &Exact,
+        exact: bool,
+        economics: Option<&super::AllocationEconomics>,
+    ) -> Result<(), String> {
         let signed = match fill.side {
             Side::Buy => quantity.clone(),
             Side::Sell => -quantity,
@@ -170,7 +176,15 @@ impl Lot {
             .map(|a| Ok(a.price.value.clone()))
             .unwrap_or_else(|| Exact::from_legacy_f64(fill.px))
             .map_err(|e| e.to_string())?;
-        let value = &price * quantity;
+        let value = match economics {
+            Some(economics) => {
+                &economics.consideration
+                    * quantity
+                        .checked_div(&economics.quantity)
+                        .map_err(|e| e.to_string())?
+            }
+            None => &price * quantity,
+        };
         if self.signed_qty.is_zero() {
             self.held = if signed.is_negative() { -1.0 } else { 1.0 };
             self.opened_ms = fill.venue_ts_ms;
@@ -185,14 +199,32 @@ impl Lot {
         }
         self.exact_quantity |= exact;
         self.signed_qty += &signed;
-        self.cash -= &signed * &price;
+        self.cash += if signed.is_positive() {
+            -&value
+        } else {
+            value.clone()
+        };
         self.fills += 1;
         let projected_value = value.reporting_f64();
         self.notional = (self.notional + projected_value).min(f64::MAX);
         if fill.is_maker {
             self.maker_notional = (self.maker_notional + projected_value).min(f64::MAX);
         }
-        let (fee, whole_quantity) = if let Some(amounts) = &fill.amounts {
+        let (fee, whole_quantity) = if let Some(economics) = economics {
+            if let Some(amounts) = &fill.amounts {
+                self.usdt &=
+                    matches!(&amounts.settlement_asset, AssetId::Named(asset) if asset == "USDT");
+            }
+            let fee = economics.fee.clone().filter(|_| {
+                fill.amounts.as_ref().is_none_or(|amounts| {
+                    amounts.fee.as_ref().is_some_and(|fee| {
+                        fee.amount.value.is_zero()
+                            || matches!(&fee.asset, AssetId::Named(asset) if asset == "USDT")
+                    })
+                })
+            });
+            (fee, economics.quantity.clone())
+        } else if let Some(amounts) = &fill.amounts {
             self.usdt &=
                 matches!(&amounts.settlement_asset, AssetId::Named(asset) if asset == "USDT");
             let fee = amounts.fee.as_ref().and_then(|fee| {
@@ -510,6 +542,17 @@ impl Lots {
         fill: &Fill,
         exact_qty: Option<&Exact>,
     ) -> Result<(), String> {
+        self.on_fill_with_economics(sleeve, symbol, fill, exact_qty, None)
+    }
+
+    pub(crate) fn on_fill_with_economics(
+        &mut self,
+        sleeve: &str,
+        symbol: &str,
+        fill: &Fill,
+        exact_qty: Option<&Exact>,
+        economics: Option<&super::AllocationEconomics>,
+    ) -> Result<(), String> {
         if let Some(amounts) = &fill.amounts {
             amounts
                 .validate_projection(fill.qty, fill.px, fill.fee)
@@ -561,14 +604,14 @@ impl Lots {
         let opening = &quantity - &closing;
         let mut closed = None;
         if closing.is_positive() {
-            lot.fold(fill, &closing, exact)?;
+            lot.fold(fill, &closing, exact, economics)?;
             if lot.flat() || legacy_flat_after {
                 closed = Some(lot.closed(&key.0, &key.1, fill.venue_ts_ms)?);
                 lot = Lot::default();
             }
         }
         if opening.is_positive() && !legacy_flat_after {
-            lot.fold(fill, &opening, exact)?;
+            lot.fold(fill, &opening, exact, economics)?;
         }
         if lot.signed_qty.is_zero() {
             self.open.remove(&key);

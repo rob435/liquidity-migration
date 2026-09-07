@@ -46,6 +46,62 @@ use engine_types::{ForcedClose, MarketState, OrderUpdate, Side, StrategyId, Symb
 
 use crate::replay::LogNames;
 
+pub(crate) struct AllocationEconomics {
+    pub quantity: engine_types::numeric::Exact,
+    pub consideration: engine_types::numeric::Exact,
+    pub fee: Option<engine_types::numeric::Exact>,
+}
+
+pub(crate) fn allocated_fill(
+    fill: &Fill,
+    allocation: &engine_types::execution_allocation::ExecutionAllocation,
+) -> Result<(Fill, AllocationEconomics), String> {
+    use engine_types::numeric::{Exact, ExactNumber};
+    let slice = allocation
+        .slices
+        .iter()
+        .find(|slice| slice.strategy == fill.strategy)
+        .ok_or("allocated analytic fill has no owner")?;
+    let quantity = crate::portfolio_allocation::fill_quantity(
+        fill.qty,
+        fill.amounts.as_deref(),
+        Some(allocation),
+    )?;
+    let economic_quantity = crate::reconcile::fill_quantity(fill.qty, fill.amounts.as_deref())?;
+    let price = fill
+        .amounts
+        .as_ref()
+        .map(|a| Ok(a.price.value.clone()))
+        .unwrap_or_else(|| Exact::from_legacy_f64(fill.px))
+        .map_err(|e| e.to_string())?;
+    let share = slice
+        .quantity
+        .checked_div(&quantity)
+        .map_err(|e| e.to_string())?;
+    let economics = AllocationEconomics {
+        quantity: slice.quantity.clone(),
+        consideration: economic_quantity * price * share,
+        fee: slice.fee.as_ref().map(|fee| fee.amount.value.clone()),
+    };
+    let mut part = fill.clone();
+    part.qty = slice.quantity.to_f64().map_err(|e| e.to_string())?;
+    part.fee = if fill.fee.is_some() {
+        economics
+            .fee
+            .as_ref()
+            .map(Exact::to_f64)
+            .transpose()
+            .map_err(|e| e.to_string())?
+    } else {
+        None
+    };
+    if let Some(amounts) = &mut part.amounts {
+        amounts.quantity = ExactNumber::derived(slice.quantity.clone());
+        amounts.fee = slice.fee.clone();
+    }
+    Ok((part, economics))
+}
+
 /// The horizons a markout is read at (`docs/architecture.md`: 1 s, 15 s,
 /// 1 min, 5 min). A 50 ms markout is deliberately absent there and absent
 /// here: it is only honest with exact raw observations and clock bounds, and
@@ -423,7 +479,7 @@ impl Fills {
         match filled_ns {
             Some(filled_ns) => self.on_fill_with_quantity(fill, filled_ns, quantity)?,
             None => {
-                self.price(fill, quantity)?;
+                self.price(fill, quantity, None)?;
             }
         }
         self.recovered += 1;
@@ -441,7 +497,39 @@ impl Fills {
         filled_ns: u64,
         quantity: Option<&engine_types::numeric::Exact>,
     ) -> Result<(), String> {
-        let notional = self.price(fill, quantity)?;
+        self.on_fill_inner(fill, filled_ns, quantity, None)
+    }
+
+    pub(crate) fn on_allocated_fill(
+        &mut self,
+        fill: &Fill,
+        filled_ns: Option<u64>,
+        recovered: bool,
+        allocation: &engine_types::execution_allocation::ExecutionAllocation,
+    ) -> Result<(), String> {
+        let (part, economics) = allocated_fill(fill, allocation)?;
+        match filled_ns {
+            Some(when) => {
+                self.on_fill_inner(&part, when, Some(&economics.quantity), Some(&economics))?
+            }
+            None => {
+                self.price(&part, Some(&economics.quantity), Some(&economics))?;
+            }
+        }
+        if recovered {
+            self.recovered += 1;
+        }
+        Ok(())
+    }
+
+    fn on_fill_inner(
+        &mut self,
+        fill: &Fill,
+        filled_ns: u64,
+        quantity: Option<&engine_types::numeric::Exact>,
+        economics: Option<&AllocationEconomics>,
+    ) -> Result<(), String> {
+        let notional = self.price(fill, quantity, economics)?;
         if !usable(fill.px) || !usable(notional) {
             return Ok(());
         }
@@ -469,11 +557,12 @@ impl Fills {
         &mut self,
         fill: &Fill,
         quantity: Option<&engine_types::numeric::Exact>,
+        economics: Option<&AllocationEconomics>,
     ) -> Result<f64, String> {
         let notional = (fill.px * fill.qty).abs();
         let key = self.key(fill.strategy, fill.symbol);
         self.lots
-            .on_fill_with_quantity(&key.0, &key.1, fill, quantity)?;
+            .on_fill_with_economics(&key.0, &key.1, fill, quantity, economics)?;
         let costs = self.by_key.entry(key).or_default();
         costs.fills += 1;
         if fill.is_maker {
@@ -838,11 +927,12 @@ impl Fills {
                         }
                     }
                 }
-                for (strategy, update) in crate::portfolio_allocation::slice_updates(&update)?
+                for (strategy, _) in crate::portfolio_allocation::slice_updates(&update)?
                     .ok_or("expected execution slices")?
                 {
                     let OrderUpdate::Fill {
                         amounts,
+                        allocation: Some(allocation),
                         client_order_id,
                         symbol,
                         side,
@@ -852,7 +942,7 @@ impl Fills {
                         is_maker,
                         venue_ts_ms,
                         ..
-                    } = update
+                    } = update.clone()
                     else {
                         unreachable!()
                     };
@@ -872,19 +962,7 @@ impl Fills {
                         venue_ts_ms,
                         arrival_mid,
                     };
-                    if recovered {
-                        me.on_recovered_fill_with_quantity(
-                            &fill,
-                            Some(0),
-                            amounts.as_deref().map(|a| &a.quantity.value),
-                        )?;
-                    } else {
-                        me.on_fill_with_quantity(
-                            &fill,
-                            0,
-                            amounts.as_deref().map(|a| &a.quantity.value),
-                        )?;
-                    }
+                    me.on_allocated_fill(&fill, Some(0), recovered, &allocation)?;
                 }
                 continue;
             }

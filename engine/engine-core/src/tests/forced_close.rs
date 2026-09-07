@@ -731,6 +731,7 @@ async fn exact_shared_close_after_rotation_keeps_reconciliation_in_step_with_inv
         }));
         *allocation = Some(Box::new(ExecutionAllocation {
             policy: AllocationPolicy::EmergencyNetFifo,
+            legacy_quantity_step: None,
             slices: (0..2)
                 .map(|id| ExecutionSlice {
                     strategy: StrategyId(id),

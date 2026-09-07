@@ -1226,6 +1226,7 @@ fn recovered_callback_record() -> WalRecord {
         allocation: Some(Box::new(
             engine_types::execution_allocation::ExecutionAllocation {
                 policy: engine_types::execution_allocation::AllocationPolicy::EmergencyNetFifo,
+                legacy_quantity_step: None,
                 slices: [(0, "a", "0.25"), (1, "b", "0.75")]
                     .into_iter()
                     .map(|(strategy, key, qty)| {

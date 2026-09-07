@@ -211,6 +211,389 @@ fn forced(records: &mut Vec<WalRecord>, quantity: &str) {
     records.push(WalRecord::OrderUpdate { update, callbacks });
 }
 
+fn legacy_emergency(records: &mut Vec<WalRecord>, quantity: &str, engine_order: bool) {
+    let state = Attribution::try_from_records(records).unwrap();
+    let side = if state.signed_exact(StrategyId(0), SymbolId(0)).is_positive() {
+        Side::Sell
+    } else {
+        Side::Buy
+    };
+    let mut rows = fill("legacy-emergency", side, quantity, false);
+    let request = if engine_order {
+        let WalRecord::OrderSent { request, .. } = &mut rows[0] else {
+            unreachable!()
+        };
+        request.reduce_only = true;
+        request.sleeve_effect = Some(
+            engine_types::orders::SleeveOrderEffect::EmergencyNetReduction { emergency_id: 1 },
+        );
+        Some(request.clone())
+    } else {
+        None
+    };
+    let WalRecord::OrderUpdate { update, .. } = &mut rows[1] else {
+        unreachable!()
+    };
+    if !engine_order {
+        let OrderUpdate::Fill {
+            client_order_id,
+            forced_close,
+            ..
+        } = update
+        else {
+            unreachable!()
+        };
+        client_order_id.clear();
+        *forced_close = Some(engine_types::ForcedClose::StopLoss);
+    }
+    let step = records
+        .iter()
+        .any(|row| matches!(row, WalRecord::LegacyQuantityGridAdopted { .. }))
+        .then(|| n("0.01"));
+    let prepared = state
+        .prepare_portfolio_update_on_grid(
+            request.as_ref(),
+            &["left".into(), "right".into(), "third".into()],
+            update,
+            step.as_ref(),
+        )
+        .expect("legacy full close must respect the adopted quantity")
+        .unwrap();
+    let OrderUpdate::Fill {
+        allocation,
+        amounts,
+        ..
+    } = update
+    else {
+        unreachable!()
+    };
+    assert!(amounts.is_none());
+    *allocation = Some(Box::new(prepared.allocation));
+    if engine_order {
+        records.push(rows.remove(0));
+    }
+    records.push(rows.pop().unwrap());
+}
+
+fn assert_legacy_emergency_closed(records: &[WalRecord]) {
+    let claims = Attribution::try_from_records(records).unwrap().snapshot();
+    assert!(claims.positions.is_empty());
+    assert!(
+        claims.accounting.is_empty(),
+        "legacy asset units must remain unknown"
+    );
+    assert_eq!(claims.unvalued[0].execution_cash_flow_events, 2);
+    assert_eq!(claims.unvalued[0].fee_events, 2);
+    assert!(reconcile::physical_exposure(records).unwrap().is_empty());
+    let fills = Fills::try_from_records(records).unwrap();
+    assert!(fills.open_trade_lots().is_empty());
+    assert_eq!(fills.closed().len(), 1);
+    assert_eq!(
+        fills.closed()[0]
+            .round_trip
+            .as_ref()
+            .unwrap()
+            .net_usdt_exact,
+        -Exact::from_legacy_f64(0.0066016).unwrap() * n("2")
+    );
+}
+
+#[test]
+fn legacy_binary64_emergency_fifo_rederives_an_actual_point_one_full_close() {
+    let mut records = vec![base(&[], 0.0)];
+    add(&mut records, 0, Side::Buy, "0.1", false, 1000);
+    legacy_emergency(&mut records, "0.1", true);
+    assert_legacy_emergency_closed(&records);
+    let original = serde_json::to_vec(&records).unwrap();
+    records.push(plan(&records));
+    assert_legacy_emergency_closed(&records);
+    assert_eq!(
+        serde_json::to_vec(&records[..records.len() - 1]).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn legacy_binary64_forced_full_close_after_grid_adoption_keeps_cash_and_replays() {
+    for side in [Side::Buy, Side::Sell] {
+        for quantity in ["0.1", "0.3"] {
+            let mut records = vec![base(&[], 0.0)];
+            add(&mut records, 0, side, quantity, false, 1000);
+            records.push(plan(&records));
+            legacy_emergency(&mut records, quantity, false);
+            assert_legacy_emergency_closed(&records);
+            let persisted = serde_json::to_vec(&records).unwrap();
+            let restored: Vec<WalRecord> = serde_json::from_slice(&persisted).unwrap();
+            assert_legacy_emergency_closed(&restored);
+        }
+    }
+}
+
+#[test]
+fn native_sub_ulp_partial_is_not_erased_by_a_legacy_forced_overfill() {
+    for opening_side in [Side::Buy, Side::Sell] {
+        let closing_side = if opening_side == Side::Buy {
+            Side::Sell
+        } else {
+            Side::Buy
+        };
+        let mut records = vec![base(&[], 0.0)];
+        add(&mut records, 0, opening_side, "0.1", true, 1000);
+        add(
+            &mut records,
+            0,
+            closing_side,
+            "0.00000000000000000001",
+            true,
+            2000,
+        );
+        let claims = Attribution::try_from_records(&records).unwrap();
+        let before = claims.snapshot();
+        assert_eq!(
+            before.positions[0].signed_qty.abs(),
+            n("0.09999999999999999999")
+        );
+        assert_eq!(before.positions[0].signed_qty.abs().to_f64().unwrap(), 0.1);
+        let mut rows = fill("unproven-close", closing_side, "0.1", false);
+        let WalRecord::OrderUpdate { update, .. } = &mut rows[1] else {
+            unreachable!()
+        };
+        let OrderUpdate::Fill {
+            client_order_id,
+            forced_close,
+            ..
+        } = update
+        else {
+            unreachable!()
+        };
+        client_order_id.clear();
+        *forced_close = Some(engine_types::ForcedClose::StopLoss);
+        assert!(claims
+            .prepare_portfolio_update_on_grid(None, &["left".into()], update, Some(&n("0.01")))
+            .is_err());
+        assert_eq!(claims.snapshot(), before);
+
+        let mut rows = fill(
+            "known-partial",
+            closing_side,
+            "0.09999999999999999998",
+            true,
+        );
+        let WalRecord::OrderUpdate { update, .. } = &mut rows[1] else {
+            unreachable!()
+        };
+        let OrderUpdate::Fill {
+            client_order_id,
+            forced_close,
+            ..
+        } = update
+        else {
+            unreachable!()
+        };
+        client_order_id.clear();
+        *forced_close = Some(engine_types::ForcedClose::StopLoss);
+        let prepared = claims
+            .prepare_portfolio_update_for_order(None, &["left".into()], update)
+            .unwrap()
+            .unwrap();
+        let mut claims = claims;
+        claims.commit_portfolio_fill(prepared).unwrap();
+        assert_eq!(
+            claims.signed_exact(StrategyId(0), SymbolId(0)).abs(),
+            n("0.00000000000000000001")
+        );
+    }
+}
+
+#[test]
+fn allocated_native_btc_fee_remains_unpriced_in_usdt_round_trips() {
+    let mut records = vec![base(&[], 0.0)];
+    add(&mut records, 0, Side::Buy, "1", true, 1000);
+    forced(&mut records, "1");
+    let WalRecord::OrderUpdate {
+        update:
+            OrderUpdate::Fill {
+                amounts: Some(amounts),
+                allocation: Some(allocation),
+                ..
+            },
+        ..
+    } = records.last_mut().unwrap()
+    else {
+        unreachable!()
+    };
+    amounts.fee.as_mut().unwrap().asset = engine_types::numeric::AssetId::Named("BTC".into());
+    allocation.slices[0].fee.as_mut().unwrap().asset =
+        engine_types::numeric::AssetId::Named("BTC".into());
+    let claims = Attribution::try_from_records(&records).unwrap().snapshot();
+    assert!(claims.positions.is_empty());
+    assert_eq!(
+        claims
+            .accounting
+            .iter()
+            .find(|row| row.asset == engine_types::numeric::AssetId::Named("BTC".into()))
+            .unwrap()
+            .fees,
+        n("0.0066016")
+    );
+    let fills = Fills::try_from_records(&records).unwrap();
+    assert_eq!(fills.closed().len(), 1);
+    assert!(fills.closed()[0].round_trip.is_none());
+    assert_eq!(
+        fills.closed()[0].unpriced,
+        Some(engine_types::risk::UnpricedTradeReason::FeeValue)
+    );
+}
+
+#[test]
+fn current_binary64_full_close_keeps_its_quantity_before_any_grid_adoption() {
+    let mut records = vec![base(&[], 0.0)];
+    add(&mut records, 0, Side::Buy, "0.1", false, 1000);
+    let mut claims = Attribution::try_from_records(&records).unwrap();
+    let mut rows = fill("before-adoption", Side::Sell, "0.1", false);
+    let WalRecord::OrderUpdate { update, .. } = &mut rows[1] else {
+        unreachable!()
+    };
+    let OrderUpdate::Fill {
+        client_order_id,
+        forced_close,
+        ..
+    } = update
+    else {
+        unreachable!()
+    };
+    client_order_id.clear();
+    *forced_close = Some(engine_types::ForcedClose::StopLoss);
+    let prepared = claims
+        .prepare_portfolio_update_on_grid(None, &["left".into()], update, Some(&n("0.01")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        prepared.allocation.slices[0].quantity,
+        Exact::from_legacy_f64(0.1).unwrap()
+    );
+    assert!(prepared.allocation.legacy_quantity_step.is_none());
+    claims.commit_portfolio_fill(prepared).unwrap();
+    assert!(claims.snapshot().positions.is_empty());
+}
+
+#[test]
+fn legacy_grid_receipts_reject_invalid_steps_native_amounts_and_changed_slice_totals() {
+    let mut records = vec![base(&[], 0.0)];
+    add(&mut records, 0, Side::Buy, "0.1", false, 1000);
+    records.push(plan(&records));
+    legacy_emergency(&mut records, "0.1", false);
+    for mutation in 0..6 {
+        let mut invalid = records.clone();
+        let WalRecord::OrderUpdate {
+            update:
+                OrderUpdate::Fill {
+                    amounts,
+                    qty,
+                    allocation: Some(allocation),
+                    ..
+                },
+            ..
+        } = invalid.last_mut().unwrap()
+        else {
+            unreachable!()
+        };
+        match mutation {
+            0 => allocation.legacy_quantity_step = Some(Exact::zero()),
+            1 => allocation.legacy_quantity_step = Some(n("0.03")),
+            2 => allocation.slices[0].quantity = n("0.09"),
+            3 => allocation.legacy_quantity_step = Some(n("0.00000000000000001")),
+            4 => *qty = 0.101,
+            _ => {
+                let native = fill("native", Side::Sell, "0.1", true);
+                let WalRecord::OrderUpdate {
+                    update:
+                        OrderUpdate::Fill {
+                            amounts: source, ..
+                        },
+                    ..
+                } = &native[1]
+                else {
+                    unreachable!()
+                };
+                *amounts = source.clone();
+            }
+        }
+        assert!(
+            Attribution::try_from_records(&invalid).is_err(),
+            "mutation {mutation}"
+        );
+        assert!(
+            Fills::try_from_records(&invalid).is_err(),
+            "mutation {mutation}"
+        );
+    }
+    assert_legacy_emergency_closed(&records);
+}
+
+#[test]
+fn recovered_legacy_grid_receipt_keeps_the_delivered_fill_quantity_and_economics() {
+    let mut records = vec![base(&[], 0.0)];
+    add(&mut records, 0, Side::Buy, "0.1", false, 1000);
+    records.push(plan(&records));
+    let claims = Attribution::try_from_records(&records).unwrap();
+    legacy_emergency(&mut records, "0.1", false);
+    let delivered = Fills::try_from_records(&records).unwrap().closed().to_vec();
+    let WalRecord::OrderUpdate {
+        update:
+            OrderUpdate::Fill {
+                allocation,
+                amounts,
+                exec_id,
+                client_order_id,
+                symbol,
+                side,
+                qty,
+                px,
+                fee,
+                is_maker,
+                forced_close,
+                venue_ts_ms,
+                ..
+            },
+        ..
+    } = records.pop().unwrap()
+    else {
+        unreachable!()
+    };
+    let mut recovered = WalRecord::RecoveredFill {
+        callbacks: None,
+        allocation: None,
+        amounts: amounts.map(|amounts| *amounts),
+        exec_id,
+        client_order_id,
+        symbol,
+        side,
+        qty,
+        px,
+        fee,
+        is_maker,
+        forced_close,
+        venue_ts_ms,
+        recovered_wall_ts_ms: 4000,
+    };
+    let prepared = claims
+        .prepare_portfolio_recovered_on_grid(None, &["left".into()], &recovered, Some(&n("0.01")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(Some(&prepared.allocation), allocation.as_deref());
+    let WalRecord::RecoveredFill { allocation, .. } = &mut recovered else {
+        unreachable!()
+    };
+    *allocation = Some(Box::new(prepared.allocation));
+    records.push(recovered);
+    assert_legacy_emergency_closed(&records);
+    assert_eq!(
+        Fills::try_from_records(&records).unwrap().closed(),
+        delivered
+    );
+}
+
 #[test]
 fn legacy_fifo_slices_rederive_from_valid_original_receipts_with_exact_whole_fee_conservation() {
     for opposing in [false, true] {

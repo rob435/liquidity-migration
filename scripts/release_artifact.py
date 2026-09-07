@@ -251,7 +251,7 @@ def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: s
             images: dict[str, Any] = {}
             if budget["contract"] == "absolute_and_paired_source_relative":
                 reference_commit = budget["reference_commit"]
-                line = f"latency reference source: {reference_commit}; fresh build with the candidate compiler, target and build command\n"
+                line = f"latency reference source: {reference_commit}; fresh build with the candidate compiler, target and build flags in an isolated target directory\n"
                 print(line, end="", flush=True)
                 log.write(line)
                 source = evidence / "reference-source"
@@ -266,13 +266,17 @@ def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: s
                 reference_pinned = tomllib.loads((source / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
                 if reference_pinned != pinned:
                     raise ValueError("latency reference and candidate must use the same pinned Rust compiler")
-                _run(build, source / "engine", log, reference_commit)
+                reference_target = evidence / "reference-target"
+                reference_build = build.copy()
+                reference_build[reference_build.index("--target-dir") + 1] = str(reference_target)
+                _run(reference_build, source / "engine", log, reference_commit)
                 reference = evidence / "reference-release"
                 reference.mkdir()
                 for name in BINARIES:
-                    shutil.copy2(release / name, reference / name)
+                    shutil.copy2(reference_target / native_target / "release" / name, reference / name)
                 images["A"] = {"commit": reference_commit, "binaries": _binary_hashes(reference),
                                "source": "fresh_reference_source_build"}
+                shutil.rmtree(reference_target)
                 shutil.rmtree(source)
             _run(build, repo / "engine", log, commit)
             hashes = _binary_hashes(release)

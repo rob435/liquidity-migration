@@ -233,8 +233,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     owned_request.as_ref(),
                     symbol,
                     exec.side,
-                    &reconcile::fill_quantity(exec.qty, exec.amounts.as_ref())
-                        .map_err(EngineError::State)?,
+                    &crate::portfolio_allocation::fill_quantity(
+                        exec.qty,
+                        exec.amounts.as_ref(),
+                        match &record {
+                            WalRecord::RecoveredFill { allocation, .. } => allocation.as_deref(),
+                            _ => None,
+                        },
+                    )
+                    .map_err(EngineError::State)?,
                 )
                 .map_err(EngineError::State)?;
                 if let Some(request) = owned_request.as_ref() {
@@ -254,33 +261,53 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         .expect("recovered fill");
                 let slices = crate::portfolio_allocation::slice_updates(&update)
                     .map_err(EngineError::State)?
-                    .unwrap_or_else(|| owner.map(|sid| vec![(sid, update)]).unwrap_or_default());
-                for (sid, update) in slices {
+                    .unwrap_or_else(|| {
+                        owner
+                            .map(|sid| vec![(sid, update.clone())])
+                            .unwrap_or_default()
+                    });
+                for (sid, _) in slices {
                     let OrderUpdate::Fill {
-                        qty, fee, amounts, ..
-                    } = update
+                        qty,
+                        fee,
+                        amounts,
+                        allocation,
+                        ..
+                    } = &update
                     else {
                         unreachable!()
                     };
-                    self.fills
-                        .on_recovered_fill_with_quantity(
-                            &execution::Fill {
-                                amounts: amounts.clone(),
-                                client_order_id: exec.client_order_id.clone(),
-                                strategy: sid,
-                                symbol,
-                                side: exec.side,
-                                qty,
-                                px: exec.px,
-                                fee,
-                                is_maker: exec.is_maker,
-                                arrival_mid: self.arrival_mid_of(&exec.client_order_id),
-                                venue_ts_ms: exec.venue_ts_ms,
-                            },
-                            clock::now_ns().checked_sub(late_ns),
-                            amounts.as_deref().map(|a| &a.quantity.value),
-                        )
-                        .map_err(EngineError::State)?;
+                    let fill = execution::Fill {
+                        amounts: amounts.clone(),
+                        client_order_id: exec.client_order_id.clone(),
+                        strategy: sid,
+                        symbol,
+                        side: exec.side,
+                        qty: *qty,
+                        px: exec.px,
+                        fee: *fee,
+                        is_maker: exec.is_maker,
+                        arrival_mid: self.arrival_mid_of(&exec.client_order_id),
+                        venue_ts_ms: exec.venue_ts_ms,
+                    };
+                    if let Some(allocation) = allocation {
+                        self.fills
+                            .on_allocated_fill(
+                                &fill,
+                                clock::now_ns().checked_sub(late_ns),
+                                true,
+                                allocation,
+                            )
+                            .map_err(EngineError::State)?;
+                    } else {
+                        self.fills
+                            .on_recovered_fill_with_quantity(
+                                &fill,
+                                clock::now_ns().checked_sub(late_ns),
+                                amounts.as_deref().map(|a| &a.quantity.value),
+                            )
+                            .map_err(EngineError::State)?;
+                    }
                 }
             } else {
                 batch

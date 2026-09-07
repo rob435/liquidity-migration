@@ -46,6 +46,7 @@ pub(crate) fn allocate(
     if let Some(strategy) = owner {
         return Ok(ExecutionAllocation {
             policy: AllocationPolicy::DirectOrder,
+            legacy_quantity_step: None,
             slices: vec![ExecutionSlice {
                 strategy,
                 strategy_key: name(strategy)?,
@@ -99,8 +100,40 @@ pub(crate) fn allocate(
     }
     Ok(ExecutionAllocation {
         policy: AllocationPolicy::EmergencyNetFifo,
+        legacy_quantity_step: None,
         slices,
     })
+}
+
+pub(crate) fn fill_quantity(
+    qty: f64,
+    amounts: Option<&engine_types::numeric::ExecutionAmounts>,
+    allocation: Option<&ExecutionAllocation>,
+) -> Result<Exact, String> {
+    let raw = crate::reconcile::fill_quantity(qty, amounts)?;
+    let Some(step) = allocation.and_then(|row| row.legacy_quantity_step.as_ref()) else {
+        return Ok(raw);
+    };
+    if amounts.is_some()
+        || allocation.is_none_or(|row| row.policy != AllocationPolicy::EmergencyNetFifo)
+    {
+        return Err("legacy grid receipt requires a binary64 FIFO execution".into());
+    }
+    legacy_quantity(qty, step)
+}
+
+pub(crate) fn legacy_quantity(qty: f64, step: &Exact) -> Result<Exact, String> {
+    if !step.is_positive() {
+        return Err("legacy execution quantity grid must be positive".into());
+    }
+    let raw = Exact::from_legacy_f64(qty).map_err(|e| e.to_string())?;
+    let mut origin = crate::legacy_quantity::Origin::default();
+    origin.note(&raw)?;
+    let quantity = origin.resolve(&raw, step)?;
+    if !quantity.is_positive() {
+        return Err("legacy execution quantity does not resolve to a positive grid value".into());
+    }
+    Ok(quantity)
 }
 
 pub(crate) fn slice_updates(
@@ -117,10 +150,7 @@ pub(crate) fn slice_updates(
     else {
         return Ok(None);
     };
-    let exact_qty = amounts
-        .as_ref()
-        .map(|amounts| Ok(amounts.quantity.value.clone()))
-        .unwrap_or_else(|| Exact::from_legacy_f64(*qty).map_err(|e| e.to_string()))?;
+    let exact_qty = fill_quantity(*qty, amounts.as_deref(), Some(allocation))?;
     let mut sum = Exact::zero();
     let expected_fee = if let Some(amounts) = amounts {
         amounts.fee.clone()

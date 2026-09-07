@@ -981,8 +981,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     request,
                     symbol,
                     exec.side,
-                    &reconcile::fill_quantity(exec.qty, exec.amounts.as_ref())
-                        .map_err(EngineError::State)?,
+                    &crate::portfolio_allocation::fill_quantity(
+                        exec.qty,
+                        exec.amounts.as_ref(),
+                        match &record {
+                            WalRecord::RecoveredFill { allocation, .. } => allocation.as_deref(),
+                            _ => None,
+                        },
+                    )
+                    .map_err(EngineError::State)?,
                 )
                 .map_err(EngineError::State)?;
                 let update = crate::portfolio_allocation::recovered_update(&record, 0)
@@ -991,12 +998,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .map_err(EngineError::State)?
                     .unwrap_or_else(|| {
                         analytic_owner
-                            .map(|id| vec![(id, update)])
+                            .map(|id| vec![(id, update.clone())])
                             .unwrap_or_default()
                     });
-                for (strategy, update) in slices {
+                for (strategy, _) in slices {
                     let OrderUpdate::Fill {
                         amounts,
+                        allocation,
                         qty,
                         px,
                         fee,
@@ -1004,39 +1012,51 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         venue_ts_ms,
                         is_maker,
                         ..
-                    } = update
+                    } = update.clone()
                     else {
                         unreachable!()
                     };
                     let sleeve = strategy_names.get(strategy.idx()).ok_or_else(|| {
                         EngineError::Boot("recovered lot has no durable sleeve name".into())
                     })?;
-                    recovered_state
-                        .fills
-                        .lots()
-                        .on_fill_with_quantity(
-                            sleeve,
-                            table.name(symbol),
-                            &execution::Fill {
-                                amounts,
-                                qty,
-                                px,
-                                fee,
-                                side,
-                                venue_ts_ms,
-                                is_maker,
-                                client_order_id: client_order_id.clone(),
-                                strategy,
-                                symbol,
-                                arrival_mid: recovered_state
-                                    .orders
-                                    .orders
-                                    .get(&client_order_id)
-                                    .map_or(0.0, |order| order.arrival_mid),
-                            },
-                            None,
-                        )
-                        .map_err(EngineError::State)?;
+                    let fill = execution::Fill {
+                        amounts,
+                        qty,
+                        px,
+                        fee,
+                        side,
+                        venue_ts_ms,
+                        is_maker,
+                        client_order_id: client_order_id.clone(),
+                        strategy,
+                        symbol,
+                        arrival_mid: recovered_state
+                            .orders
+                            .orders
+                            .get(&client_order_id)
+                            .map_or(0.0, |order| order.arrival_mid),
+                    };
+                    if let Some(allocation) = allocation {
+                        let (part, economics) = execution::allocated_fill(&fill, &allocation)
+                            .map_err(EngineError::State)?;
+                        recovered_state
+                            .fills
+                            .lots()
+                            .on_fill_with_economics(
+                                sleeve,
+                                table.name(symbol),
+                                &part,
+                                Some(&economics.quantity),
+                                Some(&economics),
+                            )
+                            .map_err(EngineError::State)?;
+                    } else {
+                        recovered_state
+                            .fills
+                            .lots()
+                            .on_fill_with_quantity(sleeve, table.name(symbol), &fill, None)
+                            .map_err(EngineError::State)?;
+                    }
                     for trade in recovered_state.fills.take_closed() {
                         if let Some(row) = trade.loss_row() {
                             risk.observe_closed_trade(row);

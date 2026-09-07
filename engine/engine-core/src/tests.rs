@@ -1848,6 +1848,8 @@ mod heartbeat;
 mod live_legacy_fixture;
 mod order_path;
 mod ownership;
+#[cfg(feature = "bybit")]
+mod quarantine_conversion;
 mod quote_staleness;
 mod reconciliation;
 mod recovery_liveness;

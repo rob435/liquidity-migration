@@ -325,15 +325,17 @@ pub fn strategies_for_registry(
     replayed: &[WalRecord],
 ) -> Result<Vec<Box<dyn Strategy>>, Box<dyn Error>> {
     one_name_per_sleeve(configured)?;
-    let restored =
-        crate::callback_recovery::state::CallbackState::replay(replayed, plan.state.sleeves.len())?;
+    let restored = crate::callback_recovery::paging::CallbackPages::replay_committed(
+        replayed,
+        plan.state.sleeves.len(),
+    )?;
     let mut strategies: Vec<Box<dyn Strategy>> = Vec::with_capacity(plan.slot_configs.len());
     for (slot, config) in plan.slot_configs.iter().enumerate() {
         let id = StrategyId(u16::try_from(slot)?);
         let Some(index) = config else {
             strategies.push(Box::new(crate::identities::InactiveStrategy::new(
                 plan.state.sleeves[slot].clone(),
-                restored.committed.get(&id),
+                restored.get(&id),
             )));
             continue;
         };

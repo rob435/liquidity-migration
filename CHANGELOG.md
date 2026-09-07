@@ -57,7 +57,60 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     Both A decisions also return below 10 µs, while the final A submit
     misses at 5.324799 ms. Current point targets pass with the preceding
     wide cell; no converter regression or scheduling cause is established.
-    Retain all misses and the separate stored CI budget.
+    Retain all misses and the separate stored CI budget. Commit `46bbb346`
+    passes the required developer gate with 1,971 Rust tests, seven ignored,
+    and 1,693 Python tests, zero failures.
+  - Qualification `34104340078` fails before benchmarks on `46bbb346`:
+    after compiling reference A, candidate B cannot find `engine_wal::conversion`
+    because Cargo reuses the baseline dependency in their shared target directory.
+    Normal Linux CI passes 1,973 Rust / 1,693 Python tests. Add R3-17 before
+    separating the build directories. The real Cargo regression builds both sources
+    successfully, but B prints A before the fix; after isolation B prints B and
+    all three packed executables contain B. All 82 qualifier tests pass. Earlier
+    paired archive hashes/logs still verify; their candidate dependency source
+    attribution remains uncertain until fresh hosted isolation is qualified.
+  - Add R3-18 before repairing strategy assembly over retained paged callbacks.
+    The real v7 fixture fails with `callback cursor restatement requires paged
+    replay`; assembly now takes committed runtime from the existing paged replay.
+    Its duplicate-owner assertion also fails before preserving the prior rejection.
+    Committed runtime, timers, subscriptions and pending queue authority pass the
+    focused checks. The first repaired image passes all 27 paired copied boots,
+    nine queued and nine prepared callback retrievals; source-frontier coverage
+    is zero. Demo archive lookup matches three rows through Filled 2220. Mainnet's
+    first query returns only its request, so the strengthened final-source fixture
+    requires observed terminal/fill state before selecting that query.
+  - Add R3-16 before preserving source decimal instrument constraints and requiring
+    exact metadata in simulation/backtest. The old backtest emits `exact_terms=None`;
+    the repaired fixture retains step `0.0100000000000000000000000001` and submits
+    `0.0900000000000000000000000009`, where the binary64 grid permits `0.1`.
+    All 35 backtest tests pass, including deterministic 1,800-second replay; simulated
+    fills and cash remain binary64. Light seed 1 and heavy seed 7 expose a separate
+    legacy FIFO full-close fault across canonical grid adoption, recorded as R3-19
+    before its repair. Two prior-code regressions fail on a `0.1` close. The repair
+    keeps native quantities exact and raw legacy economics distinct from normalized
+    inventory. Its existing allocation carries the actual grid; older readers cannot
+    consume those normalized receipts. Deploy reader support before enabling the
+    runtime writer and exact simulation metadata; no new feature flag is introduced.
+    Stage A's release reader accepts the generated two-record canonical-base/new-
+    receipt fixture rejected by the prior binary, independently of historical adoption.
+    Its full frozen-writer WAL fills report matches exactly. Final focused scopes pass
+    24 legacy, 77 execution, four allocation and 13 forced-close tests.
+  - Add R3-20 before fixing nondeterministic portfolio retry timing. Heavy seed 7
+    reconciles twice but first differs at WAL index 3816: emergency 46 and a deferred
+    quote change order after identical cancel completion. Retry deadlines use real
+    `Instant` while simulation uses virtual time. The actual prior implementation
+    fails the 250 ms engine-clock deadline assertion; engine-clock nanoseconds pass
+    all four focused portfolio-control tests with the same exponential delay and
+    30 s cap. No pump, event priority or fault rate changes. The first fixed seed 7 pair
+    repeats exactly (`6c79023c8cae...`), with 209 orders, 119 fills, two injected deaths,
+    zero restarts and 189 faults; clean/light/heavy tests pass. A test-only API spelling
+    compile error is retained separately
+    and is not counted as the failing regression.
+    Reader-stage Mac cells run 10:11:31–10:12:51 UTC without builds/tests/scans:
+    narrow decision 15.671 µs misses 10 µs, submit 4.968447 ms passes 5 ms; wide
+    decision p99 25.919 µs passes 50 µs. All 700 orders have one barrier and zero
+    failures; both Rust readbacks pass. The shared before cell has narrow
+    decision 16.591 µs / submit 4.927487 ms and wide decision p99 40.735 µs.
   - Add registered-plug conformance, Exact/WAL properties and authenticated
     demo private frames. The corpus includes LINK Buy 53.9 at 13.329 with
     0.39513821 USDT fee; its replay uses the real WebSocket parser. Convert

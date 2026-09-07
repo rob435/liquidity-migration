@@ -30,11 +30,22 @@ impl Attribution {
         names: &[String],
         update: &OrderUpdate,
     ) -> Result<Option<PreparedPortfolioFill>, String> {
+        self.prepare_portfolio_update_on_grid(request, names, update, None)
+    }
+
+    pub(crate) fn prepare_portfolio_update_on_grid(
+        &self,
+        request: Option<&engine_types::OrderRequest>,
+        names: &[String],
+        update: &OrderUpdate,
+        legacy_step: Option<&engine_types::numeric::Exact>,
+    ) -> Result<Option<PreparedPortfolioFill>, String> {
         self.prepare_portfolio_update_authorized(
             request.and_then(|r| r.sleeve_owner()),
             names,
             update,
             request.is_some_and(|r| r.is_portfolio_reduction()),
+            legacy_step,
         )
     }
 
@@ -44,6 +55,7 @@ impl Attribution {
         names: &[String],
         update: &OrderUpdate,
         engine_net: bool,
+        legacy_step: Option<&engine_types::numeric::Exact>,
     ) -> Result<Option<PreparedPortfolioFill>, String> {
         let OrderUpdate::Fill {
             client_order_id,
@@ -75,6 +87,7 @@ impl Attribution {
                 forced_close: *forced_close,
                 engine_net,
             },
+            legacy_step,
         )
     }
 
@@ -84,11 +97,22 @@ impl Attribution {
         names: &[String],
         record: &WalRecord,
     ) -> Result<Option<PreparedPortfolioFill>, String> {
+        self.prepare_portfolio_recovered_on_grid(request, names, record, None)
+    }
+
+    pub(crate) fn prepare_portfolio_recovered_on_grid(
+        &self,
+        request: Option<&engine_types::OrderRequest>,
+        names: &[String],
+        record: &WalRecord,
+        legacy_step: Option<&engine_types::numeric::Exact>,
+    ) -> Result<Option<PreparedPortfolioFill>, String> {
         self.prepare_portfolio_recovered_authorized(
             request.and_then(|r| r.sleeve_owner()),
             names,
             record,
             request.is_some_and(|r| r.is_portfolio_reduction()),
+            legacy_step,
         )
     }
 
@@ -98,6 +122,7 @@ impl Attribution {
         names: &[String],
         record: &WalRecord,
         engine_net: bool,
+        legacy_step: Option<&engine_types::numeric::Exact>,
     ) -> Result<Option<PreparedPortfolioFill>, String> {
         let WalRecord::RecoveredFill {
             client_order_id,
@@ -129,6 +154,7 @@ impl Attribution {
                 forced_close: *forced_close,
                 engine_net,
             },
+            legacy_step,
         )
     }
 
@@ -137,6 +163,7 @@ impl Attribution {
         owner: Option<StrategyId>,
         names: &[String],
         execution: ExecutionRef<'_>,
+        legacy_step: Option<&engine_types::numeric::Exact>,
     ) -> Result<Option<PreparedPortfolioFill>, String> {
         let forced = execution.engine_net
             || (execution.client_order_id.is_empty() && execution.forced_close.is_some());
@@ -159,7 +186,8 @@ impl Attribution {
             }
         }
         use engine_types::numeric::{AssetId, Exact, ExactNumber};
-        let (quantity, price, settlement_asset, fee) = if let Some(amounts) = execution.amounts {
+        let (mut quantity, price, settlement_asset, fee) = if let Some(amounts) = execution.amounts
+        {
             amounts
                 .validate_projection(execution.qty, execution.px, execution.fee)
                 .map_err(|e| e.to_string())?;
@@ -187,7 +215,24 @@ impl Attribution {
                 fee,
             )
         };
-        let allocation = crate::portfolio_allocation::allocate(
+        let legacy_step = execution.allocation.map_or_else(
+            || {
+                (execution.amounts.is_none()
+                    && owner.is_none()
+                    && forced
+                    && quantity != self.inventory.net(execution.symbol).abs())
+                .then_some(legacy_step)
+                .flatten()
+            },
+            |allocation| allocation.legacy_quantity_step.as_ref(),
+        );
+        if let Some(step) = legacy_step {
+            if execution.amounts.is_some() || owner.is_some() || !forced {
+                return Err("legacy grid receipt requires a binary64 FIFO execution".into());
+            }
+            quantity = crate::portfolio_allocation::legacy_quantity(execution.qty, step)?;
+        }
+        let mut allocation = crate::portfolio_allocation::allocate(
             &self.inventory,
             owner,
             names,
@@ -199,6 +244,7 @@ impl Attribution {
                 forced_close: forced,
             },
         )?;
+        allocation.legacy_quantity_step = legacy_step.cloned();
         if execution
             .allocation
             .is_some_and(|recorded| recorded != &allocation)
@@ -288,12 +334,14 @@ impl Attribution {
                     names,
                     update,
                     request.is_some_and(|r| r.is_portfolio_reduction()),
+                    None,
                 )?,
                 WalRecord::RecoveredFill { .. } => self.prepare_portfolio_recovered_authorized(
                     owner,
                     names,
                     record,
                     request.is_some_and(|r| r.is_portfolio_reduction()),
+                    None,
                 )?,
                 _ => unreachable!(),
             }

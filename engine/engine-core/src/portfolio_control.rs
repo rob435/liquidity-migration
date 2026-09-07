@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PortfolioControls {
     next_id: u64,
-    retry_after: BTreeMap<u64, std::time::Instant>,
+    retry_after: BTreeMap<u64, u64>,
     pub native_pending: BTreeMap<SymbolId, engine_types::numeric::Exact>,
     pub exits: BTreeMap<(StrategyId, SymbolId), PortfolioExit>,
     pub emergencies: BTreeMap<SymbolId, PortfolioEmergency>,
@@ -60,7 +60,7 @@ impl PortfolioControls {
     pub fn retry_ready(&self, id: u64) -> bool {
         self.retry_after
             .get(&id)
-            .is_none_or(|deadline| std::time::Instant::now() >= *deadline)
+            .is_none_or(|deadline| engine_types::clock::mono_ns() >= *deadline)
     }
     pub fn attempted(&mut self, id: u64, attempt: u32) {
         let delay_ms = 250_u64
@@ -68,7 +68,7 @@ impl PortfolioControls {
             .min(30_000);
         self.retry_after.insert(
             id,
-            std::time::Instant::now() + std::time::Duration::from_millis(delay_ms),
+            engine_types::clock::mono_ns().saturating_add(delay_ms * 1_000_000),
         );
     }
     pub fn next_id(&self) -> Result<u64, String> {
@@ -444,6 +444,32 @@ fn numeric_engine_order_id(id: &str) -> bool {
 mod tests {
     use super::*;
     use engine_types::numeric::{AssetId, Exact};
+
+    #[test]
+    fn portfolio_retry_deadlines_follow_the_engine_clock() {
+        let _clock =
+            engine_types::clock::install_virtual(1_700_000_000_000_000_000, 1_000_000_000).unwrap();
+        let mut controls = PortfolioControls::default();
+        for (attempt, delay_ms) in [
+            (1, 250),
+            (2, 500),
+            (7, 16_000),
+            (8, 30_000),
+            (u32::MAX, 30_000),
+        ] {
+            let now = engine_types::clock::mono_ns();
+            controls.attempted(1, attempt);
+            assert!(!controls.retry_ready(1));
+            engine_types::clock::advance_virtual_to(now + delay_ms * 1_000_000 - 1).unwrap();
+            assert!(!controls.retry_ready(1), "retry before its engine deadline");
+            engine_types::clock::advance_virtual_to(now + delay_ms * 1_000_000).unwrap();
+            assert!(
+                controls.retry_ready(1),
+                "retry deadline depends on real elapsed time"
+            );
+        }
+    }
+
     fn emergency() -> PortfolioEmergency {
         PortfolioEmergency {
             id: 1,

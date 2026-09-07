@@ -45,6 +45,16 @@ impl Default for CallbackPages {
 }
 
 impl CallbackPages {
+    pub(crate) fn replay_committed(
+        records: &[WalRecord],
+        count: usize,
+    ) -> Result<BTreeMap<StrategyId, engine_types::strategy_process::StrategyProcessState>, String>
+    {
+        // Assembly needs private state only; synthetic inline cursors never leave this projection.
+        let (state, _) = Self::replay(records, count, 1)?;
+        Ok(state.committed)
+    }
+
     pub fn hash(input: &StrategyCallbackInput) -> Result<[u8; 32], String> {
         struct HashWriter(Sha256);
         impl std::io::Write for HashWriter {
@@ -237,6 +247,9 @@ impl CallbackPages {
                     state = CallbackState::default();
                     pages.slots.clear();
                     for process in strategy_processes {
+                        if state.committed.contains_key(&process.strategy) {
+                            return Err("invalid strategy process restatement".into());
+                        }
                         state.restore_process(process.clone(), count)?;
                     }
                     for slot in strategy_callback_queues {
@@ -425,6 +438,142 @@ mod tests {
             timers: Vec::new(),
             retained_signal_subscriptions: None,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn registry_assembly_preserves_inactive_runtime_with_paged_callbacks() {
+        let path = crate::testpath::temp_path("registry-paged-callbacks");
+        let mut base = base().await;
+        let mut committed = process(&input(1, 0, CallbackEvent::Boot));
+        committed
+            .timers
+            .push(engine_types::strategy_process::StrategyTimerState {
+                id: engine_types::TimerId(7),
+                deadline_ns: 10,
+                deadline_wall_ms: 10,
+            });
+        committed.retained_signal_subscriptions = Some(vec![engine_types::Subscription {
+            symbol: "BTCUSDT".into(),
+            feed: engine_types::Feed::Quote,
+        }]);
+        let mut state = CallbackState::default();
+        state.restore_process(committed.clone(), 2).unwrap();
+        let mut pages = CallbackPages::default();
+        restate(&mut base, &state, &pages);
+        let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+        wal.append(&base).unwrap();
+        let queued = input(2, 0, CallbackEvent::Boot);
+        let sequence = crate::testpath::append_history(
+            &mut wal,
+            &path,
+            &WalRecord::Retained(
+                engine_types::wal::RetainedWalRecord::StrategyCallbackQueued {
+                    input: queued.clone(),
+                },
+            ),
+        )
+        .unwrap();
+        pages
+            .queued(
+                &queued,
+                CallbackWalCursor {
+                    segment: 1,
+                    sequence,
+                    offset: 0,
+                },
+            )
+            .unwrap();
+        restate(&mut base, &state, &pages);
+        assert!(wal.rotate(&base).unwrap());
+        drop(wal);
+        let (_, rows) = engine_wal::open_current(&path).unwrap();
+        let records: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
+        for (_, segment) in engine_wal::segments(&path).unwrap() {
+            std::fs::remove_file(segment).unwrap();
+        }
+        assert_eq!(records.len(), 1);
+        let plan =
+            crate::identities::plan_identities(&records, &[], None, &Default::default(), &[])
+                .unwrap();
+        let built = crate::assembly::strategies_for_registry(&[], &plan, &records).unwrap_or_else(
+            |error| panic!("valid v7 queued callback prevents strategy assembly: {error}"),
+        );
+        assert!(!built[0].callback_enabled());
+        assert_eq!(
+            built[0].runtime_state().unwrap(),
+            Some(committed.runtime.clone())
+        );
+        assert_eq!(
+            built[0].retained_signal_subscriptions(),
+            committed.retained_signal_subscriptions.clone()
+        );
+        assert_eq!(
+            CallbackPages::replay_committed(&records, 2).unwrap()[&StrategyId(0)],
+            committed
+        );
+        let mut duplicate_process = records.clone();
+        let WalRecord::SegmentBase {
+            strategy_processes, ..
+        } = &mut duplicate_process[0]
+        else {
+            panic!()
+        };
+        strategy_processes.push(strategy_processes[0].clone());
+        assert!(
+            crate::assembly::strategies_for_registry(&[], &plan, &duplicate_process).is_err(),
+            "duplicate process owners must remain invalid during registry assembly"
+        );
+        let mut bad_queue = records.clone();
+        let WalRecord::SegmentBase {
+            strategy_callback_queues,
+            ..
+        } = &mut bad_queue[0]
+        else {
+            panic!()
+        };
+        strategy_callback_queues[0].queued.sequence = 0;
+        assert!(
+            crate::assembly::strategies_for_registry(&[], &plan, &bad_queue)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("invalid callback queue restatement")
+        );
+
+        let mut bad_commit = records.clone();
+        bad_commit.push(WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::StrategyProcessTransitionQueued {
+                input_id: queued.callback_id,
+                process: process(&queued),
+                transition: None,
+            },
+        ));
+        assert!(
+            crate::assembly::strategies_for_registry(&[], &plan, &bad_commit)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("process commit changes or overtakes callback authority")
+        );
+
+        let mut timer = records;
+        timer.push(WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::StrategyCallbackQueued {
+                input: input(
+                    3,
+                    0,
+                    CallbackEvent::Timer {
+                        id: engine_types::TimerId(7),
+                        now_ns: 10,
+                    },
+                ),
+            },
+        ));
+        assert!(
+            CallbackPages::replay_committed(&timer, 2).unwrap()[&StrategyId(0)]
+                .timers
+                .is_empty()
+        );
     }
 
     #[test]

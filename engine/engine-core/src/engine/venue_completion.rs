@@ -1698,6 +1698,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 side,
                 qty,
                 amounts,
+                allocation,
                 ..
             },
         ) = (owned_fill, update)
@@ -1708,7 +1709,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 fill_request,
                 *symbol,
                 *side,
-                &reconcile::fill_quantity(*qty, amounts.as_deref()).map_err(EngineError::State)?,
+                &crate::portfolio_allocation::fill_quantity(
+                    *qty,
+                    amounts.as_deref(),
+                    allocation.as_deref(),
+                )
+                .map_err(EngineError::State)?,
             )
             .map_err(EngineError::State)?;
         }
@@ -1758,8 +1764,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if let Some(slices) =
             crate::portfolio_allocation::slice_updates(update).map_err(EngineError::State)?
         {
-            for (owner, slice) in slices {
-                self.price_fill(owner, &slice)?;
+            for (owner, _) in slices {
+                self.price_fill(owner, update)?;
             }
             return Ok(());
         }
@@ -1885,6 +1891,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     ) -> Result<(), EngineError> {
         let OrderUpdate::Fill {
             amounts,
+            allocation,
             client_order_id,
             symbol,
             side,
@@ -1899,24 +1906,32 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(());
         };
         let arrival_mid = self.arrival_mid_of(client_order_id);
-        self.fills
-            .on_fill_with_quantity(
-                &execution::Fill {
-                    amounts: amounts.clone(),
-                    client_order_id: client_order_id.clone(),
-                    strategy,
-                    symbol: *symbol,
-                    side: *side,
-                    qty: *qty,
-                    px: *px,
-                    fee: *fee,
-                    is_maker: *is_maker,
-                    arrival_mid,
-                    venue_ts_ms: *venue_ts_ms,
-                },
-                clock::now_ns(),
-                amounts.as_deref().map(|a| &a.quantity.value),
-            )
-            .map_err(EngineError::State)
+        let fill = execution::Fill {
+            amounts: amounts.clone(),
+            client_order_id: client_order_id.clone(),
+            strategy,
+            symbol: *symbol,
+            side: *side,
+            qty: *qty,
+            px: *px,
+            fee: *fee,
+            is_maker: *is_maker,
+            arrival_mid,
+            venue_ts_ms: *venue_ts_ms,
+        };
+        if let Some(allocation) = allocation {
+            self.fills
+                .on_allocated_fill(&fill, Some(clock::now_ns()), false, allocation)
+                .map_err(EngineError::State)?;
+        } else {
+            self.fills
+                .on_fill_with_quantity(
+                    &fill,
+                    clock::now_ns(),
+                    amounts.as_deref().map(|a| &a.quantity.value),
+                )
+                .map_err(EngineError::State)?;
+        }
+        Ok(())
     }
 }

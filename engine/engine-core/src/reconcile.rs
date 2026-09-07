@@ -655,6 +655,43 @@ pub(crate) fn fill_quantity(qty: f64, amounts: Option<&ExecutionAmounts>) -> Res
     Ok(quantity)
 }
 
+fn allocated_quantity(record: &WalRecord) -> Result<Option<(SymbolId, Side, Exact)>, String> {
+    let (symbol, side, qty, amounts, allocation) = match record {
+        WalRecord::OrderUpdate {
+            update:
+                OrderUpdate::Fill {
+                    symbol,
+                    side,
+                    qty,
+                    amounts,
+                    allocation: Some(allocation),
+                    ..
+                },
+            ..
+        } => (
+            *symbol,
+            *side,
+            *qty,
+            amounts.as_deref(),
+            allocation.as_ref(),
+        ),
+        WalRecord::RecoveredFill {
+            symbol,
+            side,
+            qty,
+            amounts,
+            allocation: Some(allocation),
+            ..
+        } => (*symbol, *side, *qty, amounts.as_ref(), allocation.as_ref()),
+        _ => return Ok(None),
+    };
+    Ok(Some((
+        symbol,
+        side,
+        crate::portfolio_allocation::fill_quantity(qty, amounts, Some(allocation))?,
+    )))
+}
+
 fn restored_exposure(rows: &[engine_types::SymbolTotal]) -> Result<PhysicalExposure, String> {
     let mut exposure = PhysicalExposure::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -754,7 +791,17 @@ pub(crate) fn position_state_with_adoption(
             }
             crate::legacy_quantity::Event::Record(record) => record,
         };
+        let original = record.original();
         let record = record.as_ref();
+        if let Some((symbol, side, before)) =
+            original.map(allocated_quantity).transpose()?.flatten()
+        {
+            if let Some((_, _, after)) = allocated_quantity(record)? {
+                let change = after - before;
+                *delta.entry(symbol).or_default() +=
+                    if side == Side::Buy { change } else { -change };
+            }
+        }
         if let Some(symbol) = crate::legacy_quantity::canonical_symbol(record) {
             if origins.contains_key(&symbol) {
                 discovered.insert(symbol);
@@ -824,15 +871,25 @@ pub(crate) fn position_state_with_adoption(
                     &strategy_names,
                 ) == Ok(true)
                 {
-                    let amounts = match record {
+                    let (amounts, allocation) = match record {
                         WalRecord::OrderUpdate {
-                            update: OrderUpdate::Fill { amounts, .. },
+                            update:
+                                OrderUpdate::Fill {
+                                    amounts,
+                                    allocation,
+                                    ..
+                                },
                             ..
-                        } => amounts.as_deref(),
-                        WalRecord::RecoveredFill { amounts, .. } => amounts.as_ref(),
+                        } => (amounts.as_deref(), allocation.as_deref()),
+                        WalRecord::RecoveredFill {
+                            amounts,
+                            allocation,
+                            ..
+                        } => (amounts.as_ref(), allocation.as_deref()),
                         _ => unreachable!(),
                     };
-                    let quantity = fill_quantity(*qty, amounts)?;
+                    let quantity =
+                        crate::portfolio_allocation::fill_quantity(*qty, amounts, allocation)?;
                     if amounts.is_none() && !has_allocation(record) {
                         origins
                             .entry(*symbol)

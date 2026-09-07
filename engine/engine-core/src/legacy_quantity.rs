@@ -631,6 +631,7 @@ mod tests {
         let update = OrderUpdate::Fill {
             allocation: Some(Box::new(ExecutionAllocation {
                 policy: AllocationPolicy::DirectOrder,
+                legacy_quantity_step: None,
                 slices: vec![ExecutionSlice {
                     strategy: StrategyId(0),
                     strategy_key: "left".into(),
