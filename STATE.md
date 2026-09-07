@@ -8,18 +8,24 @@ Record the latest verified host snapshot and the source of each operational sett
 
 | Observation | Value |
 | --- | --- |
-| Verified at | 2026-09-07 01:42:53 UTC authenticated native positions/stops, service state, heartbeats, disk and loaded images |
-| Evidence | [Deploy run `34055716541`](https://github.com/rob435/liquidity-migration/actions/runs/34055716541); private native read `/tmp/r3-prepush-native-protection.txt`; service, heartbeat, disk and loaded images `/tmp/r3-prepush-host-state.txt`; corrective LONG recovery `/tmp/r3-step0-long.txt` |
+| Verified at | 2026-09-07 02:13:27–02:13:54 UTC authenticated native positions/stops, service state, heartbeats, disk and loaded images |
+| Evidence | [Deploy run `34074541111`](https://github.com/rob435/liquidity-migration/actions/runs/34074541111); native read `/tmp/r3-native-after-handover.json`; services and images `/tmp/r3-host-postdeploy.json`; status `/tmp/r3-postdeploy-status.txt`; workflow log `/tmp/r3-deploy-vps-complete.log` |
 | Host | `208.84.103.4`; 4 vCPU, 8 GiB RAM, 118 GB disk |
-| Deployed commit | `bb4bc3d32f99dfa81152386627deb24764873343`; current loaded engine and worker images match the release artifact; companion and child images were verified at handover |
-| Funded permission | `REAL_MONEY=true`; verified by `scripts/ops.sh status` at 20:00 UTC |
-| Runtime state | Both engines and workers active with zero service restarts. Engine heartbeats are under five seconds old; both report `may_open=true`, `strategy_errors=[]` and zero stream resets. Authenticated reads match six open positions to six exact full-size native stops in each realm |
-| Worker lifetime | Both LONG children remain alive after handover; the invalid filled-state repair is deployed. The sanctioned handover clears both historical reconciliation latches after authenticated agreement |
-| Stored previous commit | `af09aab53fc13cf53f66c393931c0ecccd765598`; rollback remains subject to runtime-input and WAL compatibility, with forward repair across incompatible state |
-| Disk | 26.21 GiB free on `/var/lib`; watchdog minimum 25 GiB. Measured WAL growth is workload-dependent and is not a steady-state capacity guarantee. |
+| Deployed commit | `a4189a4897409e65acba7a2078b964986ceea928`; loaded engine and worker images match the default-feature release artifact; installed companion checksum matches |
+| Funded permission | `REAL_MONEY=true`; `scripts/ops.sh status` reports armed at 02:13 UTC |
+| Runtime state | Both engines and workers are active; workers report ready. Engine heartbeats are under five seconds old; both report `may_open=true`, `strategy_errors=[]` and zero stream resets. All four cgroups have zero OOM events and services have zero restarts. Authenticated reads match six positions to six exact full-size native stops in each realm |
+| Execution | Both engines run embedded callbacks with no strategy children. Both engine units use `Type=notify`, `WatchdogSec=30s`; anonymous memory is 134.8 MiB demo / 105.2 MiB mainnet. The invalid filled-state repair remains deployed |
+| Stored previous commit | `bb4bc3d32f99dfa81152386627deb24764873343`; its runtime inputs differ, so a compatible demo rollback drill remains unexercised; repair forward across incompatible state |
+| Disk | 30.43 GiB free on `/var/lib`; watchdog minimum 25 GiB. A 30-second demo soak sample measures 28,537 WAL bytes/s, zero engine errors and no process change; this is a workload sample, not a capacity guarantee. |
 | Timer observation | The natural 20:00 demo probe records PULL 1.041 ms after its deadline, cancel dispatch 9.557 ms later and cancellation 23.936 ms after dispatch. Captured timer/cancel links are unambiguous; the FIRE preparation clock is absent from the focused read, so total resting time is not measured (`/tmp/r3-step0-probe-analysis.txt`) |
 | Entry permissions | CARRY/LONG/EXODUS enabled in both realms, demo PROBE enabled; original permissions survive handover |
-| Current implementation | Round-3 changes remain local and undeployed; the host observation above applies to `bb4bc3d3`. [Implementation checkpoint](docs/tier1-round-handoff.md); [Round-3 plan](docs/tier1-audit-round-3.md) |
+| Current implementation | Round-3 embedded/default-Bybit execution is deployed. Demo passes 300 seconds of resource checks from 02:06:41 to 02:11:41 UTC before mainnet handover at 02:11:42 UTC. Host Python contains only pip 24.0 and websocket-client 1.9.1. [Implementation checkpoint](docs/tier1-round-handoff.md); [Round-3 plan](docs/tier1-audit-round-3.md) |
+
+| Release image | SHA256 |
+| --- | --- |
+| Engine, loaded in both realms | `6d8a0765aadae6ecf2bfe23825108c36b2dfe81c9b5f34a9c516827abc7bdd87` |
+| Signal worker, loaded in both realms | `e77bb2b88ac32fbac1b4f61574c2eabb41a818f8ab33e92ed1c0a155394e0e5e` |
+| Engine tools, installed companion | `4f1db0a5e9cbe719ad0a534b93914f111853c36ec1e31f5d3fa6d765792e2f4d` |
 
 | Open long position | Demo quantity / native stop | Mainnet quantity / native stop |
 | --- | --- | --- |

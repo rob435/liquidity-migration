@@ -8,11 +8,10 @@ every = 20
 symbols = ["BTCUSDT"]
 
 [runners.linux-x86_64]
-# Provisional engineering references, not observed Linux measurements.
-# Calibrate from the first hosted qualification before claiming R3-06 complete.
-status = "provisional-unmeasured"
-decision_p99_ns = 50000
-submit_p50_ns = 5000000
+# GitHub ubuntu-latest, a4189a48, qualification run 34074530152; execution-performance.md.
+status = "measured-embedded-one-barrier-hosted"
+decision_p99_ns = 6000
+submit_p50_ns = 1090000
 
 [runners.darwin-arm64]
 # Apple M4, same recipe, embedded execution with one order barrier; execution-performance.md.

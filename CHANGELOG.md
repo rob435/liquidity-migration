@@ -10,7 +10,7 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
-- **2026-09-06 — Round-3 embedded execution candidate.**
+- **2026-09-06 — Round-3 embedded execution.**
   - Replace child strategy execution with one embedded path for production,
     bench, simulation and backtest. Catch reducer panics, fault only their
     sleeve and cancel its orders; unchanged state writes no callback WAL.
@@ -60,7 +60,20 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     medians to 5.03 ms narrow / 5.25 ms wide; borrowing stop-fraction keys
     measures 5.05 / 5.41 ms. Submit acceptance remains open; all cells stay recorded.
   - Add the accepted demo soak, watchdog, rollback and runtime-only Python
-    deployment changes. They remain local; no Round-3 handover is attempted.
+    deployment changes. Workflow `34074541111` deploys `a4189a48` on
+    2026-09-07: demo passes all 300 seconds from 02:06:41 to 02:11:41 UTC
+    before mainnet handover at 02:11:42. Hosted debug passes 1,961 tests,
+    zero failed, seven ignored. Both loaded runtime hashes match the default
+    Bybit artifact; no strategy children remain. Both workers are ready at
+    02:13 UTC. Native reads verify six fully protected positions per realm;
+    all four services have zero restarts/OOMs. Engine watchdogs are active
+    and host Python contains only pip and websocket-client. A 30-second
+    demo sample measures 28,537 WAL bytes/s with zero engine errors.
+    Hosted qualification `34074530152` passes 1,959 release tests and
+    account-state workloads. Its separately built Linux artifact measures
+    decision p99 6.0 µs and submit p50 1.09 ms, replacing the provisional
+    Linux budget with measured references and 1.5× limits. Doubling either
+    measured segment fails the validator. A compatible demo rollback remains open.
     The final developer gate passes 1,959 Rust tests (zero failed, seven ignored) and
     1,646 Python tests. All six venue feature builds and their tests pass;
     combined venue/public/market-data qualification passes 810 tests, with
@@ -71,7 +84,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     uses Bybit catalog decoding and continuing captured quotes with mocked
     transport, risk and collateral. Submit latency remains open. Current
     host reads show six fully protected positions per realm and healthy
-    incumbent engines and workers.
+    deployed engines and workers.
     [Execution measurements](docs/execution-performance.md) retain every
     measured cell and its interference/source limits.
 

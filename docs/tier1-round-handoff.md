@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define the execution ownership model, the current qualification checkpoint and the operational boundaries of the candidate engine.
+Define the execution ownership model, the current qualification checkpoint and the operational boundaries of the deployed engine.
 
 ## Spec Tables
 
@@ -59,14 +59,20 @@ Define the execution ownership model, the current qualification checkpoint and t
 | --- | --- |
 | Local Round-3 checkpoint | The final developer gate passes 1,959 Rust tests (zero failed, seven ignored) and 1,646 Python tests, with formatting and strict default workspace Clippy (`/tmp/r3-developer-check-8.log`). Release passes 1,957 tests, zero failed, seven ignored (`/tmp/r3-release-qualification.log`); two readback tests are debug-only. All six heavy fault seeds replay identically after two crashes each. The final gate includes the exact-boot fixture and mock catalog/identity support. |
 | Venue features | All six individual feature builds pass; venue/public/market-data tests pass 353 / 218 / 230 / 266 / 190 / 134 for Bybit / Binance / Hyperliquid / Lighter / MEXC / Variational respectively. The combined-feature suite passes 810 tests, two ignored; strict all-feature workspace Clippy passes. The default graph excludes k256 and sha3. `/tmp/r3-feature-*-{build,tests}.log`, `/tmp/r3-feature-qualification-all.log`, `/tmp/r3-all-feature-clippy-final.log`. |
+| Hosted qualification | [Run 34074530152](https://github.com/rob435/liquidity-migration/actions/runs/34074530152) passes 1,959 release tests, zero failed, seven ignored, account-state workloads and the latency check. Its separate native-target build measures decision p99 6.0 µs and submit p50 1.09 ms; these measured references calibrate the Linux budget. [Execution measurements](execution-performance.md) identifies artifact and build scope. |
 | Current-family rehearsal | Both complete retained families through the pinned 00:56 UTC current prefix pass the production exact-instrument embedded boot entry point, full-prefix reboot and real WAL rotation with exact ownership, accounting and lots intact. All 12 deliberately removed native stops are repaired, with zero opening/reduction orders. Bybit decodes its persisted catalog; transport, risk and collateral remain mocked. No future executions are supplied. `/tmp/r3-exact-boot-fixtures.log`; originals and captured hashes under `/tmp/r3-current-wal-20260907T005622Z`. The same run also passes the older fixture on the final helpers. |
-| Open acceptance | Submit latency; archived segment-version conversion; legacy retirement; hosted latency calibration; actual demo soak and compatible rollback drill. The live-network probe passes in a separate process; all async test attributes use paused clocks. The plan retains every unfinished row. |
+| Open acceptance | Submit latency; archived segment-version conversion; legacy retirement; compatible demo rollback drill. The live-network probe passes in a separate process; all async test attributes use paused clocks. The plan retains every unfinished row. |
 | Accounting baseline `2422be0d` | 2,333 release tests, six ignored, six repeated heavy fault seeds and real copied-WAL accounting fixtures; full historical evidence is retained in that Git revision |
 | Deployed corrective baseline | 2,426 debug and 2,426 release tests pass; six ignored in each profile. Strict Clippy, both doctest profiles, six repeated heavy fault seeds and copied-WAL boot/rotation/reboot pass. Source manifest covers 662 files. The required push gate passes. Corrected timer fixtures pass the Linux run: 2,430 tests, zero failed, six ignored; corrective handover succeeds on `bb4bc3d3`. [Evidence](tier1-round2-evidence.json) |
 | Previous `af09aab5` release | 2,404 release tests pass with strict Clippy, both doctest profiles, six repeated heavy fault seeds, copied-WAL boot/rotation/reboot and three measured process workloads. The mandatory pre-push developer gate passes 2,403 regular debug tests and 1,608 Python tests on `af09aab5`. [Evidence](tier1-round2-evidence.json) |
 | Regression controls | Actual assertion failures exist for callback timing/freshness, nonfinite fee preservation, canary exact terms, malformed private stream recovery and broken recovery CLI verbs; setup and compile failures add no count |
-| Local execution mode | Production, bench, simulation and backtest use the same embedded callback implementation; the deployed baseline still uses children |
-| Host evidence | [STATE.md](../STATE.md) owns dated observations. Both realms run `bb4bc3d3` after workflow `34055716541`. Native reads at 01:42 UTC verify six protected positions each, including ARB and JUP; services, heartbeats and loaded images verify active engines/workers, clear latches, zero strategy errors/restarts and the corrective release hashes. |
+| Local execution mode | Production, bench, simulation and backtest use the same embedded callback implementation; both deployed engines have zero strategy children |
+| Host evidence | [STATE.md](../STATE.md) owns dated observations. Workflow `34074541111` deploys `a4189a48` after 300 healthy demo seconds; hosted debug passes 1,961 tests, zero failed, seven ignored. Native reads and loaded-image checks at 02:13 UTC verify six protected positions each, active embedded engines and ready workers, clear latches, zero strategy errors/restarts/OOMs, and artifact hashes. Engine watchdogs are active; host Python contains only pip and websocket-client. |
+
+| Conditional retirement | Current evidence and required boundary |
+| --- | --- |
+| R3-07 segment readers | Quarantined families remain under `/var/lib/liquidity-migration-wal-quarantine`; v5 conversion or retirement is uncompleted. Keep every reader needed by retained state |
+| R3-08 legacy order terms | The pinned 00:56 UTC demo base retains three zero-filled cancelled probe requests without exact terms: `eng-1788685989000-{8,9,10}`. `retained_since_ms=1788702340615`; the seven-day plus two-minute retention requires both wall time and complete history strictly beyond 2026-09-13 13:47:40.615 UTC before natural expiry. Mainnet's six retained requests have exact terms. Rotation and archive/rollback dependencies still govern removal |
 
 ## Invariants
 

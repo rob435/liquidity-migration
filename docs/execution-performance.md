@@ -2,14 +2,14 @@
 
 ## Purpose
 
-State measured execution workloads, timing boundaries and resource limits for the deployed baseline and the Round-3 candidate.
+State measured execution workloads, timing boundaries and resource limits for the deployed Round-3 engine and its retained baseline.
 
 ## Spec Tables
 
 | Decision | Current evidence |
 | --- | --- |
-| Deployed baseline | `bb4bc3d3`; isolated strategy callbacks; dated host evidence lives in [STATE.md](../STATE.md) |
-| Local candidate | One embedded callback mode, Bybit default features and one dispatch barrier per order; broader qualification and deployment remain pending |
+| Deployed engine | `a4189a48`; embedded callbacks and default Bybit features; dated host evidence lives in [STATE.md](../STATE.md) |
+| Qualification | Local debug/release, all six venue features and hosted debug checks pass; deployment passes the 300-second demo gate. Hosted release tests and latency calibration pass |
 | Target gaps | Latest uncontended cells pass narrow decision p50 and wide decision p99; submit p50 remains above target |
 | Latest source boundary | Callback-buffer reuse, direct binary64 normalization, immutable envelope policy, reduced products, aggregate margin division, grouped pending risk and per-symbol pending quantity totals, covered native-stop writes, fresh priced-quantity grouping and batched exact sums; normal release builds carry no temporary profiling |
 
@@ -176,6 +176,20 @@ Latency cells are milliseconds, `p50 / p99 / p99.9`; MiB means 1,048,576 bytes.
 | --- | --- |
 | Source and scope | Grouped-risk source, before the quantity index; same 2,000-event / 100 Hz recipe. Temporary stage timing records median admission 326.771 µs, quantization/protection 161.875 µs and pre-send recheck 404.812 µs (`/tmp/r3-grouped-profile-unloaded.log`). |
 | Detailed capture | `/tmp/r3-detailed-risk-profile-unloaded.log`; per-call timers and stderr output make this diagnostic. Source instrumentation is removed and the normal release is rebuilt before the quantity-index cells. |
+
+### Hosted Linux qualification
+
+| Boundary | Evidence |
+| --- | --- |
+| Source / runner | `a4189a4897409e65acba7a2078b964986ceea928`, Rust 1.90.0, `ubuntu-latest`, `x86_64-unknown-linux-gnu`; [run 34074530152](https://github.com/rob435/liquidity-migration/actions/runs/34074530152) |
+| Build scope | The qualification job builds and tests its own release binaries with an explicit native target. Their hashes differ from the separately built deployment artifact; these measurements bind to the qualification artifact and source commit |
+| Recipe | 2,000 events / 100 Hz / BTCUSDT / every 20; 100 completed submits, 100 dispatch barriers, zero barrier failures |
+| Cell | Decision p50 / p99: 5.0 / 6.0 µs; submit p50 / p99: 1.09 / 2.40 ms; dispatch barrier p50: 635.9 µs |
+| Optimized checks | 1,959 tests passed, zero failed, seven ignored; two million account-state operations with 65,536 retained IDs, plus repeated history-recovery workloads |
+| Budget | [execution-latency-budgets.toml](execution-latency-budgets.toml) uses observed 6,000 ns decision p99 and 1,090,000 ns submit p50; 1.5× limits are 9,000 / 1,635,000 ns. Doubling either measured segment fails the validator |
+| Calibration boundary | The first run passes provisional 75,000 / 7,500,000 ns limits. Its unmodified log also passes the calibrated limits; the budget update has no runtime change |
+| Artifact | `/tmp/r3-hosted-qualified-a4189a48/engine-binaries-a4189a4897409e65acba7a2078b964986ceea928-qualified.tar.gz`; verified checksums and embedded qualification log. Raw log: `/tmp/r3-hosted-qualification-raw.log` |
+| Scope | One hosted runner sample is not a Mac result, venue-network latency or a universal Linux bound. The Mac submit target remains open |
 
 ## Invariants
 
