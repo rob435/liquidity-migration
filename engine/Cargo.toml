@@ -15,6 +15,7 @@ members = [
 
 [workspace.dependencies]
 async-trait = { version = "0.1.89" }
+base64 = { version = "0.22.1" }
 bytes = { version = "1.12.1" }
 crc32c = { version = "0.6.8" }
 engine-marketdata = { path = "engine-marketdata", default-features = false }

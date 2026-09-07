@@ -49,11 +49,8 @@ __all__ = [
     "callback_authorized",
     "main",
     "message_authorized",
-    "sleeve_pause_rewrite",
-    "sleeve_strip_rewrite",
 ]
 
-_MANAGED_SLEEVE_KEYS = ("LONG_SLEEVE", "CARRY_SLEEVE")
 CONTROL_HELPER = "/opt/liquidity-migration-engine/bin/telegram-control-helper"
 CONTROL_COMMANDS: dict[str, tuple[str, ...]] = {
     action: ("/usr/bin/sudo", "-n", CONTROL_HELPER, action)
@@ -61,7 +58,6 @@ CONTROL_COMMANDS: dict[str, tuple[str, ...]] = {
 }
 CONTROLS_STATE_DIR = Path("/var/lib/liquidity-migration-telegram-controls")
 
-_PAUSE_MARKER = "# paused by telegram-controls; resume restores the saved original"
 _ENVIRONMENTS = ("demo", "mainnet")
 
 
@@ -103,43 +99,6 @@ def load_config_from_environment() -> ControlsConfig | None:
         control_user_ids=frozenset(user_ids),
         offset_path=CONTROLS_STATE_DIR / "offset.json",
     )
-
-
-# Pure pieces: sleeve-file rewrites and authorization
-
-
-def _strip_managed_lines(text: str) -> list[str]:
-    kept: list[str] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped == _PAUSE_MARKER:
-            continue
-        key = stripped.split("=", 1)[0].strip() if "=" in stripped else ""
-        if key in _MANAGED_SLEEVE_KEYS:
-            continue
-        kept.append(line)
-    return kept
-
-
-def sleeve_pause_rewrite(text: str | None) -> str:
-    """Host override content with every managed sleeve set off, all else kept."""
-    kept = _strip_managed_lines(text or "")
-    lines = [*kept, _PAUSE_MARKER, *(f"{key}=off" for key in _MANAGED_SLEEVE_KEYS)]
-    return "\n".join(lines).strip("\n") + "\n"
-
-
-def sleeve_strip_rewrite(text: str | None) -> str | None:
-    """Fallback resume content: managed keys removed, or None to delete the file.
-
-    Used only when the verbatim pre-pause copy is missing; repo defaults then
-    decide what runs.
-    """
-    if text is None:
-        return None
-    kept = _strip_managed_lines(text)
-    if not any(line.strip() for line in kept):
-        return None
-    return "\n".join(kept).strip("\n") + "\n"
 
 
 def message_authorized(message: Mapping[str, Any], config: ControlsConfig) -> bool:
@@ -354,15 +313,6 @@ class VpsFleet:
 
     def mainnet_present(self) -> bool:
         return self._fleet_status().owner("mainnet").active == "active"
-
-    def paused(self, environment: str) -> bool:
-        status = self._fleet_status()
-        if environment not in _ENVIRONMENTS:
-            raise ValueError(f"unsupported environment: {environment}")
-        return not any(status.entries[environment].values())
-
-    def resolved_sleeves(self) -> dict[str, str]:
-        return {f"{name.upper()}_SLEEVE": state for name, state in self._fleet_status().sleeves.items()}
 
     def pause(self, environment: str) -> str:
         action = {"demo": "pause-demo", "mainnet": "pause-mainnet"}.get(environment)

@@ -229,7 +229,7 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     esac
     curve_samples="${2:-240}"
     [[ "$curve_samples" =~ ^[1-9][0-9]*$ ]] || die_usage "curve samples must be a positive integer"
-    remote_exec 'exec "$REPO_DIR/.venv/bin/python" "$REPO_DIR/scripts/runtime/record_equity.py" \
+    remote_exec 'exec /opt/liquidity-migration-engine/bin/engine-tools record-equity \
       --show "${REMOTE_ARGS[0]}" --samples "${REMOTE_ARGS[1]}"' "$curve_realm" "$curve_samples"
     ;;
   research-refresh)

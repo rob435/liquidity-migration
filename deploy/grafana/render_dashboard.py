@@ -6,7 +6,7 @@ written, so a panel is added in twenty lines of Python rather than two hundred
 of hand-edited JSON. `--check` fails when the committed JSON is not what this
 script renders, which is how the test keeps them together.
 
-Every expression here charts a field `scripts/runtime/record_equity.py` pushes.
+Every expression here charts a field `engine-tools record-equity` pushes.
 The realm variable is fed by `lm_engine_up`, so recorder panels, whose realm is
 a venue, deliberately do not filter on it.
 """

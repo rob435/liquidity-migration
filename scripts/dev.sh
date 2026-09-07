@@ -57,7 +57,6 @@ MYPY_TARGETS=(
   scripts/release_artifact.py
   scripts/data/build_candidate_tape.py
   scripts/runtime/check_fleet_liveness.py
-  scripts/runtime/record_equity.py
   deploy/grafana/render_dashboard.py
 )
 

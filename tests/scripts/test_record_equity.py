@@ -1,4 +1,4 @@
-"""The minute sampler that gives the fleet an equity history, and its unit."""
+"""Deployment and dashboard contracts for the Rust fleet sampler."""
 
 from __future__ import annotations
 
@@ -6,596 +6,29 @@ import importlib.util
 import json
 import shlex
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts" / "runtime" / "record_equity.py"
-SYSTEMD = ROOT / "deploy" / "systemd"
-MANIFEST = ROOT / "deploy" / "fleet_manifest.tsv"
-
-
-def _module() -> Any:
-    spec = importlib.util.spec_from_file_location("record_equity", SCRIPT)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["record_equity"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-record_equity = _module()
-
-
-def _heartbeat(now_ms: int, **overrides: Any) -> dict[str, Any]:
-    beat = {
-        "wall_ts_ms": now_ms - 3_000,
-        "account_observed_wall_ts_ms": now_ms - 4_000,
-        "account_equity_usdt": 130.28,
-        "account_available_usdt": 118.29,
-        "may_open": True,
-        "mode": "live",
-        "realm": "mainnet",
-        "venue": "bybit",
-        "engine_commit": "14383fd5",
-        "rolling_loss_net_usdt": 1.59,
-        "rolling_loss_limit_usdt": 13.0,
-        "rolling_loss_tripped": False,
-        "positions": [
-            {"symbol": "NEARUSDT", "side": "long", "qty": 20.7, "entry_px": 2.0, "strategy": "long"},
-            {"symbol": "AAVEUSDT", "side": "short", "qty": -1.0, "entry_px": 100.0, "strategy": "carry"},
-        ],
-        "strategies": ["carry", "long", "exodus"],
-        "strategy_entries_enabled": [
-            {"strategy": "carry", "entries_enabled": True},
-            {"strategy": "long", "entries_enabled": True},
-            {"strategy": "exodus", "entries_enabled": False},
-        ],
-        "entry_blockers": [{"strategy": "long", "symbol": "NEARUSDT", "reason": "inside_resize_band"}],
-        "strategy_errors": [],
-        "working_entries": [{"strategy": "carry", "symbol": "AAVEUSDT"}],
-        "pending_flatten_requests": [],
-        "decide_p50_ns": 41_000,
-        "decide_p99_ns": 90_000,
-        "durable_p99_ns": 2_100_000,
-        "wire_p99_ns": 310_000,
-        "ack_p99_ns": 48_000_000,
-        "end_to_end_p50_ns": 44_000_000,
-        "end_to_end_p99_ns": 51_000_000,
-        "quota_hold_p99_ns": None,
-    }
-    beat.update(overrides)
-    return beat
-
-
-def _worker_heartbeat(now_ms: int, **overrides: Any) -> dict[str, Any]:
-    beat = {
-        "updated_at_ms": now_ms - 2_000,
-        "status": "starting",
-        "source_generation": "g123",
-        "last_long_cycle_completed_wall_ts_ms": now_ms - 5_000,
-        "last_carry_cycle_completed_wall_ts_ms": None,
-        "rest_ticker_success_count": 3,
-        "rest_ticker_failure_count": 1,
-        "bybit_ws_connected": True,
-        "bybit_ws_gap_open": True,
-        "bybit_ws_gap_open_since_wall_ts_ms": now_ms - 10_000,
-        "bybit_ws_last_frame_ts_ms": now_ms - 100,
-        "bybit_ws_ticker_rows": 171,
-        "bybit_ws_ticker_capacity": 171,
-        "bybit_ws_ticker_coverage_complete": True,
-        "bybit_ws_ticker_topics_accepted": 171,
-        "bybit_ws_ticker_topics_quarantined": 0,
-        "bybit_ws_kline_topics_accepted": 171,
-        "bybit_ws_kline_topics_quarantined": 0,
-        "bybit_ws_queued_frames": 2,
-        "bybit_ws_queue_capacity": 342,
-        "spool_files": 1,
-        "spool_bytes": 120_981,
-        "spool_file_cap": 4_096,
-        "spool_byte_cap": 2_147_483_648,
-        "spool_backpressured": False,
-        "spool_backpressured_classes": [],
-        "replaceable_outputs_coalesced": 7,
-    }
-    beat.update(overrides)
-    return beat
-
-
-def test_realms_and_paths_come_from_the_fleet_manifest() -> None:
-    sources = record_equity.read_sources(MANIFEST)
-    engines = {source.realm: source.path for source in sources if source.kind == "engine"}
-    assert engines == {
-        "demo": Path("/var/lib/liquidity-migration-engine/heartbeat.json"),
-        "mainnet": Path("/var/lib/liquidity-migration-engine-mainnet/heartbeat.json"),
-    }
-    recorders = {source.realm for source in sources if source.kind == "recorder"}
-    assert recorders == {"bybit", "binance"}
-    workers = {source.realm: source.path for source in sources if source.kind == "worker"}
-    assert workers == {
-        "demo": Path("/var/lib/liquidity-migration-signal-worker-demo/heartbeat.json"),
-        "mainnet": Path("/var/lib/liquidity-migration-signal-worker-mainnet/heartbeat.json"),
-    }
-
-
-def test_a_live_heartbeat_becomes_the_numbers_a_curve_needs(tmp_path: Path) -> None:
-    now_ms = 1_788_000_000_000
-    beat = tmp_path / "heartbeat.json"
-    beat.write_text(json.dumps(_heartbeat(now_ms)), encoding="utf-8")
-
-    sample = record_equity.engine_sample("mainnet", beat, now_ms)
-
-    assert sample["state"] == "live"
-    assert sample["equity_usdt"] == 130.28
-    assert sample["available_usdt"] == 118.29
-    assert sample["heartbeat_age_ms"] == 3_000
-    assert sample["account_age_ms"] == 4_000
-    assert sample["position_count"] == 2
-    # Absolute exposure at entry: a short counts as size held, not negative.
-    assert sample["position_entry_notional_usdt"] == 141.4
-    assert sample["sleeve_positions"] == {"carry": 1, "long": 1, "exodus": 0}
-    assert sample["may_open"] == 1.0
-    assert sample["rolling_loss_tripped"] == 0.0
-    assert sample["entry_blockers"] == 1
-    assert sample["strategy_errors"] == 0
-
-
-def test_a_hand_position_the_engine_does_not_own_is_still_counted_once(tmp_path: Path) -> None:
-    # The heartbeat writes `strategy: null` for exposure no single sleeve owns.
-    # Recording it as `unattributed` keeps the account's total honest without
-    # crediting a sleeve that does not hold it.
-    now_ms = 1_788_000_000_000
-    beat = tmp_path / "heartbeat.json"
-    positions = [{"symbol": "1000PEPEUSDT", "side": "long", "qty": 100.0, "entry_px": 0.004, "strategy": None}]
-    beat.write_text(json.dumps(_heartbeat(now_ms, positions=positions)), encoding="utf-8")
-
-    sample = record_equity.engine_sample("mainnet", beat, now_ms)
-
-    assert sample["sleeve_positions"] == {"carry": 0, "long": 0, "exodus": 0, "unattributed": 1}
-    assert sample["position_count"] == 1
-
-
-def test_every_configured_sleeve_is_a_series_even_while_it_holds_nothing(tmp_path: Path) -> None:
-    # Exodus holds nothing most of the month. A chart that only shows sleeves
-    # with positions cannot show that; a zero can.
-    now_ms = 1_788_000_000_000
-    beat = tmp_path / "heartbeat.json"
-    beat.write_text(json.dumps(_heartbeat(now_ms)), encoding="utf-8")
-
-    sample = record_equity.engine_sample("mainnet", beat, now_ms)
-    line = record_equity.line_protocol(sample)
-
-    assert sample["sleeve_entries_enabled"] == {"carry": 1, "long": 1, "exodus": 0}
-    assert sample["sleeve_blockers"] == {"carry": 0, "long": 1, "exodus": 0}
-    for field in (
-        "sleeve_exodus_positions=0.0",
-        "sleeve_exodus_entries_enabled=0.0",
-        "sleeve_long_entries_enabled=1.0",
-        "sleeve_long_blockers=1.0",
-        "sleeve_exodus_blockers=0.0",
-    ):
-        assert f",{field}," in f",{line.split(' ')[1]},", field
-
-
-def test_the_order_path_steps_pass_through_and_an_empty_window_is_absent_not_zero(tmp_path: Path) -> None:
-    now_ms = 1_788_000_000_000
-    beat = tmp_path / "heartbeat.json"
-    beat.write_text(json.dumps(_heartbeat(now_ms)), encoding="utf-8")
-
-    sample = record_equity.engine_sample("mainnet", beat, now_ms)
-    fields = dict(pair.split("=", 1) for pair in record_equity.line_protocol(sample).split(" ")[1].split(","))
-
-    assert sample["decide_p99_ns"] == 90_000.0
-    assert sample["end_to_end_p99_ns"] == 51_000_000.0
-    assert sample["working_entries"] == 1
-    assert sample["pending_flatten_requests"] == 0
-    assert fields["ack_p99_ns"] == "48000000.0"
-    # The ledger wrote null: nothing was measured, and nothing must be charted.
-    assert sample["quota_hold_p99_ns"] is None
-    assert "quota_hold_p99_ns" not in fields
-    assert "wire_p50_ns" not in fields
-    assert set(record_equity.ORDER_PATH_FIELDS) <= set(sample)
-
-
-def test_a_realm_with_no_heartbeat_is_recorded_and_pushed_as_down(tmp_path: Path) -> None:
-    # The whole point of the file: an engine that was down for two hours has
-    # 120 lines saying so. A curve that simply stops cannot be told apart from
-    # a sampler that stopped, locally or in the remote.
-    now_ms = 1_788_000_000_000
-    sample = record_equity.engine_sample("demo", tmp_path / "gone.json", now_ms)
-
-    assert sample == {"ts_ms": now_ms, "realm": "demo", "kind": "engine", "state": "absent"}
-    line = record_equity.line_protocol(sample)
-    assert line.startswith("lm_engine,realm=demo up=0")
-    assert line.endswith(str(now_ms * 1_000_000))
-
-
-@pytest.mark.parametrize(
-    ("sampler", "stamp_key", "scale", "limit_ms", "age_key", "value_key"),
-    [
-        ("engine_sample", "wall_ts_ms", 1, 60_000, "heartbeat_age_ms", "account_equity_usdt"),
-        ("worker_sample", "updated_at_ms", 1, 60_000, "heartbeat_age_ms", "status"),
-        ("recorder_sample", "recorded_at_ns", 1_000_000, 120_000, "status_age_ms", "written_rows"),
-    ],
-)
-def test_stopped_source_is_down_without_republishing_old_values(
-    tmp_path: Path, sampler: str, stamp_key: str, scale: int, limit_ms: int, age_key: str, value_key: str
-) -> None:
-    now_ms = 1_788_000_000_000
-    path = tmp_path / "source.json"
-    payload = {stamp_key: (now_ms - limit_ms) * scale, value_key: "ready" if value_key == "status" else 130.28}
-    path.write_text(json.dumps(payload))
-    sample_source = getattr(record_equity, sampler)
-
-    assert sample_source("mainnet", path, now_ms)["state"] == "live"
-    stale = sample_source("mainnet", path, now_ms + 1)
-
-    assert stale["state"] == "stale"
-    assert stale[age_key] == limit_ms + 1
-    assert set(stale) == {"ts_ms", "realm", "kind", "state", age_key}
-    fields = record_equity.line_protocol(stale).split(" ")[1]
-    assert set(fields.split(",")) == {"up=0.0", f"{age_key}={float(limit_ms + 1)}"}
-    record_equity.append(tmp_path, stale)
-    if sampler == "engine_sample":
-        curve = record_equity.render_curve(tmp_path, "mainnet", samples=1)
-        assert "1 of 1 samples had no live heartbeat" in curve
-        assert "130.28" not in curve
-
-
-@pytest.mark.parametrize("stamp", [None, True, "1788000000000", float("nan"), float("inf"), -1, 1_788_000_000_001])
-@pytest.mark.parametrize(
-    ("sampler", "stamp_key", "scale"),
-    [
-        ("engine_sample", "wall_ts_ms", 1),
-        ("worker_sample", "updated_at_ms", 1),
-        ("recorder_sample", "recorded_at_ns", 1_000_000),
-    ],
-)
-def test_source_without_valid_timestamp_is_not_online(
-    tmp_path: Path, sampler: str, stamp_key: str, scale: int, stamp: Any
-) -> None:
-    path = tmp_path / "source.json"
-    if type(stamp) in (int, float):
-        stamp *= scale
-    path.write_text(json.dumps({stamp_key: stamp}))
-
-    sample = getattr(record_equity, sampler)("mainnet", path, 1_788_000_000_000)
-
-    assert sample["state"] == "unreadable"
-    assert "timestamp" in sample["error"]
-    assert record_equity.line_protocol(sample).split(" ")[1] == "up=0.0"
+RUST_SOURCE = ROOT / "engine/engine-tools/src/equity_recorder.rs"
+ORACLE = ROOT / "engine/engine-tools/tests/fixtures/equity_recorder_oracle.json"
+SYSTEMD = ROOT / "deploy/systemd"
+MANIFEST = ROOT / "deploy/fleet_manifest.tsv"
 
 
 def test_sample_freshness_uses_the_deployed_liveness_limits() -> None:
-    spec = importlib.util.spec_from_file_location("equity_liveness", SCRIPT.with_name("check_fleet_liveness.py"))
+    spec = importlib.util.spec_from_file_location("equity_liveness", ROOT / "scripts/runtime/check_fleet_liveness.py")
     assert spec and spec.loader
     liveness = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = liveness
     spec.loader.exec_module(liveness)
+    limits = json.loads(ORACLE.read_text())["freshness_limits_ms"]
     defaults = liveness.build_arg_parser().parse_args([])
-    assert record_equity._HEARTBEAT_MAX_AGE_MS == defaults.max_heartbeat_age_sec * 1_000
+    assert limits["engine"] == limits["worker"] == defaults.max_heartbeat_age_sec * 1_000
     unit = (SYSTEMD / "liquidity-migration-host-liveness.service").read_text().replace("\\\n", " ")
     command = next(line.removeprefix("ExecStart=") for line in unit.splitlines() if line.startswith("ExecStart="))
     args = liveness.build_arg_parser().parse_args(shlex.split(command)[2:])
-    assert record_equity._RECORDER_MAX_AGE_MS == args.max_heartbeat_age_sec * 1_000
-
-
-def test_main_observes_each_source_after_reading_it(tmp_path: Path, monkeypatch) -> None:
-    now_ms = 1_788_000_000_000
-    clock_ms = [now_ms]
-    sources = []
-    payloads = {}
-    for kind, key, scale in (
-        ("engine", "wall_ts_ms", 1),
-        ("worker", "updated_at_ms", 1),
-        ("recorder", "recorded_at_ns", 1_000_000),
-    ):
-        path = tmp_path / f"{kind}.json"
-        sources.append(record_equity.Source(realm="mainnet", kind=kind, path=path))
-        payloads[path] = (key, scale)
-    read_text = Path.read_text
-
-    def read_updated_source(path, *args, **kwargs):
-        if path in payloads:
-            clock_ms[0] += 1
-            key, scale = payloads[path]
-            path.write_text(json.dumps({key: clock_ms[0] * scale + (scale // 4 if scale > 1 else 0)}))
-        return read_text(path, *args, **kwargs)
-
-    samples = []
-    monkeypatch.setattr(Path, "read_text", read_updated_source)
-    monkeypatch.setattr(record_equity.time, "time_ns", lambda: clock_ms[0] * 1_000_000 + 500_000)
-    monkeypatch.setattr(record_equity, "read_sources", lambda _path: sources)
-    monkeypatch.setattr(record_equity, "append", lambda _path, sample: samples.append(sample))
-    for key in ("METRICS_PUSH_URL", "METRICS_PUSH_USER", "METRICS_PUSH_TOKEN"):
-        monkeypatch.delenv(key, raising=False)
-
-    assert record_equity.main(["--state-dir", str(tmp_path)]) == 0
-    assert [sample["state"] for sample in samples] == ["live"] * 3
-    assert [sample["ts_ms"] for sample in samples] == [now_ms + 1, now_ms + 2, now_ms + 3]
-
-
-def test_p999_preserves_old_missing_empty_and_measured_zero_windows(tmp_path: Path) -> None:
-    now_ms = 1_788_000_000_000
-    beat = tmp_path / "heartbeat.json"
-    stages = (
-        "decide", "durable", "wire", "ack", "dispatch_queue", "venue_task",
-        "core_resume", "end_to_end", "barrier_wait", "quota_hold",
-    )
-    keys = {f"{stage}_p999_ns" for stage in stages}
-    for values in ({}, {key: None for key in keys}, {key: 0 for key in keys}):
-        beat.write_text(json.dumps(_heartbeat(now_ms, **values)), encoding="utf-8")
-        sample = record_equity.engine_sample("mainnet", beat, now_ms)
-        fields = dict(pair.split("=", 1) for pair in record_equity.line_protocol(sample).split(" ")[1].split(","))
-        for key in keys:
-            assert key in sample
-            if values.get(key) == 0:
-                assert sample[key] == 0.0
-                assert fields[key] == "0.0"
-            else:
-                assert sample[key] is None
-                assert key not in fields
-        assert sample["decide_p99_ns"] == 90_000.0
-
-    measured = {key: 100_000 + i for i, key in enumerate(sorted(keys))}
-    beat.write_text(json.dumps(_heartbeat(now_ms, **measured)), encoding="utf-8")
-    sample = record_equity.engine_sample("mainnet", beat, now_ms)
-    fields = dict(pair.split("=", 1) for pair in record_equity.line_protocol(sample).split(" ")[1].split(","))
-    for key, value in measured.items():
-        assert sample[key] == float(value)
-        assert fields[key] == str(float(value))
-    path = record_equity.append(tmp_path, sample)
-    assert json.loads(path.read_text(encoding="utf-8")) == sample
-
-
-def test_an_unparsable_heartbeat_is_a_sample_not_a_crash(tmp_path: Path) -> None:
-    beat = tmp_path / "heartbeat.json"
-    beat.write_text("{half a li", encoding="utf-8")
-
-    sample = record_equity.engine_sample("mainnet", beat, 1_788_000_000_000)
-
-    assert sample["state"] == "unparsable"
-    assert sample["error"]
-    assert record_equity.line_protocol(sample).count("up=0") == 1
-
-
-def test_every_live_sample_field_becomes_one_metric_field(tmp_path: Path) -> None:
-    now_ms = 1_788_000_000_000
-    beat = tmp_path / "heartbeat.json"
-    beat.write_text(json.dumps(_heartbeat(now_ms)), encoding="utf-8")
-
-    line = record_equity.line_protocol(record_equity.engine_sample("mainnet", beat, now_ms))
-    head, fields, stamp = line.split(" ")
-
-    assert head == "lm_engine,realm=mainnet"
-    assert stamp == str(now_ms * 1_000_000)
-    keys = {pair.split("=", 1)[0] for pair in fields.split(",")}
-    assert {"up", "equity_usdt", "available_usdt", "position_count", "may_open"} <= keys
-    # Strings are tags or dropped; a field must always parse as a number.
-    for pair in fields.split(","):
-        float(pair.split("=", 1)[1])
-
-
-def test_samples_land_in_one_monthly_file_per_realm_and_append(tmp_path: Path) -> None:
-    stamp = int(time.mktime((2026, 9, 3, 23, 15, 0, 0, 0, 0)) * 1000)
-    first = {"ts_ms": stamp, "realm": "mainnet", "kind": "engine", "state": "live", "equity_usdt": 1.0}
-    second = {**first, "ts_ms": stamp + 60_000, "equity_usdt": 2.0}
-
-    path = record_equity.append(tmp_path, first)
-    assert record_equity.append(tmp_path, second) == path
-    assert path.name.startswith("engine-mainnet-2026-09")
-
-    lines = path.read_text(encoding="utf-8").splitlines()
-    assert [json.loads(line)["equity_usdt"] for line in lines] == [1.0, 2.0]
-
-
-def test_a_sample_too_large_to_append_atomically_is_refused(tmp_path: Path) -> None:
-    # One append is one line and this is the only writer, which is only safe
-    # while the line stays under the atomic write size.
-    huge = {
-        "ts_ms": 1_788_000_000_000,
-        "realm": "mainnet",
-        "kind": "engine",
-        "state": "live",
-        "error": "x" * 5_000,
-    }
-    try:
-        record_equity.append(tmp_path, huge)
-    except ValueError as error:
-        assert "append cap" in str(error)
-    else:
-        raise AssertionError("an oversized sample must be refused, not silently torn")
-
-
-def test_tag_values_with_line_protocol_metacharacters_are_escaped() -> None:
-    sample = {"ts_ms": 1, "realm": "one two,three=four", "kind": "engine", "state": "live"}
-    line = record_equity.line_protocol(sample)
-    assert r"realm=one\ two\,three\=four" in line
-
-
-def test_realm_is_the_only_tag_so_one_realm_is_one_series_through_an_outage() -> None:
-    # A tag that changes value starts a new series. Tagging `state`, or a
-    # `venue` only known while the engine is up, would split a realm's history
-    # in two at the moment it went down -- the moment the history is for.
-    now_ms = 1_788_000_000_000
-    down = record_equity.engine_sample("mainnet", Path("/nonexistent"), now_ms)
-    up_head = "lm_engine,realm=mainnet"
-    assert record_equity.line_protocol(down).split(" ")[0] == up_head
-
-    beat = Path(__file__).parent / "does-not-exist"
-    assert not beat.exists()
-    live = {
-        "ts_ms": now_ms,
-        "realm": "mainnet",
-        "kind": "engine",
-        "state": "live",
-        "venue": "bybit",
-        "mode": "live",
-        "equity_usdt": 130.0,
-    }
-    assert record_equity.line_protocol(live).split(" ")[0] == up_head
-
-
-def test_the_recorder_sample_carries_the_budget_and_the_drops(tmp_path: Path) -> None:
-    now_ms = 1_788_000_000_000
-    status = tmp_path / "status.json"
-    status.write_text(
-        json.dumps(
-            {
-                "venue": "bybit",
-                "recorded_at_ns": (now_ms - 1_000) * 1_000_000,
-                "last_receive_ns": (now_ms - 500) * 1_000_000,
-                "received_frames": 12_566_753,
-                "written_rows": 13_825_572,
-                "dropped_frames": 0,
-                "disk_dropped_frames": 0,
-                "queued_frames": 2,
-                "snapshot_failures": 0,
-                "free_disk_bytes": 54_422_888_448,
-                "disk_blocked": False,
-                "queue_capacity": 131072,
-                "budget": {"projected_month_gb": 1670.2, "monthly_gb": 2400.0, "over": False, "shed": []},
-                "shards": [
-                    {"index": 0, "connected": True, "reconnects": 2},
-                    {"index": 1, "connected": True, "reconnects": 499},
-                    {"index": 2, "connected": False, "reconnects": 0},
-                ],
-                "bytes": {"received_24h": 53_045_936_545, "window_seconds": 60_197},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    sample = record_equity.recorder_sample("bybit", status, now_ms)
-
-    assert sample["state"] == "live"
-    assert sample["projected_month_gb"] == 1670.2
-    assert sample["queue_capacity"] == 131072.0
-    assert sample["queue_fill"] == round(2 / 131072, 6)
-    assert sample["shards"] == 3
-    assert sample["shards_connected"] == 2
-    assert sample["reconnects"] == 501
-    assert sample["bytes_24h"] == 53_045_936_545.0
-    assert sample["disk_blocked"] == 0.0
-    assert sample["monthly_gb"] == 2400.0
-    assert sample["budget_over"] == 0.0
-    assert sample["shed_feeds"] == 0
-    assert sample["status_age_ms"] == 1_000
-    assert sample["receive_age_ms"] == 500
-    line = record_equity.line_protocol(sample)
-    assert line.startswith("lm_recorder,realm=bybit ")
-    assert ",up=1.0," in line
-
-
-def test_the_worker_sample_carries_the_verdict_and_the_supporting_facts(tmp_path: Path) -> None:
-    now_ms = 1_788_000_000_000
-    beat = tmp_path / "heartbeat.json"
-    beat.write_text(json.dumps(_worker_heartbeat(now_ms)), encoding="utf-8")
-
-    sample = record_equity.worker_sample("mainnet", beat, now_ms)
-
-    assert sample["state"] == "live"
-    assert sample["heartbeat_age_ms"] == 2_000
-    assert sample["status_healthy"] == 1.0
-    assert sample["status_ready"] == 0.0
-    assert sample["status_starting"] == 1.0
-    assert sample["status_recovering"] == 0.0
-    assert sample["ws_connected"] == 1.0
-    assert sample["ws_gap_open"] == 1.0
-    assert sample["ws_gap_age_ms"] == 10_000
-    assert sample["ws_last_frame_age_ms"] == 100
-    assert sample["ticker_coverage_complete"] == 1.0
-    assert sample["ticker_topics_accepted"] == 171.0
-    assert sample["kline_topics_accepted"] == 171.0
-    assert sample["long_cycle_age_ms"] == 5_000
-    assert sample["carry_cycle_age_ms"] is None
-    assert sample["ws_queue_fill"] == round(2 / 342, 6)
-    assert sample["spool_backpressured"] == 0.0
-    assert sample["spool_byte_fill"] == round(120_981 / 2_147_483_648, 6)
-    line = record_equity.line_protocol(sample)
-    assert line.startswith("lm_worker,realm=mainnet ")
-    assert ",up=1.0," in line
-
-    beat.write_text(json.dumps(_worker_heartbeat(now_ms, status="recovering")), encoding="utf-8")
-    recovering = record_equity.worker_sample("mainnet", beat, now_ms)
-    assert recovering["status_healthy"] == 1.0
-    assert recovering["status_recovering"] == 1.0
-
-
-def test_a_run_with_no_sink_configured_records_and_exits_zero(tmp_path: Path, capsys, monkeypatch) -> None:
-    for key in ("METRICS_PUSH_URL", "METRICS_PUSH_USER", "METRICS_PUSH_TOKEN"):
-        monkeypatch.delenv(key, raising=False)
-    manifest = tmp_path / "manifest.tsv"
-    manifest.write_text(
-        "# fleet-manifest-v2\n"
-        "liquidity-migration-engine-mainnet.service|service|mainnet|owner|20|mainnet|funded|-|"
-        f"active|{tmp_path / 'absent.json'}|-|-|-|-|-|-\n",
-        encoding="utf-8",
-    )
-    state = tmp_path / "equity"
-
-    code = record_equity.main(["--state-dir", str(state), "--manifest", str(manifest)])
-
-    assert code == 0
-    assert "no metrics sink configured" in capsys.readouterr().out
-    written = list(state.glob("engine-mainnet-*.jsonl"))
-    assert len(written) == 1
-    assert json.loads(written[0].read_text(encoding="utf-8").splitlines()[0])["state"] == "absent"
-
-
-def test_a_failed_push_warns_and_still_exits_zero(tmp_path: Path, capsys, monkeypatch) -> None:
-    # The remote is a view. Losing it must never cost the local record or
-    # leave a oneshot unit in `failed`, which the host watchdog would page on.
-    monkeypatch.setenv("METRICS_PUSH_URL", "http://127.0.0.1:1/write")
-    monkeypatch.setenv("METRICS_PUSH_USER", "12345")
-    monkeypatch.setenv("METRICS_PUSH_TOKEN", "token")
-    monkeypatch.setattr(
-        record_equity,
-        "push",
-        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("connection refused")),
-    )
-    manifest = tmp_path / "manifest.tsv"
-    manifest.write_text(
-        "# fleet-manifest-v2\n"
-        "liquidity-migration-engine.service|service|demo|owner|10|always|direct|-|"
-        f"active|{tmp_path / 'absent.json'}|-|-|-|-|-|-\n",
-        encoding="utf-8",
-    )
-    state = tmp_path / "equity"
-
-    code = record_equity.main(["--state-dir", str(state), "--manifest", str(manifest)])
-
-    assert code == 0
-    assert "WARNING: metrics push failed" in capsys.readouterr().err
-    assert list(state.glob("engine-demo-*.jsonl"))
-
-
-def test_the_curve_shows_the_range_and_names_the_gap(tmp_path: Path) -> None:
-    base = 1_788_000_000_000
-    for index in range(10):
-        sample: dict[str, Any] = {
-            "ts_ms": base + index * 60_000,
-            "realm": "mainnet",
-            "kind": "engine",
-            "state": "absent" if index in (4, 5) else "live",
-        }
-        if sample["state"] == "live":
-            sample.update({"equity_usdt": 100.0 + index, "available_usdt": 90.0, "position_count": 1, "may_open": 1.0})
-        record_equity.append(tmp_path, sample)
-
-    curve = record_equity.render_curve(tmp_path, "mainnet", 240)
-
-    assert "samples=10" in curve
-    assert "equity 100.00 .. 109.00 USDT" in curve
-    assert "net +9.00" in curve
-    assert "2 of 10 samples had no live heartbeat" in curve
-
-
-def test_an_empty_state_directory_says_so_rather_than_failing(tmp_path: Path) -> None:
-    assert "no equity samples yet" in record_equity.render_curve(tmp_path, "mainnet", 60)
+    assert limits["recorder"] == args.max_heartbeat_age_sec * 1_000
 
 
 def test_the_recorder_unit_is_sandboxed_and_holds_no_venue_credentials() -> None:
@@ -613,7 +46,10 @@ def test_the_recorder_unit_is_sandboxed_and_holds_no_venue_credentials() -> None
         "ReadWritePaths=/var/lib/liquidity-migration/equity",
     ):
         assert setting in unit, setting
-    assert "ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/record_equity.py" in unit
+    assert (
+        "ExecStart=/opt/liquidity-migration-engine/bin/engine-tools record-equity "
+        "--manifest /opt/liquidity-migration/deploy/fleet_manifest.tsv"
+    ) in unit
     # Stronger than unsetting keys it was handed: it is handed none. Every
     # bybit-*.env carries live account credentials.
     assert "bybit" not in unit
@@ -639,7 +75,7 @@ def test_the_timer_samples_every_minute_and_never_replays_a_missed_one() -> None
 def test_the_sink_variables_are_documented_and_templated() -> None:
     template = (ROOT / "deploy" / "observability.env.template").read_text(encoding="utf-8")
     doc = (ROOT / "docs" / "observability.md").read_text(encoding="utf-8")
-    script = SCRIPT.read_text(encoding="utf-8")
+    script = RUST_SOURCE.read_text(encoding="utf-8")
     for key in ("METRICS_PUSH_URL", "METRICS_PUSH_USER", "METRICS_PUSH_TOKEN"):
         assert f"{key}=" in template, key
         assert key in doc, key
@@ -699,66 +135,18 @@ def test_account_cards_show_stale_instead_of_last_known_account_values() -> None
     assert 'and on(realm) (lm_engine_up{realm=~"$realm"} == 1)' in panels[2]["targets"][0]["expr"]
 
 
-def test_the_dashboard_charts_only_fields_the_sampler_actually_pushes(tmp_path: Path) -> None:
+def test_the_dashboard_charts_only_fields_the_sampler_actually_pushes() -> None:
     import re
 
-    dashboard = _dashboard()
-    expressions = " ".join(_expressions(dashboard))
-    now_ms = 1_788_000_000_000
-    beat = tmp_path / "heartbeat.json"
-    # A heartbeat with every field present, so the set of series the sampler
-    # can produce is the full one.
-    counters = {
-        "uptime_s": 1,
-        "market_events": 1,
-        "orders_sent": 1,
-        "fills": 1,
-        "stream_resets": 0,
-        "amends_confirmed": 0,
-        "amends_pulled_unconfirmed": 0,
-        "rolling_loss_trades": 0,
-        "venue_clock_offset_ms": 1,
-        "fills_maker_share": 1.0,
-        "fill_all_in_arrival_bps": 1.0,
-        "fill_arrival_shortfall_bps": 1.0,
-        "fill_fee_coverage": 1.0,
-        "fill_markout_1m_our_way_bps": 1.0,
+    expressions = " ".join(_expressions(_dashboard()))
+    cases = json.loads(ORACLE.read_text())["cases"]
+    lines = {case["kind"]: case["line_protocol"] for case in cases if case["name"] == "all_fields"}
+    assert set(lines) == {"engine", "worker", "recorder"}
+    fields = {
+        kind: {pair.split("=", 1)[0] for pair in line.split(" ")[1].split(",")}
+        for kind, line in lines.items()
     }
-    ledger = {key: 1 for key in record_equity.ORDER_PATH_FIELDS}
-    beat.write_text(json.dumps(_heartbeat(now_ms, **counters, **ledger)), encoding="utf-8")
-    engine_line = record_equity.line_protocol(record_equity.engine_sample("mainnet", beat, now_ms))
-    engine_fields = {pair.split("=", 1)[0] for pair in engine_line.split(" ")[1].split(",")}
-    status = tmp_path / "status.json"
-    status.write_text(
-        json.dumps(
-            {
-                "venue": "bybit",
-                "recorded_at_ns": now_ms * 1_000_000,
-                "last_receive_ns": now_ms * 1_000_000,
-                "received_frames": 1,
-                "written_rows": 1,
-                "queued_frames": 0,
-                "dropped_frames": 0,
-                "disk_dropped_frames": 0,
-                "snapshot_failures": 0,
-                "free_disk_bytes": 1,
-                "queue_capacity": 1,
-                "budget": {"projected_month_gb": 1.0, "monthly_gb": 2.0, "over": False, "shed": []},
-                "shards": [{"connected": True, "reconnects": 0}],
-                "bytes": {"received_24h": 1},
-            }
-        ),
-        encoding="utf-8",
-    )
-    recorder_line = record_equity.line_protocol(record_equity.recorder_sample("bybit", status, now_ms))
-    recorder_fields = {pair.split("=", 1)[0] for pair in recorder_line.split(" ")[1].split(",")}
-    worker_beat = tmp_path / "worker-heartbeat.json"
-    worker_beat.write_text(
-        json.dumps(_worker_heartbeat(now_ms, last_carry_cycle_completed_wall_ts_ms=now_ms - 6_000)),
-        encoding="utf-8",
-    )
-    worker_line = record_equity.line_protocol(record_equity.worker_sample("mainnet", worker_beat, now_ms))
-    worker_fields = {pair.split("=", 1)[0] for pair in worker_line.split(" ")[1].split(",")}
+    engine_fields, recorder_fields, worker_fields = (fields[kind] for kind in ("engine", "recorder", "worker"))
 
     charted_engine = set(re.findall(r"lm_engine_([a-z0-9_]+)", expressions))
     charted_recorder = set(re.findall(r"lm_recorder_([a-z0-9_]+)", expressions))

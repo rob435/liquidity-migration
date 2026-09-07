@@ -30,7 +30,7 @@ def test_demo_gate_precedes_every_mainnet_candidate_change(tmp_path: Path, soak_
         "seed_generation_record build_engine fetch_exact_commit ensure_runtime_identities "
         "install_python_environment seed_realm_fingerprints prepare_oncall_inputs install_units "
         "start_independent_units prepare_demo_inputs record_generation verify_mode "
-        "stage_demo_candidate pin_mainnet_runtime clear_demo_candidate_override"
+        "stage_demo_candidate pin_mainnet_runtime clear_demo_candidate_override clear_recorder_runtime"
     ).split()
     harness = "\n".join([
         "set -euo pipefail",
@@ -62,6 +62,197 @@ def test_demo_gate_precedes_every_mainnet_candidate_change(tmp_path: Path, soak_
         assert "demo-soak" in trace, trace
         assert trace.index("handover-demo") < trace.index("demo-soak") < trace.index("candidate-shared-install")
         assert trace.index("candidate-shared-install") < trace.index("mainnet-config") < trace.index("handover-mainnet")
+
+
+@pytest.fixture
+def recorder_handover(tmp_path: Path):
+    import json
+
+    repo, release, units = (tmp_path / name for name in ("repo", "release", "units"))
+    for path in (repo / "deploy/systemd", repo / "scripts/runtime", release / "bin", units):
+        path.mkdir(parents=True)
+    unit = "liquidity-migration-equity-recorder.service"
+    script = repo / "scripts/runtime/record_equity.py"
+    manifest = repo / "deploy/fleet_manifest.tsv"
+    manifest.write_text("# recorder handover fixture\n")
+    for name in ("lib_sleeves.sh", "lib_systemd_environment.sh"):
+        (repo / "deploy" / name).write_text("")
+
+    sample = (
+        "import json,os,pathlib,sys\n"
+        "with pathlib.Path(os.environ['RECORDER_SAMPLES']).open('a') as output:\n"
+        " output.write(json.dumps({'phase':os.environ.get('RECORDER_PHASE','handover'),"
+        "'implementation':IMPLEMENTATION})+'\\n')\n"
+    )
+    script.write_text("IMPLEMENTATION='python'\n" + sample)
+    incumbent_unit = subprocess.check_output(
+        ["git", "show", "29366d3a:deploy/systemd/" + unit], cwd=ROOT, text=True,
+    ).replace("/opt/liquidity-migration/.venv/bin/python", sys.executable)
+    (repo / "deploy/systemd" / unit).write_text(incumbent_unit)
+    (units / unit).write_text(incumbent_unit)
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "recorder fixture")
+    git("config", "user.email", "fixture@example.invalid")
+    git("add", ".")
+    git("commit", "-qm", "Python recorder")
+    python_commit = git("rev-parse", "HEAD")
+    script.unlink()
+    candidate_unit = (ROOT / "deploy/systemd" / unit).read_text().replace(
+        "/opt/liquidity-migration-engine", str(release),
+    ).replace("/opt/liquidity-migration", str(repo))
+    (repo / "deploy/systemd" / unit).write_text(candidate_unit)
+    git("add", "-A")
+    git("commit", "-qm", "Rust recorder")
+    rust_commit = git("rev-parse", "HEAD")
+    git("update-ref", "refs/remotes/origin/main", rust_commit)
+    git("checkout", "-q", "-B", "main", python_commit)
+
+    artifacts = tmp_path / "artifacts"
+    for commit, implementation in ((python_commit, "unsupported"), (rust_commit, "rust")):
+        directory = artifacts / commit
+        directory.mkdir(parents=True)
+        for binary in ("engine", "engine-tools", "signal-worker"):
+            executable = directory / binary
+            executable.write_text(
+                f"#!{sys.executable}\nIMPLEMENTATION={implementation!r}\n"
+                "import sys\n"
+                "if len(sys.argv)<2 or sys.argv[1]!='record-equity' or IMPLEMENTATION=='unsupported':\n"
+                " print('unsupported companion command',file=sys.stderr);sys.exit(2)\n"
+                + sample
+            )
+            executable.chmod(0o755)
+            (release / "bin" / binary).write_bytes((artifacts / python_commit / binary).read_bytes())
+            (release / "bin" / binary).chmod(0o755)
+    mock_bin = tmp_path / "mock-bin"
+    mock_bin.mkdir()
+    systemctl = mock_bin / "systemctl"
+    systemctl.write_text(
+        f"#!{sys.executable}\n"
+        "import os,pathlib,shlex,subprocess,sys\n"
+        "if sys.argv[1]=='daemon-reload': sys.exit(0)\n"
+        "if sys.argv[1]!='start': sys.exit('unexpected systemctl command')\n"
+        "unit=pathlib.Path(os.environ['LM_SYSTEMD_UNIT_DIR'])/sys.argv[2]\n"
+        "command=''\n"
+        "for source in [unit,*sorted(unit.with_name(unit.name+'.d').glob('*.conf'))]:\n"
+        " for line in source.read_text().splitlines():\n"
+        "  if line.startswith('ExecStart='): command=line.removeprefix('ExecStart=')\n"
+        "sys.exit(subprocess.run(shlex.split(command),cwd=os.environ['REPO_DIR']).returncode)\n"
+    )
+    systemctl.chmod(0o755)
+    samples = tmp_path / "samples.jsonl"
+    environment = {
+        "PATH": f"{mock_bin}:{os.environ['PATH']}", "REPO_DIR": str(repo),
+        "RELEASE_DIR": str(release), "ENGINE_TOOLS_BINARY": str(release / "bin/engine-tools"),
+        "ENGINE_BINARY": str(release / "bin/engine"), "LM_SYSTEMD_UNIT_DIR": str(units),
+        "RUNTIME_GROUP": subprocess.check_output(["id", "-gn"], text=True).strip(),
+        "RECORDER_SAMPLES": str(samples), "FIXTURE_ARTIFACTS": str(artifacts),
+        "SOAK_OVERRIDE": "20-demo-soak.conf", "REMOTE": "origin", "BRANCH": "main",
+    }
+
+    def run(commit: str, soak_status: int, *, compatible: bool = True):
+        baseline = {path.name: path.read_bytes() for path in (release / "bin").iterdir()}
+        expected = tmp_path / "incumbent"
+        expected.mkdir(exist_ok=True)
+        for name, data in baseline.items():
+            (expected / name).write_bytes(data)
+        noop = (
+            "seed_generation_record pin_mainnet_runtime install_python_environment "
+            "seed_realm_fingerprints prepare_oncall_inputs prepare_demo_inputs record_generation "
+            "verify_mode clear_demo_candidate_override"
+        ).split()
+        definitions = [function(name) for name in (
+            "cleanup_release", "fetch_exact_commit", "stage_demo_candidate", "deploy_mode",
+            "prepare_recorder_runtime", "clear_recorder_runtime",
+        ) if f"{name}() {{" in remote()]
+        harness = "\n".join([
+            "set -euo pipefail", "QUALIFIED_RELEASE_DIR= INCUMBENT_STAGE= CANDIDATE_RELEASE_DIR=",
+            'fail() { echo "$*" >&2; exit 1; }',
+            *[f"{name}() {{ :; }}" for name in noop],
+            'install() { local last="${!#}"; if [ "$1" = -d ]; then mkdir -p "$last"; '
+            'else local before=$(( $# - 1 )); cp "${!before}" "$last"; chmod 0755 "$last"; fi; }',
+            "git_authorized() { :; }", "mainnet_armed() { return 0; }", "realm_unchanged() { return 1; }",
+            f"rollback_runtime_compatible() {{ return {0 if compatible else 1}; }}",
+            'build_engine() { QUALIFIED_RELEASE_DIR="$(mktemp -d "$RELEASE_DIR/.qualified.XXXXXX")"; '
+            'cp "$FIXTURE_ARTIFACTS/$EXPECTED_COMMIT/"* "$QUALIFIED_RELEASE_DIR/"; }',
+            f'tick() {{ RECORDER_PHASE="$1" systemctl start {unit}; }}',
+            'ensure_runtime_identities() { tick after-checkout; }',
+            f'install_units() {{ cp "$REPO_DIR/deploy/systemd/{unit}" "$LM_SYSTEMD_UNIT_DIR/{unit}"; }}',
+            "start_independent_units() { tick new-unit; }", "handover_realm() { :; }",
+            'wait_demo_soak() { for binary in engine engine-tools signal-worker; do '
+            'cmp "$RELEASE_DIR/bin/$binary" "$FIXTURE_INCUMBENT/$binary"; done; '
+            f'tick soak; return {soak_status}; }}',
+            'install_release() { cp "$QUALIFIED_RELEASE_DIR/"* "$RELEASE_DIR/bin/"; }',
+            "provision_mainnet() { tick after-install; }",
+            *definitions, "trap cleanup_release EXIT", "deploy_mode",
+        ])
+        result = subprocess.run(
+            ["bash", "-c", harness],
+            env={**environment, "EXPECTED_COMMIT": commit, "FIXTURE_INCUMBENT": str(expected)},
+            text=True, capture_output=True, check=False,
+        )
+        rows = [json.loads(line) for line in samples.read_text().splitlines()] if samples.exists() else []
+        return result, rows, baseline
+
+    return run, environment, python_commit, rust_commit
+
+
+@pytest.mark.parametrize("soak_status", [0, 1])
+def test_recorder_runs_after_python_deletion_and_failed_soak_cleanup(recorder_handover, soak_status: int) -> None:
+    run, environment, _python, rust = recorder_handover
+    result, rows, baseline = run(rust, soak_status)
+    phases = {row["phase"]: row["implementation"] for row in rows}
+    assert phases.get("after-checkout") == "rust", f"recorder cannot run after Python deletion:\n{result.stderr}"
+    assert phases["new-unit"] == phases["soak"] == "rust"
+    release = Path(environment["RELEASE_DIR"])
+    assert not list(release.glob(".qualified.*"))
+    if soak_status:
+        assert result.returncode != 0
+        assert {path.name: path.read_bytes() for path in (release / "bin").iterdir()} == baseline
+    else:
+        assert result.returncode == 0, result.stderr
+        assert phases["after-install"] == "rust"
+    subprocess.run(
+        ["systemctl", "start", "liquidity-migration-equity-recorder.service"],
+        env=environment, text=True, capture_output=True, check=True,
+    )
+
+
+def test_recorder_retry_keeps_the_permanent_candidate_and_finishes_handover(recorder_handover) -> None:
+    run, environment, _python, rust = recorder_handover
+    first, first_rows, _ = run(rust, 1)
+    assert any(row["phase"] == "soak" for row in first_rows), first.stderr
+    assert first.returncode != 0
+    second, rows, _ = run(rust, 0)
+    assert second.returncode == 0, second.stderr
+    assert rows[-1] == {"phase": "after-install", "implementation": "rust"}
+    assert not list(Path(environment["LM_SYSTEMD_UNIT_DIR"]).glob("*.service.d/*recorder*.conf"))
+
+
+def test_recorder_python_unit_rollback_does_not_run_unsupported_candidate(recorder_handover) -> None:
+    run, environment, python, rust = recorder_handover
+    first, rows, _ = run(rust, 1)
+    assert any(row["phase"] == "soak" for row in rows), first.stderr
+    result, rows, _ = run(python, 0)
+    assert result.returncode == 0, result.stderr
+    assert rows[-1] == {"phase": "after-install", "implementation": "python"}
+    assert not list(Path(environment["LM_SYSTEMD_UNIT_DIR"]).glob("*.service.d/*recorder*.conf"))
+
+
+def test_recorder_rejected_backward_target_keeps_the_existing_override(recorder_handover) -> None:
+    run, environment, python, rust = recorder_handover
+    first, rows, _ = run(rust, 1)
+    assert any(row["phase"] == "soak" for row in rows), first.stderr
+    units = Path(environment["LM_SYSTEMD_UNIT_DIR"])
+    before = {path: path.read_bytes() for path in units.glob("*.service.d/*.conf")}
+    result, after_rows, _ = run(python, 0, compatible=False)
+    assert result.returncode != 0
+    assert "older deploy has the same compatibility requirements" in result.stderr
+    assert after_rows == rows
+    assert {path: path.read_bytes() for path in units.glob("*.service.d/*.conf")} == before
 
 
 def test_runtime_install_removes_an_already_installed_research_package(tmp_path: Path) -> None:

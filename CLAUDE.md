@@ -21,8 +21,6 @@ in the token-efficient, Spec-First structured format without narrative padding.
 | Which script to run, and who runs it | [scripts/README.md](scripts/README.md) |
 | Producers, account owner, journals, how a target becomes an order | [docs/architecture.md](docs/architecture.md) |
 | The Rust execution engine: contracts, latency budget, safety posture | [docs/engine.md](docs/engine.md) |
-| The engine audit round: what is implemented, what is verified on this tree, what is open | [docs/tier1-round-handoff.md](docs/tier1-round-handoff.md) |
-| The round-2 audit: rating, the hot path as it runs, what to delete, simplify, and the Tier-1 gap | [docs/tier1-audit-round-2.md](docs/tier1-audit-round-2.md) |
 | What each sleeve trades and where its evidence stops | [docs/trading_logic.md](docs/trading_logic.md) |
 | Operator commands, deploy modes, unit topology | [docs/operations.md](docs/operations.md) |
 | Telegram channels, watchdog alerts, heartbeat dead-man's switch | [docs/notifications.md](docs/notifications.md) |

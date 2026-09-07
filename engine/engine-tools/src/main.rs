@@ -46,6 +46,11 @@ engine — the execution loop
   engine replay --wal PATH
       Print the log in words, and what was still in flight at each point.
 
+  engine-tools record-equity [--manifest PATH] [--state-dir PATH]
+                            [--show REALM] [--samples N]
+      Append fleet equity and health observations, then optionally push metrics.
+      --show reads the existing local curve without sampling or pushing.
+
   engine wal-convert-v5 --wal PATH --output-dir NEW_DIRECTORY
       Convert v5 restatements into a separate WAL family with explicit v7
       cost-basis and source-retirement state. The input must be stopped.

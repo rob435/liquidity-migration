@@ -1,4 +1,4 @@
-"""Typed CARRY research inputs and native takeover state."""
+"""Typed CARRY research inputs."""
 
 from __future__ import annotations
 
@@ -139,52 +139,6 @@ class PresettlementObservation:
             object.__setattr__(self, name, normalized)
 
 
-@dataclass(frozen=True, slots=True)
-class PriorState:
-    """Durable CARRY lifecycle fields accepted by native takeover."""
-
-    sizing_anchors: tuple[tuple[int, float], ...] = ()
-    fired_exits: tuple[tuple[str, int], ...] = ()
-
-    def __post_init__(self) -> None:
-        anchors: dict[int, float] = {}
-        for decision_ts_ms, equity_usdt in self.sizing_anchors:
-            if type(decision_ts_ms) is not int or decision_ts_ms <= 0:
-                raise ValueError("CARRY sizing anchor has an invalid decision time")
-            equity = _finite(equity_usdt, label="CARRY sizing anchor equity")
-            if equity <= 0.0:
-                raise ValueError("CARRY sizing anchor equity must be positive")
-            if decision_ts_ms in anchors:
-                raise ValueError("CARRY sizing anchors contain a duplicate decision")
-            anchors[decision_ts_ms] = equity
-        if len(anchors) > 2:
-            raise ValueError("CARRY sizing anchors retain more than two decisions")
-
-        fired: dict[str, int] = {}
-        for symbol, decision_ts_ms in self.fired_exits:
-            typed_symbol = _plain_symbol(symbol, label="CARRY fired-exit symbol")
-            if type(decision_ts_ms) is not int or decision_ts_ms <= 0:
-                raise ValueError("CARRY fired-exit decision time is invalid")
-            if typed_symbol in fired:
-                raise ValueError("CARRY fired exits contain a duplicate symbol")
-            fired[typed_symbol] = decision_ts_ms
-        object.__setattr__(self, "sizing_anchors", tuple(sorted(anchors.items())))
-        object.__setattr__(self, "fired_exits", tuple(sorted(fired.items())))
-
-    def anchor_by_decision(self) -> dict[int, float]:
-        return dict(self.sizing_anchors)
-
-    def fired_by_symbol(self) -> dict[str, int]:
-        return dict(self.fired_exits)
-
-    def as_json_dict(self) -> dict[str, object]:
-        return {
-            "schema_version": CARRY_MODEL_SCHEMA_VERSION,
-            "sizing_anchors": [list(row) for row in self.sizing_anchors],
-            "fired_exits": [list(row) for row in self.fired_exits],
-        }
-
-
 __all__ = [
     "CARRY_MODEL_SCHEMA_VERSION",
     "CARRY_CONFIG_PATH",
@@ -193,6 +147,5 @@ __all__ = [
     "DAY_MS",
     "HOUR_MS",
     "PresettlementObservation",
-    "PriorState",
     "SettledFundingObservation",
 ]

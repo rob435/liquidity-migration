@@ -24,7 +24,7 @@ time**, including the minutes it lost money without closing anything.
 
 ### Sample Schema
 
-`scripts/runtime/record_equity.py` reads every artifact the fleet manifest
+`engine-tools record-equity` reads every artifact the fleet manifest
 declares and appends one line per artifact per run.
 
 | File | Written when |
@@ -42,6 +42,8 @@ noise, and the history is the point.
 | `ts_ms` | When the sample was taken, wall clock |
 | `state` | `live`, `stale`, or `absent` / `unreadable` / `unparsable` with an `error`; stale sources emit `up=0` and omit previous values |
 | Freshness | Engine and worker source timestamps expire after 60 seconds; recorder after 120 seconds. Each source is read before its observation time is sampled. Invalid or future source timestamps are unreadable |
+| Source JSON | Standard JSON only. Bare `NaN`/`Infinity` tokens produce a down sample. Derived nonfinite values and integer results outside the supported range become `null`; ordinary producer values retain their existing meanings |
+| Metrics transport | Direct configured HTTP(S) endpoint, Basic authentication, ten-second timeout; proxy environment and redirects are unsupported. Failed pushes warn after all local appends and do not fail the sampler |
 | `equity_usdt`, `available_usdt` | The venue's own reading, from the heartbeat |
 | `heartbeat_age_ms`, `account_age_ms` | Age of the heartbeat, and of the venue reading inside it |
 | `position_count`, `position_entry_notional_usdt`, `sleeve_positions` | Holdings, and how many each **configured** sleeve owns, zero included; `unattributed` is the owner's hand exposure |
@@ -72,8 +74,7 @@ scripts/ops.sh curve mainnet
 scripts/ops.sh curve demo 1440
 
 # Or on the host directly
-/opt/liquidity-migration/.venv/bin/python \
-  /opt/liquidity-migration/scripts/runtime/record_equity.py --show mainnet --samples 240
+/opt/liquidity-migration-engine/bin/engine-tools record-equity --show mainnet --samples 240
 
 # Raw samples, newest last
 tail -3 /var/lib/liquidity-migration/equity/engine-mainnet-$(date -u +%Y-%m).jsonl | jq .

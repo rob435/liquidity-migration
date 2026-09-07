@@ -307,7 +307,7 @@ Dated history; current state lives in [STATE.md](../../STATE.md).
     --no-fail-fast` after `cargo clean`: 27 binaries, 2,207 passed, 0
     failed, 5 ignored (live sockets and Linux opt-ins); no doctests in the
     workspace. Clippy with the deny table and rustfmt clean. Python: doctor ready, Ruff, ShellCheck, mypy clean, 1,517 pytest.
-  - Docs: [docs/tier1-round-handoff.md](../../docs/tier1-round-handoff.md) loses
+  - Docs: [docs/tier1-round-handoff.md](https://github.com/rob435/liquidity-migration/blob/29366d3a2013701a0956a2a471a7c916bf6980e2/docs/tier1-round-handoff.md) loses
     the crash-loop finding and gains the two implemented rows;
     [docs/engine.md](../../docs/engine.md) §3 and §10 say what a halt cancel does
     now. Deploy: `vps-deploy.yml` in `deploy` mode is dispatched at this

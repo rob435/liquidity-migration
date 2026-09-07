@@ -10,6 +10,34 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-07 — Remove obsolete audits and Python runtime code.**
+  - Delete the four Tier-1 audit/handoff/evidence files; retain their immutable
+    Git snapshots and all benchmark cells. Consolidate live recovery requirements
+    into engine/operations docs and keep the terminal-expiry and unqualified
+    production-day replay boundaries in STATE.md.
+  - Remove the unused Bybit REST limiter/statistics, Telegram sleeve-file rewrite
+    API, CARRY takeover model, invocation-ID validator and two orphan subprocess
+    fixtures. Retained REST requests, results, errors and retry delays match the
+    prior implementation across twelve scripted cases; active research/data
+    Python and the LONG research state remain supported.
+  - Move minute equity/health sampling and curve display to `engine-tools
+    record-equity`; the systemd observer and operator route use that companion.
+    Preserve append-first monthly files, finite/null sample values, metric names,
+    configured zero series and gaps. Standard JSON replaces Python's nonfinite
+    token extension; the metrics client uses a direct endpoint without proxy or
+    redirect handling. Local records survive remote push failure.
+  - Pin the recorder's verified candidate command before checkout removes its
+    Python entrypoint. The prior deployment order fails the executable
+    transition test with `can't open file .../record_equity.py: [Errno 2] No
+    such file or directory`; the fix retains sampling through checkout and
+    failed soak without changing the funded runtime before its demo gate.
+  - Rust 1.90 developer gate passes 2,003 Rust tests and 1,675 Python tests,
+    zero failures and eight Rust ignores. The 29 saved Python cases match
+    JSON bytes, metric lines and filenames exactly. A compiled-command check
+    also matches all six fresh host artifacts, Influx bytes and both curves;
+    the local HTTP fixture uses no production push credentials. Deployment
+    verification remains pending at this source checkpoint.
+
 - **2026-09-06 — Round-3 embedded execution.**
   - Replace child strategy execution with one embedded path for production,
     bench, simulation and backtest. Catch reducer panics, fault only their
@@ -731,8 +759,8 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     pass. All 48 simulator seed runs, each repeated, pass evaluated checks
     and produce identical WAL replay; flat-only accounting checks run on
     36 flat endings. 108 isolated fault/pass cases cover 106 distinct controls.
-  - [Current audit](docs/tier1-audit-round-2.md),
+  - [Audit snapshot](https://github.com/rob435/liquidity-migration/blob/29366d3a2013701a0956a2a471a7c916bf6980e2/docs/tier1-audit-round-2.md),
     [source-bound evidence](https://github.com/rob435/liquidity-migration/blob/2422be0d9ca5a40e0ad954c6499d9f5a35e77d5c/docs/tier1-round-evidence.json) and
-    [implementation contract](docs/tier1-round-handoff.md) contain the details.
+    [implementation checkpoint](https://github.com/rob435/liquidity-migration/blob/29366d3a2013701a0956a2a471a7c916bf6980e2/docs/tier1-round-handoff.md) contain the details.
     The [archived callback incident](docs/history/CHANGELOG-2026-09-01-through-05.md) records its local repair. No deployment or
     live account qualification is performed in this round.

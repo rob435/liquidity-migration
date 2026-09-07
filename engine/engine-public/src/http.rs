@@ -145,6 +145,43 @@ impl HttpClient {
         self.send(req).await
     }
 
+    /// POST to a status-only endpoint; a successful empty reply needs no JSON body.
+    /// Redirects are returned as failures, not followed with the caller's credentials.
+    pub async fn post_status(
+        &self,
+        path: &str,
+        body: String,
+        content_type: &str,
+        headers: &[(&str, String)],
+    ) -> Result<(), VenueError> {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(self.url(path, ""))
+            .header("Content-Type", content_type);
+        for (name, value) in headers {
+            req = req.header(*name, value);
+        }
+        let req = req
+            .body(Full::new(Bytes::from(body)))
+            .map_err(|e| VenueError::BadRequest(e.to_string()))?;
+        let response = tokio::time::timeout(self.request_timeout, self.client.request(req))
+            .await
+            .map_err(|_| {
+                VenueError::Transport(format!(
+                    "request did not complete within {:?}",
+                    self.request_timeout
+                ))
+            })?
+            .map_err(|e| VenueError::Transport(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(VenueError::Transport(format!(
+                "HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+        Ok(())
+    }
+
     /// PUT with a query string and no body. Binance's keepalive and amend
     /// endpoints take every parameter in the query, which the caller has
     /// already signed there.
@@ -310,6 +347,49 @@ mod tests {
         assert!(
             matches!(err, VenueError::Transport(ref text) if text.contains("did not complete"))
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_status_only_post_times_out_waiting_for_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut client = HttpClient::new(format!("http://{address}"));
+        client.request_timeout = Duration::from_millis(50);
+        let error = client
+            .post_status("/write", "sample\n".into(), "text/plain", &[])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, VenueError::Transport(ref text) if text.contains("did not complete"))
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_status_only_post_does_not_wait_for_an_unused_response_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 1024];
+            assert!(socket.read(&mut buf).await.unwrap() > 0);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut client = HttpClient::new(format!("http://{address}"));
+        client.request_timeout = Duration::from_millis(200);
+        client
+            .post_status("/write", "sample\n".into(), "text/plain", &[])
+            .await
+            .unwrap();
         server.abort();
     }
 }

@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import logging
-import threading
 import time
-from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
 from liquidity_migration.marketdata.bybit_errors import (
     BybitDataError,
-    is_rate_limit as _is_rate_limit,
     is_transient_venue_fault as _is_transient_venue_fault,
 )
 try:
@@ -44,69 +41,6 @@ logging.getLogger("pybit._http_manager").addFilter(_PybitRateLimitLogFilter())
 
 _logger_market_data = logging.getLogger("liquidity_migration.marketdata.bybit")
 
-
-class BybitRestRateLimiter:
-    """Thread-safe sliding-window rate limiter shared across BybitMarketData.
-
-    Bybit public REST allows ~120 requests / 5s per IP per category; the default
-    18 req/s keeps concurrent workers off sustained 429s, which pybit handles by
-    sleeping 2s per retry. No waiting or lock contention under budget.
-    """
-
-    __slots__ = ("_max", "_per", "_timestamps", "_lock", "_throttle_events", "_throttled_seconds")
-
-    def __init__(self, max_requests: int = 18, per_seconds: float = 1.0) -> None:
-        if max_requests <= 0:
-            raise ValueError("max_requests must be positive")
-        if per_seconds <= 0.0:
-            raise ValueError("per_seconds must be positive")
-        self._max = max_requests
-        self._per = per_seconds
-        self._timestamps: deque[float] = deque()
-        self._lock = threading.Lock()
-        self._throttle_events = 0
-        self._throttled_seconds = 0.0
-
-    def acquire(self) -> None:
-        # Compute the wait UNDER the lock, sleep OUTSIDE it, then re-acquire and
-        # re-check: sleeping under the lock serialises the whole shared REST
-        # worker pool. A slot is still only claimed when len < max.
-        #
-        # Stats count once per blocking acquire, accumulating slept time across
-        # re-loops; per-loop counting inflates throttled_seconds, the metric used
-        # to size the REST budget.
-        slept = 0.0
-        while True:
-            with self._lock:
-                now = time.monotonic()
-                cutoff = now - self._per
-                # `<=`, not `<`: a slot exactly at the window edge has aged out,
-                # and leaving it gives wait<=0 and a busy-spin until the clock
-                # passes the boundary.
-                while self._timestamps and self._timestamps[0] <= cutoff:
-                    self._timestamps.popleft()
-                if len(self._timestamps) < self._max:
-                    self._timestamps.append(now)
-                    if slept > 0.0:
-                        self._throttle_events += 1
-                        self._throttled_seconds += slept
-                    return
-                wait = self._per - (now - self._timestamps[0])
-                if wait <= 0.0:
-                    # Window boundary: the oldest slot rolls off on the next
-                    # pop, so re-evaluate without sleeping or double-counting.
-                    continue
-            time.sleep(wait)
-            slept += wait
-
-    def stats(self) -> dict[str, Any]:
-        with self._lock:
-            return {
-                "max_requests": self._max,
-                "per_seconds": self._per,
-                "throttle_events": self._throttle_events,
-                "throttled_seconds": round(self._throttled_seconds, 3),
-            }
 
 INTERVAL_MS = {
     "1": 60_000,
@@ -162,29 +96,13 @@ class BybitMarketData:
     demo: bool = False
     retries: int = 3
     retry_sleep_seconds: float = 0.5
-    slow_call_threshold_ms: float = 1000.0
-    rate_limiter: BybitRestRateLimiter | None = None
-    logical_calls: int = field(init=False, default=0)
-    http_calls: int = field(init=False, default=0)
-    retry_events: int = field(init=False, default=0)
-    rate_limit_events: int = field(init=False, default=0)
-    error_events: int = field(init=False, default=0)
-    slow_calls: int = field(init=False, default=0)
-    total_call_ms: float = field(init=False, default=0.0)
-    slow_call_ms: float = field(init=False, default=0.0)
-    last_error: str = field(init=False, default="")
     _client: Any = field(init=False, repr=False)
-    # The bootstrap worker pool shares ONE BybitMarketData, so every counter
-    # mutation is a concurrent read-modify-write and lost increments make
-    # stats() under-report. The lock wraps only the arithmetic, never the call.
-    _stats_lock: threading.Lock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if HTTP is None:
             raise RuntimeError("pybit is required for BybitMarketData")
         if self.testnet and self.demo:
             raise ValueError("Bybit market data cannot select both testnet and demo")
-        self._stats_lock = threading.Lock()
         session_options: dict[str, Any] = {"testnet": self.testnet}
         if self.demo:
             session_options["demo"] = True
@@ -385,27 +303,14 @@ class BybitMarketData:
     def _get(self, method_name: str, **params: Any) -> dict[str, Any]:
         method = getattr(self._client, method_name)
         last_error: Exception | None = None
-        with self._stats_lock:
-            self.logical_calls += 1
         for attempt in range(self.retries):
-            if self.rate_limiter is not None:
-                self.rate_limiter.acquire()
-            started = time.perf_counter()
             try:
-                with self._stats_lock:
-                    self.http_calls += 1
                 payload = method(**params)
-                elapsed_ms = (time.perf_counter() - started) * 1000.0
                 ret_code = payload.get("retCode")
                 if ret_code != 0:
-                    self._record_call(elapsed_ms, error_text=str(payload), rate_limited=_is_rate_limit(payload))
                     raise BybitDataError(f"Bybit {method_name} failed: {payload}")
-                self._record_call(elapsed_ms)
                 return payload
             except Exception as exc:  # noqa: BLE001 - pybit raises several transport types
-                if not isinstance(exc, BybitDataError):
-                    elapsed_ms = (time.perf_counter() - started) * 1000.0
-                    self._record_call(elapsed_ms, error_text=str(exc), rate_limited=_is_rate_limit(exc))
                 last_error = exc
                 # A definite venue reject -- bad symbol, invalid param --
                 # will not change on retry, so raise instead of spending the
@@ -417,38 +322,5 @@ class BybitMarketData:
                     raise
                 if attempt + 1 >= self.retries:
                     break
-                with self._stats_lock:
-                    self.retry_events += 1
                 time.sleep(self.retry_sleep_seconds * (2**attempt))
         raise BybitDataError(f"Bybit {method_name} failed after retries") from last_error
-
-    def _record_call(self, elapsed_ms: float, *, error_text: str = "", rate_limited: bool = False) -> None:
-        # Guarded so the shared bootstrap pool cannot lose increments.
-        with self._stats_lock:
-            self.total_call_ms += elapsed_ms
-            if elapsed_ms >= self.slow_call_threshold_ms:
-                self.slow_calls += 1
-                self.slow_call_ms += elapsed_ms
-            if error_text:
-                self.error_events += 1
-                self.last_error = error_text[:500]
-            if rate_limited:
-                self.rate_limit_events += 1
-
-    def stats(self) -> dict[str, Any]:
-        # Snapshot under the lock so a concurrent mutation cannot produce an
-        # internally inconsistent dict.
-        with self._stats_lock:
-            backoff_events = self.retry_events + self.rate_limit_events + self.slow_calls
-            return {
-                "logical_calls": self.logical_calls,
-                "http_calls": self.http_calls,
-                "retry_events": self.retry_events,
-                "rate_limit_events": self.rate_limit_events,
-                "error_events": self.error_events,
-                "slow_calls": self.slow_calls,
-                "total_call_ms": round(self.total_call_ms, 3),
-                "slow_call_ms": round(self.slow_call_ms, 3),
-                "backoff_events": backoff_events,
-                "last_error": self.last_error,
-            }

@@ -25,6 +25,8 @@ mexc = ["engine-core/mexc", "engine-venue/mexc", "engine-marketdata/mexc"]
 variational = ["engine-core/variational", "engine-venue/variational", "engine-marketdata/variational"]
 
 [dependencies]
+base64 = { workspace = true }
+engine-public = { workspace = true }
 engine-core = { path = "../engine-core", default-features = false }
 engine-types = { workspace = true }
 engine-wal = { workspace = true }

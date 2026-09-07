@@ -21,7 +21,7 @@ def test_host_service_imports_use_only_runtime_dependencies() -> None:
         if not words[0].endswith("/python"):
             continue
         entrypoints.add(("module", words[2]) if words[1] == "-m" else ("script", words[1]))
-    assert len(entrypoints) == 6
+    assert len(entrypoints) == 5
     # These command handlers are imported lazily by the recorder CLI.
     entrypoints.update(("module", name) for name in ("market_tape.record", "market_tape.pack"))
     entrypoints.add(("script", "scripts/runtime/demo_rollback.py"))

@@ -1,4 +1,4 @@
-"""Telegram control panel: authorization, sleeve rewrites, and the confirm flow."""
+"""Telegram control panel: authorization, helper calls, and the confirm flow."""
 
 from __future__ import annotations
 
@@ -16,8 +16,6 @@ from liquidity_migration.ops.telegram_controls import (
     callback_authorized,
     drain_backlog,
     message_authorized,
-    sleeve_pause_rewrite,
-    sleeve_strip_rewrite,
 )
 
 
@@ -30,41 +28,6 @@ def make_config(tmp_path: Path, **overrides: object) -> ControlsConfig:
     }
     values.update(overrides)
     return ControlsConfig(**values)  # type: ignore[arg-type]
-
-
-# --------------------------------------------------------------------------
-# Sleeve override rewrites
-# --------------------------------------------------------------------------
-
-
-def test_pause_rewrite_preserves_foreign_lines_and_sets_all_off() -> None:
-    # CONTINUOUS_SLEEVE is a retired toggle: pause must leave an existing line
-    # alone as a foreign line and never add one of its own.
-    original = "# host note\nRETIRED_TOGGLE=off\nCONTINUOUS_SLEEVE=off\nLONG_SLEEVE=on\n"
-    rewritten = sleeve_pause_rewrite(original)
-    assert "# host note" in rewritten
-    assert "RETIRED_TOGGLE=off" in rewritten
-    assert rewritten.count("CONTINUOUS_SLEEVE=") == 1
-    for key in ("LONG_SLEEVE", "CARRY_SLEEVE"):
-        assert rewritten.count(f"{key}=") == 1
-        assert f"{key}=off" in rewritten
-    assert rewritten.endswith("\n")
-
-
-def test_pause_rewrite_is_idempotent_and_handles_absent_file() -> None:
-    once = sleeve_pause_rewrite(None)
-    assert sleeve_pause_rewrite(once) == once
-
-
-def test_strip_rewrite_removes_managed_keys_and_marker() -> None:
-    text = sleeve_pause_rewrite("# keep me\nRETIRED_TOGGLE=off\n")
-    stripped = sleeve_strip_rewrite(text)
-    assert stripped == "# keep me\nRETIRED_TOGGLE=off\n"
-
-
-def test_strip_rewrite_returns_none_when_nothing_remains() -> None:
-    assert sleeve_strip_rewrite(None) is None
-    assert sleeve_strip_rewrite(sleeve_pause_rewrite(None)) is None
 
 
 # --------------------------------------------------------------------------
@@ -289,7 +252,9 @@ def test_demo_resume_uses_helper_then_reads_helper_status(fleet_env) -> None:
 
 def test_helper_status_is_exactly_parsed_and_rejects_extra_fields(fleet_env, monkeypatch) -> None:
     _config, fleet, _commands = fleet_env
-    assert fleet.resolved_sleeves() == {"LONG_SLEEVE": "on", "CARRY_SLEEVE": "on"}
+    status = fleet.status_text()
+    assert "demo long: entries on, configured on" in status
+    assert "demo carry: entries on, configured on" in status
 
     def malformed(argv: list[str], *, timeout: float = 90.0) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
@@ -301,7 +266,7 @@ def test_helper_status_is_exactly_parsed_and_rejects_extra_fields(fleet_env, mon
 
     monkeypatch.setattr(fleet, "_run", malformed)
     with pytest.raises(RuntimeError, match="malformed fleet row"):
-        fleet.resolved_sleeves()
+        fleet.status_text()
 
 
 def test_status_renders_manifest_owners_signal_workers_and_entry_permissions(fleet_env) -> None:

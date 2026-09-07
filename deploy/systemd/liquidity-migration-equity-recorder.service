@@ -12,11 +12,8 @@ TimeoutStartSec=45
 User=liquidity-observer
 Group=liquidity-migration
 WorkingDirectory=/opt/liquidity-migration
-# The only unit in the fleet that loads no venue environment at all: it reads
-# published artifacts and pushes numbers. Its credential surface is empty by
-# construction, which is stronger than unsetting keys it was handed.
+# Published artifacts and metrics credentials only; no venue environment.
 EnvironmentFile=-/etc/liquidity-migration/observability.env
-Environment=PYTHONDONTWRITEBYTECODE=1
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectProc=invisible
@@ -28,7 +25,7 @@ ReadWritePaths=/var/lib/liquidity-migration/equity
 MemoryMax=128M
 # An observer must not preempt the signal workers (Nice=5) or owners (Nice=-5).
 Nice=10
-ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/record_equity.py
+ExecStart=/opt/liquidity-migration-engine/bin/engine-tools record-equity --manifest /opt/liquidity-migration/deploy/fleet_manifest.tsv
 SuccessExitStatus=0
 StandardOutput=journal
 StandardError=journal

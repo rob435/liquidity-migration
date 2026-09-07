@@ -106,6 +106,7 @@ fetch_exact_commit() {
         rollback_runtime_compatible "$EXPECTED_COMMIT" \
             || fail "an older deploy has the same compatibility requirements as rollback; use a forward repair"
     fi
+    prepare_recorder_runtime
     git -C "$REPO_DIR" checkout -B "$BRANCH" "$EXPECTED_COMMIT" \
         || fail "cannot check out $EXPECTED_COMMIT"
     [ "$(git -C "$REPO_DIR" rev-parse HEAD)" = "$EXPECTED_COMMIT" ] \
@@ -492,6 +493,47 @@ EOF
 ExecStart=
 ExecStart=$CANDIDATE_RELEASE_DIR/signal-worker live --signal-config \${SIGNAL_WORKER_CONFIG_FILE} --long-rule \${LONG_NATIVE_RULE_FILE} --carry-config \${CARRY_SIGNAL_CONFIG_FILE} --operational-config \${OPERATIONAL_PROFILE_FILE} --engine-config \${ENGINE_CONFIG_FILE} --spool-dir \${SIGNAL_WORKER_SPOOL_DIR} --state-dir \${SIGNAL_WORKER_STATE_DIR} --heartbeat \${SIGNAL_WORKER_HEARTBEAT_FILE}
 EOF
+}
+
+prepare_recorder_runtime() {
+    local unit=liquidity-migration-equity-recorder.service target candidate override
+    target="$(git -C "$REPO_DIR" show "$EXPECTED_COMMIT:deploy/systemd/$unit")" \
+        || fail "cannot read the target recorder unit"
+    case "$(printf '%s\n' "$target" | sed -n 's/^ExecStart=//p')" in
+        "$RELEASE_DIR/bin/engine-tools record-equity "*) ;;
+        *) return 0 ;;
+    esac
+    candidate="$RELEASE_DIR/releases/$EXPECTED_COMMIT/engine-tools"
+    install -d -o root -g root -m 0755 "${candidate%/*}"
+    if [ -f "$candidate" ]; then
+        cmp -s "$QUALIFIED_RELEASE_DIR/engine-tools" "$candidate" \
+            || fail "candidate path contains different engine-tools bytes"
+    else
+        install -o root -g root -m 0755 "$QUALIFIED_RELEASE_DIR/engine-tools" "$candidate.new" \
+            || fail "cannot stage the recorder runtime"
+        mv -f -- "$candidate.new" "$candidate" || fail "cannot publish the recorder executable"
+    fi
+    override="$LM_SYSTEMD_UNIT_DIR/$unit.d/20-recorder-runtime.conf"
+    install -d -m 0755 "${override%/*}"
+    cat > "$override.new" <<EOF
+[Service]
+ExecStart=
+ExecStart=$candidate record-equity --manifest $REPO_DIR/deploy/fleet_manifest.tsv
+EOF
+    mv -f -- "$override.new" "$override" || fail "cannot publish the recorder runtime"
+    systemctl daemon-reload || fail "cannot activate the recorder runtime"
+    # Checkout can delete the Python entrypoint. Finish any existing oneshot first.
+    if [ -f "$LM_SYSTEMD_UNIT_DIR/$unit" ]; then
+        systemctl start "$unit" || fail "recorder handover failed before checkout"
+    fi
+}
+
+clear_recorder_runtime() {
+    local override="$LM_SYSTEMD_UNIT_DIR/liquidity-migration-equity-recorder.service.d/20-recorder-runtime.conf"
+    if [ -f "$override" ]; then
+        rm -f -- "$override" || fail "cannot remove the recorder runtime override"
+        systemctl daemon-reload || fail "cannot activate the installed recorder unit"
+    fi
 }
 
 clear_realm_soak_overrides() {
@@ -1172,6 +1214,7 @@ deploy_mode() {
     wait_demo_soak
     ENGINE_BINARY="$RELEASE_DIR/bin/engine"
     install_release
+    clear_recorder_runtime
     clear_demo_candidate_override
     if mainnet_armed; then
         echo "staging mainnet configuration while live engine continues trading"

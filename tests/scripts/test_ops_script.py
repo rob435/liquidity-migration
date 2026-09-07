@@ -55,6 +55,18 @@ def test_unknown_command_fails_with_usage() -> None:
     assert "unknown command" in result.stderr
 
 
+def test_curve_routes_the_selected_history_to_the_rust_companion(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+    result = _run("curve", "demo", "1440", env=environment)
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text()
+    assert "REMOTE_ARGS=( demo 1440 )" in payload
+    assert "exec /opt/liquidity-migration-engine/bin/engine-tools record-equity" in payload
+    assert '--show "${REMOTE_ARGS[0]}" --samples "${REMOTE_ARGS[1]}"' in payload
+    for realm, samples in (("unknown", "1"), ("demo", "0"), ("mainnet", "1;false")):
+        assert _run("curve", realm, samples, env=environment).returncode == 2
+
+
 def test_deploy_allowlists_the_four_modes() -> None:
     result = _run("deploy", "definitely-not-a-mode")
     assert result.returncode == 2

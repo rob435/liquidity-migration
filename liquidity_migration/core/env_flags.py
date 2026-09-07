@@ -73,15 +73,3 @@ def env_positive_float(
     if not value > 0.0 or value == float("inf"):
         raise ValueError(f"{name} must be finite and positive; got {raw!r}")
     return value
-
-
-def validate_systemd_invocation_id(value: object, *, label: str = "systemd INVOCATION_ID") -> str:
-    """Return one canonical non-zero systemd invocation identifier."""
-
-    if type(value) is not str or len(value) != 32 or any(
-        character not in "0123456789abcdef" for character in value
-    ):
-        raise ValueError(f"{label} must be exactly 32 lowercase hexadecimal characters")
-    if value == "0" * 32:
-        raise ValueError(f"{label} cannot be the zero identifier")
-    return value

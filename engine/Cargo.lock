@@ -353,9 +353,11 @@ dependencies = [
 name = "engine-tools"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "crc32c",
  "engine-core",
  "engine-marketdata",
+ "engine-public",
  "engine-risk",
  "engine-strategies",
  "engine-types",
