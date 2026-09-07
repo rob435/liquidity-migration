@@ -1,0 +1,7 @@
+{
+  "source_url": "https://public.bybit.com/trading/BTCUSDT/BTCUSDT2020-03-25.csv.gz",
+  "archive_sha256": "cbca6933a8f0a11429661cfa93b04056055d776ee199209e8af9719ad2060a33",
+  "sample": "First 64 original rows plus original header; no source reordering. Parquet preserves every source field as a string.",
+  "csv_sha256": "b095e2ebe13a9a2845c07b0e420bdca648215bf758b10e8fe53518390d7ee39b",
+  "bars": "Twelve interior hourly candles generated from the full downloaded archive by the existing read_public_trade_archive_klines_1h function; first listing hour excluded. CSV and Parquet contain the same bars."
+}

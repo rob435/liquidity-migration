@@ -13,6 +13,44 @@ State measured execution workloads, timing boundaries and resource limits for th
 | Point targets | Final local exact-only image `5d90e8f3` meets narrow decision p50 7.959 µs, wide decision p99 26.431 µs and narrow submit p50 4.882431 ms. All 700 opportunities complete with one barrier and valid readbacks. The frozen old-image control still misses submit at 5.283839 ms after release-cache cleanup; every earlier miss remains below. The fixed comparison does not establish a stable bound or assign the submit difference solely to source. The Round-3 developer gate, optimized qualification and deployment at `70f4c557` pass; R3-13 acceptance is source-bound |
 | Measured source boundary | Callback-buffer reuse, direct binary64 normalization, immutable envelope policy, reduced products, aggregate margin division, grouped pending risk and per-symbol pending quantity totals, covered native-stop writes, fresh priced-quantity grouping and batched exact sums; borrowed prices, reused order projections, temporary route-membership bitsets, exact storage bit bounds and a venue-actor yield; per-symbol virtual-stop reads and a split synchronous stop/control path remove full snapshots and empty nested futures. Normal release builds carry no temporary profiling |
 
+### Current-source sustained and offline-reader measurements
+
+| Boundary | Evidence |
+| --- | --- |
+| Baseline identity | Clean archived `80db33df4b3113c3c75769f22d10237e7d32d37e` source; frozen `baseline-engine-tools` SHA256 `f4486bd0311e3562e16e72f5110d6cec8db92d28061f41aaef6a4ab885c0b56c`. |
+| Environment | Rust 1.90.0 release, Apple M4 / 10 CPUs / 16 GiB, macOS 15.7.2 arm64; no compiler, tests or full-WAL scans during baseline cells. `/tmp/connected-work-20260907/baseline-*.{json,log,wal}` contain command, platform, binary hash, rusage and 0.5 s parent-process RSS samples |
+| Resource scope | CPU is parent user+system time; RSS is macOS `wait4` maximum. Short peaks between `ps` samples and child resource use are not included in sampled growth. All workloads run locally against a synthetic venue; no funded-service load |
+| Storage boundary | Baseline starts under approximately 6.9 GiB free-space pressure; free space later changes materially. Reader before/after runs share the later environment. Do not attribute differences from older host/latency cells solely to code |
+| Baseline timing | Completed order barriers remain required. “Submit result” includes engine processing, durability and the synthetic venue response. API RTT is localhost; 20 ms delay is injected by the fixture, not measured exchange latency |
+
+| Workload | Completed submits / opportunities | CPU s / elapsed s | Max RSS MB; sampled ≥1 s first→last KiB | Decision p50 / p99 / max | Submit p50 / p99 / max |
+| --- | --- | --- | --- | --- | --- |
+| 60 s, 200 quotes/s, BTC, order every 20 | 600 / 600 | 0.460 / 60.838 | 11.93; 10032→11472 | 2.0 / 7.4 / 40.9 µs | 6.30 / 24.31 / 28.33 ms |
+| Unpaced 40,000 quotes, 270 names, growing pending | 2,000 / 2,000 | 1.628 / 11.161 | 18.25; 13728→17648 | 0.209 / 0.500 / 10.8 µs | 4.98 / 9.51 / 10.26 s |
+| 60 s, 200 quotes/s, 270 names, fills/history | 299 / 600 | 1.441 / 60.407 | 14.16; 12192→13760 | 3.5 / 35.2 / 95.4 µs | 5.88 / 14.93 / 21.99 ms |
+| 60 s, 200 quotes/s, 270 names, 20 ms venue delay | 600 / 600 | 2.072 / 60.540 | 14.01; 11872→13504 | 10.3 / 18.5 / 33.0 µs | 26.87 / 31.56 / 44.66 ms |
+
+| Cost / adverse result | Interpretation |
+| --- | --- |
+| Normal order barrier | Observed p50/p99/max `5.88/23.87/27.89 ms`; dispatch queue `4.8/11.8/20.4 µs`. Durability observation dominates this cell; observer wake/confirmation overhead is included |
+| Burst backlog | Decision-to-dispatch-ready p99 `9.51 s`, maximum `10.26 s`; observed barrier p99 `25.71 ms`, maximum `41.39 ms`. Low per-handler decision time does not establish low end-to-end latency under a burst |
+| Filled-history adverse result | 301 exact WAL denials: `UnknownState { detail: "unallocated physical exposure has no readable stop" }`. There are 299 fills, not 600. The synthetic account/ownership/protection observations constrain this fixture; its 299-submission histogram cannot grade all opportunities |
+| Delayed-response cell | Queue p99/max `14.4/69.1 µs`; observed barrier p99/max `9.63/22.82 ms`. The configured delay is only one component of the `44.66 ms` submit maximum |
+| 2,000,000 execution-ID operations | Fixed 65,536 retained IDs end at exactly 65,536. Early/middle/late p50 window mean `157/152/164 ns/op`; p99 window mean `249/307/276 ns/op`; maxima `629/331/283 ns/op`. These are 4,096-operation window means, not individual latency percentiles |
+| Cold decoded history | Three boots per tier: 0 / 1,000 / 10,000 / 100,000 rows; all recovered. Median `0.096/7.799/116.433/1506.478 ms`, maximum `0.112/8.043/116.467/1509.836 ms`. Per-row cost grows with history; no constant-time claim |
+| Soak resource boundary | 7.35 s wall, 6.14 s user, 0.78 s system, 164.22 MB max RSS, zero sampled page faults/swaps. `/tmp/connected-work-20260907/account-soak{.json,-resource.log}`. Network, venue JSON and durable WAL are intentionally excluded |
+| Recovery/backpressure | Existing integration fault seeds cover lost replies, private gaps/duplicates, reconnects and process deaths with byte-identical reruns. Core fixtures exercise delayed account/history reads and continued reductions, WAL barriers and callback overload. These functional tests establish invariants, not network/host latency distributions |
+
+| Reader comparison, same original 1,124,608-byte WAL | Time with `tracemalloc` | Peak Python allocation | Result |
+| --- | --- | --- | --- |
+| Frozen old reader | 5.656 s | 9,408,828 B | 4,210 frames; old accounting parser misses all 600 current-format orders |
+| New full reader | 0.114 s | 8,605,779 B | Same 4,210 records, sequence numbers, segment hash and CRC; current parser finds 600 orders |
+| New accounting-only reader | 0.103 s | 4,696,669 B | Every frame checked, 1,203 relevant records retained; current accounting exactly equals the full-reader result |
+| Same 1 MiB checksum | 4.951 s old → 0.0132 s native (including first import) | 184 B → 55,392 B | Same CRC `1806706747`; native import increases this tiny scratch allocation while removing the per-byte Python loop |
+| Complete copied family | Demo 66.55 s / mainnet 63.77 s; 53 segments and roughly 14 GB each | Process max RSS 155.03 / 227.69 MB | 11,053 / 4,196 retained accounting rows, all CRCs/hashes checked. Sequential scans share a process; RSS is cumulative and build overlap makes these informational, not a paired speed comparison |
+
+Reader timing is a single fixed before/after diagnostic with tracing overhead; it is not a production engine speedup. The full-reader records match the old reader exactly when both use the independently checked native CRC. Current parsing fixes a separate schema omission. `/tmp/connected-work-20260907/reader-{performance,equivalence}.json` retains identities, measurements and equivalence scope; earlier failing schema/decompression/missing-time and sample runs remain alongside them. The interrupted debug copied-boot scan is retained in `conversion-debug-interruption.txt` and `conversion-test-stack.txt`; optimized qualification is recorded separately.
+
 ### Retained Round-2 baseline
 
 | Field | Scope |

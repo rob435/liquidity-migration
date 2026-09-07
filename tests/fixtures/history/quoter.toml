@@ -1,0 +1,32 @@
+
+[engine]
+wal_path = "replaced-by-the-runner.wal"
+group_flush_ms = 250
+account_view_max_age_ms = 5000
+max_quote_age_ms = 30000
+
+[risk]
+max_account_view_age_s = 120
+max_rolling_loss_fraction = 0.1
+leverage = 2.0
+
+[risk.envelope]
+tracks_equity = true
+reference_usdt = 1000000.0
+equity_fraction = 1.0
+floor_usdt = 100.0
+expand_dead_band_fraction = 0.05
+gross_notional_multiple = 2.0
+disaster_stop_fraction = 0.35
+max_component_gross_notional_usdt = 2000000.0
+max_initial_margin_usdt = 1000000.0
+
+[[strategy]]
+name = "quoter"
+sleeve = "quotes"
+symbols = ["BTCUSDT"]
+half_spread_bps = 1.0
+requote_bps = 0.5
+qty = 0.01
+max_position = 0.03
+stop_loss_fraction = 0.35

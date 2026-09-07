@@ -772,7 +772,7 @@ def test_report_file_is_new_and_owner_readable_only(tmp_path: Path) -> None:
         write_report(path, {"summary": {"venue_confirmed": 0}})
 
 
-@pytest.mark.parametrize("segment_kind", ["segment_base", "segment_base_v2"])
+@pytest.mark.parametrize("segment_kind", ["segment_base", *[f"segment_base_v{i}" for i in range(2, 8)]])
 def test_rotated_signal_gap_schema_retains_accounting_identity(tmp_path: Path, segment_kind: str) -> None:
     family = tmp_path / "engine.wal"
     _write_wal(family, [_wal_records()[0]])
@@ -793,3 +793,139 @@ def test_rotated_signal_gap_schema_retains_accounting_identity(tmp_path: Path, s
     accounting = parse_wal_accounting(wal)
     assert not accounting.issues
     assert len(accounting.open_trades) == 1
+
+
+def test_current_versioned_orders_and_fills_use_the_identity_registry(tmp_path):
+    records = _wal_records()
+    records[1] = {"kind": "identity_state", "state": {"schema_version": 1,
+        "sleeves": ["carry", "long"], "instruments": [{"symbol": "BTCUSDT", "identity": {"status": "unresolved"}}]}}
+    for row in records:
+        if row["kind"] == "order_sent":
+            row["kind"] = "order_sent_v2"
+        elif row["kind"] == "order_update":
+            row["kind"] = "order_update_v3"
+    path = tmp_path / "engine.wal"
+    _write_wal(path, records)
+    result = parse_wal_accounting(read_wal_family(path))
+    assert len(result.closed_trades) == 1
+    assert len(result.fills) == 2
+    assert not result.issues
+
+
+def test_accounting_scan_keeps_sequence_hashes_and_rejects_corruption_in_omitted_rows(tmp_path):
+    records = _wal_records()
+    records.insert(2, {"kind": "strategy_checkpoint", "payload": "x" * 65_536})
+    path = tmp_path / "engine.wal"
+    _write_wal(path, records)
+    whole = read_wal_family(path)
+    selected = read_wal_family(path, accounting_only=True)
+    assert whole.segments == selected.segments
+    assert parse_wal_accounting(whole) == parse_wal_accounting(selected)
+    assert [r.sequence for r in selected.records] == [1, 2, *range(4, 10)]
+    assert all(r.record["kind"] != "strategy_checkpoint" for r in selected.records)
+    raw = path.read_bytes()
+    location = raw.index(b"x" * 20)
+    path.write_bytes(raw[:location] + b"y" + raw[location + 1:])
+    with pytest.raises(EvidenceError, match="checksum"):
+        read_wal_family(path, accounting_only=True)
+
+
+def test_crc32c_native_implementation_matches_frozen_wal_vector():
+    assert crc32c(b"123456789") == 0xe3069283
+    assert crc32c(b"") == 0
+
+
+def _window_fixture(tmp_path):
+    from liquidity_migration.research.venue_wal_accounting import read_venue_capture
+    wal = tmp_path / "window.wal"
+    _write_wal(wal, _wal_records())
+    rows = _capture_rows()
+    funding = dict(rows[1], execId="funding-stamp", orderLinkId="", execType="Funding", execFee="0.05", execTime="1500")
+    rows.append(funding)
+    rows[0]["sources"]["execution"]["rows"] = 3
+    balances = {"txn-entry": "999.90", "txn-funding": "999.85", "txn-exit": "1019.74"}
+    for r in rows:
+        if r.get("_kind") == "transaction":
+            r["cashBalance"] = balances[r["id"]]
+            r["funding"] = r["funding"] or "0"
+    capture = tmp_path / "window.jsonl"
+    _write_capture(capture, rows)
+    return parse_wal_accounting(read_wal_family(wal), "long"), read_venue_capture(capture)
+
+
+def test_observed_day_joins_exact_fills_cash_and_funding_without_claiming_simulation(tmp_path):
+    from liquidity_migration.research.venue_wal_accounting import reconstruct_observed_window
+    accounting, capture = _window_fixture(tmp_path)
+    result = reconstruct_observed_window(accounting, capture)
+    assert result["issues"] == []
+    assert result["matched_trade_executions"] == 2
+    assert result["funding_executions"] == 1
+    assert result["transaction_totals_usdt"]["change"] == "19.74"
+    assert result["implied_initial_cash_usdt"] == "1000.00"
+    assert result["observed_final_transaction_cash_usdt"] == "1019.74"
+    assert result["request_attributed_quantity_changes"] == {"long": {"BTCUSDT": "0.0"}}
+    assert not result["complete_production_reproduction"]
+
+
+def test_observed_cash_orders_equal_timestamp_rows_by_balance_not_response_order(tmp_path):
+    from dataclasses import replace
+    from liquidity_migration.research.venue_wal_accounting import reconstruct_observed_window
+    accounting, capture = _window_fixture(tmp_path)
+    transactions = tuple({**r, "transactionTime": "2000"} for r in reversed(capture.transactions))
+    result = reconstruct_observed_window(accounting, replace(capture, transactions=transactions))
+    assert result["issues"] == []
+    assert result["observed_final_transaction_cash_usdt"] == "1019.74"
+
+
+@pytest.mark.parametrize("field,value,reason", [("execQty", "3", "execQty"), ("execFee", None, "execFee")])
+def test_observed_trade_mismatch_is_not_a_match(tmp_path, field, value, reason):
+    from dataclasses import replace
+    from liquidity_migration.research.venue_wal_accounting import reconstruct_observed_window
+    accounting, capture = _window_fixture(tmp_path)
+    executions = tuple({**r, field: value} if r["execId"] == "exec-entry" else r for r in capture.executions)
+    result = reconstruct_observed_window(accounting, replace(capture, executions=executions))
+    assert result["matched_trade_executions"] == 1
+    assert any(reason in issue for issue in result["issues"])
+
+
+def test_observed_window_missing_cash_and_funding_mismatch_are_explicit(tmp_path):
+    from dataclasses import replace
+    from liquidity_migration.research.venue_wal_accounting import reconstruct_observed_window
+    accounting, capture = _window_fixture(tmp_path)
+    transactions = tuple({**r, "cashBalance": None, "funding": "9"} for r in capture.transactions)
+    result = reconstruct_observed_window(accounting, replace(capture, transactions=transactions))
+    assert any("missing cash fields" in issue for issue in result["issues"])
+    assert any("funding execution" in issue for issue in result["issues"])
+
+
+def test_observed_window_trade_transaction_must_match_the_execution(tmp_path):
+    from dataclasses import replace
+    from liquidity_migration.research.venue_wal_accounting import reconstruct_observed_window
+    accounting, capture = _window_fixture(tmp_path)
+    transactions = tuple({**r, "qty": "3"} if r["tradeId"] == "exec-entry" else r for r in capture.transactions)
+    result = reconstruct_observed_window(accounting, replace(capture, transactions=transactions))
+    assert any("transaction exec-entry qty" in issue for issue in result["issues"])
+    assert result["matched_trade_executions"] == 1
+
+
+def test_stream_reader_refuses_a_file_that_shrinks_after_its_length_snapshot(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from liquidity_migration.research import venue_wal_accounting as module
+    path = tmp_path / "shrinking.wal"
+    _write_wal(path, _wal_records())
+    original_stat = module.os.fstat
+    original_hash = module.hashlib.sha256
+    class BoundedDigest:
+        def __init__(self):
+            self.inner = original_hash()
+            self.empty_reads = 0
+        def update(self, value):
+            self.inner.update(value)
+            self.empty_reads += not value
+            assert self.empty_reads < 2, "reader loops at EOF after file shrinks"
+        def hexdigest(self):
+            return self.inner.hexdigest()
+    monkeypatch.setattr(module.os, "fstat", lambda fd: SimpleNamespace(st_size=original_stat(fd).st_size + 1))
+    monkeypatch.setattr(module.hashlib, "sha256", BoundedDigest)
+    with pytest.raises(EvidenceError, match="changed length"):
+        read_wal_family(path)

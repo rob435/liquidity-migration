@@ -16,6 +16,8 @@ engine — the execution loop
       Run the engine. It sends orders; REAL_MONEY gates the funded venue.
 
   engine backtest --config PATH --tape PATH --instruments PATH --wal PATH
+                  [--source tape|normalized] [--execution books|trades|bars]
+                  [--spread-bps BPS --slippage-bps BPS --participation FRACTION]
                   [--signals DIR] [--trades PATH] [--equity PATH] [--report PATH]
                   [--capital USDT] [--taker-fee RATE] [--maker-fee RATE]
                   [--rtt-ms MS] [--private-latency-ms MS] [--mmr FRACTION] [--durable-log]

@@ -145,6 +145,12 @@ struct Accepted {
 }
 
 pub struct SimulatedVenue {
+    model: super::execution::ExecutionModel,
+    membership: Option<Vec<super::source::Membership>>,
+    modeled_orders: BTreeMap<String, (u64, u64, OrderRequest)>,
+    position_changed_at: Vec<u64>,
+    stop_changed_at: Vec<u64>,
+    modeled_stop_pending: Vec<bool>,
     params: VenueParams,
     scheduler: Scheduler,
     symbols: Vec<Symbol>,
@@ -195,6 +201,12 @@ impl SimulatedVenue {
             ..Accounting::default()
         };
         SimulatedVenue {
+            model: super::execution::ExecutionModel::Books,
+            membership: None,
+            modeled_orders: BTreeMap::new(),
+            position_changed_at: vec![0; n],
+            stop_changed_at: vec![0; n],
+            modeled_stop_pending: vec![false; n],
             cash: params.initial_cash_usdt,
             params,
             scheduler,
@@ -218,6 +230,67 @@ impl SimulatedVenue {
         }
     }
 
+    pub fn set_membership(&mut self, membership: Vec<super::source::Membership>) {
+        self.membership = Some(membership);
+    }
+
+    pub fn accepts_history(&self, event: &super::source::HistoricalEvent) -> bool {
+        use super::{execution::ExecutionModel, source::HistoricalEvent};
+        match event {
+            HistoricalEvent::Book { .. } => matches!(self.model, ExecutionModel::Books),
+            HistoricalEvent::Bar(_) => matches!(self.model, ExecutionModel::Bars { .. }),
+            _ => true,
+        }
+    }
+
+    pub fn set_execution_model(
+        &mut self,
+        model: super::execution::ExecutionModel,
+    ) -> Result<(), String> {
+        model.validate()?;
+        if model.assumptions().is_some() {
+            for symbol in &self.symbols {
+                let spec = self
+                    .specs
+                    .iter()
+                    .find(|(name, _)| name == symbol)
+                    .map(|(_, spec)| spec)
+                    .ok_or_else(|| {
+                        format!("{symbol}: modeled execution requires exact metadata")
+                    })?;
+                if spec.settlement_asset != engine_types::numeric::AssetId::Named("USDT".into())
+                    || spec
+                        .qty_step
+                        .as_ref()
+                        .is_none_or(|step| !step.is_positive())
+                {
+                    return Err(format!("{symbol}: trade/bar execution requires an explicit USDT settlement asset and positive exact quantity step"));
+                }
+            }
+        }
+        self.model = model;
+        Ok(())
+    }
+
+    pub fn modeled_quote(
+        &self,
+        price: f64,
+        volume: f64,
+        at: u64,
+        exchange: u64,
+    ) -> Option<engine_types::Quote> {
+        let (spread, _, participation) = self.model.assumptions()?;
+        Some(engine_types::Quote {
+            bid_px: price * (1.0 - spread / 20_000.0),
+            ask_px: price * (1.0 + spread / 20_000.0),
+            bid_qty: volume * participation,
+            ask_qty: volume * participation,
+            recv_ns: at,
+            venue_ts_ms: (exchange / 1_000_000) as i64,
+            seq: 0,
+        })
+    }
+
     pub fn symbol_id(&self, name: &str) -> Option<SymbolId> {
         self.symbols
             .iter()
@@ -239,6 +312,10 @@ impl SimulatedVenue {
 
     // ------------------------------------------------------------ the tape
 
+    pub fn replace_book(&mut self, symbol: SymbolId, depth: Option<&Depth>) {
+        self.books[symbol.0 as usize] = depth.copied();
+    }
+
     pub fn on_book(&mut self, symbol: SymbolId, depth: &Depth) {
         let i = symbol.0 as usize;
         self.books[i] = Some(*depth);
@@ -250,6 +327,10 @@ impl SimulatedVenue {
         let i = symbol.0 as usize;
         self.lasts[i] = Some(price);
         self.settle_funding_if_due(i);
+        if matches!(self.model, super::execution::ExecutionModel::Trades { .. }) {
+            self.match_modeled(symbol, price, qty, self.scheduler.now_ns());
+            return;
+        }
         let ids: Vec<String> = self
             .resting
             .iter()
@@ -288,6 +369,159 @@ impl SimulatedVenue {
         }
     }
 
+    pub fn on_bar(&mut self, symbol: SymbolId, bar: &super::source::BarRow) {
+        let i = symbol.0 as usize;
+        self.lasts[i] = Some(bar.close);
+        self.settle_funding_if_due(i);
+        let participation = self.model.assumptions().expect("bar execution").2;
+        let mut budget = bar.volume * participation;
+        // Intrabar path is unknown. Carried protection executes first at the
+        // adverse extreme; new entries execute only at the completed close.
+        if self.position_changed_at[i] <= bar.start_ns && self.stop_changed_at[i] <= bar.start_ns {
+            if let Some(position) = self.positions[i].clone() {
+                let touched = position.stop_px.is_some_and(|stop| match position.side {
+                    Side::Buy => bar.low <= stop,
+                    Side::Sell => bar.high >= stop,
+                });
+                if touched || self.modeled_stop_pending[i] {
+                    let adverse = if position.side == Side::Buy {
+                        bar.low
+                    } else {
+                        bar.high
+                    };
+                    budget -= self.modeled_stop(i, &position, adverse, budget);
+                }
+            }
+        }
+        self.match_modeled(symbol, bar.close, budget / participation, bar.start_ns);
+    }
+
+    fn modeled_stop(&mut self, i: usize, position: &Position, reference: f64, budget: f64) -> f64 {
+        let step = self.rules[i].expect("position rule").qty_step;
+        let qty = (position.qty.min(budget) / step).floor() * step;
+        self.modeled_stop_pending[i] = qty < position.qty - 1e-12;
+        if qty <= 0.0 {
+            return 0.0;
+        }
+        let side = if position.side == Side::Buy {
+            Side::Sell
+        } else {
+            Side::Buy
+        };
+        let request = OrderRequest {
+            symbol: SymbolId(i as u16),
+            side,
+            qty: position.qty,
+            kind: OrderKind::Market,
+            reduce_only: true,
+            close_position: true,
+            client_order_id: String::new(),
+            stop: None,
+            strategy: engine_types::StrategyId(0),
+            exact_terms: None,
+            sleeve_effect: None,
+        };
+        self.apply_fill(
+            &request,
+            qty,
+            self.model.price(reference, side),
+            false,
+            Some(ForcedClose::StopLoss),
+        );
+        qty
+    }
+
+    fn match_modeled(&mut self, symbol: SymbolId, price: f64, volume: f64, eligible_at: u64) {
+        let i = symbol.0 as usize;
+        let (_, _, participation) = self.model.assumptions().expect("modeled execution");
+        let mut remaining_volume = volume * participation;
+        if matches!(self.model, super::execution::ExecutionModel::Trades { .. }) {
+            if let Some(position) = self.positions[i].clone() {
+                if self.modeled_stop_pending[i]
+                    || position.stop_px.is_some_and(|stop| {
+                        if position.side == Side::Buy {
+                            price <= stop
+                        } else {
+                            price >= stop
+                        }
+                    })
+                {
+                    remaining_volume -= self.modeled_stop(i, &position, price, remaining_volume);
+                }
+            }
+        }
+        let mut ready: Vec<_> = self
+            .modeled_orders
+            .iter()
+            .filter(|(_, (at, _, r))| r.symbol == symbol && *at <= eligible_at)
+            .map(|(id, (_, seq, _))| (*seq, id.clone()))
+            .collect();
+        ready.sort();
+        for (_, id) in ready {
+            let (at, seq, mut request) = self.modeled_orders.remove(&id).unwrap();
+            let px = self.model.price(price, request.side);
+            let (reaches, persistent, maker) = match request.kind {
+                OrderKind::Market => (true, false, false),
+                OrderKind::Limit { px: limit, tif } => (
+                    if request.side == Side::Buy {
+                        (if tif == TimeInForce::PostOnly {
+                            price
+                        } else {
+                            px
+                        }) <= limit
+                    } else {
+                        (if tif == TimeInForce::PostOnly {
+                            price
+                        } else {
+                            px
+                        }) >= limit
+                    },
+                    tif != TimeInForce::Ioc,
+                    tif == TimeInForce::PostOnly,
+                ),
+            };
+            let max_reduce = if request.reduce_only || request.close_position {
+                self.positions[i]
+                    .as_ref()
+                    .filter(|p| p.side != request.side)
+                    .map(|p| p.qty)
+                    .unwrap_or(0.0)
+            } else {
+                request.qty
+            };
+            let step = self.rules[i].expect("accepted order rule").qty_step;
+            let fill_qty = if reaches {
+                (request.qty.min(max_reduce).min(remaining_volume) / step).floor() * step
+            } else {
+                0.0
+            };
+            if fill_qty > 0.0 {
+                let fill_px = if maker {
+                    match request.kind {
+                        OrderKind::Limit { px, .. } => px,
+                        _ => unreachable!(),
+                    }
+                } else {
+                    px
+                };
+                self.apply_fill(&request, fill_qty, fill_px, maker, None);
+                remaining_volume = (remaining_volume - fill_qty).max(0.0);
+                request.qty = (request.qty - fill_qty).max(0.0);
+            }
+            if request.qty > 1e-12 {
+                if persistent && max_reduce > 0.0 {
+                    self.modeled_orders.insert(id, (at, seq, request));
+                } else {
+                    self.queue_private(OrderUpdate::Cancelled {
+                        client_order_id: id,
+                        recv_ns: 0,
+                    });
+                }
+            }
+        }
+        self.check_liquidation();
+    }
+
     pub fn on_ticker(&mut self, symbol: SymbolId, row: &TickerRow) {
         let i = symbol.0 as usize;
         if let Some(mark) = row.mark_price {
@@ -311,8 +545,10 @@ impl SimulatedVenue {
                 self.funding[i].next_ms = Some(next);
             }
         }
-        self.check_stop(i);
-        self.check_liquidation();
+        if self.model.assumptions().is_none() {
+            self.check_stop(i);
+            self.check_liquidation();
+        }
     }
 
     // -------------------------------------------------------------- orders
@@ -344,6 +580,35 @@ impl SimulatedVenue {
                 filled: 0.0,
             },
         );
+        if self.model.assumptions().is_some() {
+            if let OrderKind::Limit {
+                px,
+                tif: TimeInForce::PostOnly,
+            } = request.kind
+            {
+                if self.lasts[i].is_some_and(|reference| {
+                    let spread = self.model.assumptions().unwrap().0;
+                    let sign = if request.side == Side::Buy { 1.0 } else { -1.0 };
+                    let touch = reference * (1.0 + sign * spread / 20_000.0);
+                    if request.side == Side::Buy {
+                        px >= touch
+                    } else {
+                        px <= touch
+                    }
+                }) {
+                    self.queue_private(OrderUpdate::Cancelled {
+                        client_order_id: request.client_order_id,
+                        recv_ns: 0,
+                    });
+                    return Ok(venue_order_id);
+                }
+            }
+            self.modeled_orders.insert(
+                request.client_order_id.clone(),
+                (self.scheduler.now_ns(), self.order_counter, request),
+            );
+            return Ok(venue_order_id);
+        }
         match request.kind {
             OrderKind::Market => {
                 let filled = self.walk_book(&request, None, false, None);
@@ -410,6 +675,24 @@ impl SimulatedVenue {
                 format!("{} has no instrument rule on this tape", self.name(i)),
             ));
         };
+        if !request.reduce_only
+            && !request.close_position
+            && self.membership.as_ref().is_some_and(|rows| {
+                !rows.iter().any(|row| {
+                    row.symbol == self.name(i)
+                        && row.start_ns <= self.scheduler.now_ns()
+                        && self.scheduler.now_ns() < row.end_ns
+                })
+            })
+        {
+            return Err(rejected(
+                reject::PARAMS,
+                format!(
+                    "{} is outside historical membership at order arrival",
+                    self.name(i)
+                ),
+            ));
+        }
         if self.accounting.liquidated {
             return Err(rejected(
                 reject::INSUFFICIENT_BALANCE,
@@ -445,6 +728,9 @@ impl SimulatedVenue {
                 }
                 px
             }
+            OrderKind::Market if self.model.assumptions().is_some() => self.lasts[i]
+                .map(|px| self.model.price(px, request.side))
+                .unwrap_or(0.0),
             OrderKind::Market => match (request.side, self.book(i)) {
                 (Side::Buy, Some(book)) => book.best_ask().map(|l| l.px).unwrap_or(0.0),
                 (Side::Sell, Some(book)) => book.best_bid().map(|l| l.px).unwrap_or(0.0),
@@ -573,12 +859,48 @@ impl SimulatedVenue {
         forced: Option<ForcedClose>,
     ) {
         let i = request.symbol.0 as usize;
+        let exact_qty = self.model.assumptions().map(|_| {
+            use engine_types::numeric::Exact;
+            let step = self
+                .specs
+                .iter()
+                .find(|(s, _)| s == &self.symbols[i])
+                .and_then(|(_, spec)| spec.qty_step.clone())
+                .expect("modeled execution requires an exact quantity step");
+            let units = (qty / self.rules[i].unwrap().qty_step).round() as u64;
+            step * Exact::from_u64(units)
+        });
+        let qty = exact_qty
+            .as_ref()
+            .map(|q| q.to_f64().unwrap())
+            .unwrap_or(qty);
+        self.position_changed_at[i] = self.scheduler.now_ns();
         let rate = if is_maker {
             self.params.maker_fee_rate
         } else {
             self.params.taker_fee_rate
         };
         let fee = (px * qty * rate).abs();
+        let amounts = exact_qty.map(|quantity| {
+            use engine_types::numeric::{
+                AssetAmount, AssetId, Exact, ExactNumber, ExecutionAmounts,
+            };
+            let settlement_asset = self
+                .specs
+                .iter()
+                .find(|(s, _)| s == &self.symbols[i])
+                .map(|(_, spec)| spec.settlement_asset.clone())
+                .unwrap_or(AssetId::Unknown);
+            ExecutionAmounts {
+                settlement_asset: settlement_asset.clone(),
+                quantity: ExactNumber::derived(quantity),
+                price: ExactNumber::derived(Exact::from_legacy_f64(px).unwrap()),
+                fee: Some(AssetAmount {
+                    asset: settlement_asset,
+                    amount: ExactNumber::derived(Exact::from_legacy_f64(fee).unwrap()),
+                }),
+            }
+        });
         self.cash -= fee;
         self.accounting.fees_paid_usdt += fee;
         self.accounting.fills += 1;
@@ -662,14 +984,14 @@ impl SimulatedVenue {
             qty,
             px,
             fee: Some(fee),
-            amounts: None,
+            amounts: amounts.clone(),
             is_maker,
             forced_close: forced,
             venue_ts_ms: clock::wall_ms(),
         });
         self.queue_private(OrderUpdate::Fill {
             allocation: None,
-            amounts: None,
+            amounts: amounts.map(Box::new),
             exec_id,
             client_order_id: request.client_order_id.clone(),
             symbol: request.symbol,
@@ -751,9 +1073,15 @@ impl SimulatedVenue {
                 self.force_close(i, &position, ForcedClose::Liquidation, mark);
             }
         }
-        let ids: Vec<String> = self.resting.keys().cloned().collect();
+        let ids: Vec<String> = self
+            .resting
+            .keys()
+            .chain(self.modeled_orders.keys())
+            .cloned()
+            .collect();
         for id in ids {
             self.resting.remove(&id);
+            self.modeled_orders.remove(&id);
             self.queue_private(OrderUpdate::Cancelled {
                 client_order_id: id,
                 recv_ns: 0,
@@ -899,7 +1227,19 @@ impl SimulatedVenue {
             .filter(|r| r.opens)
             .map(|r| r.px * r.remaining / self.leverage_of(r.request.symbol.0 as usize))
             .sum();
-        positions + orders
+        let modeled: f64 = self
+            .modeled_orders
+            .values()
+            .map(|(_, _, r)| {
+                if self.opens_exposure(r, r.qty) {
+                    self.reference_px(r.symbol.0 as usize, 0.0) * r.qty
+                        / self.leverage_of(r.symbol.0 as usize)
+                } else {
+                    0.0
+                }
+            })
+            .sum();
+        positions + orders + modeled
     }
 
     fn available_usdt(&self) -> f64 {
@@ -942,7 +1282,7 @@ impl SimulatedVenue {
         a.unrealized_usdt = self.unrealized_usdt() + 0.0;
         a.equity_usdt = self.cash + a.unrealized_usdt;
         a.open_positions = self.positions.iter().flatten().count();
-        a.resting_orders = self.resting.len();
+        a.resting_orders = self.resting.len() + self.modeled_orders.len();
         a.open_entry_fees_usdt = self
             .positions
             .iter()
@@ -990,11 +1330,24 @@ impl SimulatedVenue {
                 filled_qty: r.request.qty - r.remaining,
                 reduce_only: r.request.reduce_only,
             })
+            .chain(self.modeled_orders.values().map(|(_, _, r)| {
+                let accepted = &self.accepted[&r.client_order_id];
+                VenueOrder {
+                    client_order_id: r.client_order_id.clone(),
+                    symbol: self.name(r.symbol.0 as usize).into(),
+                    side: r.side,
+                    qty: accepted.qty,
+                    filled_qty: accepted.filled,
+                    reduce_only: r.reduce_only,
+                }
+            }))
             .collect()
     }
 
     fn cancel(&mut self, client_order_id: &str) -> Result<(), VenueError> {
-        if self.resting.remove(client_order_id).is_none() {
+        if self.resting.remove(client_order_id).is_none()
+            && self.modeled_orders.remove(client_order_id).is_none()
+        {
             return Err(VenueError::Rejected {
                 code: reject::ORDER_NOT_FOUND,
                 message: format!("order {client_order_id} is not working"),
@@ -1008,6 +1361,9 @@ impl SimulatedVenue {
     }
 
     fn amend(&mut self, client_order_id: &str, spec: AmendSpec) -> Result<(), VenueError> {
+        if self.model.assumptions().is_some() {
+            return Err(VenueError::Rejected { code: reject::PARAMS, message: "trade/bar execution requires cancel and replace; amendment queue priority is unobserved".into() });
+        }
         let i;
         let side;
         let (px, remaining) = {
@@ -1087,6 +1443,7 @@ impl SimulatedVenue {
 
     fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
         let i = symbol.0 as usize;
+        self.stop_changed_at[i] = self.scheduler.now_ns();
         let Some(position) = self.positions.get_mut(i).and_then(Option::as_mut) else {
             return Err(VenueError::Rejected {
                 code: reject::PARAMS,
@@ -1111,6 +1468,9 @@ impl SimulatedVenue {
         self.symbols.push(name.to_string());
         self.rules.push(None);
         self.books.push(None);
+        self.position_changed_at.push(0);
+        self.stop_changed_at.push(0);
+        self.modeled_stop_pending.push(false);
         self.marks.push(None);
         self.lasts.push(None);
         self.funding.push(Funding::default());
@@ -1177,7 +1537,9 @@ impl SimulatedVenue {
                 .map_err(|_| ())
                 .expect("zero is a decimal"),
         };
-        if self.resting.contains_key(client_order_id) {
+        if self.resting.contains_key(client_order_id)
+            || self.modeled_orders.contains_key(client_order_id)
+        {
             OrderLookup::Working(row)
         } else if accepted.filled >= accepted.qty - 1e-12 {
             OrderLookup::Terminal {

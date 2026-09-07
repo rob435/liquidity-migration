@@ -373,6 +373,39 @@ pub(super) fn parse_backtest_options(args: &[String]) -> Result<BacktestOptions,
         wal_path: required("--wal")?,
         ..BacktestOptions::default()
     };
+    options.source_format = match value(args, "--source").as_deref().unwrap_or("tape") {
+        "tape" => engine_tools::backtest::source::SourceFormat::Tape,
+        "normalized" => engine_tools::backtest::source::SourceFormat::Normalized,
+        other => return Err(format!("unsupported historical source {other}").into()),
+    };
+    options.execution = match value(args, "--execution").as_deref().unwrap_or("books") {
+        "books" => engine_tools::backtest::execution::ExecutionModel::Books,
+        mode @ ("trades" | "bars") => {
+            let number = |flag| -> Result<f64, Box<dyn Error>> {
+                Ok(value(args, flag)
+                    .ok_or_else(|| format!("{mode} execution requires explicit {flag}"))?
+                    .parse()?)
+            };
+            let spread_bps = number("--spread-bps")?;
+            let slippage_bps = number("--slippage-bps")?;
+            let participation = number("--participation")?;
+            if mode == "trades" {
+                engine_tools::backtest::execution::ExecutionModel::Trades {
+                    spread_bps,
+                    slippage_bps,
+                    participation,
+                }
+            } else {
+                engine_tools::backtest::execution::ExecutionModel::Bars {
+                    spread_bps,
+                    slippage_bps,
+                    participation,
+                }
+            }
+        }
+        other => return Err(format!("unsupported execution mode {other}").into()),
+    };
+    options.execution.validate()?;
     options.signals_path = value(args, "--signals").map(PathBuf::from);
     options.trades_path = value(args, "--trades").map(PathBuf::from);
     options.equity_path = value(args, "--equity").map(PathBuf::from);

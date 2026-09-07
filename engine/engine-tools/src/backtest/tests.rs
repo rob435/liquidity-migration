@@ -14,10 +14,9 @@ use engine_types::{
 };
 
 use super::feed::Cursor;
+use super::instruments::read_instruments;
 use super::scheduler::{Scheduler, VirtualTimer, WaiterKind};
-use super::tape::{
-    read_instruments, BookBuilder, BookRow, TapeError, TapeReader, TapeRow, TickerRow,
-};
+use super::tape::{BookBuilder, BookRow, TapeError, TapeReader, TapeRow, TickerRow};
 use super::venue::{SimulatedVenue, VenueParams};
 use crate::engine::{LoopInterval, LoopTimer};
 use crate::testpath::temp_path;
@@ -1440,4 +1439,613 @@ async fn a_replay_that_ends_flat_reconciles_the_venue_and_the_ledger_exactly() {
         report.reconciliation
     );
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_book_gap_removes_execution_liquidity_until_a_fresh_snapshot() {
+    let mut rows: Vec<serde_json::Value> = recorder_rows()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let mut gap = rows[0].clone();
+    gap["kind"] = serde_json::json!("orderbook_delta");
+    gap["sequence_gap"] = serde_json::json!(true);
+    gap["update_id"] = serde_json::json!(3);
+    gap["local_receive_ts_ns"] = serde_json::json!(1700000000100000000_u64);
+    rows.truncate(1);
+    rows.push(gap);
+    let path = write_temp(
+        "book-gap-execution",
+        &rows
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let (venue, _) = venue(1_000_000.0, 10.0);
+    let venue = Arc::new(Mutex::new(venue));
+    let mut cursor = Cursor::new(
+        TapeReader::open(path.path()).unwrap(),
+        venue.clone(),
+        &["BTCUSDT".into()],
+        &[],
+    );
+    for _ in 0..2 {
+        cursor.next_row_at().unwrap().unwrap();
+        cursor.absorb_next();
+    }
+    assert!(
+        venue
+            .lock()
+            .unwrap()
+            .submit(&order("after-gap", Side::Buy, 1.0, OrderKind::Market))
+            .is_err(),
+        "a broken book chain cannot execute an order using stale depth"
+    );
+}
+
+#[test]
+fn trade_execution_waits_for_a_print_and_shares_its_capacity() {
+    use super::execution::ExecutionModel;
+    let (mut v, scheduler) = modeled_venue(1_000_000.0, 10.0);
+    v.set_execution_model(ExecutionModel::Trades {
+        spread_bps: 10.0,
+        slippage_bps: 5.0,
+        participation: 0.1,
+    })
+    .unwrap();
+    assert!(v
+        .submit(&order("no-price", Side::Buy, 1.0, OrderKind::Market))
+        .is_err());
+    v.on_trade(SymbolId(0), 100.0, 100.0, true);
+    v.submit(&order("one", Side::Buy, 1.0, OrderKind::Market))
+        .unwrap();
+    v.submit(&order("two", Side::Buy, 1.0, OrderKind::Market))
+        .unwrap();
+    assert_eq!(v.accounting().fills, 0);
+    assert_eq!(v.working_orders().len(), 2);
+    assert!(matches!(
+        v.lookup("BTCUSDT", "one"),
+        engine_types::orders::OrderLookup::Working(_)
+    ));
+    scheduler.advance_to(1_000_000_000);
+    v.on_trade(SymbolId(0), 101.0, 15.0, true);
+    let fills = v.executions();
+    assert_eq!(fills.len(), 2);
+    assert_eq!(fills[0].client_order_id, "one");
+    assert_eq!(fills[1].client_order_id, "two");
+    assert_eq!(fills.iter().map(|f| f.qty).sum::<f64>(), 1.5);
+    assert_eq!(fills[0].px, 101.0 * 1.001);
+    assert_eq!(v.working_orders().len(), 0);
+    assert_eq!(v.accounting().maker_fills, 0);
+}
+
+#[test]
+fn bars_only_fill_orders_present_at_open_after_the_complete_candle() {
+    use super::{execution::ExecutionModel, source::BarRow};
+    let (mut v, scheduler) = modeled_venue(1_000_000.0, 10.0);
+    v.set_execution_model(ExecutionModel::Bars {
+        spread_bps: 0.0,
+        slippage_bps: 10.0,
+        participation: 0.1,
+    })
+    .unwrap();
+    let bar = |start, close| BarRow {
+        symbol: "BTCUSDT".into(),
+        recv_ns: start + 100,
+        exchange_ts_ns: start + 100,
+        start_ns: start,
+        end_ns: start + 100,
+        open: 100.0,
+        high: 110.0,
+        low: 90.0,
+        close,
+        volume: 20.0,
+    };
+    scheduler.advance_to(1100);
+    v.on_bar(SymbolId(0), &bar(1000, 100.0));
+    scheduler.advance_to(1150);
+    v.submit(&order("entry", Side::Buy, 1.0, OrderKind::Market))
+        .unwrap();
+    scheduler.advance_to(1200);
+    v.on_bar(SymbolId(0), &bar(1100, 105.0));
+    assert_eq!(
+        v.accounting().fills,
+        0,
+        "mid-candle orders cannot use that candle's earlier range"
+    );
+    scheduler.advance_to(1300);
+    v.on_bar(SymbolId(0), &bar(1200, 102.0));
+    assert_eq!(v.executions()[0].px, 102.0 * 1.001);
+    assert_eq!(v.executions()[0].qty, 1.0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn normalized_book_facts_preserve_orders_fills_accounting_and_wal_bytes() {
+    use super::source::{
+        HistoricalEvent, HistoricalSource, HistoryHeader, Membership, SourceFormat,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tape = dir.path().join("tape.jsonl");
+    let (start, _) = synthetic_tape(&tape, 60);
+    let normalized = dir.path().join("history.jsonl");
+    let header = HistoryHeader {
+        schema: "historical_v1".into(),
+        venue: "bybit-linear".into(),
+        delivery: "observed".into(),
+        channels: vec!["book".into(), "trade".into(), "ticker".into()],
+        membership: vec![Membership {
+            symbol: "BTCUSDT".into(),
+            start_ns: start,
+            end_ns: start + 61_000_000_000,
+        }],
+        instrument_assumption: "same fixed test catalog as recorder control".into(),
+    };
+    let mut text = serde_json::to_string(&header).unwrap() + "\n";
+    let mut reader = TapeReader::open(&tape).unwrap();
+    while let Some((at, event)) = reader.next_event().unwrap() {
+        let mut row = match event {
+            HistoricalEvent::Trade(row) => {
+                let mut v = serde_json::to_value(row).unwrap();
+                v["kind"] = "trade".into();
+                v
+            }
+            HistoricalEvent::Ticker(row) => {
+                let mut v = serde_json::to_value(row).unwrap();
+                v["kind"] = "ticker".into();
+                v
+            }
+            HistoricalEvent::Book {
+                symbol,
+                depth,
+                levels,
+            } => {
+                let b = levels.unwrap();
+                serde_json::json!({"kind":"book","symbol":symbol,"depth":depth,"valid":true,
+                    "recv_ns":at,"exchange_ts_ns":b.venue_ts_ms as u64 * 1_000_000,
+                    "bids":&b.bids[..b.bid_len as usize],"asks":&b.asks[..b.ask_len as usize],
+                    "update_id":b.update_id,"cross_sequence":b.seq})
+            }
+            HistoricalEvent::Bar(_) => unreachable!(),
+        };
+        row["venue"] = "bybit-linear".into();
+        text.push_str(&row.to_string());
+        text.push('\n');
+    }
+    std::fs::write(&normalized, text).unwrap();
+    let original = run_once(dir.path(), "tape", &tape).await;
+    let adapted = super::run(super::BacktestOptions {
+        engine_config_path: dir.path().join("engine.toml"),
+        tape_path: normalized,
+        source_format: SourceFormat::Normalized,
+        instruments_path: dir.path().join("instruments.json"),
+        wal_path: dir.path().join("normalized.wal"),
+        trades_path: Some(dir.path().join("normalized-trades.jsonl")),
+        initial_capital_usdt: 100_000.0,
+        ..super::BacktestOptions::default()
+    })
+    .await
+    .unwrap();
+    assert!(original.orders_sent > 0 && original.venue.fills > 0);
+    assert_eq!(original.venue, adapted.venue);
+    assert_eq!(original.engine, adapted.engine);
+    assert_eq!(
+        std::fs::read(dir.path().join("tape.wal")).unwrap(),
+        std::fs::read(dir.path().join("normalized.wal")).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("tape-trades.jsonl")).unwrap(),
+        std::fs::read(dir.path().join("normalized-trades.jsonl")).unwrap()
+    );
+}
+
+#[test]
+fn recorder_missing_availability_is_rejected_instead_of_becoming_epoch_zero() {
+    let mut row: serde_json::Value =
+        serde_json::from_str(recorder_rows().lines().next().unwrap()).unwrap();
+    row.as_object_mut().unwrap().remove("local_receive_ts_ns");
+    let path = write_temp("missing-availability", &row.to_string());
+    assert!(TapeReader::open(path.path()).unwrap().next_row().is_err());
+}
+
+#[test]
+fn failed_tape_decompression_cannot_report_successful_eof() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("rows.jsonl");
+    let compressed = dir.path().join("rows.jsonl.zst");
+    std::fs::write(&plain, recorder_rows()).unwrap();
+    let status = std::process::Command::new("zstd")
+        .args(["-q", "-o"])
+        .arg(&compressed)
+        .arg(&plain)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut bytes = std::fs::read(&compressed).unwrap();
+    bytes.truncate(bytes.len() - 2);
+    std::fs::write(&compressed, bytes).unwrap();
+    let mut reader = TapeReader::open(&compressed).unwrap();
+    let failed = loop {
+        match reader.next_row() {
+            Ok(Some(_)) => {}
+            Ok(None) => break false,
+            Err(_) => break true,
+        }
+    };
+    assert!(
+        failed,
+        "truncated compressed input must not become a successful partial dataset"
+    );
+}
+
+#[test]
+fn modeled_partial_fills_use_exact_grid_quantities() {
+    use super::execution::ExecutionModel;
+    use engine_types::numeric::Exact;
+    let (mut v, _) = modeled_venue(1_000_000.0, 10.0);
+    v.set_execution_model(ExecutionModel::Trades {
+        spread_bps: 0.0,
+        slippage_bps: 0.0,
+        participation: 1.0,
+    })
+    .unwrap();
+    v.on_trade(SymbolId(0), 6000.0, 1.0, true);
+    v.submit(&order("partial", Side::Buy, 0.002, OrderKind::Market))
+        .unwrap();
+    v.on_trade(SymbolId(0), 6000.0, 0.001, true);
+    let fill = &v.executions()[0];
+    let amounts = fill
+        .amounts
+        .as_ref()
+        .expect("modeled fills carry derived exact amounts");
+    assert_eq!(
+        amounts.quantity.value,
+        Exact::parse_decimal("0.001").unwrap()
+    );
+    amounts
+        .validate_projection(fill.qty, fill.px, fill.fee)
+        .unwrap();
+}
+
+#[test]
+fn modeled_post_only_rejects_crossing_the_declared_spread_without_slippage() {
+    use super::execution::ExecutionModel;
+    let (mut v, _) = modeled_venue(1_000_000.0, 10.0);
+    v.set_execution_model(ExecutionModel::Trades {
+        spread_bps: 0.0,
+        slippage_bps: 100.0,
+        participation: 1.0,
+    })
+    .unwrap();
+    v.on_trade(SymbolId(0), 100.0, 100.0, true);
+    v.submit(&order(
+        "crossing",
+        Side::Buy,
+        1.0,
+        OrderKind::Limit {
+            px: 100.5,
+            tif: TimeInForce::PostOnly,
+        },
+    ))
+    .unwrap();
+    assert!(v.working_orders().is_empty());
+    v.submit(&order(
+        "passive",
+        Side::Buy,
+        1.0,
+        OrderKind::Limit {
+            px: 99.5,
+            tif: TimeInForce::PostOnly,
+        },
+    ))
+    .unwrap();
+    v.on_trade(SymbolId(0), 99.0, 100.0, true);
+    assert_eq!(v.executions()[0].px, 99.5);
+    assert!(v.executions()[0].is_maker);
+}
+
+#[test]
+fn normalized_catalog_preserves_exact_decimal_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = read_instruments(
+        &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/history/instruments.json"),
+    )
+    .unwrap();
+    let path = dir.path().join("catalog.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({"kind":"instrument_catalog_v1","specs":original.specs}).to_string(),
+    )
+    .unwrap();
+    let adapted = read_instruments(&path).unwrap();
+    assert_eq!(original.specs, adapted.specs);
+    assert_eq!(
+        serde_json::to_value(original.rules).unwrap(),
+        serde_json::to_value(adapted.rules).unwrap()
+    );
+}
+
+#[test]
+fn normalized_history_rejects_bad_clocks_membership_and_missing_prices() {
+    use super::source::{HistoricalSource, NormalizedReader};
+    let header = serde_json::json!({"schema":"historical_v1","venue":"example-exchange","delivery":"observed",
+        "channels":["trade"],"membership":[{"symbol":"XBT","start_ns":1,"end_ns":1000}],
+        "instrument_assumption":"fixed test catalog"});
+    let good = serde_json::json!({"kind":"trade","venue":"example-exchange","symbol":"XBT", "recv_ns":120,"exchange_ts_ns":100,
+        "price":10.0,"qty":1.0,"buyer_aggressor":true});
+    for (key, value) in [
+        ("venue", serde_json::json!("bybit-linear")),
+        ("symbol", serde_json::json!("BTC")),
+        ("recv_ns", serde_json::json!(99)),
+        ("recv_ns", serde_json::json!(120.5)),
+        ("exchange_ts_ns", serde_json::json!(1000)),
+        ("price", serde_json::Value::Null),
+    ] {
+        let mut bad = good.clone();
+        bad[key] = value;
+        let file = write_temp("bad-normalized", &format!("{header}\n{bad}\n"));
+        assert!(
+            NormalizedReader::open(file.path())
+                .unwrap()
+                .next_event()
+                .is_err(),
+            "{key}"
+        );
+    }
+    let mut earlier = good.clone();
+    earlier["recv_ns"] = serde_json::json!(110);
+    let file = write_temp(
+        "sorted-normalized",
+        &format!("{header}\n{good}\n{earlier}\n"),
+    );
+    let mut reader = NormalizedReader::open(file.path()).unwrap();
+    assert!(reader.next_event().unwrap().is_some());
+    assert!(matches!(
+        reader.next_event(),
+        Err(TapeError::OutOfOrder { .. })
+    ));
+}
+
+#[test]
+fn bar_carried_stop_has_priority_and_new_entries_cannot_use_prior_range() {
+    use super::{execution::ExecutionModel, source::BarRow};
+    let (mut v, scheduler) = modeled_venue(1_000_000.0, 10.0);
+    v.set_execution_model(ExecutionModel::Bars {
+        spread_bps: 0.0,
+        slippage_bps: 0.0,
+        participation: 0.1,
+    })
+    .unwrap();
+    let bar = |start, low, volume| BarRow {
+        symbol: "BTCUSDT".into(),
+        recv_ns: start + 100,
+        exchange_ts_ns: start + 100,
+        start_ns: start,
+        end_ns: start + 100,
+        open: 100.0,
+        high: 110.0,
+        low,
+        close: 100.0,
+        volume,
+    };
+    scheduler.advance_to(1100);
+    v.on_bar(SymbolId(0), &bar(1000, 80.0, 20.0));
+    let mut entry = order("entry-stop", Side::Buy, 1.0, OrderKind::Market);
+    entry.stop = Some(StopSpec { trigger_px: 90.0 });
+    v.submit(&entry).unwrap();
+    scheduler.advance_to(1200);
+    v.on_bar(SymbolId(0), &bar(1100, 80.0, 20.0));
+    assert_eq!(v.accounting().fills, 1);
+    assert_eq!(
+        v.accounting().stop_fills,
+        0,
+        "entry at close cannot stop on an earlier low"
+    );
+    v.submit(&order("next-entry", Side::Buy, 1.0, OrderKind::Market))
+        .unwrap();
+    scheduler.advance_to(1300);
+    v.on_bar(SymbolId(0), &bar(1200, 80.0, 5.0));
+    assert_eq!(v.accounting().stop_fills, 1);
+    assert_eq!(v.executions()[1].qty, 0.5);
+    assert_eq!(v.executions()[1].px, 80.0);
+    assert_eq!(
+        v.executions().len(),
+        2,
+        "carried protection consumes the shared budget"
+    );
+    scheduler.advance_to(1400);
+    v.on_bar(SymbolId(0), &bar(1300, 99.0, 5.0));
+    assert_eq!(
+        v.accounting().stop_fills,
+        2,
+        "an activated partial stop remains active"
+    );
+    assert_eq!(v.accounting().open_positions, 0);
+}
+
+fn modeled_venue(cash: f64, leverage: f64) -> (SimulatedVenue, Scheduler) {
+    let scheduler = Scheduler::starting_at(1_000);
+    scheduler.open();
+    let mut catalog = instrument_catalog();
+    catalog.specs[0].1.settlement_asset = engine_types::numeric::AssetId::Named("USDT".into());
+    (
+        SimulatedVenue::new(
+            VenueParams {
+                initial_cash_usdt: cash,
+                taker_fee_rate: 0.00055,
+                maker_fee_rate: 0.0002,
+                order_rtt_ns: 100,
+                private_latency_ns: 50,
+                default_leverage: leverage,
+                maintenance_margin_rate: 0.005,
+            },
+            vec!["BTCUSDT".into()],
+            &catalog,
+            scheduler.clone(),
+        ),
+        scheduler,
+    )
+}
+
+#[test]
+fn modeled_liquidation_cancels_pending_orders_before_later_observations() {
+    use super::execution::ExecutionModel;
+    for bars in [false, true] {
+        let (mut v, scheduler) = modeled_venue(1_000.0, 10.0);
+        let model = if bars {
+            ExecutionModel::Bars {
+                spread_bps: 0.0,
+                slippage_bps: 0.0,
+                participation: 1.0,
+            }
+        } else {
+            ExecutionModel::Trades {
+                spread_bps: 0.0,
+                slippage_bps: 0.0,
+                participation: 1.0,
+            }
+        };
+        v.set_execution_model(model).unwrap();
+        v.on_trade(SymbolId(0), 100.0, 1_000.0, true);
+        v.submit(&order("entry", Side::Buy, 90.0, OrderKind::Market))
+            .unwrap();
+        let deliver = |v: &mut SimulatedVenue, at, price| {
+            scheduler.advance_to(at);
+            if bars {
+                v.on_bar(
+                    SymbolId(0),
+                    &super::source::BarRow {
+                        symbol: "BTCUSDT".into(),
+                        recv_ns: at,
+                        exchange_ts_ns: at,
+                        start_ns: at - 1_000,
+                        end_ns: at,
+                        open: price,
+                        high: price,
+                        low: price,
+                        close: price,
+                        volume: 1_000.0,
+                    },
+                );
+            } else {
+                v.on_trade(SymbolId(0), price, 1_000.0, true);
+            }
+        };
+        deliver(&mut v, 2_000, 100.0);
+        v.submit(&order("pending", Side::Buy, 1.0, limit(50.0)))
+            .unwrap();
+        deliver(&mut v, 3_000, 89.0);
+        assert!(v.accounting().liquidated);
+        assert_eq!(v.accounting().resting_orders, 0);
+        assert!(v.debug_private().iter().any(|update| matches!(
+            update,
+            OrderUpdate::Cancelled { client_order_id, .. } if client_order_id == "pending"
+        )));
+        let fills = v.accounting().fills;
+        deliver(&mut v, 4_000, 49.0);
+        assert_eq!(v.accounting().fills, fills);
+        assert!(v.account_view().positions.is_empty());
+    }
+}
+
+#[test]
+fn recorder_books_cannot_silently_enter_trade_execution() {
+    use super::execution::ExecutionModel;
+    let (mut v, _) = modeled_venue(1_000_000.0, 10.0);
+    v.set_execution_model(ExecutionModel::Trades {
+        spread_bps: 0.0,
+        slippage_bps: 0.0,
+        participation: 1.0,
+    })
+    .unwrap();
+    let path = write_temp("mode-mismatch", &recorder_rows());
+    let mut cursor = Cursor::new(
+        TapeReader::open(path.path()).unwrap(),
+        Arc::new(Mutex::new(v)),
+        &["BTCUSDT".into()],
+        &[],
+    );
+    assert!(
+        cursor.next_row_at().is_err(),
+        "mode compatibility applies to every source adapter"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn missing_strategy_features_cannot_be_reported_as_a_zero_trade_backtest() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("engine.toml");
+    quoter_config(&config);
+    let mut text = std::fs::read_to_string(&config)
+        .unwrap()
+        .split("[[strategy]]")
+        .next()
+        .unwrap()
+        .to_string();
+    let fixture: toml::Value =
+        toml::from_str(include_str!("../../../../deploy/engine.demo.toml.template")).unwrap();
+    let strategy = fixture["strategy"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"].as_str() == Some("long_native"))
+        .unwrap();
+    use std::fmt::Write as _;
+    write!(
+        text,
+        "[[strategy]]\nname = \"long_native\"\nsleeve = \"long\"\nconfig_json = {}\n",
+        strategy["config_json"]
+    )
+    .unwrap();
+    std::fs::write(&config, text).unwrap();
+    let tape = dir.path().join("tape.jsonl");
+    synthetic_tape(&tape, 2);
+    let instruments = dir.path().join("instruments.json");
+    instruments_file(&instruments);
+    let error = super::run(super::BacktestOptions {
+        engine_config_path: config,
+        tape_path: tape,
+        instruments_path: instruments,
+        wal_path: dir.path().join("out.wal"),
+        ..super::BacktestOptions::default()
+    })
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("requires historical signals"),
+        "{error}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn bar_execution_without_any_bars_is_not_a_successful_empty_result() {
+    use super::execution::ExecutionModel;
+    let dir = tempfile::tempdir().unwrap();
+    let root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/history");
+    let tape = dir.path().join("ticker.jsonl");
+    let rows = recorder_rows()
+        .lines()
+        .filter(|s| serde_json::from_str::<serde_json::Value>(s).unwrap()["kind"] == "ticker")
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!rows.is_empty());
+    std::fs::write(&tape, rows).unwrap();
+    let error = super::run(super::BacktestOptions {
+        engine_config_path: root.join("bar-probe.toml"),
+        tape_path: tape,
+        instruments_path: root.join("instruments.json"),
+        wal_path: dir.path().join("out.wal"),
+        execution: ExecutionModel::Bars {
+            spread_bps: 0.0,
+            slippage_bps: 0.0,
+            participation: 1.0,
+        },
+        ..super::BacktestOptions::default()
+    })
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("no bar observations"), "{error}");
 }

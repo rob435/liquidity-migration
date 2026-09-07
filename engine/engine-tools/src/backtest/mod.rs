@@ -25,10 +25,13 @@
 //! other participants reacting to us, venue outages, rate-limit waits. Every
 //! number it prints is bounded by those omissions, and the report says so.
 
+pub mod execution;
 pub mod feed;
+pub mod instruments;
 pub mod runner;
 pub mod scheduler;
 pub mod signals;
+pub mod source;
 pub mod tape;
 pub mod venue;
 

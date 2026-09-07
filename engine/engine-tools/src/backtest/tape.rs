@@ -13,17 +13,17 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
-use engine_types::numeric::{AssetId, Exact, ExactInstrumentSpec, PricePrecision};
-use engine_types::orders::InstrumentCatalog;
-use engine_types::{BookLevel, Depth, InstrumentRule, Symbol, BOOK_DEPTH};
+use engine_types::{BookLevel, Depth, Symbol, BOOK_DEPTH};
 use serde_json::Value;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TapeError {
+    #[error("historical book/bar row is incompatible with the selected execution model")]
+    UnsupportedExecution,
     #[error("tape io: {0}")]
     Io(#[from] std::io::Error),
     #[error("tape line {line}: {detail}")]
@@ -54,30 +54,7 @@ pub struct BookRow {
     pub sequence_gap: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct TradeRow {
-    pub symbol: Symbol,
-    pub recv_ns: u64,
-    pub exchange_ts_ns: u64,
-    pub price: f64,
-    pub qty: f64,
-    /// `Buy` on the tape: the buyer crossed the spread.
-    pub buyer_aggressor: bool,
-}
-
-/// A ticker delta. Every field is what the venue pushed in that message;
-/// absent means unchanged, never zero.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct TickerRow {
-    pub symbol: Symbol,
-    pub recv_ns: u64,
-    pub exchange_ts_ns: u64,
-    pub last_price: Option<f64>,
-    pub mark_price: Option<f64>,
-    pub index_price: Option<f64>,
-    pub funding_rate: Option<f64>,
-    pub next_funding_time_ms: Option<i64>,
-}
+pub use super::source::{TickerRow, TradeRow};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TapeRow {
@@ -92,6 +69,7 @@ pub struct TapeStats {
     pub books: u64,
     pub trades: u64,
     pub tickers: u64,
+    pub bars: u64,
     pub skipped_by_kind: BTreeMap<String, u64>,
     pub first_recv_ns: Option<u64>,
     pub last_recv_ns: Option<u64>,
@@ -104,6 +82,7 @@ pub struct TapeReader {
     line: u64,
     buffer: String,
     pub stats: TapeStats,
+    books: BTreeMap<(Symbol, u32), BookBuilder>,
 }
 
 impl TapeReader {
@@ -132,6 +111,7 @@ impl TapeReader {
             line: 0,
             buffer: String::new(),
             stats: TapeStats::default(),
+            books: BTreeMap::new(),
         })
     }
 
@@ -141,6 +121,12 @@ impl TapeReader {
         loop {
             self.buffer.clear();
             if self.lines.read_line(&mut self.buffer)? == 0 {
+                if let Some(mut decoder) = self._decoder.take() {
+                    let status = decoder.wait()?;
+                    if !status.success() {
+                        return Err(self.malformed(format!("zstd decompression failed: {status}")));
+                    }
+                }
                 return Ok(None);
             }
             self.line += 1;
@@ -153,8 +139,17 @@ impl TapeReader {
                 .get("kind")
                 .and_then(Value::as_str)
                 .ok_or_else(|| self.malformed("row has no kind"))?;
-            let recv_ns =
-                u64_field(&value, "local_receive_ts_ns").map_err(|d| self.malformed(d))?;
+            let recv_ns = value
+                .get("local_receive_ts_ns")
+                .and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
+                .ok_or_else(|| {
+                    self.malformed(
+                        "local_receive_ts_ns must be a present exact nonnegative integer",
+                    )
+                })?;
             if let Some(previous) = self.stats.last_recv_ns {
                 if recv_ns < previous {
                     return Err(TapeError::OutOfOrder {
@@ -481,135 +476,39 @@ fn apply_side(out: &mut [BookLevel; BOOK_DEPTH], len: &mut u8, changes: &[BookLe
     }
 }
 
-// ------------------------------------------------------- instruments
-
-/// Recorder instrument rows retain decimal constraints; legacy rules are
-/// projections of the same catalog. Missing assets and bounds stay unknown.
-pub fn read_instruments(path: &Path) -> Result<InstrumentCatalog, TapeError> {
-    let mut text = String::new();
-    if path.extension().is_some_and(|ext| ext == "zst") {
-        let output = Command::new("zstd")
-            .arg("-dc")
-            .arg("--")
-            .arg(path)
-            .stderr(Stdio::inherit())
-            .output()
-            .map_err(|source| TapeError::Zstd {
-                path: path.display().to_string(),
-                source,
-            })?;
-        text = String::from_utf8_lossy(&output.stdout).into_owned();
-    } else {
-        File::open(path)?.read_to_string(&mut text)?;
-    }
-    let malformed = |detail: String| TapeError::Malformed { line: 1, detail };
-    let payload: Value = serde_json::from_str(text.trim()).map_err(|e| malformed(e.to_string()))?;
-    let kind = payload.get("kind").and_then(Value::as_str).unwrap_or("");
-    if kind != "instruments_snapshot" {
-        return Err(malformed(format!(
-            "expected an instruments_snapshot payload, found kind {kind:?}"
-        )));
-    }
-    let rows = payload
-        .get("rows")
-        .and_then(Value::as_array)
-        .ok_or_else(|| malformed("instruments_snapshot has no rows".to_string()))?;
-    let mut out = InstrumentCatalog {
-        cache: None,
-        rules: Vec::with_capacity(rows.len()),
-        specs: Vec::with_capacity(rows.len()),
-    };
-    for row in rows {
-        let Some(symbol) = row.get("symbol").and_then(Value::as_str) else {
-            continue;
-        };
-        let (Some(price_filter), Some(lot_filter)) =
-            (row.get("priceFilter"), row.get("lotSizeFilter"))
-        else {
-            tracing::warn!(
-                symbol,
-                "instrument has no price or lot filter; not tradable"
-            );
-            continue;
-        };
-        let field = |obj: &Value, name: &str| -> Result<Exact, TapeError> {
-            let v = obj
-                .get(name)
-                .ok_or_else(|| malformed(format!("{symbol}: instrument lacks {name}")))?;
-            match v {
-                Value::String(text) => Exact::parse_decimal(text.trim()),
-                // Numeric JSON fields retain this reader's binary64 input model.
-                Value::Number(number) => {
-                    Exact::from_legacy_f64(number.as_f64().ok_or_else(|| {
-                        malformed(format!("{symbol}: {name} is not a finite binary64 number"))
-                    })?)
+impl super::source::HistoricalSource for TapeReader {
+    fn next_event(&mut self) -> Result<Option<(u64, super::source::HistoricalEvent)>, TapeError> {
+        use super::source::HistoricalEvent;
+        Ok(self.next_row()?.map(|(at, row)| {
+            let event = match row {
+                TapeRow::Book(row) => {
+                    let builder = self
+                        .books
+                        .entry((row.symbol.clone(), row.depth))
+                        .or_default();
+                    let levels = builder.apply(&row).copied().map(Box::new);
+                    HistoricalEvent::Book {
+                        symbol: row.symbol,
+                        depth: row.depth,
+                        levels,
+                    }
                 }
-                _ => return Err(malformed(format!("{symbol}: {name} is not a number"))),
-            }
-            .map_err(|error| malformed(format!("{symbol}: {name}: {error}")))
-        };
-        let optional = |obj: &Value, name: &str| -> Result<Option<Exact>, TapeError> {
-            match obj.get(name) {
-                None | Some(Value::Null) => Ok(None),
-                _ => field(obj, name).map(Some),
-            }
-        };
-        let projection = |value: &Exact| {
-            value
-                .to_f64()
-                .map_err(|error| malformed(format!("{symbol}: {error}")))
-        };
-        let asset = |name| {
-            row.get(name)
-                .and_then(Value::as_str)
-                .filter(|name| !name.is_empty())
-                .map(|name| AssetId::Named(name.to_owned()))
-                .unwrap_or(AssetId::Unknown)
-        };
-        let tick_size = field(price_filter, "tickSize")?;
-        let qty_step = field(lot_filter, "qtyStep")?;
-        let min_qty = field(lot_filter, "minOrderQty")?;
-        let min_notional = optional(lot_filter, "minNotionalValue")?;
-        if !tick_size.is_positive() || !qty_step.is_positive() {
-            tracing::warn!(symbol, "instrument has a zero tick or step");
-            continue;
-        }
-        out.rules.push((
-            symbol.to_string(),
-            InstrumentRule {
-                tick_size: projection(&tick_size)?,
-                qty_step: projection(&qty_step)?,
-                min_qty: projection(&min_qty)?,
-                min_notional: min_notional
-                    .as_ref()
-                    .map(projection)
-                    .transpose()?
-                    .unwrap_or(0.0),
-            },
-        ));
-        out.specs.push((
-            symbol.to_string(),
-            ExactInstrumentSpec {
-                native_symbol: symbol.to_string(),
-                base_asset: asset("baseCoin"),
-                quote_asset: asset("quoteCoin"),
-                settlement_asset: asset("settleCoin"),
-                tick_size: Some(tick_size),
-                min_price: optional(price_filter, "minPrice")?,
-                max_price: optional(price_filter, "maxPrice")?,
-                price_precision: PricePrecision::Tick,
-                qty_step: Some(qty_step.clone()),
-                min_qty: Some(min_qty.clone()),
-                market_qty_step: Some(qty_step),
-                market_min_qty: Some(min_qty),
-                max_qty: optional(lot_filter, "maxOrderQty")?,
-                max_market_qty: optional(lot_filter, "maxMktOrderQty")?,
-                min_notional,
-                contract_multiplier: None,
-                fee_assets: None,
-                fee_step: None,
-            },
-        ));
+                TapeRow::Trade(row) => HistoricalEvent::Trade(row),
+                TapeRow::Ticker(row) => HistoricalEvent::Ticker(row),
+            };
+            (at, event)
+        }))
     }
-    Ok(out)
+    fn stats(&self) -> &TapeStats {
+        &self.stats
+    }
+}
+
+impl Drop for TapeReader {
+    fn drop(&mut self) {
+        if let Some(mut decoder) = self._decoder.take() {
+            let _ = decoder.kill();
+            let _ = decoder.wait();
+        }
+    }
 }

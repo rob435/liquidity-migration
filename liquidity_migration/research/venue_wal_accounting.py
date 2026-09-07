@@ -198,14 +198,10 @@ def _close(left: Decimal | None, right: Decimal | None, *, money: bool = False) 
 
 
 def crc32c(payload: bytes) -> int:
-    """CRC-32C in the same reflected form used by the Rust WAL crate."""
-
-    crc = 0xFFFFFFFF
-    for byte in payload:
-        crc ^= byte
-        for _ in range(8):
-            crc = (crc >> 1) ^ (0x82F63B78 if crc & 1 else 0)
-    return crc ^ 0xFFFFFFFF
+    """Use the hardware CRC-32C implementation for the Rust WAL contract."""
+    # Capture-only host commands import this module without reading a WAL.
+    import google_crc32c
+    return int(google_crc32c.value(payload))
 
 
 def _load_json(payload: bytes | str, source: str) -> dict[str, Any]:
@@ -277,62 +273,78 @@ def _segment_candidates(family: Path) -> tuple[list[tuple[int, Path]], bool, lis
     return found, complete, issues
 
 
-def _read_segment(path: Path, index: int) -> tuple[list[dict[str, Any]], bool, bytes]:
-    raw = path.read_bytes()
-    if len(raw) < len(WAL_MAGIC) or raw[: len(WAL_MAGIC)] != WAL_MAGIC:
-        raise EvidenceError(f"{path}: not an engine WAL (magic does not match)")
-    records: list[dict[str, Any]] = []
-    offset = len(WAL_MAGIC)
+SEGMENT_KINDS = {"segment_base", *[f"segment_base_v{i}" for i in range(2, 8)]}
+ACCOUNTING_KINDS = {"boot", "names", "identity_state", "order_lineage_restored", "order_sent", "order_sent_v2",
+                    "order_update", "order_update_v2", "order_update_v3", "claims_dropped",
+                    "recovered_fill", "recovered_fill_v2", "recovered_fill_v3", *SEGMENT_KINDS}
+
+
+def _read_segment(path: Path, index: int, *, accounting_only: bool) -> tuple[list[tuple[int, dict[str, Any]]], WalSegmentIdentity, bool]:
+    records: list[tuple[int, dict[str, Any]]] = []
+    digest = hashlib.sha256()
+    count = 0
     torn = False
-    while offset < len(raw):
-        if len(raw) - offset < 8:
-            torn = True
-            break
-        payload_len, expected_crc = struct.unpack_from("<II", raw, offset)
-        frame_offset = offset
-        offset += 8
-        if payload_len == 0 or payload_len > len(raw) - offset:
-            torn = True
-            break
-        payload = raw[offset : offset + payload_len]
-        actual_crc = crc32c(payload)
-        if actual_crc != expected_crc:
-            raise EvidenceError(
-                f"{path}: WAL frame checksum differs at byte {frame_offset} "
-                f"(wanted {expected_crc:#010x}, got {actual_crc:#010x})"
-            )
-        records.append(_load_json(payload, f"{path}:frame@{frame_offset}"))
-        offset += payload_len
-    if index >= 2 and records and records[0].get("kind") not in {"segment_base", "segment_base_v2"}:
-        return [], torn, raw
-    return records, torn, raw
+    trusted = index == 1
+    with path.open("rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        def read(n: int) -> bytes:
+            raw = handle.read(min(n, size - handle.tell()))
+            digest.update(raw)
+            if n > 0 and not raw and handle.tell() < size:
+                raise EvidenceError(f"{path}: WAL changed length during the read")
+            return raw
+        if read(len(WAL_MAGIC)) != WAL_MAGIC:
+            raise EvidenceError(f"{path}: not an engine WAL (magic does not match)")
+        while handle.tell() < size:
+            frame_offset = handle.tell()
+            header = read(8)
+            if len(header) < 8:
+                torn = True
+                break
+            payload_len, expected_crc = struct.unpack("<II", header)
+            payload = read(payload_len)
+            if payload_len == 0 or len(payload) != payload_len:
+                torn = True
+                break
+            actual_crc = crc32c(payload)
+            if actual_crc != expected_crc:
+                raise EvidenceError(f"{path}: WAL frame checksum differs at byte {frame_offset} "
+                                    f"(wanted {expected_crc:#010x}, got {actual_crc:#010x})")
+            record = _load_json(payload, f"{path}:frame@{frame_offset}")
+            count += 1
+            kind = record.get("kind")
+            if count == 1 and kind in SEGMENT_KINDS:
+                trusted = True
+            if accounting_only and kind not in ACCOUNTING_KINDS:
+                continue
+            if accounting_only and kind in SEGMENT_KINDS:
+                record = {key: value for key, value in record.items()
+                          if key in {"kind", "wall_ts_ms", "strategies", "symbols", "open_orders"}}
+            records.append((count, record))
+        # Hash even a rejected incomplete suffix; identities cover original bytes.
+        while handle.tell() < size:
+            read(min(1 << 20, size - handle.tell()))
+    identity = WalSegmentIdentity(index, str(path), size, digest.hexdigest(), count, torn)
+    return records, identity, trusted
 
 
-def read_wal_family(path: Path) -> WalRead:
+def read_wal_family(path: Path, *, accounting_only: bool = False) -> WalRead:
     family = path.expanduser().resolve()
     candidates, complete, issues = _segment_candidates(family)
     rows: list[WalRecordRow] = []
     identities: list[WalSegmentIdentity] = []
     damaged = False
+    sequence = 0
     for index, segment_path in candidates:
-        records, torn, raw = _read_segment(segment_path, index)
-        trusted = index == 1 or bool(records)
+        records, identity, trusted = _read_segment(segment_path, index, accounting_only=accounting_only)
         if not trusted:
             issues.append(f"ignored untrusted rotation segment {segment_path}")
             continue
-        damaged |= torn
-        identities.append(
-            WalSegmentIdentity(
-                index=index,
-                path=str(segment_path),
-                size=len(raw),
-                sha256=hashlib.sha256(raw).hexdigest(),
-                records=len(records),
-                torn_tail=torn,
-            )
-        )
-        for record in records:
-            rows.append(WalRecordRow(len(rows) + 1, index, record))
+        damaged |= identity.torn_tail
+        identities.append(identity)
+        for ordinal, record in records:
+            rows.append(WalRecordRow(sequence + ordinal, index, record))
+        sequence += identity.records
     if damaged:
         issues.append("a WAL segment has bytes after its last complete CRC-checked frame")
     return WalRead(tuple(rows), tuple(identities), complete, damaged, tuple(issues))
@@ -421,7 +433,15 @@ def parse_wal_accounting(wal: WalRead, sleeve: str = "long") -> WalAccounting:
             )
             boots.append(active_boot)
             continue
-        if kind in {"names", "segment_base", "segment_base_v2"}:
+        if kind == "identity_state":
+            identity = record.get("state", {})
+            if not isinstance(identity, Mapping) or not isinstance(identity.get("sleeves"), list) or not isinstance(identity.get("instruments"), list):
+                issues.append(f"WAL sequence {row.sequence} has malformed identity state")
+            else:
+                strategies = list(identity["sleeves"])
+                symbols = [binding.get("symbol") if isinstance(binding, Mapping) else None for binding in identity["instruments"]]
+            continue
+        if kind in {"names", *SEGMENT_KINDS}:
             next_strategies = record.get("strategies")
             next_symbols = record.get("symbols")
             if isinstance(next_strategies, list) and isinstance(next_symbols, list):
@@ -429,21 +449,28 @@ def parse_wal_accounting(wal: WalRead, sleeve: str = "long") -> WalAccounting:
                 symbols = list(next_symbols)
             else:
                 issues.append(f"WAL sequence {row.sequence} has malformed name tables")
-            if kind in {"segment_base", "segment_base_v2"}:
+            if kind in SEGMENT_KINDS:
                 open_orders = record.get("open_orders")
                 if isinstance(open_orders, list):
                     for open_order in open_orders:
                         if isinstance(open_order, Mapping) and isinstance(open_order.get("request"), Mapping):
                             learn_order(open_order["request"], restatement=True)
             continue
-        if kind == "order_sent":
+        if kind == "order_lineage_restored":
+            restored = record.get("order", {})
+            if isinstance(restored, Mapping) and isinstance(restored.get("request"), Mapping):
+                learn_order(restored["request"], restatement=True)
+            else:
+                issues.append(f"WAL sequence {row.sequence} has unreadable restored order lineage")
+            continue
+        if kind in {"order_sent", "order_sent_v2"}:
             request = record.get("request")
             if isinstance(request, Mapping):
                 learn_order(request)
             else:
                 issues.append(f"WAL sequence {row.sequence} has no readable order request")
             continue
-        if kind == "order_update":
+        if kind in {"order_update", "order_update_v2", "order_update_v3"}:
             update = record.get("update")
             ack = _enum_payload(update, "Ack")
             if ack is not None:
@@ -481,7 +508,7 @@ def parse_wal_accounting(wal: WalRead, sleeve: str = "long") -> WalAccounting:
                     continue
                 claim_drops.append(_ClaimDrop(row.sequence, strategy, symbol))
             continue
-        if kind == "recovered_fill":
+        if kind in {"recovered_fill", "recovered_fill_v2", "recovered_fill_v3"}:
             raw_fills.append(
                 (row.sequence, record, "recovered_fill", list(symbols), active_boot)
             )
@@ -1344,6 +1371,115 @@ def _json_value(value: Any) -> Any:
     return value
 
 
+def reconstruct_observed_window(accounting: WalAccounting, venue: VenueCapture) -> dict[str, Any]:
+    """Join recorded executions and cash legs; this function never simulates fills."""
+    manifest = venue.manifest or {}
+    start = _integer(manifest.get("start_ms"))
+    end = _integer(manifest.get("end_ms_exclusive"))
+    issues = list(venue.issues)
+    if start is None or end is None:
+        return {"issues": [*issues, "capture has no time window"], "complete_production_reproduction": False}
+    fills = {f.exec_id: f for f in accounting.fills if f.venue_ts_ms is not None and start <= f.venue_ts_ms < end}
+    executions = {str(r.get("execId") or ""): r for r in venue.executions}
+    transactions = {str(r.get("tradeId") or ""): r for r in venue.transactions}
+    matched = 0
+    owners: dict[str, dict[str, Decimal]] = {}
+    for identity, row in executions.items():
+        txn = transactions.get(identity)
+        if txn is None:
+            issues.append(f"execution {identity} has no transaction")
+        elif row.get("execType") == "Funding":
+            fee = _decimal(row.get("execFee"))
+            funding = _decimal(txn.get("funding"))
+            if fee is None or funding is None or fee != -funding:
+                issues.append(f"funding execution {identity} differs from its transaction")
+        if row.get("execType") != "Trade":
+            continue
+        fill = fills.get(identity)
+        if fill is None:
+            issues.append(f"venue trade {identity} has no WAL fill inside the window")
+            continue
+        before = len(issues)
+        if txn is not None:
+            for field_name, expected in [("symbol", fill.symbol), ("side", fill.side), ("orderLinkId", fill.client_order_id), ("orderId", row.get("orderId"))]:
+                _field_match(issues, f"transaction {identity} {field_name}", txn.get(field_name), expected)
+            for field_name, expected in [("qty", fill.qty), ("tradePrice", fill.px), ("fee", fill.fee)]:
+                _field_match(issues, f"transaction {identity} {field_name}", txn.get(field_name), expected, numeric=True)
+        for field_name, expected in [("symbol", fill.symbol), ("side", fill.side), ("orderLinkId", fill.client_order_id)]:
+            _field_match(issues, f"execution {identity} {field_name}", row.get(field_name), expected)
+        for field_name, expected in [("execQty", fill.qty), ("execPrice", fill.px), ("execFee", fill.fee), ("execTime", fill.venue_ts_ms)]:
+            _field_match(issues, f"execution {identity} {field_name}", row.get(field_name), expected, numeric=True)
+        if txn is not None and len(issues) == before:
+            matched += 1
+        if fill.qty is not None:
+            owner = fill.strategy or "unresolved"
+            symbol = fill.symbol or "unresolved"
+            quantities = owners.setdefault(owner, {})
+            quantities[symbol] = quantities.get(symbol, Decimal(0)) + fill.qty * (1 if fill.side == "Buy" else -1)
+    for identity in fills.keys() - executions.keys():
+        issues.append(f"WAL fill {identity} has no captured venue execution")
+    for identity in transactions.keys() - executions.keys():
+        issues.append(f"transaction {identity} has no captured execution (requires separate cash-event interpretation)")
+    totals = {key: Decimal(0) for key in ["fee", "funding", "cashFlow", "change"]}
+    cash_edges: dict[int, list[tuple[Decimal, Decimal, str]]] = {}
+    for row in venue.transactions:
+        identity = str(row.get("id"))
+        values = {key: _decimal(row.get(key)) for key in [*totals, "cashBalance"]}
+        stamp = _integer(row.get("transactionTime"))
+        if any(v is None for v in values.values()) or stamp is None:
+            issues.append(f"transaction {identity} has missing cash fields")
+            continue
+        for key in totals:
+            totals[key] += values[key]  # type: ignore[operator]
+        _transaction_change(row, issues, identity)
+        balance = values["cashBalance"]
+        change = values["change"]
+        cash_edges.setdefault(stamp, []).append((balance - change, balance, identity))  # type: ignore[operator,arg-type]
+    initial_cash: Decimal | None = None
+    cash: Decimal | None = None
+    for stamp, group in sorted(cash_edges.items()):
+        if cash is None:
+            ends = {after for _, after, _ in group}
+            starts = {before for before, after, _ in group if before not in ends or before == after}
+            if len(starts) != 1:
+                issues.append(f"cash boundary at {stamp} has {len(starts)} possible initial balances")
+                break
+            cash = initial_cash = starts.pop()
+        while group:
+            reachable = [edge for edge in group if edge[0] == cash]
+            if not reachable:
+                issues.append(f"cash ledger has a discontinuity at {stamp} after balance {cash}")
+                break
+            if len({after for _, after, _ in reachable}) > 1:
+                issues.append(f"cash ledger ordering at {stamp} is ambiguous")
+                break
+            edge = min(reachable, key=lambda e: e[2])
+            group.remove(edge)
+            cash = edge[1]
+        if group:
+            break
+    if initial_cash is not None and cash is not None and cash - initial_cash != totals["change"]:
+        issues.append("window cash endpoints do not equal summed transaction changes")
+    return {
+        "scope": "Observed USDT linear execution/transaction window; no hypothetical fill model",
+        "start_ms": start, "end_ms_exclusive": end,
+        "matched_trade_executions": matched, "wal_fills": len(fills),
+        "venue_trade_executions": sum(r.get("execType") == "Trade" for r in venue.executions),
+        "funding_executions": sum(r.get("execType") == "Funding" for r in venue.executions),
+        "transaction_totals_usdt": {k: str(v) for k, v in totals.items()},
+        "implied_initial_cash_usdt": None if initial_cash is None else str(initial_cash),
+        "observed_final_transaction_cash_usdt": None if cash is None else str(cash),
+        "request_attributed_quantity_changes": {owner: {symbol: str(qty) for symbol, qty in changes.items()} for owner, changes in owners.items()},
+        "boot_commits_in_fill_lineage": sorted({f.boot.commit for f in fills.values() if f.boot}),
+        "issues": issues,
+        "complete_production_reproduction": False,
+        "remaining_requirements": ["Independent initial/final account positions and balances at the day boundaries",
+            "Order lifecycle and all ownership changes, including archived lineage and internal allocations",
+            "Matched public events, historical metadata, initial strategy state and chronological producer lifecycle",
+            "Cash capture excludes other currencies and products; inferred cash endpoints are not independent account snapshots"],
+    }
+
+
 def reconcile(
     wal_path: Path,
     venue_path: Path,
@@ -1356,7 +1492,7 @@ def reconcile(
     expected_config_sha256: str,
     trade_execution_id: str | None = None,
 ) -> dict[str, Any]:
-    wal = read_wal_family(wal_path)
+    wal = read_wal_family(wal_path, accounting_only=True)
     accounting = parse_wal_accounting(wal, sleeve)
     venue = read_venue_capture(venue_path)
     deployment = read_deployment_evidence(
@@ -1456,6 +1592,7 @@ def reconcile(
             "open_wal_positions": len(accounting.open_trades),
         },
         "trades": trades,
+        "observed_window": reconstruct_observed_window(accounting, venue),
         "issues": selection_issues,
         "non_conclusions": [
             "This does not prove producer-to-target parity or point-in-time model validity.",

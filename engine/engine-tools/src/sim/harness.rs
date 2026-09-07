@@ -22,10 +22,11 @@ use super::market::{self, MarketPlan};
 use super::rng::Rng;
 use crate::assembly;
 use crate::backtest::feed::{pump, Cursor, SharedCursor, TapeFeed};
+use crate::backtest::instruments::read_instruments;
 use crate::backtest::runner::{read_engine_ledger, BacktestOptions};
 use crate::backtest::scheduler::{Scheduler, VirtualTimer, WaiterKind, YieldNow};
 use crate::backtest::signals::SignalReplayFeed;
-use crate::backtest::tape::{read_instruments, TapeReader};
+use crate::backtest::tape::TapeReader;
 use crate::backtest::venue::{
     Accounting, SimOrderFeed, SimVenueGateway, SimulatedVenue, VenueParams,
 };

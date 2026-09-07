@@ -1,0 +1,29 @@
+{
+  "source": "mapped",
+  "kind": "trade",
+  "venue": "bybit-linear",
+  "symbols": {
+    "BTCUSDT": "BTCUSDT"
+  },
+  "delivery": {
+    "kind": "exchange_plus_delay",
+    "delay_ns": 1000000
+  },
+  "membership": [
+    {
+      "symbol": "BTCUSDT",
+      "start_ns": 1585094400000000000,
+      "end_ns": 1585180800000000000
+    }
+  ],
+  "instrument_assumption": "Illustrative fixed BTCUSDT constraints for this sample; historical exchange metadata is not supplied. This is an adapter and execution diagnostic.",
+  "columns": {
+    "exchange_ts_ns": "timestamp",
+    "symbol": "symbol",
+    "price": "price",
+    "qty": "size",
+    "side": "side",
+    "trade_id": "trdMatchID"
+  },
+  "timestamp_unit": "s"
+}

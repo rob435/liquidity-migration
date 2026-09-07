@@ -15,10 +15,13 @@ use engine_types::{Symbol, WalRecord};
 use engine_wal::WalWriter;
 use serde::Serialize;
 
+use super::execution::ExecutionModel;
 use super::feed::{pump, Cursor, TapeFeed};
+use super::instruments::read_instruments;
 use super::scheduler::{Scheduler, VirtualTimer};
 use super::signals::SignalReplayFeed;
-use super::tape::{read_instruments, TapeReader, TapeStats};
+use super::source::{self, HistoryHeader, SourceFormat};
+use super::tape::TapeStats;
 use super::venue::{Accounting, SimOrderFeed, SimVenueGateway, SimulatedVenue, VenueParams};
 use crate::assembly;
 use crate::config;
@@ -29,6 +32,8 @@ use crate::trades::Trades;
 #[derive(Clone, Debug)]
 pub struct BacktestOptions {
     pub engine_config_path: PathBuf,
+    pub source_format: SourceFormat,
+    pub execution: ExecutionModel,
     /// `market_tape` rows, receive-time ordered: a `.jsonl` or `.jsonl.zst`.
     pub tape_path: PathBuf,
     /// The recorder's `instruments_snapshot` (`_meta/instruments-*.json[.zst]`).
@@ -55,6 +60,8 @@ impl Default for BacktestOptions {
     fn default() -> Self {
         BacktestOptions {
             engine_config_path: PathBuf::from("engine.toml"),
+            source_format: SourceFormat::Tape,
+            execution: ExecutionModel::Books,
             tape_path: PathBuf::new(),
             instruments_path: PathBuf::new(),
             signals_path: None,
@@ -105,6 +112,9 @@ pub struct Reconciliation {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct BacktestReport {
+    pub source: Option<HistoryHeader>,
+    pub execution: ExecutionModel,
+    pub execution_limitations: Vec<String>,
     pub callback_execution: &'static str,
     pub tape: TapeStats,
     pub unknown_symbol_rows: u64,
@@ -133,10 +143,10 @@ impl BacktestReport {
             Some(false) => format!("NO, off by {:.6}", r.difference_usdt),
             None => "not checkable: positions open at tape end".to_string(),
         };
-        format!(
+        format!("execution: {:?}\nlimitations: {}\n", self.execution, self.execution_limitations.join("; ")) + &format!(
             "callbacks: embedded reducer simulation (process execution is qualified by bench and integration tests)\n\
              the tape\n\
-             \x20 rows {} (books {}, trades {}, tickers {}); {:.2} h of market time; unknown-symbol rows {}\n\
+             \x20 rows {} (books {}, trades {}, tickers {}, bars {}); {:.2} h of market time; unknown-symbol rows {}\n\
              \x20 skipped kinds: {}\n\
              the loop\n\
              \x20 market events {}, orders sent {}, stopped by {}, signals replayed {}\n\
@@ -154,6 +164,7 @@ impl BacktestReport {
             self.tape.books,
             self.tape.trades,
             self.tape.tickers,
+            self.tape.bars,
             span_h,
             self.unknown_symbol_rows,
             if self.tape.skipped_by_kind.is_empty() {
@@ -281,6 +292,7 @@ fn write_equity(path: &Path, venue: &SimulatedVenue) -> Result<(), EngineError> 
 }
 
 pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
+    opts.execution.validate().map_err(EngineError::Boot)?;
     let loaded = config::load(&opts.engine_config_path)
         .map_err(|e| EngineError::Boot(format!("config: {e}")))?;
     let mut settings = loaded.config.engine.clone();
@@ -292,6 +304,17 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
 
     let strategies = assembly::strategies(&loaded.config.strategies)
         .map_err(|e| EngineError::Boot(e.to_string()))?;
+    if opts.signals_path.is_none() {
+        let missing: Vec<_> = strategies
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.requires_signal_feed())
+            .map(|(i, _)| loaded.config.strategies[i].sleeve_name())
+            .collect();
+        if !missing.is_empty() {
+            return Err(EngineError::Boot(format!("{} requires historical signals and producer lifecycle; market rows alone do not supply strategy features (see docs/data.md)", missing.join(", "))));
+        }
+    }
     let sleeves: Vec<String> = loaded
         .config
         .strategies
@@ -299,6 +322,11 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
         .map(|s| s.sleeve_name().to_string())
         .collect();
     let wanted: Vec<_> = strategies.iter().flat_map(|s| s.subscriptions()).collect();
+    if !matches!(opts.execution, ExecutionModel::Books)
+        && wanted.iter().any(|s| s.feed == engine_types::Feed::Depth)
+    {
+        return Err(EngineError::Boot("strategy requires observed depth; trade/bar execution only supplies explicitly modeled risk quotes".into()));
+    }
     let risk = assembly::risk(&loaded.config.risk).map_err(|e| EngineError::Boot(e.to_string()))?;
 
     // The log: claimed, fresh, then opened — the live runner's order, with
@@ -331,8 +359,44 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
     }
 
     // The tape is opened first so the clock can start where it starts.
-    let reader =
-        TapeReader::open(&opts.tape_path).map_err(|e| EngineError::Boot(format!("tape: {e}")))?;
+    let (reader, source_header) = source::open(&opts.tape_path, opts.source_format)
+        .map_err(|e| EngineError::Boot(format!("history: {e}")))?;
+    if let Some(header) = &source_header {
+        let engine_venue = match settings.venue.as_str() {
+            "bybit" | "bybit_demo" | "bybit_mainnet" => "bybit-linear",
+            name => name,
+        };
+        if header.venue != engine_venue {
+            return Err(EngineError::Boot(format!(
+                "history venue {} differs from configured {}",
+                header.venue, settings.venue
+            )));
+        }
+        let required = match opts.execution {
+            ExecutionModel::Books => "book",
+            ExecutionModel::Trades { .. } => "trade",
+            ExecutionModel::Bars { .. } => "bar",
+        };
+        if !header.channels.iter().any(|c| c == required) {
+            return Err(EngineError::Boot(format!(
+                "execution requires {required} observations"
+            )));
+        }
+        if !matches!(opts.execution, ExecutionModel::Books)
+            && header.channels.contains(&"book".into())
+        {
+            return Err(EngineError::Boot(
+                "select book execution for observed books".into(),
+            ));
+        }
+        if header.channels.contains(&"bar".into())
+            && !matches!(opts.execution, ExecutionModel::Bars { .. })
+        {
+            return Err(EngineError::Boot(
+                "bar observations require bar execution".into(),
+            ));
+        }
+    }
     let scheduler = Scheduler::default();
     let venue = Arc::new(Mutex::new(SimulatedVenue::new(
         VenueParams {
@@ -353,6 +417,17 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
         &catalog,
         scheduler.clone(),
     )));
+    venue
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .set_execution_model(opts.execution.clone())
+        .map_err(EngineError::Boot)?;
+    if let Some(header) = &source_header {
+        venue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_membership(header.membership.clone());
+    }
     let subscriptions = assembly::boot_subscriptions(&symbols, &wanted);
     let cursor = Arc::new(Mutex::new(Cursor::new(
         reader,
@@ -450,6 +525,9 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
     };
     drop(market_feed);
     let report = BacktestReport {
+        source: source_header,
+        execution: opts.execution.clone(),
+        execution_limitations: source::limitations(&opts.execution),
         callback_execution: "embedded",
         start_wall_ms: (start_ns / 1_000_000) as i64,
         end_wall_ms: (stats.last_recv_ns.unwrap_or(start_ns) / 1_000_000) as i64,
@@ -475,6 +553,16 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
         let json = serde_json::to_string_pretty(&report).map_err(|e| state(e.to_string()))?;
         std::fs::write(path, json)
             .map_err(|e| state(format!("cannot write {}: {e}", path.display())))?;
+    }
+    let (channel, count) = match opts.execution {
+        ExecutionModel::Books => ("book", report.tape.books),
+        ExecutionModel::Trades { .. } => ("trade", report.tape.trades),
+        ExecutionModel::Bars { .. } => ("bar", report.tape.bars),
+    };
+    if count == 0 {
+        return Err(state(format!(
+            "selected execution model received no {channel} observations"
+        )));
     }
     if report.reconciliation.agrees == Some(false) {
         return Err(state(format!(

@@ -38,7 +38,8 @@ use engine_types::{
 };
 
 use super::scheduler::{Scheduler, WaiterKind, YieldNow};
-use super::tape::{BookBuilder, TapeError, TapeReader, TapeRow, TapeStats};
+use super::source::{HistoricalEvent, HistoricalSource};
+use super::tape::{TapeError, TapeStats};
 use super::venue::SimulatedVenue;
 
 /// What the loop or its tasks wait for. The idle pump leaps to these only.
@@ -63,23 +64,20 @@ const DRAIN_KINDS: [WaiterKind; 2] = [WaiterKind::Venue, WaiterKind::Private];
 /// The tape, the venue-side state it drives, and the engine-visible events
 /// waiting to be delivered.
 pub struct Cursor {
-    reader: TapeReader,
+    reader: Box<dyn HistoricalSource>,
     venue: Arc<Mutex<SimulatedVenue>>,
     /// Engine ids by position; the same order the venue and the engine use.
     symbols: Vec<Symbol>,
     /// Feeds each symbol's strategies asked for. `Feed` has no ordering, so
     /// a small vector stands in for a set.
     subscribed: Vec<Vec<Feed>>,
-    books: HashMap<(u16, u32), BookBuilder>,
+    books: HashMap<(u16, u32), engine_types::Depth>,
     /// The shallowest book depth seen per symbol — the one its quotes come
     /// from, as the live feed's quotes come from `orderbook.1`.
     quote_depth: Vec<Option<u32>>,
-    /// The deepest book depth seen per symbol — the one the venue matches
-    /// against.
-    venue_depth: Vec<Option<u32>>,
     tickers: Vec<Ticker>,
     trade_seq: Vec<u64>,
-    peeked: Option<(u64, TapeRow)>,
+    peeked: Option<(u64, HistoricalEvent)>,
     ready: VecDeque<MarketEvent>,
     exhausted: bool,
     /// Rows for symbols the tape names but nothing follows. Counted, so a
@@ -89,19 +87,18 @@ pub struct Cursor {
 
 impl Cursor {
     pub fn new(
-        reader: TapeReader,
+        reader: impl HistoricalSource + 'static,
         venue: Arc<Mutex<SimulatedVenue>>,
         symbols: &[Symbol],
         subscriptions: &[Subscription],
     ) -> Self {
         let mut cursor = Cursor {
-            reader,
+            reader: Box::new(reader),
             venue,
             symbols: Vec::new(),
             subscribed: Vec::new(),
             books: HashMap::new(),
             quote_depth: Vec::new(),
-            venue_depth: Vec::new(),
             tickers: Vec::new(),
             trade_seq: Vec::new(),
             peeked: None,
@@ -126,7 +123,6 @@ impl Cursor {
         self.symbols.push(symbol.to_string());
         self.subscribed.push(Vec::new());
         self.quote_depth.push(None);
-        self.venue_depth.push(None);
         self.tickers.push(Ticker::default());
         self.trade_seq.push(0);
         SymbolId((self.symbols.len() - 1) as u16)
@@ -140,14 +136,24 @@ impl Cursor {
     }
 
     pub fn stats(&self) -> &TapeStats {
-        &self.reader.stats
+        self.reader.stats()
     }
 
     /// The receive stamp of the next row, without consuming it.
     pub fn next_row_at(&mut self) -> Result<Option<u64>, TapeError> {
         if self.peeked.is_none() && !self.exhausted {
-            match self.reader.next_row()? {
-                Some(row) => self.peeked = Some(row),
+            match self.reader.next_event()? {
+                Some(row) => {
+                    if !self
+                        .venue
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .accepts_history(&row.1)
+                    {
+                        return Err(TapeError::UnsupportedExecution);
+                    }
+                    self.peeked = Some(row);
+                }
                 None => self.exhausted = true,
             }
         }
@@ -162,30 +168,32 @@ impl Cursor {
             return;
         };
         match row {
-            TapeRow::Book(book) => {
-                let Some(id) = self.known(&book.symbol) else {
+            HistoricalEvent::Book {
+                symbol,
+                depth: depth_key,
+                levels,
+            } => {
+                let Some(id) = self.known(&symbol) else {
                     return;
                 };
                 let i = id.0 as usize;
-                let depth_key = book.depth;
                 let quote_depth = *self.quote_depth[i].get_or_insert(depth_key);
                 if depth_key < quote_depth {
                     self.quote_depth[i] = Some(depth_key);
                 }
-                let venue_depth = *self.venue_depth[i].get_or_insert(depth_key);
-                if depth_key > venue_depth {
-                    self.venue_depth[i] = Some(depth_key);
-                }
-                let builder = self.books.entry((id.0, depth_key)).or_default();
-                let Some(depth) = builder.apply(&book).copied() else {
+                let Some(depth) = levels else {
+                    self.books.remove(&(id.0, depth_key));
+                    let replacement = self
+                        .deepest_valid_depth(id.0)
+                        .and_then(|key| self.books.get(&(id.0, key)))
+                        .copied();
+                    self.venue
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .replace_book(id, replacement.as_ref());
                     return;
                 };
-                // The venue matches against the deepest book that is
-                // currently chained. A range cut from the middle of a
-                // recording carries the deep stream's deltas without the
-                // snapshot they chain to, while the top-of-book stream is a
-                // snapshot every row; until a deep snapshot lands, the
-                // shallow book is the venue's book rather than none.
+                self.books.insert((id.0, depth_key), *depth);
                 if self.deepest_valid_depth(id.0) == Some(depth_key) {
                     self.venue
                         .lock()
@@ -200,11 +208,33 @@ impl Cursor {
                     });
                 }
                 if depth_key > 1 && subs.contains(&Feed::Depth) {
-                    self.ready
-                        .push_back(MarketEvent::Depth { symbol: id, depth });
+                    self.ready.push_back(MarketEvent::Depth {
+                        symbol: id,
+                        depth: *depth,
+                    });
                 }
             }
-            TapeRow::Trade(trade) => {
+            HistoricalEvent::Bar(bar) => {
+                let Some(id) = self.known(&bar.symbol) else {
+                    return;
+                };
+                self.venue
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .on_bar(id, &bar);
+                self.modeled_quote(id, bar.close, bar.volume, recv_ns, bar.exchange_ts_ns);
+                let t = &mut self.tickers[id.0 as usize];
+                t.last_px = bar.close;
+                t.venue_ts_ms = (bar.end_ns / 1_000_000) as i64;
+                t.recv_ns = recv_ns;
+                if self.subscribed[id.0 as usize].contains(&Feed::Ticker) {
+                    self.ready.push_back(MarketEvent::Ticker {
+                        symbol: id,
+                        ticker: *t,
+                    });
+                }
+            }
+            HistoricalEvent::Trade(trade) => {
                 let Some(id) = self.known(&trade.symbol) else {
                     return;
                 };
@@ -213,6 +243,7 @@ impl Cursor {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .on_trade(id, trade.price, trade.qty, trade.buyer_aggressor);
+                self.modeled_quote(id, trade.price, trade.qty, recv_ns, trade.exchange_ts_ns);
                 if self.subscribed[i].contains(&Feed::Trades) {
                     self.trade_seq[i] += 1;
                     let (buy_qty, sell_qty) = if trade.buyer_aggressor {
@@ -234,7 +265,7 @@ impl Cursor {
                     });
                 }
             }
-            TapeRow::Ticker(row) => {
+            HistoricalEvent::Ticker(row) => {
                 let Some(id) = self.known(&row.symbol) else {
                     return;
                 };
@@ -271,11 +302,25 @@ impl Cursor {
         }
     }
 
+    fn modeled_quote(&mut self, id: SymbolId, price: f64, volume: f64, at: u64, exchange: u64) {
+        if self.subscribed[id.0 as usize].contains(&Feed::Quote) {
+            let quote = self
+                .venue
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .modeled_quote(price, volume, at, exchange);
+            if let Some(quote) = quote {
+                self.ready
+                    .push_back(MarketEvent::Quote { symbol: id, quote });
+            }
+        }
+    }
+
     /// The deepest book of this symbol whose chain is intact right now.
     fn deepest_valid_depth(&self, symbol: u16) -> Option<u32> {
         self.books
             .iter()
-            .filter(|((id, _), builder)| *id == symbol && builder.is_valid())
+            .filter(|((id, _), _)| *id == symbol)
             .map(|((_, depth), _)| *depth)
             .max()
     }

@@ -10,6 +10,76 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-07 — Historical source adapters and explicit sparse-data execution.**
+  - Separate recorder decoding/Bybit book reconstruction, normalized events,
+    exact instrument catalogs, virtual delivery and execution assumptions.
+    Reuse the archive importer and existing Rust strategy/risk/accounting core.
+    Add mapped CSV/Parquet trades, tickers, reconstructed books and completed
+    bars, explicit delivery/membership metadata and runnable actual Bybit samples.
+  - Preserve the book simulator's binary64 contract. Add trade/bar models with
+    declared spread, slippage, shared participation and conservative candle
+    ordering. New modes emit derived exact grid quantities and require declared
+    USDT settlement metadata; the sample's partial-reduction residual disappears.
+    Passive limits use the declared spread for admission and print/close reach.
+  - Reproduce stale book execution after a chain gap, missing receipt time
+    becoming epoch zero, truncated zstd input becoming successful EOF, missing
+    strategy features becoming a quiet run, absent execution observations,
+    source-dependent mode validation and sparse-mode pending orders surviving
+    liquidation. Liquidation cancels those orders before later observations.
+    Regressions fail without each fix and pass with it. Preserve the failed
+    diagnostics under `/tmp/connected-work-20260907`.
+  - Actual Bybit CSV/mapped CSV/Parquet produce byte-identical normalized rows,
+    WALs and trade files: 89 orders, 23 fills, 11 closed trips, net
+    `-0.3531254284500014` USDT. Twelve hourly bars through CSV/Parquet produce
+    identical WALs: three orders, two fills, one closed trip, net
+    `-0.14267467319999985` USDT. These samples shape adapter diagnostics;
+    they establish no alpha or independent execution-model validation.
+  - Recorder/normalized-book equivalence compares decisions, fills, accounting,
+    trade output and WAL bytes exactly. The supported LONG feature-generation
+    path stays in the existing PIT/native research code; managed full-engine
+    lifecycle replay remains an explicit unsupported requirement.
+    The 1,500-row real recorder excerpt matches the frozen original binary's
+    two orders, zero fills and every WAL record except the expected build commit
+    label; continuous accounting matches exactly and neither zero-trade run
+    emits a trade file.
+  - Final Rust 1.90 developer gate passes 2,018 Rust and 1,696 Python tests,
+    strict Clippy, formatting, Ruff, mypy and ShellCheck; eight fixture-dependent
+    Rust tests are ignored by the broad gate. Separate copied-family and
+    native/legacy rehearsals pass. Final external adapter runs reproduce the
+    same WAL/trade bytes after the liquidation fix.
+
+- **2026-09-07 — Current-WAL accounting and sustained resource qualification.**
+  - The Python accounting reader ignores rotated v3–v7 bases and current
+    identity/order/fill tags in the before regressions. Teach that research
+    reader the retained versions, stream all CRC-checked frames, retain original
+    sequence/hash identities, and use native CRC32C instead of a Python bit loop.
+    Also refuse a file that shrinks during its length-bounded read.
+  - Reconstruct the complete Sep 6 captured USDT linear cash/execution window:
+    38 demo / 77 mainnet trades and 28/29 funding executions match exactly;
+    transaction cash changes are `159.55178845` / `10.56366464` USDT. Keep
+    inferred cash boundaries distinct from independent account observations.
+    Full-day strategy/order/ownership reproduction remains incomplete; exact
+    missing boundaries, public payload qualification and lifecycle/version
+    replay requirements live in operations/STATE.
+    Private order-history snapshots also match cumulative fills/fees for all
+    109/49 engine requests. Preserve one historical demo XCN request/terminal
+    difference: requested 61,960, venue-adjusted/filled 30,980, original remainder
+    cancelled. Seven deactivated native stops have no engine client IDs.
+  - Preserve the frozen `80db33df` sustained cells, including the 10.26 s burst
+    submit maximum and 301 filled-history refusals. The offline 2M-operation
+    soak retains exactly 65,536 IDs and recovers every row at all history tiers.
+    On the same 1.12 MB WAL, traced reader time is 5.656 → 0.103 s and peak
+    Python allocation 9.41 → 4.70 MB; this is not a funded-runtime speedup.
+  - Recheck original/copied conversion hashes and all 27 base transformations;
+    non-base frames remain byte-identical. All 27 converted boots, nine queued/
+    nine prepared callback reads, both archived fill queries and native/legacy
+    restart-rotation rehearsals pass. Retain the interrupted debug boot scan
+    and optimized qualification separately. Keep required archive lineage,
+    grid adoption, callback recovery, native protective repair and the compatible
+    release; the 21:04:59 UTC read still contains all three scalar requests,
+    and neither wall time nor history passes the Sep 13 strict boundary.
+    No live WAL conversion/pruning, capital or arming change is made.
+
 - **2026-09-07 — Remove obsolete audits and Python runtime code.**
   - Delete the four Tier-1 audit/handoff/evidence files; retain their immutable
     Git snapshots and all benchmark cells. Consolidate live recovery requirements

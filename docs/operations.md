@@ -57,6 +57,28 @@ python scripts/research/reconcile_venue_wal.py \
 
 ---
 
+### Observed production-day reconstruction
+
+| Input / claim | Current scope and exact limitation |
+| --- | --- |
+| Candidate interval | 2026-09-06 00:00:00 UTC ≤ execution time < 2026-09-07 00:00:00 UTC; both realms, USDT linear only |
+| Original copied WALs | `/tmp/r3-current-wal-20260907T005622Z/{demo,mainnet}/raw/engine.wal`; 53 complete segments per family; all frames and original SHA256s checked. The research reader accepts segment versions 1–7 and current identity/order/fill tags; this does not change the ordinary Rust runtime's v1/v7 reader contract |
+| Private captures | `/tmp/connected-work-20260907/{demo,mainnet}-history.jsonl`; authenticated paginated executions, closed P&L and USDT transactions for the complete interval; 38/77 trade fills and 28/29 funding executions respectively |
+| Observed accounting | Every trade matches WAL execution ID, request, symbol, side, quantity, price, fee and timestamp plus its transaction quantity/price/fee. Funding execution fees match signed transaction funding; cash balances form one exact chain, including equal-millisecond rows |
+| Demo cash legs | Fees `5.02740506`, funding credit `4.17601351`, cash flow `160.40318`, net change `159.55178845` USDT. Transaction-implied initial `1612.99704261`, final transaction `1772.54883106` USDT |
+| Mainnet cash legs | Fees `1.56448939`, funding credit `0.32668403`, cash flow `11.80147000`, net change `10.56366464` USDT. Transaction-implied initial `127.95896334`, final transaction `138.52262798` USDT |
+| Missing boundary account fields | No independent account snapshot with balances and per-symbol positions exactly at either midnight is identified in this bundle. `reconciled` WAL rows contain findings/may-open, not account quantities or balances. The retained venue snapshot is at the later 00:56–00:57 capture; transaction endpoints are inferred cash, not independent boundary observations |
+| Ownership/order lifecycle | Request-attributed signed fill deltas are available. They do not reconstruct all internal offsets, forced-fill allocations, initial holdings, cancellations/amendments and final sleeve positions. Full lifecycle equality remains unestablished |
+| Order-history snapshots | `/tmp/connected-work-20260907/history-orders-{demo,mainnet}-20260906.json` contains 112/53 orders created during the day, captured at 21:12:30/33 UTC Sep 7. All 109/49 engine requests match cumulative fill quantity and USDT fee; 108/49 also match original request terms and terminal state. Seven remaining rows are venue-created deactivated stops without client IDs. Pagination is complete; chronology is not. [Bybit documents](https://bybit-exchange.github.io/docs/v5/order/order-list) only 24-hour retention for fully cancelled/rejected/deactivated orders; this capture returns some older rows, which does not establish exhaustive older coverage |
+| Preserved lifecycle difference | Under historical `cece1d9f`, demo `eng-1788648652000-47` requests a 61,960-unit XCNUSDT reduce-only buy. The venue snapshot reports adjusted quantity 30,980 and `Filled`; the WAL records exactly 30,980 filled, fee `0.07081409`, then cancels the original remainder. These terminal labels refer to different quantities. `/tmp/connected-work-20260907/{demo,mainnet}-order-history-comparison.json` retains the difference; no full lifecycle equality is claimed |
+| Signals | The WAL contains 19,962 demo / 21,483 mainnet accepted and consumed day observations, seven/six lifecycle records, and one mainnet signal gap. The current disk spools contain readiness files and a socket. No claim that signals are absent; managed lifecycle timeline replay remains unsupported by `SignalReplayFeed` |
+| Public archives | All 24 named Bybit hourly tar objects exist under `LiquidityMigration/market-tape/bybit-linear/2026/09/06/`. Object presence does not establish complete symbol/channel delivery, instrument snapshots or gap-free book chains; their full payloads are not qualified against every traded interval |
+| Runtime/config timeline | Five demo / four mainnet boots span multiple commits. Copied realm configs and WAL hashes exist; replaying all decisions as a single current binary is not the historical production program. Exact clock/state/version transition replay remains unqualified |
+| Result files | `/tmp/connected-work-20260907/{demo,mainnet}-observed-day.json`, `*-wal-scan.json`, `*-wal-input-inventory.json`, `observed-day-summary-final.log`; originals and prior failed diagnostics remain intact |
+| Full-day outcome | No complete independent production reproduction is established. Observed cash/fill matching does not validate hypothetical public-data fills or a strategy's profitability |
+
+The existing reconciliation report includes `observed_window`. Its `complete_production_reproduction` remains false and its missing requirements remain explicit. Missing cash fields, discontinuities, funding mismatches and unmatched executions are reported individually; missing values never become zero. `accounting_only=True` streams/CRC-checks every frame while retaining only accounting records and original sequence numbers.
+
 ### Fleet Manifest & Systemd Unit Inventory
 
 | Systemd Unit | Realm | User / Group | Activation Policy | Role |
@@ -130,6 +152,22 @@ gh workflow run vps-deploy.yml --ref main -f mode=diagnose
 | Durable state | Rollback never restores old WAL or worker files over newer state; required record refusal remains explicit. |
 | Legacy Python snapshots | Deployment refuses missing or invalid canonical native state when the WAL is nonempty or any required legacy source file exists. Recovery uses a retained compatible release with the complete source bundle and matching account/configuration; the current release has no Python state importer. |
 | Retained WAL recovery | Ordinary readers accept segment v1/v7; `wal-convert-v5` privately reads v5 into a separate complete family. Original families remain recoverable through the compatible `8c92c964` release pinned in [STATE.md](../STATE.md). Preserve original source segments, unresolved callback sources and compatible binaries until their replay/rollback requirement is retired. Copied conversion does not authorize host conversion or pruning. [Retained input assembly and qualification](https://github.com/rob435/liquidity-migration/blob/29366d3a2013701a0956a2a471a7c916bf6980e2/docs/tier1-round-handoff.md#L80-L86) records the exact prefix/tail boundaries; a quarantined suffix alone is not a complete family. |
+
+### Retained legacy dependencies
+
+| Call path | Why it remains required |
+| --- | --- |
+| `engine/engine-core/src/engine/order_lineage.rs` → WAL archive reader → `OrderLineageRestored` | Late fills reactivate original scalar requests and cumulative fill lineage from retained segments |
+| `engine/engine-core/src/engine/boot_recovery.rs` → `legacy_quantity::plan` / `Replay` → attribution/reconciliation | Actual retained inventory still needs provenance-driven grid adoption; native exact residuals cannot use legacy dust rules |
+| `callback_recovery/host.rs`, `state.rs`, `snapshot.rs` → WAL queued/prepared pages | Converted fixtures still retrieve four demo / five mainnet queued and prepared callbacks; zero source-frontier fixture coverage does not authorize source-reader deletion |
+| Native stop maintenance / legacy stop intent | A held position lacking fresh catalog metadata still needs its durable same-side protective-stop repair |
+| `backtest/venue.rs` book mode and `sim/` | Existing binary64 fill compatibility remains tested; new trade/bar modes use derived exact grid quantities with an explicitly supplied USDT settlement asset |
+| `wal-convert-v5` and retained `8c92c964` release | Quarantined v5 originals remain recoverable only through the retained compatible reader/converter. Current ordinary readers still refuse them |
+| Three terminal demo requests | `eng-1788685989000-{8,9,10}` lack exact terms; both wall time and complete execution history must be strictly beyond 2026-09-13 13:47:40.615 UTC. Calendar passage cannot remove other retained-state dependencies |
+| Current retained-state read | At 2026-09-07 21:04:59 UTC, live demo segment `000063` still contains all three cancelled, zero-filled, scalar requests. Its execution-history frontier is `1788801307401` ms; neither strict expiry condition is met. `/tmp/connected-work-20260907/live-retention-boundary.json` retains the read |
+| Current-source copied boots | All 14 demo / 13 mainnet converted v7 bases boot; original v5 bases remain refused. Nine queued/nine prepared callbacks and both known filled archive queries remain readable. Full-prefix/rotated reboot preserves exact ownership, quantities, accounting, lots and protection for six captured native positions per realm; the separate legacy-quantity original/cleared rehearsal also passes. Transport, collateral and fresh quote receipt times are mocked; real callback-source coverage is zero |
+
+Copied-family requalification verifies all 27 base transformations, every frame CRC, original hashes and unchanged non-base bytes. The current-source boot checks add no independent venue/account truth or new compatible-image paired comparison. No live WAL conversion, pruning, release removal, capital change or mainnet arming change is part of this research work. Such a live migration still needs explicit owner authorization after the retained dependencies are resolved.
 
 ### Native State Initialization
 

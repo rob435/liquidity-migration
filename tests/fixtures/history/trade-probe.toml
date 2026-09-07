@@ -1,0 +1,33 @@
+
+[engine]
+wal_path = "replaced-by-the-runner.wal"
+group_flush_ms = 250
+account_view_max_age_ms = 5000
+max_quote_age_ms = 14400000
+
+[risk]
+max_account_view_age_s = 120
+max_rolling_loss_fraction = 0.1
+leverage = 2.0
+
+[risk.envelope]
+tracks_equity = true
+reference_usdt = 1000000.0
+equity_fraction = 1.0
+floor_usdt = 100.0
+expand_dead_band_fraction = 0.05
+gross_notional_multiple = 2.0
+disaster_stop_fraction = 0.35
+max_component_gross_notional_usdt = 2000000.0
+max_initial_margin_usdt = 1000000.0
+
+[[strategy]]
+name = "probe"
+sleeve = "probe"
+symbol = "BTCUSDT"
+every_s = 60.0
+rest_ms = 59000.0
+offset_bps = 0.1
+notional_usdt = 10.0
+stop_loss_fraction = 0.35
+max_quote_age_ms = 14400000.0

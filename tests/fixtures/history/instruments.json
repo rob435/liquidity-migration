@@ -1,0 +1,25 @@
+{
+  "kind": "instruments_snapshot",
+  "venue": "bybit",
+  "market": "linear",
+  "category": "linear",
+  "schema": 2,
+  "recorded_at_ns": 1,
+  "source": "test",
+  "rows": [
+    {
+      "symbol": "BTCUSDT",
+      "priceFilter": {
+        "tickSize": "0.10"
+      },
+      "lotSizeFilter": {
+        "minOrderQty": "0.001",
+        "qtyStep": "0.001",
+        "minNotionalValue": "5"
+      },
+      "baseCoin": "BTC",
+      "quoteCoin": "USDT",
+      "settleCoin": "USDT"
+    }
+  ]
+}
