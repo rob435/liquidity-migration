@@ -10,6 +10,58 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-07 22:56 UTC — The `capture-disk` page returns, and the read-only
+  diagnostic still cannot name the writer holding the disk. The recorders are
+  correct; the filesystem is genuinely at their reserved floor. `mode=diagnose`
+  now reports directory totals, so the next page is decidable without SSH.**
+  - Incident `host-681737fd16e1f806`, scope `host`, host `ip-208-84-103-4`,
+    `new_critical_refs=capture-disk`. Exact alert text, 22:56:24 UTC, raised
+    once per recorder: `CRITICAL recorder storage is blocked; frames are
+    counted but not written` and `CRITICAL recorder forward-market-binance
+    storage is blocked; frames are counted but not written`, with
+    `WARNING ... dropped 369082 frames` (Bybit) and `139267 frames` (Binance)
+    since the previous check. Level-triggered on `disk_blocked is True`
+    (`scripts/runtime/check_fleet_liveness.py:458`, raised at `:460`).
+  - **The funded engine is not implicated.** Diagnose run `34168433363` at
+    22:58:10 UTC: `liquidity-migration-engine-mainnet` active, heartbeat 3 s;
+    both signal workers `status=ready`, `spool_backpressured=false`,
+    `bybit_ws_gap_open=false`; `systemctl --failed` lists 0 units. Only
+    research tape is lost.
+  - **Not a regression.** Deployed commit is `f1fbe34`, current `main`,
+    deployed 22:34 UTC the same day; all six earlier recorder fixes and the
+    sliding window are live. The blocks are bounded to one
+    `status_interval_seconds` cycle — 22:53:12 → 22:55:42 on Binance — which
+    is `1702d14d` working, not the 300 s block it replaced.
+  - **The disk is at the floor, which is the reserve doing its job.**
+    `/dev/sda2 118G 88G 25G 78% /` against `min_free_disk_gb = 25`
+    (`deploy/capture/bybit-linear.toml:28`,
+    `deploy/capture/binance-usdm.toml:31`). `writable()` blocks the recorder
+    above that floor (`market_tape/storage.py:440`), which is the reservation
+    held for the mainnet WAL. Free space has fallen 27G → 25G since the
+    2026-09-05 08:36 deploy, so the two tape caps (60 + 18 GB) plus the rest
+    of the host no longer fit under 118G with a 26.8 GB reserve.
+  - **What the evidence cannot settle, and why.** Whether the 88G is tape at
+    its `max_disk_gb` caps (a repository config change) or a foreign writer
+    leaking (an owner action) turns on per-directory usage. `verify_mode`
+    printed one `df -h /var/lib` line and nothing else, and the routine has no
+    SSH key, so every page from this floor has had to hand the owner a `du`
+    recipe to run by hand. That gap is the repository defect fixed here.
+  - **Fix.** `report_disk_usage` (`scripts/vps/deploy_remote.sh`), called from
+    `verify_mode`, prints `disk <bytes> <path>` for one level under
+    `/var/lib/liquidity-migration`, `/var/log/journal` and `/opt`, largest
+    first, capped at 20 lines. `du -x --block-size=1 --max-depth=1`: never
+    crosses a filesystem, never descends past the directory, prints no file
+    name, so no tape content is exposed. A missing root is skipped.
+  - **Tests.** `tests/scripts/test_diagnose_disk_report.py`, five cases
+    driving the extracted function over a built tree: directories named with
+    their bytes largest first, one level deep with no file name, a missing
+    root skipped, the line cap honoured, and `verify_mode` taking the reading.
+    All five fail on the previous `deploy_remote.sh` and pass on this one.
+  - **Still required from the owner.** The disk is genuinely full to the
+    reserve; this change measures the fault, it does not clear it. Read the
+    next diagnose run's `disk` lines and then either lower `max_disk_gb` on
+    the two recorders or clear the foreign consumer they name.
+
 - **2026-09-07 — Historical source adapters and explicit sparse-data execution.**
   - Separate recorder decoding/Bybit book reconstruction, normalized events,
     exact instrument catalogs, virtual delivery and execution assumptions.

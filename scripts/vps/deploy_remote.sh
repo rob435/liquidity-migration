@@ -63,6 +63,13 @@ CARRY_MAINNET_ROOT=/opt/liquidity-migration/data/bybit-carry-mainnet-event
 EXODUS_MAINNET_ROOT=/opt/liquidity-migration/data/bybit-exodus-mainnet-event
 SIGNAL_SPOOL_ROOT=/var/lib/liquidity-migration/signals
 CONTROL_SPOOL_ROOT=/var/lib/liquidity-migration/controls
+# What `verify_mode` breaks the filesystem down by. A `capture-disk` page turns
+# on which writer holds the disk — the recorders block above a floor they share
+# with every other writer — and the `df` line alone cannot name one. Read-only,
+# one level deep, no filenames: directory totals only.
+DISK_REPORT_ROOTS=${DISK_REPORT_ROOTS:-/var/lib/liquidity-migration /var/log/journal /opt}
+#: Directory totals printed per `verify_mode`, largest first.
+DISK_REPORT_LINES=${DISK_REPORT_LINES:-20}
 
 PYTHON="$REPO_DIR/.venv/bin/python"
 
@@ -1116,6 +1123,19 @@ verify_mode() {
         fi
     done < <(lm_expected_systemd_units)
     df -h /var/lib | tail -1
+    report_disk_usage
+}
+
+# `du` in bytes of actual blocks, one level under each root, largest first, as
+# `disk <bytes> <path>`. Never crosses a filesystem, never descends past the
+# directory, and prints no file name, so a diagnose run exposes no tape
+# contents. A root that does not exist is skipped rather than failing the read.
+report_disk_usage() {
+    local root
+    for root in $DISK_REPORT_ROOTS; do
+        [ -d "$root" ] || continue
+        du -x --block-size=1 --max-depth=1 "$root" 2>/dev/null || true
+    done | sort -rn | head -n "$DISK_REPORT_LINES" | awk '{printf "disk %s %s\n", $1, $2}'
 }
 
 # ----------------------------------------------------------- mainnet stops
