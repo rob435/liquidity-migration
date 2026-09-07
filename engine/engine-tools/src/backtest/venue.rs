@@ -28,7 +28,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use engine_types::numeric::ExactNumber;
+use engine_types::numeric::{ExactInstrumentSpec, ExactNumber};
+use engine_types::orders::InstrumentCatalog;
 use engine_types::orders::{OrderLookup, OrderLookupClient, OrderLookupRow, TerminalOrderStatus};
 use engine_types::{
     AccountIdentity, AccountView, AmendSpec, Depth, FeedError, ForcedClose, InstrumentRule,
@@ -148,6 +149,7 @@ pub struct SimulatedVenue {
     scheduler: Scheduler,
     symbols: Vec<Symbol>,
     rules: Vec<Option<InstrumentRule>>,
+    specs: Vec<(Symbol, ExactInstrumentSpec)>,
     books: Vec<Option<Depth>>,
     marks: Vec<Option<f64>>,
     lasts: Vec<Option<f64>>,
@@ -172,13 +174,19 @@ impl SimulatedVenue {
     pub fn new(
         params: VenueParams,
         symbols: Vec<Symbol>,
-        rules: &[(Symbol, InstrumentRule)],
+        catalog: &InstrumentCatalog,
         scheduler: Scheduler,
     ) -> Self {
         let n = symbols.len();
         let rules = symbols
             .iter()
-            .map(|name| rules.iter().find(|(s, _)| s == name).map(|(_, r)| *r))
+            .map(|name| {
+                catalog
+                    .rules
+                    .iter()
+                    .find(|(s, _)| s == name)
+                    .map(|(_, r)| *r)
+            })
             .collect();
         let accounting = Accounting {
             initial_cash_usdt: params.initial_cash_usdt,
@@ -192,6 +200,7 @@ impl SimulatedVenue {
             scheduler,
             symbols,
             rules,
+            specs: catalog.specs.clone(),
             books: vec![None; n],
             marks: vec![None; n],
             lasts: vec![None; n],
@@ -1348,6 +1357,18 @@ impl VenueGateway for SimVenueGateway {
             .zip(venue.rules.iter())
             .filter_map(|(name, rule)| rule.map(|r| (name.clone(), r)))
             .collect())
+    }
+
+    async fn instrument_specs(&mut self) -> Result<Vec<(Symbol, ExactInstrumentSpec)>, VenueError> {
+        let venue = self.lock();
+        for symbol in &venue.symbols {
+            if !venue.specs.iter().any(|(name, _)| name == symbol) {
+                return Err(VenueError::BadReply(format!(
+                    "the instruments snapshot has no exact metadata for {symbol}"
+                )));
+            }
+        }
+        Ok(venue.specs.clone())
     }
 
     async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError> {

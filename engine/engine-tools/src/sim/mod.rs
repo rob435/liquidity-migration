@@ -4,7 +4,7 @@
 //! venue replies are lost, slowed or refused, which private updates are
 //! dropped, duplicated or delayed, where the market feed hiccups
 //! ([`faults`]), and when the process dies ([`harness`]). The engine under
-//! test is the real one — `Engine::boot_as`, the risk kernel, the strategy
+//! test is the real one — `Engine::boot_as_exact`, the risk kernel, the strategy
 //! plugs, the log — on the backtest's virtual clock and simulated venue, so
 //! two runs of one seed write byte-identical logs and a failing seed
 //! reproduces on any machine.

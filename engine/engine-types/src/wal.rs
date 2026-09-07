@@ -490,15 +490,7 @@ pub enum WalRecord {
     /// at that point in the stream it is exactly what the records before it
     /// already produced, which is what makes chain reads and single-segment
     /// reads agree.
-    #[serde(
-        rename = "segment_base_v7",
-        alias = "segment_base_v6",
-        alias = "segment_base_v5",
-        alias = "segment_base_v4",
-        alias = "segment_base_v3",
-        alias = "segment_base_v2",
-        alias = "segment_base"
-    )]
+    #[serde(rename = "segment_base_v7", alias = "segment_base")]
     SegmentBase {
         #[serde(default)]
         order_id_epoch_ms: Option<i64>,

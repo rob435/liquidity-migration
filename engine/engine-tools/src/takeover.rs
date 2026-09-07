@@ -1,63 +1,16 @@
-//! Stopped-runtime import of one native strategy's whole-sleeve state.
+//! Canonical native strategy state initialization and stopped verification.
 
 use std::error::Error;
-use std::fs::OpenOptions;
-use std::io::Read;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
 use engine_types::{
-    CheckpointProvenance, StrategyCheckpoint, StrategyCheckpointIdentity, StrategyEvent,
-    StrategyGlobalCheckpointState, StrategyId, StrategyImportContext, StrategyImportSource,
-    VenueGateway, Wal, WalRecord, MAX_STRATEGY_EVENT_BYTES, MAX_STRATEGY_STATE_BYTES,
+    StrategyCheckpoint, StrategyCheckpointIdentity, StrategyGlobalCheckpointState, StrategyId,
+    VenueGateway, Wal, WalRecord, MAX_STRATEGY_STATE_BYTES,
 };
 
 use crate::{assembly, clock, config};
 
-const LEASE_ROLE: &str = "strategy-state-import";
 const INITIALIZE_LEASE_ROLE: &str = "strategy-state-initialize";
-const MAX_IMPORT_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_IMPORT_BUNDLE_BYTES: u64 = 64 * 1024 * 1024;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImportOutcome {
-    Imported,
-    AlreadyPresent,
-}
-
-fn latest_checkpoint(
-    replayed: &[WalRecord],
-    strategy: StrategyId,
-) -> Option<StrategyGlobalCheckpointState> {
-    let mut current = None;
-    for record in replayed {
-        match record {
-            WalRecord::StrategyGlobalCheckpoint {
-                strategy: owner,
-                checkpoint,
-                provenance,
-                ..
-            } if *owner == strategy => {
-                current = Some(StrategyGlobalCheckpointState {
-                    strategy,
-                    checkpoint: checkpoint.clone(),
-                    provenance: provenance.clone(),
-                });
-            }
-            WalRecord::SegmentBase {
-                strategy_global_checkpoints,
-                ..
-            } => {
-                current = strategy_global_checkpoints
-                    .iter()
-                    .find(|row| row.strategy == strategy)
-                    .cloned();
-            }
-            _ => {}
-        }
-    }
-    current
-}
 
 fn validate_checkpoint_contract(
     strategy: &dyn engine_types::Strategy,
@@ -306,124 +259,6 @@ fn require_expected_account(who: &engine_types::AccountIdentity) -> Result<(), B
     verify_expected_account(who, &expected)
 }
 
-fn append_import<W: Wal>(
-    wal: &mut W,
-    replayed: &[WalRecord],
-    strategy: StrategyId,
-    checkpoint: StrategyCheckpoint,
-    mut provenance: CheckpointProvenance,
-    events: &[StrategyEvent],
-    identity: Option<WalRecord>,
-) -> Result<ImportOutcome, Box<dyn Error>> {
-    let same_bundle = |existing: &CheckpointProvenance| {
-        existing.source_format == provenance.source_format
-            && existing.source_sha256 == provenance.source_sha256
-            && existing.bundle_sha256 == provenance.bundle_sha256
-    };
-    let resuming = match latest_checkpoint(replayed, strategy) {
-        Some(existing) => {
-            let Some(existing_provenance) = existing.provenance.as_ref() else {
-                return Err(format!(
-                    "strategy {} already has live whole-sleeve state",
-                    strategy.0
-                )
-                .into());
-            };
-            if existing.checkpoint != checkpoint || !same_bundle(existing_provenance) {
-                return Err(format!(
-                    "strategy {} already has different whole-sleeve state or import provenance",
-                    strategy.0
-                )
-                .into());
-            }
-            if existing_provenance.import_complete {
-                return Ok(ImportOutcome::AlreadyPresent);
-            }
-            true
-        }
-        None => false,
-    };
-    // Admitted. Nothing above this line writes: a refusal leaves the log as
-    // the incumbent binary can read it, new record kinds included.
-    if let Some(record) = identity {
-        wal.append(&record)?;
-    }
-    if !resuming {
-        if events.is_empty() {
-            provenance.import_complete = true;
-            wal.append(&WalRecord::StrategyGlobalCheckpoint {
-                wall_ts_ms: clock::wall_ms(),
-                strategy,
-                checkpoint,
-                provenance: Some(provenance),
-            })?;
-            wal.barrier()?;
-            return Ok(ImportOutcome::Imported);
-        }
-        provenance.import_complete = false;
-        wal.append(&WalRecord::StrategyGlobalCheckpoint {
-            wall_ts_ms: clock::wall_ms(),
-            strategy,
-            checkpoint: checkpoint.clone(),
-            provenance: Some(provenance.clone()),
-        })?;
-        wal.barrier()?;
-    }
-
-    let mut published = std::collections::BTreeMap::new();
-    for record in replayed {
-        match record {
-            WalRecord::StrategyEventPublished { event, .. } => {
-                published.insert((event.source.0, event.event_id.clone()), event.clone());
-            }
-            WalRecord::SegmentBase {
-                strategy_events, ..
-            } => {
-                published = strategy_events
-                    .iter()
-                    .map(|event| ((event.source.0, event.event_id.clone()), event.clone()))
-                    .collect();
-            }
-            _ => {}
-        }
-    }
-    let mut appended_event = false;
-    for event in events {
-        let key = (event.source.0, event.event_id.clone());
-        if let Some(existing) = published.get(&key) {
-            if existing != event {
-                return Err(format!(
-                    "strategy {} event id {:?} already has different bytes",
-                    event.source.0, event.event_id
-                )
-                .into());
-            }
-            continue;
-        }
-        wal.append(&WalRecord::StrategyEventPublished {
-            wall_ts_ms: clock::wall_ms(),
-            event: event.clone(),
-        })?;
-        appended_event = true;
-    }
-    if appended_event {
-        wal.barrier()?;
-    }
-    provenance.import_complete = true;
-    wal.append(&WalRecord::StrategyGlobalCheckpoint {
-        wall_ts_ms: clock::wall_ms(),
-        strategy,
-        checkpoint,
-        provenance: Some(provenance),
-    })?;
-    wal.barrier()?;
-    Ok(ImportOutcome::Imported)
-}
-
-// Strategy identity is append-only: a WAL name owns its id forever, and a
-// config may add ids after the ones the WAL knows. `Engine::boot` takes the
-// same rule (`configured.starts_with(prior)`), so this must too, or a deploy
-// that appends a sleeve cannot import the state of the sleeves that existed.
 fn verify_names(configured: &[String], replayed: &[WalRecord]) -> Result<(), Box<dyn Error>> {
     let logged = crate::identities::replay_identities(replayed)?
         .unwrap_or_default()
@@ -442,306 +277,6 @@ fn verify_names(configured: &[String], replayed: &[WalRecord]) -> Result<(), Box
         .into());
     }
     Ok(())
-}
-
-fn initialize_or_verify_names<W: Wal>(
-    wal: &mut W,
-    configured: &[String],
-    replayed: &mut Vec<WalRecord>,
-) -> Result<(), Box<dyn Error>> {
-    if replayed.is_empty() {
-        let wall_ts_ms = clock::wall_ms();
-        let names = WalRecord::SegmentBase {
-            order_id_epoch_ms: None,
-            open_trade_lots: Some(Vec::new()),
-            legacy_signal_source_retirements: Vec::new(),
-            portfolio_control: Default::default(),
-            portfolio: Some(Default::default()),
-            pending_order_dispatches: Vec::new(),
-            signal_producers: Vec::new(),
-            identities: Some(
-                crate::identities::plan_identities(
-                    &[],
-                    configured,
-                    None,
-                    &Default::default(),
-                    &[],
-                )?
-                .state,
-            ),
-            instrument_catalog: None,
-            signal_suspensions: Vec::new(),
-            strategy_processes: Vec::new(),
-            strategy_callback_queues: Vec::new(),
-            strategy_callback_sources: Vec::new(),
-            signal_callback_deliveries: Vec::new(),
-            strategy_callbacks: Vec::new(),
-            wall_ts_ms,
-            strategies: configured.to_vec(),
-            symbols: Vec::new(),
-            may_open: true,
-            control_anchors: Vec::new(),
-            attribution: Vec::new(),
-            logged_exposure: Vec::new(),
-            intended_stops: Vec::new(),
-            recent_execution_ids: Vec::new(),
-            execution_history_through_ms: Some(wall_ts_ms),
-            target_book_latches: Vec::new(),
-            strategy_checkpoints: Vec::new(),
-            strategy_global_checkpoints: Vec::new(),
-            strategy_events: Vec::new(),
-            signal_observations: Vec::new(),
-            signal_cursors: Vec::new(),
-            signal_subscriptions: Vec::new(),
-            signal_gaps: Vec::new(),
-            strategy_effects: Default::default(),
-            runtime_control_requests: Vec::new(),
-            runtime_control_consumed: Vec::new(),
-            open_orders: Vec::new(),
-            rolling_loss_rows: Vec::new(),
-        };
-        wal.append(&names)?;
-        wal.barrier()?;
-        replayed.push(names);
-        return Ok(());
-    }
-    verify_names(configured, replayed)
-}
-
-fn checkpoint_from_source(
-    strategy: &dyn engine_types::Strategy,
-    identity: StrategyCheckpointIdentity,
-    context: &StrategyImportContext,
-    source_format: &str,
-    sources: &[StrategyImportSource],
-) -> Result<
-    (
-        StrategyCheckpoint,
-        Vec<engine_types::TranslatedStrategyEvent>,
-    ),
-    Box<dyn Error>,
-> {
-    if identity.schema_version == 0 || identity.decision_fingerprint.trim().is_empty() {
-        return Err("strategy returned an invalid checkpoint identity".into());
-    }
-    let translated = strategy
-        .translate_checkpoint(context, source_format, sources)
-        .map_err(|error| format!("strategy refused {source_format:?} source state: {error}"))?;
-    if translated.checkpoint_payload.len() > MAX_STRATEGY_STATE_BYTES {
-        return Err(format!(
-            "checkpoint is {} bytes; maximum is {}",
-            translated.checkpoint_payload.len(),
-            MAX_STRATEGY_STATE_BYTES
-        )
-        .into());
-    }
-    let checkpoint = StrategyCheckpoint {
-        schema_version: identity.schema_version,
-        decision_fingerprint: identity.decision_fingerprint,
-        payload: translated.checkpoint_payload,
-    };
-    strategy
-        .validate_checkpoint(&checkpoint)
-        .map_err(|error| format!("strategy refused translated canonical checkpoint: {error}"))?;
-    Ok((checkpoint, translated.pending_events))
-}
-
-fn same_source_snapshot(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    left.dev() == right.dev()
-        && left.ino() == right.ino()
-        && left.mode() == right.mode()
-        && left.nlink() == right.nlink()
-        && left.uid() == right.uid()
-        && left.gid() == right.gid()
-        && left.size() == right.size()
-        && left.mtime() == right.mtime()
-        && left.mtime_nsec() == right.mtime_nsec()
-        && left.ctime() == right.ctime()
-        && left.ctime_nsec() == right.ctime_nsec()
-}
-
-fn read_sources_with_before_open<F>(
-    configured: &[(String, std::path::PathBuf)],
-    mut before_open: F,
-) -> Result<Vec<StrategyImportSource>, Box<dyn Error>>
-where
-    F: FnMut(&Path),
-{
-    if configured.is_empty() {
-        return Err("import-strategy-state needs at least one --source NAME=PATH".into());
-    }
-    let mut ordered = configured.to_vec();
-    ordered.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut previous: Option<&str> = None;
-    let mut total = 0u64;
-    let mut sources = Vec::with_capacity(ordered.len());
-    for (name, path) in &ordered {
-        if name.is_empty()
-            || name.len() > 64
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
-        {
-            return Err(format!("source name {name:?} must be 1..=64 ASCII name bytes").into());
-        }
-        if previous == Some(name) {
-            return Err(format!("duplicate import source name {name:?}").into());
-        }
-        previous = Some(name);
-        let metadata = std::fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink()
-            || !metadata.file_type().is_file()
-            || metadata.nlink() != 1
-        {
-            return Err(format!(
-                "import source {} is not a single regular non-symlink file",
-                path.display()
-            )
-            .into());
-        }
-        if metadata.len() > MAX_IMPORT_SOURCE_BYTES {
-            return Err(format!(
-                "import source {} is {} bytes; maximum is {}",
-                path.display(),
-                metadata.len(),
-                MAX_IMPORT_SOURCE_BYTES
-            )
-            .into());
-        }
-        before_open(path);
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)?;
-        let opened = file.metadata()?;
-        if !opened.file_type().is_file()
-            || opened.nlink() != 1
-            || !same_source_snapshot(&metadata, &opened)
-        {
-            return Err(format!(
-                "import source {} changed while it was opened",
-                path.display()
-            )
-            .into());
-        }
-        total = total.saturating_add(opened.len());
-        if total > MAX_IMPORT_BUNDLE_BYTES {
-            return Err(
-                format!("import source bundle exceeds {MAX_IMPORT_BUNDLE_BYTES} bytes").into(),
-            );
-        }
-        let mut bytes = Vec::with_capacity(opened.len() as usize);
-        file.by_ref()
-            .take(MAX_IMPORT_SOURCE_BYTES + 1)
-            .read_to_end(&mut bytes)?;
-        let after = file.metadata()?;
-        if bytes.len() as u64 != opened.len() || !same_source_snapshot(&opened, &after) {
-            return Err(
-                format!("import source {} changed while it was read", path.display()).into(),
-            );
-        }
-        sources.push(StrategyImportSource {
-            name: name.clone(),
-            bytes,
-        });
-    }
-    Ok(sources)
-}
-
-fn read_sources(
-    configured: &[(String, std::path::PathBuf)],
-) -> Result<Vec<StrategyImportSource>, Box<dyn Error>> {
-    read_sources_with_before_open(configured, |_| {})
-}
-
-fn source_bundle_sha256(sources: &[StrategyImportSource]) -> String {
-    let mut encoded = b"engine.strategy-import-sources.v1\0".to_vec();
-    for source in sources {
-        encoded.extend_from_slice(&(source.name.len() as u64).to_le_bytes());
-        encoded.extend_from_slice(source.name.as_bytes());
-        encoded.extend_from_slice(&(source.bytes.len() as u64).to_le_bytes());
-        encoded.extend_from_slice(&source.bytes);
-    }
-    config::sha256_hex(&encoded)
-}
-
-fn resolve_events(
-    translated: Vec<engine_types::TranslatedStrategyEvent>,
-    configured: &[String],
-    selected: StrategyId,
-) -> Result<Vec<StrategyEvent>, Box<dyn Error>> {
-    let mut out = Vec::with_capacity(translated.len());
-    let mut keys = std::collections::BTreeSet::new();
-    for pending in translated {
-        let source = configured
-            .iter()
-            .position(|name| name == &pending.source_strategy)
-            .ok_or_else(|| {
-                format!(
-                    "pending event source {:?} is not configured",
-                    pending.source_strategy
-                )
-            })?;
-        let destination = configured
-            .iter()
-            .position(|name| name == &pending.destination_strategy)
-            .ok_or_else(|| {
-                format!(
-                    "pending event destination {:?} is not configured",
-                    pending.destination_strategy
-                )
-            })?;
-        let source = StrategyId(u16::try_from(source)?);
-        let destination = StrategyId(u16::try_from(destination)?);
-        if source == destination || (source != selected && destination != selected) {
-            return Err(
-                "a translated pending event must cross and involve the selected strategy".into(),
-            );
-        }
-        if pending.kind.trim().is_empty()
-            || pending.kind.len() > 256
-            || pending.event_id.trim().is_empty()
-            || pending.event_id.len() > 256
-            || pending.payload.len() > MAX_STRATEGY_EVENT_BYTES
-        {
-            return Err("translated pending event has invalid kind, id, or payload size".into());
-        }
-        if !keys.insert((source.0, pending.event_id.clone())) {
-            return Err(format!(
-                "translated state repeats strategy {} event id {:?}",
-                source.0, pending.event_id
-            )
-            .into());
-        }
-        out.push(StrategyEvent {
-            source,
-            destination,
-            kind: pending.kind,
-            event_id: pending.event_id,
-            payload: pending.payload,
-        });
-    }
-    Ok(out)
-}
-
-fn bundle_sha256(checkpoint: &StrategyCheckpoint, events: &[StrategyEvent]) -> String {
-    fn bytes(out: &mut Vec<u8>, value: &[u8]) {
-        out.extend_from_slice(&(value.len() as u64).to_le_bytes());
-        out.extend_from_slice(value);
-    }
-    let mut encoded = b"engine.strategy-import.v1\0".to_vec();
-    encoded.extend_from_slice(&checkpoint.schema_version.to_le_bytes());
-    bytes(&mut encoded, checkpoint.decision_fingerprint.as_bytes());
-    bytes(&mut encoded, &checkpoint.payload);
-    encoded.extend_from_slice(&(events.len() as u64).to_le_bytes());
-    for event in events {
-        encoded.extend_from_slice(&event.source.0.to_le_bytes());
-        encoded.extend_from_slice(&event.destination.0.to_le_bytes());
-        bytes(&mut encoded, event.kind.as_bytes());
-        bytes(&mut encoded, event.event_id.as_bytes());
-        bytes(&mut encoded, &event.payload);
-    }
-    config::sha256_hex(&encoded)
 }
 
 async fn account_identity(
@@ -835,193 +370,20 @@ pub fn verify_native_strategy_state(config_path: &Path) -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// Import translated canonical bytes while both the WAL and account writer
-/// leases prove the live engine is stopped.
-pub async fn run(
-    config_path: &Path,
-    strategy_name: &str,
-    source_format: &str,
-    source_paths: &[(String, std::path::PathBuf)],
-) -> Result<ImportOutcome, Box<dyn Error>> {
-    let source_format = source_format.trim();
-    if source_format.is_empty() || source_format.len() > 256 {
-        return Err("--source-format must contain 1..=256 bytes".into());
-    }
-    let loaded = config::load(config_path)?;
-    let configured: Vec<String> = loaded
-        .config
-        .strategies
-        .iter()
-        .map(|row| row.sleeve_name().to_string())
-        .collect();
-    let at = configured
-        .iter()
-        .position(|name| name == strategy_name)
-        .ok_or_else(|| format!("strategy {strategy_name:?} is not in this config"))?;
-    let settings = &loaded.config.engine;
-    let _log_claim = engine_wal::lock(&settings.wal_path)?;
-    let chosen = assembly::venue_name(&settings.venue)?;
-    let who = account_identity(chosen).await?;
-    if who.venue != chosen.venue() || who.realm != chosen.realm() {
-        return Err(format!(
-            "venue identity mismatch: config selects {}/{} but credentials answered as {}/{}",
-            chosen.venue(),
-            chosen.realm(),
-            who.venue,
-            who.realm
-        )
-        .into());
-    }
-    require_expected_account(&who)?;
-    let _account_claim =
-        engine_venue::lease::acquire(&who.venue, &who.realm, &who.user_id, LEASE_ROLE)?;
-    let (mut wal, mut replayed) = assembly::wal(&settings.wal_path)?;
-    let scope = engine_types::identity::InstrumentScope {
-        venue: who.venue.clone(),
-        environment: who.realm.clone(),
-    };
-    let plan = crate::identities::plan_identities(
-        &replayed,
-        &configured,
-        Some(&scope),
-        &Default::default(),
-        &[],
-    )?;
-    let strategy_id = plan.configured_ids[at];
-    let strategies =
-        assembly::strategies_for_registry(&loaded.config.strategies, &plan, &replayed)?;
-    let configured = plan
-        .state
-        .sleeves
-        .iter()
-        .map(|key| key.as_str().to_string())
-        .collect::<Vec<_>>();
-    let identity = strategies[strategy_id.idx()]
-        .checkpoint_identity()
-        .ok_or_else(|| {
-            format!(
-                "strategy {strategy_name:?} does not declare a whole-sleeve checkpoint contract"
-            )
-        })?;
-    initialize_or_verify_names(&mut wal, &configured, &mut replayed)?;
-    // Written inside the import, after admission: a refused import must leave
-    // the log exactly as the running binary can read it.
-    let identity_record = plan.changed.then(|| WalRecord::IdentityState {
-        wall_ts_ms: clock::wall_ms(),
-        state: plan.state,
-    });
-
-    let sources = read_sources(source_paths)?;
-    let context = StrategyImportContext {
-        venue: who.venue.clone(),
-        realm: who.realm.clone(),
-        account_user_id: who.user_id.clone(),
-    };
-    let (checkpoint, translated_events) = checkpoint_from_source(
-        strategies[strategy_id.idx()].as_ref(),
-        identity,
-        &context,
-        source_format,
-        &sources,
-    )?;
-    let events = resolve_events(translated_events, &configured, strategy_id)?;
-    let provenance = CheckpointProvenance {
-        source_format: source_format.to_string(),
-        source_sha256: source_bundle_sha256(&sources),
-        bundle_sha256: bundle_sha256(&checkpoint, &events),
-        import_complete: false,
-    };
-    let outcome = append_import(
-        &mut wal,
-        &replayed,
-        strategy_id,
-        checkpoint,
-        provenance,
-        &events,
-        identity_record,
-    )?;
-    println!("log       {}", settings.wal_path.display());
-    println!("strategy  {} ({})", strategy_name, strategy_id.0);
-    println!("account   {} on {} ({})", who.user_id, who.venue, who.realm);
-    println!("result    {outcome:?}");
-    Ok(outcome)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_types::{Strategy, Subscription, TranslatedStrategyState, WalError, WalRecord};
+    use engine_types::{CheckpointProvenance, Strategy, Subscription};
 
-    #[derive(Default)]
-    struct MemoryWal {
-        records: Vec<WalRecord>,
-        barriers: usize,
-    }
+    struct Stateless;
 
-    impl Wal for MemoryWal {
-        fn append(&mut self, record: &WalRecord) -> Result<u64, WalError> {
-            self.records.push(record.clone());
-            Ok(self.records.len() as u64)
-        }
-
-        fn barrier(&mut self) -> Result<(), WalError> {
-            self.barriers += 1;
-            Ok(())
-        }
-
-        fn flush(&mut self) -> Result<(), WalError> {
-            Ok(())
-        }
-    }
-
-    fn checkpoint(payload: &[u8]) -> StrategyCheckpoint {
-        StrategyCheckpoint {
-            schema_version: 3,
-            decision_fingerprint: "carry-native-v3".into(),
-            payload: payload.to_vec(),
-        }
-    }
-
-    fn provenance(hash: &str) -> CheckpointProvenance {
-        CheckpointProvenance {
-            source_format: "carry-python-v1".into(),
-            source_sha256: hash.into(),
-            bundle_sha256: "bundle-aa".into(),
-            import_complete: false,
-        }
-    }
-
-    struct StrictTranslator;
-
-    impl Strategy for StrictTranslator {
+    impl Strategy for Stateless {
         fn name(&self) -> &str {
-            "strict"
+            "stateless"
         }
 
         fn subscriptions(&self) -> Vec<Subscription> {
             Vec::new()
-        }
-
-        fn translate_checkpoint(
-            &self,
-            context: &StrategyImportContext,
-            source_format: &str,
-            sources: &[StrategyImportSource],
-        ) -> Result<TranslatedStrategyState, String> {
-            if context.account_user_id != "account-7"
-                || source_format != "legacy-v1"
-                || sources
-                    != [StrategyImportSource {
-                        name: "state".into(),
-                        bytes: b"legacy-state".to_vec(),
-                    }]
-            {
-                return Err("unknown or malformed legacy state".into());
-            }
-            Ok(TranslatedStrategyState {
-                checkpoint_payload: b"canonical-state".to_vec(),
-                pending_events: Vec::new(),
-            })
         }
     }
 
@@ -1063,8 +425,7 @@ mod tests {
     #[test]
     fn cold_native_state_is_one_atomic_segment_base_and_verifies_strictly() {
         let configured = vec!["long".to_string(), "stateless".to_string()];
-        let strategies: Vec<Box<dyn Strategy>> =
-            vec![Box::new(Stateful), Box::new(StrictTranslator)];
+        let strategies: Vec<Box<dyn Strategy>> = vec![Box::new(Stateful), Box::new(Stateless)];
         let initial = initial_state_record(&configured, &strategies).unwrap();
         let WalRecord::SegmentBase {
             strategies: names,
@@ -1136,266 +497,35 @@ mod tests {
     }
 
     #[test]
-    fn selected_strategy_is_the_only_checkpoint_translation_authority() {
-        let context = StrategyImportContext {
-            venue: "bybit".into(),
-            realm: "demo".into(),
-            account_user_id: "account-7".into(),
+    fn completed_import_provenance_survives_wal_replay_and_native_verification() {
+        let configured = vec!["long".to_string()];
+        let strategies: Vec<Box<dyn Strategy>> = vec![Box::new(Stateful)];
+        let mut imported = initial_state_record(&configured, &strategies).unwrap();
+        let WalRecord::SegmentBase {
+            strategy_global_checkpoints,
+            ..
+        } = &mut imported
+        else {
+            unreachable!()
         };
-        let identity = StrategyCheckpointIdentity {
-            schema_version: 3,
-            decision_fingerprint: "strict-v3".into(),
-        };
-        let (translated, events) = checkpoint_from_source(
-            &StrictTranslator,
-            identity.clone(),
-            &context,
-            "legacy-v1",
-            &[StrategyImportSource {
-                name: "state".into(),
-                bytes: b"legacy-state".to_vec(),
-            }],
-        )
-        .unwrap();
-        assert_eq!(translated.payload, b"canonical-state");
-        assert!(events.is_empty());
-        assert!(checkpoint_from_source(
-            &StrictTranslator,
-            identity,
-            &context,
-            "legacy-v1",
-            &[StrategyImportSource {
-                name: "state".into(),
-                bytes: b"caller-chosen-canonical-bytes".to_vec(),
-            }]
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("refused"));
+        strategy_global_checkpoints[0].provenance = Some(CheckpointProvenance {
+            source_format: "long-book-state-v2".into(),
+            source_sha256: "a".repeat(64),
+            bundle_sha256: "b".repeat(64),
+            import_complete: true,
+        });
+        let path = crate::testpath::temp_path("retained-import-provenance");
+        let (mut wal, existing) = engine_wal::WalWriter::open(path.path()).unwrap();
+        assert!(existing.is_empty());
+        wal.append(&imported).unwrap();
+        wal.barrier().unwrap();
+        drop(wal);
 
-        let wrong_account = StrategyImportContext {
-            account_user_id: "account-8".into(),
-            ..context
-        };
-        assert!(checkpoint_from_source(
-            &StrictTranslator,
-            StrategyCheckpointIdentity {
-                schema_version: 3,
-                decision_fingerprint: "strict-v3".into(),
-            },
-            &wrong_account,
-            "legacy-v1",
-            &[StrategyImportSource {
-                name: "state".into(),
-                bytes: b"legacy-state".to_vec(),
-            }]
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("refused"));
-    }
-
-    #[test]
-    fn import_barriers_once_and_identical_retry_is_a_noop() {
-        let mut wal = MemoryWal::default();
-        assert_eq!(
-            append_import(
-                &mut wal,
-                &[],
-                StrategyId(1),
-                checkpoint(b"state"),
-                provenance("aa"),
-                &[],
-                None
-            )
-            .unwrap(),
-            ImportOutcome::Imported
-        );
-        assert_eq!(wal.barriers, 1);
-        let replayed = wal.records.clone();
-        assert_eq!(
-            append_import(
-                &mut wal,
-                &replayed,
-                StrategyId(1),
-                checkpoint(b"state"),
-                provenance("aa"),
-                &[],
-                None
-            )
-            .unwrap(),
-            ImportOutcome::AlreadyPresent
-        );
-        assert_eq!(wal.records.len(), 1);
-        assert_eq!(wal.barriers, 1);
-    }
-
-    #[test]
-    fn pending_handoff_is_between_checkpoint_and_completion_barriers() {
-        let event = StrategyEvent {
-            source: StrategyId(0),
-            destination: StrategyId(1),
-            kind: "carry_fire".into(),
-            event_id: "fire-7".into(),
-            payload: b"exact-target".to_vec(),
-        };
-        let mut wal = MemoryWal::default();
-        assert_eq!(
-            append_import(
-                &mut wal,
-                &[],
-                StrategyId(1),
-                checkpoint(b"state"),
-                provenance("aa"),
-                std::slice::from_ref(&event),
-                None
-            )
-            .unwrap(),
-            ImportOutcome::Imported
-        );
-        assert_eq!(wal.barriers, 3);
-        assert!(matches!(
-            &wal.records[0],
-            WalRecord::StrategyGlobalCheckpoint {
-                provenance: Some(CheckpointProvenance {
-                    import_complete: false,
-                    ..
-                }),
-                ..
-            }
-        ));
-        assert!(matches!(
-            &wal.records[1],
-            WalRecord::StrategyEventPublished { event: written, .. } if written == &event
-        ));
-        assert!(matches!(
-            &wal.records[2],
-            WalRecord::StrategyGlobalCheckpoint {
-                provenance: Some(CheckpointProvenance {
-                    import_complete: true,
-                    ..
-                }),
-                ..
-            }
-        ));
-        let replayed = wal.records.clone();
-        assert_eq!(
-            append_import(
-                &mut wal,
-                &replayed,
-                StrategyId(1),
-                checkpoint(b"state"),
-                provenance("aa"),
-                &[event],
-                None
-            )
-            .unwrap(),
-            ImportOutcome::AlreadyPresent
-        );
-        assert_eq!(wal.records.len(), 3);
-        assert_eq!(wal.barriers, 3);
-    }
-
-    #[test]
-    fn a_refused_import_writes_nothing_and_an_admitted_one_pins_identity_first() {
-        let identity = || WalRecord::IdentityState {
-            wall_ts_ms: 3,
-            state: Default::default(),
-        };
-        // Live native state without import provenance is refused, and the log
-        // is untouched: the incumbent binary must still read it on rollback.
-        let live = vec![WalRecord::StrategyGlobalCheckpoint {
-            wall_ts_ms: 1,
-            strategy: StrategyId(1),
-            checkpoint: checkpoint(b"live"),
-            provenance: None,
-        }];
-        let mut wal = MemoryWal::default();
-        let refused = append_import(
-            &mut wal,
-            &live,
-            StrategyId(1),
-            checkpoint(b"import"),
-            provenance("aa"),
-            &[],
-            Some(identity()),
-        )
-        .unwrap_err();
-        assert!(refused
-            .to_string()
-            .contains("already has live whole-sleeve state"));
-        assert!(wal.records.is_empty());
-        assert_eq!(wal.barriers, 0);
-
-        let mut wal = MemoryWal::default();
-        assert_eq!(
-            append_import(
-                &mut wal,
-                &[],
-                StrategyId(1),
-                checkpoint(b"import"),
-                provenance("aa"),
-                &[],
-                Some(identity()),
-            )
-            .unwrap(),
-            ImportOutcome::Imported
-        );
-        assert!(matches!(
-            wal.records.as_slice(),
-            [
-                WalRecord::IdentityState { .. },
-                WalRecord::StrategyGlobalCheckpoint { .. }
-            ]
-        ));
-
-        let replayed = wal.records.clone();
-        let mut wal = MemoryWal::default();
-        assert_eq!(
-            append_import(
-                &mut wal,
-                &replayed,
-                StrategyId(1),
-                checkpoint(b"import"),
-                provenance("aa"),
-                &[],
-                Some(identity()),
-            )
-            .unwrap(),
-            ImportOutcome::AlreadyPresent
-        );
-        assert!(wal.records.is_empty());
-    }
-
-    #[test]
-    fn import_refuses_state_or_provenance_conflicts() {
-        let existing = vec![WalRecord::StrategyGlobalCheckpoint {
-            wall_ts_ms: 1,
-            strategy: StrategyId(0),
-            checkpoint: checkpoint(b"old"),
-            provenance: Some({
-                let mut proof = provenance("aa");
-                proof.import_complete = true;
-                proof
-            }),
-        }];
-        for (state, proof) in [(b"new".as_slice(), "aa"), (b"old".as_slice(), "bb")] {
-            let mut wal = MemoryWal::default();
-            assert!(append_import(
-                &mut wal,
-                &existing,
-                StrategyId(0),
-                checkpoint(state),
-                provenance(proof),
-                &[],
-                None
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("different"));
-            assert!(wal.records.is_empty());
-            assert_eq!(wal.barriers, 0);
-        }
+        let (replayed, torn) = engine_wal::replay_current(path.path()).unwrap();
+        assert!(!torn);
+        let records = replayed.into_iter().map(|(_, row)| row).collect::<Vec<_>>();
+        assert_eq!(records, [imported]);
+        verify_records(&configured, &strategies, &records).unwrap();
     }
 
     #[test]
@@ -1416,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn an_appended_strategy_keeps_the_takeover_and_a_dropped_one_does_not() {
+    fn an_appended_strategy_preserves_wal_identity_and_a_dropped_one_does_not() {
         let replayed = vec![WalRecord::Retained(
             engine_types::wal::RetainedWalRecord::Names {
                 strategies: vec!["carry".into(), "long".into(), "exodus".into()],
@@ -1432,7 +562,7 @@ mod tests {
             ],
             &replayed,
         )
-        .expect("a config that appends an id after the WAL's own may still import state");
+        .expect("appending a configured strategy preserves the WAL's existing identities");
         assert!(
             verify_names(&["carry".into(), "long".into()], &replayed)
                 .unwrap_err()
@@ -1492,74 +622,33 @@ mod tests {
     }
 
     #[test]
-    fn empty_wal_is_initialized_but_nonempty_nameless_wal_is_refused() {
-        let configured = vec!["long".into(), "carry".into(), "exodus".into()];
-        let mut wal = MemoryWal::default();
-        let mut replayed = Vec::new();
-        initialize_or_verify_names(&mut wal, &configured, &mut replayed).unwrap();
-        assert_eq!(wal.barriers, 1);
-        assert_eq!(wal.records, replayed);
-        assert!(matches!(
-            &replayed[0],
-            WalRecord::SegmentBase {
-                strategies,
-                symbols,
-                execution_history_through_ms: Some(_),
-                strategy_global_checkpoints,
-                ..
-            } if strategies == &configured
-                && symbols.is_empty()
-                && strategy_global_checkpoints.is_empty()
-        ));
-        initialize_or_verify_names(&mut wal, &configured, &mut replayed).unwrap();
-        assert_eq!(wal.records.len(), 1);
-        assert_eq!(wal.barriers, 1);
-
-        let mut nameless = vec![WalRecord::Note {
-            source: "legacy".into(),
-            text: "already contains bytes".into(),
-        }];
-        let before = nameless.clone();
-        let mut refused = MemoryWal::default();
-        assert!(
-            initialize_or_verify_names(&mut refused, &configured, &mut nameless)
-                .unwrap_err()
-                .to_string()
-                .contains("nonempty")
-        );
-        assert_eq!(nameless, before);
-        assert!(refused.records.is_empty());
-        assert_eq!(refused.barriers, 0);
-    }
-
-    #[test]
-    fn stopped_takeover_claims_are_exclusive() {
-        let wal_path = crate::testpath::temp_path("takeover-wal-lock");
+    fn stopped_initialization_claims_are_exclusive() {
+        let wal_path = crate::testpath::temp_path("initialize-wal-lock");
         let _wal_claim = engine_wal::lock(wal_path.path()).unwrap();
         assert!(matches!(
             engine_wal::lock(wal_path.path()),
             Err(engine_wal::WalLockError::AlreadyHeld { .. })
         ));
 
-        let lease_path = crate::testpath::temp_path("takeover-account-lock");
+        let lease_path = crate::testpath::temp_path("initialize-account-lock");
         let _account_claim = engine_venue::lease::acquire_at(
             lease_path.path(),
             engine_venue::lease::REALM_DEMO,
-            "strategy-state-import-test",
+            "strategy-state-initialize-test",
         )
         .unwrap();
         assert!(matches!(
             engine_venue::lease::acquire_at(
                 lease_path.path(),
                 engine_venue::lease::REALM_DEMO,
-                "second-import-test",
+                "second-initialize-test",
             ),
             Err(engine_venue::lease::LeaseError::AlreadyHeld { .. })
         ));
     }
 
     #[test]
-    fn takeover_account_binding_is_exact() {
+    fn initialization_account_binding_is_exact() {
         let who = engine_types::AccountIdentity {
             venue: "bybit".into(),
             realm: "demo".into(),
@@ -1574,54 +663,5 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("empty"));
-    }
-
-    #[test]
-    fn named_sources_are_sorted_and_unsafe_inputs_are_refused() {
-        let left = crate::testpath::temp_path("takeover-source-left");
-        let right = crate::testpath::temp_path("takeover-source-right");
-        std::fs::write(left.path(), b"left").unwrap();
-        std::fs::write(right.path(), b"right").unwrap();
-        let sources = read_sources(&[
-            ("zeta".into(), right.path().to_path_buf()),
-            ("alpha".into(), left.path().to_path_buf()),
-        ])
-        .unwrap();
-        assert_eq!(
-            sources
-                .iter()
-                .map(|row| row.name.as_str())
-                .collect::<Vec<_>>(),
-            ["alpha", "zeta"]
-        );
-        assert!(read_sources(&[
-            ("same".into(), left.path().to_path_buf()),
-            ("same".into(), right.path().to_path_buf()),
-        ])
-        .unwrap_err()
-        .to_string()
-        .contains("duplicate"));
-
-        let link = crate::testpath::temp_path("takeover-source-link");
-        std::os::unix::fs::symlink(left.path(), link.path()).unwrap();
-        assert!(read_sources(&[("link".into(), link.path().to_path_buf())])
-            .unwrap_err()
-            .to_string()
-            .contains("non-symlink"));
-    }
-
-    #[test]
-    fn source_swap_between_identity_check_and_open_is_refused() {
-        let source = crate::testpath::temp_path("takeover-source-swap");
-        let replacement = crate::testpath::temp_path("takeover-source-replacement");
-        std::fs::write(source.path(), b"first").unwrap();
-        std::fs::write(replacement.path(), b"other").unwrap();
-
-        let error =
-            read_sources_with_before_open(&[("state".into(), source.path().to_path_buf())], |_| {
-                std::fs::rename(replacement.path(), source.path()).unwrap()
-            })
-            .unwrap_err();
-        assert!(error.to_string().contains("changed while it was opened"));
     }
 }

@@ -1092,7 +1092,7 @@ mod tests {
         row.content_sha256 = crate::signals::content_sha256(&row);
         let state = SignalState::replay(&[accepted(row)], 1).unwrap();
         let value = serde_json::json!({
-            "kind": "segment_base_v2", "wall_ts_ms": 2, "strategies": ["one"], "symbols": ["BTCUSDT"],
+            "kind": "segment_base", "wall_ts_ms": 2, "strategies": ["one"], "symbols": ["BTCUSDT"],
             "may_open": true, "control_anchors": [], "attribution": [], "logged_exposure": [],
             "intended_stops": [], "recent_execution_ids": [], "target_book_latches": [], "open_orders": [],
             "signal_observations": state.observations().collect::<Vec<_>>(),

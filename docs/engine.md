@@ -185,7 +185,7 @@ A run that ends without being asked returns one `EngineError`. The supervisor re
 | Volatile market callbacks | Strategies read current `Books` directly. Changed checkpoints and ordered effects persist; unchanged checkpoint proposals write nothing. No current callback record contains a market snapshot. |
 | Ordered effects | `StrategyTransitionQueued` retains effect order and placement IDs; retained process-transition records replay through the same effects. `StrategyEffectCompleted` retires an index after its completion; a per-turn budget retains the suffix, including reductions. |
 | Orders | Checkpoint, `Intent`, `Verdict`, `OrderSent` and `OrderDispatchAttempted` share one barrier before dispatch. An uncached leverage mutation first flushes dependent strategy state. Ambiguous sends retain ownership; terminal rejection/cancellation releases an attempt ID while its durable exit target remains. |
-| Rotation | `segment_base_v7` restates canonical portfolio/accounting, open trade lots, pending dispatches, callbacks/effects, identities, metadata, input lifecycle, explicit legacy source retirements and retained terminal orders. Legacy segment aliases remain readable; required precision and record kinds make incompatible readers refuse without truncating the log. |
+| Rotation | `segment_base_v7` restates canonical portfolio/accounting, open trade lots, pending dispatches, callbacks/effects, identities, metadata, input lifecycle, explicit legacy source retirements and retained terminal orders. Ordinary readers accept v1 and v7; the offline converter privately accepts v5. The retained `8c92c964` release reads all original host families. Required precision and unsupported record kinds cause refusal without truncating the log. |
 | Accepted inputs | The channel admits at most 256 rows / 64 MiB. Durable admission retains one ordinary delivery per destination plus missing-prefix recovery ownership within byte limits; spool acknowledgement follows the acceptance barrier. |
 | Outcomes | Consumed, explicitly rejected and retained pending are distinct. Terminal payload release follows its WAL barrier; failed callbacks retain the accepted input for retry. |
 | Readiness exchange | `input-readiness-request.json` / `input-readiness-response.json` carry a fresh matching `boot_nonce`. Schema 2 lifecycle reports bind producer generations, granted epochs, stable sleeve destinations and published frontiers; schema 1 responses retain legacy compatibility. Metadata files are excluded from observation inventory. |
@@ -335,14 +335,13 @@ Operator controls are dispatched by placing JSON command files into the realm co
 
 ---
 
-### 8. Native State Takeover & State Audit
+### 8. Canonical Native State
 
 When performing rollouts or cold starts, state is seeded or verified while units are stopped:
 
 | CLI Subcommand | Purpose | Preconditions |
 | :--- | :--- | :--- |
 | `initialize-native-strategy-state` | Initializes canonical empty checkpoints in a fresh WAL. | Empty WAL file only. |
-| `import-strategy-state` | Ingests verified historical strategy bundles into the WAL. | Requires WAL lock and account match. |
 | `retire-legacy-signal-sources` | Records an operator-selected terminal outcome for stopped legacy sources without rewriting accepted cursors. | WAL lock; full plan validation; explicit `--execute`; no accepted pending observations. |
 | `reconcile-clear` | Restates canonical authenticated physical quantities and records the operator's historical evidence note; currently owned net quantities must agree first. | WAL lock; exact native quantities; explicit `--execute`; identical interrupted clear retries append nothing. |
 | `verify-native-strategy-state` | Verifies WAL checkpoint identity, frame CRC, and state provenance from the newest trusted segment, the records boot replays (`engine_wal::replay_current`). | Run before restarting units on deploy. |
@@ -353,8 +352,9 @@ When performing rollouts or cold starts, state is seeded or verified while units
 * **Must** use the newest trusted segment for takeover state verification;
   `engine_wal::replay_chain` is an offline reader whose memory grows with the
   retained family.
-* **Must** leave a refused or already-complete import unchanged
-  (`takeover::append_import`).
+* **Must** verify canonical checkpoints before restarting units. Deployment initializes
+  only an empty WAL with no retained legacy source files; other unverified state
+  requires recovery through the compatible retained release.
 * **Must Never** reinterpret an unsupported required record as a torn tail or
   truncate it. `ExecutionPrecisionV1` and `segment_base_v7` require a compatible
   reader; an older reader’s explicit refusal is the compatibility behavior.
@@ -374,28 +374,22 @@ When performing rollouts or cold starts, state is seeded or verified while units
 
 * **Must** preserve every existing durable slot’s key and every recorded fill’s owner.
 * **Must Never** use current configuration position to reinterpret an existing `StrategyId` or transfer a removed sleeve’s position to another sleeve.
-* **Must** treat a newly appended key as owning no earlier fill; a plug without a checkpoint contract requires no takeover source.
-
-#### Takeover Source Roles
-| Sleeve | Source Format | Named Source Roles |
-| :--- | :--- | :--- |
-| **LONG** | `long-book-state-v2` | `state` |
-| **CARRY** | `carry-sizing-anchors-v1-early-exits-v1-target-book-v1` | `early_exits`, `sizing_anchors`, `target_book` |
-| **EXODUS** | `exodus-state-v1-v4-event-tape-v1-identity-v2` | `carry_events`, `identity`, `state` (and generated `legacy_paths`) |
+* **Must** treat a newly appended key as owning no earlier fill; a plug without a checkpoint contract requires no initial checkpoint.
 
 ---
 
 ### 9. Backtest Replay (`engine backtest`)
 
-The live loop — `Engine::boot_as`, the risk kernel, the strategy reducers, the working-order supervisor, the log — driven by a recorded `market_tape` in the tape's own time, on a simulated venue.
+The live loop — `Engine::boot_as_exact`, the risk kernel, the strategy reducers, the working-order supervisor, the log — driven by a recorded `market_tape` in the tape's own time, on a simulated venue.
 
 | Input | Source | Contract |
 | :--- | :--- | :--- |
 | `--tape PATH` | `python -m market_tape rows ARCHIVE --hours A..B > tape.jsonl` (or `.jsonl.zst`) | `market_tape/schema.py` rows, `local_receive_ts_ns` ordered; a malformed row stops the run at its line. Book rows must be Bybit's: another venue's chaining is refused, not guessed |
-| `--instruments PATH` | `ARCHIVE/<day>/<HH>/_meta/instruments-<stamp>.json[.zst]` | Bybit `instruments-info` rows; a wanted symbol without rules refuses boot |
+| `--instruments PATH` | `ARCHIVE/<day>/<HH>/_meta/instruments-<stamp>.json[.zst]` | Bybit `instruments-info` rows; original decimal strings and optional price/quantity bounds survive in the exact catalog. Missing required exact metadata refuses boot |
 | `--config PATH` | engine TOML with `[[strategy]]` blocks | `wal_path`, `trades_path`, spool paths are replaced by the flags |
 | `--wal PATH` | new file | Must be absent or empty; every run starts from nothing |
 | `--signals DIR` | signal spool | Rows validated as live; delivered at `available_wall_ts_ms` |
+| Numeric boundary | Existing simulated venue | Decimal instrument strings remain exact; JSON numbers retain their binary64 input precision. Simulated fills and cash remain binary64, with `amounts=None`; no native asset or multiplier is invented |
 
 | Output | Written by | Holds |
 | :--- | :--- | :--- |

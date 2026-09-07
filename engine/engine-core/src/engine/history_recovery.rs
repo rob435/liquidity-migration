@@ -149,14 +149,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .orders
                 .get(&exec.client_order_id)
                 .map(|order| order.request.clone());
-            let allocation = match self
-                .books
-                .attribution
-                .prepare_portfolio_recovered_for_order(
-                    owned_request.as_ref(),
-                    &self.host.names,
-                    &record,
-                ) {
+            let allocation = match self.books.attribution.prepare_portfolio_recovered_on_grid(
+                owned_request.as_ref(),
+                &self.host.names,
+                &record,
+                self.instrument_specs
+                    .get(&symbol)
+                    .and_then(|spec| spec.qty_step.as_ref()),
+            ) {
                 Ok(allocation) => allocation,
                 Err(reason) => {
                     batch.foreign.push(Self::untrusted_fill_line(

@@ -379,9 +379,9 @@ fn instruments_are_read_with_the_gateways_four_fields() {
         {"symbol":"NOFILTERUSDT"}
     ]}"#;
     let path = write_temp("instruments", payload);
-    let rules = read_instruments(path.path()).unwrap();
+    let catalog = read_instruments(path.path()).unwrap();
     assert_eq!(
-        rules,
+        catalog.rules,
         vec![(
             "BTCUSDT".to_string(),
             InstrumentRule {
@@ -392,16 +392,197 @@ fn instruments_are_read_with_the_gateways_four_fields() {
             }
         )]
     );
+    let spec = &catalog.specs[0].1;
+    assert_eq!(
+        spec.tick_size
+            .as_ref()
+            .unwrap()
+            .to_decimal_string()
+            .as_deref(),
+        Some("0.1")
+    );
+    assert_eq!(
+        spec.max_price
+            .as_ref()
+            .unwrap()
+            .to_decimal_string()
+            .as_deref(),
+        Some("1999999.8")
+    );
+    assert_eq!(spec.base_asset, engine_types::numeric::AssetId::Unknown);
+    assert_eq!(spec.quote_asset, engine_types::numeric::AssetId::Unknown);
+    assert_eq!(
+        spec.settlement_asset,
+        engine_types::numeric::AssetId::Unknown
+    );
+    assert!(spec.contract_multiplier.is_none());
+    assert!(spec.fee_assets.is_none());
+}
+
+#[test]
+fn instrument_decimal_strings_keep_precision_and_missing_limits_stay_unknown() {
+    use engine_types::numeric::{AssetId, Exact};
+
+    let tick = "0.1000000000000000000000000001";
+    let step = "0.0100000000000000000000000001";
+    let path = write_temp(
+        "exact-instruments",
+        &format!(
+            r#"{{
+        "kind":"instruments_snapshot","rows":[{{"symbol":"X",
+        "baseCoin":"BASE","quoteCoin":"QUOTE","settleCoin":"SETTLE",
+        "priceFilter":{{"tickSize":"{tick}"}},
+        "lotSizeFilter":{{"qtyStep":"{step}","minOrderQty":"{step}"}}}}]}}"#
+        ),
+    );
+    let catalog = read_instruments(path.path()).unwrap();
+    let spec = &catalog.specs[0].1;
+    assert_eq!(spec.tick_size, Some(Exact::parse_decimal(tick).unwrap()));
+    assert_eq!(spec.qty_step, Some(Exact::parse_decimal(step).unwrap()));
+    assert_eq!(spec.market_qty_step, spec.qty_step);
+    assert_eq!(spec.market_min_qty, spec.min_qty);
+    assert_eq!(spec.base_asset, AssetId::Named("BASE".into()));
+    assert_eq!(spec.quote_asset, AssetId::Named("QUOTE".into()));
+    assert_eq!(spec.settlement_asset, AssetId::Named("SETTLE".into()));
+    assert!(spec.min_notional.is_none());
+    assert!(spec.min_price.is_none());
+    assert!(spec.max_price.is_none());
+    assert!(spec.max_qty.is_none());
+    assert!(spec.max_market_qty.is_none());
+    assert!(catalog.cache.is_none());
+    assert_ne!(
+        spec.qty_step,
+        Some(Exact::parse_decimal(&catalog.rules[0].1.qty_step.to_string()).unwrap())
+    );
+}
+
+#[test]
+fn numeric_instrument_fields_retain_the_existing_binary64_input_value() {
+    use engine_types::numeric::Exact;
+
+    let path = write_temp(
+        "numeric-instruments",
+        r#"{"kind":"instruments_snapshot","rows":[
+        {"symbol":"X","priceFilter":{"tickSize":0.1},
+        "lotSizeFilter":{"minOrderQty":0.01,"qtyStep":0.01}}
+    ]}"#,
+    );
+    let catalog = read_instruments(path.path()).unwrap();
+    assert_eq!(
+        catalog.specs[0].1.tick_size,
+        Some(Exact::from_legacy_f64(0.1).unwrap())
+    );
+    assert_ne!(
+        catalog.specs[0].1.tick_size,
+        Some(Exact::parse_decimal("0.1").unwrap())
+    );
+}
+
+#[test]
+fn recorded_price_and_size_limits_apply_to_exact_simulated_orders() {
+    use engine_types::order_terms::{quantize_order, QuantityPolicy};
+
+    let path = write_temp(
+        "bounded-instruments",
+        r#"{"kind":"instruments_snapshot","rows":[
+        {"symbol":"X","priceFilter":{"tickSize":"0.1","minPrice":"90","maxPrice":"110"},
+        "lotSizeFilter":{"minOrderQty":"0.01","qtyStep":"0.01",
+        "maxOrderQty":"0.05","maxMktOrderQty":"0.03"}}
+    ]}"#,
+    );
+    let catalog = read_instruments(path.path()).unwrap();
+    let spec = &catalog.specs[0].1;
+    let order = |qty, kind| {
+        quantize_order(
+            spec,
+            Side::Buy,
+            qty,
+            kind,
+            None,
+            Some(100.0),
+            QuantityPolicy::Normal,
+        )
+    };
+    assert_eq!(
+        engine_types::quantize::quantize_qty(0.1, &catalog.rules[0].1),
+        Some(0.1)
+    );
+    assert!(order(0.1, limit(100.0)).is_err(), "maxOrderQty must apply");
+    assert!(order(0.05, limit(100.0)).is_ok());
+    assert!(
+        order(0.04, OrderKind::Market).is_err(),
+        "maxMktOrderQty must apply"
+    );
+    assert!(order(0.03, OrderKind::Market).is_ok());
+    assert!(order(0.01, limit(89.9)).is_err(), "minPrice must apply");
+    assert!(order(0.01, limit(110.1)).is_err(), "maxPrice must apply");
+    assert!(order(0.01, limit(90.0)).is_ok());
+    assert!(order(0.01, limit(110.0)).is_ok());
 }
 
 // ------------------------------------------------------------ the venue
 
-const RULE: InstrumentRule = InstrumentRule {
-    tick_size: 0.5,
-    qty_step: 0.001,
-    min_qty: 0.001,
-    min_notional: 5.0,
-};
+fn instrument_catalog() -> engine_types::orders::InstrumentCatalog {
+    let path = write_temp(
+        "venue-instruments",
+        r#"{"kind":"instruments_snapshot","rows":[
+        {"symbol":"BTCUSDT","priceFilter":{"tickSize":"0.5"},
+        "lotSizeFilter":{"minOrderQty":"0.001","qtyStep":"0.001","minNotionalValue":"5"}}
+    ]}"#,
+    );
+    read_instruments(path.path()).unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn exact_simulation_boot_refuses_a_catalog_with_only_float_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("engine.toml");
+    quoter_config(&config);
+    let loaded = crate::config::load(&config).unwrap();
+    let mut settings = loaded.config.engine.clone();
+    settings.wal_path = dir.path().join("missing-exact.wal");
+    settings.heartbeat_path = None;
+    let (wal, _) = engine_wal::WalWriter::open(&settings.wal_path).unwrap();
+    let mut catalog = instrument_catalog();
+    catalog.specs.clear();
+    let scheduler = Scheduler::starting_at(1_700_000_000_000_000_000);
+    let venue = Arc::new(Mutex::new(SimulatedVenue::new(
+        VenueParams {
+            initial_cash_usdt: 100_000.0,
+            taker_fee_rate: 0.0,
+            maker_fee_rate: 0.0,
+            order_rtt_ns: 0,
+            private_latency_ns: 0,
+            default_leverage: 2.0,
+            maintenance_margin_rate: 0.005,
+        },
+        vec!["BTCUSDT".into()],
+        &catalog,
+        scheduler.clone(),
+    )));
+    let gateway = super::venue::SimVenueGateway::new(venue.clone(), scheduler, 0);
+    let result = crate::engine::Engine::boot_as_exact(
+        &settings,
+        &loaded.sha256,
+        wal,
+        crate::assembly::risk(&loaded.config.risk).unwrap(),
+        gateway,
+        crate::assembly::strategies(&loaded.config.strategies).unwrap(),
+        &["quotes".into()],
+        &[],
+    )
+    .await;
+    let error = match result {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("exact boot accepted only binary64 instrument rules"),
+    };
+    assert!(
+        error.contains("exact instrument catalog unavailable"),
+        "{error}"
+    );
+    assert!(error.contains("BTCUSDT"), "{error}");
+    assert_eq!(venue.lock().unwrap().accounting().fills, 0);
+}
 
 fn venue(cash: f64, leverage: f64) -> (SimulatedVenue, Scheduler) {
     let scheduler = Scheduler::starting_at(1_000);
@@ -417,7 +598,7 @@ fn venue(cash: f64, leverage: f64) -> (SimulatedVenue, Scheduler) {
             maintenance_margin_rate: 0.005,
         },
         vec!["BTCUSDT".into()],
-        &[("BTCUSDT".into(), RULE)],
+        &instrument_catalog(),
         scheduler.clone(),
     );
     (venue, scheduler)
@@ -663,7 +844,7 @@ fn funding_settles_once_per_boundary_at_the_quoted_rate() {
             maintenance_margin_rate: 0.005,
         },
         vec!["BTCUSDT".into()],
-        &[("BTCUSDT".into(), RULE)],
+        &instrument_catalog(),
         scheduler.clone(),
     );
     let _clock = engine_types::clock::install_virtual(t0_ns, t0_ns).unwrap();
@@ -783,7 +964,11 @@ fn venue_without_rules() -> (SimulatedVenue, Scheduler) {
             maintenance_margin_rate: 0.005,
         },
         vec!["BTCUSDT".into()],
-        &[],
+        &engine_types::orders::InstrumentCatalog {
+            cache: None,
+            rules: vec![],
+            specs: vec![],
+        },
         scheduler.clone(),
     );
     (venue, scheduler)
@@ -1065,6 +1250,71 @@ async fn run_once(
     })
     .await
     .expect("the replay runs")
+}
+
+#[tokio::test(start_paused = true)]
+async fn recorded_decimal_grids_reach_exact_order_terms() {
+    use engine_types::numeric::Exact;
+
+    let dir = tempfile::tempdir().unwrap();
+    let tape = dir.path().join("tape.jsonl");
+    synthetic_tape(&tape, 4);
+    let config = dir.path().join("engine.toml");
+    quoter_config(&config);
+    let instruments = dir.path().join("instruments.json");
+    let tick = "0.1000000000000000000000000001";
+    let step = "0.0100000000000000000000000001";
+    std::fs::write(
+        &instruments,
+        serde_json::to_vec(&serde_json::json!({
+            "kind": "instruments_snapshot", "venue": "bybit", "market": "linear",
+            "category": "linear", "schema": 2, "recorded_at_ns": 1,
+            "source": "test", "rows": [{"symbol": "BTCUSDT",
+                "priceFilter": {"tickSize": tick},
+                "lotSizeFilter": {"minOrderQty": step, "qtyStep": step,
+                    "minNotionalValue": "5"}}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let wal = dir.path().join("orders.wal");
+    let report = super::run(super::BacktestOptions {
+        engine_config_path: config,
+        tape_path: tape,
+        instruments_path: instruments,
+        wal_path: wal.clone(),
+        initial_capital_usdt: 100_000.0,
+        ..super::BacktestOptions::default()
+    })
+    .await
+    .unwrap();
+    assert!(report.orders_sent > 0, "the fixture must send an order");
+    let tick = Exact::parse_decimal(tick).unwrap();
+    let step = Exact::parse_decimal(step).unwrap();
+    let mut orders = 0;
+    for (_, record) in engine_wal::replay(wal).unwrap() {
+        let engine_types::WalRecord::OrderSent { request, .. } = record else {
+            continue;
+        };
+        orders += 1;
+        let terms = request
+            .exact_terms
+            .expect("backtest order lost the snapshot's exact decimal constraints");
+        if orders == 1 {
+            eprintln!(
+                "recorded step={} first quantity={}",
+                step.to_decimal_string().unwrap(),
+                terms.quantity.to_decimal_string().unwrap()
+            );
+        }
+        if !request.close_position {
+            assert_eq!(terms.quantity.floor_to(&step).unwrap(), terms.quantity);
+        }
+        if let Some(price) = terms.limit_price {
+            assert_eq!(price.floor_to(&tick).unwrap(), price);
+        }
+    }
+    assert!(orders > 0);
 }
 
 /// The whole promise, on one tape: the loop ticks in tape time, orders fill

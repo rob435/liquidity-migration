@@ -898,7 +898,7 @@ mod tests {
 
     fn rotation(state: &SignalState) -> WalRecord {
         serde_json::from_value(serde_json::json!({
-            "kind":"segment_base_v2", "wall_ts_ms":2, "strategies":["long","carry"], "symbols":["BTCUSDT"],
+            "kind":"segment_base", "wall_ts_ms":2, "strategies":["long","carry"], "symbols":["BTCUSDT"],
             "may_open":true, "control_anchors":[], "attribution":[], "logged_exposure":[], "intended_stops":[], "open_orders":[],
             "signal_observations":state.observations().collect::<Vec<_>>(), "signal_cursors":state.cursors().collect::<Vec<_>>(),
             "signal_subscriptions":state.subscriptions().collect::<Vec<_>>(), "signal_gaps":state.gaps().collect::<Vec<_>>(),

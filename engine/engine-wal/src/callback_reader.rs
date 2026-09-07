@@ -16,6 +16,7 @@ pub(crate) struct Reader {
     pub segment: u64,
     pub family: PathBuf,
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub conversion_v5: bool,
 }
 
 struct Window<'a> {
@@ -83,14 +84,17 @@ struct EventEnvelope {
     event: Option<engine_types::strategy_process::CallbackEvent>,
 }
 
-struct InputSeed(u64);
+struct InputSeed {
+    callback_id: u64,
+    conversion_v5: bool,
+}
 impl<'de> DeserializeSeed<'de> for InputSeed {
     type Value = Option<StrategyCallbackInput>;
     fn deserialize<D: serde::Deserializer<'de>>(
         self,
         deserializer: D,
     ) -> Result<Self::Value, D::Error> {
-        struct InputVisitor(u64);
+        struct InputVisitor(InputSeed);
         impl<'de> Visitor<'de> for InputVisitor {
             type Value = Option<StrategyCallbackInput>;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -98,24 +102,35 @@ impl<'de> DeserializeSeed<'de> for InputSeed {
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut found = None;
+                let mut kind = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
+                        "kind" => {
+                            if kind.is_some() {
+                                return Err(serde::de::Error::duplicate_field("kind"));
+                            }
+                            kind = Some(map.next_value::<String>()?);
+                        }
                         "input" => {
                             let input: StrategyCallbackInput = map.next_value()?;
-                            if input.callback_id == self.0 {
+                            if input.callback_id == self.0.callback_id {
                                 found = Some(input);
                             }
                         }
-                        "strategy_callbacks" => found = map.next_value_seed(InputsSeed(self.0))?,
+                        "strategy_callbacks" => {
+                            found = map.next_value_seed(InputsSeed(self.0.callback_id))?
+                        }
                         _ => {
                             map.next_value::<IgnoredAny>()?;
                         }
                     }
                 }
+                crate::segment_base_kind(kind.as_deref().unwrap_or(""), self.0.conversion_v5)
+                    .map_err(serde::de::Error::custom)?;
                 Ok(found)
             }
         }
-        deserializer.deserialize_map(InputVisitor(self.0))
+        deserializer.deserialize_map(InputVisitor(self))
     }
 }
 struct InputsSeed(u64);
@@ -313,9 +328,12 @@ impl CallbackWalReader for Reader {
         let (length, crc) = self.header(cursor)?;
         let mut reader = self.frame(cursor, length);
         let mut json = serde_json::Deserializer::from_reader(&mut reader);
-        let input = InputSeed(callback_id)
-            .deserialize(&mut json)
-            .map_err(crate::json_error)?;
+        let input = InputSeed {
+            callback_id,
+            conversion_v5: self.conversion_v5,
+        }
+        .deserialize(&mut json)
+        .map_err(crate::json_error)?;
         json.end().map_err(crate::json_error)?;
         let consumed = reader.into_inner();
         if consumed.left != 0 || consumed.crc != crc {
@@ -348,6 +366,7 @@ impl CallbackWalReader for Reader {
         }
         let (length, crc) = self.header(cursor)?;
         let envelope: Envelope = self.envelope(cursor, length, crc)?;
+        crate::segment_base_kind(&envelope.kind, self.conversion_v5).map_err(crate::json_error)?;
         let corrupt = |detail: &str| WalError::Corrupt {
             offset: cursor.offset,
             detail: detail.into(),

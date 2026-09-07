@@ -121,14 +121,6 @@ engine — the execution loop
       and resets the latch, keeping the findings in the log as the receipt.
       The next boot still runs its own comparison.
 
-  engine import-strategy-state --config engine.toml --strategy SLEEVE
-                               --source-format FORMAT --source NAME=PATH
-                               [--source NAME=PATH ...]
-      Stop the engine, lock its WAL and venue account, verify the config's
-      strategy ids against WAL Names, ask that strategy's strict legacy codec
-      to translate the source, then append its canonical state.
-      An exact retry is a no-op; any different state or source proof is refused.
-
   engine initialize-native-strategy-state --config engine.toml
       On a truly empty WAL only, lock the WAL and configured venue account,
       bind the authenticated user to EXPECTED_ENGINE_ACCOUNT_USER_ID, and
@@ -339,12 +331,4 @@ fn runtime() -> Result<tokio::runtime::Runtime, Box<dyn Error>> {
 fn value(args: &[String], flag: &str) -> Option<String> {
     let at = args.iter().position(|a| a == flag)?;
     args.get(at + 1).cloned()
-}
-
-fn values(args: &[String], flag: &str) -> Vec<String> {
-    args.iter()
-        .enumerate()
-        .filter(|(_, value)| value.as_str() == flag)
-        .filter_map(|(at, _)| args.get(at + 1).cloned())
-        .collect()
 }

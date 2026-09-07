@@ -876,7 +876,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             let owner = recovered_state.orders.owner_of(&client_order_id);
             let allocation = match recovered_state
                 .attribution
-                .prepare_portfolio_recovered_for_order(
+                .prepare_portfolio_recovered_on_grid(
                     recovered_state
                         .orders
                         .orders
@@ -884,6 +884,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         .map(|order| &order.request),
                     &strategy_names,
                     &record,
+                    specs
+                        .and_then(|specs| specs.get(&symbol))
+                        .and_then(|spec| spec.qty_step.as_ref()),
                 ) {
                 Ok(allocation) => allocation,
                 Err(reason) => {

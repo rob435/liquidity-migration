@@ -120,20 +120,26 @@ gh workflow run vps-deploy.yml --ref main -f mode=diagnose
 | Exact source | Fetch and verify the requested commit belongs to `origin/main`. A backward deployment uses the same compatibility decision as rollback before moving the checkout. |
 | Artifact delivery | Verify and install the CI-built archive for that commit; missing artifacts fail before stopping the fleet. The funded host does not compile releases. |
 | Installation | Binaries and units land while both realms run. Independent recorders restart only when their own inputs change. |
-| Realm handover | Compare the engine source tree, systemd units, fleet manifest, worker config and rendered realm inputs with the retained fingerprint. Unchanged active realms keep running; changed realms stop, apply any explicit legacy retirement plan, verify/import native state, apply any explicit reconciliation note, then restart. |
+| Realm handover | Compare the engine source tree, systemd units, fleet manifest, worker config and rendered realm inputs with the retained fingerprint. Unchanged active realms keep running; changed realms stop, apply any explicit legacy retirement plan, verify canonical native state or initialize an empty WAL with no legacy source files, apply any explicit reconciliation note, then restart. |
 | Readiness | Require a fresh heartbeat and the same active main PID/restart counter throughout the 12-second settle window before recording the realm fingerprint. |
 | Failed handover or fleet rollback | A predecessor must have identical Rust, dependency, toolchain and build inputs to the current checkout and recorded deployed generation. Incompatible or unavailable inputs leave the installed candidate and durable state in place for forward repair. The worker has no read-only state compatibility command, so a changed-runtime rollback is not inferred safe. |
 | Default demo rollback/drill | `scripts/runtime/chaos_drill.sh rollback\|drill` selects the recorded previous generation under the deployment lock and requires identical runtime inputs. `restore` selects the completed current generation without requiring a predecessor |
 | Selected demo pair | `rollback\|drill --qualified-pair EXPECTED_CURRENT_SHA PREDECESSOR_SHA` selects a retained archive independently of `previous-commit`. The caller must qualify the specific runtime/state compatibility before using this input. The helper requires the completed deployment to equal the supplied current SHA under the lock; a failed predecessor startup restores that current release. `restore` rejects pair arguments |
 | Pair qualification scope | Full-SHA pair selection permits its reviewed source difference; it does not suppress archive, WAL or worker-state errors. A copied-WAL read establishes record readability only. Loaded images, fresh process/account readiness and successful restoration require an actual demo drill |
 | Durable state | Rollback never restores old WAL or worker files over newer state; required record refusal remains explicit. |
+| Legacy Python snapshots | Deployment refuses missing or invalid canonical native state when the WAL is nonempty or any required legacy source file exists. Recovery uses a retained compatible release with the complete source bundle and matching account/configuration; the current release has no Python state importer. |
 
-### Native State Takeover Sources
-| Sleeve | Source Format | Named Source Roles |
-| :--- | :--- | :--- |
-| **LONG** | `long-book-state-v2` | `state` |
-| **CARRY** | `carry-sizing-anchors-v1-early-exits-v1-target-book-v1` | `early_exits`, `sizing_anchors`, `target_book` |
-| **EXODUS** | `exodus-state-v1-v4-event-tape-v1-identity-v2` | `carry_events`, `identity`, `state` (and generated `legacy_paths`) |
+### Native State Initialization
+
+| Existing source checked before empty initialization | Path |
+| --- | --- |
+| LONG state | `/var/lib/liquidity-migration/targets/long-${realm}-state.json` |
+| CARRY sizing anchors | `${carry_root}/.cache/carry_sizing_anchors.json` |
+| CARRY target book | `/var/lib/liquidity-migration/targets/carry-${realm}.json` |
+| EXODUS identity | `${exodus_root}/exodus_state_identity.json` |
+| EXODUS state | `${exodus_root}/exodus_state.json` |
+| Root selection | `scripts/vps/deploy_remote.sh::ensure_native_strategy_state` selects the configured CARRY and EXODUS roots for each realm |
+| Fresh initialization | All five paths absent and WAL empty; verified canonical state preserves legacy files in place |
 
 ---
 

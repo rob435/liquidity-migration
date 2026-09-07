@@ -23,21 +23,67 @@ fn options(seed: u64, tag: &str) -> SimOptions {
     opts
 }
 
+fn assert_order_terms_and_simulated_fill_boundary(dir: &std::path::Path) {
+    let mut orders = 0;
+    let mut fills = 0;
+    let mut legacy_frontiers = 0;
+    let mut ledger = engine_core::inflight::LedgerOfOrders::default();
+    for (_, record) in engine_wal::replay(dir.join("run.wal")).unwrap() {
+        ledger.try_apply(&record).unwrap();
+        match record {
+            engine_types::WalRecord::OrderSent { request, .. } => {
+                assert!(request.exact_terms.is_some());
+                orders += 1;
+            }
+            engine_types::WalRecord::OrderUpdate {
+                update:
+                    engine_types::OrderUpdate::Fill {
+                        amounts,
+                        client_order_id,
+                        ..
+                    },
+                ..
+            } => {
+                assert!(
+                    amounts.is_none(),
+                    "the simulator still models binary64 fills"
+                );
+                fills += 1;
+                if let Some(order) = ledger.orders.get(&client_order_id) {
+                    assert!(matches!(
+                        order.fill_quantity,
+                        engine_types::wal::OrderFillQuantity::LegacyBinary64 { .. }
+                    ));
+                    legacy_frontiers += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(orders > 0);
+    assert!(fills > 0);
+    assert!(legacy_frontiers > 0);
+}
+
 #[tokio::test(start_paused = true)]
 async fn without_faults_the_simulation_keeps_the_backtest_promise() {
     let _alone = ONE_AT_A_TIME.lock().await;
     let mut opts = options(1, "clean");
     opts.crashes = 0;
     opts.faults = FaultRates::NONE;
+    opts.keep = true;
+    let dir = opts.dir.clone();
     let first = run_seed(opts.clone()).await.expect("the world runs");
     assert!(first.passed(), "{:#?}", first.failures());
     assert!(first.venue.fills > 0, "{:#?}", first.venue);
     assert!(first.orders_sent > 2, "{}", first.orders_sent);
     assert!(first.faults.is_empty(), "{:?}", first.faults);
     assert_eq!(first.segments, 1);
+    assert_order_terms_and_simulated_fill_boundary(&dir);
     let second = run_seed(opts).await.expect("the world runs again");
     assert_eq!(first.wal_sha256, second.wal_sha256, "one seed, one log");
     assert_eq!(first.venue, second.venue);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -79,9 +125,12 @@ async fn one_seed_replays_byte_for_byte_under_heavy_faults() {
     let mut opts = options(7, "heavy");
     opts.crashes = 2;
     opts.faults = FaultRates::HEAVY;
+    opts.keep = true;
+    let dir = opts.dir.clone();
     let first = run_seed(opts.clone()).await.expect("the world runs");
     assert!(first.passed(), "{:#?}", first.failures());
     assert_eq!(first.crashes_injected, 2);
+    assert_order_terms_and_simulated_fill_boundary(&dir);
     // Every halt cancel the venue refused, never answered or never confirmed
     // was settled by a status read. A boot whose account read fails still
     // exits for its supervisor; a reconciliation exit is that lane failing.
@@ -97,4 +146,5 @@ async fn one_seed_replays_byte_for_byte_under_heavy_faults() {
     assert_eq!(first.wal_sha256, second.wal_sha256);
     assert_eq!(first.faults, second.faults);
     assert_eq!(first.venue, second.venue);
+    std::fs::remove_dir_all(dir).unwrap();
 }

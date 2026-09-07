@@ -17,6 +17,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
+use engine_types::numeric::{AssetId, Exact, ExactInstrumentSpec, PricePrecision};
+use engine_types::orders::InstrumentCatalog;
 use engine_types::{BookLevel, Depth, InstrumentRule, Symbol, BOOK_DEPTH};
 use serde_json::Value;
 
@@ -481,11 +483,9 @@ fn apply_side(out: &mut [BookLevel; BOOK_DEPTH], len: &mut u8, changes: &[BookLe
 
 // ------------------------------------------------------- instruments
 
-/// The venue's instrument table as the recorder captured it
-/// (`_meta/instruments-<stamp>.json[.zst]`): a `snapshot_payload` whose
-/// `rows` are Bybit's own `instruments-info` rows. Read with the same four
-/// fields the Bybit gateway reads, and the same refusals.
-pub fn read_instruments(path: &Path) -> Result<Vec<(Symbol, InstrumentRule)>, TapeError> {
+/// Recorder instrument rows retain decimal constraints; legacy rules are
+/// projections of the same catalog. Missing assets and bounds stay unknown.
+pub fn read_instruments(path: &Path) -> Result<InstrumentCatalog, TapeError> {
     let mut text = String::new();
     if path.extension().is_some_and(|ext| ext == "zst") {
         let output = Command::new("zstd")
@@ -514,7 +514,11 @@ pub fn read_instruments(path: &Path) -> Result<Vec<(Symbol, InstrumentRule)>, Ta
         .get("rows")
         .and_then(Value::as_array)
         .ok_or_else(|| malformed("instruments_snapshot has no rows".to_string()))?;
-    let mut out = Vec::with_capacity(rows.len());
+    let mut out = InstrumentCatalog {
+        cache: None,
+        rules: Vec::with_capacity(rows.len()),
+        specs: Vec::with_capacity(rows.len()),
+    };
     for row in rows {
         let Some(symbol) = row.get("symbol").and_then(Value::as_str) else {
             continue;
@@ -528,35 +532,82 @@ pub fn read_instruments(path: &Path) -> Result<Vec<(Symbol, InstrumentRule)>, Ta
             );
             continue;
         };
-        let field = |obj: &Value, name: &str| -> Result<f64, TapeError> {
+        let field = |obj: &Value, name: &str| -> Result<Exact, TapeError> {
             let v = obj
                 .get(name)
                 .ok_or_else(|| malformed(format!("{symbol}: instrument lacks {name}")))?;
-            f64_value(v, name).map_err(malformed)
+            match v {
+                Value::String(text) => Exact::parse_decimal(text.trim()),
+                // Numeric JSON fields retain this reader's binary64 input model.
+                Value::Number(number) => {
+                    Exact::from_legacy_f64(number.as_f64().ok_or_else(|| {
+                        malformed(format!("{symbol}: {name} is not a finite binary64 number"))
+                    })?)
+                }
+                _ => return Err(malformed(format!("{symbol}: {name} is not a number"))),
+            }
+            .map_err(|error| malformed(format!("{symbol}: {name}: {error}")))
+        };
+        let optional = |obj: &Value, name: &str| -> Result<Option<Exact>, TapeError> {
+            match obj.get(name) {
+                None | Some(Value::Null) => Ok(None),
+                _ => field(obj, name).map(Some),
+            }
+        };
+        let projection = |value: &Exact| {
+            value
+                .to_f64()
+                .map_err(|error| malformed(format!("{symbol}: {error}")))
+        };
+        let asset = |name| {
+            row.get(name)
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(|name| AssetId::Named(name.to_owned()))
+                .unwrap_or(AssetId::Unknown)
         };
         let tick_size = field(price_filter, "tickSize")?;
         let qty_step = field(lot_filter, "qtyStep")?;
         let min_qty = field(lot_filter, "minOrderQty")?;
-        let min_notional = match lot_filter.get("minNotionalValue") {
-            None | Some(Value::Null) => 0.0,
-            Some(v) => f64_value(v, "minNotionalValue").map_err(malformed)?,
-        };
-        if tick_size <= 0.0 || qty_step <= 0.0 {
-            tracing::warn!(
-                symbol,
-                tick_size,
-                qty_step,
-                "instrument has a zero tick or step"
-            );
+        let min_notional = optional(lot_filter, "minNotionalValue")?;
+        if !tick_size.is_positive() || !qty_step.is_positive() {
+            tracing::warn!(symbol, "instrument has a zero tick or step");
             continue;
         }
-        out.push((
+        out.rules.push((
             symbol.to_string(),
             InstrumentRule {
-                tick_size,
-                qty_step,
-                min_qty,
+                tick_size: projection(&tick_size)?,
+                qty_step: projection(&qty_step)?,
+                min_qty: projection(&min_qty)?,
+                min_notional: min_notional
+                    .as_ref()
+                    .map(projection)
+                    .transpose()?
+                    .unwrap_or(0.0),
+            },
+        ));
+        out.specs.push((
+            symbol.to_string(),
+            ExactInstrumentSpec {
+                native_symbol: symbol.to_string(),
+                base_asset: asset("baseCoin"),
+                quote_asset: asset("quoteCoin"),
+                settlement_asset: asset("settleCoin"),
+                tick_size: Some(tick_size),
+                min_price: optional(price_filter, "minPrice")?,
+                max_price: optional(price_filter, "maxPrice")?,
+                price_precision: PricePrecision::Tick,
+                qty_step: Some(qty_step.clone()),
+                min_qty: Some(min_qty.clone()),
+                market_qty_step: Some(qty_step),
+                market_min_qty: Some(min_qty),
+                max_qty: optional(lot_filter, "maxOrderQty")?,
+                max_market_qty: optional(lot_filter, "maxMktOrderQty")?,
                 min_notional,
+                contract_multiplier: None,
+                fee_assets: None,
+                fee_step: None,
             },
         ));
     }

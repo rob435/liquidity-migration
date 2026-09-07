@@ -150,9 +150,14 @@ impl<'de> Visitor<'de> for Select<'_> {
             order: None,
         };
         let mut client_id = None;
+        let mut kind_seen = false;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "kind" => {
+                    if kind_seen {
+                        return Err(serde::de::Error::duplicate_field("kind"));
+                    }
+                    kind_seen = true;
                     selected.kind = map.next_value_seed(Bounded::<String>::new(&self.budget))?
                 }
                 "client_order_id" => {
@@ -179,6 +184,7 @@ impl<'de> Visitor<'de> for Select<'_> {
                 }
             }
         }
+        crate::segment_base_kind(&selected.kind, false).map_err(serde::de::Error::custom)?;
         if let Some(id) = client_id {
             match id {
                 Some(id) => selected.matches |= id == self.wanted,
@@ -301,16 +307,7 @@ impl Reader {
                         ordinal: None,
                     },
                 )?;
-                if !matches!(
-                    selected.kind.as_str(),
-                    "segment_base"
-                        | "segment_base_v2"
-                        | "segment_base_v3"
-                        | "segment_base_v4"
-                        | "segment_base_v5"
-                        | "segment_base_v6"
-                        | "segment_base_v7"
-                ) {
+                if !crate::segment_base_kind(&selected.kind, false).map_err(crate::json_error)? {
                     self.source.record(cursor, length)?;
                     self.advance_segment();
                     continue;
@@ -341,6 +338,7 @@ impl Reader {
                 segment,
                 family,
                 cancel: None,
+                conversion_v5: false,
             },
             pinned,
             last_segment: segment,
@@ -374,7 +372,7 @@ impl OrderLineageReader for Reader {
                     ordinal: None,
                 },
             )?;
-            if selected.kind.starts_with("segment_base") {
+            if crate::segment_base_kind(&selected.kind, false).map_err(crate::json_error)? {
                 if let Some(ordinal) = selected.ordinal {
                     let budget = Arc::new(AtomicU64::new(u64::MAX));
                     let selected = self.source.decode(
@@ -437,9 +435,14 @@ impl<'de> Visitor<'de> for EpochSeed {
         let mut wall_ms = None;
         let mut epoch = None;
         let mut client_id = None;
+        let mut kind_seen = false;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "kind" if self.record => {
+                    if kind_seen {
+                        return Err(serde::de::Error::duplicate_field("kind"));
+                    }
+                    kind_seen = true;
                     kind = map.next_value_seed(Bounded::<String>::new(&self.budget))?
                 }
                 "wall_ts_ms" if self.record => wall_ms = Some(map.next_value::<i64>()?),
@@ -477,7 +480,10 @@ impl<'de> Visitor<'de> for EpochSeed {
                 }
             }
         }
-        if kind == "boot" || kind.starts_with("segment_base") {
+        if self.record
+            && (kind == "boot"
+                || crate::segment_base_kind(&kind, false).map_err(serde::de::Error::custom)?)
+        {
             from_ids = from_ids.max(wall_ms);
         }
         Ok(from_ids.max(epoch))

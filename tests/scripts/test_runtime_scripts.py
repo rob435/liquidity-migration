@@ -270,7 +270,7 @@ def test_a_realm_that_does_not_come_up_rolls_back_to_the_last_finished_deploy() 
     assert "record_generation" in deploy_body
     handover = _function_body(remote, "handover_realm")
     assert 'stop_realm_units "$realm"' in handover
-    assert 'import_native_strategy_state "$realm"' in handover
+    assert 'ensure_native_strategy_state "$realm"' in handover
     assert 'start_realm "$realm"' in handover
     assert 'rollback_after_failure "$realm"' in handover
     assert handover.index('rollback_after_failure "$realm"') < handover.index("return 1")
@@ -542,15 +542,141 @@ printf '%s\\n' "$*" >> "$SYSTEMCTL_TRACE"
     return trace.read_text(encoding="utf-8").splitlines()
 
 
+def _native_state_paths(tmp_path: Path, realm: str) -> tuple[Path, list[Path]]:
+    runtime = "liquidity-migration-engine" + ("-mainnet" if realm == "mainnet" else "")
+    targets = tmp_path / "liquidity-migration/targets"
+    return tmp_path / runtime / "engine.wal", [
+        targets / f"long-{realm}-state.json",
+        tmp_path / f"carry-{realm}/.cache/carry_sizing_anchors.json",
+        targets / f"carry-{realm}.json",
+        tmp_path / f"exodus-{realm}/exodus_state_identity.json",
+        tmp_path / f"exodus-{realm}/exodus_state.json",
+    ]
+
+
+def _ensure_native_state(
+    tmp_path: Path, realm: str, *, verify_status: int = 1,
+    initialize_status: int = 0, final_verify_status: int = 0,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    helper = _function(_remote_script(), "ensure_native_strategy_state")
+    # Relocate the host's absolute state paths; the function's control flow is unchanged.
+    helper = helper.replace("/var/lib/", f"{tmp_path}/")
+    trace = tmp_path / "native-state.trace"
+    trace.unlink(missing_ok=True)
+    harness = "\n".join(
+        [
+            "set -uo pipefail",
+            "ENGINE_DEMO_CONFIG=demo.toml",
+            "ENGINE_MAINNET_CONFIG=mainnet.toml",
+            'CARRY_DEMO_ROOT="$STATE_ROOT/carry-demo"',
+            'CARRY_MAINNET_ROOT="$STATE_ROOT/carry-mainnet"',
+            'EXODUS_DEMO_ROOT="$STATE_ROOT/exodus-demo"',
+            'EXODUS_MAINNET_ROOT="$STATE_ROOT/exodus-mainnet"',
+            "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }",
+            "verify_count=0",
+            "run_engine_takeover_command() {",
+            "  printf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> \"$STATE_TRACE\"",
+            '  if [ "$3" = initialize-native-strategy-state ]; then',
+            '    return "$INITIALIZE_STATUS"',
+            "  fi",
+            "  verify_count=$((verify_count + 1))",
+            '  if [ "$verify_count" -eq 1 ]; then return "$VERIFY_STATUS"; fi',
+            '  return "$FINAL_VERIFY_STATUS"',
+            "}",
+            helper,
+            f"ensure_native_strategy_state {realm}",
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        env={
+            **os.environ,
+            "STATE_ROOT": str(tmp_path),
+            "STATE_TRACE": str(trace),
+            "VERIFY_STATUS": str(verify_status),
+            "INITIALIZE_STATUS": str(initialize_status),
+            "FINAL_VERIFY_STATUS": str(final_verify_status),
+        },
+        text=True, capture_output=True, check=False, timeout=10,
+    )
+    return result, trace.read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.parametrize("realm", ["demo", "mainnet"])
+def test_verified_native_state_keeps_existing_wal_and_legacy_sources(tmp_path: Path, realm: str) -> None:
+    wal, sources = _native_state_paths(tmp_path, realm)
+    originals = {wal: b"canonical WAL", **{source: b"retained source" for source in sources}}
+    for path, contents in originals.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
+    result, calls = _ensure_native_state(tmp_path, realm, verify_status=0)
+    assert result.returncode == 0, result.stderr
+    assert calls == [f"{realm} {realm}.toml verify-native-strategy-state"]
+    assert "result=already-complete" in result.stdout
+    assert {path: path.read_bytes() for path in originals} == originals
+
+
+@pytest.mark.parametrize("realm", ["demo", "mainnet"])
+@pytest.mark.parametrize("wal_exists", [False, True])
+def test_native_initialization_requires_empty_wal_and_no_legacy_sources(
+    tmp_path: Path, realm: str, wal_exists: bool,
+) -> None:
+    wal, _ = _native_state_paths(tmp_path, realm)
+    if wal_exists:
+        wal.parent.mkdir(parents=True)
+        wal.touch()
+    result, calls = _ensure_native_state(tmp_path, realm)
+    assert result.returncode == 0, result.stderr
+    assert calls == [
+        f"{realm} {realm}.toml {command}" for command in
+        ("verify-native-strategy-state", "initialize-native-strategy-state", "verify-native-strategy-state")
+    ]
+    assert "result=initialized-empty" in result.stdout
+
+
+@pytest.mark.parametrize("realm", ["demo", "mainnet"])
+@pytest.mark.parametrize("existing", ["wal", "long", "carry-checkpoint", "carry-book", "exodus-identity", "exodus-state", "all-legacy"])
+def test_unverified_native_state_never_initializes_over_retained_state(
+    tmp_path: Path, realm: str, existing: str,
+) -> None:
+    wal, sources = _native_state_paths(tmp_path, realm)
+    paths = dict(zip(
+        ("wal", "long", "carry-checkpoint", "carry-book", "exodus-identity", "exodus-state"),
+        (wal, *sources), strict=True,
+    ))
+    retained = sources if existing == "all-legacy" else [paths[existing]]
+    for path in retained:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"retained state")
+    result, calls = _ensure_native_state(tmp_path, realm)
+    assert result.returncode != 0
+    assert "compatible retained release" in result.stderr
+    assert calls == [f"{realm} {realm}.toml verify-native-strategy-state"]
+    assert all(path.read_bytes() == b"retained state" for path in retained)
+
+
+@pytest.mark.parametrize("realm", ["demo", "mainnet"])
+@pytest.mark.parametrize("initialize_status,final_verify_status,expected_calls", [(19, 0, 2), (0, 19, 3)])
+def test_native_initialization_and_verification_failures_propagate(
+    tmp_path: Path, realm: str, initialize_status: int, final_verify_status: int, expected_calls: int,
+) -> None:
+    result, calls = _ensure_native_state(
+        tmp_path, realm, initialize_status=initialize_status, final_verify_status=final_verify_status,
+    )
+    assert result.returncode != 0
+    assert len(calls) == expected_calls
+    assert "result=initialized-empty" not in result.stdout
+
+
 def _trace_handover_realm(
     tmp_path: Path,
     *,
-    import_status: int,
+    state_status: int,
     start_status: int,
     retirement_status: int = 0,
     clear_status: int = 0,
 ) -> tuple[int, list[str]]:
-    trace = tmp_path / f"handover-{import_status}-{start_status}-{retirement_status}-{clear_status}.trace"
+    trace = tmp_path / f"handover-{state_status}-{start_status}-{retirement_status}-{clear_status}.trace"
     deploy = _remote_script()
     harness = "\n".join(
         [
@@ -558,7 +684,7 @@ def _trace_handover_realm(
             'trace() { printf \'%s\\n\' "$1" >> "$HANDOVER_TRACE"; }',
             "stop_realm_units() { trace stop; }",
             'retire_legacy_signal_sources() { trace retire; return "$RETIREMENT_STATUS"; }',
-            'import_native_strategy_state() { trace import; return "$IMPORT_STATUS"; }',
+            'ensure_native_strategy_state() { trace state; return "$STATE_STATUS"; }',
             'clear_reconciliation_if_requested() { trace clear; return "$CLEAR_STATUS"; }',
             'start_realm() { trace start; return "$START_STATUS"; }',
             "rollback_after_failure() { trace rollback; }",
@@ -573,7 +699,7 @@ def _trace_handover_realm(
         env={
             **os.environ,
             "HANDOVER_TRACE": str(trace),
-            "IMPORT_STATUS": str(import_status),
+            "STATE_STATUS": str(state_status),
             "START_STATUS": str(start_status),
             "RETIREMENT_STATUS": str(retirement_status),
             "CLEAR_STATUS": str(clear_status),
@@ -608,28 +734,28 @@ def test_a_deploy_handover_stops_units_without_disabling_the_watchdogs(tmp_path:
 
 
 def test_every_handover_failure_rolls_back_before_recording_a_fingerprint(tmp_path: Path) -> None:
-    assert _trace_handover_realm(tmp_path, import_status=0, start_status=0, retirement_status=1) == (
+    assert _trace_handover_realm(tmp_path, state_status=0, start_status=0, retirement_status=1) == (
         1,
         ["stop", "retire", "rollback"],
     )
-    assert _trace_handover_realm(tmp_path, import_status=1, start_status=0) == (
+    assert _trace_handover_realm(tmp_path, state_status=1, start_status=0) == (
         1,
-        ["stop", "retire", "import", "rollback"],
+        ["stop", "retire", "state", "rollback"],
     )
-    assert _trace_handover_realm(tmp_path, import_status=0, start_status=1) == (
+    assert _trace_handover_realm(tmp_path, state_status=0, start_status=1) == (
         1,
-        ["stop", "retire", "import", "clear", "start", "rollback"],
+        ["stop", "retire", "state", "clear", "start", "rollback"],
     )
-    assert _trace_handover_realm(tmp_path, import_status=0, start_status=0) == (
+    assert _trace_handover_realm(tmp_path, state_status=0, start_status=0) == (
         0,
-        ["stop", "retire", "import", "clear", "start", "record"],
+        ["stop", "retire", "state", "clear", "start", "record"],
     )
 
 
-def test_reconciliation_clear_failure_prevents_start_after_verified_import(tmp_path: Path) -> None:
-    assert _trace_handover_realm(tmp_path, import_status=0, start_status=0, clear_status=19) == (
+def test_reconciliation_clear_failure_prevents_start_after_verified_state(tmp_path: Path) -> None:
+    assert _trace_handover_realm(tmp_path, state_status=0, start_status=0, clear_status=19) == (
         1,
-        ["stop", "retire", "import", "clear", "rollback"],
+        ["stop", "retire", "state", "clear", "rollback"],
     )
 
 

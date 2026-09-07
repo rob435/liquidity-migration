@@ -1,7 +1,7 @@
 //! `engine backtest`: the live loop, driven by a recorded tape in the tape's
 //! own time.
 //!
-//! What runs is the engine — `Engine::boot_as`, the risk kernel, the
+//! What runs is the engine — `Engine::boot_as_exact`, the risk kernel, the
 //! strategy reducers, the working-order supervisor, the log — against parts
 //! that stand in for the outside world:
 //!

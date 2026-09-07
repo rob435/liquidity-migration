@@ -70,110 +70,93 @@ fn copy_prefix(chain: &[(u64, PathBuf)], boundary: u64, head: &[u8], directory: 
     directory.join(chain[0].1.file_name().unwrap())
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct Retrievals {
     queued: usize,
     prepared: usize,
     sources: usize,
 }
 
-fn compare_callbacks(
-    original: &mut engine_wal::WalWriter,
-    converted: &mut engine_wal::WalWriter,
-    a: &WalRecord,
-    b: &WalRecord,
-    counts: &mut Retrievals,
-) {
+fn reject_original_v5(frame: &[u8], path: &Path) {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .unwrap()
+        .write_all(frame)
+        .unwrap();
+    let error = match crate::assembly::wal(path) {
+        Ok(_) => panic!("ordinary boot accepted a retained v5 base"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(&error, engine_types::WalError::Corrupt { offset: 8, detail }
+            if detail.contains("segment_base_v5")),
+        "v5 refusal must name the unsupported record, not a checksum or I/O failure: {error}"
+    );
+    assert_eq!(fs::read(path).unwrap(), frame);
+}
+
+fn check_callbacks(wal: &mut engine_wal::WalWriter, base: &WalRecord, counts: &mut Retrievals) {
     let WalRecord::SegmentBase {
-        strategy_callback_queues: old_slots,
-        strategy_callback_sources: old_sources,
+        strategy_callback_queues: slots,
+        strategy_callback_sources: sources,
         ..
-    } = a
+    } = base
     else {
         panic!()
     };
-    let WalRecord::SegmentBase {
-        strategy_callback_queues: new_slots,
-        strategy_callback_sources: new_sources,
-        ..
-    } = b
-    else {
-        panic!()
-    };
-    assert_eq!(old_slots.len(), new_slots.len());
-    assert_eq!(old_sources.len(), new_sources.len());
-    let mut old = original.callback_reader().unwrap().unwrap();
-    let mut new = converted.callback_reader().unwrap().unwrap();
-    for (a, b) in old_slots.iter().zip(new_slots) {
+    let mut reader = wal.callback_reader().unwrap().unwrap();
+    for slot in slots {
+        let queued = reader.read_callback(slot.queued, slot.callback_id).unwrap();
         assert_eq!(
-            old.read_callback(a.queued, a.callback_id).unwrap(),
-            new.read_callback(b.queued, b.callback_id).unwrap()
+            (queued.callback_id, queued.strategy),
+            (slot.callback_id, slot.strategy)
+        );
+        assert_eq!(
+            crate::callback_recovery::paging::CallbackPages::hash(&queued).unwrap(),
+            slot.event_sha256
+        );
+        assert_eq!(
+            queued.snapshot().is_some(),
+            slot.prepared == Some(slot.queued)
         );
         counts.queued += 1;
-        assert_eq!(a.prepared.is_some(), b.prepared.is_some());
-        if let (Some(a_cursor), Some(b_cursor)) = (a.prepared, b.prepared) {
+        if let Some(cursor) = slot.prepared {
+            let prepared = reader.read_callback(cursor, slot.callback_id).unwrap();
             assert_eq!(
-                old.read_callback(a_cursor, a.callback_id).unwrap(),
-                new.read_callback(b_cursor, b.callback_id).unwrap()
+                (prepared.callback_id, prepared.strategy),
+                (slot.callback_id, slot.strategy)
+            );
+            assert_eq!(prepared.event, queued.event);
+            assert_eq!(prepared.order_origin, queued.order_origin);
+            assert!(prepared.snapshot().is_some());
+            assert_eq!(
+                crate::callback_recovery::paging::CallbackPages::hash(&prepared).unwrap(),
+                slot.event_sha256
             );
             counts.prepared += 1;
         }
     }
-    for (a, b) in old_sources.iter().zip(new_sources) {
-        assert_eq!(
-            (a.strategy, a.accepted, a.latest),
-            (b.strategy, b.accepted, b.latest)
-        );
-        let (mut a_cursor, mut b_cursor) = (a.cursor, b.cursor);
+    for source in sources {
+        let mut cursor = source.cursor;
         loop {
-            if (CallbackOrderOrigin {
-                segment: a_cursor.segment,
-                sequence: a_cursor.sequence,
-            }) > a.latest
-            {
+            let position = CallbackOrderOrigin {
+                segment: cursor.segment,
+                sequence: cursor.sequence,
+            };
+            if position > source.latest {
                 break;
             }
-            let a_row = old
-                .next(a_cursor)
-                .unwrap()
-                .expect("original retained source");
-            let b_row = new
-                .next(b_cursor)
+            let row = reader
+                .next(cursor)
                 .unwrap()
                 .expect("converted retained source");
-            assert_eq!(
-                (a_row.cursor.segment, a_row.cursor.sequence),
-                (b_row.cursor.segment, b_row.cursor.sequence)
-            );
-            assert_eq!(a_row.source, b_row.source);
-            counts.sources += usize::from(a_row.source.is_some());
-            a_cursor = a_row.next;
-            b_cursor = b_row.next;
+            assert!((row.next.segment, row.next.sequence) > (cursor.segment, cursor.sequence));
+            counts.sources += usize::from(row.source.is_some());
+            cursor = row.next;
         }
     }
-}
-
-fn normalized(mut snapshot: WalRecord) -> WalRecord {
-    let WalRecord::SegmentBase {
-        strategy_callback_queues,
-        strategy_callback_sources,
-        ..
-    } = &mut snapshot
-    else {
-        panic!()
-    };
-    for cursor in strategy_callback_queues
-        .iter_mut()
-        .flat_map(|slot| std::iter::once(&mut slot.queued).chain(slot.prepared.as_mut()))
-        .chain(
-            strategy_callback_sources
-                .iter_mut()
-                .map(|source| &mut source.cursor),
-        )
-    {
-        cursor.offset = 0;
-    }
-    snapshot
 }
 
 fn mock_from_base(record: &WalRecord, realm: engine_venue::VenueRealm) -> MockVenue {
@@ -268,10 +251,9 @@ async fn boot(
     path: &Path,
     wal: engine_wal::WalWriter,
     record: WalRecord,
-    source: &WalRecord,
     config: &crate::config::LoadedConfig,
     realm: engine_venue::VenueRealm,
-) -> (WalRecord, serde_json::Value, Vec<Step>) {
+) -> WalRecord {
     let WalRecord::SegmentBase {
         strategies: sleeves,
         ..
@@ -297,13 +279,8 @@ async fn boot(
     let strategies =
         crate::assembly::strategies_for_registry(&config.config.strategies, &plan, records)
             .unwrap();
-    let venue = mock_from_base(source, realm);
+    let venue = mock_from_base(&record, realm);
     let calls = venue.tape.clone();
-    let sends = venue.sends.clone();
-    let cancels = venue.cancels.clone();
-    let amends = venue.amends.clone();
-    let stops = venue.exact_stops.clone();
-    let leverages = venue.leverages.clone();
     let (risk, _) = MockRisk::with(allow_all());
     let mut settings = config.config.engine.clone();
     settings.wal_path = path.into();
@@ -323,10 +300,8 @@ async fn boot(
     )
     .await
     .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-    let snapshot = normalized(engine.rotation_base(clock::wall_ms()));
+    let snapshot = engine.rotation_base(clock::wall_ms());
     engine.wal.barrier().unwrap();
-    let mutations = serde_json::json!({"sends":*sends.lock().unwrap(), "cancels":*cancels.lock().unwrap(),
-        "amends":*amends.lock().unwrap(), "stops":*stops.lock().unwrap(), "leverages":*leverages.lock().unwrap()});
     let calls = calls.lock().unwrap().clone();
     assert_eq!(
         calls
@@ -336,7 +311,7 @@ async fn boot(
         1,
         "boot must consume the supplied WAL-derived account response exactly once"
     );
-    (snapshot, mutations, calls)
+    snapshot
 }
 
 fn archived_legacy_request(chain: &[(u64, PathBuf)]) -> OrderRequest {
@@ -404,7 +379,7 @@ fn archived_legacy_request(chain: &[(u64, PathBuf)]) -> OrderRequest {
 
 #[tokio::test(start_paused = true)]
 #[ignore = "requires original/converted complete quarantine families and strategy configuration"]
-async fn copied_v5_bases_boot_and_archive_lookup_preserve_state() {
+async fn converted_v7_bases_boot_and_archived_fills_remain_readable() {
     let env_path = |name| PathBuf::from(std::env::var_os(name).expect(name));
     let original = env_path("TIER1_WAL_CONVERSION_ORIGINAL");
     let converted = env_path("TIER1_WAL_CONVERSION_CONVERTED");
@@ -413,11 +388,24 @@ async fn copied_v5_bases_boot_and_archive_lookup_preserve_state() {
         .unwrap()
         .parse()
         .unwrap();
-    let realm = match config.config.engine.venue.as_str() {
-        "bybit_demo" => engine_venue::VenueRealm::Demo,
-        "bybit_mainnet" | "bybit" => engine_venue::VenueRealm::Mainnet,
-        other => panic!("unexpected captured venue {other}"),
-    };
+    let (realm, expected_id, expected_rows, expected_filled, expected_callbacks) =
+        match config.config.engine.venue.as_str() {
+            "bybit_demo" => (
+                engine_venue::VenueRealm::Demo,
+                "eng-1786752177403-3",
+                3,
+                110.0,
+                4,
+            ),
+            "bybit_mainnet" | "bybit" => (
+                engine_venue::VenueRealm::Mainnet,
+                "eng-1787357335566-5",
+                13,
+                1.2,
+                5,
+            ),
+            other => panic!("unexpected captured venue {other}"),
+        };
     let old_chain = engine_wal::segments(&original).unwrap();
     let new_chain = engine_wal::segments(&converted).unwrap();
     assert_eq!(
@@ -432,10 +420,9 @@ async fn copied_v5_bases_boot_and_archive_lookup_preserve_state() {
             (path.clone(), metadata.len(), metadata.modified().unwrap())
         })
         .collect();
-    let scratch = Scratch::new(original.parent().unwrap(), "pairs");
+    let scratch = Scratch::new(original.parent().unwrap(), "converted");
     let mut counts = Retrievals::default();
     let mut bases = 0;
-    let mut archived_request = None;
     for ((index, old_path), (_, new_path)) in old_chain.iter().zip(&new_chain) {
         let old_frame = first_frame(old_path);
         if frame_kind(&old_frame) != "segment_base_v5" {
@@ -443,108 +430,104 @@ async fn copied_v5_bases_boot_and_archive_lookup_preserve_state() {
         }
         let new_frame = first_frame(new_path);
         assert_eq!(frame_kind(&new_frame), "segment_base_v7");
-        let pair = Scratch::new(&scratch.0, &format!("base-{index}"));
-        let old_path = copy_prefix(&old_chain, *index, &old_frame, &pair.0.join("original"));
-        let new_path = copy_prefix(&new_chain, *index, &new_frame, &pair.0.join("converted"));
-        let (mut old_wal, mut old_records) = crate::assembly::wal(&old_path).unwrap();
-        let (mut new_wal, mut new_records) = crate::assembly::wal(&new_path).unwrap();
-        let old = old_records.pop().unwrap();
-        let new = new_records.pop().unwrap();
-        assert!(old_records.is_empty() && new_records.is_empty());
-        if bases == 0 {
-            let WalRecord::SegmentBase { open_orders, .. } = &old else {
-                panic!()
-            };
-            archived_request = open_orders
-                .iter()
-                .find(|order| {
-                    order.request.exact_terms.is_none()
-                        && matches!(order.request.kind, OrderKind::Market)
-                        && (order.terminal.is_some() || order.filled_qty > 0.0)
-                })
-                .map(|order| order.request.clone());
-        }
-        compare_callbacks(&mut old_wal, &mut new_wal, &old, &new, &mut counts);
-        assert_eq!(
-            Attribution::try_from_records(std::slice::from_ref(&old))
-                .unwrap()
-                .snapshot(),
-            Attribution::try_from_records(std::slice::from_ref(&new))
-                .unwrap()
-                .snapshot()
+        let boundary = Scratch::new(&scratch.0, &format!("base-{index}"));
+        reject_original_v5(&old_frame, &boundary.0.join("original.wal"));
+        let path = copy_prefix(
+            &new_chain,
+            *index,
+            &new_frame,
+            &boundary.0.join("converted"),
         );
-        assert_eq!(
-            Fills::try_from_records(std::slice::from_ref(&old))
-                .unwrap()
-                .open_trade_lots(),
-            Fills::try_from_records(std::slice::from_ref(&new))
-                .unwrap()
-                .open_trade_lots()
-        );
-        let WalRecord::SegmentBase { wall_ts_ms, .. } = &old else {
+        let (mut wal, mut records) = crate::assembly::wal(&path).unwrap();
+        let base = records.pop().unwrap();
+        assert!(records.is_empty());
+        check_callbacks(&mut wal, &base, &mut counts);
+        let WalRecord::SegmentBase { wall_ts_ms, .. } = &base else {
             panic!()
         };
         let wall_ns = u64::try_from(*wall_ts_ms).unwrap() * 1_000_000;
-        let before = {
+        let snapshot = {
             let _clock = engine_types::clock::install_virtual(wall_ns, 1_000_000_000).unwrap();
-            boot(&old_path, old_wal, old.clone(), &old, &config, realm).await
+            boot(&path, wal, base, &config, realm).await
         };
-        let after = {
-            let _clock = engine_types::clock::install_virtual(wall_ns, 1_000_000_000).unwrap();
-            boot(&new_path, new_wal, new, &old, &config, realm).await
-        };
+        let (replayed, torn) = engine_wal::replay_current(&path).unwrap();
+        assert!(!torn && !replayed.is_empty());
+        let replayed = replayed
+            .into_iter()
+            .map(|(_, record)| record)
+            .collect::<Vec<_>>();
+        let snapshot = std::slice::from_ref(&snapshot);
         assert_eq!(
-            before, after,
-            "base {index}: full boot state and venue mutations"
+            Attribution::try_from_records(&replayed).unwrap().snapshot(),
+            Attribution::try_from_records(snapshot).unwrap().snapshot(),
+            "base {index}: durable attribution must match the boot rotation state"
+        );
+        assert_eq!(
+            Fills::try_from_records(&replayed)
+                .unwrap()
+                .open_trade_lots(),
+            Fills::try_from_records(snapshot).unwrap().open_trade_lots(),
+            "base {index}: durable quantities and cost basis must match the boot rotation state"
+        );
+        assert_eq!(
+            crate::reconcile::position_state_with_adoption(&replayed, None, false)
+                .unwrap()
+                .0,
+            crate::reconcile::position_state_with_adoption(snapshot, None, false)
+                .unwrap()
+                .0,
+            "base {index}: durable physical exposure must match the boot rotation state"
         );
         bases += 1;
-        eprintln!("{realm} base {index}: exact paired boot state preserved");
+        eprintln!("{realm} base {index}: original v5 refused unchanged; converted v7 boot and durable state agree");
     }
     assert_eq!(bases, expected);
-    let request = archived_request.unwrap_or_else(|| archived_legacy_request(&old_chain));
-    let id = &request.client_order_id;
+    assert_eq!(
+        counts,
+        Retrievals {
+            queued: expected_callbacks,
+            prepared: expected_callbacks,
+            sources: 0,
+        }
+    );
     // One request per family bounds full archive walks independently of its order count.
-    let mut readers = Vec::new();
-    for (label, chain) in [
-        ("lookup-original", &old_chain),
-        ("lookup-converted", &new_chain),
-    ] {
-        let directory = scratch.0.join(label);
-        let (index, source) = chain.last().unwrap();
-        let path = copy_prefix(chain, *index, &first_frame(source), &directory);
-        let (mut wal, _) = engine_wal::open_current(path).unwrap();
-        // The private head grows only after boot's bounded one-record scan. No appends follow.
-        let head = directory.join(source.file_name().unwrap());
-        assert_ne!(
-            fs::metadata(source).unwrap().ino(),
-            fs::metadata(&head).unwrap().ino()
-        );
-        fs::copy(source, head).unwrap();
-        readers.push(wal.order_lineage_reader(id).unwrap().unwrap());
-    }
+    let request = archived_legacy_request(&new_chain);
+    let id = &request.client_order_id;
+    assert_eq!(id, expected_id);
+    let directory = scratch.0.join("lookup-converted");
+    let (index, source) = new_chain.last().unwrap();
+    let path = copy_prefix(&new_chain, *index, &first_frame(source), &directory);
+    let (mut wal, _) = engine_wal::open_current(path).unwrap();
+    // The private head grows only after boot's bounded one-record scan. No appends follow.
+    let head = directory.join(source.file_name().unwrap());
+    assert_ne!(
+        fs::metadata(source).unwrap().ino(),
+        fs::metadata(&head).unwrap().ino()
+    );
+    fs::copy(source, head).unwrap();
+    let mut reader = wal.order_lineage_reader(id).unwrap().unwrap();
+    drop(wal);
     let mut lookup_rows = 0;
     let mut order_state = crate::inflight::LedgerOfOrders::default();
     let mut sent_seen = false;
-    loop {
-        let before = readers[0].next().unwrap();
-        let after = readers[1].next().unwrap();
-        assert_eq!(before, after, "archived request {id}");
-        if before.is_none() {
-            break;
-        }
-        if let Some(WalRecord::OrderSent { request: found, .. }) = &before {
+    while let Some(record) = reader.next().unwrap() {
+        if let WalRecord::OrderSent { request: found, .. } = &record {
             assert_eq!(found, &request);
             sent_seen = true;
         }
-        order_state.try_apply(&before.unwrap()).unwrap();
+        order_state.try_apply(&record).unwrap();
         lookup_rows += 1;
     }
-    assert!(lookup_rows > 1 && sent_seen);
+    assert_eq!(lookup_rows, expected_rows);
+    assert!(sent_seen);
     assert_eq!(order_state.orders[id].request, request);
-    assert!(
-        order_state.orders[id].ending.is_some()
-            || order_state.orders[id].filled_qty().unwrap() > 0.0,
-        "archived lookup must preserve observed terminal/fill state"
+    assert_eq!(
+        order_state.orders[id].ending,
+        Some(crate::inflight::Ending::Filled)
+    );
+    assert_eq!(
+        order_state.orders[id].filled_qty().unwrap(),
+        expected_filled
     );
     eprintln!(
         "archived {id}: rows={lookup_rows}, ending={:?}, filled={:?}",
@@ -558,6 +541,6 @@ async fn copied_v5_bases_boot_and_archive_lookup_preserve_state() {
             (length, modified)
         );
     }
-    eprintln!("{realm}: bases={bases}, queued={}, prepared={}, source_events={}, archived_ids=1, archived_rows={lookup_rows}", counts.queued, counts.prepared, counts.sources);
-    eprintln!("scope: real copied WAL boot and readers; identical WAL-derived account, orders, catalog and mocked collateral; unknown entry price remains zero, no future executions or network; zero callback counts are covered only by synthetic fixtures");
+    eprintln!("{realm}: refused_v5={bases}, converted_boots={bases}, queued={}, prepared={}, source_events={}, archived_ids=1, archived_rows={lookup_rows}", counts.queued, counts.prepared, counts.sources);
+    eprintln!("scope: candidate-image converted WAL boot and readers, with WAL-derived account, orders, catalog and mocked collateral; one supplied account response per boot; unknown entry price remains zero; no cross-image snapshot or venue-mutation equality, future executions, network, or account-truth claim; real source-frontier coverage is zero");
 }

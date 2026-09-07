@@ -9,10 +9,9 @@ Define how a registered Rust strategy consumes engine facts, emits durable effec
 | Path | Responsibility |
 | --- | --- |
 | `engine/engine-strategies/src/lib.rs::PLUGS` | Authoritative plug names and builders |
-| `engine/engine-types/src/strategy.rs::Strategy` | Callback, checkpoint, subscription, and state-import contracts |
+| `engine/engine-types/src/strategy.rs::Strategy` | Callback, checkpoint, and subscription contracts |
 | `engine/engine-strategies/src/<name>/plan.rs` | Pure reducer and validated typed configuration |
 | `engine/engine-strategies/src/<name>/plug.rs` | Translate engine facts to reducer inputs and ordered `Action` values |
-| `engine/engine-strategies/src/<name>/state_import.rs` | Optional decoder for an existing runtime's checkpoint |
 | `engine/engine-strategies/src/mock_ctx.rs` | Deterministic market, account, checkpoint, action, and timer context |
 | `engine/engine-strategies/src/conformance.rs` | Shared definition of a conforming registered plug |
 | `engine/engine-strategies/tests/fixtures/plug-events.jsonl` | Frozen synthetic event stream; no live-account or profitability evidence |

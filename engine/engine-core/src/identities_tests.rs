@@ -24,7 +24,7 @@ fn registry(state: IdentityState) -> WalRecord {
 
 fn rotation(state: Option<&IdentityState>, sleeves: &[&str], symbols: &[&str]) -> WalRecord {
     serde_json::from_value(serde_json::json!({
-        "kind": "segment_base_v3", "wall_ts_ms": 1,
+        "kind": "segment_base", "wall_ts_ms": 1,
         "strategies": sleeves, "symbols": symbols, "may_open": true,
         "control_anchors": [], "attribution": [], "logged_exposure": [],
         "intended_stops": [], "open_orders": [], "identities": state,

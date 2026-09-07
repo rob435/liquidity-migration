@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use engine_types::{InstrumentRule, Symbol, WalRecord};
+use engine_types::{Symbol, WalRecord};
 use engine_wal::WalWriter;
 use serde::Serialize;
 
@@ -315,11 +315,11 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
     let symbols: Vec<Symbol> = assembly::symbol_order(&replayed, &wanted)
         .map_err(|error| EngineError::Boot(error.to_string()))?;
 
-    let rules: Vec<(Symbol, InstrumentRule)> = read_instruments(&opts.instruments_path)
+    let catalog = read_instruments(&opts.instruments_path)
         .map_err(|e| EngineError::Boot(format!("instruments: {e}")))?;
     let missing: Vec<&str> = symbols
         .iter()
-        .filter(|s| !rules.iter().any(|(name, _)| name == *s))
+        .filter(|s| !catalog.rules.iter().any(|(name, _)| name == *s))
         .map(String::as_str)
         .collect();
     if !missing.is_empty() {
@@ -350,7 +350,7 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
             maintenance_margin_rate: opts.maintenance_margin_rate,
         },
         symbols.clone(),
-        &rules,
+        &catalog,
         scheduler.clone(),
     )));
     let subscriptions = assembly::boot_subscriptions(&symbols, &wanted);
@@ -393,7 +393,7 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
     let signals_replayed = signal_feed.len();
     let mut controls = NoControls;
 
-    let mut engine = Engine::boot_as(
+    let mut engine = Engine::boot_as_exact(
         &settings,
         &loaded.sha256,
         wal,

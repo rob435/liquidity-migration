@@ -29,8 +29,8 @@ pub struct StrategyCheckpoint {
 
 /// The exact durable state contract accepted by one strategy build.
 ///
-/// The stopped-runtime importer uses this before it appends translated bytes,
-/// and the reducer checks the same pair again when it restores them.
+/// Canonical initialization and recovery validate this pair before accepting
+/// the strategy-owned payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StrategyCheckpointIdentity {
     pub schema_version: u16,
@@ -52,43 +52,6 @@ pub struct CheckpointProvenance {
     /// The final marker written only after every bundled event is durable.
     #[serde(default)]
     pub import_complete: bool,
-}
-
-/// One pending durable handoff recovered from a retired runtime.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TranslatedStrategyEvent {
-    pub source_strategy: String,
-    pub destination_strategy: String,
-    pub kind: String,
-    pub event_id: String,
-    pub payload: Vec<u8>,
-}
-
-/// Canonical state and pending handoffs produced by a strategy-owned legacy
-/// decoder. The importer resolves names to the WAL's exact ids.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TranslatedStrategyState {
-    pub checkpoint_payload: Vec<u8>,
-    pub pending_events: Vec<TranslatedStrategyEvent>,
-}
-
-/// One named, exact legacy file supplied to a stopped-runtime import.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StrategyImportSource {
-    pub name: String,
-    pub bytes: Vec<u8>,
-}
-
-/// Authenticated account identity available only during a stopped import.
-///
-/// The values come from the venue after the importer owns both the WAL and
-/// account leases. They let a legacy codec bind retired state to the exact
-/// account without putting an account id in committed strategy config.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StrategyImportContext {
-    pub venue: String,
-    pub realm: String,
-    pub account_user_id: String,
 }
 
 /// One immutable message from one strategy reducer to another.
@@ -713,23 +676,10 @@ pub trait Strategy {
     }
 
     /// Validate durable bytes against this exact reducer and config. Boot and
-    /// stopped import call this before any venue mutation can depend on them.
+    /// stopped verification call this before any venue mutation can depend on them.
     fn validate_checkpoint(&self, checkpoint: &StrategyCheckpoint) -> Result<(), String> {
         let _ = checkpoint;
         Ok(())
-    }
-
-    /// Decode one retired runtime's state and return this reducer's canonical
-    /// payload bytes. The importer never accepts caller-supplied canonical
-    /// bytes: the selected strategy owns the legacy format and validation.
-    fn translate_checkpoint(
-        &self,
-        context: &StrategyImportContext,
-        source_format: &str,
-        sources: &[StrategyImportSource],
-    ) -> Result<TranslatedStrategyState, String> {
-        let _ = (context, source_format, sources);
-        Err("this strategy has no legacy state translator".to_string())
     }
 
     /// Whether this strategy needs the ordered external signal spool to make

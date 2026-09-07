@@ -217,7 +217,7 @@ fn write_raw_record(path: &std::path::Path, value: &serde_json::Value) -> Vec<u8
 
 #[test]
 fn versioned_rotation_requires_gap_state_but_legacy_rotation_still_reads() {
-    for kind in ["segment_base", "segment_base_v2"] {
+    for kind in ["segment_base", "segment_base_v7"] {
         let dir = TempDir::new().unwrap();
         let path = log_path(&dir);
         let mut value = serde_json::to_value(base("required-gap-state")).unwrap();
@@ -225,7 +225,7 @@ fn versioned_rotation_requires_gap_state_but_legacy_rotation_still_reads() {
         value.as_object_mut().unwrap().remove("signal_gaps");
         let bytes = write_raw_record(&path, &value);
         let result = WalWriter::open(&path);
-        if kind == "segment_base_v2" {
+        if kind == "segment_base_v7" {
             assert!(matches!(result, Err(engine_wal::WalError::Corrupt { .. })));
         } else {
             let (_, records) = result.unwrap();
@@ -466,17 +466,21 @@ fn effect_rotation_requires_all_mandatory_state_without_truncating() {
             "{missing} must not be repaired as a torn tail"
         );
     }
-    for kind in ["segment_base", "segment_base_v2"] {
+    for kind in ["segment_base", "segment_base_v7"] {
         let dir = TempDir::new().unwrap();
         let path = log_path(&dir);
         let mut value = serde_json::to_value(base("legacy-effects")).unwrap();
         value["kind"] = kind.into();
         value.as_object_mut().unwrap().remove("strategy_effects");
         let bytes = write_raw_record(&path, &value);
-        let (_, rows) = WalWriter::open(&path).unwrap();
-        assert!(
-            matches!(&rows[0].1, WalRecord::SegmentBase { strategy_effects, .. } if strategy_effects.transitions.is_empty())
-        );
+        if kind == "segment_base_v7" {
+            assert!(WalWriter::open(&path).is_err());
+        } else {
+            let (_, rows) = WalWriter::open(&path).unwrap();
+            assert!(
+                matches!(&rows[0].1, WalRecord::SegmentBase { strategy_effects, .. } if strategy_effects.transitions.is_empty())
+            );
+        }
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 }
@@ -600,7 +604,7 @@ fn v5_open_orders_require_typed_fill_progress_without_truncating() {
             "current snapshot silently lost its typed fill frontier"
         );
         assert_eq!(fs::read(&path).unwrap(), bytes);
-        value["kind"] = "segment_base_v4".into();
+        value["kind"] = "segment_base".into();
         let bytes = write_raw_record(&path, &value);
         let (_, rows) = WalWriter::open(&path).unwrap();
         let WalRecord::SegmentBase { open_orders, .. } = &rows[0].1 else {
@@ -613,11 +617,11 @@ fn v5_open_orders_require_typed_fill_progress_without_truncating() {
 }
 
 #[test]
-fn v4_snapshots_keep_their_original_identity_migration_shape() {
+fn v1_snapshots_keep_their_original_identity_migration_shape() {
     let dir = TempDir::new().unwrap();
     let path = log_path(&dir);
-    let mut value = serde_json::to_value(base("original-v4-shape")).unwrap();
-    value["kind"] = "segment_base_v4".into();
+    let mut value = serde_json::to_value(base("original-v1-shape")).unwrap();
+    value["kind"] = "segment_base".into();
     value.as_object_mut().unwrap().remove("identities");
     value.as_object_mut().unwrap().remove("portfolio_control");
     for field in [
@@ -629,8 +633,8 @@ fn v4_snapshots_keep_their_original_identity_migration_shape() {
         value.as_object_mut().unwrap().remove(field);
     }
     let bytes = write_raw_record(&path, &value);
-    let (_, rows) = WalWriter::open(&path)
-        .expect("a v4 snapshot cannot be required to contain a v5 identity field");
+    let (_, rows) =
+        WalWriter::open(&path).expect("a v1 snapshot retains its missing identity fields");
     assert!(matches!(
         &rows[0].1,
         WalRecord::SegmentBase {
@@ -703,7 +707,7 @@ fn callback_pages_read_legacy_arrays_and_refuse_damaged_archives_without_repair(
 }
 
 #[test]
-fn exact_rotation_requires_cost_basis_but_preserves_legacy_v5_bytes() {
+fn exact_rotation_requires_cost_basis_but_preserves_legacy_v1_bytes() {
     let dir = TempDir::new().unwrap();
     let path = log_path(&dir);
     let mut value = serde_json::to_value(base("exact-cost-basis")).unwrap();
@@ -723,7 +727,7 @@ fn exact_rotation_requires_cost_basis_but_preserves_legacy_v5_bytes() {
     );
     assert_eq!(fs::read(&path).unwrap(), bytes);
     value.as_object_mut().unwrap().remove("open_trade_lots");
-    value["kind"] = "segment_base_v5".into();
+    value["kind"] = "segment_base".into();
     let bytes = write_raw_record(&path, &value);
     let (_, rows) = WalWriter::open(&path).unwrap();
     assert!(matches!(
@@ -737,7 +741,7 @@ fn exact_rotation_requires_cost_basis_but_preserves_legacy_v5_bytes() {
 }
 
 #[test]
-fn retirement_rotation_requires_outcomes_but_preserves_legacy_v6_bytes() {
+fn retirement_rotation_requires_outcomes_but_preserves_legacy_v1_bytes() {
     let dir = TempDir::new().unwrap();
     let path = log_path(&dir);
     let mut value = serde_json::to_value(base("retired-source")).unwrap();
@@ -758,11 +762,192 @@ fn retirement_rotation_requires_outcomes_but_preserves_legacy_v6_bytes() {
         );
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
-    value["kind"] = "segment_base_v6".into();
+    value["kind"] = "segment_base".into();
     let bytes = write_raw_record(&path, &value);
     let (_, rows) = WalWriter::open(&path).unwrap();
     assert!(
         matches!(&rows[0].1, WalRecord::SegmentBase { legacy_signal_source_retirements, .. } if legacy_signal_source_retirements.is_empty())
     );
     assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+fn tagged_payload(mut value: serde_json::Value, kind: &str, kind_last: bool) -> Vec<u8> {
+    value.as_object_mut().unwrap().remove("kind");
+    let fields = serde_json::to_string(&value).unwrap();
+    let fields = &fields[1..fields.len() - 1];
+    let tag = serde_json::to_string(kind).unwrap();
+    if kind_last {
+        format!("{{{fields},\"kind\":{tag}}}").into_bytes()
+    } else {
+        format!("{{\"kind\":{tag},{fields}}}").into_bytes()
+    }
+}
+
+fn append_raw_frame(bytes: &mut Vec<u8>, payload: &[u8]) {
+    bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&crc32c::crc32c(payload).to_le_bytes());
+    bytes.extend_from_slice(payload);
+}
+
+#[test]
+fn removed_segment_versions_refuse_complete_frames_without_truncation_or_fallback() {
+    for kind in [
+        "segment_base_v2",
+        "segment_base_v3",
+        "segment_base_v4",
+        "segment_base_v5",
+        "segment_base_v6",
+        "segment_base_v99",
+    ] {
+        for kind_last in [false, true] {
+            for numbered in [false, true] {
+                let dir = TempDir::new().unwrap();
+                let family = log_path(&dir);
+                let path = if numbered {
+                    write_raw_record(&family, &serde_json::to_value(base("previous")).unwrap());
+                    PathBuf::from(format!("{}.000002", family.display()))
+                } else {
+                    family.clone()
+                };
+                let payload = tagged_payload(
+                    serde_json::to_value(base("unsupported")).unwrap(),
+                    kind,
+                    kind_last,
+                );
+                assert!(
+                    serde_json::from_slice::<WalRecord>(&payload).is_err(),
+                    "serde accepted {kind}"
+                );
+                let mut bytes = b"EWAL0001".to_vec();
+                append_raw_frame(&mut bytes, &payload);
+                fs::write(&path, &bytes).unwrap();
+                let before_family = fs::read(&family).unwrap();
+                assert!(WalWriter::open(&path).is_err(), "open accepted {kind}");
+                assert!(
+                    engine_wal::replay_scan(&path).is_err(),
+                    "scan accepted {kind}"
+                );
+                assert!(
+                    replay_current(&family).is_err(),
+                    "current replay skipped {kind}"
+                );
+                assert!(
+                    open_current(&family).is_err(),
+                    "current open skipped {kind}"
+                );
+                assert!(replay_chain(&family).is_err(), "chain skipped {kind}");
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+                assert_eq!(fs::read(&family).unwrap(), before_family);
+            }
+        }
+    }
+}
+
+#[test]
+fn streamed_callback_lineage_and_epoch_reads_refuse_removed_tags_without_a_match() {
+    use engine_types::strategy_process::{
+        CallbackEvent, CallbackPreparation, CallbackWalCursor, StrategyCallbackInput,
+    };
+    let input = StrategyCallbackInput {
+        order_origin: None,
+        callback_id: 77,
+        strategy: engine_types::StrategyId(0),
+        event: CallbackEvent::Timer {
+            id: engine_types::TimerId(1),
+            now_ns: 10,
+        },
+        preparation: CallbackPreparation::Queued,
+    };
+    for (kind, duplicate) in [
+        ("segment_base_v2", false),
+        ("segment_base_v3", false),
+        ("segment_base_v4", false),
+        ("segment_base_v5", false),
+        ("segment_base_v6", false),
+        ("segment_base_v99", false),
+        ("segment_base_v5", true),
+    ] {
+        let expected_error = if duplicate {
+            "duplicate field `kind`"
+        } else {
+            "unsupported WAL segment kind"
+        };
+        for kind_last in [false, true] {
+            for first in [false, true] {
+                let dir = TempDir::new().unwrap();
+                let family = log_path(&dir);
+                let (mut wal, _) = WalWriter::open(&family).unwrap();
+                wal.append(&base("initial")).unwrap();
+                wal.rotate(&base("archived")).unwrap();
+                wal.rotate(&base("current")).unwrap();
+                let path = PathBuf::from(format!("{}.000002", family.display()));
+                let mut value = serde_json::to_value(base("unsupported")).unwrap();
+                value["strategy_callbacks"] = serde_json::json!([input]);
+                value["open_orders"] = serde_json::json!([{
+                    "request": {
+                        "client_order_id":"kept", "strategy":0, "symbol":0, "side":"Buy", "qty":1.0,
+                        "kind":{"Limit":{"px":100.0,"tif":"Gtc"}}, "stop":null,
+                        "reduce_only":false, "close_position":false
+                    },
+                    "wire_ns":1, "acked":true, "filled_qty":0.0,
+                    "fill_quantity":{"kind":"legacy_binary64","quantity":0.0}
+                }]);
+                // Validate the fixture independently before assigning an unsupported tag.
+                serde_json::from_value::<WalRecord>(value.clone()).unwrap();
+                let mut payload = tagged_payload(value, kind, kind_last);
+                if duplicate {
+                    if kind_last {
+                        drop(payload.splice(1..1, br#""kind":"segment_base_v7","#.iter().copied()));
+                    } else {
+                        payload.pop();
+                        payload.extend_from_slice(br#", "kind":"segment_base_v7"}"#);
+                    }
+                }
+                let mut bytes = b"EWAL0001".to_vec();
+                if !first {
+                    append_raw_frame(&mut bytes, &serde_json::to_vec(&base("preceding")).unwrap());
+                }
+                append_raw_frame(&mut bytes, &payload);
+                fs::write(&path, &bytes).unwrap();
+                let cursor = CallbackWalCursor {
+                    segment: 2,
+                    sequence: if first { 1 } else { 2 },
+                    offset: 0,
+                };
+                let mut callbacks = wal.callback_reader().unwrap().unwrap();
+                for wanted in [77, 78] {
+                    let error = callbacks
+                        .read_callback(cursor, wanted)
+                        .unwrap_err()
+                        .to_string();
+                    assert!(error.contains(expected_error), "{kind}: {error}");
+                }
+                let error = callbacks
+                    .next(cursor)
+                    .err()
+                    .expect("unsupported callback frame accepted")
+                    .to_string();
+                assert!(error.contains(expected_error), "{kind}: {error}");
+                for wanted in ["kept", "absent"] {
+                    let error = wal
+                        .order_lineage_reader(wanted)
+                        .unwrap()
+                        .unwrap()
+                        .next()
+                        .unwrap_err()
+                        .to_string();
+                    assert!(error.contains(expected_error), "{kind}: {error}");
+                }
+                let error = wal
+                    .order_epoch_reader()
+                    .unwrap()
+                    .unwrap()
+                    .max_order_epoch_ms()
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(expected_error), "{kind}: {error}");
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+            }
+        }
+    }
 }

@@ -2,8 +2,7 @@
 
 use engine_types::{
     MarketEvent, OrderUpdate, Strategy, StrategyCheckpoint, StrategyCheckpointIdentity,
-    StrategyCtx, StrategyEvent, StrategyId, StrategyImportContext, StrategyImportSource,
-    Subscription, SymbolId, TimerId, TranslatedStrategyState,
+    StrategyCtx, StrategyEvent, StrategyId, Subscription, SymbolId, TimerId,
 };
 
 use super::plan::{reduce, ReducerInput, ReducerOutput, SleeveState, StrategyConfig};
@@ -373,24 +372,6 @@ impl Strategy for NativeExodus {
 
     fn validate_checkpoint(&self, checkpoint: &StrategyCheckpoint) -> Result<(), String> {
         self.core.validate_checkpoint("Exodus", checkpoint)
-    }
-
-    fn translate_checkpoint(
-        &self,
-        context: &StrategyImportContext,
-        source_format: &str,
-        sources: &[StrategyImportSource],
-    ) -> Result<TranslatedStrategyState, String> {
-        super::state_import::translate(
-            &self.core.config,
-            super::state_import::LegacyImportIdentity {
-                venue: &context.venue,
-                realm: &context.realm,
-                account_user_id: &context.account_user_id,
-            },
-            source_format,
-            sources,
-        )
     }
 
     fn configured_entries_enabled(&self) -> bool {

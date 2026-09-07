@@ -89,36 +89,32 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if !self.instrument_specs.contains_key(&symbol) {
             return Ok(());
         }
-        let state = self.books.attribution.snapshot();
-        for row in state.positions.iter().filter(|row| row.symbol == symbol) {
+        let stops = self
+            .books
+            .attribution
+            .positions_on_symbol(symbol)
+            .filter_map(|row| {
+                row.stop_px
+                    .as_ref()
+                    .map(|stop| (row.strategy, row.signed_qty.is_positive(), stop.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (strategy, long, stop) in stops {
             if self.portfolio_controls.emergencies.contains_key(&symbol) {
                 continue;
             }
-            let Some(stop) = &row.stop_px else { continue };
-            let value = if row.signed_qty.is_positive() {
-                bid
-            } else {
-                ask
-            };
+            let value = if long { bid } else { ask };
             if !value.is_finite() || value <= 0.0 {
                 continue;
             }
             let price =
                 Exact::from_legacy_f64(value).map_err(|e| EngineError::State(e.to_string()))?;
-            let triggered = if row.signed_qty.is_positive() {
-                &price <= stop
-            } else {
-                &price >= stop
-            };
+            let triggered = if long { price <= stop } else { price >= stop };
             if triggered {
                 self.request_portfolio_exit(
-                    row.strategy,
+                    strategy,
                     symbol,
-                    if row.signed_qty.is_positive() {
-                        Side::Buy
-                    } else {
-                        Side::Sell
-                    },
+                    if long { Side::Buy } else { Side::Sell },
                     Exact::zero(),
                     Some(price),
                 )?;
@@ -296,7 +292,29 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     pub(super) async fn service_portfolio_controls(&mut self) -> Result<(), EngineError> {
-        self.advance_portfolio_controls().await?;
+        if self.dispatches.write.is_some() {
+            return Ok(());
+        }
+        if !self.portfolio_dirty {
+            if let Some((symbol, price)) = self
+                .portfolio_controls
+                .native_pending
+                .iter()
+                .next()
+                .map(|(symbol, price)| (*symbol, price.clone()))
+            {
+                self.start_portfolio_emergency(
+                    symbol,
+                    price,
+                    PortfolioEmergencyReason::NativeClose,
+                )?;
+            } else if !self.portfolio_controls.emergencies.is_empty()
+                || !self.portfolio_controls.exits.is_empty()
+            {
+                // Keep the nested venue futures out of every empty market turn.
+                Box::pin(self.advance_portfolio_controls()).await?;
+            }
+        }
         if self.portfolio_dirty && self.dispatches.write.is_none() {
             let barrier = self.begin_dispatch_barrier()?;
             self.portfolio_dirty = false;
@@ -307,29 +325,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     async fn advance_portfolio_controls(&mut self) -> Result<(), EngineError> {
-        if self.dispatches.write.is_some() {
-            return Ok(());
-        }
-        if self.portfolio_dirty {
-            let barrier = self.begin_dispatch_barrier()?;
-            self.portfolio_dirty = false;
-            self.dispatches
-                .begin(crate::order_dispatch::DispatchWrite::Portfolio, barrier);
-            return Ok(());
-        }
-        if let Some((symbol, price)) = self
-            .portfolio_controls
-            .native_pending
-            .iter()
-            .next()
-            .map(|(symbol, price)| (*symbol, price.clone()))
-        {
-            return self.start_portfolio_emergency(
-                symbol,
-                price,
-                PortfolioEmergencyReason::NativeClose,
-            );
-        }
         let mut controls: Vec<_> = self
             .portfolio_controls
             .emergencies
@@ -1851,3 +1846,7 @@ mod tests {
         assert!(error.to_string().contains("test barrier failure"));
     }
 }
+
+#[cfg(test)]
+#[path = "portfolio_runtime_path_tests.rs"]
+mod path_tests;

@@ -23,7 +23,6 @@ pub(super) fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
         "fills" => fills(args),
         "latency" => latency(args),
         "reconcile-clear" => reconcile_clear(args),
-        "import-strategy-state" => import_strategy_state(args),
         "initialize-native-strategy-state" => initialize_native_strategy_state(args),
         "verify-native-strategy-state" => verify_native_strategy_state(args),
         "retire-legacy-signal-sources" => retire_legacy_signal_sources(args),
@@ -287,38 +286,6 @@ fn reconcile_clear(args: &[String]) -> Result<(), Box<dyn Error>> {
     runtime()?.block_on(engine_core::clear::run(&config, &note, execute))
 }
 
-fn import_strategy_state(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
-    let strategy =
-        value(args, "--strategy").ok_or("import-strategy-state needs --strategy SLEEVE")?;
-    let source_format = value(args, "--source-format")
-        .ok_or("import-strategy-state needs --source-format FORMAT")?;
-    let source_flags = args.iter().filter(|arg| arg.as_str() == "--source").count();
-    let source_values = values(args, "--source");
-    if source_values.len() != source_flags {
-        return Err("import-strategy-state has --source without NAME=PATH".into());
-    }
-    let sources: Vec<(String, PathBuf)> = source_values
-        .into_iter()
-        .map(|source| {
-            let (name, path) = source
-                .split_once('=')
-                .ok_or("import-strategy-state --source must be NAME=PATH")?;
-            if path.is_empty() {
-                return Err("import-strategy-state --source path is empty");
-            }
-            Ok((name.to_string(), PathBuf::from(path)))
-        })
-        .collect::<Result<_, &str>>()?;
-    runtime()?.block_on(engine_tools::takeover::run(
-        &config,
-        &strategy,
-        &source_format,
-        &sources,
-    ))?;
-    Ok(())
-}
-
 fn initialize_native_strategy_state(args: &[String]) -> Result<(), Box<dyn Error>> {
     let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
     runtime()?.block_on(engine_tools::takeover::initialize_native_strategy_state(
@@ -563,10 +530,6 @@ mod tests {
             ("latency", "latency needs --wal PATH"),
             ("canary-order", "canary-order needs --symbol SYMBOL"),
             (
-                "import-strategy-state",
-                "import-strategy-state needs --strategy SLEEVE",
-            ),
-            (
                 "flatten-strategy",
                 "flatten-strategy needs --strategy SLEEVE",
             ),
@@ -580,6 +543,10 @@ mod tests {
             .unwrap_err()
             .to_string()
             .starts_with("unknown command unknown-command\n"));
+        assert!(dispatch(&args(&["import-strategy-state"]))
+            .unwrap_err()
+            .to_string()
+            .starts_with("unknown command import-strategy-state\n"));
         assert!(parse_bench_options(&args(&["bench", "--events", "no"])).is_err());
         assert_eq!(
             parse_bench_options(&args(&["bench", "--venue-delay-ms", "0.5"]))

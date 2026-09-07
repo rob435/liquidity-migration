@@ -72,6 +72,11 @@ fn records(path: &Path) -> Vec<WalRecord> {
     records.into_iter().map(|(_, record)| record).collect()
 }
 
+fn expected_v5(mut value: Value) -> WalRecord {
+    value["kind"] = "segment_base".into();
+    serde_json::from_value(value).unwrap()
+}
+
 fn callback() -> StrategyCallbackInput {
     StrategyCallbackInput {
         order_origin: Some(CallbackOrderOrigin {
@@ -129,9 +134,12 @@ fn conversion_preserves_unknown_basis_exact_positions_and_retirement_outcomes() 
     }]);
     let terminal = json!({"kind":"legacy_signal_source_retired", "wall_ts_ms":60,
         "retirement":retirement});
+    let before = vec![
+        expected_v5(value.clone()),
+        serde_json::from_value(terminal.clone()).unwrap(),
+    ];
     write_segment(&input, &[value, terminal]);
     let original = fs::read(&input).unwrap();
-    let before = records(&input);
     let output = dir.path().join("converted");
     let converted = convert(&input, &output).unwrap();
     assert_eq!(
@@ -185,7 +193,7 @@ fn conversion_preserves_known_cost_basis_already_carried_by_a_v5_base() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("engine.wal");
     let mut value = v5_holding();
-    let record = serde_json::from_value(value.clone()).unwrap();
+    let record = expected_v5(value.clone());
     let mut lots = Fills::try_from_records(&[record])
         .unwrap()
         .open_trade_lots();
@@ -311,7 +319,6 @@ fn conversion_relocates_callbacks_and_preserves_archived_order_lineage() {
         ),
         (3, 8, 1, 1)
     );
-    let (mut old, _) = engine_wal::open_current(&input).unwrap();
     let (mut new, latest) = engine_wal::open_current(&converted.family).unwrap();
     let WalRecord::SegmentBase {
         strategy_callback_queues,
@@ -359,23 +366,22 @@ fn conversion_relocates_callbacks_and_preserves_archived_order_lineage() {
             update: OrderUpdate::Cancelled { .. }
         }
     ));
-    let mut old_lineage = old.order_lineage_reader("kept").unwrap().unwrap();
     let mut new_lineage = new.order_lineage_reader("kept").unwrap().unwrap();
-    let mut matched = 0;
-    loop {
-        let before = old_lineage.next().unwrap();
-        let after = new_lineage.next().unwrap();
-        assert_eq!(before, after);
-        if before.is_none() {
-            break;
-        }
-        matched += 1;
+    let cancellation = WalRecord::OrderUpdate {
+        callbacks: Some(vec![StrategyId(0)]),
+        update: OrderUpdate::Cancelled {
+            client_order_id: "kept".into(),
+            recv_ns: 200,
+        },
+    };
+    for expected in [
+        serde_json::from_value(order()).unwrap(),
+        cancellation.clone(),
+        cancellation,
+    ] {
+        assert_eq!(new_lineage.next().unwrap(), Some(expected));
     }
-    assert!(
-        matched >= 3,
-        "archived request and both terminal source records must remain"
-    );
-    drop(old);
+    assert_eq!(new_lineage.next().unwrap(), None);
     drop(new);
     for ((_, path), bytes) in engine_wal::segments(&input).unwrap().iter().zip(original) {
         assert_eq!(fs::read(path).unwrap(), bytes);
@@ -549,4 +555,121 @@ fn conversion_refuses_missing_torn_corrupt_untrusted_and_invalid_state() {
             assert_eq!(fs::read(path).unwrap(), bytes, "input changed for {defect}");
         }
     }
+}
+
+#[test]
+fn conversion_reads_callback_inputs_embedded_in_original_v5_bases() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("engine.wal");
+    let mut queued = callback();
+    queued.order_origin = None;
+    let mut original = v5_holding();
+    original["strategy_callbacks"] = serde_json::to_value(vec![queued.clone()]).unwrap();
+    write_segment(&input, &[original]);
+    let mut head = base();
+    head["strategy_callback_queues"] = serde_json::to_value(vec![CallbackQueueSlot {
+        callback_id: queued.callback_id,
+        strategy: queued.strategy,
+        queued: CallbackWalCursor {
+            segment: 1,
+            sequence: 1,
+            offset: 8,
+        },
+        prepared: None,
+        event_sha256: [7; 32],
+    }])
+    .unwrap();
+    write_segment(&dir.path().join("engine.wal.000002"), &[head]);
+    let before = fs::read(&input).unwrap();
+    assert!(engine_wal::replay_chain(&input).is_err());
+    let converted = convert(&input, &dir.path().join("converted")).unwrap();
+    let (mut wal, _) = engine_wal::open_current(&converted.family).unwrap();
+    let mut reader = wal.callback_reader().unwrap().unwrap();
+    assert_eq!(
+        reader
+            .read_callback(
+                CallbackWalCursor {
+                    segment: 1,
+                    sequence: 1,
+                    offset: 0
+                },
+                queued.callback_id
+            )
+            .unwrap(),
+        queued
+    );
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn conversion_keeps_v5_mandatory_fields_and_rejects_other_removed_versions() {
+    for missing in [
+        "strategy_callback_queues",
+        "strategy_callback_sources",
+        "signal_callback_deliveries",
+        "identities",
+        "instrument_catalog",
+        "portfolio_control",
+        "open_orders",
+        "signal_producers",
+        "signal_suspensions",
+        "strategy_processes",
+        "strategy_callbacks",
+        "pending_order_dispatches",
+        "portfolio",
+        "strategy_effects",
+        "signal_gaps",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("engine.wal");
+        let mut value = v5_holding();
+        value.as_object_mut().unwrap().remove(missing);
+        write_segment(&input, &[value]);
+        let before = fs::read(&input).unwrap();
+        let output = dir.path().join("converted");
+        let error = convert(&input, &output).unwrap_err().to_string();
+        assert!(error.contains(missing), "{missing}: {error}");
+        assert!(!output.exists());
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+    for kind in [
+        "segment_base_v2",
+        "segment_base_v3",
+        "segment_base_v4",
+        "segment_base_v6",
+        "segment_base_v99",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("engine.wal");
+        let mut value = v5_holding();
+        value["kind"] = kind.into();
+        write_segment(&input, &[value]);
+        let before = fs::read(&input).unwrap();
+        let output = dir.path().join("converted");
+        let error = convert(&input, &output).unwrap_err().to_string();
+        assert!(
+            error.contains("unsupported WAL segment kind"),
+            "{kind}: {error}"
+        );
+        assert!(!output.exists());
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}
+
+#[test]
+fn conversion_refuses_duplicate_v5_fields_instead_of_overwriting_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("engine.wal");
+    let value = serde_json::to_string(&v5_holding()).unwrap();
+    let payload = format!("{{\"portfolio\":null,{}", &value[1..]);
+    let mut before = b"EWAL0001".to_vec();
+    before.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    before.extend_from_slice(&crc32c::crc32c(payload.as_bytes()).to_le_bytes());
+    before.extend_from_slice(payload.as_bytes());
+    fs::write(&input, &before).unwrap();
+    let output = dir.path().join("converted");
+    let error = convert(&input, &output).unwrap_err().to_string();
+    assert!(error.contains("duplicate field"), "{error}");
+    assert!(!output.exists());
+    assert_eq!(fs::read(&input).unwrap(), before);
 }

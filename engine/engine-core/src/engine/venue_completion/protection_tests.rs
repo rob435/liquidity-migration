@@ -91,6 +91,7 @@ async fn filled(
         recv_ns: clock::now_ns(),
     };
     let journaled = TestEngine::journal_update(
+        None,
         update,
         &mut engine.wal,
         &engine.books.orders,

@@ -68,7 +68,8 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     successfully, but B prints A before the fix; after isolation B prints B and
     all three packed executables contain B. All 82 qualifier tests pass. Earlier
     paired archive hashes/logs still verify; their candidate dependency source
-    attribution remains uncertain until fresh hosted isolation is qualified.
+    attribution remains uncertain for those shared-target bytes; the later isolated
+    build does not retroactively establish their contents.
   - Add R3-18 before repairing strategy assembly over retained paged callbacks.
     The real v7 fixture fails with `callback cursor restatement requires paged
     replay`; assembly now takes committed runtime from the existing paged replay.
@@ -78,7 +79,35 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     nine queued and nine prepared callback retrievals; source-frontier coverage
     is zero. Demo archive lookup matches three rows through Filled 2220. Mainnet's
     first query returns only its request, so the strengthened final-source fixture
-    requires observed terminal/fill state before selecting that query.
+    requires observed terminal/fill state before selecting that query. Frozen reader
+    image `1e757dbf` passes all 27 final paired bases / 54 boots with complete state,
+    ordered venue effects and tape equality, and exactly one derived account response
+    per boot. Nine queued/nine prepared retrievals pass; real source-frontier coverage
+    remains zero. Demo's filled archive has three matching rows / quantity 110;
+    mainnet has 13 rows / quantity 1.2. Original and converted input sizes/mtimes stay
+    unchanged. Commit `8c92c964` passes the mandatory gate with 1,980 Rust tests,
+    eight ignored, and 1,694 Python tests; its earlier push stops on rustfmt module
+    ordering after Python passes. Fresh isolated qualification `34111799713` passes
+    1,980 release tests, eight ignored, and the account workloads. All eight fixed
+    cells complete 800 orders with one barrier each and zero failures. Candidate
+    decision p99 median 15.05 µs fails the 13.95 µs absolute and 10.8 µs paired
+    limits; submit p50 1.12 ms passes both. No qualified archive is published.
+    The separate sanctioned deployment `34114063829` consumes the normal release
+    artifact after functional checks; latency acceptance remains open under R3-13.
+    Delete R3-06 and R3-17 after verifying absolute enforcement and both independent
+    builds; the failed latency verdict establishes neither a qualified archive nor
+    completion of the point targets.
+    Deployment `34114063829` completes at 11:14:17 UTC after the 300-second demo
+    soak. The 11:14:38 authenticated host read verifies both loaded images,
+    fourteen exact full-size native stops, may_open=true and zero restarts/OOMs;
+    mainnet worker recovery remains in progress at that observation, then reports
+    ready at 11:18:06 on the same PID with complete coverage and zero stream faults. Both native
+    state checks report already-complete. All three compatible binaries and the
+    staged archive remain on the host with verified hashes; original WAL files
+    remain without shrinking. Reader reduction proceeds locally only after this
+    compatible release is retained and deployed. Remove the completed R3-18
+    paged-assembly and R3-20 engine-clock rows after their failing regressions,
+    copied/seeded replay checks and this deployment.
   - Add R3-16 before preserving source decimal instrument constraints and requiring
     exact metadata in simulation/backtest. The old backtest emits `exact_terms=None`;
     the repaired fixture retains step `0.0100000000000000000000000001` and submits
@@ -95,6 +124,45 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     receipt fixture rejected by the prior binary, independently of historical adoption.
     Its full frozen-writer WAL fills report matches exactly. Final focused scopes pass
     24 legacy, 77 execution, four allocation and 13 forced-close tests.
+  - Remove the Python state-import writers/codecs under R3-08 after both realms
+    verify native checkpoints. Delete three codecs, four import-only types,
+    the translation trait method, CLI and deploy staging/import calls. Preserve
+    all ten native initialization/verification bodies, canonical codecs, provenance,
+    account/WAL locks and source retirement. Deployment retains empty-WAL plus
+    no-legacy-source-files initialization; retained snapshots require the compatible
+    release. Focused checks pass 128 Rust and 84 Python tests plus strict Clippy;
+    the initial unused test-helper Clippy failure is retained separately.
+    The combined metadata/import-removal image measures narrow decision 20.127 µs
+    (miss), narrow submit 4.878335 ms (pass), and wide decision p99 38.303 µs (pass),
+    against reader-stage 15.671 µs / 4.968447 ms / 25.919 µs. All 700 orders retain
+    one barrier, zero failures and valid readbacks. No scheduling change is made.
+    Extend R3-13 before simplifying the profiled stop path. Its diagnostic assigns
+    49.6% of mean pre-decision time to virtual/native stop handling; the quarter-run
+    medians drift, so this is not acceptance or a scheduling diagnosis. Read only
+    per-symbol position/stop rows, separate synchronous repair discovery, and box
+    the nested emergency/exit future only when that work exists. Preserve native,
+    dirty-barrier and cursor-ordered control precedence. Original-function
+    comparisons pass 34 populated/empty/error-order cases across three tests;
+    34 additional stop, portfolio and shared-sleeve tests and strict core Clippy
+    pass. Fixture setup errors and the first test-only Clippy failure remain
+    separate diagnostics, not claimed product faults. Ordinary release measurements
+    at 11:28:04–11:29:24 UTC pass narrow decision 6.083 µs and wide decision p99
+    21.167 µs, but narrow submit 5.406719 ms misses 5 ms. Before values are
+    20.127 µs / 38.303 µs / 4.878335 ms. All 700 orders complete with one barrier,
+    zero failures and valid readbacks. Retain the miss and source-attribution limit. Reduced readers pass 91 WAL tests, including duplicate version tags
+    in both orders with unchanged input bytes, plus 29 converter/CLI/paged-registry/
+    quantity/metadata checks. All 27 converted-only candidate boots pass: demo
+    14 and mainnet 13, nine queued/nine prepared retrievals, both filled archive
+    IDs and all 154 source-file length/mtime checks; scratch directories are
+    removed. Prior paired-image evidence remains distinct from these candidate-only
+    state checks; no real source-frontier events or future fills are supplied. Remove the
+    completed R3-07 row after compatible-release retention and candidate checks.
+    The fixed A B B A control at 11:45:26–11:46:47 keeps all four submit misses:
+    5.353471 / 5.267455 / 5.361663 / 5.230591 ms. Both new-image decision
+    medians pass at 6.459 / 5.795 µs, while their p99s exceed both old-image
+    p99s. All 400 orders complete with one barrier and valid unchanged readbacks.
+    The control does not attribute the earlier submit increase to this change;
+    R3-13 remains open.
   - Add R3-20 before fixing nondeterministic portfolio retry timing. Heavy seed 7
     reconciles twice but first differs at WAL index 3816: emergency 46 and a deferred
     quote change order after identical cancel completion. Retry deadlines use real

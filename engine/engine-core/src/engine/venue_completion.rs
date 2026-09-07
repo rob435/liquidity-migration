@@ -1339,6 +1339,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.books.account.observed_ns = 0;
         }
         let Some(journaled) = Self::journal_update(
+            match &update {
+                OrderUpdate::Fill { symbol, .. } => self
+                    .instrument_specs
+                    .get(symbol)
+                    .and_then(|spec| spec.qty_step.as_ref()),
+                _ => None,
+            },
             update,
             &mut self.wal,
             &self.books.orders,
@@ -1365,7 +1372,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn journal_update(
+        legacy_step: Option<&engine_types::numeric::Exact>,
         mut update: OrderUpdate,
         wal: &mut W,
         orders: &LedgerOfOrders,
@@ -1449,10 +1458,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     })
                 })
                 .and_then(|()| {
-                    allocation = attribution.prepare_portfolio_update_for_order(
+                    allocation = attribution.prepare_portfolio_update_on_grid(
                         fill_request.as_ref(),
                         strategy_names,
                         &update,
+                        legacy_step,
                     )?;
                     Ok(())
                 })

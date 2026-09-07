@@ -4,8 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use engine_types::{
     MarketEvent, OrderUpdate, SignalObservation, Strategy, StrategyCheckpoint,
-    StrategyCheckpointIdentity, StrategyCtx, StrategyId, StrategyImportContext,
-    StrategyImportSource, Subscription, SymbolId, TimerId, TranslatedStrategyState,
+    StrategyCheckpointIdentity, StrategyCtx, StrategyId, Subscription, SymbolId, TimerId,
     SIGNAL_OBSERVATION_SCHEMA_VERSION,
 };
 use serde::Deserialize;
@@ -929,15 +928,6 @@ impl Strategy for NativeCarry {
 
     fn validate_checkpoint(&self, checkpoint: &StrategyCheckpoint) -> Result<(), String> {
         self.core.validate_checkpoint("CARRY", checkpoint)
-    }
-
-    fn translate_checkpoint(
-        &self,
-        _context: &StrategyImportContext,
-        source_format: &str,
-        sources: &[StrategyImportSource],
-    ) -> Result<TranslatedStrategyState, String> {
-        super::state_import::translate(&self.core.config, source_format, sources)
     }
 
     fn requires_signal_feed(&self) -> bool {

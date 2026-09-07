@@ -173,7 +173,10 @@ fn write_record<W: Write>(writer: &mut W, record: &WalRecord) -> Result<(), WalE
 fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
     #[cfg(test)]
     RECORD_READS.with(|count| count.set(count.get() + 1));
-    let value = record_value::parse(payload)?;
+    read_record_value(record_value::parse(payload)?)
+}
+
+fn read_record_value(value: serde_json::Value) -> Result<WalRecord, serde_json::Error> {
     validate_segment_fields(&value)?;
     let kind = value
         .get("kind")
@@ -266,145 +269,88 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
     Ok(record)
 }
 
+fn segment_base_kind(kind: &str, conversion_v5: bool) -> Result<bool, serde_json::Error> {
+    match kind {
+        "segment_base" | "segment_base_v7" => Ok(true),
+        "segment_base_v5" if conversion_v5 => Ok(true),
+        "" => Err(serde_json::Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "WAL record has no kind",
+        ))),
+        kind if kind.starts_with("segment_base") => Err(serde_json::Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported WAL segment kind {kind}"),
+        ))),
+        _ => Ok(false),
+    }
+}
+
 fn validate_segment_fields(value: &serde_json::Value) -> Result<(), serde_json::Error> {
-    if value.get("kind").and_then(serde_json::Value::as_str) == Some("segment_base_v7")
-        && !value
-            .get("legacy_signal_source_retirements")
-            .is_some_and(serde_json::Value::is_array)
-    {
-        return Err(serde_json::Error::io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "segment_base_v7 is missing required legacy source retirements",
-        )));
-    }
-    if matches!(
-        value.get("kind").and_then(serde_json::Value::as_str),
-        Some("segment_base_v6" | "segment_base_v7")
-    ) && !value
-        .get("open_trade_lots")
-        .is_some_and(serde_json::Value::is_array)
-    {
-        return Err(serde_json::Error::io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "segment_base_v6 is missing required open trade cost basis",
-        )));
-    }
-    if matches!(
-        value.get("kind").and_then(serde_json::Value::as_str),
-        Some("segment_base_v5" | "segment_base_v6" | "segment_base_v7")
-    ) {
-        for field in [
-            "strategy_callback_queues",
-            "strategy_callback_sources",
-            "signal_callback_deliveries",
-        ] {
+    let kind = value
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    segment_base_kind(kind, false)?;
+    if kind == "segment_base_v7" {
+        for field in ["open_trade_lots", "legacy_signal_source_retirements"] {
             if !value.get(field).is_some_and(serde_json::Value::is_array) {
                 return Err(serde_json::Error::io(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("segment_base_v5 is missing required {field}"),
+                    format!("{kind} is missing required {field}"),
                 )));
             }
         }
-        if value.get("identities").is_none() {
-            return Err(serde_json::Error::io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "segment_base_v5 is missing required identities state",
-            )));
-        }
-        if value.get("instrument_catalog").is_none() {
-            return Err(serde_json::Error::io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "segment_base_v5 is missing required instrument catalog state",
-            )));
-        }
-        if !value
-            .get("portfolio_control")
-            .is_some_and(serde_json::Value::is_object)
-        {
-            return Err(serde_json::Error::io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "segment_base_v5 is missing required portfolio control state",
-            )));
-        }
-        let rows = value
-            .get("open_orders")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                serde_json::Error::io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "segment_base_v5 is missing required open order state",
-                ))
-            })?;
-        if rows.iter().any(|row| {
-            !row.get("fill_quantity")
-                .is_some_and(serde_json::Value::is_object)
-        }) {
-            return Err(serde_json::Error::io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "segment_base_v5 is missing required typed order fill progress",
-            )));
-        }
+        validate_base_fields(value, kind)?;
     }
-    if matches!(
-        value.get("kind").and_then(serde_json::Value::as_str),
-        Some("segment_base_v4" | "segment_base_v5" | "segment_base_v6" | "segment_base_v7")
-    ) {
-        for field in [
-            "signal_producers",
-            "signal_suspensions",
-            "strategy_processes",
-            "strategy_callbacks",
-            "pending_order_dispatches",
-        ] {
-            if !value.get(field).is_some_and(serde_json::Value::is_array) {
-                return Err(serde_json::Error::io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("segment_base_v4 is missing required {field} state"),
-                )));
-            }
-        }
-        if !value
-            .get("portfolio")
-            .is_some_and(serde_json::Value::is_object)
-        {
-            return Err(serde_json::Error::io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "segment_base_v4 is missing required portfolio state",
-            )));
-        }
-    }
-    if matches!(
-        value.get("kind").and_then(serde_json::Value::as_str),
-        Some(
-            "segment_base_v3"
-                | "segment_base_v4"
-                | "segment_base_v5"
-                | "segment_base_v6"
-                | "segment_base_v7"
-        )
-    ) && value.get("strategy_effects").is_none()
-    {
-        return Err(serde_json::Error::io(io::Error::new(
+    Ok(())
+}
+
+// These fields are mandatory in both the current base and the converter's v5 input.
+fn validate_base_fields(value: &serde_json::Value, kind: &str) -> Result<(), serde_json::Error> {
+    let missing = |field: &str| {
+        serde_json::Error::io(io::Error::new(
             io::ErrorKind::InvalidData,
-            "segment_base_v3 is missing required strategy_effects state",
-        )));
+            format!("{kind} is missing required {field}"),
+        ))
+    };
+    for field in [
+        "strategy_callback_queues",
+        "strategy_callback_sources",
+        "signal_callback_deliveries",
+        "signal_producers",
+        "signal_suspensions",
+        "strategy_processes",
+        "strategy_callbacks",
+        "pending_order_dispatches",
+    ] {
+        if !value.get(field).is_some_and(serde_json::Value::is_array) {
+            return Err(missing(field));
+        }
     }
-    if matches!(
-        value.get("kind").and_then(serde_json::Value::as_str),
-        Some(
-            "segment_base_v2"
-                | "segment_base_v3"
-                | "segment_base_v4"
-                | "segment_base_v5"
-                | "segment_base_v6"
-                | "segment_base_v7"
-        )
-    ) && value.get("signal_gaps").is_none()
-    {
-        return Err(serde_json::Error::io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "segment_base_v2 is missing required signal_gaps state",
-        )));
+    for field in [
+        "identities",
+        "instrument_catalog",
+        "strategy_effects",
+        "signal_gaps",
+    ] {
+        if value.get(field).is_none() {
+            return Err(missing(field));
+        }
+    }
+    for field in ["portfolio_control", "portfolio"] {
+        if !value.get(field).is_some_and(serde_json::Value::is_object) {
+            return Err(missing(field));
+        }
+    }
+    let rows = value
+        .get("open_orders")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| missing("open_orders"))?;
+    if rows.iter().any(|row| {
+        !row.get("fill_quantity")
+            .is_some_and(serde_json::Value::is_object)
+    }) {
+        return Err(missing("typed order fill progress"));
     }
     Ok(())
 }
@@ -720,6 +666,7 @@ impl Wal for WalWriter {
             segment: self.segment_index,
             family: self.family.clone(),
             cancel: None,
+            conversion_v5: false,
         })))
     }
 
@@ -1181,7 +1128,7 @@ struct Scan {
 
 fn scan_file(file: &mut File, len: u64) -> Result<Scan, WalError> {
     let mut records = Vec::new();
-    let good_end = scan_frames(file, len, |sequence, _, _, record| {
+    let good_end = scan_frames(file, len, read_record, |sequence, _, _, record| {
         records.push((sequence, record));
         Ok(())
     })?;
@@ -1191,6 +1138,7 @@ fn scan_file(file: &mut File, len: u64) -> Result<Scan, WalError> {
 fn scan_frames(
     file: &mut File,
     len: u64,
+    mut decode: impl FnMut(&[u8]) -> Result<WalRecord, serde_json::Error>,
     mut visit: impl FnMut(u64, u64, &[u8], WalRecord) -> Result<(), WalError>,
 ) -> Result<u64, WalError> {
     file.seek(SeekFrom::Start(0))?;
@@ -1257,7 +1205,7 @@ fn scan_frames(
 
         // Checksum good but the bytes are not a record we understand: the disk
         // is fine and the data is real, so refuse rather than delete it.
-        let record: WalRecord = read_record(&payload).map_err(|e| WalError::Corrupt {
+        let record = decode(&payload).map_err(|e| WalError::Corrupt {
             offset,
             detail: format!("frame passed its checksum but is not a readable record: {e}"),
         })?;

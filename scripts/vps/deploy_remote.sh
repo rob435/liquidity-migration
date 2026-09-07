@@ -903,58 +903,9 @@ clear_reconciliation_if_requested() {
         || fail "cannot retire the applied $realm reconciliation note"
 }
 
-stage_native_takeover_source() {
-    [ "$#" -eq 5 ] || return 2
-    local source="$1" template="$2" kind="$3"
-    local output_name="$4" temporary_name="$5"
-    local staged
-    case "$kind" in
-        required|carry-early-exits-v1|carry-event-tape-v1) ;;
-        *) fail "unsupported takeover source kind: $kind" ;;
-    esac
-    printf -v "$output_name" '%s' ""
-    printf -v "$temporary_name" '%s' ""
-    staged="$(mktemp "$template")" \
-        || fail "cannot create a staged takeover source for $source"
-    printf -v "$output_name" '%s' "$staged"
-    printf -v "$temporary_name" '%s' "$staged"
-    if ! "$PYTHON" - "$source" "$staged" "$kind" <<'PY'
-import sys
-from pathlib import Path
-
-source, target, kind = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
-if source.exists():
-    payload = source.read_bytes()
-elif kind == "required":
-    raise SystemExit(f"required takeover source is missing: {source}")
-elif kind == "carry-early-exits-v1":
-    payload = b'{"fired":{}}\n'
-else:
-    payload = b""
-target.write_bytes(payload)
-PY
-    then
-        rm -f -- "$staged"
-        fail "cannot stage the takeover source bytes for $source"
-    fi
-    chown root:"$RUNTIME_GROUP" "$staged" && chmod 0640 "$staged" || {
-        rm -f -- "$staged"
-        fail "cannot secure the staged takeover source for $source"
-    }
-}
-
-remove_native_takeover_temps() {
-    local path
-    for path in "$@"; do
-        [ -n "$path" ] || continue
-        rm -f -- "$path" || echo "cannot remove temporary takeover source: $path" >&2
-    done
-}
-
-import_native_strategy_state() {
+ensure_native_strategy_state() {
     local realm="$1" config wal carry_root exodus_root
-    local long_state carry_checkpoint carry_early_exits carry_book carry_events
-    local exodus_identity exodus_state exodus_target_book engine_heartbeat
+    local long_state carry_checkpoint carry_book exodus_identity exodus_state
     local required_present=0 source
     case "$realm" in
         demo)
@@ -962,25 +913,20 @@ import_native_strategy_state() {
             wal=/var/lib/liquidity-migration-engine/engine.wal
             carry_root="$CARRY_DEMO_ROOT"
             exodus_root="$EXODUS_DEMO_ROOT"
-            engine_heartbeat=/var/lib/liquidity-migration-engine/heartbeat.json
             ;;
         mainnet)
             config="$ENGINE_MAINNET_CONFIG"
             wal=/var/lib/liquidity-migration-engine-mainnet/engine.wal
             carry_root="$CARRY_MAINNET_ROOT"
             exodus_root="$EXODUS_MAINNET_ROOT"
-            engine_heartbeat=/var/lib/liquidity-migration-engine-mainnet/heartbeat.json
             ;;
-        *) fail "unsupported strategy-state import realm: $realm" ;;
+        *) fail "unsupported native strategy-state realm: $realm" ;;
     esac
     long_state="/var/lib/liquidity-migration/targets/long-${realm}-state.json"
     carry_checkpoint="$carry_root/.cache/carry_sizing_anchors.json"
-    carry_early_exits="$carry_root/carry_early_exits.json"
     carry_book="/var/lib/liquidity-migration/targets/carry-${realm}.json"
-    carry_events="$carry_root/carry_presettlement_events.jsonl"
     exodus_identity="$exodus_root/exodus_state_identity.json"
     exodus_state="$exodus_root/exodus_state.json"
-    exodus_target_book="/var/lib/liquidity-migration/targets/exodus-${realm}.json"
 
     if run_engine_takeover_command "$realm" "$config" verify-native-strategy-state; then
         echo "native-state-ok realm=$realm result=already-complete"
@@ -999,91 +945,7 @@ import_native_strategy_state() {
         echo "native-state-ok realm=$realm result=initialized-empty"
         return 0
     fi
-    [ "$required_present" -eq 5 ] \
-        || fail "$realm strategy-state takeover is incomplete: found $required_present of 5 required sources"
-
-    (
-        long_state_source="" carry_checkpoint_source="" carry_early_exits_source=""
-        carry_book_source="" carry_events_source="" exodus_identity_source=""
-        exodus_state_source=""
-        long_state_temp="" carry_checkpoint_temp="" carry_early_exits_temp=""
-        carry_book_temp="" carry_events_temp="" exodus_identity_temp=""
-        exodus_state_temp="" exodus_legacy_paths=""
-        cleanup_native_takeover_temps() {
-            local status="$?"
-            trap - EXIT
-            remove_native_takeover_temps \
-                "$exodus_legacy_paths" "$long_state_temp" "$carry_checkpoint_temp" \
-                "$carry_early_exits_temp" "$carry_book_temp" "$carry_events_temp" \
-                "$exodus_identity_temp" "$exodus_state_temp"
-            exit "$status"
-        }
-        trap cleanup_native_takeover_temps EXIT
-        stage_native_takeover_source "$long_state" \
-            "/run/liquidity-migration/long-${realm}-state.XXXXXX" \
-            required long_state_source long_state_temp
-        stage_native_takeover_source "$carry_checkpoint" \
-            "/run/liquidity-migration/carry-${realm}-sizing.XXXXXX" \
-            required carry_checkpoint_source carry_checkpoint_temp
-        stage_native_takeover_source "$carry_early_exits" \
-            "/run/liquidity-migration/carry-${realm}-early-exits.XXXXXX" \
-            carry-early-exits-v1 carry_early_exits_source carry_early_exits_temp
-        stage_native_takeover_source "$carry_book" \
-            "/run/liquidity-migration/carry-${realm}-target-book.XXXXXX" \
-            required carry_book_source carry_book_temp
-        stage_native_takeover_source "$carry_events" \
-            "/run/liquidity-migration/carry-${realm}-events.XXXXXX" \
-            carry-event-tape-v1 carry_events_source carry_events_temp
-        stage_native_takeover_source "$exodus_identity" \
-            "/run/liquidity-migration/exodus-${realm}-identity.XXXXXX" \
-            required exodus_identity_source exodus_identity_temp
-        stage_native_takeover_source "$exodus_state" \
-            "/run/liquidity-migration/exodus-${realm}-state.XXXXXX" \
-            required exodus_state_source exodus_state_temp
-
-        run_engine_takeover_command "$realm" "$config" import-strategy-state \
-            --strategy long \
-            --source-format long-book-state-v2 \
-            --source "state=$long_state_source" \
-            || fail "cannot import exact LONG state for $realm"
-        run_engine_takeover_command "$realm" "$config" import-strategy-state \
-            --strategy carry \
-            --source-format carry-sizing-anchors-v1-early-exits-v1-target-book-v1 \
-            --source "early_exits=$carry_early_exits_source" \
-            --source "sizing_anchors=$carry_checkpoint_source" \
-            --source "target_book=$carry_book_source" \
-            || fail "cannot import exact CARRY state for $realm"
-        exodus_legacy_paths="$(
-            mktemp "/run/liquidity-migration/exodus-${realm}-legacy-paths.XXXXXX"
-        )" || fail "cannot create the $realm Exodus legacy-path bundle"
-        "$PYTHON" - "$carry_events" "$exodus_target_book" "$engine_heartbeat" \
-            > "$exodus_legacy_paths" <<'PY'
-import json
-import sys
-
-event_path, target_book_path, engine_heartbeat_path = sys.argv[1:]
-payload = {
-    "schema_version": 1,
-    "event_path": event_path,
-    "target_book_path": target_book_path,
-    "engine_heartbeat_path": engine_heartbeat_path,
-}
-sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
-PY
-        chown root:"$RUNTIME_GROUP" "$exodus_legacy_paths" \
-            && chmod 0640 "$exodus_legacy_paths"
-        run_engine_takeover_command "$realm" "$config" import-strategy-state \
-            --strategy exodus \
-            --source-format exodus-state-v1-v4-event-tape-v1-identity-v2 \
-            --source "carry_events=$carry_events_source" \
-            --source "identity=$exodus_identity_source" \
-            --source "legacy_paths=$exodus_legacy_paths" \
-            --source "state=$exodus_state_source" \
-            || fail "cannot import exact Exodus state for $realm"
-        run_engine_takeover_command "$realm" "$config" verify-native-strategy-state \
-            || fail "imported $realm native strategy state failed verification"
-    ) || fail "$realm strategy-state takeover failed"
-    echo "native-state-ok realm=$realm result=imported"
+    fail "$realm canonical native strategy state is unavailable; recover retained legacy snapshots with the compatible retained release before deployment"
 }
 
 # ----------------------------------------------------------------- mainnet
@@ -1181,7 +1043,7 @@ handover_realm() {
         stop_realm_units "$realm" \
             && { [ "$realm" != mainnet ] || clear_realm_soak_overrides mainnet; } \
             && retire_legacy_signal_sources "$realm" \
-            && import_native_strategy_state "$realm" \
+            && ensure_native_strategy_state "$realm" \
             && clear_reconciliation_if_requested "$realm" \
             && start_realm "$realm"
     ); then

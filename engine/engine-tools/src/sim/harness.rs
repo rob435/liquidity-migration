@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use engine_types::{AccountView, InstrumentRule, Subscription, Symbol, WalRecord};
+use engine_types::{AccountView, Subscription, Symbol, WalRecord};
 use engine_wal::WalWriter;
 use sha2::{Digest, Sha256};
 
@@ -225,7 +225,7 @@ impl World {
             assembly::strategies(&loaded.config.strategies).map_err(|e| boot(e.to_string()))?;
         let wanted: Vec<Subscription> = probe.iter().flat_map(|s| s.subscriptions()).collect();
         drop(probe);
-        let rules: Vec<(Symbol, InstrumentRule)> =
+        let catalog =
             read_instruments(&paths.instruments).map_err(|e| boot(format!("instruments: {e}")))?;
         let symbols: Vec<Symbol> = assembly::symbol_order(&[], &wanted)
             .map_err(|error| boot(format!("symbol order: {error}")))?;
@@ -250,7 +250,7 @@ impl World {
                 maintenance_margin_rate: defaults.maintenance_margin_rate,
             },
             symbols.clone(),
-            &rules,
+            &catalog,
             scheduler.clone(),
         )));
         let reader = TapeReader::open(&paths.tape).map_err(|e| boot(format!("tape: {e}")))?;
@@ -345,7 +345,7 @@ impl World {
         // The pump runs before boot: after a death the clock is already
         // pumping, and boot's venue reads wait on it like every other reply.
         let pump_task = tokio::spawn(pump(self.cursor.clone(), self.scheduler.clone()));
-        let mut engine = match Engine::boot_as(
+        let mut engine = match Engine::boot_as_exact(
             &self.settings,
             &self.loaded.sha256,
             wal,

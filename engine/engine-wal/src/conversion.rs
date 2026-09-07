@@ -63,6 +63,7 @@ pub fn v5_to_v7(
         segment: 1,
         family: input.to_path_buf(),
         cancel: None,
+        conversion_v5: true,
     };
     fs::DirBuilder::new().mode(0o700).create(output_dir)?;
     let family = output_dir.join(name);
@@ -84,21 +85,29 @@ pub fn v5_to_v7(
                 .open(segment_path(&result.family, index))?;
             target.write_all(&MAGIC)?;
             let mut count = 0;
-            let end = scan_frames(&mut source, len, |sequence, _, payload, record| {
-                if index > 1 && sequence == 1 && !matches!(record, WalRecord::SegmentBase { .. }) {
-                    return Err(invalid(format!("segment {index} has no complete base")));
-                }
-                validate_cursors(&record, &mut callbacks)?;
-                let converted = convert_base(payload, record, &mut lots, &mut result)?;
-                let payload = converted.as_deref().unwrap_or(payload);
-                let length = u32::try_from(payload.len())
-                    .map_err(|_| invalid("converted WAL frame exceeds u32 length"))?;
-                target.write_all(&length.to_le_bytes())?;
-                target.write_all(&crc32c::crc32c(payload).to_le_bytes())?;
-                target.write_all(payload)?;
-                count += 1;
-                Ok(())
-            })?;
+            let end = scan_frames(
+                &mut source,
+                len,
+                read_source_record,
+                |sequence, _, payload, record| {
+                    if index > 1
+                        && sequence == 1
+                        && !matches!(record, WalRecord::SegmentBase { .. })
+                    {
+                        return Err(invalid(format!("segment {index} has no complete base")));
+                    }
+                    validate_cursors(&record, &mut callbacks)?;
+                    let converted = convert_base(payload, record, &mut lots, &mut result)?;
+                    let payload = converted.as_deref().unwrap_or(payload);
+                    let length = u32::try_from(payload.len())
+                        .map_err(|_| invalid("converted WAL frame exceeds u32 length"))?;
+                    target.write_all(&length.to_le_bytes())?;
+                    target.write_all(&crc32c::crc32c(payload).to_le_bytes())?;
+                    target.write_all(payload)?;
+                    count += 1;
+                    Ok(())
+                },
+            )?;
             if end != len || (index > 1 && count == 0) {
                 return Err(invalid(format!(
                     "segment {index} is incomplete; input is unchanged"
@@ -119,6 +128,15 @@ pub fn v5_to_v7(
         return Err(error);
     }
     Ok(result)
+}
+
+fn read_source_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
+    let mut value = crate::record_value::parse(payload)?;
+    if value.get("kind").and_then(serde_json::Value::as_str) == Some("segment_base_v5") {
+        crate::validate_base_fields(&value, "segment_base_v5")?;
+        value["kind"] = "segment_base".into();
+    }
+    crate::read_record_value(value)
 }
 
 fn validate_cursors(

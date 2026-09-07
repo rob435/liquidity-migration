@@ -506,8 +506,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 
     pub(super) async fn enforce_position_stop_intent(&mut self) -> Result<(), EngineError> {
+        if self.prepare_position_stops()? {
+            self.service_portfolio_controls().await?;
+        }
+        Ok(())
+    }
+
+    fn prepare_position_stops(&mut self) -> Result<bool, EngineError> {
         if self.dispatches.write.is_some() {
-            return Ok(());
+            return Ok(false);
         }
         let symbols: std::collections::BTreeSet<_> = self
             .books
@@ -581,7 +588,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         repairs.truncate(MAX_ORDERS_PER_BATCH);
         self.queue_native_stops(repairs)?;
-        self.service_portfolio_controls().await
+        Ok(true)
     }
 }
 
@@ -591,3 +598,7 @@ fn tighter(side: Side, a: f64, b: f64) -> f64 {
         Side::Sell => a.min(b),
     }
 }
+
+#[cfg(test)]
+#[path = "stop_runtime_tests.rs"]
+mod path_tests;
