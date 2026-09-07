@@ -146,8 +146,8 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     all four decision cells: 32.0 / 28.9 / 15.5 / 15.7 µs, median 22.3 µs
     against 13.95 µs. Submit medians are 1.09 / 1.04 / 1.03 / 1.07 ms;
     their median 1.055 ms passes. All 400 orders have one barrier and zero
-    failures. No qualified archive is uploaded. Keep R3-06 open; the fixed
-    four-cell estimator does not resolve the hosted failure.
+    failures. No qualified archive is uploaded; the fixed four-cell
+    estimator does not resolve the hosted failure.
     Replace Linux absolute acceptance with an explicit same-worker relative
     comparison against freshly built baseline source `a4189a48`: fixed
     A B B A B A A B cells, 1.5× baseline medians, all build/check work first.
@@ -160,7 +160,18 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     The fixed Mac after pair uses unchanged bytes: narrow submit 4.939775 ms,
     wide decision p99 10.255 µs, 700 orders, one barrier each, zero failures.
     Prior misses remain recorded; no runtime speedup or stable 5 ms bound
-    follows from this helper change. Fresh hosted qualification is pending.
+    follows from this helper change. Commit `6de33fa3` passes the developer
+    gate with 1,962 Rust and 1,691 Python tests; normal hosted checks pass
+    1,964 Rust and 1,691 Python tests. Fresh hosted qualification
+    `34093133061` passes 1,962 release tests and account workloads. All eight
+    fixed cells complete 800 orders with one barrier each and zero failures.
+    Baseline medians are 13.65 µs decision p99 / 1.24 ms submit p50;
+    candidate medians 10.5 µs / 1.25 ms pass the relative gate and absolute
+    median limits. Three individual decision cells still fail the absolute
+    limit; one baseline barrier maximum is 137.93 ms. Retain all cells and
+    prior failures. Downloaded candidate binaries and the embedded log verify.
+    Delete the completed R3-06 row. The CI helper change has no engine runtime
+    change or VPS redeploy; the two retained-WAL removals remain open.
     The final qualified-source Mac remeasurement records narrow decision
     p50 4.751 µs, submit p50 4.997119 ms and wide decision p99 15.047 µs.
     All 700 opportunities complete with one barrier each and zero failures.
