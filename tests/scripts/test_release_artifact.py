@@ -119,8 +119,9 @@ def _qualified_files(commit: str = COMMIT) -> dict[str, bytes]:
 
 @pytest.fixture
 def qualification_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, artifact_module: ModuleType
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, artifact_module: ModuleType, request: pytest.FixtureRequest,
 ) -> tuple[Path, str, Path, list[list[str]], dict[str, str]]:
+    decision_baseline, submit_baseline = getattr(request, "param", (40000, 4000000))
     repo = tmp_path / "source"
     (repo / "engine").mkdir(parents=True)
     (repo / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.90.0"\n')
@@ -135,8 +136,8 @@ every = 20
 symbols = ["BTCUSDT"]
 [runners.{platform.system().lower()}-{platform.machine().lower()}]
 status = "measured-fixture"
-decision_p99_ns = 40000
-submit_p50_ns = 4000000
+decision_p99_ns = {decision_baseline}
+submit_p50_ns = {submit_baseline}
 ''')
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
@@ -179,9 +180,15 @@ submit_p50_ns = 4000000
                 binary.write_bytes(f"{name} at {commit}\n".encode())
                 binary.chmod(0o755)
         if len(command) > 1 and command[1] == "bench":
-            log.write(behavior.get("bench", """  market to decision               100        20.0us        30.0us         40.0us        50.0us     50.0us
+            index = sum(len(call) > 1 and call[1] == "bench" for call in calls)
+            wal = Path(command[command.index("--wal") + 1])
+            assert not wal.exists()
+            wal.write_bytes(f"fixture WAL {index}\n".encode())
+            log.write(behavior.get(f"bench-{index}", behavior.get("bench", """  market to decision               100        20.0us        30.0us         40.0us        50.0us     50.0us
   market to submit result          100        4.00ms        5.00ms         6.00ms        7.00ms     7.00ms
-"""))
+""")))
+            if behavior.get("fail-bench") == str(index):
+                raise subprocess.CalledProcessError(7, command)
         if phase == behavior.get("fail"):
             raise subprocess.CalledProcessError(7, command)
         if phase == "signal-worker":
@@ -192,6 +199,118 @@ submit_p50_ns = 4000000
 
     monkeypatch.setattr(artifact_module, "_run", run)
     return repo, commit, target, calls, behavior
+
+
+def _latency_cell(decision: int, submit: int, *, decision_scale: int = 1, submit_scale: int = 1) -> str:
+    rows = (
+        ("market to decision", [1000, 2000, decision, 20000, 20000], decision_scale),
+        ("market to submit result", [submit, 2 * submit, 3 * submit, 4 * submit, 4 * submit], submit_scale),
+    )
+    return "".join(f"{name} 100 " + " ".join(f"{value * scale}ns" for value in values) + "\n"
+                   for name, values, scale in rows)
+
+
+@pytest.mark.parametrize("qualification_workspace", [(9300, 1090000)], indirect=True)
+def test_four_fixed_latency_cells_keep_high_first_verdict_and_qualify_by_run_medians(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]],
+) -> None:
+    repo, commit, target, calls, behavior = qualification_workspace
+    decisions = (14300, 8600, 9400, 8000)
+    submits = (1160000, 1230000, 1330000, 1280000)
+    for index, (decision, submit) in enumerate(zip(decisions, submits), 1):
+        behavior[f"bench-{index}"] = _latency_cell(decision, submit)
+    output = tmp_path / "qualified.tar.gz"
+    artifact_module.qualify(repo, commit, output, target)
+    extracted = tmp_path / "verified"
+    manifest = artifact_module.verify(output, commit, extracted)
+    latency = manifest["latency_budget"]
+    assert latency["aggregation"] == "median_of_run_metrics"
+    assert "samples" not in latency
+    assert latency["measured_ns"] == {"decision_p99_ns": 9000, "submit_p50_ns": 1255000}
+    assert latency["limits_ns"] == {"decision_p99_ns": 13950, "submit_p50_ns": 1635000}
+    assert [cell["budget_passed"] for cell in latency["runs"]] == [False, True, True, True]
+    assert [cell["measured_ns"]["decision_p99_ns"] for cell in latency["runs"]] == list(decisions)
+    assert all(cell["samples"] == {"decision_p99_ns": 100, "submit_p50_ns": 100} for cell in latency["runs"])
+    benches = [command for command in calls if len(command) > 1 and command[1] == "bench"]
+    assert len(benches) == 4
+    assert len({command[command.index("--wal") + 1] for command in benches}) == 4
+    log = (extracted / "qualification.log").read_text()
+    assert all(behavior[f"bench-{index}"] in log for index in range(1, 5))
+    assert '"budget_passed": false' in log
+    assert "decision_p99_ns=14300 exceeds 13950 ns" in log
+    assert "not pooled quantiles" in log
+
+
+@pytest.mark.parametrize("qualification_workspace", [(9300, 1090000)], indirect=True)
+@pytest.mark.parametrize("metric", ["decision_p99_ns", "submit_p50_ns"])
+def test_doubling_either_histogram_across_all_four_cells_fails_qualification(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]], metric: str,
+) -> None:
+    repo, commit, target, calls, behavior = qualification_workspace
+    for index, (decision, submit) in enumerate(zip((7900, 10000, 8600, 10500), (1310000, 1310000, 1340000, 1290000)), 1):
+        behavior[f"bench-{index}"] = _latency_cell(
+            decision, submit, decision_scale=2 if metric == "decision_p99_ns" else 1,
+            submit_scale=2 if metric == "submit_p50_ns" else 1,
+        )
+    output = tmp_path / "unqualified.tar.gz"
+    with pytest.raises(ValueError, match=f"latency budget failed: {metric}="):
+        artifact_module.qualify(repo, commit, output, target)
+    assert len([command for command in calls if len(command) > 1 and command[1] == "bench"]) == 4
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("fault", ["process", "missing", "empty", "unit", "duplicate", "malformed-duplicate", "nan", "unordered"])
+def test_one_invalid_cell_is_fatal_after_all_four_cells_execute(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]], fault: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, commit, target, calls, behavior = qualification_workspace
+    text = _latency_cell(9300, 1090000)
+    if fault == "process":
+        behavior["fail-bench"] = "1"
+    elif fault == "missing":
+        text = text.splitlines()[0] + "\n"
+    elif fault == "empty":
+        text = text.replace("100 ", "0 ")
+    elif fault == "unit":
+        text = text.replace("9300ns", "9300")
+    elif fault == "duplicate":
+        text += text.splitlines()[0] + "\n"
+    elif fault == "malformed-duplicate":
+        text += "market to decision 100 1us\n"
+    elif fault == "nan":
+        text = text.replace("9300ns", "NaNns")
+    elif fault == "unordered":
+        text = text.replace("9300ns", "100ns")
+    behavior["bench-1"] = text
+    output = tmp_path / "unqualified.tar.gz"
+    with pytest.raises(subprocess.CalledProcessError if fault == "process" else ValueError):
+        artifact_module.qualify(repo, commit, output, target)
+    assert len([command for command in calls if len(command) > 1 and command[1] == "bench"]) == 4
+    verdicts = [json.loads(line.removeprefix("latency cell: "))
+                for line in capsys.readouterr().out.splitlines() if line.startswith("latency cell: ")]
+    assert len(verdicts) == 4
+    assert "error" in verdicts[0]
+    assert all(cell["budget_passed"] for cell in verdicts[1:])
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("qualification_workspace", [(9300, 1090000)], indirect=True)
+def test_four_run_median_does_not_round_down_across_the_limit(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]],
+) -> None:
+    repo, commit, target, calls, behavior = qualification_workspace
+    for index, decision in enumerate((13950, 13950, 13951, 13951), 1):
+        behavior[f"bench-{index}"] = _latency_cell(decision, 1090000)
+    output = tmp_path / "unqualified.tar.gz"
+    with pytest.raises(ValueError, match="decision_p99_ns=13950.5 exceeds 13950 ns"):
+        artifact_module.qualify(repo, commit, output, target)
+    assert len([command for command in calls if len(command) > 1 and command[1] == "bench"]) == 4
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("fault", ["double-decision", "double-submit", "missing", "empty", "unit", "duplicate", "nan", "unordered"])
@@ -422,7 +541,9 @@ def test_qualification_packages_the_tested_native_bytes_without_rebuilding(
     latency = manifest["latency_budget"]
     assert latency["measured_ns"] == {"decision_p99_ns": 40000, "submit_p50_ns": 4000000}
     assert latency["limits_ns"] == {"decision_p99_ns": 60000, "submit_p50_ns": 6000000}
-    assert latency["samples"] == {"decision_p99_ns": 100, "submit_p50_ns": 100}
+    assert latency["aggregation"] == "median_of_run_metrics"
+    assert len(latency["runs"]) == 4
+    assert all(cell["samples"] == {"decision_p99_ns": 100, "submit_p50_ns": 100} for cell in latency["runs"])
     cargo_calls = [command for command in calls if command[0] == "cargo"]
     assert [command[1] for command in cargo_calls] == ["build", "test"]
     for command in cargo_calls:

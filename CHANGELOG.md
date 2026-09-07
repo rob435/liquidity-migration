@@ -101,7 +101,14 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     The selected-pair regression fails at the original runtime-equality check
     before the change; all 29 helper tests pass afterward. The old reader also
     parses all 4,466 records of a captured current demo segment without a torn
-    or corrupt tail; actual selected-pair startup acceptance remains pending.
+    or corrupt tail. Workflow `34085705580` deploys `905c10d3` after 300
+    healthy demo seconds through 05:26:22 UTC and leaves mainnet running.
+    The explicit `32858587`/`905c10d3` demo return drill passes from 05:29:01
+    to 05:31:12 UTC, verifying both loaded images and fresh account readiness.
+    The 05:31:53 read confirms original mainnet PIDs, unchanged generation
+    markers, all twelve full-size native stops and no missing/shrunk WAL files.
+    Delete R3-09 after this selected-pair acceptance. The required push gate
+    passes 1,962 Rust tests and 1,661 Python tests; hosted debug passes 1,964.
     Hosted qualification `34081614240` passes 1,962 release tests and
     account-state workloads, then fails decision p99 at 9.3 µs against
     9.0 µs. Submit p50 1.16 ms passes; all 100 opportunities complete with
@@ -116,8 +123,23 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     only the 6 µs decision reference with the A-only median run-level p99 of
     9.3 µs; keep the 1.09 ms submit reference and 1.5× rule. The decision
     limit becomes 13.95 µs; B at 18.9 µs remains a failure. Keep all original
-    verdicts and remove the temporary workflow. Fresh qualification follows
-    the reference commit; no repetition-based acceptance is added.
+    verdicts and remove the temporary workflow. Fresh qualification
+    `34085706786` passes all 1,962 release tests and account workloads, then
+    fails decision p99 at 14.3 µs versus 13.95 µs; submit p50 is 1.16 ms,
+    with 100 orders, one barrier each and zero failures. No qualified archive
+    is uploaded. Match the four-run decision reference with exactly four
+    fresh candidate cells and compare median run-level metrics. Keep both
+    references and limits fixed, retain all individual verdicts and raw logs,
+    and fail on process errors or invalid selected histograms. The existing
+    qualification-entry regression fails on the first 14.3 µs cell before
+    the fix and passes afterward at median 9.0 µs, retaining that failed cell.
+    The strict archive layout stays unchanged; benchmark WALs remain temporary.
+    A malformed duplicate histogram exposes a parser acceptance bug; its
+    regression fails before and passes after counting every selected row.
+    All 61 qualifier tests pass. The fixed Mac after pair uses unchanged
+    executable bytes and completes all 700 orders with one barrier and zero
+    failures. Narrow submit measures 5.079039 ms and misses 5 ms; decision
+    targets pass. Retain this miss beside the earlier accepted point cell.
     The final qualified-source Mac remeasurement records narrow decision
     p50 4.751 µs, submit p50 4.997119 ms and wide decision p99 15.047 µs.
     All 700 opportunities complete with one barrier each and zero failures.

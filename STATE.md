@@ -8,26 +8,27 @@ Record the latest verified host snapshot and the source of each operational sett
 
 | Observation | Value |
 | --- | --- |
-| Verified at | 2026-09-07 04:19:36 UTC authenticated native positions/stops, service state, heartbeats, disk and loaded images |
-| Evidence | [Deploy run `34081612658`](https://github.com/rob435/liquidity-migration/actions/runs/34081612658); native read `/tmp/r3-native-post-fc2ad99c.json`; services and images `/tmp/r3-host-post-fc2ad99c.json`; workflow log `/tmp/r3-deploy-fc2ad99c-complete.log` |
+| Verified at | 2026-09-07 05:31:53 UTC authenticated native positions/stops, service state, heartbeats, disk and loaded images after the selected-pair demo drill |
+| Evidence | [Deploy run `34085705580`](https://github.com/rob435/liquidity-migration/actions/runs/34085705580); native read `/tmp/r3-native-post-selected-pair.json`; services/images `/tmp/r3-host-post-selected-pair.json`; workflow log `/tmp/r3-deploy-905c10d3-complete.log`; drill log `/tmp/r3-demo-selected-pair-run.log` |
 | Host | `208.84.103.4`; 4 vCPU, 8 GiB RAM, 118 GB disk |
-| Deployed commit | Completed generation, checkout and both loaded engine/worker pairs are `fc2ad99c64cfa6652739caccd9da2ced2dc37583`; loaded hashes match the verified default-Bybit deployment archive |
-| Funded permission | Mainnet deployment preflight passes at 04:18:24 UTC; funded entry permissions remain enabled |
+| Deployed commit | Completed generation and checkout `905c10d3de3cd2e913b626f0a49cd0e2001fb420`; demo loads its verified engine. Mainnet retains the `fc2ad99c` engine and PID because runtime inputs are identical. The worker image is identical in both archives |
+| Funded permission | Mainnet remains armed and unchanged-left-running at 05:26:23 UTC; funded entry permissions remain enabled |
 | Runtime state | Both engines and workers are active; workers report ready. Engine heartbeats are under five seconds old; both report `may_open=true`, `strategy_errors=[]` and zero stream resets. All four cgroups have zero OOM events and services have zero restarts. Authenticated reads match six positions to six exact full-size native stops in each realm |
-| Execution | Both engines run embedded callbacks with no strategy children. Both engine units use `Type=notify`, `WatchdogSec=30s`; anonymous memory is 109.1 MiB demo / 71.2 MiB mainnet. The invalid filled-state repair remains deployed |
-| Stored previous commit | `32858587f70755980332a3fefd048446980659d8`; the existing demo drill refuses this pair because runtime inputs differ. The completed 02:47–02:48 drill covers `a4189a48`/`32858587` only; it does not qualify this predecessor pair |
-| Disk | 29.26 GiB free on `/var/lib`; watchdog minimum 25 GiB. Every pre-deploy WAL filename remains present and nonshrinking: 58 demo files; mainnet grows from 56 to 57 files. No retained reader is removed |
+| Execution | Both engines run embedded callbacks with no strategy children. Both engine units use `Type=notify`, `WatchdogSec=30s`; anonymous memory is 241.2 MiB demo / 71.9 MiB mainnet. The invalid filled-state repair remains deployed |
+| Stored previous commit | `fc2ad99c64cfa6652739caccd9da2ced2dc37583`. The explicit demo drill selects older `32858587` and restores `905c10d3` from 05:29:01 to 05:31:12 UTC, verifying fresh account readiness and loaded images. Both generation markers and mainnet PIDs stay unchanged |
+| Disk | 27.44 GiB free on `/var/lib`; watchdog minimum 25 GiB. All 58 demo and 57 mainnet WAL files survive deployment and the drill without shrinking. No retained reader is removed |
 | Timer observation | The natural 04:15 demo probe records one source-to-submit sample of 19.84 ms including venue network; decision 137.1 µs and observed barrier 1.11 ms. One sample is not a latency distribution (`/tmp/r3-fc2ad99c-demo-probe-journal.log`) |
 | Entry permissions | CARRY/LONG/EXODUS enabled in both realms, demo PROBE enabled; original permissions survive handover |
-| Current implementation | Borrowed exact prices, reused order projections, fresh route membership bits, exact storage bit bounds and earlier venue-actor scheduling are deployed. Demo passes 300 seconds through 04:18:23 UTC before mainnet handover at 04:18:24; deploy completes 04:18:56. Host Python contains only pip 24.0 and websocket-client 1.9.1. [Implementation checkpoint](docs/tier1-round-handoff.md); [Round-3 plan](docs/tier1-audit-round-3.md) |
-| Qualified local follow-up | The deployed source passes 1,962 developer Rust tests, 1,646 Python tests, 1,961 local release tests, repeated heavy crash simulations and copied-WAL restart/stop-repair fixtures. Hosted debug passes 1,964 tests and hosted release tests pass 1,962. Separate hosted latency qualification fails decision p99 at 9.3 µs versus 9.0 µs; submit p50 1.16 ms passes |
-| Pending operational follow-up | The local demo helper accepts an explicitly qualified retained predecessor pair; 29 focused tests pass. Workflow installation and the actual selected-pair drill remain pending. Fixed hosted comparison shows the unchanged baseline failing the old decision budget in two of four cells, so only its decision reference changes to 9.3 µs; fresh qualification remains pending. The Mac source meets the original point targets, with only 2.881 µs narrow-submit headroom |
+| Current implementation | Round-3 embedded/default-Bybit execution and the explicitly qualified demo-pair helper are deployed. Demo passes 300 seconds through 05:26:22 UTC; unchanged mainnet keeps running. Host Python contains only pip 24.0 and websocket-client 1.9.1. [Implementation checkpoint](docs/tier1-round-handoff.md); [Round-3 plan](docs/tier1-audit-round-3.md) |
+| Qualified local follow-up | The deployed source passes 1,962 developer Rust tests, 1,661 Python tests, 1,961 local release tests, repeated heavy crash simulations and copied-WAL restart/stop-repair fixtures. Hosted debug passes 1,964 tests. Fresh qualification [34085706786](https://github.com/rob435/liquidity-migration/actions/runs/34085706786) passes 1,962 release tests and account workloads but fails decision p99 at 14.3 µs versus 13.95 µs; submit p50 1.16 ms passes. No qualified archive is uploaded |
+| Pending qualification | R3-06 matches its four-run decision reference with four fixed candidate runs and median run-level metrics, retaining all individual results. The decision/submit limits remain 13.95 µs / 1.635 ms. The selected-pair helper passes 29 focused tests and the actual demo drill. The accepted Mac point has only 2.881 µs narrow-submit headroom; the latest unchanged-binary cell misses at 5.079039 ms |
 
 | Release image | SHA256 |
 | --- | --- |
-| Engine, loaded in both realms | `6d59459580fae52b0bc972009d55dbb16a4232642b12cb6844c0955719b0b95f` |
+| Engine, demo / installed `905c10d3` | `1d2eecb8c16a2792a655d1901654163f2d60f43e414b7bb25a34f725a5e6bfc7` |
+| Engine, mainnet retained `fc2ad99c` | `6d59459580fae52b0bc972009d55dbb16a4232642b12cb6844c0955719b0b95f` |
 | Signal worker, loaded in both realms | `36cf9d8d3a3b9d831be90c29f9b435c59690413e7a1d0cc8cddead76575e69af` |
-| Engine tools, installed companion | `a83a55a90865f3d26b5ae9c05b79356b84a0c411b4a8b8f739bb3806bd5810cb` |
+| Engine tools, installed companion | `a7a695f09046fce2bfc96c1a2d9af3936ee0599fe97cbd8ae88b6f3e455ede2f` |
 
 | Open long position | Demo quantity / native stop | Mainnet quantity / native stop |
 | --- | --- | --- |

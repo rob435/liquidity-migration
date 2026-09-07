@@ -11,6 +11,7 @@ import platform
 import re
 import shlex
 import shutil
+import statistics
 import subprocess
 import tarfile
 import tempfile
@@ -20,6 +21,7 @@ from typing import Any, TextIO
 BINARIES = ("engine", "engine-tools", "signal-worker")
 CHECKS = ("release-tests", "account-state-soak", "engine-bench", "binary-smoke")
 METADATA = ("binaries.sha256", "qualification.json", "qualification.log")
+LATENCY_RUNS = 4
 
 
 def _latency_budget(repo: Path, runner_class: str | None) -> dict[str, Any]:
@@ -54,7 +56,7 @@ def _latency_budget(repo: Path, runner_class: str | None) -> dict[str, Any]:
     }
 
 
-def _check_latency(text: str, budget: dict[str, Any]) -> dict[str, Any]:
+def _latency_measurement(text: str, budget: dict[str, Any]) -> dict[str, Any]:
     result = dict(budget)
     result["measured_ns"], result["samples"] = {}, {}
     scales = {"ns": 1, "us": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
@@ -62,8 +64,9 @@ def _check_latency(text: str, budget: dict[str, Any]) -> dict[str, Any]:
         ("market to decision", "decision_p99_ns", 2),
         ("market to submit result", "submit_p50_ns", 0),
     ):
+        row_count = len(re.findall(r"^[ \t]*" + re.escape(segment) + r"(?:[ \t]|$)", text, re.MULTILINE))
         rows = re.findall(r"^\s*" + re.escape(segment) + r"\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*$", text, re.MULTILINE)
-        if len(rows) != 1 or int(rows[0][0]) <= 0:
+        if row_count != 1 or len(rows) != 1 or int(rows[0][0]) <= 0:
             raise ValueError(f"latency histogram is missing, duplicated or empty: {segment}")
         values = []
         for cell in rows[0][1:]:
@@ -79,8 +82,17 @@ def _check_latency(text: str, budget: dict[str, Any]) -> dict[str, Any]:
         measured = values[quantile]
         result["measured_ns"][metric] = measured
         result["samples"][metric] = int(rows[0][0])
-    failures = [f"{key}={value} exceeds {budget['limits_ns'][key]} ns"
-                for key, value in result["measured_ns"].items() if value > budget["limits_ns"][key]]
+    return result
+
+
+def _latency_failures(result: dict[str, Any]) -> list[str]:
+    return [f"{key}={value} exceeds {result['limits_ns'][key]} ns"
+            for key, value in result["measured_ns"].items() if value > result["limits_ns"][key]]
+
+
+def _check_latency(text: str, budget: dict[str, Any]) -> dict[str, Any]:
+    result = _latency_measurement(text, budget)
+    failures = _latency_failures(result)
     print("latency budget: " + json.dumps(result, sort_keys=True), flush=True)
     if failures:
         raise ValueError("latency budget failed: " + "; ".join(failures))
@@ -135,6 +147,55 @@ def _run(command: list[str], repo: Path, log: TextIO, commit: str) -> None:
             raise subprocess.CalledProcessError(process.returncode, command)
 
 
+def _qualify_latency(
+    repo: Path, release: Path, evidence: Path, log: TextIO, commit: str, budget: dict[str, Any],
+) -> dict[str, Any]:
+    bench = budget["bench"]
+    heading = f"latency qualification: {LATENCY_RUNS} fixed fresh-WAL runs; median of per-run metrics, not pooled quantiles\n"
+    print(heading, end="", flush=True)
+    log.write(heading)
+    runs = []
+    errors: list[Exception] = []
+    for index in range(1, LATENCY_RUNS + 1):
+        cell: dict[str, Any] = {"run": index}
+        start = log.tell()
+        try:
+            _run(
+                [str(release / "engine"), "bench", "--events", str(bench["events"]),
+                 "--rate", str(bench["rate"]), "--every", str(bench["every"]),
+                 "--symbols", ",".join(bench["symbols"]), "--wal", str(evidence / f"bench-{index}.wal")],
+                repo, log, commit,
+            )
+            log.flush()
+            with (evidence / "qualification.log").open() as bench_log:
+                bench_log.seek(start)
+                measured = _latency_measurement(bench_log.read(), budget)
+            failures = _latency_failures(measured)
+            cell.update(measured_ns=measured["measured_ns"], samples=measured["samples"],
+                        budget_passed=not failures, budget_failures=failures)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            cell["error"] = str(error)
+            errors.append(error)
+        runs.append(cell)
+        line = "latency cell: " + json.dumps(cell, sort_keys=True) + "\n"
+        print(line, end="", flush=True)
+        log.write(line)
+    if errors:
+        raise errors[0]
+    result = dict(budget)
+    result.update(aggregation="median_of_run_metrics", runs=runs, measured_ns={
+        metric: statistics.median(cell["measured_ns"][metric] for cell in runs)
+        for metric in budget["limits_ns"]
+    })
+    line = "latency budget: " + json.dumps(result, sort_keys=True) + "\n"
+    print(line, end="", flush=True)
+    log.write(line)
+    failures = _latency_failures(result)
+    if failures:
+        raise ValueError("latency budget failed: " + "; ".join(failures))
+    return result
+
+
 def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: str | None = None) -> None:
     import tomllib
 
@@ -142,7 +203,6 @@ def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: s
     if output.exists():
         raise ValueError(f"output already exists: {output}")
     budget = _latency_budget(repo, runner_class)
-    bench = budget["bench"]
     pinned = tomllib.loads((repo / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
     compiler = subprocess.check_output(
         [os.environ.get("RUSTC", "rustc"), "--version", "--verbose"], cwd=repo, text=True
@@ -212,31 +272,7 @@ def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: s
                 log,
                 commit,
             )
-            bench_start = log.tell()
-            _run(
-                [
-                    str(release / "engine"),
-                    "bench",
-                    "--events",
-                    str(bench["events"]),
-                    "--rate",
-                    str(bench["rate"]),
-                    "--every",
-                    str(bench["every"]),
-                    "--symbols",
-                    ",".join(bench["symbols"]),
-                    "--wal",
-                    str(evidence / "bench.wal"),
-                ],
-                repo,
-                log,
-                commit,
-            )
-            log.flush()
-            with (evidence / "qualification.log").open() as bench_log:
-                bench_log.seek(bench_start)
-                latency = _check_latency(bench_log.read(), budget)
-            log.write("latency budget: " + json.dumps(latency, sort_keys=True) + "\n")
+            latency = _qualify_latency(repo, release, evidence, log, commit, budget)
             for command in (
                 [str(release / "engine"), "--help"],
                 [str(release / "engine-tools"), "--help"],
