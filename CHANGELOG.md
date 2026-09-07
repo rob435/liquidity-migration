@@ -140,6 +140,27 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     executable bytes and completes all 700 orders with one barrier and zero
     failures. Narrow submit measures 5.079039 ms and misses 5 ms; decision
     targets pass. Retain this miss beside the earlier accepted point cell.
+    Commit `ecc3ea12` passes the developer gate with 1,962 Rust and 1,673
+    Python tests; hosted debug passes 1,964 Rust tests. Fresh qualification
+    `34088883848` passes 1,962 release tests and account workloads but fails
+    all four decision cells: 32.0 / 28.9 / 15.5 / 15.7 µs, median 22.3 µs
+    against 13.95 µs. Submit medians are 1.09 / 1.04 / 1.03 / 1.07 ms;
+    their median 1.055 ms passes. All 400 orders have one barrier and zero
+    failures. No qualified archive is uploaded. Keep R3-06 open; the fixed
+    four-cell estimator does not resolve the hosted failure.
+    Replace Linux absolute acceptance with an explicit same-worker relative
+    comparison against freshly built baseline source `a4189a48`: fixed
+    A B B A B A A B cells, 1.5× baseline medians, all build/check work first.
+    Keep absolute verdicts and the candidate-only archive layout. Darwin
+    retains absolute acceptance. A noisy baseline can hide a change; a
+    relative pass is not an absolute latency pass. All 79 qualifier tests
+    and three doc-link tests pass, including twice-baseline rejection and
+    actual final-cell binary mutation refusal. The old API reproduces the
+    22.3 µs absolute failure; the new contract preserves it as a diagnostic.
+    The fixed Mac after pair uses unchanged bytes: narrow submit 4.939775 ms,
+    wide decision p99 10.255 µs, 700 orders, one barrier each, zero failures.
+    Prior misses remain recorded; no runtime speedup or stable 5 ms bound
+    follows from this helper change. Fresh hosted qualification is pending.
     The final qualified-source Mac remeasurement records narrow decision
     p50 4.751 µs, submit p50 4.997119 ms and wide decision p99 15.047 µs.
     All 700 opportunities complete with one barrier each and zero failures.

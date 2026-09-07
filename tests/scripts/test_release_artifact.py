@@ -121,7 +121,7 @@ def _qualified_files(commit: str = COMMIT) -> dict[str, bytes]:
 def qualification_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, artifact_module: ModuleType, request: pytest.FixtureRequest,
 ) -> tuple[Path, str, Path, list[list[str]], dict[str, str]]:
-    decision_baseline, submit_baseline = getattr(request, "param", (40000, 4000000))
+    decision_baseline, submit_baseline, *paired = getattr(request, "param", (40000, 4000000))
     repo = tmp_path / "source"
     (repo / "engine").mkdir(parents=True)
     (repo / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.90.0"\n')
@@ -134,7 +134,7 @@ events = 2000
 rate = 100
 every = 20
 symbols = ["BTCUSDT"]
-[runners.{platform.system().lower()}-{platform.machine().lower()}]
+[runners.{"linux-x86_64" if paired else f"{platform.system().lower()}-{platform.machine().lower()}"}]
 status = "measured-fixture"
 decision_p99_ns = {decision_baseline}
 submit_p50_ns = {submit_baseline}
@@ -159,6 +159,18 @@ submit_p50_ns = {submit_baseline}
         capture_output=True,
     )
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    reference_commit = commit if paired else ""
+    if paired:
+        config = repo / "docs" / "execution-latency-budgets.toml"
+        config.write_text(config.read_text() + f'reference_commit = "{reference_commit}"\n')
+        (repo / "engine" / "Cargo.toml").write_text("# candidate source\n")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-qm", "Candidate source"],
+            cwd=repo, check=True, capture_output=True,
+        )
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     rustc = tmp_path / "rustc"
     rustc.write_text("#!/bin/sh\nprintf 'rustc 1.90.0 (fixture)\\nhost: fixture-host\\n'\n")
     rustc.chmod(0o755)
@@ -166,29 +178,38 @@ submit_p50_ns = {submit_baseline}
     target = tmp_path / "target"
     release = target / "fixture-host" / "release"
     calls: list[list[str]] = []
-    behavior: dict[str, str] = {}
+    behavior: dict[str, str] = {"reference_commit": reference_commit}
 
     def run(command: list[str], cwd: Path, log: TextIO, source_commit: str) -> None:
-        assert source_commit == commit
+        assert source_commit in (commit, reference_commit)
+        role = "A" if source_commit == reference_commit else "B"
         calls.append(command)
         log.write(shlex.join(command) + "\n")
         phase = command[1] if command[0] == "cargo" else Path(command[0]).name
         if phase == "build":
-            release.mkdir(parents=True)
+            expected_source = "# candidate source\n" if paired and role == "B" else "# fixture source\n"
+            assert (cwd / "Cargo.toml").read_text() == expected_source
+            behavior[f"build-{role}-cwd"] = str(cwd)
+            release.mkdir(parents=True, exist_ok=True)
             for name in BINARIES:
                 binary = release / name
-                binary.write_bytes(f"{name} at {commit}\n".encode())
+                binary.write_bytes(f"{name} at {source_commit}\n".encode())
                 binary.chmod(0o755)
         if len(command) > 1 and command[1] == "bench":
+            assert Path(command[0]).read_bytes() == f"engine at {source_commit}\n".encode()
             index = sum(len(call) > 1 and call[1] == "bench" for call in calls)
+            role_index = sum(len(call) > 1 and call[1] == "bench" and call[0] == command[0] for call in calls)
             wal = Path(command[command.index("--wal") + 1])
             assert not wal.exists()
             wal.write_bytes(f"fixture WAL {index}\n".encode())
-            log.write(behavior.get(f"bench-{index}", behavior.get("bench", """  market to decision               100        20.0us        30.0us         40.0us        50.0us     50.0us
+            log.write(behavior.get(f"bench-{index}", behavior.get(f"bench-{role}-{role_index}", behavior.get(f"bench-{role}", behavior.get("bench", """  market to decision               100        20.0us        30.0us         40.0us        50.0us     50.0us
   market to submit result          100        4.00ms        5.00ms         6.00ms        7.00ms     7.00ms
-""")))
+""")))))
             if behavior.get("fail-bench") == str(index):
                 raise subprocess.CalledProcessError(7, command)
+            if index == 8 and behavior.get("mutate-latency-image"):
+                changed = Path(calls[-8][0]) if behavior["mutate-latency-image"] == "A" else release / "engine"
+                changed.write_bytes(b"changed after the last latency cell\n")
         if phase == behavior.get("fail"):
             raise subprocess.CalledProcessError(7, command)
         if phase == "signal-worker":
@@ -203,11 +224,183 @@ submit_p50_ns = {submit_baseline}
 
 def _latency_cell(decision: int, submit: int, *, decision_scale: int = 1, submit_scale: int = 1) -> str:
     rows = (
-        ("market to decision", [1000, 2000, decision, 20000, 20000], decision_scale),
+        ("market to decision", [1000, 2000, decision, max(20000, decision), max(20000, decision)], decision_scale),
         ("market to submit result", [submit, 2 * submit, 3 * submit, 4 * submit, 4 * submit], submit_scale),
     )
     return "".join(f"{name} 100 " + " ".join(f"{value * scale}ns" for value in values) + "\n"
                    for name, values, scale in rows)
+
+
+@pytest.mark.parametrize("qualification_workspace", [(9300, 1090000, True)], indirect=True)
+def test_paired_source_qualifies_a_slow_host_without_claiming_an_absolute_pass(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]],
+) -> None:
+    repo, commit, target, calls, behavior = qualification_workspace
+    behavior["bench-A"] = _latency_cell(30000, 1090000)
+    for index, (decision, submit) in enumerate(zip((32000, 28900, 15500, 15700), (1090000, 1040000, 1030000, 1070000)), 1):
+        behavior[f"bench-B-{index}"] = _latency_cell(decision, submit)
+    output = tmp_path / "qualified.tar.gz"
+    artifact_module.qualify(repo, commit, output, target, runner_class="linux-x86_64")
+    extracted = tmp_path / "verified"
+    manifest = artifact_module.verify(output, commit, extracted)
+    latency = manifest["latency_budget"]
+    assert latency["contract"] == "paired_source_relative"
+    assert latency["measured_ns"] == {"decision_p99_ns": 22300, "submit_p50_ns": 1055000}
+    assert latency["reference_measured_ns"] == {"decision_p99_ns": 30000, "submit_p50_ns": 1090000}
+    assert latency["limits_ns"] == {"decision_p99_ns": 13950, "submit_p50_ns": 1635000}
+    assert latency["relative_limits_ns"] == {"decision_p99_ns": 45000, "submit_p50_ns": 1635000}
+    assert latency["relative_passed"] is True and latency["absolute_passed"] is False
+    assert latency["reference_absolute_passed"] is False
+    assert latency["aggregation"] == "median_of_run_metrics" and "samples" not in latency
+    assert [cell["image"] for cell in latency["runs"]] == list("ABBABAAB")
+    assert all(not cell["budget_passed"] for cell in latency["runs"])
+    benches = [command for command in calls if len(command) > 1 and command[1] == "bench"]
+    assert len(benches) == len({command[command.index("--wal") + 1] for command in benches}) == 8
+    assert calls[-8:] == benches
+    assert [command[1] for command in calls if command[0] == "cargo"] == ["build", "build", "test"]
+    builds = [command for command in calls if command[:2] == ["cargo", "build"]]
+    assert builds[0] == builds[1]
+    assert builds[0][-4:] == ["--target-dir", str(target), "--target", "fixture-host"]
+    reference_commit = behavior["reference_commit"]
+    assert reference_commit != commit
+    assert latency["images"]["A"] == {
+        "commit": reference_commit, "source": "fresh_reference_source_build",
+        "binaries": {name: hashlib.sha256(f"{name} at {reference_commit}\n".encode()).hexdigest() for name in BINARIES},
+    }
+    assert latency["images"]["B"] == {
+        "commit": commit, "source": "candidate_qualification_build", "binaries": manifest["binaries"],
+    }
+    assert behavior["build-B-cwd"] == str(repo / "engine")
+    assert not Path(behavior["build-A-cwd"]).exists()
+    assert not Path(benches[0][0]).parent.exists()
+    assert (repo / "engine" / "Cargo.toml").read_text() == "# candidate source\n"
+    assert subprocess.check_output(["git", "status", "--porcelain"], cwd=repo, text=True) == ""
+    assert {path.name for path in extracted.iterdir()} == {*BINARIES, "binaries.sha256", "qualification.json", "qualification.log"}
+    log = (extracted / "qualification.log").read_text()
+    assert all(behavior[f"bench-B-{index}"] in log for index in range(1, 5))
+    assert log.count(behavior["bench-A"]) == 4
+    assert log.index("latency images:") < log.index("latency qualification:")
+    assert '"absolute_passed": false' in log and '"relative_passed": true' in log
+
+
+@pytest.mark.parametrize("qualification_workspace", [(9300, 1090000, True)], indirect=True)
+@pytest.mark.parametrize("metric", ["decision_p99_ns", "submit_p50_ns"])
+def test_twice_the_same_worker_reference_fails_either_relative_metric_after_all_eight_cells(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]], metric: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, commit, target, calls, behavior = qualification_workspace
+    behavior["bench-A"] = _latency_cell(10000, 1000000)
+    behavior["bench-B"] = _latency_cell(10000, 1000000, decision_scale=2 if metric == "decision_p99_ns" else 1,
+                                      submit_scale=2 if metric == "submit_p50_ns" else 1)
+    output = tmp_path / "unqualified.tar.gz"
+    with pytest.raises(ValueError, match=f"relative latency budget failed: {metric}="):
+        artifact_module.qualify(repo, commit, output, target, runner_class="linux-x86_64")
+    benches = [command for command in calls if len(command) > 1 and command[1] == "bench"]
+    assert len(benches) == 8 and not output.exists()
+    assert not Path(benches[0][0]).parent.exists()
+    summary = next(line.removeprefix("latency budget: ") for line in capsys.readouterr().out.splitlines()
+                   if line.startswith("latency budget: "))
+    verdict = json.loads(summary)
+    assert verdict["relative_passed"] is False
+    assert len(verdict["runs"]) == 8
+
+
+@pytest.mark.parametrize("qualification_workspace", [(9300, 1090000, True)], indirect=True)
+def test_doubling_an_already_fast_candidate_can_remain_within_the_relative_contract(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]],
+) -> None:
+    repo, commit, target, _, behavior = qualification_workspace
+    behavior["bench-A"] = _latency_cell(20000, 2000000)
+    behavior["bench-B"] = _latency_cell(10000, 1000000, decision_scale=2, submit_scale=2)
+    output = tmp_path / "qualified.tar.gz"
+    artifact_module.qualify(repo, commit, output, target, runner_class="linux-x86_64")
+    latency = artifact_module.verify(output, commit)["latency_budget"]
+    assert latency["measured_ns"] == latency["reference_measured_ns"]
+    assert latency["relative_passed"] is True and latency["absolute_passed"] is False
+
+
+@pytest.mark.parametrize("qualification_workspace", [(9300, 1090000, True)], indirect=True)
+def test_reference_build_failure_does_not_fall_back_to_the_candidate(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]],
+) -> None:
+    repo, commit, target, calls, behavior = qualification_workspace
+    behavior["fail"] = "build"
+    output = tmp_path / "unqualified.tar.gz"
+    with pytest.raises(subprocess.CalledProcessError):
+        artifact_module.qualify(repo, commit, output, target, runner_class="linux-x86_64")
+    assert len(calls) == 1 and calls[0][:2] == ["cargo", "build"]
+    assert not Path(behavior["build-A-cwd"]).exists() and not output.exists()
+
+
+@pytest.mark.parametrize("qualification_workspace", [(9300, 1090000, True)], indirect=True)
+@pytest.mark.parametrize("image", ["A", "B"])
+def test_paired_images_remain_frozen_through_the_last_cell(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]], image: str,
+) -> None:
+    repo, commit, target, calls, behavior = qualification_workspace
+    behavior["bench"] = _latency_cell(9300, 1090000)
+    behavior["mutate-latency-image"] = image
+    output = tmp_path / "unqualified.tar.gz"
+    message = "latency reference binary bytes changed during qualification" if image == "A" else "release binary bytes changed during qualification"
+    with pytest.raises(ValueError, match=message):
+        artifact_module.qualify(repo, commit, output, target, runner_class="linux-x86_64")
+    assert len([command for command in calls if len(command) > 1 and command[1] == "bench"]) == 8
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("qualification_workspace", [(9300, 1090000, True)], indirect=True)
+@pytest.mark.parametrize("fault", ["missing-source", "different-compiler"])
+def test_an_unavailable_or_differently_pinned_reference_is_fatal_before_any_build(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]], fault: str,
+) -> None:
+    repo, _, target, calls, behavior = qualification_workspace
+
+    def commit_fixture() -> str:
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-qm", "Reference fixture"],
+            cwd=repo, check=True, capture_output=True,
+        )
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    reference_commit = "f" * 40
+    if fault == "different-compiler":
+        (repo / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.89.0"\n')
+        reference_commit = commit_fixture()
+        (repo / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.90.0"\n')
+    config = repo / "docs" / "execution-latency-budgets.toml"
+    config.write_text(config.read_text().replace(behavior["reference_commit"], reference_commit))
+    commit = commit_fixture()
+    output = tmp_path / "unqualified.tar.gz"
+    with pytest.raises(subprocess.CalledProcessError if fault == "missing-source" else ValueError):
+        artifact_module.qualify(repo, commit, output, target, runner_class="linux-x86_64")
+    assert not calls and not output.exists()
+
+
+def test_registered_linux_source_and_absolute_darwin_contracts(
+    artifact_module: ModuleType, capsys: pytest.CaptureFixture[str],
+) -> None:
+    linux = artifact_module._latency_budget(ROOT, "linux-x86_64")
+    assert linux["contract"] == "paired_source_relative"
+    assert linux["reference_commit"] == "a4189a4897409e65acba7a2078b964986ceea928"
+    assert linux["limits_ns"] == {"decision_p99_ns": 13950, "submit_p50_ns": 1635000}
+    darwin = artifact_module._latency_budget(ROOT, "darwin-arm64")
+    assert darwin["contract"] == "absolute" and "reference_commit" not in darwin
+    with pytest.raises(ValueError, match="latency budget failed"):
+        artifact_module._check_latency(_latency_cell(30000, 1090000), linux)
+    standalone = artifact_module._check_latency(_latency_cell(10000, 1090000), linux)
+    assert standalone["contract"] == "absolute" and standalone["reference_commit"] == linux["reference_commit"]
+    assert "reference_measured_ns" not in standalone
+    assert all(json.loads(line.removeprefix("latency budget: "))["contract"] == "absolute"
+               for line in capsys.readouterr().out.splitlines() if line.startswith("latency budget: "))
 
 
 @pytest.mark.parametrize("qualification_workspace", [(9300, 1090000)], indirect=True)
@@ -261,14 +454,17 @@ def test_doubling_either_histogram_across_all_four_cells_fails_qualification(
     assert not output.exists()
 
 
+@pytest.mark.parametrize("qualification_workspace", [(40000, 4000000), (9300, 1090000, True)], indirect=True)
 @pytest.mark.parametrize("fault", ["process", "missing", "empty", "unit", "duplicate", "malformed-duplicate", "nan", "unordered"])
-def test_one_invalid_cell_is_fatal_after_all_four_cells_execute(
+def test_one_invalid_cell_is_fatal_after_all_fixed_cells_execute(
     tmp_path: Path, artifact_module: ModuleType,
     qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]], fault: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     repo, commit, target, calls, behavior = qualification_workspace
     text = _latency_cell(9300, 1090000)
+    behavior["bench"] = text
+    paired = bool(behavior["reference_commit"])
     if fault == "process":
         behavior["fail-bench"] = "1"
     elif fault == "missing":
@@ -288,11 +484,11 @@ def test_one_invalid_cell_is_fatal_after_all_four_cells_execute(
     behavior["bench-1"] = text
     output = tmp_path / "unqualified.tar.gz"
     with pytest.raises(subprocess.CalledProcessError if fault == "process" else ValueError):
-        artifact_module.qualify(repo, commit, output, target)
-    assert len([command for command in calls if len(command) > 1 and command[1] == "bench"]) == 4
+        artifact_module.qualify(repo, commit, output, target, runner_class="linux-x86_64" if paired else None)
+    assert len([command for command in calls if len(command) > 1 and command[1] == "bench"]) == (8 if paired else 4)
     verdicts = [json.loads(line.removeprefix("latency cell: "))
                 for line in capsys.readouterr().out.splitlines() if line.startswith("latency cell: ")]
-    assert len(verdicts) == 4
+    assert len(verdicts) == (8 if paired else 4)
     assert "error" in verdicts[0]
     assert all(cell["budget_passed"] for cell in verdicts[1:])
     assert not output.exists()
@@ -379,6 +575,8 @@ def test_qualification_runs_on_demand_and_uploads_only_after_it_passes() -> None
     assert not steps[qualify].get("continue-on-error", False)
     assert "rust-soak-bench" not in workflow["jobs"]
     assert "--runner-class linux-x86_64" in steps[qualify]["run"]
+    checkout = next(step for step in steps if "actions/checkout@" in step.get("uses", ""))
+    assert checkout["with"]["fetch-depth"] == 0
 
 
 def test_deploy_missing_qualified_artifact_never_compiles_on_host(tmp_path: Path) -> None:

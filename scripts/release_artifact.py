@@ -46,14 +46,21 @@ def _latency_budget(repo: Path, runner_class: str | None) -> dict[str, Any]:
     symbols = bench.get("symbols")
     if not isinstance(symbols, list) or not symbols or any(not isinstance(item, str) or not item for item in symbols):
         raise ValueError("latency bench symbols must be nonempty strings")
-    return {
+    result = {
         "runner_class": selected,
         "baseline_status": baseline["status"],
         "baseline_ns": {key: baseline[key] for key in metrics},
         "limits_ns": {key: math.floor(baseline[key] * ratio) for key in metrics},
         "maximum_baseline_ratio": ratio,
         "bench": bench,
+        "contract": "absolute",
     }
+    if selected == "linux-x86_64" and "reference_commit" in baseline:
+        reference = baseline["reference_commit"]
+        if not isinstance(reference, str):
+            raise ValueError("latency reference commit must be a full SHA")
+        result.update(contract="paired_source_relative", reference_commit=_commit(reference))
+    return result
 
 
 def _latency_measurement(text: str, budget: dict[str, Any]) -> dict[str, Any]:
@@ -92,6 +99,7 @@ def _latency_failures(result: dict[str, Any]) -> list[str]:
 
 def _check_latency(text: str, budget: dict[str, Any]) -> dict[str, Any]:
     result = _latency_measurement(text, budget)
+    result["contract"] = "absolute"
     failures = _latency_failures(result)
     print("latency budget: " + json.dumps(result, sort_keys=True), flush=True)
     if failures:
@@ -149,22 +157,27 @@ def _run(command: list[str], repo: Path, log: TextIO, commit: str) -> None:
 
 def _qualify_latency(
     repo: Path, release: Path, evidence: Path, log: TextIO, commit: str, budget: dict[str, Any],
+    reference: Path | None = None, images: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     bench = budget["bench"]
-    heading = f"latency qualification: {LATENCY_RUNS} fixed fresh-WAL runs; median of per-run metrics, not pooled quantiles\n"
+    order = "ABBABAAB" if reference is not None else "B" * LATENCY_RUNS
+    heading = f"latency qualification: {order}; fixed fresh-WAL runs; median of per-run metrics, not pooled quantiles\n"
     print(heading, end="", flush=True)
     log.write(heading)
     runs = []
     errors: list[Exception] = []
-    for index in range(1, LATENCY_RUNS + 1):
-        cell: dict[str, Any] = {"run": index}
+    for index, image in enumerate(order, 1):
+        cell: dict[str, Any] = {"run": index, "image": image}
+        directory = reference if image == "A" else release
+        assert directory is not None
+        source_commit = budget["reference_commit"] if image == "A" else commit
         start = log.tell()
         try:
             _run(
-                [str(release / "engine"), "bench", "--events", str(bench["events"]),
+                [str(directory / "engine"), "bench", "--events", str(bench["events"]),
                  "--rate", str(bench["rate"]), "--every", str(bench["every"]),
                  "--symbols", ",".join(bench["symbols"]), "--wal", str(evidence / f"bench-{index}.wal")],
-                repo, log, commit,
+                repo, log, source_commit,
             )
             log.flush()
             with (evidence / "qualification.log").open() as bench_log:
@@ -184,15 +197,28 @@ def _qualify_latency(
         raise errors[0]
     result = dict(budget)
     result.update(aggregation="median_of_run_metrics", runs=runs, measured_ns={
-        metric: statistics.median(cell["measured_ns"][metric] for cell in runs)
+        metric: statistics.median(cell["measured_ns"][metric] for cell in runs if cell["image"] == "B")
         for metric in budget["limits_ns"]
     })
+    failures = _latency_failures(result)
+    result.update(absolute_passed=not failures, absolute_failures=failures)
+    if reference is not None:
+        reference_measured = {
+            metric: statistics.median(cell["measured_ns"][metric] for cell in runs if cell["image"] == "A")
+            for metric in budget["limits_ns"]
+        }
+        relative_limits = {metric: value * budget["maximum_baseline_ratio"] for metric, value in reference_measured.items()}
+        reference_failures = _latency_failures({**budget, "measured_ns": reference_measured})
+        failures = _latency_failures({**result, "limits_ns": relative_limits})
+        result.update(reference_measured_ns=reference_measured, relative_limits_ns=relative_limits,
+                      reference_absolute_passed=not reference_failures, reference_absolute_failures=reference_failures,
+                      relative_passed=not failures, relative_failures=failures, images=images)
     line = "latency budget: " + json.dumps(result, sort_keys=True) + "\n"
     print(line, end="", flush=True)
     log.write(line)
-    failures = _latency_failures(result)
     if failures:
-        raise ValueError("latency budget failed: " + "; ".join(failures))
+        prefix = "relative latency budget failed: " if reference is not None else "latency budget failed: "
+        raise ValueError(prefix + "; ".join(failures))
     return result
 
 
@@ -214,28 +240,41 @@ def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: s
         raise ValueError("cannot read the Rust compiler host target")
     native_target = host.group(1)
     release = target / native_target / "release"
+    build = ["cargo", "build", "--release", "--locked", "--workspace", "--bins", "--examples",
+             "--target-dir", str(target), "--target", native_target]
     with tempfile.TemporaryDirectory(prefix="liquidity-qualification-") as temporary:
         evidence = Path(temporary)
         with (evidence / "qualification.log").open("w") as log:
-            _run(
-                [
-                    "cargo",
-                    "build",
-                    "--release",
-                    "--locked",
-                    "--workspace",
-                    "--bins",
-                    "--examples",
-                    "--target-dir",
-                    str(target),
-                    "--target",
-                    native_target,
-                ],
-                repo / "engine",
-                log,
-                commit,
-            )
+            reference = None
+            images: dict[str, Any] = {}
+            if budget["contract"] == "paired_source_relative":
+                reference_commit = budget["reference_commit"]
+                line = f"latency reference source: {reference_commit}; fresh build with the candidate compiler, target and build command\n"
+                print(line, end="", flush=True)
+                log.write(line)
+                source = evidence / "reference-source"
+                source_archive = evidence / "reference-source.tar"
+                subprocess.run(
+                    ["git", "archive", "--format=tar", f"--output={source_archive}", reference_commit],
+                    cwd=repo, check=True,
+                )
+                with tarfile.open(source_archive) as archive:
+                    archive.extractall(source, filter="data")
+                source_archive.unlink()
+                reference_pinned = tomllib.loads((source / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+                if reference_pinned != pinned:
+                    raise ValueError("latency reference and candidate must use the same pinned Rust compiler")
+                _run(build, source / "engine", log, reference_commit)
+                reference = evidence / "reference-release"
+                reference.mkdir()
+                for name in BINARIES:
+                    shutil.copy2(release / name, reference / name)
+                images["A"] = {"commit": reference_commit, "binaries": _binary_hashes(reference),
+                               "source": "fresh_reference_source_build"}
+                shutil.rmtree(source)
+            _run(build, repo / "engine", log, commit)
             hashes = _binary_hashes(release)
+            images["B"] = {"commit": commit, "binaries": hashes, "source": "candidate_qualification_build"}
             _run(
                 [
                     "cargo",
@@ -272,13 +311,23 @@ def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: s
                 log,
                 commit,
             )
-            latency = _qualify_latency(repo, release, evidence, log, commit, budget)
             for command in (
                 [str(release / "engine"), "--help"],
                 [str(release / "engine-tools"), "--help"],
                 [str(release / "signal-worker"), "--help"],
             ):
                 _run(command, repo, log, commit)
+            if _binary_hashes(release) != hashes:
+                raise ValueError("release binary bytes changed during qualification")
+            if reference is not None:
+                if _binary_hashes(reference) != images["A"]["binaries"]:
+                    raise ValueError("latency reference binary bytes changed during qualification")
+                line = "latency images: " + json.dumps({"rustc": compiler, "target": native_target, "images": images}, sort_keys=True) + "\n"
+                print(line, end="", flush=True)
+                log.write(line)
+            latency = _qualify_latency(repo, release, evidence, log, commit, budget, reference, images)
+            if reference is not None and _binary_hashes(reference) != images["A"]["binaries"]:
+                raise ValueError("latency reference binary bytes changed during qualification")
         _check_source(repo, commit)
         if _binary_hashes(release) != hashes:
             raise ValueError("release binary bytes changed during qualification")
