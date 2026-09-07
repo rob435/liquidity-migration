@@ -85,9 +85,11 @@ def recorder_handover(tmp_path: Path):
         "'implementation':IMPLEMENTATION})+'\\n')\n"
     )
     script.write_text("IMPLEMENTATION='python'\n" + sample)
-    incumbent_unit = subprocess.check_output(
-        ["git", "show", "29366d3a:deploy/systemd/" + unit], cwd=ROOT, text=True,
-    ).replace("/opt/liquidity-migration/.venv/bin/python", sys.executable)
+    incumbent_unit = (
+        "[Service]\nType=oneshot\n"
+        f"WorkingDirectory={repo}\n"
+        f"ExecStart={sys.executable} scripts/runtime/record_equity.py\n"
+    )
     (repo / "deploy/systemd" / unit).write_text(incumbent_unit)
     (units / unit).write_text(incumbent_unit)
 

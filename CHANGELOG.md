@@ -37,6 +37,13 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     also matches all six fresh host artifacts, Influx bytes and both curves;
     the local HTTP fixture uses no production push credentials. Deployment
     verification remains pending at this source checkpoint.
+  - Workflow `34145183215` stops at CI with `fatal: invalid object name
+    '29366d3a'`: the handover fixture reads history absent from a shallow
+    checkout. Define the old unit's execution contract inside the fixture.
+    A real shallow clone reproduces five setup errors before the change and
+    passes all five cases afterward; all 99 focused deployment tests pass.
+    The unchanged deployment implementation still fails both deleted-script
+    regressions. No host deployment starts in this refused run.
 
 - **2026-09-06 — Round-3 embedded execution.**
   - Replace child strategy execution with one embedded path for production,
