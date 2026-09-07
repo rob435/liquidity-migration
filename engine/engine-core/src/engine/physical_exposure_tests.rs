@@ -67,10 +67,10 @@ fn update(id: &str, execution: &str, side: Side, quantity: &str) -> OrderUpdate 
 #[tokio::test(start_paused = true)]
 async fn exact_physical_live_replay_rotation_restart_preserves_external_baseline() {
     let prior = vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["physical-owner".into()],
             symbols: vec!["BTCUSDT".into()],
-        },
+        }),
         WalRecord::LatchCleared {
             wall_ts_ms: 1,
             note: "accepted manual half-unit".into(),

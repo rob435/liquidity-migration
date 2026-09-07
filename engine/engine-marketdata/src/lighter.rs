@@ -32,7 +32,8 @@
 use crate::symbols::intern;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use engine_public::venues::lighter::markets::{engine_symbol, Market};
 use engine_public::venues::lighter::public;
@@ -419,10 +420,10 @@ impl Worker {
         // is the Bybit feed's rule, which the two newer feeds did not carry.
         let mut pong_due: Option<Instant> = None;
         loop {
-            let deadline = tokio::time::Instant::from_std(match pong_due {
+            let deadline = match pong_due {
                 Some(due) => due.min(last_ping + PING_INTERVAL),
                 None => last_ping + PING_INTERVAL,
-            });
+            };
             tokio::select! {
                 fresh = self.admissions.recv() => {
                     let Some(symbol) = fresh else { return Err(Gone) };
@@ -880,7 +881,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn empty_demand_after_retirement_stays_idle_until_readmission() {
     use std::future::Future;
     let subs = [Subscription {

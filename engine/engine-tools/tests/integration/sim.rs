@@ -23,7 +23,7 @@ fn options(seed: u64, tag: &str) -> SimOptions {
     opts
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn without_faults_the_simulation_keeps_the_backtest_promise() {
     let _alone = ONE_AT_A_TIME.lock().await;
     let mut opts = options(1, "clean");
@@ -40,7 +40,7 @@ async fn without_faults_the_simulation_keeps_the_backtest_promise() {
     assert_eq!(first.venue, second.venue);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn faults_and_a_death_leave_the_log_and_the_venue_agreeing() {
     let _alone = ONE_AT_A_TIME.lock().await;
     let mut injected = std::collections::BTreeSet::new();
@@ -73,7 +73,7 @@ async fn faults_and_a_death_leave_the_log_and_the_venue_agreeing() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn one_seed_replays_byte_for_byte_under_heavy_faults() {
     let _alone = ONE_AT_A_TIME.lock().await;
     let mut opts = options(7, "heavy");

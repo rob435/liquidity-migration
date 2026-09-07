@@ -81,10 +81,10 @@ pub fn replay_identities(replayed: &[WalRecord]) -> Result<Option<IdentityState>
             }
             registry = Some(candidate.clone());
         }
-        if let WalRecord::Names {
+        if let WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies,
             symbols,
-        }
+        })
         | WalRecord::SegmentBase {
             strategies,
             symbols,

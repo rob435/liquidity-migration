@@ -152,7 +152,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// account before the first message is allowed in.
     ///
     /// Strategy plug names are acceptable for simple callers. Fleet assembly
-    /// uses [`Engine::boot_as`] so logs and heartbeats carry sleeve names.
+    /// uses [`Engine::boot_as_exact`] so logs and heartbeats carry sleeve names.
     pub async fn boot(
         settings: &EngineSection,
         config_sha256: &str,
@@ -192,7 +192,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         sleeves: &[String],
         replayed: &[WalRecord],
     ) -> Result<Self, EngineError> {
-        Self::boot_as_with_execution(
+        Self::boot_as_with_instruments(
             settings,
             config_sha256,
             wal,
@@ -201,13 +201,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             strategies,
             sleeves,
             replayed,
-            crate::strategy_process::host::CallbackExecution::Embedded,
+            false,
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn boot_as_isolated(
+    pub async fn boot_as_exact(
         settings: &EngineSection,
         config_sha256: &str,
         wal: W,
@@ -216,9 +216,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         strategies: Vec<Box<dyn Strategy>>,
         sleeves: &[String],
         replayed: &[WalRecord],
-        executable: std::path::PathBuf,
     ) -> Result<Self, EngineError> {
-        Self::boot_as_with_execution(
+        Self::boot_as_with_instruments(
             settings,
             config_sha256,
             wal,
@@ -227,13 +226,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             strategies,
             sleeves,
             replayed,
-            crate::strategy_process::host::CallbackExecution::Isolated { executable },
+            true,
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn boot_as_with_execution(
+    async fn boot_as_with_instruments(
         settings: &EngineSection,
         config_sha256: &str,
         mut wal: W,
@@ -242,7 +241,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         strategies: Vec<Box<dyn Strategy>>,
         sleeves: &[String],
         replayed: &[WalRecord],
-        execution: crate::strategy_process::host::CallbackExecution,
+        require_exact_instruments: bool,
     ) -> Result<Self, EngineError> {
         if !(1..=crate::config::MAX_GROUP_FLUSH_MS).contains(&settings.group_flush_ms) {
             return Err(EngineError::Boot(format!(
@@ -254,27 +253,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // below, so a fill the venue saw while this process was down seeds
         // every accounting view the same way a delivered one would have.
 
-        let require_exact_instruments = matches!(
-            &execution,
-            crate::strategy_process::host::CallbackExecution::Isolated { .. }
-        );
-        let mut callbacks = if require_exact_instruments {
-            let reader = wal.callback_reader()?.ok_or_else(|| {
-                EngineError::Boot("isolated callbacks require a durable callback reader".into())
-            })?;
-            crate::strategy_process::host::CallbackHost::new_paged(
-                execution,
-                &strategies,
-                replayed,
-                reader,
-            )
-        } else {
-            crate::strategy_process::host::CallbackHost::new(execution, &strategies, replayed)
+        use crate::callback_recovery::host::{CallbackExecution, CallbackHost};
+        let mut callbacks = match wal.callback_reader()? {
+            Some(reader) => {
+                CallbackHost::new_paged(CallbackExecution::Embedded, &strategies, replayed, reader)
+            }
+            None => CallbackHost::new(CallbackExecution::Embedded, &strategies, replayed),
         }
         .map_err(EngineError::Boot)?;
-        if callbacks.isolated() {
+        if callbacks.recovering {
             let reader = wal.callback_reader()?.ok_or_else(|| {
-                EngineError::Boot("isolated callbacks require an order source reader".into())
+                EngineError::Boot("retained callbacks require their WAL reader".into())
             })?;
             callbacks
                 .order_news
@@ -338,10 +327,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             source: "engine".into(),
             text: "live: orders are sent, each one gated by the risk kernel".to_string(),
         })?;
-        // Say what the ids mean before any record uses one. Without this every
-        // later line names a number, and a log read a week later cannot say
-        // which coin an order was for.
-        wal.append(&names_record(&names, &market))?;
         for state in initial_global_checkpoints.values() {
             wal.append(&WalRecord::StrategyGlobalCheckpoint {
                 wall_ts_ms: boot_ms,
@@ -548,7 +533,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 id = %client_order_id,
                 "this order ended while the engine was down; recording the ending"
             );
-            let owners = callbacks.isolated().then(|| {
+            let owners = callbacks.recovering.then(|| {
                 orders
                     .owner_of(&client_order_id)
                     .into_iter()
@@ -609,6 +594,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 names,
                 timers: Timers::default(),
                 pending: VecDeque::new(),
+                callback_actions: VecDeque::new(),
                 checkpoints: strategy_checkpoints,
                 global_checkpoints: strategy_global_checkpoints,
                 events: strategy_events,
@@ -652,6 +638,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             dispatches,
             portfolio_controls,
             portfolio_dirty: false,
+            strategy_barrier_pending: false,
+            strategy_runtime_retirements: BTreeSet::new(),
             portfolio_cursor: 0,
             portfolio_physical_after: BTreeMap::new(),
             halt_cancel_queue: VecDeque::new(),
@@ -728,7 +716,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         table: &SymbolTable,
         execution_ids: &mut ExecutionIds,
         fresh_start_ms: i64,
-        callbacks: &mut crate::strategy_process::host::CallbackHost,
+        callbacks: &mut crate::callback_recovery::host::CallbackHost,
         account: &AccountView,
         risk: &mut R,
         specs: Option<&BTreeMap<SymbolId, engine_types::numeric::ExactInstrumentSpec>>,
@@ -773,16 +761,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         })?;
         let mut delivered = legacy_overlap_counts(replayed, since);
         let mut recovered = 0usize;
-        let strategy_names = replayed
-            .iter()
-            .rev()
-            .find_map(|record| match record {
-                WalRecord::Names { strategies, .. } | WalRecord::SegmentBase { strategies, .. } => {
-                    Some(strategies.clone())
-                }
-                _ => None,
-            })
-            .unwrap_or_default();
+        let strategy_names = crate::replay::LogNames::of_log(replayed).strategies;
         for exec in execs {
             let exec = exec?;
             if execution_ids.contains(&exec.exec_id, now_ms) {
@@ -934,14 +913,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 },
             ) = (&allocation, &mut record)
             {
-                if callbacks.isolated()
+                if callbacks.recovering
                     || prepared.allocation.policy
                         == engine_types::execution_allocation::AllocationPolicy::EmergencyNetFifo
                 {
                     *recorded = Some(Box::new(prepared.allocation.clone()));
                 }
             }
-            if callbacks.isolated() {
+            if callbacks.recovering {
                 let owners = allocation
                     .as_ref()
                     .map(|prepared| {
@@ -1336,7 +1315,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 #[cfg(test)]
 mod callback_recovery_tests {
     use super::*;
-    use crate::strategy_process::host::{CallbackExecution, CallbackHost};
+    use crate::callback_recovery::host::{CallbackExecution, CallbackHost};
     use engine_types::strategy_process::CallbackEvent;
 
     #[tokio::test(start_paused = true)]
@@ -1359,10 +1338,10 @@ mod callback_recovery_tests {
             exact_terms: None,
         };
         let replay = vec![
-            WalRecord::Names {
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
                 strategies: vec![strategies[0].name().into()],
                 symbols: vec!["BTCUSDT".into()],
-            },
+            }),
             WalRecord::OrderSent {
                 dispatch: None,
                 request: request.clone(),
@@ -1394,17 +1373,12 @@ mod callback_recovery_tests {
         let path = crate::testpath::temp_path("initial-recovery-source");
         let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
         for row in &replay {
-            wal.append(row).unwrap();
+            crate::testpath::append_history(&mut wal, &path, row).unwrap();
         }
         wal.barrier().unwrap();
-        let mut callbacks = CallbackHost::new(
-            CallbackExecution::Isolated {
-                executable: "/bin/false".into(),
-            },
-            &strategies,
-            &replay,
-        )
-        .unwrap();
+        let mut callbacks =
+            CallbackHost::new(CallbackExecution::Embedded, &strategies, &replay).unwrap();
+        callbacks.recovering = true;
         callbacks
             .order_news
             .attach(wal.callback_reader().unwrap().unwrap(), &replay, 1)
@@ -1495,9 +1469,9 @@ mod callback_recovery_tests {
 #[cfg(test)]
 mod memory_tests {
     use super::*;
-    use crate::strategy_process::host::{CallbackExecution, CallbackHost};
+    use crate::callback_recovery::host::{CallbackExecution, CallbackHost};
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn boot_recovers_a_rejected_order_from_archives_before_charging_its_late_fill() {
         use engine_types::numeric::{AssetAmount, AssetId, Exact, ExactNumber, ExecutionAmounts};
         let prior = crate::tests::shared_sleeves::fragmented_engine().await;
@@ -1710,10 +1684,10 @@ mod memory_tests {
         let mut table = SymbolTable::default();
         table.intern("BTCUSDT");
         let replay = [
-            WalRecord::Names {
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
                 strategies: Vec::new(),
                 symbols: vec!["BTCUSDT".into()],
-            },
+            }),
             WalRecord::ExecutionHistoryCheckpoint {
                 through_wall_ts_ms: through,
             },
@@ -1852,7 +1826,7 @@ mod memory_tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn boot_history_memory_does_not_grow_with_recovered_wal_payload() {
         const CHILD: &str = "TIER1_BOOT_RECOVERY_MEMORY_CHILD";
         if std::env::var_os(CHILD).is_none() {
@@ -1893,10 +1867,10 @@ mod memory_tests {
         let mut table = SymbolTable::default();
         table.intern("BTCUSDT");
         let replay = [
-            WalRecord::Names {
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
                 strategies: Vec::new(),
                 symbols: vec!["BTCUSDT".into()],
-            },
+            }),
             WalRecord::ExecutionHistoryCheckpoint {
                 through_wall_ts_ms: now - 60_000,
             },
@@ -1950,7 +1924,7 @@ mod memory_tests {
 #[cfg(test)]
 mod valuation_recovery_tests {
     use super::*;
-    use crate::strategy_process::host::{CallbackExecution, CallbackHost};
+    use crate::callback_recovery::host::{CallbackExecution, CallbackHost};
     use engine_types::numeric::{AssetAmount, AssetId, ExactNumber, ExecutionAmounts};
     use engine_types::risk::UnpricedTradeReason;
 
@@ -1969,10 +1943,10 @@ mod valuation_recovery_tests {
             })
         };
         let replay = vec![
-            WalRecord::Names {
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
                 strategies: vec!["owner".into()],
                 symbols: vec!["BTCUSDT".into()],
-            },
+            }),
             WalRecord::OrderSent {
                 dispatch: None,
                 request: OrderRequest {
@@ -2029,7 +2003,7 @@ mod valuation_recovery_tests {
         let path = crate::testpath::temp_path("unvalued-recovery-loss");
         let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
         for row in &replay {
-            wal.append(row).unwrap();
+            crate::testpath::append_history(&mut wal, &path, row).unwrap();
         }
         wal.barrier().unwrap();
         let mut table = SymbolTable::default();

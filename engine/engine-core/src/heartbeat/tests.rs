@@ -704,6 +704,54 @@ fn a_heartbeat_that_cannot_be_written_leaves_no_file_and_no_half_file() {
 }
 
 #[test]
+fn systemd_liveness_follows_a_successfully_published_heartbeat() {
+    use std::os::unix::net::UnixDatagram;
+    if let Ok(case) = std::env::var("HEARTBEAT_NOTIFY_TEST_CASE") {
+        let path = temp_path("heartbeat-notify-child");
+        let output = if case == "valid" {
+            path.path().to_path_buf()
+        } else {
+            path.path().join("missing").join("heartbeat.json")
+        };
+        let mut beat = Heartbeat::new(output, None, None);
+        beat.write(1, &facts(&["long".to_string()], &[]));
+        return;
+    }
+    for case in ["valid", "unwritable"] {
+        let socket_path = temp_path("heartbeat-notify-socket");
+        let receiver = UnixDatagram::bind(socket_path.path()).unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "heartbeat::tests::systemd_liveness_follows_a_successfully_published_heartbeat",
+            ])
+            .env("NOTIFY_SOCKET", socket_path.path())
+            .env("HEARTBEAT_NOTIFY_TEST_CASE", case)
+            .env_remove("WATCHDOG_PID")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut bytes = [0; 64];
+        if case == "valid" {
+            let size = receiver
+                .recv(&mut bytes)
+                .expect("published heartbeat must notify systemd");
+            assert_eq!(&bytes[..size], b"READY=1\nWATCHDOG=1");
+        } else {
+            assert_eq!(
+                receiver.recv(&mut bytes).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+    }
+}
+
+#[test]
 fn the_cadence_holds_it_back_between_beats() {
     let path = temp_path("heartbeat-cadence");
     let mut beat = Heartbeat::with_every(

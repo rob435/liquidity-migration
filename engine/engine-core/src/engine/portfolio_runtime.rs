@@ -60,8 +60,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         {
             self.books
                 .attribution
-                .set_sleeve_stop_exact(strategy, symbol, side, trigger_price)
+                .set_sleeve_stop_exact(strategy, symbol, side, trigger_price.clone())
                 .map_err(EngineError::State)?;
+            reconcile::note_sleeve_stop(
+                &self.logged_exposure,
+                &mut self.intended_stops,
+                symbol,
+                side,
+                &trigger_price,
+            );
         }
         self.portfolio_controls = next;
         self.portfolio_dirty = true;
@@ -291,7 +298,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) async fn service_portfolio_controls(&mut self) -> Result<(), EngineError> {
         self.advance_portfolio_controls().await?;
         if self.portfolio_dirty && self.dispatches.write.is_none() {
-            let barrier = self.wal.barrier_begin()?;
+            let barrier = self.begin_dispatch_barrier()?;
             self.portfolio_dirty = false;
             self.dispatches
                 .begin(crate::order_dispatch::DispatchWrite::Portfolio, barrier);
@@ -304,7 +311,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(());
         }
         if self.portfolio_dirty {
-            let barrier = self.wal.barrier_begin()?;
+            let barrier = self.begin_dispatch_barrier()?;
             self.portfolio_dirty = false;
             self.dispatches
                 .begin(crate::order_dispatch::DispatchWrite::Portfolio, barrier);
@@ -784,7 +791,7 @@ mod tests {
             None
         );
         assert_eq!(engine.books.orders.owner_of(&request.client_order_id), None);
-        for _ in 0..2 {
+        while engine.dispatches.write.is_some() {
             let durable =
                 tokio::time::timeout(Duration::from_secs(1), engine.dispatches.durable.recv())
                     .await
@@ -1235,7 +1242,7 @@ mod tests {
     async fn acknowledge(
         engine: &mut Engine<crate::tests::MockWal, engine_risk::Kernel, crate::tests::MockVenue>,
     ) {
-        for _ in 0..2 {
+        while engine.dispatches.write.is_some() {
             let durable =
                 tokio::time::timeout(Duration::from_secs(1), engine.dispatches.durable.recv())
                     .await

@@ -20,6 +20,8 @@ pub mod quoter;
 pub mod runtime;
 
 #[cfg(test)]
+mod conformance;
+#[cfg(test)]
 mod mock_ctx;
 #[cfg(test)]
 mod probe_tests;

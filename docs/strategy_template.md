@@ -1,70 +1,55 @@
-# Native Strategy Implementation Contract
+# Strategy plug contract
 
-Architecture and developer contract for implementing new trading strategies within `engine-strategies`.
+## Purpose
 
----
+Define how a registered Rust strategy consumes engine facts, emits durable effects, and satisfies the shared plug conformance suite.
 
-## 1. Module Architecture
+## Spec tables
 
-New strategy implementations reside in `engine/engine-strategies/src/<strategy_name>/`:
-
-| File | Role | Constraints |
-| :--- | :--- | :--- |
-| `mod.rs` | Public API surface | Re-exports plug and config types only. |
-| `plan.rs` | Pure decision reducer | **Pure logic only**. Zero I/O, no network, no clock reads, no credentials. |
-| `plug.rs` | Engine adapter | Implements `Strategy` trait; converts engine facts to reducer inputs and orders. |
-| `state_import.rs`| Takeover decoder | Implements legacy state import (optional). |
-
----
-
-## 2. Pure Reducer Contract
-
-Every strategy reducer is a pure mathematical state transition function:
-
-```rust
-pub fn reduce(
-    input: ReducerInput,
-    prior: SleeveState,
-    config: &StrategyConfig,
-) -> Result<ReducerOutput, StrategyError>;
-```
-
-### Core Type Contracts
-* **`StrategyConfig`**: Immutable strategy dials with strict validation and deterministic hash fingerprint.
-* **`ReducerInput`**: External facts provided by engine: current timestamp, order book facts, attributed fills, active rules.
-* **`SleeveState`**: Minimal persistent state required to resume execution after process crash.
-* **`ReducerOutput`**: Next checkpoint state, ordered target positions, and durable cross-sleeve events.
-
----
-
-## 3. Durability & Ordering Invariants
-
-Reducers must enforce deterministic ordering across process crash boundaries:
-
-| Event Boundary | Durability Sequence |
-| :--- | :--- |
-| **External Signal** | Append observation to WAL $\to$ Persist sleeve checkpoint $\to$ Acknowledge signal. |
-| **Order Dispatch** | Persist checkpoint $\to$ Write WAL `OrderSent` record $\to$ Transmit order bytes over socket. |
-| **Cross-Sleeve Fire** | Append cross-sleeve event to WAL $\to$ Persist emitting checkpoint $\to$ Deliver event. |
-| **Event Consumption**| Persist consuming checkpoint $\to$ Acknowledge event receipt. |
-
-### Execution ownership
-
-| Fact / action | Contract |
+| Path | Responsibility |
 | --- | --- |
-| `StrategyCtx::foreign_position(symbol)` | True when another sleeve has attributed exposure or a live opening order, including an order with no fill yet |
-| `PlannerFacts::foreign_owned` | Explicitly carries unavailable ownership into the shared position planner; missing `held` alone is not permission to enter |
-| Opening placement / amend | Core refuses conflicting ownership with `foreign_strategy_owner`; an accepted sibling's `OrderSent` claims its symbol before the next sibling is judged |
-| Own reduction / exit / tighter stop | Remains available if another sleeve also has a claim; own attributed quantity stays visible to the planner |
-| Cancel / reduce-only amend | Uses existing cancellation, risk and venue checks |
-| Replay / rotation | Existing fill attribution and live-order records reconstruct ownership; no separate ownership WAL schema |
+| `engine/engine-strategies/src/lib.rs::PLUGS` | Authoritative plug names and builders |
+| `engine/engine-types/src/strategy.rs::Strategy` | Callback, checkpoint, subscription, and state-import contracts |
+| `engine/engine-strategies/src/<name>/plan.rs` | Pure reducer and validated typed configuration |
+| `engine/engine-strategies/src/<name>/plug.rs` | Translate engine facts to reducer inputs and ordered `Action` values |
+| `engine/engine-strategies/src/<name>/state_import.rs` | Optional decoder for an existing runtime's checkpoint |
+| `engine/engine-strategies/src/mock_ctx.rs` | Deterministic market, account, checkpoint, action, and timer context |
+| `engine/engine-strategies/src/conformance.rs` | Shared definition of a conforming registered plug |
+| `engine/engine-strategies/tests/fixtures/plug-events.jsonl` | Frozen synthetic event stream; no live-account or profitability evidence |
 
----
+| Contract | Required behavior |
+| --- | --- |
+| Execution | `Strategy::on_event` runs embedded on the engine loop; `catch_unwind` faults a panicking sleeve and queues its live-order cancellations |
+| Inputs | Market, account, order, clock, and sleeve ownership facts come from `StrategyCtx` |
+| State | Whole-sleeve checkpoints have a schema version, decision fingerprint, validated canonical payload, and `MAX_STRATEGY_STATE_BYTES` bound |
+| Durability | Changed checkpoints and ordered effects enter a durable strategy transition; the dispatch barrier covers its order attempt before venue submission |
+| Unchanged state | An identical checkpoint emits no additional callback WAL record |
+| External signals / cross-sleeve events | Reducer state and consumption effects preserve their durable order; duplicate input identity cannot create another opening |
+| Retained private state | `runtime_state` and `runtime::restore` preserve existing callback WAL runtime payloads; current callbacks persist checkpoint actions |
+| Opening ownership | Another sleeve's attributed exposure or live opening order makes `foreign_position` true; core admission rejects conflicting opening ownership |
+| Own reductions | Attributed quantity remains available for exits and tighter stops when another sleeve also has exposure |
 
-## 4. Required Test Matrix
+| Conformance check | Coverage |
+| --- | --- |
+| Recorded replay | Every `PLUGS` builder receives the same fixed event stream twice; emitted action and armed-timer bytes match exactly |
+| Restore | Nonempty native checkpoints survive two fresh restores; all registered retained-runtime payloads round-trip byte-identically |
+| Seeded event corpus | Four reproducible seeds, 512 callbacks per seed and plug, covering market resets, quote/depth/trades, timers, rejected signals/orders, refusals, permissions, and flatten requests |
+| State bound | Every corpus callback checks retained private state size; every emitted checkpoint validates and round-trips within the payload bound |
+| New registration | A `PLUGS` entry without a conformance parameter/state fixture fails the shared suite |
 
-Before a strategy can be registered in production, it must implement:
-1. **Determinism Test**: Replaying identical input bytes over identical state yields bit-for-bit identical outputs.
-2. **Crash-Prefix Audit**: Replaying truncated WAL frames never causes duplicate orders or position desynchronization.
-3. **Boot State Recovery**: Strategy recovers open positions and timers from cold start without incoming market ticks.
-4. **Idempotent Acknowledgment**: Duplicate signals or repeated event deliveries produce no additional orders.
+## Invariants
+
+- Strategies must use engine-provided time and facts; reducers must never perform network, filesystem, credential, or wall-clock I/O.
+- Equal configuration, state, context, and event bytes must produce equal ordered action bytes.
+- A checkpoint must contain the complete durable sleeve state required after restart; its validator must reject incompatible schema, fingerprint, and invalid numerical state.
+- Strategies must preserve owned exits, input acknowledgements, and effect order across restart and repeated delivery.
+- The fixed corpus must remain reproducible; it is bounded coverage, not a claim that every possible event sequence is panic-free.
+- Strategy-specific numerical, duplicate-input, open-position restart, and execution-accounting tests must accompany the shared harness where those behaviors apply.
+
+## Operational recipes
+
+```sh
+cd engine
+cargo +1.90.0 test -p engine-strategies conformance --locked -- --nocapture
+cargo +1.90.0 test -p engine-strategies --locked
+```

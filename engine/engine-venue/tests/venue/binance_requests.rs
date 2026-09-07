@@ -56,7 +56,7 @@ fn query_value<'a>(request: &'a Recorded, name: &str) -> Option<&'a str> {
     })
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_entry_and_stop_use_the_ordinary_and_algo_services_in_that_order() {
     let server =
         TestServer::start(
@@ -119,7 +119,7 @@ async fn an_entry_and_stop_use_the_ordinary_and_algo_services_in_that_order() {
     assert!(query_value(stop, "quantity").is_none());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancelling_an_entry_after_restart_cancels_its_exact_attached_algo_stop() {
     let server =
         TestServer::start(
@@ -186,7 +186,7 @@ async fn cancelling_an_entry_after_restart_cancels_its_exact_attached_algo_stop(
     assert!(query_value(&requests[4], "algoId").is_none());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancelling_a_partially_filled_entry_keeps_its_position_stop() {
     let server =
         TestServer::start(
@@ -217,7 +217,7 @@ async fn cancelling_a_partially_filled_entry_keeps_its_position_stop() {
     assert_eq!(requests[0].path, "/fapi/v1/order");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_stop_cancels_the_accepted_entry_and_keeps_the_outcome_unknown() {
     let server =
         TestServer::start(
@@ -261,7 +261,7 @@ async fn a_refused_stop_cancels_the_accepted_entry_and_keeps_the_outcome_unknown
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn account_identity_comes_from_signed_balance_and_checks_position_mode() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/fapi/v3/balance" => (
@@ -294,7 +294,7 @@ async fn account_identity_comes_from_signed_balance_and_checks_position_mode() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn account_identity_rejects_multi_assets_mode_before_position_mode() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/fapi/v3/balance" => (200, r#"[{"accountAlias":"SgsR","asset":"USDT"}]"#.into()),
@@ -323,7 +323,7 @@ async fn account_identity_rejects_multi_assets_mode_before_position_mode() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn replacing_a_stop_cancels_only_same_side_algos_by_algo_id() {
     let server =
         TestServer::start(
@@ -374,7 +374,7 @@ async fn replacing_a_stop_cancels_only_same_side_algos_by_algo_id() {
     assert!(query_value(&deletes[0], "signature").is_some());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn replacing_a_stop_surfaces_any_cancel_refusal_other_than_known_already_gone() {
     let server =
         TestServer::start(
@@ -412,7 +412,7 @@ async fn replacing_a_stop_surfaces_any_cancel_refusal_other_than_known_already_g
     assert!(matches!(error, VenueError::Rejected { code: -4120, .. }));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn market_orders_use_the_distinct_market_lot_minimum_step_and_maximum() {
     let exchange_info = r#"{"symbols":[{
         "symbol":"ARKUSDT","status":"TRADING","contractType":"PERPETUAL",
@@ -499,7 +499,7 @@ async fn market_orders_use_the_distinct_market_lot_minimum_step_and_maximum() {
     assert_eq!(query_value(&requests[1], "quantity"), Some("30"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn execution_recovery_is_unavailable_and_never_reaches_the_wire() {
     let server =
         TestServer::start(|_, _| (500, r#"{"code":-1,"msg":"must not be called"}"#.into())).await;
@@ -517,7 +517,7 @@ async fn execution_recovery_is_unavailable_and_never_reaches_the_wire() {
     assert!(server.requests().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn private_stream_retries_key_failure_resets_before_news_and_deduplicates_after_expiry() {
     use engine_types::{FeedError, OrderFeed, OrderUpdate};
     use engine_venue::BinanceOrderFeed;
@@ -596,6 +596,7 @@ async fn private_stream_retries_key_failure_resets_before_news_and_deduplicates_
         assert!(matches!(feed.next_update().await,Ok(OrderUpdate::StreamReset{..})));
         assert!(matches!(feed.next_update().await,Ok(OrderUpdate::Ack(ack)) if ack.client_order_id == "client-1"));
         assert!(matches!(feed.next_update().await,Err(FeedError::Transport(message)) if message.contains("expired")));
+        tokio::time::advance(Duration::from_millis(250)).await;
         assert!(matches!(feed.next_update().await,Ok(OrderUpdate::StreamReset{..})));
         assert!(matches!(feed.next_update().await,Ok(OrderUpdate::Ack(ack)) if ack.client_order_id == "client-2"));
     }).await;
@@ -616,7 +617,7 @@ async fn private_stream_retries_key_failure_resets_before_news_and_deduplicates_
     assert_eq!(rest.to_path("/fapi/v1/listenKey").len(), 3);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn independent_catalog_installs_market_rules_before_a_mutation_without_another_read() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/fapi/v1/exchangeInfo" => (200, BTC_EXCHANGE_INFO.into()),
@@ -651,7 +652,7 @@ async fn independent_catalog_installs_market_rules_before_a_mutation_without_ano
         .is_err());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_amend_preserves_unmodified_native_quantity_and_checks_identity() {
     use engine_types::numeric::Exact;
     use engine_types::order_terms::{ExactAmendTerms, OrderInputPolicy};
@@ -704,7 +705,7 @@ async fn exact_amend_preserves_unmodified_native_quantity_and_checks_identity() 
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn independent_account_recovery_uses_requested_ids_and_preserves_history_unavailability() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/fapi/v2/account" => (200, r#"{"totalMarginBalance":"1500.25","availableBalance":"1200.5","positions":[{"symbol":"BTCUSDT","positionAmt":"0.004","entryPrice":"78000.5","leverage":"6","positionSide":"BOTH"}]}"#.into()),

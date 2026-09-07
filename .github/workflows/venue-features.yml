@@ -1,0 +1,55 @@
+name: Venue feature conformance
+
+on:
+  push:
+    branches: [main]
+    paths: ['engine/**', '.github/workflows/venue-features.yml']
+  pull_request:
+    paths: ['engine/**', '.github/workflows/venue-features.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: venue-features-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        venue:
+          - bybit
+          - binance
+          - hyperliquid
+          - lighter
+          - mexc
+          - variational
+          - bybit,binance,hyperliquid,lighter,mexc,variational
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.90.0 --profile minimal
+      - name: Build this venue and its feeds
+        working-directory: engine
+        run: cargo +1.90.0 build --locked -p engine-tools --no-default-features --features '${{ matrix.venue }}' --bins
+      - name: Run this venue's protocol and conformance tests
+        working-directory: engine
+        run: cargo +1.90.0 test --locked -p engine-venue --no-default-features --features '${{ matrix.venue }}'
+      - name: Run public catalog and market feed tests
+        working-directory: engine
+        run: cargo +1.90.0 test --locked -p engine-marketdata -p engine-public --no-default-features --features '${{ matrix.venue }}'
+      - name: Default binary excludes Hyperliquid cryptography
+        if: matrix.venue == 'bybit'
+        working-directory: engine
+        run: |
+          if cargo +1.90.0 tree --locked -p engine-tools --edges normal | grep -Eq ' (k256|sha3) v'; then
+            echo 'Default funded binary includes Hyperliquid cryptography' >&2
+            exit 1
+          fi

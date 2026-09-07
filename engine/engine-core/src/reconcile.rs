@@ -413,10 +413,8 @@ fn foreign_fills(replayed: &[WalRecord]) -> Result<Vec<Finding>, String> {
             crate::legacy_quantity::Event::Record(record) => record,
         };
         let record = record.as_ref();
-        if let WalRecord::Names { strategies, .. } | WalRecord::SegmentBase { strategies, .. } =
-            record
-        {
-            strategy_names = strategies.clone();
+        if let Some(strategies) = crate::replay::LogNames::strategy_table(record) {
+            strategy_names = strategies;
         }
         match record {
             WalRecord::OrderSent { request, .. } => {
@@ -487,7 +485,10 @@ fn foreign_fills(replayed: &[WalRecord]) -> Result<Vec<Finding>, String> {
             } => {
                 claims.set_sleeve_stop_exact(*strategy, *symbol, *side, trigger_price.clone())?;
             }
-            WalRecord::ClaimsDropped { rows, .. } => claims.forget(rows),
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::ClaimsDropped {
+                rows,
+                ..
+            }) => claims.forget(rows),
             WalRecord::LatchCleared {
                 restated_exposure, ..
             } => {
@@ -516,6 +517,32 @@ fn side_of(signed_qty: &Exact) -> Option<Side> {
     } else {
         None
     }
+}
+
+pub(crate) fn note_sleeve_stop(
+    exposure: &PhysicalExposure,
+    intended: &mut BTreeMap<SymbolId, IntendedPositionStop>,
+    symbol: SymbolId,
+    side: Side,
+    trigger: &Exact,
+) {
+    if exposure.get(&symbol).and_then(side_of) != Some(side) {
+        return;
+    }
+    let Ok(trigger_px) = trigger.to_f64() else {
+        return;
+    };
+    if !trigger_px.is_finite() || trigger_px <= 0.0 {
+        return;
+    }
+    let trigger_px = match intended.get(&symbol).filter(|old| old.side == side) {
+        Some(old) => match side {
+            Side::Buy => old.trigger_px.max(trigger_px),
+            Side::Sell => old.trigger_px.min(trigger_px),
+        },
+        None => trigger_px,
+    };
+    intended.insert(symbol, IntendedPositionStop { side, trigger_px });
 }
 
 fn request_stop_for_fill(
@@ -744,10 +771,8 @@ pub(crate) fn position_state_with_adoption(
         if matches!(record, WalRecord::LatchCleared { .. }) {
             delta.clear();
         }
-        if let WalRecord::Names { strategies, .. } | WalRecord::SegmentBase { strategies, .. } =
-            record
-        {
-            strategy_names = strategies.clone();
+        if let Some(strategies) = crate::replay::LogNames::strategy_table(record) {
+            strategy_names = strategies;
         }
         match record {
             WalRecord::OrderSent { request, .. } => {
@@ -859,8 +884,12 @@ pub(crate) fn position_state_with_adoption(
                 ..
             } => {
                 claims.set_sleeve_stop_exact(*strategy, *symbol, *side, trigger_price.clone())?;
+                note_sleeve_stop(&exposure, &mut intended, *symbol, *side, trigger_price);
             }
-            WalRecord::ClaimsDropped { rows, .. } => claims.forget(rows),
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::ClaimsDropped {
+                rows,
+                ..
+            }) => claims.forget(rows),
             WalRecord::SegmentBase {
                 logged_exposure,
                 portfolio,
@@ -1715,10 +1744,12 @@ mod tests {
     fn physical_frontier_internal_settlement_cannot_leave_ghost_forced_close_owners() {
         use engine_types::numeric::{AssetId, Exact};
         use engine_types::portfolio_control::{PortfolioOffsetSettlement, PortfolioOffsetSlice};
-        let mut log = vec![WalRecord::Names {
-            strategies: vec!["long".into(), "short".into(), "next".into()],
-            symbols: vec!["A".into(), "B".into(), "C".into(), "BTCUSDT".into()],
-        }];
+        let mut log = vec![WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::Names {
+                strategies: vec!["long".into(), "short".into(), "next".into()],
+                symbols: vec!["A".into(), "B".into(), "C".into(), "BTCUSDT".into()],
+            },
+        )];
         let mut order = sent("short", 3, Side::Sell, 1.0, Some(110.0));
         if let WalRecord::OrderSent { request, .. } = &mut order {
             request.strategy = StrategyId(1);

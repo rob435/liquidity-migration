@@ -16,7 +16,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, Once};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Subscription, SymbolId, SymbolTable};
 use futures_util::{SinkExt, StreamExt};
@@ -125,6 +126,8 @@ pub struct BybitPublicFeed {
     timing: FeedTiming,
     inbox: Option<Inbox>,
     pending_reset: bool,
+    #[cfg(test)]
+    test_phases: Option<mpsc::Sender<tests::Phase>>,
 }
 
 /// The running worker: where its events land, and the handle that stops it.
@@ -312,6 +315,8 @@ impl BybitPublicFeed {
             timing: FeedTiming::default(),
             inbox: None,
             pending_reset: false,
+            #[cfg(test)]
+            test_phases: None,
         }
     }
 
@@ -433,6 +438,8 @@ impl BybitPublicFeed {
             timing: self.timing,
             subscription_request_sequence: 0,
             admissions: admit_rx,
+            #[cfg(test)]
+            test_phases: self.test_phases.take(),
         };
         // The engine runs one thread, so this stays on it.
         let worker = tokio::spawn(worker.run());
@@ -453,6 +460,8 @@ impl Drop for BybitPublicFeed {
 /// Owns the socket for as long as the feed lives. Nothing cancels it, so it
 /// can dial, sleep out a backoff and reconnect without losing its place.
 struct FeedWorker {
+    #[cfg(test)]
+    test_phases: Option<mpsc::Sender<tests::Phase>>,
     url: String,
     topics: Vec<String>,
     /// Topic and first socket epoch on which a bounded re-probe is allowed.
@@ -515,6 +524,14 @@ impl FeedWorker {
         }
     }
 
+    #[cfg(test)]
+    fn phase(&self, phase: tests::Phase) {
+        if let Some(tx) = &self.test_phases {
+            tx.try_send(phase)
+                .expect("test phase observer must keep up");
+        }
+    }
+
     /// False once nobody is listening, which is the worker's cue to stop.
     fn emit(&self, item: Result<MarketEvent, FeedError>) -> bool {
         self.events.push(item)
@@ -529,6 +546,8 @@ impl FeedWorker {
             // until a socket succeeds, so checking it alone turns an outage
             // into a tight connection storm.
             if self.epochs > 0 || self.backoff > BACKOFF_START {
+                #[cfg(test)]
+                self.phase(tests::Phase::Retry(Instant::now() + self.backoff));
                 tokio::time::sleep(self.backoff).await;
             }
             let mut socket = match self.dial_socket().await {
@@ -573,6 +592,8 @@ impl FeedWorker {
                         epoch = self.epochs,
                         "market feed connected"
                     );
+                    #[cfg(test)]
+                    self.phase(tests::Phase::Ready);
                     return Ok(socket);
                 }
                 Err(FeedError::Closed) => return Err(FeedError::Closed),
@@ -1034,7 +1055,7 @@ impl FeedWorker {
                 }
             }
             let wake_at = reply_deadline.min(housekeeping_at);
-            match tokio::time::timeout_at(wake_at.into(), socket.next()).await {
+            match tokio::time::timeout_at(wake_at, socket.next()).await {
                 Ok(Some(Ok(message))) => return Ok((self.clock.now_ns(), message)),
                 Ok(Some(Err(error))) => return Err(FeedError::Transport(error.to_string())),
                 Ok(None) => {
@@ -1151,7 +1172,7 @@ impl FeedWorker {
                 }
                 return Ok(Step::Idle);
             }
-            _ = tokio::time::sleep_until(deadline.into()) => None,
+            _ = tokio::time::sleep_until(deadline) => None,
         };
         match incoming {
             Some((recv_ns, Some(Ok(msg)))) => self.on_message(msg, recv_ns),
@@ -1196,6 +1217,8 @@ impl FeedWorker {
         match &frame {
             ParsedFrame::Pong => {
                 self.pong_deadline = None;
+                #[cfg(test)]
+                self.phase(tests::Phase::Pong);
                 debug!("market feed keep-alive answered");
             }
             ParsedFrame::Ack { op, success, .. } => {
@@ -1477,7 +1500,7 @@ fn message_topic(message: &Message) -> Option<&str> {
 mod tests;
 
 #[cfg(test)]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn empty_demand_after_retirement_stays_idle_until_readmission() {
     use std::future::Future;
     let subs = [Subscription {

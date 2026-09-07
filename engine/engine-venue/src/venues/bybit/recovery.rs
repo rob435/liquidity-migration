@@ -149,8 +149,9 @@ mod history_progress_tests {
     use engine_types::orders::AccountRecoveryClient;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn repeated_history_payloads_cannot_keep_a_changing_cursor_alive() {
+        let _io = crate::test_io::IoProgress::new();
         for exec_type in ["Trade", "Funding"] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();

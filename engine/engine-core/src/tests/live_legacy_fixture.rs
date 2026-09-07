@@ -2,10 +2,10 @@ use super::*;
 use crate::{attribution::Attribution, execution::Fills};
 use engine_types::numeric::{AssetId, Exact, ExactInstrumentSpec, ExactNumber, PricePrecision};
 use serde_json::{json, Value};
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
-struct FixtureBoot {
-    engine: Engine<MockWal, MockRisk, MockVenue>,
+struct FixtureBoot<W: Wal = MockWal> {
+    engine: Engine<W, MockRisk, MockVenue>,
     records: Vec<WalRecord>,
     sends: Arc<Mutex<Vec<OrderRequest>>>,
     stops: Arc<Mutex<Vec<(SymbolId, engine_types::order_terms::ExactStopTerms)>>>,
@@ -43,27 +43,55 @@ fn native_spec(row: &Value) -> ExactInstrumentSpec {
 }
 
 fn names(records: &[WalRecord]) -> (Vec<String>, Vec<String>) {
-    records
-        .iter()
-        .rev()
-        .find_map(|record| match record {
-            WalRecord::Names {
-                strategies,
-                symbols,
-            }
-            | WalRecord::SegmentBase {
-                strategies,
-                symbols,
-                ..
-            } => Some((strategies.clone(), symbols.clone())),
-            _ => None,
-        })
+    let state = crate::identities::replay_identities(records)
         .unwrap()
+        .unwrap();
+    (
+        state
+            .sleeves
+            .iter()
+            .map(|key| key.as_str().to_owned())
+            .collect(),
+        state
+            .instruments
+            .into_iter()
+            .map(|row| row.symbol)
+            .collect(),
+    )
 }
 
 fn captured_venue(symbols: &[String], capture: &Value) -> MockVenue {
     let references = symbols.iter().map(String::as_str).collect::<Vec<_>>();
     let (mut venue, _) = MockVenue::new(tape(), &references);
+    #[cfg(feature = "bybit")]
+    {
+        let base = capture["rest_endpoint"].as_str().unwrap();
+        let realm = [
+            engine_venue::VenueRealm::Demo,
+            engine_venue::VenueRealm::Mainnet,
+        ]
+        .into_iter()
+        .find(|realm| realm.rest_base() == base)
+        .unwrap();
+        venue.identity = Some(AccountIdentity {
+            venue: "bybit".into(),
+            realm: realm.as_str().into(),
+            user_id: "captured-account".into(),
+        });
+        // Only native catalog decoding/install is delegated; transport stays mocked.
+        venue.catalog_adapter = Some(Box::new(engine_venue::BybitGateway::for_test(
+            base,
+            realm,
+            engine_venue::Credentials::new(
+                &realm.to_string(),
+                false,
+                "fixture-key",
+                "fixture-secret",
+            ),
+            symbols.to_vec(),
+        )));
+    }
+
     let specifications = capture["instruments"]
         .as_array()
         .unwrap()
@@ -150,6 +178,26 @@ async fn boot_fixture(
     let (mut wal, _) = MockWal::new(tape());
     *wal.records.lock().unwrap() = records.clone();
     wal.seq = records.len() as u64;
+    boot_wal_fixture(directory, config, capture, wal, records).await
+}
+
+async fn boot_disk_fixture(
+    directory: &Path,
+    config: &crate::config::LoadedConfig,
+    capture: &Value,
+) -> FixtureBoot<engine_wal::WalWriter> {
+    let (wal, records) = crate::assembly::wal(&directory.join("engine.wal")).unwrap();
+    boot_wal_fixture(directory, config, capture, wal, records).await
+}
+
+async fn boot_wal_fixture<W: Wal>(
+    directory: &Path,
+    config: &crate::config::LoadedConfig,
+    capture: &Value,
+    wal: W,
+    records: Vec<WalRecord>,
+) -> FixtureBoot<W> {
+    let path = directory.join("engine.wal");
     let (sleeves, symbols) = names(&records);
     let venue = captured_venue(&symbols, capture);
     let sends = venue.sends.clone();
@@ -167,7 +215,7 @@ async fn boot_fixture(
     settings.heartbeat_path = None;
     settings.trades_path = None;
     let (risk, _) = MockRisk::with(allow_all());
-    let engine = Engine::boot_as(
+    let engine = Engine::boot_as_exact(
         &settings,
         &config.sha256,
         wal,
@@ -237,14 +285,46 @@ async fn verify_rotated_stop_repair(
         position["stopLoss"] = json!("0");
     }
     missing["open_orders"] = json!([]);
+    let boot = boot_fixture(directory, config, &missing, Some(vec![snapshot.clone()])).await;
+    verify_stop_repairs(capture, snapshot, boot).await
+}
+
+struct RepairQuotes(ScriptFeed);
+
+impl MarketFeed for RepairQuotes {
+    fn admit(&mut self, symbol: &str, feed: engine_types::Feed) -> Option<SymbolId> {
+        self.0.admit(symbol, feed)
+    }
+
+    async fn next_event(&mut self) -> Result<MarketEvent, FeedError> {
+        tokio::task::yield_now().await;
+        let mut event = self
+            .0
+            .events
+            .pop_front()
+            .expect("captured held-symbol quotes");
+        if let MarketEvent::Quote { quote, .. } = &mut event {
+            quote.recv_ns = clock::now_ns();
+        }
+        self.0.events.push_back(event);
+        Ok(event)
+    }
+}
+
+async fn verify_stop_repairs<W: Wal>(
+    capture: &Value,
+    snapshot: &WalRecord,
+    boot: FixtureBoot<W>,
+) -> Value {
     let FixtureBoot {
         mut engine,
         records,
         sends,
         stops,
-    } = boot_fixture(directory, config, &missing, Some(vec![snapshot.clone()])).await;
+    } = boot;
+    let _io = crate::test_io::IoProgress::new();
     let (_, symbols) = names(&records);
-    let mut quotes = ScriptFeed {
+    let mut quotes = RepairQuotes(ScriptFeed {
         events: capture["positions"]
             .as_array()
             .unwrap()
@@ -267,17 +347,24 @@ async fn verify_rotated_stop_repair(
                 }
             })
             .collect(),
-        close_at_end: true,
+        close_at_end: false,
         symbols,
         admits_wrongly: false,
         admitted: Default::default(),
-    };
+    });
+    let expected_repairs = capture["positions"].as_array().unwrap().len();
+    let completed = stops.clone();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     engine
-        .run(
-            &mut quotes,
-            &mut ScriptOrderFeed::empty(),
-            std::future::pending::<()>(),
-        )
+        .run(&mut quotes, &mut ScriptOrderFeed::empty(), async move {
+            while completed.lock().unwrap().len() < expected_repairs {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "native repair I/O did not complete"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
         .await
         .unwrap();
     let actual_orders = sends.lock().unwrap().clone();
@@ -289,7 +376,7 @@ async fn verify_rotated_stop_repair(
     assert_eq!(
         repairs.len(),
         before.positions.len(),
-        "all seven removed native stops must be repaired"
+        "all removed native stops must be repaired"
     );
     for position in &before.positions {
         let target = position.stop_px.as_ref().unwrap();
@@ -329,7 +416,7 @@ async fn verify_rotated_stop_repair(
     json!({"removed_native_stops":before.positions.len(), "exact_repairs":*repairs, "opening_or_reduction_orders":0, "quote_source":"captured mark prices replayed with fresh mocked receipt times"})
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[ignore = "requires the captured full live WAL and authenticated venue fixture bundle"]
 async fn full_live_legacy_quantity_boot_replay_rotation_and_reboot() {
     let root = std::env::var_os("TIER1_LIVE_LEGACY_FIXTURES").expect("TIER1_LIVE_LEGACY_FIXTURES");
@@ -568,4 +655,141 @@ async fn full_live_legacy_quantity_boot_replay_rotation_and_reboot() {
         "live legacy fixture evidence: {}",
         out.join("report.json").display()
     );
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "requires current canonical WAL prefixes and authenticated venue captures"]
+async fn current_native_state_boot_rotation_and_reboot() {
+    let root =
+        std::env::var_os("TIER1_CURRENT_NATIVE_FIXTURES").expect("TIER1_CURRENT_NATIVE_FIXTURES");
+    let root = Path::new(&root);
+    let capture: Value =
+        serde_json::from_slice(&std::fs::read(root.join("venue.json")).unwrap()).unwrap();
+    let wall_ns = capture["finished_ns"].as_u64().unwrap();
+    let _clock = engine_types::clock::install_virtual(wall_ns, 1_000_000_000).unwrap();
+    let out = root.join(format!("canonical-rehearsal-{}", std::process::id()));
+    std::fs::create_dir(&out).unwrap();
+    for realm in ["demo", "mainnet"] {
+        let directory = out.join(realm);
+        std::fs::create_dir(&directory).unwrap();
+        for entry in std::fs::read_dir(root.join(realm).join("working")).unwrap() {
+            let entry = entry.unwrap();
+            let destination = directory.join(entry.file_name());
+            #[cfg(target_os = "macos")]
+            assert!(std::process::Command::new("cp")
+                .arg("-c")
+                .arg(entry.path())
+                .arg(&destination)
+                .status()
+                .unwrap()
+                .success());
+            #[cfg(not(target_os = "macos"))]
+            std::fs::copy(entry.path(), destination).unwrap();
+        }
+        let config = crate::config::load(&root.join(realm).join("engine.toml")).unwrap();
+        let native = &capture["realms"][realm];
+        assert_eq!(native["account_matches_expected"], true);
+        let FixtureBoot {
+            mut engine,
+            records,
+            ..
+        } = boot_disk_fixture(&directory, &config, native).await;
+        let (_, symbols) = names(&records);
+        let before = Attribution::try_from_records(&records).unwrap();
+        assert!(
+            before.legacy_quantities.is_empty(),
+            "{realm}: canonical fixture"
+        );
+        let physical = crate::reconcile::physical_exposure(&records).unwrap();
+        let native_positions = native["positions"].as_array().unwrap();
+        let expected_physical: BTreeMap<_, _> = native_positions
+            .iter()
+            .map(|row| {
+                let symbol = SymbolId(
+                    symbols
+                        .iter()
+                        .position(|name| name == row["symbol"].as_str().unwrap())
+                        .unwrap() as u16,
+                );
+                let quantity = decimal(row["size"].as_str().unwrap());
+                (
+                    symbol,
+                    if row["side"] == "Sell" {
+                        -quantity
+                    } else {
+                        quantity
+                    },
+                )
+            })
+            .collect();
+        let nonzero: BTreeMap<_, _> = physical
+            .into_iter()
+            .filter(|(_, quantity)| !quantity.is_zero())
+            .collect();
+        assert_eq!(nonzero, expected_physical, "{realm}: captured native net");
+        let snapshot = engine.rotation_base(clock::wall_ms());
+        assert!(
+            matches!(&snapshot, WalRecord::SegmentBase { may_open: true, .. }),
+            "{realm}: initial boot reconciles"
+        );
+        let WalRecord::SegmentBase {
+            portfolio: Some(portfolio),
+            open_trade_lots: Some(lots),
+            ..
+        } = &snapshot
+        else {
+            panic!("complete canonical rotation");
+        };
+        assert_eq!(
+            portfolio,
+            &before.snapshot(),
+            "{realm}: exact ownership and accounting"
+        );
+        assert_eq!(
+            lots,
+            &Fills::try_from_records(&records).unwrap().open_trade_lots(),
+            "{realm}: exact open lots"
+        );
+        let expected = financial_projection(&snapshot);
+        engine.wal.barrier().unwrap();
+        drop(records);
+        drop(engine);
+        let FixtureBoot {
+            engine: mut second, ..
+        } = boot_disk_fixture(&directory, &config, native).await;
+        let snapshot = second.rotation_base(clock::wall_ms());
+        assert!(
+            matches!(&snapshot, WalRecord::SegmentBase { may_open: true, .. }),
+            "{realm}: full-prefix reboot reconciles"
+        );
+        assert_eq!(
+            financial_projection(&snapshot),
+            expected,
+            "{realm}: full-prefix reboot"
+        );
+        second.wal.rotate(&snapshot).unwrap();
+        drop(second);
+        let FixtureBoot { engine: third, .. } =
+            boot_disk_fixture(&directory, &config, native).await;
+        let snapshot = third.rotation_base(clock::wall_ms());
+        assert!(
+            matches!(&snapshot, WalRecord::SegmentBase { may_open: true, .. }),
+            "{realm}: rotated reboot reconciles"
+        );
+        assert_eq!(
+            financial_projection(&snapshot),
+            expected,
+            "{realm}: rotated reboot"
+        );
+        drop(third);
+        let mut missing = native.clone();
+        for position in missing["positions"].as_array_mut().unwrap() {
+            position["stopLoss"] = json!("0");
+        }
+        missing["open_orders"] = json!([]);
+        let boot = boot_disk_fixture(&directory, &config, &missing).await;
+        let repairs = verify_stop_repairs(native, &snapshot, boot).await;
+        eprintln!("{realm}: {} captured native positions; exact ownership, accounting, lots and protection survive full-prefix and rotated reboot; repairs={repairs}", native_positions.len());
+    }
+    eprintln!("scope: complete retained families through the pinned current prefix, configured embedded strategies, real WAL readers/writer/rotation, mocked transport/risk/collateral; no live mutations or uncaptured future executions");
 }

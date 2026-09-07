@@ -10,64 +10,97 @@
 //! the segment the engine reports in nanoseconds — a different budget from the
 //! gateway, which is called once per order.
 
-use engine_public::{
-    BinanceRealm, HyperliquidRealm, LighterRealm, MexcRealm, VariationalRealm, VenueName,
-};
+#[cfg(feature = "binance")]
+use engine_public::BinanceRealm;
+#[cfg(feature = "hyperliquid")]
+use engine_public::HyperliquidRealm;
+#[cfg(feature = "lighter")]
+use engine_public::LighterRealm;
+#[cfg(feature = "mexc")]
+use engine_public::MexcRealm;
+#[cfg(feature = "variational")]
+use engine_public::VariationalRealm;
+use engine_public::VenueName;
+use engine_types::VenueError;
+
 use engine_types::{Feed, FeedError, MarketEvent, MarketFeed, Subscription, SymbolId};
 
+#[cfg(feature = "binance")]
 use crate::binance::BinancePublicFeed;
+#[cfg(feature = "bybit")]
 use crate::bybit::feed::BybitPublicFeed;
+#[cfg(feature = "hyperliquid")]
 use crate::hyperliquid::HyperliquidPublicFeed;
+#[cfg(feature = "lighter")]
 use crate::lighter::LighterPublicFeed;
+#[cfg(feature = "mexc")]
 use crate::mexc::MexcPublicFeed;
+#[cfg(feature = "variational")]
 use crate::variational::VariationalPublicFeed;
 
 pub enum MarketFeeds {
+    #[cfg(feature = "bybit")]
     Bybit(BybitPublicFeed),
+    #[cfg(feature = "hyperliquid")]
     Hyperliquid(HyperliquidPublicFeed),
+    #[cfg(feature = "lighter")]
     Lighter(LighterPublicFeed),
+    #[cfg(feature = "mexc")]
     Mexc(MexcPublicFeed),
+    #[cfg(feature = "binance")]
     Binance(BinancePublicFeed),
+    #[cfg(feature = "variational")]
     Variational(VariationalPublicFeed),
 }
 
 impl MarketFeeds {
     /// The public feed for the venue this name selects.
-    pub fn build(name: VenueName, subs: &[Subscription]) -> Self {
-        match name {
+    pub fn build(name: VenueName, subs: &[Subscription]) -> Result<Self, VenueError> {
+        #[allow(unreachable_patterns)]
+        Ok(match name {
             // Bybit publishes one public stream for both realms; the demo
             // account matches against these same prices.
+            #[cfg(feature = "bybit")]
             VenueName::BybitDemo | VenueName::BybitMainnet => {
                 MarketFeeds::Bybit(BybitPublicFeed::new(subs))
             }
+            #[cfg(feature = "hyperliquid")]
             VenueName::HyperliquidTestnet => MarketFeeds::Hyperliquid(HyperliquidPublicFeed::new(
                 HyperliquidRealm::Testnet,
                 subs,
             )),
+            #[cfg(feature = "hyperliquid")]
             VenueName::HyperliquidMainnet => MarketFeeds::Hyperliquid(HyperliquidPublicFeed::new(
                 HyperliquidRealm::Mainnet,
                 subs,
             )),
+            #[cfg(feature = "lighter")]
             VenueName::LighterTestnet => {
                 MarketFeeds::Lighter(LighterPublicFeed::new(LighterRealm::Testnet, subs))
             }
+            #[cfg(feature = "lighter")]
             VenueName::LighterMainnet => {
                 MarketFeeds::Lighter(LighterPublicFeed::new(LighterRealm::Mainnet, subs))
             }
+            #[cfg(feature = "mexc")]
             VenueName::MexcMainnet => {
                 MarketFeeds::Mexc(MexcPublicFeed::new(MexcRealm::Mainnet, subs))
             }
+            #[cfg(feature = "binance")]
             VenueName::BinanceTestnet => {
                 MarketFeeds::Binance(BinancePublicFeed::new(BinanceRealm::Testnet, subs))
             }
+            #[cfg(feature = "binance")]
             VenueName::BinanceMainnet => {
                 MarketFeeds::Binance(BinancePublicFeed::new(BinanceRealm::Mainnet, subs))
             }
+            #[cfg(feature = "variational")]
             VenueName::VariationalMainnet => MarketFeeds::Variational(VariationalPublicFeed::new(
                 VariationalRealm::Mainnet,
                 subs,
             )),
-        }
+            other => return Err(other.disabled_error()),
+        })
     }
 
     /// The id this feed hands out for a symbol, if it follows it.
@@ -78,11 +111,17 @@ impl MarketFeeds {
     /// agreement with.
     pub fn id_of(&self, symbol: &str) -> Option<SymbolId> {
         match self {
+            #[cfg(feature = "bybit")]
             MarketFeeds::Bybit(feed) => feed.symbols().get(symbol),
+            #[cfg(feature = "hyperliquid")]
             MarketFeeds::Hyperliquid(feed) => feed.id_of(symbol),
+            #[cfg(feature = "lighter")]
             MarketFeeds::Lighter(feed) => feed.id_of(symbol),
+            #[cfg(feature = "mexc")]
             MarketFeeds::Mexc(feed) => feed.id_of(symbol),
+            #[cfg(feature = "binance")]
             MarketFeeds::Binance(feed) => feed.id_of(symbol),
+            #[cfg(feature = "variational")]
             MarketFeeds::Variational(feed) => feed.id_of(symbol),
         }
     }
@@ -91,33 +130,51 @@ impl MarketFeeds {
 impl MarketFeed for MarketFeeds {
     async fn next_event(&mut self) -> Result<MarketEvent, FeedError> {
         match self {
+            #[cfg(feature = "bybit")]
             MarketFeeds::Bybit(feed) => feed.next_event().await,
+            #[cfg(feature = "hyperliquid")]
             MarketFeeds::Hyperliquid(feed) => feed.next_event().await,
+            #[cfg(feature = "lighter")]
             MarketFeeds::Lighter(feed) => feed.next_event().await,
+            #[cfg(feature = "mexc")]
             MarketFeeds::Mexc(feed) => feed.next_event().await,
+            #[cfg(feature = "binance")]
             MarketFeeds::Binance(feed) => feed.next_event().await,
+            #[cfg(feature = "variational")]
             MarketFeeds::Variational(feed) => feed.next_event().await,
         }
     }
 
     fn retire(&mut self, symbol: &str, feed: Feed) -> bool {
         match self {
+            #[cfg(feature = "bybit")]
             MarketFeeds::Bybit(inner) => inner.retire(symbol, feed),
+            #[cfg(feature = "hyperliquid")]
             MarketFeeds::Hyperliquid(inner) => inner.retire(symbol, feed),
+            #[cfg(feature = "lighter")]
             MarketFeeds::Lighter(inner) => inner.retire(symbol, feed),
+            #[cfg(feature = "mexc")]
             MarketFeeds::Mexc(inner) => inner.retire(symbol, feed),
+            #[cfg(feature = "binance")]
             MarketFeeds::Binance(inner) => inner.retire(symbol, feed),
+            #[cfg(feature = "variational")]
             MarketFeeds::Variational(inner) => inner.retire(symbol, feed),
         }
     }
 
     fn admit(&mut self, symbol: &str, feed: Feed) -> Option<SymbolId> {
         match self {
+            #[cfg(feature = "bybit")]
             MarketFeeds::Bybit(inner) => MarketFeed::admit(inner, symbol, feed),
+            #[cfg(feature = "hyperliquid")]
             MarketFeeds::Hyperliquid(inner) => MarketFeed::admit(inner, symbol, feed),
+            #[cfg(feature = "lighter")]
             MarketFeeds::Lighter(inner) => MarketFeed::admit(inner, symbol, feed),
+            #[cfg(feature = "mexc")]
             MarketFeeds::Mexc(inner) => MarketFeed::admit(inner, symbol, feed),
+            #[cfg(feature = "binance")]
             MarketFeeds::Binance(inner) => MarketFeed::admit(inner, symbol, feed),
+            #[cfg(feature = "variational")]
             MarketFeeds::Variational(inner) => MarketFeed::admit(inner, symbol, feed),
         }
     }
@@ -155,12 +212,21 @@ mod tests {
             (VenueName::BinanceMainnet, "binance"),
             (VenueName::VariationalMainnet, "variational"),
         ] {
-            let built = match MarketFeeds::build(name, &subs()) {
+            if !name.compiled() {
+                continue;
+            }
+            let built = match MarketFeeds::build(name, &subs()).unwrap() {
+                #[cfg(feature = "bybit")]
                 MarketFeeds::Bybit(_) => "bybit",
+                #[cfg(feature = "hyperliquid")]
                 MarketFeeds::Hyperliquid(_) => "hyperliquid",
+                #[cfg(feature = "lighter")]
                 MarketFeeds::Lighter(_) => "lighter",
+                #[cfg(feature = "mexc")]
                 MarketFeeds::Mexc(_) => "mexc",
+                #[cfg(feature = "binance")]
                 MarketFeeds::Binance(_) => "binance",
+                #[cfg(feature = "variational")]
                 MarketFeeds::Variational(_) => "variational",
             };
             assert_eq!(built, expected, "{name} built the wrong venue's feed");
@@ -176,7 +242,10 @@ mod tests {
             VenueName::BinanceTestnet,
             VenueName::VariationalMainnet,
         ] {
-            let mut feed = MarketFeeds::build(name, &subs());
+            if !name.compiled() {
+                continue;
+            }
+            let mut feed = MarketFeeds::build(name, &subs()).unwrap();
             assert_eq!(feed.id_of("BTCUSDT"), Some(SymbolId(0)), "{name}");
             assert_eq!(
                 MarketFeed::admit(&mut feed, "ETHUSDT", Feed::Quote),
@@ -197,7 +266,10 @@ mod tests {
             VenueName::BinanceTestnet,
             VenueName::VariationalMainnet,
         ] {
-            let mut feed = MarketFeeds::build(name, &subs());
+            if !name.compiled() {
+                continue;
+            }
+            let mut feed = MarketFeeds::build(name, &subs()).unwrap();
             for _ in 0..64 {
                 assert_eq!(feed.admit("BTCUSDT", Feed::Quote), Some(SymbolId(0)));
             }

@@ -130,7 +130,9 @@ impl SignalState {
                     state.consumable(*strategy, source, *sequence, observation_id)?;
                     state.consume(source, *sequence);
                 }
-                WalRecord::StrategyCallbackQueued { input } => {
+                WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyCallbackQueued { input },
+                ) => {
                     if let engine_types::strategy_process::CallbackEvent::Signal { observation } =
                         &input.event
                     {

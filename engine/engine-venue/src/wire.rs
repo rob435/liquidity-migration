@@ -64,12 +64,26 @@ impl Field<String> {
 
 pub(crate) use engine_public::numeric_wire::IntegerField;
 
+#[cfg(any(
+    test,
+    feature = "binance",
+    feature = "mexc",
+    feature = "hyperliquid",
+    feature = "lighter"
+))]
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum Id {
     Text(String),
     Number(serde_json::Number),
 }
+#[cfg(any(
+    test,
+    feature = "binance",
+    feature = "mexc",
+    feature = "hyperliquid",
+    feature = "lighter"
+))]
 impl Id {
     pub(crate) fn into_text(self) -> String {
         match self {

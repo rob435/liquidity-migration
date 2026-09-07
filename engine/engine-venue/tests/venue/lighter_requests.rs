@@ -114,7 +114,7 @@ fn percent_decode(raw: &str) -> String {
     String::from_utf8(out).expect("utf8")
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_order_goes_out_form_encoded_with_its_transaction_type() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
@@ -148,7 +148,7 @@ async fn an_order_goes_out_form_encoded_with_its_transaction_type() {
     assert_eq!(tx["ReduceOnly"], 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn prices_and_sizes_are_the_markets_own_integers() {
     // The signature covers the integer, so a decimal anywhere here would be a
     // rounding the venue never agreed to.
@@ -173,7 +173,7 @@ async fn prices_and_sizes_are_the_markets_own_integers() {
     assert!(tx["BaseAmount"].is_number());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn every_transaction_carries_a_signature() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
@@ -197,7 +197,7 @@ async fn every_transaction_carries_a_signature() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_stop_is_a_second_transaction_on_the_other_side() {
     // This venue takes one order per transaction, so an entry and its stop
     // cannot travel together the way they do on Bybit and Hyperliquid.
@@ -240,7 +240,7 @@ async fn a_stop_is_a_second_transaction_on_the_other_side() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_stop_the_venue_refuses_does_not_unsay_the_entry_it_accepted() {
     // The entry is already live by the time the stop is sent. Reporting the
     // stop's refusal as the entry's would tell the engine no order exists,
@@ -282,7 +282,7 @@ async fn a_stop_the_venue_refuses_does_not_unsay_the_entry_it_accepted() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_exit_never_carries_a_stop_even_when_handed_one() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
@@ -304,7 +304,7 @@ async fn an_exit_never_carries_a_stop_even_when_handed_one() {
     assert_eq!(tx["IsAsk"], 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_cancel_names_the_order_by_the_index_the_engine_minted() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
@@ -322,7 +322,7 @@ async fn a_cancel_names_the_order_by_the_index_the_engine_minted() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_nonce_is_asked_for_once_and_then_counted() {
     // Asking before every order would be a round trip in front of every order,
     // and the venue takes nonces strictly in order anyway.
@@ -352,7 +352,7 @@ async fn the_nonce_is_asked_for_once_and_then_counted() {
     assert_eq!(nonces, vec![7, 8, 9], "nonces must climb without a gap");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_transaction_makes_the_next_one_ask_again() {
     // A stale counter refuses every order after it, and the venue may or may
     // not have consumed the nonce of the one it refused.
@@ -399,7 +399,7 @@ async fn a_refused_transaction_makes_the_next_one_ask_again() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_busy_window_is_walked_rather_than_truncated() {
     // This read is the ONLY way a fill is ever learned on this venue, so a
     // page that came back full and was taken as complete is a fill the log
@@ -458,7 +458,7 @@ async fn a_busy_window_is_walked_rather_than_truncated() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_signed_read_carries_the_auth_token() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
@@ -476,7 +476,7 @@ async fn a_signed_read_carries_the_auth_token() {
     assert!(!sent[0].query.contains("market_id"), "{}", sent[0].query);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn long_history_streams_past_twenty_pages_and_deduplicates_inclusive_boundaries() {
     let page = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls = page.clone();
@@ -512,7 +512,7 @@ async fn long_history_streams_past_twenty_pages_and_deduplicates_inclusive_bound
     assert!(rows.pop_front().unwrap().is_none());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_account_read_and_the_order_read_go_out_together() {
     // Two reads because this venue keeps no stop on the position row; issued
     // together so the picture is of one moment.
@@ -531,7 +531,7 @@ async fn the_account_read_and_the_order_read_go_out_together() {
     assert_eq!(server.to_path("/api/v1/accountActiveOrders").len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn instrument_rules_come_from_the_venues_own_market_list() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
@@ -543,7 +543,7 @@ async fn instrument_rules_come_from_the_venues_own_market_list() {
     assert_eq!(rule.min_notional, 10.0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_amend_is_refused_rather_than_turned_into_a_different_trade() {
     // Declared false in caps. Cancel-and-replace is a new order at the back of
     // the queue, and the caller decides whether to make it.
@@ -568,7 +568,7 @@ async fn an_amend_is_refused_rather_than_turned_into_a_different_trade() {
     assert!(!gw.caps().amend_in_place);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_account_the_venue_does_not_know_stops_the_engine_at_the_door() {
     let server = TestServer::start(|request, _| {
         if request.path == "/api/v1/account" {
@@ -584,7 +584,7 @@ async fn an_account_the_venue_does_not_know_stops_the_engine_at_the_door() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_account_identity_names_the_venue_the_account_and_the_realm() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
@@ -596,7 +596,7 @@ async fn the_account_identity_names_the_venue_the_account_and_the_realm() {
     assert!(engine_venue::lease::account_key_text(&who.user_id).is_some());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn filtered_history_rows_do_not_make_a_full_wire_page_look_complete() {
     let server = TestServer::start(|request, seen| {
         if request.path != "/api/v1/trades" {
@@ -643,7 +643,7 @@ async fn filtered_history_rows_do_not_make_a_full_wire_page_look_complete() {
     assert_eq!(server.to_path("/api/v1/trades").len(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_order_size_does_not_lose_a_lot_during_integer_wire_scaling() {
     use engine_types::numeric::Exact;
     use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
@@ -686,7 +686,7 @@ async fn exact_order_size_does_not_lose_a_lot_during_integer_wire_scaling() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn independent_catalog_installs_market_indices_before_a_mutation_without_another_read() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
@@ -716,7 +716,7 @@ async fn independent_catalog_installs_market_indices_before_a_mutation_without_a
     assert!(other.requests().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn independent_account_recovery_uses_requested_ids_and_preserves_protection() {
     // Two reads because this venue keeps no stop on the position row; issued
     // together so the picture is of one moment.
@@ -748,7 +748,7 @@ async fn independent_account_recovery_uses_requested_ids_and_preserves_protectio
     assert_eq!(server.to_path("/api/v1/accountActiveOrders").len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn recovery_catalog_install_refreshes_native_units_without_metadata_reads() {
     let server = TestServer::start(|request, prior| {
         match request.path.as_str() {

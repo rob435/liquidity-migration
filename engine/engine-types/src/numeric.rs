@@ -5,6 +5,7 @@ use std::ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign};
 use std::str::FromStr;
 
 use num_bigint::BigInt;
+use num_integer::Integer;
 use num_rational::BigRational;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -197,6 +198,44 @@ pub struct ExactInstrumentSpec {
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Exact(BigRational);
 
+/// Accumulates equal-denominator runs; `finish` returns a reduced `Exact`.
+#[derive(Clone, Debug)]
+pub struct ExactSum {
+    numerator: BigInt,
+    denominator: BigInt,
+}
+impl Default for ExactSum {
+    fn default() -> Self {
+        Self {
+            numerator: BigInt::zero(),
+            denominator: BigInt::one(),
+        }
+    }
+}
+impl AddAssign<&Exact> for ExactSum {
+    fn add_assign(&mut self, rhs: &Exact) {
+        if self.numerator.is_zero() {
+            self.numerator = rhs.0.numer().clone();
+            self.denominator = rhs.0.denom().clone();
+        } else if self.denominator == *rhs.0.denom() {
+            self.numerator += rhs.0.numer();
+        } else {
+            // Discard canceled factors before switching denominators.
+            let mut current = BigRational::new(
+                std::mem::take(&mut self.numerator),
+                std::mem::replace(&mut self.denominator, BigInt::one()),
+            );
+            current += &rhs.0;
+            (self.numerator, self.denominator) = current.into_raw();
+        }
+    }
+}
+impl ExactSum {
+    pub fn finish(self) -> Exact {
+        Exact(BigRational::new(self.numerator, self.denominator))
+    }
+}
+
 impl Exact {
     pub fn zero() -> Self {
         Self(BigRational::zero())
@@ -272,9 +311,38 @@ impl Exact {
 
     /// Preserves the exact binary64 value, not an inferred original decimal.
     pub fn from_legacy_f64(value: f64) -> Result<Self, ExactError> {
-        BigRational::from_float(value)
-            .map(Self)
-            .ok_or(ExactError::NonFinite)
+        let bits = value.to_bits();
+        let encoded_exponent = ((bits >> 52) & 0x7ff) as i32;
+        if encoded_exponent == 0x7ff {
+            return Err(ExactError::NonFinite);
+        }
+        let mut mantissa = bits & ((1u64 << 52) - 1);
+        let mut exponent = if encoded_exponent == 0 {
+            -1074
+        } else {
+            mantissa |= 1u64 << 52;
+            encoded_exponent - 1023 - 52
+        };
+        if mantissa == 0 {
+            return Ok(Self::zero());
+        }
+        let powers_of_two = mantissa.trailing_zeros();
+        mantissa >>= powers_of_two;
+        exponent += powers_of_two as i32;
+        let numerator = if bits >> 63 == 0 {
+            BigInt::from(mantissa)
+        } else {
+            -BigInt::from(mantissa)
+        };
+        Ok(if exponent >= 0 {
+            Self(BigRational::from_integer(numerator << exponent as usize))
+        } else {
+            // An odd numerator and positive power-of-two denominator are coprime.
+            Self(BigRational::new_raw(
+                numerator,
+                BigInt::one() << -exponent as usize,
+            ))
+        })
     }
 
     pub fn from_ratio(numerator: &str, denominator: &str) -> Result<Self, ExactError> {
@@ -321,6 +389,17 @@ impl Exact {
             return Err(ExactError::DivisionByZero);
         }
         Ok(Self(&self.0 / &rhs.0))
+    }
+    fn product(&self, rhs: &Self) -> Self {
+        let (a, b) = (self.0.numer(), self.0.denom());
+        let (c, d) = (rhs.0.numer(), rhs.0.denom());
+        let ad = a.gcd(d);
+        let bc = b.gcd(c);
+        // Both operands are reduced; cross-cancellation leaves a reduced product.
+        Self(BigRational::new_raw(
+            (a / &ad) * (c / &bc),
+            (b / &bc) * (d / &ad),
+        ))
     }
     pub fn floor_to(&self, step: &Self) -> Result<Self, ExactError> {
         if !step.is_positive() {
@@ -484,7 +563,30 @@ macro_rules! arithmetic {
 }
 arithmetic!(Add, add, +);
 arithmetic!(Sub, sub, -);
-arithmetic!(Mul, mul, *);
+impl Mul<&Exact> for &Exact {
+    type Output = Exact;
+    fn mul(self, rhs: &Exact) -> Exact {
+        self.product(rhs)
+    }
+}
+impl Mul<Exact> for Exact {
+    type Output = Exact;
+    fn mul(self, rhs: Exact) -> Exact {
+        self.product(&rhs)
+    }
+}
+impl Mul<&Exact> for Exact {
+    type Output = Exact;
+    fn mul(self, rhs: &Exact) -> Exact {
+        self.product(rhs)
+    }
+}
+impl Mul<Exact> for &Exact {
+    type Output = Exact;
+    fn mul(self, rhs: Exact) -> Exact {
+        self.product(&rhs)
+    }
+}
 impl AddAssign<&Exact> for Exact {
     fn add_assign(&mut self, rhs: &Exact) {
         self.0 += &rhs.0;
@@ -555,6 +657,79 @@ mod tests {
         assert_eq!(serde_json::from_str::<Exact>(&encoded).unwrap(), third);
     }
     #[test]
+    fn batched_sums_match_reduction_oracle_at_every_prefix() {
+        let mut sum = ExactSum::default();
+        let mut expected = BigRational::zero();
+        assert_eq!(sum.clone().finish(), Exact::zero());
+        let mut seed = 0x491f_35a7_f62b_091du64;
+        for step in 0..4096u64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let value = match (step / 128) % 3 {
+                0 => dec(if seed & 1 == 0 { "0.01" } else { "-0.01" }),
+                1 => Exact::from_ratio(
+                    &((seed % 201) as i64 - 100).to_string(),
+                    &((seed >> 8) % 101 + 1).to_string(),
+                )
+                .unwrap(),
+                _ => dec(["1e2048", "-1e2048", "1e-2048", "0"][(seed % 4) as usize]),
+            };
+            sum += &value;
+            expected += &value.0;
+            let actual = sum.clone().finish();
+            assert_eq!(actual.0, expected, "prefix {step}");
+            assert_eq!(
+                serde_json::to_vec(&actual).unwrap(),
+                serde_json::to_vec(&Exact(expected.clone())).unwrap(),
+                "canonical bytes at prefix {step}"
+            );
+            if step.is_multiple_of(97) {
+                sum += &-actual;
+                assert_eq!(sum.clone().finish(), Exact::zero());
+                expected = BigRational::zero();
+            }
+        }
+    }
+    #[test]
+    fn rational_products_match_reduction_oracle_and_canonical_bytes() {
+        let compare = |a: Exact, b: Exact| {
+            let expected = Exact(&a.0 * &b.0);
+            for actual in [&a * &b, a.clone() * &b, &a * b.clone(), a * b] {
+                assert_eq!(actual, expected);
+                assert_eq!(
+                    serde_json::to_vec(&actual).unwrap(),
+                    serde_json::to_vec(&expected).unwrap()
+                );
+            }
+        };
+        let mut values: Vec<_> = ["0", "1", "-1", "0.1", "-0.00001", "1e2048", "-1e-2048"]
+            .into_iter()
+            .map(dec)
+            .collect();
+        values.push(Exact::from_ratio("-7", "13").unwrap());
+        values.push(Exact::from_ratio("13", "7").unwrap());
+        for a in &values {
+            for b in &values {
+                compare(a.clone(), b.clone());
+            }
+        }
+        let mut seed = 0x735f_27cb_91e3_824du64;
+        for _ in 0..4096 {
+            let mut next = || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed
+            };
+            let a = Exact::from_legacy_f64(f64::from_bits(next()));
+            let b = Exact::from_legacy_f64(f64::from_bits(next()));
+            if let (Ok(a), Ok(b)) = (a, b) {
+                compare(a, b);
+            }
+        }
+    }
+    #[test]
     fn legacy_input_preserves_bits_without_claiming_venue_decimal_precision() {
         let legacy = Exact::from_legacy_f64(0.1).unwrap();
         assert_ne!(legacy, dec("0.1"));
@@ -568,6 +743,39 @@ mod tests {
             1
         );
         assert_eq!(Exact::from_legacy_f64(f64::NAN), Err(ExactError::NonFinite));
+    }
+    #[test]
+    fn binary64_conversion_matches_reduced_rational_and_canonical_bytes() {
+        let mut samples = Vec::new();
+        for exponent in 0..=0x7ffu64 {
+            for fraction in [0, 1, 1 << 51, (1 << 52) - 2, (1 << 52) - 1] {
+                for sign in [0, 1u64 << 63] {
+                    samples.push(sign | (exponent << 52) | fraction);
+                }
+            }
+        }
+        let mut seed = 0x735f_27cb_91e3_824du64;
+        for _ in 0..4096 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            samples.push(seed);
+        }
+        for bits in samples {
+            let value = f64::from_bits(bits);
+            let expected = BigRational::from_float(value)
+                .map(Exact)
+                .ok_or(ExactError::NonFinite);
+            let actual = Exact::from_legacy_f64(value);
+            assert_eq!(actual, expected, "binary64 {bits:016x}");
+            if let (Ok(actual), Ok(expected)) = (actual, expected) {
+                assert_eq!(
+                    serde_json::to_vec(&actual).unwrap(),
+                    serde_json::to_vec(&expected).unwrap(),
+                    "binary64 {bits:016x} canonical bytes"
+                );
+            }
+        }
     }
     #[test]
     fn invalid_and_amplifying_numbers_are_refused_before_bigint_construction() {

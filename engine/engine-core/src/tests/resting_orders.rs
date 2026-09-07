@@ -6,10 +6,12 @@
 use super::*;
 
 pub(super) fn owned_resting_replay(strategy: &str, ids: &[String]) -> Vec<WalRecord> {
-    let mut records = vec![WalRecord::Names {
-        strategies: vec![strategy.into()],
-        symbols: vec!["BTCUSDT".into()],
-    }];
+    let mut records = vec![WalRecord::Retained(
+        engine_types::wal::RetainedWalRecord::Names {
+            strategies: vec![strategy.into()],
+            symbols: vec!["BTCUSDT".into()],
+        },
+    )];
     records.extend(ids.iter().map(|id| WalRecord::OrderSent {
         dispatch: None,
         request: OrderRequest {
@@ -479,29 +481,32 @@ async fn the_venue_stating_the_price_settles_the_amend_and_keeps_the_order() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_price_the_venue_never_states_pulls_the_order() {
-    // The fallback, and it is exactly what a venue that cannot amend at all
-    // gets: an order resting at a price the engine cannot name is one it
-    // cannot price its own book against, so it comes down.
-    let (mut engine, h, symbol) = amended_once().await;
-    assert_eq!(h.cancels.lock().unwrap().len(), 0, "not yet overdue");
+    crate::test_clock::with_engine_clock(async {
+        // The fallback, and it is exactly what a venue that cannot amend at all
+        // gets: an order resting at a price the engine cannot name is one it
+        // cannot price its own book against, so it comes down.
+        let (mut engine, h, symbol) = amended_once().await;
+        assert_eq!(h.cancels.lock().unwrap().len(), 0, "not yet overdue");
 
-    // Past the confirmation bound, with market wakes and no word from the
-    // private stream about that order.
-    tokio::time::sleep(Duration::from_millis(40)).await;
-    engine
-        .run(
-            &mut ScriptFeed::quotes(symbol, 1, true),
-            &mut ScriptOrderFeed::empty(),
-            std::future::pending::<()>(),
-        )
-        .await
-        .unwrap();
+        // Past the confirmation bound, with market wakes and no word from the
+        // private stream about that order.
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        engine
+            .run(
+                &mut ScriptFeed::quotes(symbol, 1, true),
+                &mut ScriptOrderFeed::empty(),
+                std::future::pending::<()>(),
+            )
+            .await
+            .unwrap();
 
-    let cancels = h.cancels.lock().unwrap();
-    assert_eq!(cancels.len(), 1, "the unexplained amend left the order up");
-    assert_eq!(cancels[0].1, "eng-old-1");
+        let cancels = h.cancels.lock().unwrap();
+        assert_eq!(cancels.len(), 1, "the unexplained amend left the order up");
+        assert_eq!(cancels[0].1, "eng-old-1");
+    })
+    .await;
 }
 
 #[tokio::test(start_paused = true)]

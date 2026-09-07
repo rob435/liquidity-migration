@@ -476,15 +476,13 @@ impl Kernel {
         Ok(projected)
     }
     fn add_pending(&self, projected: &mut Projected, view: &ViewFacts) -> Result<(), DenyReason> {
-        for (_, notional, fraction) in self
+        let rows = self
             .book
             .pending_risk_rows(|symbol| self.price_for(symbol, view))
-            .map_err(unknown)?
-        {
-            projected.add(&notional);
-            projected.worst_case_loss_usdt +=
-                self.envelope.position_worst_case_usdt(&notional, &fraction);
-        }
+            .map_err(unknown)?;
+        let (gross, loss) = self.envelope.pending_totals(&rows);
+        projected.gross_usdt += gross;
+        projected.worst_case_loss_usdt += loss;
         Ok(())
     }
     fn account_caps(

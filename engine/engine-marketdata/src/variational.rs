@@ -294,7 +294,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn empty_demand_after_retirement_stays_idle_until_readmission() {
     use std::future::Future;
     let subs = [Subscription {

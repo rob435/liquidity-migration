@@ -11,7 +11,10 @@ After=network-online.target liquidity-migration-signal-worker-mainnet.service
 # fleet the moment anyone started this unit.
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+TimeoutStartSec=180
 User=liquidity-engine-mainnet
 Group=liquidity-migration
 # Not the deployed checkout: a relative log path inside /opt/liquidity-migration

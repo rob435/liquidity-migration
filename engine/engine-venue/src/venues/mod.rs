@@ -19,9 +19,15 @@
 //! written in exactly one file, and fails outright on a venue directory it
 //! does not know.
 
+#[cfg(feature = "binance")]
 pub mod binance;
+#[cfg(feature = "bybit")]
 pub mod bybit;
+#[cfg(feature = "hyperliquid")]
 pub mod hyperliquid;
+#[cfg(feature = "lighter")]
 pub mod lighter;
+#[cfg(feature = "mexc")]
 pub mod mexc;
+#[cfg(feature = "variational")]
 pub mod variational;

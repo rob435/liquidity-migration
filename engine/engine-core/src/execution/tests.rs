@@ -14,10 +14,10 @@ const MS: u64 = 1_000_000;
 
 /// What the ids mean, as the engine writes it down before its first order.
 fn names() -> WalRecord {
-    WalRecord::Names {
+    WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
         strategies: vec!["carry".into(), "long".into()],
         symbols: vec!["BTCUSDT".into(), "ETHUSDT".into()],
-    }
+    })
 }
 
 fn market(bid: f64, ask: f64) -> MarketState {
@@ -763,10 +763,10 @@ fn a_mark_survives_the_round_trip_through_a_record() {
 /// them. `symbols` is what shifts: the seeds hold the low ids and everything
 /// after arrives in whatever order a book first named it.
 fn names_with(strategies: &[&str], symbols: &[&str]) -> WalRecord {
-    WalRecord::Names {
+    WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
         strategies: strategies.iter().map(|s| s.to_string()).collect(),
         symbols: symbols.iter().map(|s| s.to_string()).collect(),
-    }
+    })
 }
 
 fn sent_for(id: &str, strategy: StrategyId, symbol: SymbolId) -> WalRecord {

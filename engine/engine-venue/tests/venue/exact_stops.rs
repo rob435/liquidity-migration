@@ -2,12 +2,32 @@ use crate::support::TestServer;
 use engine_types::numeric::Exact;
 use engine_types::order_terms::ExactStopTerms;
 use engine_types::{Side, SymbolId, VenueGateway};
-use engine_venue::{
-    BinanceGateway, BinanceRealm, BybitGateway, HyperliquidGateway, HyperliquidRealm,
-    LighterGateway, LighterRealm, MexcGateway, MexcRealm, RealmCredentials, VenueRealm,
-};
+#[cfg(feature = "binance")]
+use engine_venue::BinanceGateway;
+#[cfg(feature = "binance")]
+use engine_venue::BinanceRealm;
+#[cfg(feature = "bybit")]
+use engine_venue::BybitGateway;
+#[cfg(feature = "hyperliquid")]
+use engine_venue::HyperliquidGateway;
+#[cfg(feature = "hyperliquid")]
+use engine_venue::HyperliquidRealm;
+#[cfg(feature = "lighter")]
+use engine_venue::LighterGateway;
+#[cfg(feature = "lighter")]
+use engine_venue::LighterRealm;
+#[cfg(feature = "mexc")]
+use engine_venue::MexcGateway;
+#[cfg(feature = "mexc")]
+use engine_venue::MexcRealm;
+use engine_venue::RealmCredentials;
+#[cfg(feature = "bybit")]
+use engine_venue::VenueRealm;
+#[cfg(feature = "hyperliquid")]
 const HL_KEY: &str = "0x0123456789012345678901234567890123456789012345678901234567890123";
+#[cfg(feature = "hyperliquid")]
 const HL_ACCOUNT: &str = "0x0000000000000000000000000000000000000001";
+#[cfg(feature = "lighter")]
 const LIGHTER_KEY: &str =
     "0101010101010101010101010101010101010101010101010101010101010101010101010101010f";
 fn terms(trigger: &str, reference: &str) -> ExactStopTerms {
@@ -52,7 +72,8 @@ fn ok(result: &str) -> (u16, String) {
     )
 }
 
-#[tokio::test]
+#[cfg(feature = "bybit")]
+#[tokio::test(start_paused = true)]
 async fn bybit_exact_full_stop_preserves_price_and_refuses_a_changed_native_side() {
     for changed in [false, true] {
         let server=TestServer::start(move|request,_|match request.path.as_str(){
@@ -83,7 +104,8 @@ async fn bybit_exact_full_stop_preserves_price_and_refuses_a_changed_native_side
     }
 }
 
-#[tokio::test]
+#[cfg(feature = "binance")]
+#[tokio::test(start_paused = true)]
 async fn binance_exact_native_stop_preserves_price_without_cancel_before_replacement() {
     let server=TestServer::start(|request,_|match request.path.as_str(){
         "/fapi/v1/exchangeInfo"=>(200,r#"{"symbols":[{"symbol":"BTCUSDT","status":"TRADING","contractType":"PERPETUAL","quoteAsset":"USDT","marginAsset":"USDT","filters":[{"filterType":"PRICE_FILTER","tickSize":"0.0000000000001"},{"filterType":"LOT_SIZE","minQty":"0.001","maxQty":"100","stepSize":"0.001"},{"filterType":"MARKET_LOT_SIZE","minQty":"0.001","maxQty":"100","stepSize":"0.001"},{"filterType":"MIN_NOTIONAL","notional":"5"}]}]}"#.into()),
@@ -107,7 +129,8 @@ async fn binance_exact_native_stop_preserves_price_without_cancel_before_replace
     assert!(request.query.contains("closePosition=true"));
 }
 
-#[tokio::test]
+#[cfg(feature = "mexc")]
+#[tokio::test(start_paused = true)]
 async fn mexc_exact_native_stop_preserves_position_id_and_decimal_price() {
     let server=TestServer::start(|request,_|{
         let data=match request.path.as_str(){
@@ -134,7 +157,8 @@ async fn mexc_exact_native_stop_preserves_position_id_and_decimal_price() {
     assert_eq!(sent["stopLossReverse"], 2);
 }
 
-#[tokio::test]
+#[cfg(feature = "hyperliquid")]
+#[tokio::test(start_paused = true)]
 async fn hyperliquid_exact_stop_uses_actual_lexical_native_quantity() {
     let server=TestServer::start(|request,_|{
         if request.path=="/exchange" { return (200,r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":7}}]}}}"#.into()); }
@@ -163,7 +187,8 @@ async fn hyperliquid_exact_stop_uses_actual_lexical_native_quantity() {
     assert_eq!(order["r"], true);
 }
 
-#[tokio::test]
+#[cfg(feature = "lighter")]
+#[tokio::test(start_paused = true)]
 async fn lighter_exact_stop_never_loses_a_native_lot_to_binary64_scaling() {
     let server=TestServer::start(|request,_|{
         let reply=match request.path.as_str(){
@@ -214,7 +239,8 @@ async fn lighter_exact_stop_never_loses_a_native_lot_to_binary64_scaling() {
     assert_eq!(tx["ReduceOnly"], 1);
 }
 
-#[tokio::test]
+#[cfg(feature = "hyperliquid")]
+#[tokio::test(start_paused = true)]
 async fn retained_native_asset_survives_refresh_and_restart_at_its_original_index() {
     use std::sync::{
         atomic::{AtomicUsize, Ordering},

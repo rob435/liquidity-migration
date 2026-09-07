@@ -7,6 +7,15 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["bybit"]
+bybit = []
+binance = []
+hyperliquid = []
+lighter = []
+mexc = []
+variational = []
+
 [dependencies]
 engine-types = { workspace = true }
 bytes = { workspace = true }
@@ -18,3 +27,6 @@ rustls = { workspace = true, features = ["ring", "std"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "macros", "sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

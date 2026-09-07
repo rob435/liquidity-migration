@@ -239,7 +239,7 @@ fn assert_snapshot(snapshot: &WalRecord, expected: &ClosedTradeRow, reopened: bo
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn contextual_legacy_close_seeds_loss_once_through_boot_replay_and_rotation() {
     for reopened in [false, true] {
         let (original, expected) = prefix(reopened);
@@ -305,7 +305,7 @@ async fn contextual_legacy_close_seeds_loss_once_through_boot_replay_and_rotatio
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn contextual_legacy_close_does_not_publish_before_adoption_is_durable() {
     for failure in [WriteFailure::Append, WriteFailure::Barrier] {
         let (original, expected) = prefix(true);
@@ -328,7 +328,9 @@ async fn contextual_legacy_close_does_not_publish_before_adoption_is_durable() {
             record,
             WalRecord::Reconciled { .. }
                 | WalRecord::SegmentBase { .. }
-                | WalRecord::StrategyCallbackQueued { .. }
+                | WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyCallbackQueued { .. }
+                )
         )));
 
         let restarted = boot(&original, true, None).await;

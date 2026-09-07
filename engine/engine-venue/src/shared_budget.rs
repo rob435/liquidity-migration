@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 #[derive(Clone)]
 pub(crate) struct SharedBudget(Arc<Mutex<State>>);
@@ -52,6 +53,7 @@ impl SharedBudget {
             .unwrap_or(Duration::from_millis(10))
             .min(Duration::from_millis(10)))
     }
+    #[cfg(feature = "binance")]
     pub(crate) async fn reserve(&self, cost: u32) -> Reservation {
         loop {
             match self.try_reserve(cost, Instant::now()) {

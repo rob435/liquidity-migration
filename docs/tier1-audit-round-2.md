@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define retained architecture decisions and the remaining qualification scope for the deployed Round-2 engine.
+Define the remaining Round-2 qualification and migration conditions retained by Round 3.
 
 ## Spec Tables
 
@@ -11,22 +11,19 @@ Define retained architecture decisions and the remaining qualification scope for
 | Item | Contract |
 | --- | --- |
 | Product | Durable execution, exact accounting, deterministic strategy decisions, independent sleeves and pluggable venues |
-| Working tree | `af09aab5` integrates Round-2 cleanup and the observed scheduling repairs; [deployment run 34049060363](https://github.com/rob435/liquidity-migration/actions/runs/34049060363) succeeds |
+| Current plan | [Round 3](tier1-audit-round-3.md) owns callback execution, venue features, WAL write kinds, order durability and supervision |
 | Runtime specification | [engine.md](engine.md); source and behavior tests take precedence over ratings or audit assertions |
 | Implementation checkpoint | [tier1-round-handoff.md](tier1-round-handoff.md); [compact qualification evidence](tier1-round2-evidence.json) |
 | Operational authority | [STATE.md](../STATE.md) records a dated host observation; local tests do not update that observation |
 | History | [CHANGELOG.md](../CHANGELOG.md); resolved findings leave this table after integration and verification |
-| Qualification language | An embedded reducer simulation, a real child-process integration test and authenticated venue evidence establish different things |
+| Qualification language | Local execution, historical child-process fixtures and authenticated venue evidence have distinct scopes; only the current production callback mode qualifies new execution claims |
 
 ### Retained architecture
 
 | Area | Decision | Alternative and reason |
 | --- | --- | --- |
 | Venues | Retain Bybit, Binance, Hyperliquid, Lighter, MEXC and Variational implementations and their typed registry | Deleting adapters because their realms are dormant removes required product capability; dormant is a live-evidence status, not dead code |
-| Strategy execution | Preserve process isolation and qualify its actual protocol, scheduling and durability path | Embedded-only production cannot terminate a stuck reducer on the current-thread runtime; it is appropriate for deterministic reducer simulation |
-| WAL format | Preserve supported framed JSON readers and exact semantics; reduce encoding allocations and measure barriers before changing format | A binary-format migration or removal of v2-v6 readers is not justified by which versions one host happened to write; retained artifacts and recovery tools also read them |
 | Account ownership | Exact sleeve inventories determine one physical net; display/legacy projections have no admission authority | Merging virtual ownership with physical net loses opposing sleeves and their independent stops |
-| System supervision | Retain systemd ownership of independent services and timers | Replacing it with a new supervisor adds an owner without demonstrating a fault it fixes; WatchdogSec requires engine liveness notification before enabling it |
 | Research | Keep reusable research/data capabilities; remove only proven redundant implementations and stale interfaces | Being absent from a trading unit is expected for a research tool and is insufficient deletion evidence |
 | Grafana | Retain the dashboard renderer and published dashboard definition | The recorder, observability runbook and user workflow consume them; a self-consistency test is not their only consumer |
 | Demo probe and disabled maker | Preserve stable strategy identity and the enabled demo measurement probe; suppress unnecessary work only when state/holdings permit | Deleting template blocks changes persisted IDs and removes an enabled demo function |
@@ -36,35 +33,18 @@ Define retained architecture decisions and the remaining qualification scope for
 
 | ID | Required outcome | Current evidence and remaining work |
 | --- | --- | --- |
-| R2-20 | Verify the corrective deployment and naturally scheduled probe after ordinary-input and spool cancellation repairs | Eight actual baseline assertion failures now pass; integrated release, replay and workload qualification pass. Corrective deployment passes, but the 18:00 probe remains 5.912s late. Order-source scan and per-strategy timer corrections pass integrated debug/release/replay checks; corrective handover and natural probe observation remain. |
-| R2-21 | Restore LONG after the TAO acknowledgement abort and report process faults in the heartbeat | Inventory, both captured-state protocol restarts, callback health and owned-stop regressions fail before and pass after their repairs. Integrated debug/release/replay qualification passes; funded handover and verified reconciliation remain. |
 | R2-15 | Replay a sanitized, complete recorded production day with matched input and accounting scope | Copied private-prefix boot/rotation/reboot passes; the 123-second public tape replays byte-identically with zero fills. Neither establishes a complete production day. Full retained-family acquisition and replay remain incomplete qualification. |
-
-### Implemented contracts
-
-| Area | Current contract | Evidence authority |
-| --- | --- | --- |
-| Callback execution | Real isolated children run production and the benchmark. Unchanged proposals avoid WAL amplification; changed state decodes once. Busy callbacks defer source-owned work without false strategy failures. | [Engine ownership](engine.md); [combined qualification](tier1-round2-evidence.json) |
-| Ordinary inputs | Tick, timer, control, signal and market each receive a turn under continuous ordinary load, with private/recovery priority checked between handlers. Control-spool IO and deadlines survive cancelled polls. | Eight failing-before assertions, integrated suites and exact-SHA deployment in [evidence](tier1-round2-evidence.json) |
-| Clocks | Current admission time judges account and quote freshness. Durable decision identity remains unchanged; process-local optional timing prevents fabricated replay latency. | Five admission controls and three failing-before replay timing assertions in [regression evidence](tier1-round2-evidence.json) |
-| WAL and quantities | Borrowed encoding retains semantic validation and supported readers; one exact in-flight frontier preserves compatibility snapshots. Canary entry/cleanup keep canonical wire terms. | WAL nonfinite/ordinal controls, canary regression and byte-identical snapshot comparisons in [evidence](tier1-round2-evidence.json) |
-| Runtime and tools | `engine` owns runtime and child protocol; `engine-tools` owns operational tools, benchmark, simulation and backtest. The release installs both with `signal-worker`. | Exact installed and loaded hashes in [STATE](../STATE.md); [release workflow](https://github.com/rob435/liquidity-migration/actions/runs/34049060363) |
-| Worker and dependencies | One public HTTP request budget and shared endpoint implementation retain gap repair and persistence. The runtime Python lock includes the actual websocket-client consumer. | Combined Rust/Python checks; isolated service import test; deployed recorder and worker observations |
-| Supervision | systemd owns services and timers; engine/worker start limits are five per 300 seconds. Stale observations publish unavailable health; sleeve failures are independent of entry permission; disk-floor forecasts use measured growth. | Behavioral script regressions and dated unit/liveness observations in [STATE](../STATE.md) |
-| Recovery | Tool instructions use supported verbs. Compatible state can use retained recovery paths; incompatible predecessors require forward repair. | Failing-before CLI controls, copied-WAL rehearsal and the executed exact-SHA forward handover |
-| Venue ownership | Real local HTTP/WebSocket fixtures exercise signed clock/quota rejection, timeout then late fill, cancel/fill ordering and malformed account envelopes. | Current Linux suite and the test-only socket scheduling control in [evidence](tier1-round2-evidence.json) |
-| Cleanup | Unused Rust recorder, redundant Python current-universe builder, orphan pack wrapper and dead deploy function are absent. Research, all venues, registered configs, Grafana and the enabled demo probe retain their consumers. | Source at `af09aab5`; original audit retained by tag `codex/round2-audit-input` |
 
 ### Evidence boundaries
 
-| Boundary | Supported conclusion |
+| Boundary | Contract |
 | --- | --- |
-| R2-05 durability cost | Callback, queued-dispatch and attempted-send barriers serve distinct recovery obligations. Measured workloads report each cost and zero barrier failures; no redundant obligation is demonstrated. |
-| R2-16 capacity | [Three 60-second workloads](execution-performance.md) report platform, quantiles, sampled CPU/RSS and WAL bytes. One child over 270 symbols is not 270 workers; no-fill growth is not steady-state disk usage. Missing source opportunities remain explicit. No universal memory ceiling, many-worker capacity or unloaded latency SLO follows. |
-| Production evidence | Deployed Linux checks pass 2,408 tests on `af09aab5`; local macOS release passes 2,404. Authenticated snapshots establish the dated account/protection state, not a full-day execution or latency claim. |
-| Constructed venue fixtures | Signed protocol responses establish engine handling; they are not authenticated private-stream captures. Position topics remain separate from the authenticated snapshot/history accounting authority. |
-| Research parity | Research and live-worker populations are independently constructed; shared protocol code does not establish full cross-environment feature parity. |
-| Operational fault exercise | A successful handover and advancing health establish the observed path. Unperformed funded rollback, crash/stall injections and external on-call delivery remain unverified. |
+| Implementation | [Engine ownership](engine.md) and [current qualification](tier1-round-handoff.md) define the implemented callback, risk, durability and recovery paths |
+| Workload measurements | [Execution measurements](execution-performance.md) retain platform, source boundary, all opportunities, quantiles and resource limits; a short synthetic workload does not establish full-day accounting or steady-state capacity |
+| Production evidence | [STATE.md](../STATE.md) records authenticated account/protection and loaded-image observations; local checks do not update the host |
+| Venue fixtures | Constructed protocol fixtures and captured demo frames have separate provenance; neither replaces authenticated account/history reconciliation |
+| Research parity | Independently constructed research and worker populations require matching input and accounting scope |
+| Operations | Soak and rollback outcomes require actual host execution; local script tests establish only the exercised fixture behavior |
 
 ### Legacy removal conditions
 
@@ -74,7 +54,7 @@ Define retained architecture decisions and the remaining qualification scope for
 | Legacy signal-source retirement command | Planned stopped-source suffixes are retired on both realms and retained WAL state carries their final frontier |
 | Unmanaged producer identity and legacy worker checkpoint pair | Both realm workers publish the managed format and the retained rollback contract no longer needs the previous checkpoint |
 | Python-sleeve import writers | Authenticated deployment verifies canonical native state on both realms; initialization/verification commands remain |
-| Names alongside IdentityState | Old-reader and replay requirements are explicitly retired; append-only identity continues |
+| Legacy Names reader | Every retained Names-only family remains readable until its replay/rollback requirement is retired; current writes use append-only IdentityState |
 | ExecutionPrecisionV1 marker | Keep while any predecessor can otherwise misread canonical accounting; it is an incompatibility declaration, not an optional boot decoration |
 
 ## Invariants
@@ -101,7 +81,7 @@ scripts/dev.sh check
 ```
 
 ```sh
-# Production-mode local benchmark; synthetic market and venue, real worker executable.
+# Current production callback mode; synthetic market and venue.
 cargo build --manifest-path engine/Cargo.toml --release --locked -p engine-tools --bins
 engine/target/release/engine-tools bench --events 2000 --rate 100 --every 20 --wal /tmp/tier1-round2-bench.wal
 ```

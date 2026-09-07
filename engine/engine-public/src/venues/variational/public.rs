@@ -28,8 +28,9 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn public_stats_retries_after_http_failure_without_private_headers() {
+        let _io = crate::test_io::IoProgress::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = StatsClient::for_test(&format!("http://{}", listener.local_addr().unwrap()));
         let server = tokio::spawn(async move {

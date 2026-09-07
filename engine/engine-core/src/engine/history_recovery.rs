@@ -191,7 +191,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .map_err(EngineError::State)?
                 .map(|slices| slices.into_iter().map(|(owner, _)| owner).collect())
                 .unwrap_or_else(|| owner.into_iter().collect());
-            let callbacks = self.host.callbacks.isolated().then_some(owners);
+            let callbacks = self.host.callbacks.recovering.then_some(owners);
             if let Some(owners) = &callbacks {
                 self.ensure_callback_reader(&[])?;
                 let WalRecord::RecoveredFill {
@@ -379,7 +379,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::strategy_process::host::{CallbackExecution, CallbackHost};
+    use crate::callback_recovery::host::{CallbackExecution, CallbackHost};
 
     #[tokio::test(start_paused = true)]
     async fn empty_or_unrelated_history_cannot_move_past_a_delayed_known_fill_across_restart() {

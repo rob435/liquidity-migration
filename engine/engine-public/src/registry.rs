@@ -41,8 +41,12 @@ pub const BINANCE_MAINNET: &str = "binance_mainnet";
 pub const VARIATIONAL_MAINNET: &str = "variational_mainnet";
 
 /// Every name [`VenueName::parse`] answers to, derived from the one list.
-pub fn known_venues() -> [&'static str; VenueName::ALL.len()] {
-    VenueName::ALL.map(VenueName::as_str)
+pub fn known_venues() -> Vec<&'static str> {
+    VenueName::ALL
+        .into_iter()
+        .filter(|name| name.compiled())
+        .map(VenueName::as_str)
+        .collect()
 }
 
 /// A venue name that has been read: which adapter, and which of its realms.
@@ -120,6 +124,26 @@ impl VenueName {
         VenueName::VariationalMainnet,
     ];
 
+    /// Availability in this binary; realm identities remain stable across builds.
+    pub const fn compiled(self) -> bool {
+        match self {
+            Self::BybitDemo | Self::BybitMainnet => cfg!(feature = "bybit"),
+            Self::BinanceTestnet | Self::BinanceMainnet => cfg!(feature = "binance"),
+            Self::HyperliquidTestnet | Self::HyperliquidMainnet => cfg!(feature = "hyperliquid"),
+            Self::LighterTestnet | Self::LighterMainnet => cfg!(feature = "lighter"),
+            Self::MexcMainnet => cfg!(feature = "mexc"),
+            Self::VariationalMainnet => cfg!(feature = "variational"),
+        }
+    }
+
+    pub fn disabled_error(self) -> VenueError {
+        VenueError::BadRequest(format!(
+            "{} is not compiled; enable the {} Cargo feature",
+            self.as_str(),
+            self.venue()
+        ))
+    }
+
     /// Read one of the names above, refusing every fallback.
     ///
     /// An unknown name is refused rather than defaulted: a typo that quietly
@@ -129,7 +153,7 @@ impl VenueName {
         let name = name.trim();
         VenueName::ALL
             .into_iter()
-            .find(|known| known.as_str() == name)
+            .find(|known| known.as_str() == name && known.compiled())
             .ok_or_else(|| {
                 VenueError::BadRequest(format!(
                     "no venue named \"{name}\" is compiled into this engine (known: {})",
@@ -247,6 +271,9 @@ impl VenueName {
     /// Refuse before the engine opens a log, credential, or socket when this
     /// realm has not earned the evidence its capital class needs.
     pub fn require_engine_run_ready(self) -> Result<(), VenueError> {
+        if !self.compiled() {
+            return Err(self.disabled_error());
+        }
         if self.readiness().permits_engine_run() {
             return Ok(());
         }

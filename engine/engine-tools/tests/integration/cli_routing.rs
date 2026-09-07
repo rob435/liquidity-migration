@@ -22,11 +22,13 @@ fn legacy_venue_command_matches_the_companion_tools_output() {
     let output = String::from_utf8(direct.stdout).unwrap();
     assert!(output.starts_with("name\tvenue\trealm\treal_money\treadiness\n"));
     for name in engine_venue::VenueName::ALL {
-        assert!(
-            output
-                .lines()
-                .any(|row| row.split('\t').next() == Some(name.as_str())),
-            "missing {name} from {output}"
+        let listed = output
+            .lines()
+            .any(|row| row.split('\t').next() == Some(name.as_str()));
+        assert_eq!(
+            listed,
+            name.compiled(),
+            "compiled feature mismatch for {name}: {output}"
         );
     }
 }

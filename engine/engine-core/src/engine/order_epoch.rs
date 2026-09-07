@@ -106,7 +106,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn same_second_restart_with_evicted_orders_reserves_a_distinct_epoch() {
         let (mut engine, _) = crate::tests::callback_test_fixture(Vec::new()).await;
         let first = engine.mint_id().unwrap();
@@ -123,7 +123,7 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(id_epoch(&second), Some(next));
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn counter_rollover_journals_the_epoch_before_issuing_a_reversible_id() {
         let (mut engine, records) = crate::tests::callback_test_fixture(Vec::new()).await;
         let prior = engine.order_id_epoch_ms;

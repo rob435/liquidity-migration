@@ -12,3 +12,7 @@ pub use venues::{
 };
 pub mod registry;
 pub use registry::{VenueName, VenueReadiness};
+
+#[cfg(test)]
+#[path = "../../test-support/io.rs"]
+mod test_io;

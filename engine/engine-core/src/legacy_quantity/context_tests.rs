@@ -152,10 +152,12 @@ fn a_later_legacy_close_or_claim_drop_cannot_erase_a_witnessed_native_close() {
                     signed_qty,
                 })
                 .collect();
-            records.push(WalRecord::ClaimsDropped {
-                wall_ts_ms: 9000,
-                rows,
-            });
+            records.push(WalRecord::Retained(
+                engine_types::wal::RetainedWalRecord::ClaimsDropped {
+                    wall_ts_ms: 9000,
+                    rows,
+                },
+            ));
         } else {
             add(&mut records, 0, Side::Buy, "1", false, 4000);
             add(&mut records, 0, Side::Sell, "1", false, 5000);

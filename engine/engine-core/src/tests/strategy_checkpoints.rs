@@ -82,15 +82,17 @@ async fn fresh_boot_barriers_canonical_initial_state_before_reading_the_venue() 
 #[tokio::test(start_paused = true)]
 async fn bad_or_missing_native_state_fails_before_any_venue_read() {
     for replayed in [
-        vec![WalRecord::Names {
-            strategies: vec!["strict-boot".into()],
-            symbols: vec!["BTCUSDT".into()],
-        }],
-        vec![
-            WalRecord::Names {
+        vec![WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::Names {
                 strategies: vec!["strict-boot".into()],
                 symbols: vec!["BTCUSDT".into()],
             },
+        )],
+        vec![
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
+                strategies: vec!["strict-boot".into()],
+                symbols: vec!["BTCUSDT".into()],
+            }),
             WalRecord::StrategyGlobalCheckpoint {
                 wall_ts_ms: recent_replay_ms(),
                 strategy: StrategyId(0),
@@ -127,6 +129,7 @@ async fn bad_or_missing_native_state_fails_before_any_venue_read() {
 
 struct CheckpointThenBuyer {
     fired: bool,
+    leverage: Option<f64>,
 }
 
 impl Strategy for CheckpointThenBuyer {
@@ -170,14 +173,100 @@ impl Strategy for CheckpointThenBuyer {
             tag: "checkpointed-entry".to_string(),
             decided_ns: ctx.now_ns(),
             work: None,
-            leverage: None,
+            leverage: self.leverage,
         });
     }
 }
 
 #[tokio::test(start_paused = true)]
+async fn checkpoint_barrier_failure_stops_before_uncached_leverage_mutation() {
+    let (mut engine, h) = build(
+        allow_all(),
+        vec![Box::new(CheckpointThenBuyer {
+            fired: false,
+            leverage: Some(2.0),
+        })],
+        &["BTCUSDT"],
+        &[],
+    )
+    .await;
+    engine.wal.fail_barrier_after = Some("strategy_checkpoint");
+    let error = engine
+        .run(
+            &mut ScriptFeed::quotes(SymbolId(0), 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, EngineError::Wal(_)),
+        "disk failure became an ordinary venue refusal: {error}"
+    );
+    assert!(h.leverages.lock().unwrap().is_empty());
+    assert!(h.sends.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn checkpointed_order_uses_one_barrier_covering_its_attempt_before_send() {
+    let (mut engine, h) = build(
+        allow_all(),
+        vec![Box::new(CheckpointThenBuyer {
+            fired: false,
+            leverage: None,
+        })],
+        &["BTCUSDT"],
+        &[],
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    let start = after_boot(&h.tape);
+    let tape = h.tape.lock().unwrap();
+    let sent = tape
+        .iter()
+        .position(|step| matches!(step, Step::Send(_)))
+        .unwrap();
+    let barriers: Vec<_> = (start..sent)
+        .filter(|index| tape[*index] == Step::Barrier)
+        .collect();
+    assert_eq!(
+        barriers.len(),
+        1,
+        "checkpoint, admission and attempted send must share one barrier: {:?}",
+        &tape[start..=sent]
+    );
+    for kind in [
+        "strategy_transition_queued",
+        "strategy_checkpoint",
+        "intent",
+        "verdict",
+        "order_sent",
+        "order_dispatch_attempted",
+    ] {
+        let appended = (start..sent)
+            .find(|index| tape[*index] == Step::Append(kind.into()))
+            .unwrap();
+        assert!(
+            appended < barriers[0],
+            "{kind} is outside the send's durable prefix"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn checkpoint_owner_and_barrier_precede_the_dependent_entry() {
-    let strategy = CheckpointThenBuyer { fired: false };
+    let strategy = CheckpointThenBuyer {
+        fired: false,
+        leverage: None,
+    };
     let (mut engine, h) = build(allow_all(), vec![Box::new(strategy)], &["BTCUSDT"], &[]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
     engine
@@ -205,8 +294,8 @@ async fn checkpoint_owner_and_barrier_precede_the_dependent_entry() {
     )
     .expect("dependent intent appended");
     assert!(
-        checkpoint_at < barrier_at && barrier_at < intent_at,
-        "the one-shot checkpoint must be durable before its entry is admitted"
+        checkpoint_at < intent_at && intent_at < barrier_at,
+        "the checkpoint and its entry share the durable send prefix"
     );
 
     let saved = h
@@ -228,7 +317,7 @@ async fn checkpoint_owner_and_barrier_precede_the_dependent_entry() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn failure_between_checkpoint_and_intent_is_deliberately_fail_closed() {
+async fn failure_between_checkpoint_and_intent_preserves_the_unsent_effect() {
     let tape = tape();
     let (mut wal, records) = MockWal::new(tape.clone());
     wal.fail_on = Some("intent".to_string());
@@ -240,7 +329,10 @@ async fn failure_between_checkpoint_and_intent_is_deliberately_fail_closed() {
         wal,
         risk,
         venue,
-        vec![Box::new(CheckpointThenBuyer { fired: false })],
+        vec![Box::new(CheckpointThenBuyer {
+            fired: false,
+            leverage: None,
+        })],
         &[],
     )
     .await
@@ -277,8 +369,8 @@ async fn failure_between_checkpoint_and_intent_is_deliberately_fail_closed() {
     let checkpoint_at =
         at(&tape, &Step::Append("strategy_checkpoint".to_string())).expect("checkpoint appended");
     assert!(
-        after(&tape, &Step::Barrier, checkpoint_at + 1).is_some(),
-        "the fail-closed consume is durable"
+        after(&tape, &Step::Barrier, checkpoint_at + 1).is_none(),
+        "the failed order prefix has not reached its durability boundary"
     );
 }
 
@@ -312,10 +404,10 @@ impl Strategy for CheckpointReader {
 async fn a_booted_strategy_reads_its_latest_checkpoint() {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let replayed = replay_with_history_boundary(&[
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["checkpoint-reader".to_string()],
             symbols: vec!["BTCUSDT".to_string()],
-        },
+        }),
         WalRecord::StrategyCheckpoint {
             wall_ts_ms: recent_replay_ms(),
             strategy: StrategyId(0),
@@ -386,10 +478,10 @@ impl Strategy for BootGlobalCheckpointReader {
 async fn restored_strategy_is_woken_with_its_global_checkpoint_before_market_news() {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let replayed = replay_with_history_boundary(&[
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["boot-global-checkpoint-reader".into()],
             symbols: vec!["BTCUSDT".into()],
-        },
+        }),
         WalRecord::StrategyGlobalCheckpoint {
             wall_ts_ms: recent_replay_ms(),
             strategy: StrategyId(0),
@@ -483,7 +575,7 @@ async fn global_checkpoint_owner_and_barrier_precede_the_dependent_entry() {
     .unwrap();
     let barrier = after(&h.tape, &Step::Barrier, saved + 1).unwrap();
     let intent = after(&h.tape, &Step::Append("intent".into()), saved + 1).unwrap();
-    assert!(saved < barrier && barrier < intent);
+    assert!(saved < intent && intent < barrier);
     assert!(h.records.lock().unwrap().iter().any(|record| matches!(
         record,
         WalRecord::StrategyGlobalCheckpoint {
@@ -536,10 +628,10 @@ async fn global_checkpoint_is_visible_only_to_its_owner_after_restart() {
     let owner = Rc::new(RefCell::new(Vec::new()));
     let other = Rc::new(RefCell::new(Vec::new()));
     let replayed = vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["owner".into(), "other".into()],
             symbols: vec!["BTCUSDT".into(), "ETHUSDT".into()],
-        },
+        }),
         WalRecord::StrategyGlobalCheckpoint {
             wall_ts_ms: recent_replay_ms(),
             strategy: StrategyId(0),
@@ -726,28 +818,41 @@ async fn completed_exit_records() -> Vec<WalRecord> {
 #[tokio::test(start_paused = true)]
 async fn restart_after_checkpoint_retains_the_unsent_exit() {
     let records = completed_exit_records().await;
-    let cut = records
+    let transition = records
         .iter()
-        .position(|record| matches!(record, WalRecord::StrategyGlobalCheckpoint { .. }))
-        .unwrap()
-        + 1;
-    let (_, held) = owned_exit_fixture("checkpoint-exit", Side::Buy, 0.01);
-    let (mut restarted, h) = build_with_venue_state(
-        allow_all(),
-        vec![Box::new(CheckpointThenExit)],
-        &["BTCUSDT"],
-        &records[..cut],
-        Vec::new(),
-        held,
-    )
-    .await;
-    restarted.finish().await.unwrap();
-    assert_eq!(
-        h.sends.lock().unwrap().len(),
-        1,
-        "checkpoint recovery lost its dependent exit"
-    );
-    assert!(h.sends.lock().unwrap()[0].reduce_only);
+        .position(|record| matches!(record, WalRecord::StrategyTransitionQueued { .. }))
+        .unwrap();
+    for kind in [
+        "strategy_transition_queued",
+        "strategy_global_checkpoint",
+        "intent",
+        "verdict",
+        "order_sent",
+    ] {
+        let cut = transition
+            + records[transition..]
+                .iter()
+                .position(|record| kind_of(record) == kind)
+                .unwrap()
+            + 1;
+        let (_, held) = owned_exit_fixture("checkpoint-exit", Side::Buy, 0.01);
+        let (mut restarted, h) = build_with_venue_state(
+            allow_all(),
+            vec![Box::new(CheckpointThenExit)],
+            &["BTCUSDT"],
+            &records[..cut],
+            Vec::new(),
+            held,
+        )
+        .await;
+        restarted.finish().await.unwrap();
+        assert_eq!(
+            h.sends.lock().unwrap().len(),
+            1,
+            "recovery at {kind} lost its dependent exit"
+        );
+        assert!(h.sends.lock().unwrap()[0].reduce_only);
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -806,7 +911,10 @@ async fn failed_checkpoint_write_does_not_publish_uncommitted_strategy_state() {
         let strategy: Box<dyn Strategy> = if global {
             Box::new(GlobalCheckpointThenBuyer { fired: false })
         } else {
-            Box::new(CheckpointThenBuyer { fired: false })
+            Box::new(CheckpointThenBuyer {
+                fired: false,
+                leverage: None,
+            })
         };
         let mut engine = Engine::boot(&settings(), "0", wal, risk, venue, vec![strategy], &[])
             .await

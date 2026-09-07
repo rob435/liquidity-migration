@@ -399,10 +399,10 @@ fn prior_state(history_rows: usize, now_ms: i64) -> (Vec<WalRecord>, AccountView
             wall_ts_ms: now_ms - 1_000,
             commit: String::new(),
         },
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["account-state-soak".to_string()],
             symbols: vec![SYMBOL.to_string()],
-        },
+        }),
     ];
     let positions = if history_rows == 0 {
         Vec::new()

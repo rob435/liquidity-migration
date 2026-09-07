@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 bytes = { workspace = true }
 engine-types = { workspace = true }
-engine-public = { workspace = true }
+engine-public = { workspace = true, features = ["bybit"] }
 engine-strategies = { workspace = true }
 futures-util = { workspace = true }
 getrandom = { workspace = true }
@@ -34,3 +34,6 @@ sha2 = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "macros", "sync", "signal"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 toml = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

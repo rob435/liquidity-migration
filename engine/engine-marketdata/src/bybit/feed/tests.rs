@@ -1,5 +1,61 @@
 use super::*;
 
+#[derive(Debug)]
+pub(super) enum Phase {
+    Retry(Instant),
+    Ready,
+    Pong,
+}
+
+struct TimeDriver(tokio::task::JoinHandle<()>);
+impl Drop for TimeDriver {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TimerPlan {
+    Retries,
+    SilentEpochs(usize),
+    FirstQuoteAfter(Duration),
+}
+
+fn drive_timers(feed: &mut BybitPublicFeed, plan: TimerPlan) -> TimeDriver {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    feed.test_phases = Some(tx);
+    let ping_interval = feed.timing.ping_interval;
+    TimeDriver(tokio::spawn(async move {
+        let mut epochs = 0;
+        while let Some(phase) = rx.recv().await {
+            let delay = match phase {
+                Phase::Retry(at) => Some(at.saturating_duration_since(Instant::now())),
+                Phase::Ready => {
+                    epochs += 1;
+                    match plan {
+                        TimerPlan::SilentEpochs(count) if epochs <= count => Some(ping_interval),
+                        TimerPlan::FirstQuoteAfter(delay) if epochs == 1 => Some(delay),
+                        _ => None,
+                    }
+                }
+                Phase::Pong => match plan {
+                    TimerPlan::SilentEpochs(count) if epochs <= count => Some(ping_interval),
+                    _ => None,
+                },
+            };
+            if let Some(mut remaining) = delay {
+                // The caller can cancel its losing feed future at each flush tick.
+                while !remaining.is_zero() {
+                    let step = remaining.min(Duration::from_millis(250));
+                    tokio::time::advance(step).await;
+                    tokio::task::yield_now().await;
+                    remaining -= step;
+                }
+            }
+        }
+    }))
+}
+
 fn subs() -> Vec<Subscription> {
     vec![
         Subscription {
@@ -132,8 +188,9 @@ fn the_clock_moves_forward() {
     assert!(second >= first);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_handoff_coalesces_l1_without_crossing_an_epoch_reset() {
+    let _io = crate::test_io::IoProgress::new();
     let handoff = Handoff::new();
     let quote = |symbol, bid_px| MarketEvent::Quote {
         symbol: SymbolId(symbol),
@@ -163,8 +220,9 @@ async fn the_handoff_coalesces_l1_without_crossing_an_epoch_reset() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_handoff_adds_trade_flow_instead_of_dropping_bursts() {
+    let _io = crate::test_io::IoProgress::new();
     let handoff = Handoff::new();
     let flow = |buy_qty, sell_qty, seq| MarketEvent::Trades {
         symbol: SymbolId(0),
@@ -289,8 +347,9 @@ async fn serve_once(
 
 /// A dropped socket must resubscribe, announce the break, and only then
 /// deliver the new epoch's prices.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_dropped_socket_resubscribes_and_announces_the_reset() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -309,6 +368,7 @@ async fn a_dropped_socket_resubscribes_and_announces_the_reset() {
             feed: Feed::Quote,
         }],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
 
     match next(&mut feed).await {
         MarketEvent::Quote { quote, .. } => assert_eq!(quote.bid_px, 10.0),
@@ -331,8 +391,9 @@ async fn a_dropped_socket_resubscribes_and_announces_the_reset() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn ping_responses_cannot_hide_a_market_silent_socket() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -399,6 +460,7 @@ async fn ping_responses_cannot_hide_a_market_silent_socket() {
         Duration::from_millis(25),
         Duration::from_millis(200),
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::SilentEpochs(1));
 
     assert!(matches!(
         next(&mut feed).await,
@@ -418,8 +480,9 @@ async fn ping_responses_cannot_hide_a_market_silent_socket() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn ack_and_pong_only_epochs_escalate_reconnect_backoff() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -472,6 +535,7 @@ async fn ack_and_pong_only_epochs_escalate_reconnect_backoff() {
         Duration::from_millis(25),
         Duration::from_millis(150),
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::SilentEpochs(2));
     let waiting = tokio::spawn(async move {
         for _ in 0..2 {
             assert!(matches!(
@@ -507,8 +571,9 @@ async fn ack_and_pong_only_epochs_escalate_reconnect_backoff() {
     assert!(answered >= 4, "the silent epochs were not pong-responsive");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn accepted_market_traffic_refreshes_the_idle_deadline() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -547,19 +612,25 @@ async fn accepted_market_traffic_refreshes_the_idle_deadline() {
         Duration::from_secs(1),
         Duration::from_millis(300),
     );
+    let _timers = drive_timers(
+        &mut feed,
+        TimerPlan::FirstQuoteAfter(Duration::from_millis(180)),
+    );
 
     assert!(matches!(
         next(&mut feed).await,
         MarketEvent::Quote { quote, .. } if quote.bid_px == 10.0
     ));
+    tokio::time::advance(Duration::from_millis(180)).await;
     assert!(matches!(
         next(&mut feed).await,
         MarketEvent::Quote { quote, .. } if quote.bid_px == 11.0
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn one_frozen_quote_is_refreshed_without_interrupting_healthy_topics() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -655,6 +726,7 @@ async fn one_frozen_quote_is_refreshed_without_interrupting_healthy_topics() {
         Duration::from_millis(160),
     )
     .with_topic_timing(Duration::from_secs(1), Duration::from_millis(5));
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
 
     let mut initial = Vec::with_capacity(2);
     for _ in 0..2 {
@@ -675,6 +747,7 @@ async fn one_frozen_quote_is_refreshed_without_interrupting_healthy_topics() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let mut healthy_btc_updates = 0;
     loop {
+        tokio::time::advance(Duration::from_millis(20)).await;
         let event = tokio::time::timeout_at(deadline, feed.next_event())
             .await
             .expect("frozen ETH recovers before the deadline")
@@ -697,8 +770,9 @@ async fn one_frozen_quote_is_refreshed_without_interrupting_healthy_topics() {
     server.await.expect("stable-socket server");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn market_data_before_the_subscribe_ack_is_delivered() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -727,6 +801,7 @@ async fn market_data_before_the_subscribe_ack_is_delivered() {
             feed: Feed::Quote,
         }],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
 
     match next(&mut feed).await {
         MarketEvent::Quote { quote, .. } => assert_eq!(quote.bid_px, 10.0),
@@ -734,8 +809,9 @@ async fn market_data_before_the_subscribe_ack_is_delivered() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn request_wide_10404_is_surfaced_without_topic_bisection() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -773,6 +849,7 @@ async fn request_wide_10404_is_surfaced_without_topic_bisection() {
             },
         ],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
 
     let error = tokio::time::timeout(Duration::from_secs(2), feed.next_event())
         .await
@@ -786,15 +863,17 @@ async fn request_wide_10404_is_surfaced_without_topic_bisection() {
         requests.recv().await.expect("the original request"),
         ["orderbook.1.BTCUSDT", "orderbook.1.ETHUSDT"]
     );
-    let second = tokio::time::timeout(Duration::from_millis(100), requests.recv()).await;
+    tokio::time::advance(Duration::from_millis(100)).await;
+    let second = requests.try_recv();
     assert!(
-        !matches!(second, Ok(Some(_))),
+        second.is_err(),
         "a request-wide refusal was incorrectly bisected"
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_stray_refusal_cannot_break_an_active_feed() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -836,6 +915,7 @@ async fn a_stray_refusal_cannot_break_an_active_feed() {
             feed: Feed::Quote,
         }],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
     assert!(matches!(
         next(&mut feed).await,
         MarketEvent::Quote { quote, .. } if quote.bid_px == 10.0
@@ -847,8 +927,9 @@ async fn a_stray_refusal_cannot_break_an_active_feed() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_delayed_ack_cannot_activate_a_refused_topic_or_release_its_early_frame() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -913,14 +994,16 @@ async fn a_delayed_ack_cannot_activate_a_refused_topic_or_release_its_early_fram
             },
         ],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
     assert!(
         matches!(next(&mut feed).await, MarketEvent::Quote { quote, .. } if quote.bid_px == 10.0),
         "a delayed ACK or refused topic frame escaped activation"
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_quarantine_survives_a_later_setup_disconnect() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -986,6 +1069,7 @@ async fn a_quarantine_survives_a_later_setup_disconnect() {
             },
         ],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
     assert!(matches!(
         next(&mut feed).await,
         MarketEvent::FeedReset { .. }
@@ -1006,8 +1090,9 @@ async fn a_quarantine_survives_a_later_setup_disconnect() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn active_topic_traffic_bypasses_a_slow_late_subscription() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -1057,6 +1142,7 @@ async fn active_topic_traffic_bypasses_a_slow_late_subscription() {
             feed: Feed::Quote,
         }],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
     assert!(
         matches!(next(&mut feed).await, MarketEvent::Quote { quote, .. } if quote.bid_px == 10.0)
     );
@@ -1117,8 +1203,9 @@ async fn serve_epoch(listener: &tokio::net::TcpListener, frames: &[String]) {
 /// the future of every branch that did not win; its flush tick fires
 /// every 250ms. Drive the feed exactly that way — a fresh `next_event`
 /// future each time round — and the reconnect must still land.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_reconnect_lands_while_the_caller_cancels_every_250ms() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -1136,6 +1223,7 @@ async fn a_reconnect_lands_while_the_caller_cancels_every_250ms() {
             feed: Feed::Quote,
         }],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
 
     // The core's flush cadence, first tick immediate, same as the loop.
     let mut flush_tick = tokio::time::interval(Duration::from_millis(250));
@@ -1168,8 +1256,9 @@ async fn a_reconnect_lands_while_the_caller_cancels_every_250ms() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn failed_first_dials_are_backed_off() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -1191,6 +1280,7 @@ async fn failed_first_dials_are_backed_off() {
             feed: Feed::Quote,
         }],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
     let waiting = tokio::spawn(async move { feed.next_event().await });
     let stamps = tokio::time::timeout(Duration::from_secs(4), async {
         let mut stamps = Vec::new();
@@ -1215,8 +1305,9 @@ async fn failed_first_dials_are_backed_off() {
 
 /// One retired topic is isolated and omitted on reconnect. Healthy books
 /// keep flowing across both epochs.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_topic_does_not_end_the_feed() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -1271,6 +1362,7 @@ async fn a_refused_topic_does_not_end_the_feed() {
             },
         ],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
 
     assert!(
         matches!(next(&mut feed).await, MarketEvent::Quote { quote, .. } if quote.bid_px == 10.0)
@@ -1293,8 +1385,9 @@ async fn a_refused_topic_does_not_end_the_feed() {
     assert_eq!(after_reconnect, ["orderbook.1.BTCUSDT"]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_late_admission_keeps_books_live_and_can_be_reprobed() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -1350,6 +1443,7 @@ async fn a_refused_late_admission_keeps_books_live_and_can_be_reprobed() {
             feed: Feed::Quote,
         }],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
     assert!(
         matches!(next(&mut feed).await, MarketEvent::Quote { quote, .. } if quote.bid_px == 10.0)
     );
@@ -1363,8 +1457,9 @@ async fn a_refused_late_admission_keeps_books_live_and_can_be_reprobed() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_quarantined_topic_reprobes_itself_on_the_same_socket() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -1432,6 +1527,7 @@ async fn a_quarantined_topic_reprobes_itself_on_the_same_socket() {
         Duration::from_millis(500),
     )
     .with_topic_timing(Duration::from_millis(80), Duration::from_millis(5));
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
 
     assert!(matches!(
         next(&mut feed).await,
@@ -1450,6 +1546,7 @@ async fn a_quarantined_topic_reprobes_itself_on_the_same_socket() {
             MarketEvent::Quote { quote, .. } if quote.bid_px == 20.0 => break,
             MarketEvent::Quote { quote, .. } if quote.bid_px == 11.0 => {
                 healthy_quote_seen = true;
+                tokio::time::advance(Duration::from_millis(80)).await;
             }
             MarketEvent::FeedReset { .. } => {
                 panic!("the timed topic re-probe opened a new socket")
@@ -1464,13 +1561,15 @@ async fn a_quarantined_topic_reprobes_itself_on_the_same_socket() {
     server.await.expect("stable-socket server");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn repeated_admission_cannot_turn_one_quarantine_into_a_request_storm() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
     let port = listener.local_addr().expect("has an address").port();
 
+    let (retry_refused, refused) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accepts");
         let mut ws = tokio_tungstenite::accept_async(stream)
@@ -1509,6 +1608,7 @@ async fn repeated_admission_cannot_turn_one_quarantine_into_a_request_storm() {
         )))
         .await
         .expect("refuses retry");
+        retry_refused.send(()).unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(200), ws.next())
                 .await
@@ -1528,6 +1628,7 @@ async fn repeated_admission_cannot_turn_one_quarantine_into_a_request_storm() {
             feed: Feed::Quote,
         }],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
     assert!(
         matches!(next(&mut feed).await, MarketEvent::Quote { quote, .. } if quote.bid_px == 10.0)
     );
@@ -1538,15 +1639,19 @@ async fn repeated_admission_cannot_turn_one_quarantine_into_a_request_storm() {
     for _ in 0..32 {
         feed.admit("BADUSDT", Feed::Quote);
     }
-    assert!(
-        matches!(next(&mut feed).await, MarketEvent::Quote { quote, .. } if quote.bid_px == 12.0)
-    );
+    let advance_cooldown = async {
+        refused.await.unwrap();
+        tokio::time::advance(Duration::from_millis(200)).await;
+    };
+    let (event, ()) = tokio::join!(next(&mut feed), advance_cooldown);
+    assert!(matches!(event, MarketEvent::Quote { quote, .. } if quote.bid_px == 12.0));
 }
 
 /// Dropping the feed must take the socket with it, or a dead engine would
 /// leave a task reading prices nobody wants.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn dropping_the_feed_lets_go_of_the_socket() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binds");
@@ -1578,6 +1683,7 @@ async fn dropping_the_feed_lets_go_of_the_socket() {
             feed: Feed::Quote,
         }],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
     assert!(matches!(next(&mut feed).await, MarketEvent::Quote { .. }));
 
     drop(feed);
@@ -1589,7 +1695,7 @@ async fn dropping_the_feed_lets_go_of_the_socket() {
 
 /// Connects to the real public stream. Off by default; run with
 /// `cargo test -p engine-marketdata -- --ignored live_public_feed`.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[ignore = "needs network"]
 async fn live_public_feed_delivers_quotes_and_tickers() {
     let mut feed = BybitPublicFeed::new(&[
@@ -1630,7 +1736,7 @@ async fn live_public_feed_delivers_quotes_and_tickers() {
     assert!(tickers >= 1, "only {tickers} tickers arrived");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[ignore = "needs network"]
 async fn live_public_feed_delivers_l50_and_aggressor_trades() {
     let mut feed = BybitPublicFeed::new(&[
@@ -1672,8 +1778,9 @@ async fn live_public_feed_delivers_l50_and_aggressor_trades() {
     assert!(trades_seen, "no public trade event arrived");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn retired_topics_leave_the_live_socket_and_reconnect_without_renumbering_ids() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -1723,6 +1830,7 @@ async fn retired_topics_leave_the_live_socket_and_reconnect_without_renumbering_
             },
         ],
     );
+    let _timers = drive_timers(&mut feed, TimerPlan::Retries);
     assert!(matches!(
         next(&mut feed).await,
         MarketEvent::Quote {

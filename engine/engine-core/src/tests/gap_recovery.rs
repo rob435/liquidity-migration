@@ -567,10 +567,12 @@ async fn an_existing_log_without_a_proven_history_boundary_aborts_boot() {
     let (venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
     let (risk, _) = MockRisk::with(allow_all());
     let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
-    let replayed = vec![WalRecord::Names {
-        strategies: vec!["buyer".into()],
-        symbols: vec!["BTCUSDT".into()],
-    }];
+    let replayed = vec![WalRecord::Retained(
+        engine_types::wal::RetainedWalRecord::Names {
+            strategies: vec!["buyer".into()],
+            symbols: vec!["BTCUSDT".into()],
+        },
+    )];
 
     let result = Engine::boot(
         &settings(),
@@ -688,10 +690,10 @@ async fn a_later_reconciliation_stamp_does_not_replace_a_history_checkpoint() {
     let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
     let now_ms = clock::wall_ms();
     let replayed = vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["buyer".into()],
             symbols: vec!["BTCUSDT".into()],
-        },
+        }),
         WalRecord::Boot {
             version: ENGINE_VERSION.into(),
             config_sha256: "old".into(),
@@ -722,52 +724,56 @@ async fn a_later_reconciliation_stamp_does_not_replace_a_history_checkpoint() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_quiet_running_engine_renews_an_empty_checkpoint() {
-    let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
-    let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
-    let before = h
-        .records
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|record| matches!(record, WalRecord::ExecutionHistoryCheckpoint { .. }))
-        .count();
-    let before_wall_ms = clock::wall_ms();
-    while clock::wall_ms() <= before_wall_ms {
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-    engine.renew_execution_history().await.unwrap();
+    crate::test_clock::with_engine_clock(async {
+        let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+        let (mut engine, h) =
+            build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
+        let before = h
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|record| matches!(record, WalRecord::ExecutionHistoryCheckpoint { .. }))
+            .count();
+        let before_wall_ms = clock::wall_ms();
+        while clock::wall_ms() <= before_wall_ms {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        engine.renew_execution_history().await.unwrap();
 
-    let after = h
-        .records
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|record| matches!(record, WalRecord::ExecutionHistoryCheckpoint { .. }))
-        .count();
-    assert_eq!(after, before + 1);
-    let newest = h
-        .records
-        .lock()
-        .unwrap()
-        .iter()
-        .filter_map(|record| match record {
-            WalRecord::ExecutionHistoryCheckpoint { through_wall_ts_ms } => {
-                Some(*through_wall_ts_ms)
-            }
-            _ => None,
-        })
-        .max()
-        .unwrap();
-    let WalRecord::SegmentBase {
-        execution_history_through_ms,
-        ..
-    } = engine.rotation_base(clock::wall_ms())
-    else {
-        unreachable!()
-    };
-    assert_eq!(execution_history_through_ms, Some(newest));
+        let after = h
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|record| matches!(record, WalRecord::ExecutionHistoryCheckpoint { .. }))
+            .count();
+        assert_eq!(after, before + 1);
+        let newest = h
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|record| match record {
+                WalRecord::ExecutionHistoryCheckpoint { through_wall_ts_ms } => {
+                    Some(*through_wall_ts_ms)
+                }
+                _ => None,
+            })
+            .max()
+            .unwrap();
+        let WalRecord::SegmentBase {
+            execution_history_through_ms,
+            ..
+        } = engine.rotation_base(clock::wall_ms())
+        else {
+            unreachable!()
+        };
+        assert_eq!(execution_history_through_ms, Some(newest));
+    })
+    .await;
 }
 
 #[tokio::test(start_paused = true)]

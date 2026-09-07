@@ -98,10 +98,10 @@ fn proposer(
 
 fn prior_order(owner: u16, side: Side) -> Vec<WalRecord> {
     vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["left".into(), "right".into()],
             symbols: vec!["BTCUSDT".into()],
-        },
+        }),
         WalRecord::OrderSent {
             dispatch: None,
             request: OrderRequest {

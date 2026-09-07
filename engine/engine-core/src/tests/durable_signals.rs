@@ -155,10 +155,10 @@ async fn a_new_worker_generation_starts_at_sequence_one_after_an_old_cursor() {
     let new_source = "directional-public.g22222222222222222222222222222222.carry";
     let old = observation_from(old_source, 9, Vec::new());
     let replayed = vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["source".into(), "destination".into()],
             symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "HELDUSDT".into()],
-        },
+        }),
         WalRecord::SignalObservation {
             wall_ts_ms: 1,
             observation: old.clone(),
@@ -234,10 +234,10 @@ async fn a_gap_retains_the_last_contiguous_cursor_without_delivering_the_later_r
     let source = "directional-public.g11111111111111111111111111111111.carry";
     let old = observation_from(source, 9, Vec::new());
     let replayed = vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["source".into(), "destination".into()],
             symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "HELDUSDT".into()],
-        },
+        }),
         WalRecord::SignalObservation {
             wall_ts_ms: 1,
             observation: old.clone(),
@@ -394,8 +394,8 @@ async fn signal_admits_quote_and_ticker_everywhere_before_durable_delivery() {
     let records = h.records.lock().unwrap();
     assert!(records.iter().any(|record| matches!(
         record,
-        WalRecord::Names { symbols, .. }
-            if symbols == &vec!["BTCUSDT".to_string(), "ETHUSDT".to_string(), "HELDUSDT".to_string()]
+        WalRecord::IdentityState { state, .. }
+            if state.instruments.iter().map(|binding| binding.symbol.as_str()).collect::<Vec<_>>() == ["BTCUSDT", "ETHUSDT", "HELDUSDT"]
     )));
     assert!(records.iter().any(|record| matches!(
         record,
@@ -429,10 +429,10 @@ async fn consumed_and_rotated_universe_keeps_held_name_routed_after_restart() {
     );
     let second = observation(2, Vec::new());
     let replayed = vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["source".into(), "destination".into()],
             symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "HELDUSDT".into()],
-        },
+        }),
         WalRecord::SignalObservation {
             wall_ts_ms: 1,
             observation: first.clone(),
@@ -728,10 +728,12 @@ fn scoped_buyers() -> Vec<Box<dyn Strategy>> {
 }
 
 fn gap_history() -> Vec<WalRecord> {
-    let mut records = vec![WalRecord::Names {
-        strategies: vec!["independent".into(), "source".into(), "dependent".into()],
-        symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
-    }];
+    let mut records = vec![WalRecord::Retained(
+        engine_types::wal::RetainedWalRecord::Names {
+            strategies: vec!["independent".into(), "source".into(), "dependent".into()],
+            symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
+        },
+    )];
     records.extend(consumed_row(source_row("worker.g1", 9, 1)));
     records.push(WalRecord::SignalGapRecorded {
         wall_ts_ms: recent_replay_ms(),
@@ -1285,7 +1287,12 @@ async fn runtime_entry_permission_also_cancels_and_refuses_amends_only_for_its_o
     pause.content_sha256 = crate::controls::content_sha256(&pause);
     let mut prior: Vec<_> = gap_history()
         .into_iter()
-        .filter(|record| matches!(record, WalRecord::Names { .. }))
+        .filter(|record| {
+            matches!(
+                record,
+                WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names { .. })
+            )
+        })
         .collect();
     prior.push(WalRecord::RuntimeControlAccepted {
         wall_ts_ms: recent_replay_ms(),
@@ -1582,15 +1589,15 @@ async fn rejection_barrier_failure_retains_accepted_input_for_restart() {
         .unwrap_err()
         .to_string()
         .contains("test barrier failure"));
-    let WalRecord::SegmentBase {
-        signal_observations,
-        ..
-    } = engine.rotation_base(recent_replay_ms())
-    else {
-        panic!()
-    };
-    assert_eq!(signal_observations.len(), 1);
     let log = records.lock().unwrap();
+    assert_eq!(
+        crate::signal_state::SignalState::replay(&log[..engine.wal.barrier_seq as usize], 1)
+            .unwrap()
+            .observations()
+            .count(),
+        1,
+        "the last confirmed prefix retains the accepted input"
+    );
     assert!(!log
         .iter()
         .any(|row| matches!(row, WalRecord::SignalObservationConsumed { .. })));

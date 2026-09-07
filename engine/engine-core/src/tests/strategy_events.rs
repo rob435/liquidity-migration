@@ -67,7 +67,7 @@ impl Strategy for Consumer {
 }
 
 #[tokio::test(start_paused = true)]
-async fn publication_barrier_precedes_destination_delivery_and_consumption() {
+async fn publication_and_consumption_share_a_durable_prefix() {
     let received = Rc::new(RefCell::new(Vec::new()));
     let (mut engine, h) = build(
         allow_all(),
@@ -104,7 +104,7 @@ async fn publication_barrier_precedes_destination_delivery_and_consumption() {
         published + 1,
     )
     .unwrap();
-    assert!(published < barrier && barrier < consumed);
+    assert!(published < consumed && consumed < barrier);
     assert!(h.records.lock().unwrap().iter().any(|record| matches!(
         record,
         WalRecord::StrategyEventConsumed {
@@ -166,10 +166,10 @@ async fn replayed_event_is_visible_to_source_and_destination_but_not_a_third_sle
     let destination = Rc::new(RefCell::new(Vec::new()));
     let outsider = Rc::new(RefCell::new(Vec::new()));
     let replayed = vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["carry".into(), "exodus".into(), "maker".into()],
             symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
-        },
+        }),
         WalRecord::StrategyEventPublished {
             wall_ts_ms: recent_replay_ms(),
             event,

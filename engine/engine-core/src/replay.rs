@@ -90,12 +90,41 @@ impl LogNames {
     /// a log whose universe has moved. Id 8 has been HYPEUSDT and BICOUSDT in
     /// one log. So a reader walks the records and asks this as it goes; asking
     /// it once at the end would name every id after the last table.
+    pub(crate) fn strategy_table(record: &WalRecord) -> Option<Vec<String>> {
+        match record {
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
+                strategies, ..
+            })
+            | WalRecord::SegmentBase { strategies, .. } => Some(strategies.clone()),
+            WalRecord::IdentityState { state, .. } => Some(
+                state
+                    .sleeves
+                    .iter()
+                    .map(|key| key.as_str().to_owned())
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
     pub fn learn(&mut self, record: &WalRecord) {
         match record {
-            WalRecord::Names {
+            WalRecord::IdentityState { state, .. } => {
+                self.strategies = state
+                    .sleeves
+                    .iter()
+                    .map(|key| key.as_str().to_owned())
+                    .collect();
+                self.symbols = state
+                    .instruments
+                    .iter()
+                    .map(|binding| binding.symbol.clone())
+                    .collect();
+            }
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
                 strategies,
                 symbols,
-            }
+            })
             | WalRecord::SegmentBase {
                 strategies,
                 symbols,
@@ -141,16 +170,16 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
         WalRecord::SleeveStopSet { strategy, symbol, trigger_price, .. } => format!("sleeve stop {} {} {trigger_price:?}", names.strategy(*strategy), names.symbol(*symbol)),
         WalRecord::SignalAdmissionChanged { destination, suspension } => format!("signal admission {}: {suspension:?}", names.strategy(*destination)),
         WalRecord::StrategyCallbackSource { strategy, event, .. } => format!("callback source {} {event:?}", names.strategy(*strategy)),
-        WalRecord::StrategyCallbackQueued { input } => format!(
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::StrategyCallbackQueued { input }) => format!(
             "callback   {} queued for {}", input.callback_id, names.strategy(input.strategy)
         ),
         WalRecord::OrderDispatchQueued { order } => format!("order_dispatch_queued id={}", order.request.client_order_id),
         WalRecord::OrderDispatchAttempted { client_order_id } => format!("order_dispatch_attempted id={client_order_id}"),
         WalRecord::OrderDispatchCompleted { client_order_id } => format!("order_dispatch_completed id={client_order_id}"),
-        WalRecord::StrategyCallbackPrepared { input } => format!(
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::StrategyCallbackPrepared { input }) => format!(
             "callback   {} prepared for {}", input.callback_id, names.strategy(input.strategy)
         ),
-        WalRecord::StrategyProcessTransitionQueued { input_id, transition, process } => format!(
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::StrategyProcessTransitionQueued { input_id, transition, process }) => format!(
             "callback   {input_id} committed for {} with {} effects",
             names.strategy(process.strategy), transition.as_ref().map_or(0, |row| row.effects.len())
         ),
@@ -341,14 +370,14 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             ack_ns.map(|at| pretty(at.saturating_sub(socket_write_ns.unwrap_or(*task_started_ns)))).unwrap_or_else(|| "unknown".to_string()),
             pretty(core_handled_ns.saturating_sub(*task_completed_ns)),
         ),
-        WalRecord::FastExecution {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::FastExecution {
             client_order_id,
             symbol,
             side,
             qty,
             px,
             ..
-        } => format!(
+        }) => format!(
             "fast fill  {side:?} {qty} of {} at {px} for {client_order_id}",
             names.symbol(*symbol)
         ),
@@ -387,10 +416,10 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             optional(features.volatility_bps, 2),
             optional(features.queue_ahead_usdt, 2),
         ),
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies,
             symbols,
-        } => format!(
+        }) => format!(
             "names      {} sleeve(s): {}; {} symbol(s): {}",
             strategies.len(),
             listed(strategies),
@@ -398,7 +427,7 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             listed(symbols)
         ),
         WalRecord::Note { source, text } => format!("note       [{source}] {text}"),
-        WalRecord::ControlAnchor { source, state } => {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::ControlAnchor { source, state }) => {
             format!("anchor     [{source}] {state}")
         }
         WalRecord::RecoveredFill {
@@ -416,7 +445,7 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
                 id => format!(" for {id}"),
             }
         ),
-        WalRecord::ClaimsDropped { rows, .. } => format!(
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::ClaimsDropped { rows, .. }) => format!(
             "unclaimed  the venue held nothing in these, so the sleeve claims on them end: {}",
             rows.iter()
                 .map(|row| format!(
@@ -428,12 +457,12 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        WalRecord::TargetBookLatch {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::TargetBookLatch {
             strategy,
             symbol,
             latched,
             ..
-        } => format!(
+        }) => format!(
             "book latch {} leaves {} {}",
             names.strategy(*strategy),
             names.symbol(*symbol),

@@ -1400,10 +1400,12 @@ mod tests {
 
     #[test]
     fn names_pin_strategy_ids_to_exact_config_order() {
-        let replayed = vec![WalRecord::Names {
-            strategies: vec!["long".into(), "carry".into(), "exodus".into()],
-            symbols: vec![],
-        }];
+        let replayed = vec![WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::Names {
+                strategies: vec!["long".into(), "carry".into(), "exodus".into()],
+                symbols: vec![],
+            },
+        )];
         verify_names(&["long".into(), "carry".into(), "exodus".into()], &replayed).unwrap();
         assert!(
             verify_names(&["carry".into(), "long".into(), "exodus".into()], &replayed)
@@ -1415,10 +1417,12 @@ mod tests {
 
     #[test]
     fn an_appended_strategy_keeps_the_takeover_and_a_dropped_one_does_not() {
-        let replayed = vec![WalRecord::Names {
-            strategies: vec!["carry".into(), "long".into(), "exodus".into()],
-            symbols: vec![],
-        }];
+        let replayed = vec![WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::Names {
+                strategies: vec!["carry".into(), "long".into(), "exodus".into()],
+                symbols: vec![],
+            },
+        )];
         verify_names(
             &[
                 "carry".into(),

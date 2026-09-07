@@ -73,7 +73,7 @@ async fn boot(
     let (risk, _) = MockRisk::with(allow_all());
     let mut configured = settings();
     configured.wal_path = path.into();
-    let result = Engine::boot_as_isolated(
+    let result = Engine::boot_as_exact(
         &configured,
         "retained-archive-regression",
         wal,
@@ -82,7 +82,6 @@ async fn boot(
         vec![probe()],
         &["probe".into()],
         &records,
-        "/bin/false".into(),
     )
     .await;
     let engine = result.unwrap_or_else(|error| panic!("retained archive boot failed: {error}"));
@@ -105,14 +104,16 @@ fn recovered_callbacks(wal: &mut engine_wal::WalWriter) -> Vec<CallbackEvent> {
         cursor = record.next;
         if let Some((owners, event)) = record.source {
             assert_eq!(owners, [StrategyId(0)]);
-            events.push(event);
+            if matches!(event, CallbackEvent::Order { .. }) {
+                events.push(event);
+            }
         }
     }
     events
 }
 
-#[tokio::test]
-async fn isolated_boot_recovers_epoch_lineage_and_callbacks_from_a_heterogeneous_archive() {
+#[tokio::test(start_paused = true)]
+async fn embedded_boot_recovers_epoch_lineage_and_callbacks_from_a_heterogeneous_archive() {
     let now = recent_replay_ms();
     let archived_epoch = now - now.rem_euclid(1000) + 60_000;
     let id = format!("eng-{archived_epoch}-1");
@@ -168,10 +169,10 @@ async fn isolated_boot_recovers_epoch_lineage_and_callbacks_from_a_heterogeneous
         reason: "late fill follows the archived rejection".into(),
     };
     for record in [
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["probe".into()],
             symbols: vec!["BTCUSDT".into()],
-        },
+        }),
         WalRecord::StrategyEventPublished {
             wall_ts_ms: now - 2,
             event: engine_types::StrategyEvent {
@@ -193,7 +194,7 @@ async fn isolated_boot_recovers_epoch_lineage_and_callbacks_from_a_heterogeneous
             update: rejection.clone(),
         },
     ] {
-        wal.append(&record).unwrap();
+        crate::testpath::append_history(&mut wal, &path, &record).unwrap();
     }
     wal.barrier().unwrap();
     let archive = std::fs::read(&path).unwrap();
@@ -243,7 +244,7 @@ async fn isolated_boot_recovers_epoch_lineage_and_callbacks_from_a_heterogeneous
         assert_eq!(lots[0].fills, 1);
         assert_eq!(lots[0].fees, Some(decimal("0.001")));
         let callbacks = recovered_callbacks(&mut engine.wal);
-        assert_eq!(callbacks.len(), 2);
+        assert_eq!(callbacks.len(), 2, "pass {pass}: {callbacks:?}");
         assert_eq!(
             callbacks[0],
             CallbackEvent::Order {
@@ -256,31 +257,18 @@ async fn isolated_boot_recovers_epoch_lineage_and_callbacks_from_a_heterogeneous
         engine.wal.barrier().unwrap();
         let (records, torn) = engine_wal::replay_chain(&path).unwrap();
         assert!(!torn);
-        let origins: Vec<_> = records
-            .iter()
-            .filter_map(|(_, record)| match record {
-                WalRecord::StrategyCallbackQueued { input } => input.order_origin,
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            origins
-                .iter()
-                .filter(|origin| **origin
-                    == CallbackOrderOrigin {
-                        segment: 1,
-                        sequence: 4,
-                    })
-                .count(),
-            1,
-            "the archived rejection callback is durably queued once"
-        );
-        assert_eq!(
-            origins
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            origins.len()
+        assert!(
+            !records.iter().any(|(_, record)| matches!(
+                record,
+                WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyCallbackQueued { .. }
+                ) | WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyCallbackPrepared { .. }
+                ) | WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyProcessTransitionQueued { .. }
+                )
+            )),
+            "embedded recovery must retire source ownership through the state restatement"
         );
         if pass == 1 {
             assert!(engine.wal.rotate(&snapshot).unwrap());

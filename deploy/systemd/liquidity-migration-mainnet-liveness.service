@@ -10,7 +10,7 @@ Type=oneshot
 KillMode=control-group
 # The oneshot default is TimeoutStartSec=infinity, and an OnUnitActiveSec timer
 # cannot re-trigger while its unit is activating, so one hung run would silence
-# this 3-minute watchdog forever. Bound it under the timer interval.
+# the watchdog forever. Bound stalled delivery as well as stalled detection.
 TimeoutStartSec=120
 User=liquidity-observer
 Group=liquidity-migration
@@ -40,7 +40,7 @@ MemoryMax=512M
 # the owners Nice=-5).
 Nice=10
 ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/check_fleet_liveness.py \
-    --account-scope mainnet --cooldown-min 60 --require-oncall
+    --account-scope mainnet --cooldown-min 60 --require-oncall --engine-rates
 SuccessExitStatus=0
 StandardOutput=journal
 StandardError=journal

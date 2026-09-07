@@ -86,11 +86,25 @@ impl Timers {
             .map(|pending| pending.deadline_ns)
     }
 
-    pub(crate) fn due_for(&self, strategy: StrategyId, now_ns: u64) -> bool {
+    pub(crate) fn snapshot(
+        &self,
+        strategy: StrategyId,
+        now_ns: u64,
+        wall_ms: i64,
+    ) -> Vec<engine_types::strategy_process::StrategyTimerState> {
         self.scheduled
             .iter()
-            .take_while(|pending| pending.deadline_ns <= now_ns)
-            .any(|pending| pending.strategy == strategy.0)
+            .filter(|pending| pending.strategy == strategy.0)
+            .map(
+                |pending| engine_types::strategy_process::StrategyTimerState {
+                    id: TimerId(pending.timer),
+                    deadline_ns: pending.deadline_ns,
+                    deadline_wall_ms: wall_ms.saturating_add(
+                        (pending.deadline_ns.saturating_sub(now_ns) / 1_000_000) as i64,
+                    ),
+                },
+            )
+            .collect()
     }
 
     pub fn pop_due(&mut self, now_ns: u64) -> Option<(StrategyId, TimerId)> {
@@ -191,8 +205,9 @@ pub struct StrategyHost {
     pub timers: Timers,
     /// Actions emitted and not yet drained, in emission order.
     pub pending: VecDeque<PendingAction>,
+    pub(crate) callback_actions: VecDeque<Action>,
     pub(crate) effects: crate::effects::Effects,
-    pub(crate) callbacks: crate::strategy_process::host::CallbackHost,
+    pub(crate) callbacks: crate::callback_recovery::host::CallbackHost,
     /// Strategy-owned state, persisted before the action it guards and
     /// restated through rotation. The engine stores bytes, not meaning.
     pub checkpoints: BTreeMap<(StrategyId, SymbolId), StrategyCheckpoint>,
@@ -212,29 +227,7 @@ impl StrategyHost {
     }
 
     pub(crate) fn timer_ready(&self, strategy: StrategyId) -> bool {
-        !self.callbacks.isolated() || self.callbacks.timer_ready(strategy)
-    }
-
-    pub(crate) fn snapshot(
-        &mut self,
-        books: &Books,
-        sid: StrategyId,
-        now_ns: u64,
-    ) -> Result<engine_types::strategy_process::CallbackSnapshot, String> {
-        let mut actions = VecDeque::new();
-        let ctx = Ctx {
-            books,
-            now_ns,
-            strategy: sid,
-            out: &mut actions,
-            timers: &mut self.timers,
-            checkpoints: &self.checkpoints,
-            global_checkpoints: &self.global_checkpoints,
-            strategy_events: &self.events,
-            strategy_names: &self.names,
-            runtime_entries_enabled: self.entries_enabled.get(&sid).copied(),
-        };
-        ctx.callback_snapshot()
+        self.callbacks.is_active(strategy) && !self.callbacks.faults.contains_key(&strategy)
     }
 
     /// Wake one strategy with an event. Its actions land in `pending`.
@@ -245,34 +238,13 @@ impl StrategyHost {
         event: &EngineEvent,
         now_ns: u64,
     ) -> bool {
-        if self.callbacks.isolated() {
-            if matches!(event, EngineEvent::Market(_))
-                && self.timers.due_for(sid, now_ns)
-                && !self.callbacks.market_precedes_timer(sid)
-            {
-                self.callbacks.retry_inputs.remember(sid, event);
-                return true;
-            }
-            if let Err(error) = self.callbacks.enqueue(sid, event) {
-                let crate::strategy_process::host::EnqueueError::Fault(error) = error else {
-                    return false;
-                };
-                if self.callbacks.faults.get(&sid) != Some(&error) {
-                    tracing::error!(
-                        strategy = sid.0,
-                        error,
-                        "strategy callback not accepted; source must retain delivery"
-                    );
-                }
-                self.callbacks.faults.insert(sid, error);
-                return false;
-            }
-            return true;
+        if !self.callbacks.is_active(sid) || self.callbacks.faults.contains_key(&sid) {
+            return false;
         }
         let Some(strategy) = self.strategies.get_mut(sid.idx()) else {
             return false;
         };
-        let mut actions = VecDeque::new();
+        let mut actions = std::mem::take(&mut self.callback_actions);
         let mut ctx = Ctx {
             books,
             now_ns,
@@ -285,7 +257,158 @@ impl StrategyHost {
             strategy_names: &self.names,
             runtime_entries_enabled: self.entries_enabled.get(&sid).copied(),
         };
-        strategy.on_event(event, &mut ctx);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            strategy.on_event(event, &mut ctx);
+        }));
+        if let Err(panic) = outcome {
+            actions.clear();
+            self.callback_actions = actions;
+            let error = panic
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "strategy callback panicked".into());
+            self.fault(books, sid, error);
+            return false;
+        }
+        let accepted = self.capture_actions(sid, &mut actions, now_ns);
+        self.callback_actions = actions;
+        accepted
+    }
+
+    pub(crate) fn fault(&mut self, books: &Books, sid: StrategyId, error: String) {
+        tracing::error!(
+            strategy = sid.0,
+            error,
+            "strategy faulted; cancelling its open orders"
+        );
+        self.callbacks.faults.insert(sid, error);
+        self.timers.restore(sid, &[], 0, 0);
+        self.pending.extend(
+            books
+                .orders
+                .in_flight()
+                .into_iter()
+                .filter(|order| order.request.sleeve_owner() == Some(sid))
+                .map(|order| PendingAction {
+                    caller: Some(sid),
+                    action: Action::Cancel {
+                        symbol: order.request.symbol,
+                        client_order_id: order.request.client_order_id.clone(),
+                    },
+                    effect: None,
+                    callback_id: None,
+                    timing: None,
+                }),
+        );
+    }
+
+    pub(crate) fn capture_actions(
+        &mut self,
+        sid: StrategyId,
+        actions: &mut VecDeque<Action>,
+        now_ns: u64,
+    ) -> bool {
+        if actions.is_empty() {
+            return true;
+        }
+        let mut global = None;
+        let mut symbols = BTreeMap::new();
+        actions.retain(|action| match action {
+            Action::SetStrategyGlobalCheckpoint { checkpoint, .. } => {
+                let prior = global
+                    .as_ref()
+                    .or_else(|| {
+                        self.pending
+                            .iter()
+                            .rev()
+                            .find_map(|pending| match &pending.action {
+                                Action::SetStrategyGlobalCheckpoint {
+                                    strategy,
+                                    checkpoint,
+                                } if *strategy == sid => Some(checkpoint),
+                                _ => None,
+                            })
+                    })
+                    .or_else(|| {
+                        self.effects
+                            .transitions
+                            .values()
+                            .rev()
+                            .filter(|transition| transition.strategy == sid)
+                            .find_map(|transition| {
+                                transition
+                                    .effects
+                                    .iter()
+                                    .rev()
+                                    .find_map(|action| match action {
+                                        Action::SetStrategyGlobalCheckpoint {
+                                            checkpoint, ..
+                                        } => Some(checkpoint),
+                                        _ => None,
+                                    })
+                            })
+                    })
+                    .or_else(|| {
+                        self.global_checkpoints
+                            .get(&sid)
+                            .map(|state| &state.checkpoint)
+                    });
+                if prior == Some(checkpoint) {
+                    false
+                } else {
+                    global = Some(checkpoint.clone());
+                    true
+                }
+            }
+            Action::SetStrategyCheckpoint {
+                symbol, checkpoint, ..
+            } => {
+                let prior =
+                    symbols
+                        .get(symbol)
+                        .or_else(|| {
+                            self.pending
+                                .iter()
+                                .rev()
+                                .find_map(|pending| match &pending.action {
+                                    Action::SetStrategyCheckpoint {
+                                        strategy,
+                                        symbol: known,
+                                        checkpoint,
+                                    } if *strategy == sid && known == symbol => Some(checkpoint),
+                                    _ => None,
+                                })
+                        })
+                        .or_else(|| {
+                            self.effects
+                                .transitions
+                                .values()
+                                .rev()
+                                .filter(|transition| transition.strategy == sid)
+                                .find_map(|transition| {
+                                    transition.effects.iter().rev().find_map(
+                                        |action| match action {
+                                            Action::SetStrategyCheckpoint {
+                                                symbol: known,
+                                                checkpoint,
+                                                ..
+                                            } if known == symbol => Some(checkpoint),
+                                            _ => None,
+                                        },
+                                    )
+                                })
+                        })
+                        .or_else(|| self.checkpoints.get(&(sid, *symbol)));
+                if prior == Some(checkpoint) {
+                    false
+                } else {
+                    symbols.insert(*symbol, checkpoint.clone());
+                    true
+                }
+            }
+            _ => true,
+        });
         let timing = Some(CallbackTiming {
             origin_ns: Some(now_ns),
             decided_ns: crate::clock::now_ns(),
@@ -293,7 +416,6 @@ impl StrategyHost {
         if actions.is_empty() {
             return true;
         }
-        let actions: Vec<_> = actions.into_iter().collect();
         let durable = actions.iter().any(|action| {
             matches!(
                 action,
@@ -312,7 +434,7 @@ impl StrategyHost {
                 .checked_add(1)
                 .expect("strategy callback id exhausted");
             self.pending
-                .extend(actions.into_iter().map(|action| PendingAction {
+                .extend(actions.drain(..).map(|action| PendingAction {
                     caller: Some(sid),
                     action,
                     effect: None,
@@ -321,10 +443,10 @@ impl StrategyHost {
                 }));
             return true;
         }
-        let transition_id = self.effects.capture(sid, actions.clone());
+        let transition_id = self.effects.capture(sid, actions.iter().cloned().collect());
         self.pending.extend(
             actions
-                .into_iter()
+                .drain(..)
                 .enumerate()
                 .map(|(index, action)| PendingAction {
                     caller: Some(sid),

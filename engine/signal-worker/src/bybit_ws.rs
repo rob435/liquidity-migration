@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -1058,7 +1059,7 @@ impl StreamWorker {
                         }
                     }
                 }
-                _ = tokio::time::sleep_until(deadline.into()) => {
+                _ = tokio::time::sleep_until(deadline) => {
                     let now = Instant::now();
                     if self.pong_deadline.is_some_and(|deadline| now >= deadline) {
                         return Err("Bybit public keep-alive was unanswered".to_owned());

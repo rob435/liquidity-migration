@@ -87,12 +87,12 @@ impl OrderFeed for MexcOrderFeed {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_first_resync_goes_out_without_waiting() {
         // A boot has to recover whatever the log missed while the engine was
         // down; waiting a period first would leave it blind for that long.
         let mut feed = MexcOrderFeed::with_period(Duration::from_secs(3600));
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         assert!(matches!(
             feed.next_update().await.unwrap(),
             OrderUpdate::StreamReset { .. }
@@ -134,11 +134,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn later_resyncs_are_paced() {
         let mut feed = MexcOrderFeed::with_period(Duration::from_millis(80));
         feed.next_update().await.unwrap();
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         assert!(matches!(
             feed.next_update().await.unwrap(),
             OrderUpdate::StreamReset { .. }

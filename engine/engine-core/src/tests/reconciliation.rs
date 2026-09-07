@@ -226,10 +226,10 @@ impl Strategy for ForeignProbe {
 #[tokio::test(start_paused = true)]
 async fn a_missing_close_retains_owned_inventory_and_latches_across_restart() {
     let previous = vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["carry".to_string(), "probe".to_string()],
             symbols: vec!["ZECUSDT".to_string()],
-        },
+        }),
         WalRecord::OrderSent {
             dispatch: None,
             request: OrderRequest {
@@ -301,9 +301,10 @@ async fn a_missing_close_retains_owned_inventory_and_latches_across_restart() {
     );
     let mut records = previous.clone();
     records.extend(h.records.lock().unwrap().iter().cloned());
-    assert!(!records
-        .iter()
-        .any(|r| matches!(r, WalRecord::ClaimsDropped { .. })));
+    assert!(!records.iter().any(|r| matches!(
+        r,
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::ClaimsDropped { .. })
+    )));
     assert!(records.iter().any(|r| matches!(
         r,
         WalRecord::Reconciled {
@@ -339,18 +340,19 @@ async fn a_missing_close_retains_owned_inventory_and_latches_across_restart() {
             .snapshot(),
         before
     );
-    assert!(!records
-        .iter()
-        .any(|r| matches!(r, WalRecord::ClaimsDropped { .. })));
+    assert!(!records.iter().any(|r| matches!(
+        r,
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::ClaimsDropped { .. })
+    )));
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
     let previous = vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["carry".to_string(), "probe".to_string()],
             symbols: vec!["ZECUSDT".to_string()],
-        },
+        }),
         WalRecord::OrderSent {
             dispatch: None,
             request: OrderRequest {
@@ -390,14 +392,16 @@ async fn a_dropped_claim_stays_dropped_after_the_other_sleeve_enters() {
     ];
 
     let mut log = previous;
-    log.push(WalRecord::ClaimsDropped {
-        wall_ts_ms: recent_replay_ms(),
-        rows: vec![engine_types::FilledTotal {
-            strategy: StrategyId(0),
-            symbol: SymbolId(0),
-            signed_qty: 2.0,
-        }],
-    });
+    log.push(WalRecord::Retained(
+        engine_types::wal::RetainedWalRecord::ClaimsDropped {
+            wall_ts_ms: recent_replay_ms(),
+            rows: vec![engine_types::FilledTotal {
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                signed_qty: 2.0,
+            }],
+        },
+    ));
     log.push(WalRecord::OrderSent {
         dispatch: None,
         request: OrderRequest {

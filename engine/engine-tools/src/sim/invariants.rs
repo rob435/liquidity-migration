@@ -139,7 +139,10 @@ fn wal_exec_ids(records: &[WalRecord]) -> BTreeSet<&str> {
                 update: OrderUpdate::FastFill { exec_id, .. },
                 ..
             }
-            | WalRecord::FastExecution { exec_id, .. }
+            | WalRecord::Retained(engine_types::wal::RetainedWalRecord::FastExecution {
+                exec_id,
+                ..
+            })
             | WalRecord::RecoveredFill { exec_id, .. } => Some(exec_id.as_str()),
             _ => None,
         })
@@ -264,13 +267,13 @@ fn cash_flow_agrees_when_flat(e: &Evidence<'_>) -> Check {
                 fee,
                 ..
             } => (exec_id.as_str(), (*side, *qty, *px, *fee)),
-            WalRecord::FastExecution {
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::FastExecution {
                 exec_id,
                 side,
                 qty,
                 px,
                 ..
-            }
+            })
             | WalRecord::OrderUpdate {
                 update:
                     OrderUpdate::FastFill {

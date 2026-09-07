@@ -329,8 +329,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn archived_rejection_loads_off_core_retains_failure_and_applies_late_fill_once() {
+        let _io = crate::test_io::IoProgress::new();
         let prior = crate::tests::shared_sleeves::fragmented_engine().await;
         let mut base = prior.rotation_base(clock::wall_ms());
         let id = "eng-archive-late-1";
@@ -610,8 +611,9 @@ mod boot_cancellation_tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dropping_boot_lineage_recovery_cancels_and_releases_its_active_reader() {
+        let _io = crate::test_io::IoProgress::new();
         let (start_send, started) = tokio::sync::oneshot::channel();
         let (finish_send, finished) = tokio::sync::oneshot::channel();
         let reader = BlockingReader {

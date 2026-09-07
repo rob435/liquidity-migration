@@ -6,7 +6,7 @@ use engine_types::{
 };
 use engine_venue::{MexcGateway, MexcRealm, RealmCredentials};
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_contracts_and_prices_reach_wire_and_fractional_contracts_are_refused() {
     let server = TestServer::start(|request, _| {
         if request.path == "/api/v1/contract/detail" {
@@ -59,7 +59,7 @@ async fn exact_contracts_and_prices_reach_wire_and_fractional_contracts_are_refu
     assert_eq!(server.to_path("/api/v1/private/order/create").len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn independent_catalog_installs_contract_multipliers_before_a_mutation_without_another_read()
 {
     let server = TestServer::start(|request, _| if request.path == "/api/v1/contract/detail" {
@@ -101,7 +101,7 @@ async fn independent_catalog_installs_contract_multipliers_before_a_mutation_wit
     assert_eq!(server.only("/api/v1/private/order/create").json()["vol"], 3);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn independent_account_recovery_retains_contract_units_and_requested_ids() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/api/v1/contract/detail" => (200, r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true}]}"#.into()),
@@ -142,7 +142,7 @@ async fn independent_account_recovery_retains_contract_units_and_requested_ids()
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn recovery_catalog_install_refreshes_native_units_without_metadata_reads() {
     let server = TestServer::start(|request, prior| match request.path.as_str() {
         "/api/v1/contract/detail" if prior == 0 => (200, r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true}]}"#.into()),

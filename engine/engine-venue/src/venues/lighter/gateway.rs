@@ -1161,7 +1161,7 @@ mod tests {
         assert!(deadline > wall_ms() / 1000, "the token is already expired");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_send_that_does_not_arrive_forgets_the_nonce() {
         // The counter is advanced before the send. If the send then fails at
         // the socket, the venue may never have seen that nonce, and a counter
@@ -1186,7 +1186,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn nonces_are_handed_out_in_order_once_the_venue_has_been_asked() {
         // Seeded, so `take_nonce` hands out the counter rather than asking the
         // venue for it — the same path a second order in one boot takes.

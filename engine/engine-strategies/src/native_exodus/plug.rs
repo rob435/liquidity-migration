@@ -538,7 +538,7 @@ impl SleeveStateContract for SleeveState {
     }
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(plug.retained_signal_subscriptions(), Some(Vec::new()));
     }
 
-    fn config() -> StrategyConfig {
+    pub(crate) fn config() -> StrategyConfig {
         StrategyConfig {
             schema_version: 1,
             profile_name: "v1".into(),

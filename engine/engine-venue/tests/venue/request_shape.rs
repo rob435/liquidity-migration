@@ -117,7 +117,7 @@ fn assert_signed(request: &Recorded, payload: &str) {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn send_order_posts_the_documented_shape() {
     let server = TestServer::start(|_, _| ok(r#"{"orderId":"ord-1","orderLinkId":"eng-1"}"#)).await;
     let mut gw = gateway(&server);
@@ -152,7 +152,7 @@ async fn send_order_posts_the_documented_shape() {
     assert!(body.get("timeInForce").is_none());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn sibling_orders_are_on_the_wire_together() {
     // Each complete request is held briefly before acknowledgement. A serial
     // gateway can therefore reach only one in flight; the batch path reaches
@@ -175,13 +175,18 @@ async fn sibling_orders_are_on_the_wire_together() {
         })
         .collect();
 
-    let replies = gw.send_orders(&requests).await;
+    let send = tokio::spawn(async move { gw.send_orders(&requests).await });
+    while server.requests().len() < 3 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(100)).await;
+    let replies = send.await.unwrap();
     assert!(replies.iter().all(Result::is_ok), "{replies:?}");
     assert_eq!(server.peak_in_flight(), 3);
     assert_eq!(server.to_path("/v5/order/create").len(), 3);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn same_symbol_siblings_keep_request_order_on_the_wire() {
     let server = TestServer::start_delayed(
         |request, prior| {
@@ -200,7 +205,14 @@ async fn same_symbol_siblings_keep_request_order_on_the_wire() {
         })
         .collect();
 
-    let replies = gw.send_orders(&requests).await;
+    let send = tokio::spawn(async move { gw.send_orders(&requests).await });
+    for count in 1..=3 {
+        while server.requests().len() < count {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_millis(40)).await;
+    }
+    let replies = send.await.unwrap();
 
     assert!(replies.iter().all(Result::is_ok), "{replies:?}");
     assert_eq!(server.peak_in_flight(), 1);
@@ -219,7 +231,7 @@ async fn same_symbol_siblings_keep_request_order_on_the_wire() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_oversized_sibling_batch_is_refused_before_the_wire() {
     let server = TestServer::start(|_, _| ok(r#"{"orderId":"unexpected"}"#)).await;
     let mut gw = gateway(&server);
@@ -239,7 +251,7 @@ async fn an_oversized_sibling_batch_is_refused_before_the_wire() {
     assert!(server.requests().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_limit_order_carries_price_and_time_in_force() {
     let server = TestServer::start(|_, _| ok(r#"{"orderId":"ord-2"}"#)).await;
     let mut gw = gateway(&server);
@@ -274,7 +286,7 @@ async fn a_limit_order_carries_price_and_time_in_force() {
     assert!(body.get("tpslMode").is_none());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_reduce_only_order_never_renders_a_stop_even_when_handed_one() {
     // Bybit: "When reduceOnly is true, take profit/stop loss cannot be set" —
     // rendering the stop would reject the whole exit, exactly when exiting
@@ -310,7 +322,7 @@ async fn a_reduce_only_order_never_renders_a_stop_even_when_handed_one() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_full_position_close_uses_bybits_zero_quantity_form() {
     let server = TestServer::start(|_, _| ok(r#"{"orderId":"ord-close"}"#)).await;
     let mut gw = gateway(&server);
@@ -330,7 +342,7 @@ async fn a_full_position_close_uses_bybits_zero_quantity_form() {
     assert_eq!(body["closeOnTrigger"], true);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_full_position_close_cannot_be_an_opening_order() {
     let server = TestServer::start(|_, _| ok(r#"{"orderId":"never"}"#)).await;
     let mut gw = gateway(&server);
@@ -343,7 +355,7 @@ async fn a_full_position_close_cannot_be_an_opening_order() {
     assert!(server.requests().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_non_zero_retcode_is_a_rejection() {
     let server = TestServer::start(|_, _| {
         (
@@ -363,7 +375,7 @@ async fn a_non_zero_retcode_is_a_rejection() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_malformed_reply_is_a_bad_reply() {
     let server = TestServer::start(|_, _| (200, "<html>rate limited</html>".to_string())).await;
     let mut gw = gateway(&server);
@@ -373,7 +385,7 @@ async fn a_malformed_reply_is_a_bad_reply() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_accepted_order_without_an_id_is_a_bad_reply() {
     let server = TestServer::start(|_, _| ok(r#"{"orderLinkId":"eng-1"}"#)).await;
     let mut gw = gateway(&server);
@@ -383,7 +395,7 @@ async fn an_accepted_order_without_an_id_is_a_bad_reply() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_server_error_is_transport_not_a_rejection() {
     let server = TestServer::start(|_, _| (503, "upstream down".to_string())).await;
     let mut gw = gateway(&server);
@@ -393,7 +405,7 @@ async fn a_server_error_is_transport_not_a_rejection() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancel_goes_by_our_own_order_id() {
     let server = TestServer::start(|_, _| ok(r#"{"orderId":"ord-1","orderLinkId":"eng-1"}"#)).await;
     let mut gw = gateway(&server);
@@ -409,7 +421,7 @@ async fn cancel_goes_by_our_own_order_id() {
     assert_eq!(body["orderLinkId"], "eng-1");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancel_batch_posts_one_ordered_request_and_preserves_partial_rejection() {
     let server = TestServer::start(|_, _| {
         batch_ok(
@@ -446,7 +458,7 @@ async fn cancel_batch_posts_one_ordered_request_and_preserves_partial_rejection(
     assert_eq!(body["request"][1]["orderLinkId"], "eng-2");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn ten_cancels_use_one_quota_exact_native_batch_call() {
     let server = TestServer::start(|request, _| {
         assert_eq!(request.path, "/v5/order/cancel-batch");
@@ -489,7 +501,7 @@ async fn ten_cancels_use_one_quota_exact_native_batch_call() {
     assert_eq!(request.json()["request"].as_array().unwrap().len(), 10);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancel_batch_identity_mismatch_fails_every_item_closed() {
     let server = TestServer::start(|_, _| {
         batch_ok(
@@ -513,7 +525,7 @@ async fn cancel_batch_identity_mismatch_fails_every_item_closed() {
     assert_eq!(server.to_path("/v5/order/cancel-batch").len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_oversized_cancel_batch_is_refused_before_the_wire() {
     let server = TestServer::start(|_, _| batch_ok(r#"{"list":[]}"#, r#"{"list":[]}"#)).await;
     let mut gw = gateway(&server);
@@ -530,7 +542,7 @@ async fn an_oversized_cancel_batch_is_refused_before_the_wire() {
     assert!(server.requests().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_amend_carries_only_the_field_it_changes() {
     // An echoed-back price is not a no-op at the venue: it costs the order
     // its place in the queue, which is the one thing amending is for.
@@ -561,7 +573,7 @@ async fn an_amend_carries_only_the_field_it_changes() {
     assert!(body.get("qty").is_none(), "the size was not being changed");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_amend_renders_a_new_size_as_a_venue_string() {
     let server = TestServer::start(|_, _| ok(r#"{"orderId":"ord-1"}"#)).await;
     let mut gw = gateway(&server);
@@ -584,7 +596,7 @@ async fn an_amend_renders_a_new_size_as_a_venue_string() {
     assert!(body.get("price").is_none());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_amend_that_changes_nothing_never_reaches_the_venue() {
     let server = TestServer::start(|_, _| ok(r#"{"orderId":"ord-1"}"#)).await;
     let mut gw = gateway(&server);
@@ -622,7 +634,7 @@ async fn an_amend_that_changes_nothing_never_reaches_the_venue() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_gateway_says_what_bybit_can_actually_do() {
     // The engine refuses actions on this word, so a wrong one here is a
     // strategy believing it has something it does not.
@@ -635,7 +647,7 @@ async fn the_gateway_says_what_bybit_can_actually_do() {
     assert!(caps.amend_in_place, "/v5/order/amend");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn set_stop_uses_full_mode_on_the_one_way_position() {
     let server = TestServer::start(|_, _| ok("{}")).await;
     let mut gw = gateway(&server);
@@ -655,7 +667,7 @@ async fn set_stop_uses_full_mode_on_the_one_way_position() {
     assert_eq!(body["slOrderType"], "Market");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_unchanged_stop_is_success_not_a_failure() {
     let server = TestServer::start(|_, _| {
         (
@@ -672,7 +684,7 @@ async fn an_unchanged_stop_is_success_not_a_failure() {
         .expect("an already-equal position stop is the requested state");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_real_stop_refusal_remains_a_failure() {
     let server = TestServer::start(|_, _| {
         (
@@ -688,7 +700,7 @@ async fn a_real_stop_refusal_remains_a_failure() {
     assert!(matches!(error, VenueError::Rejected { code: 34041, .. }));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn account_view_reads_wallet_and_positions() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/v5/account/wallet-balance" => ok(r#"{"list":[{"accountType":"UNIFIED",
@@ -728,7 +740,7 @@ async fn account_view_reads_wallet_and_positions() {
     assert_eq!(server.connections(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn mainnet_inventory_reads_unfiltered_cross_account_assets() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/v5/market/instruments-info" => {
@@ -795,7 +807,7 @@ async fn mainnet_inventory_reads_unfiltered_cross_account_assets() {
     assert_signed(&request, "");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn blank_wallet_totals_fail_rather_than_read_as_zero() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/v5/account/wallet-balance" => ok(r#"{"list":[{"accountType":"UNIFIED",
@@ -810,7 +822,7 @@ async fn blank_wallet_totals_fail_rather_than_read_as_zero() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn instrument_rules_follow_the_page_cursor() {
     let server = TestServer::start(|request, prior| {
         assert_eq!(request.method, "GET");
@@ -845,7 +857,7 @@ async fn instrument_rules_follow_the_page_cursor() {
     assert_eq!(server.to_path("/v5/market/instruments-info").len(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn warm_opens_the_connection_on_the_public_time_endpoint() {
     let server =
         TestServer::start(|_, _| ok(r#"{"timeSecond":"1700000000","timeNano":"1700000000000"}"#))
@@ -864,7 +876,7 @@ async fn warm_opens_the_connection_on_the_public_time_endpoint() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_trade_socket_keeps_the_warm_rest_order_path() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let trade_url = format!("ws://{}", listener.local_addr().unwrap());
@@ -897,7 +909,7 @@ async fn a_refused_trade_socket_keeps_the_warm_rest_order_path() {
     assert_eq!(server.to_path("/v5/order/create").len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_warm_connection_is_reused_for_the_order() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/v5/market/time" => ok(r#"{"timeSecond":"1700000000"}"#),
@@ -915,7 +927,7 @@ async fn the_warm_connection_is_reused_for_the_order() {
     assert_eq!(server.connections(), 10);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_symbol_the_gateway_does_not_know_never_reaches_the_venue() {
     let server = TestServer::start(|_, _| ok(r#"{"orderId":"ord-1"}"#)).await;
     let mut gw = gateway(&server);
@@ -929,7 +941,7 @@ async fn a_symbol_the_gateway_does_not_know_never_reaches_the_venue() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_runtime_symbol_is_checked_once_before_its_first_order() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/v5/position/list" => one_way_position(request),
@@ -953,7 +965,7 @@ async fn a_runtime_symbol_is_checked_once_before_its_first_order() {
     assert_eq!(server.to_path("/v5/order/create").len(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_unquantized_quantity_never_reaches_the_venue() {
     let server = TestServer::start(|_, _| ok(r#"{"orderId":"ord-1"}"#)).await;
     let mut gw = gateway(&server);
@@ -969,7 +981,7 @@ async fn an_unquantized_quantity_never_reaches_the_venue() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn account_identity_asks_the_venue_whose_account_this_is() {
     let server = TestServer::start(|request, _| {
         if request.path == "/v5/position/list" {
@@ -1003,7 +1015,7 @@ async fn account_identity_asks_the_venue_whose_account_this_is() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_account_number_sent_as_text_reads_the_same() {
     // Bybit sends userID as a number here and as a string elsewhere. Both
     // have to land on the same lock file name or the two engines miss.
@@ -1025,7 +1037,7 @@ async fn an_account_number_sent_as_text_reads_the_same() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn hedge_mode_refuses_startup_before_any_order_can_be_sent() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/v5/position/list" if request.query.contains("symbol=BTCUSDT&") => {
@@ -1054,7 +1066,7 @@ async fn hedge_mode_refuses_startup_before_any_order_can_be_sent() {
     assert!(server.to_path("/v5/order/create").is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_identity_about_a_different_api_key_is_refused() {
     // Whatever produced this reply, it was not the key we signed with — so
     // the account number in it is somebody else's, and taking a lock in that
@@ -1068,7 +1080,7 @@ async fn an_identity_about_a_different_api_key_is_refused() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_identity_with_no_usable_account_number_is_refused() {
     for result in [
         r#"{"apiKey":"KEYHERE"}"#,
@@ -1089,7 +1101,7 @@ async fn an_identity_with_no_usable_account_number_is_refused() {
 // Leverage
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn set_leverage_states_both_sides_and_the_symbol() {
     let server = TestServer::start(|_, _| ok("{}")).await;
     let mut gw = gateway(&server);
@@ -1108,7 +1120,7 @@ async fn set_leverage_states_both_sides_and_the_symbol() {
     assert_signed(&request, &request.body);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn leverage_not_modified_is_success_not_a_failure() {
     // Bybit answers 110043 when the symbol already sits at the number asked
     // for. The request asked for a state and the state is what was asked for,
@@ -1130,7 +1142,7 @@ async fn leverage_not_modified_is_success_not_a_failure() {
         .expect("\"already at this leverage\" is not a failure");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_real_leverage_refusal_is_still_a_refusal() {
     // The other half of the pair: only 110043 is forgiven, and the proof that
     // the arm above is not swallowing everything.
@@ -1151,7 +1163,7 @@ async fn a_real_leverage_refusal_is_still_a_refusal() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_gateway_says_it_can_set_leverage() {
     // The engine only calls set_leverage when this is true, and refuses an
     // order sized at a leverage it cannot state. A gateway that could set it
@@ -1160,7 +1172,7 @@ async fn the_gateway_says_it_can_set_leverage() {
     assert!(gateway(&server).caps().set_leverage);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_wire_values_keep_physical_and_sleeve_stops_separate() {
     use engine_types::numeric::Exact;
     use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
@@ -1199,7 +1211,7 @@ async fn exact_wire_values_keep_physical_and_sleeve_stops_separate() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_amendment_values_survive_the_signed_wire_without_decimal_truncation() {
     use engine_types::numeric::Exact;
     use engine_types::order_terms::{ExactAmendTerms, OrderInputPolicy};
@@ -1236,7 +1248,7 @@ async fn exact_amendment_values_survive_the_signed_wire_without_decimal_truncati
     assert_signed(&request, &request.body);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn independent_catalog_pages_rules_and_specs_together_and_preserves_read_errors() {
     let server = TestServer::start(|request, count| {
         assert_eq!(request.path, "/v5/market/instruments-info");
@@ -1259,7 +1271,7 @@ async fn independent_catalog_pages_rules_and_specs_together_and_preserves_read_e
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn independent_account_recovery_uses_requested_ids_and_preserves_protection() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/v5/account/wallet-balance" => ok(r#"{"list":[{"accountType":"UNIFIED",

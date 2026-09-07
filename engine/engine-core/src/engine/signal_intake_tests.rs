@@ -294,137 +294,6 @@ async fn lifecycle_close_barrier_failure_retains_epoch_and_never_grants_a_succes
 }
 
 #[tokio::test(start_paused = true)]
-async fn accepted_signal_retries_a_full_callback_inbox_once_and_replays_after_restart() {
-    use crate::strategy_process::{
-        host::{CallbackExecution, CallbackHost},
-        state::CallbackState,
-    };
-    use engine_types::strategy_process::{
-        CallbackEvent, StrategyProcessState, MAX_PROCESS_PROPOSAL_BYTES,
-    };
-    let (mut engine, records) =
-        crate::tests::lifecycle_test_fixture(vec![Box::new(Consumer("long", false))]).await;
-    engine.host.callbacks = CallbackHost::new(
-        CallbackExecution::Isolated {
-            executable: "/unused-test-worker".into(),
-        },
-        &engine.host.strategies,
-        &[],
-    )
-    .unwrap();
-    assert!(engine.feed_one_strategy(StrategyId(0), &EngineEvent::Boot, 1));
-    let mut filler = engine.host.callbacks.unwritten.pop_front().unwrap();
-    // Construct an actual full serialized inbox without launching its worker.
-    engine.host.callbacks = CallbackHost::new(
-        CallbackExecution::Isolated {
-            executable: "/unused-test-worker".into(),
-        },
-        &engine.host.strategies,
-        &[],
-    )
-    .unwrap();
-    let mut large = source_row("filler", 1, 0);
-    large.payload.clear();
-    filler.event = CallbackEvent::Signal {
-        observation: large.clone(),
-    };
-    filler.preparation = engine_types::strategy_process::CallbackPreparation::Prepared {
-        snapshot: engine_types::strategy_process::CallbackSnapshot {
-            strategy: StrategyId(0),
-            now_ns: 1,
-            wall_ms: 1,
-            entries_enabled: true,
-            account: engine_types::StrategyAccountSummary {
-                equity_usdt: 0.0,
-                available_margin_usdt: 0.0,
-                observed_ns: 0,
-            },
-            symbols: Vec::new(),
-            orders: Vec::new(),
-            global_checkpoint: None,
-            strategy_names: vec!["long".into()],
-            strategy_events: Vec::new(),
-        },
-    };
-    let overhead = CallbackState::size(&filler).unwrap();
-    large.payload = vec![255; (MAX_PROCESS_PROPOSAL_BYTES - overhead) / 4];
-    filler.event = CallbackEvent::Signal { observation: large };
-    assert!(MAX_PROCESS_PROPOSAL_BYTES - CallbackState::size(&filler).unwrap() < 5);
-    engine.host.callbacks.state.accept(filler.clone()).unwrap();
-    let mut feed = FinishedSignals {
-        rows: VecDeque::new(),
-        done: None,
-        gaps: Vec::new(),
-        blocked_destinations: Vec::new(),
-    };
-    let input = source_row("durable", 1, 0);
-    engine
-        .queue_signal_observation(input.clone(), &mut feed)
-        .unwrap();
-    engine.accept_pending_signals(&mut feed).unwrap();
-    assert_eq!(
-        engine.signals.undelivered().count(),
-        1,
-        "full inbox cannot mark delivery complete"
-    );
-    assert!(engine.host.callbacks.unwritten.is_empty());
-    assert_eq!(engine.signals.cursors().next().unwrap().sequence, 1);
-    let runtime = engine.host.strategies[0].runtime_state().unwrap().unwrap();
-    engine
-        .host
-        .callbacks
-        .state
-        .commit(
-            filler.callback_id,
-            StrategyProcessState {
-                strategy: StrategyId(0),
-                last_callback_id: filler.callback_id,
-                retained_signal_subscriptions: None,
-                runtime,
-                timers: Vec::new(),
-            },
-        )
-        .unwrap();
-    engine.deliver_pending_signal_callbacks();
-    assert_eq!(engine.signals.undelivered().count(), 0);
-    assert_eq!(engine.host.callbacks.unwritten.len(), 1);
-    assert_eq!(
-        engine.host.callbacks.unwritten.front().unwrap().event,
-        CallbackEvent::Signal { observation: input }
-    );
-    engine.deliver_pending_signal_callbacks();
-    assert_eq!(
-        engine.host.callbacks.unwritten.len(),
-        1,
-        "successful admission is not repeatedly offered on every turn"
-    );
-    let queued = engine.host.callbacks.unwritten.pop_front().unwrap();
-    let mut durable = records.lock().unwrap().clone();
-    durable.push(WalRecord::StrategyCallbackQueued { input: queued });
-    engine.signals = crate::signal_state::SignalState::replay(&durable, 1).unwrap();
-    engine.host.callbacks = CallbackHost::new(
-        CallbackExecution::Isolated {
-            executable: "/unused-test-worker".into(),
-        },
-        &engine.host.strategies,
-        &durable,
-    )
-    .unwrap();
-    engine.deliver_pending_signal_callbacks();
-    assert_eq!(engine.signals.undelivered().count(), 0);
-    assert!(
-        engine.host.callbacks.unwritten.is_empty(),
-        "replay must join the existing durable callback"
-    );
-    assert_eq!(engine.host.callbacks.state.inputs.len(), 1);
-    assert_eq!(
-        engine.signals.observations().count(),
-        1,
-        "callback admission does not consume the input"
-    );
-}
-
-#[tokio::test(start_paused = true)]
 async fn lifecycle_seal_cannot_omit_an_observation_waiting_for_symbol_admission() {
     use engine_types::{SignalLifecycleResponse, SignalProducerReport, SignalSourceFrontier};
     let (mut engine, _) = crate::tests::lifecycle_test_fixture(vec![
@@ -1481,14 +1350,18 @@ async fn signal_callback_markers_refuse_wrong_identity_duplicate_markers_and_cha
         wall_ts_ms: 2,
         observation: row.clone(),
     };
-    let queued = |observation: SignalObservation| WalRecord::StrategyCallbackQueued {
-        input: StrategyCallbackInput {
-            order_origin: None,
-            callback_id: 1,
-            strategy: row.destination,
-            event: CallbackEvent::Signal { observation },
-            preparation: CallbackPreparation::Queued,
-        },
+    let queued = |observation: SignalObservation| {
+        WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::StrategyCallbackQueued {
+                input: StrategyCallbackInput {
+                    order_origin: None,
+                    callback_id: 1,
+                    strategy: row.destination,
+                    event: CallbackEvent::Signal { observation },
+                    preparation: CallbackPreparation::Queued,
+                },
+            },
+        )
     };
     let replay =
         crate::signal_state::SignalState::replay(&[accepted.clone(), queued(row.clone())], 1)

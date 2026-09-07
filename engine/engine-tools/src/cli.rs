@@ -74,9 +74,9 @@ fn bench(args: &[String]) -> Result<(), Box<dyn Error>> {
     );
     println!("{}", result.table());
     println!(
-        "  \"market to decision\" includes callback queueing and process IPC through parent receipt.\n  \
-         \"decision to dispatch ready\" includes callback durability, admission and both dispatch barriers.\n  \
-         \"dispatch barrier observed\" includes the engine resuming after either dispatch barrier.\n  \
+        "  \"market to decision\" includes market handling and the embedded callback.\n  \
+         \"decision to dispatch ready\" includes checkpoint handling, admission and the order barrier.\n  \
+         \"dispatch barrier observed\" includes the engine resuming after the order barrier.\n  \
          \"API round trip\" uses localhost; real venue network and matching time are not measured."
     );
     Ok(())
@@ -125,7 +125,10 @@ fn venue_key(args: &[String]) -> Result<(), Box<dyn Error>> {
 
 fn venues(_args: &[String]) -> Result<(), Box<dyn Error>> {
     println!("name\tvenue\trealm\treal_money\treadiness");
-    for chosen in engine_venue::VenueName::ALL {
+    for chosen in engine_venue::VenueName::ALL
+        .into_iter()
+        .filter(|name| name.compiled())
+    {
         println!(
             "{}\t{}\t{}\t{}\t{}",
             chosen.as_str(),
@@ -163,6 +166,12 @@ fn verify_account_identity(args: &[String]) -> Result<(), Box<dyn Error>> {
     runtime()?.block_on(engine_tools::flatness::verify_account_identity(&config))
 }
 
+#[cfg(not(feature = "bybit"))]
+fn canary_order(_args: &[String]) -> Result<(), Box<dyn Error>> {
+    Err("canary-order requires the bybit Cargo feature".into())
+}
+
+#[cfg(feature = "bybit")]
 fn canary_order(args: &[String]) -> Result<(), Box<dyn Error>> {
     let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
     let symbol = value(args, "--symbol").ok_or("canary-order needs --symbol SYMBOL")?;

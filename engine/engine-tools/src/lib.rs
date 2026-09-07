@@ -13,6 +13,7 @@ pub mod timing;
 #[cfg(test)]
 mod testpath;
 
+#[cfg(feature = "bybit")]
 pub mod canary;
 pub mod flatness;
 pub mod takeover;

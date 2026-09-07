@@ -24,6 +24,7 @@ pub mod plan;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
+use engine_types::order_terms::{strategy_decimal, ExactAmendTerms, OrderInputPolicy};
 use engine_types::{Action, AmendSpec, InstrumentRule, MarketState, Quote, SymbolId, WorkPolicy};
 
 use crate::inflight::LedgerOfOrders;
@@ -181,7 +182,13 @@ fn apply(
         // durable before the wire, and that fsync would land on every single
         // reprice.
         spec: AmendSpec {
-            exact_terms: None,
+            exact_terms: strategy_decimal(px).ok().map(|limit_price| {
+                Box::new(ExactAmendTerms {
+                    quantity: None,
+                    limit_price: Some(limit_price),
+                    input_policy: OrderInputPolicy::StrategyShortestDecimal,
+                })
+            }),
             px: Some(px),
             qty: None,
         },

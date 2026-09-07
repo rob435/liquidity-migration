@@ -9,6 +9,28 @@ type PlacementEffect = (
 type CancellationEffect = (SymbolId, String, Option<EffectKey>);
 
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
+    pub(super) fn flush_strategy_prefix(&mut self) -> Result<(), EngineError> {
+        if self.strategy_barrier_pending {
+            self.wal.barrier()?;
+            self.strategy_barrier_pending = false;
+            for owner in std::mem::take(&mut self.strategy_runtime_retirements) {
+                self.host.callbacks.state.forget_process(owner);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn begin_dispatch_barrier(
+        &mut self,
+    ) -> Result<engine_types::wal::PendingBarrier, EngineError> {
+        let barrier = self.wal.barrier_begin()?;
+        self.strategy_barrier_pending = false;
+        self.dispatches
+            .strategy_runtime_retirements
+            .append(&mut self.strategy_runtime_retirements);
+        Ok(barrier)
+    }
+
     pub(super) fn journal_transition(&mut self, id: u64) -> Result<(), EngineError> {
         if self.host.effects.journaled.contains(&id) {
             return Ok(());
@@ -28,7 +50,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.wal.append(&WalRecord::StrategyTransitionQueued {
             transition: transition.clone(),
         })?;
-        self.wal.barrier()?;
+        self.strategy_barrier_pending = true;
+        if transition
+            .effects
+            .iter()
+            .any(|action| matches!(action, Action::SetStrategyGlobalCheckpoint { .. }))
+        {
+            self.strategy_runtime_retirements
+                .insert(transition.strategy);
+        }
         for id in transition.order_ids.iter().flatten() {
             self.books.registry.own(id, transition.strategy);
         }

@@ -37,8 +37,9 @@ async fn http_source(
     (client, received, server)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn repair_lane_commits_one_symbol_and_stops_without_fetching_the_suffix() {
+    let _io = crate::test_io::IoProgress::new();
     let (client, mut requests, server) = http_source(|_| {
         serde_json::json!({"retCode": 0, "result": {"list": [
             [(2 * HOUR_MS).to_string(), "100", "101", "99", "100", "1", "100"]
@@ -79,8 +80,9 @@ async fn repair_lane_commits_one_symbol_and_stops_without_fetching_the_suffix() 
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn funding_job_preserves_disjoint_coverage_and_emits_settlements_once() {
+    let _io = crate::test_io::IoProgress::new();
     let (client, mut requests, server) = http_source(|_| {
         let rows = [1, 2, 4, 5].map(|hour| {
             serde_json::json!({"fundingRateTimestamp": (hour * HOUR_MS).to_string(), "fundingRate": "0.0001"})
@@ -124,8 +126,9 @@ async fn funding_job_preserves_disjoint_coverage_and_emits_settlements_once() {
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn funding_lane_continues_after_one_source_failure_and_reports_incomplete() {
+    let _io = crate::test_io::IoProgress::new();
     let (client, mut requests, server) = http_source(|path| {
         if path.contains("symbol=BTCUSDT") {
             serde_json::json!({"retCode": 10006, "retMsg": "Too many visits"})
@@ -170,8 +173,9 @@ async fn funding_lane_continues_after_one_source_failure_and_reports_incomplete(
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn whale_job_preserves_complete_day_and_its_coverage() {
+    let _io = crate::test_io::IoProgress::new();
     let (client, _requests, server) = http_source(|_| {
         Value::Array(
             (0..288)
@@ -203,8 +207,9 @@ async fn whale_job_preserves_complete_day_and_its_coverage() {
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn closed_global_budget_remains_a_fatal_error() {
+    let _io = crate::test_io::IoProgress::new();
     let budget = Arc::new(Semaphore::new(1));
     let client = PublicHttpClient::for_http_test("http://127.0.0.1:1".into(), Arc::clone(&budget));
     budget.close();

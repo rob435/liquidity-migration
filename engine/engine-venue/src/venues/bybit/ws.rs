@@ -19,7 +19,8 @@ use crate::stream::{hand_over, until_closed, AckMemory, Gone, Handover, Reconnec
 use crate::RealmCredentials;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use crate::wire::{self, Field, RawField};
 use engine_types::ids::{Symbol, SymbolId};
@@ -270,7 +271,7 @@ impl Worker {
                 .unwrap_or(next_ping_at);
             let wake = tokio::select! {
                 frame = socket.next() => Wake::Frame(frame),
-                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => Wake::Timer,
+                _ = tokio::time::sleep_until(deadline) => Wake::Timer,
             };
             let step = match wake {
                 Wake::Timer if pong_deadline.is_some_and(|deadline| Instant::now() >= deadline) => {

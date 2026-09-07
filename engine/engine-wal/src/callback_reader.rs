@@ -349,11 +349,16 @@ impl CallbackWalReader for Reader {
             offset: cursor.offset,
             detail: detail.into(),
         };
-        let source = if envelope.kind == "order_update_v2" {
+        let source = if matches!(
+            envelope.kind.as_str(),
+            "order_update_v2" | "order_update_v3"
+        ) {
+            let legacy_owners_required = envelope.kind == "order_update_v2";
             let envelope: OrderEnvelope = self.envelope(cursor, length, crc)?;
-            let owners = envelope
-                .callbacks
-                .ok_or_else(|| corrupt("order callback source has no owner metadata"))?;
+            let owners = envelope.callbacks;
+            if legacy_owners_required && owners.is_none() {
+                return Err(corrupt("order callback source has no owner metadata"));
+            }
             let mut update = envelope
                 .update
                 .ok_or_else(|| corrupt("order callback source has no parent update"))?;
@@ -366,11 +371,16 @@ impl CallbackWalReader for Reader {
                 }
             }
             let update: OrderUpdate = serde_json::from_value(update).map_err(crate::json_error)?;
-            Some((
-                owners,
-                engine_types::strategy_process::CallbackEvent::Order { update },
-            ))
-        } else if envelope.kind == "recovered_fill_v2" {
+            owners.map(|owners| {
+                (
+                    owners,
+                    engine_types::strategy_process::CallbackEvent::Order { update },
+                )
+            })
+        } else if matches!(
+            envelope.kind.as_str(),
+            "recovered_fill_v2" | "recovered_fill_v3"
+        ) {
             if length > engine_types::strategy_process::MAX_PROCESS_PROPOSAL_BYTES as u64 {
                 return Err(corrupt(
                     "recovered callback source exceeds the process input bound",
@@ -379,13 +389,16 @@ impl CallbackWalReader for Reader {
             let mut bytes = Vec::new();
             self.frame(cursor, length).read_to_end(&mut bytes)?;
             let record = crate::read_record(&bytes).map_err(crate::json_error)?;
-            let (owners, update) = record
-                .recovered_callback()
-                .ok_or_else(|| corrupt("recovered callback source has no owner metadata"))?;
-            Some((
-                owners,
-                engine_types::strategy_process::CallbackEvent::Order { update },
-            ))
+            let source = record.recovered_callback();
+            if envelope.kind == "recovered_fill_v2" && source.is_none() {
+                return Err(corrupt("recovered callback source has no owner metadata"));
+            }
+            source.map(|(owners, update)| {
+                (
+                    owners,
+                    engine_types::strategy_process::CallbackEvent::Order { update },
+                )
+            })
         } else if envelope.kind == "strategy_callback_source" {
             let envelope: EventEnvelope = self.envelope(cursor, length, crc)?;
             Some((
@@ -421,6 +434,78 @@ mod cancellation_tests {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
+
+    #[test]
+    fn retained_callback_scan_skips_embedded_ownerless_orders_and_fills() {
+        use engine_types::{Side, SymbolId, Wal, WalRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.wal");
+        let (mut wal, _) = crate::WalWriter::open(&path).unwrap();
+        for fee in [None, Some(0.01)] {
+            wal.append(&WalRecord::OrderUpdate {
+                callbacks: None,
+                update: OrderUpdate::Fill {
+                    allocation: None,
+                    exec_id: "embedded-fill".into(),
+                    client_order_id: "embedded-order".into(),
+                    symbol: SymbolId(0),
+                    side: Side::Buy,
+                    qty: 1.0,
+                    px: 100.0,
+                    fee,
+                    amounts: None,
+                    is_maker: false,
+                    forced_close: None,
+                    venue_ts_ms: 1,
+                    recv_ns: 1,
+                },
+            })
+            .unwrap();
+            wal.append(&WalRecord::RecoveredFill {
+                callbacks: None,
+                allocation: None,
+                exec_id: "embedded-recovered".into(),
+                client_order_id: "embedded-order".into(),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: 1.0,
+                px: 100.0,
+                fee,
+                amounts: None,
+                is_maker: false,
+                forced_close: None,
+                venue_ts_ms: 1,
+                recovered_wall_ts_ms: 2,
+            })
+            .unwrap();
+        }
+        wal.append(&WalRecord::OrderUpdate {
+            callbacks: Some(vec![StrategyId(7)]),
+            update: OrderUpdate::Reject {
+                client_order_id: "retained-order".into(),
+                code: 1,
+                reason: "retained callback".into(),
+            },
+        })
+        .unwrap();
+        wal.flush().unwrap();
+        let mut reader = wal.callback_reader().unwrap().unwrap();
+        let mut cursor = reader.start();
+        let mut sources = Vec::new();
+        while let Some(row) = reader.next(cursor).unwrap() {
+            cursor = row.next;
+            if let Some(source) = row.source {
+                sources.push(source);
+            }
+        }
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].0, [StrategyId(7)]);
+        assert!(matches!(&sources[0].1,
+            engine_types::strategy_process::CallbackEvent::Order {
+                update: OrderUpdate::Reject { client_order_id, .. }
+            } if client_order_id == "retained-order"));
+    }
 
     #[test]
     fn cancelling_between_frame_reads_stops_json_byte_iteration() {

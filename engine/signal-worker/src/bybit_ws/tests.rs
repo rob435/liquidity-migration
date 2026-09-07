@@ -295,8 +295,9 @@ async fn next(stream: &mut BybitPublicStream) -> StreamEvent {
         .unwrap()
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn frames_before_the_final_subscription_ack_are_discarded_on_refusal() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -370,8 +371,9 @@ async fn frames_before_the_final_subscription_ack_are_discarded_on_refusal() {
     assert!(!stream.health().connected);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn one_refused_ticker_is_quarantined_without_disabling_other_topics() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -464,8 +466,9 @@ async fn one_refused_ticker_is_quarantined_without_disabling_other_topics() {
     assert_eq!(sample.rows[0].symbol, "BTCUSDT");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn quarantined_topic_reprobes_use_unique_ids_and_survive_transient_refusal() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (reprobe_tx, reprobe_rx) = tokio::sync::oneshot::channel();
@@ -616,6 +619,25 @@ async fn quarantined_topic_reprobes_use_unique_ids_and_survive_transient_refusal
             break;
         }
     }
+    while stream.health().ticker_rows != 1 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(20)).await;
+    loop {
+        let retried = stream
+            .sample_tickers(wall_ms().unwrap(), 30_000)
+            .is_some_and(|sample| {
+                sample
+                    .rows
+                    .iter()
+                    .any(|row| row.mark_price == Some(Value::from("101")))
+            });
+        if retried {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(20)).await;
     tokio::time::timeout(Duration::from_secs(1), reprobe_rx)
         .await
         .unwrap()
@@ -626,7 +648,7 @@ async fn quarantined_topic_reprobes_use_unique_ids_and_survive_transient_refusal
             if health.ticker_topics_quarantined == 0 && health.ticker_rows == 2 {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -640,8 +662,9 @@ async fn quarantined_topic_reprobes_use_unique_ids_and_survive_transient_refusal
     assert_eq!(sample.rows.len(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn transient_subscription_refusal_reconnects_without_quarantining_topics() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -715,15 +738,16 @@ async fn transient_subscription_refusal_reconnects_without_quarantining_topics()
     )
     .unwrap();
     loop {
-        if matches!(
-            next(&mut stream).await,
+        match next(&mut stream).await {
+            StreamEvent::GapOpened { epoch: 1, .. } => {
+                tokio::time::advance(Duration::from_millis(20)).await
+            }
             StreamEvent::EpochStarted {
                 epoch: 2,
                 reconnected: true,
                 ..
-            }
-        ) {
-            break;
+            } => break,
+            _ => {}
         }
     }
     let health = stream.health();
@@ -733,8 +757,9 @@ async fn transient_subscription_refusal_reconnects_without_quarantining_topics()
     assert_eq!(health.reconnect_count, 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn global_10404_refusal_never_bisects_or_quarantines_topics() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (request_count_tx, request_count_rx) = tokio::sync::oneshot::channel();
@@ -790,13 +815,15 @@ async fn global_10404_refusal_never_bisects_or_quarantines_topics() {
             break;
         }
     }
+    tokio::time::advance(Duration::from_millis(100)).await;
     assert_eq!(request_count_rx.await.unwrap(), 1);
     assert_eq!(stream.health().ticker_topics_quarantined, 0);
     assert_eq!(stream.health().kline_topics_quarantined, 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn accepted_topic_flood_bypasses_the_unacknowledged_chunk_buffer() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -890,8 +917,9 @@ async fn accepted_topic_flood_bypasses_the_unacknowledged_chunk_buffer() {
     assert_eq!(stream.health().queued_frames, 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn ack_and_pong_only_epochs_do_not_reset_reconnect_backoff() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -935,7 +963,7 @@ async fn ack_and_pong_only_epochs_do_not_reset_reconnect_backoff() {
         backoff_start: Duration::from_millis(30),
         backoff_max: Duration::from_millis(120),
     };
-    let stream = BybitPublicStream::with_url(
+    let mut stream = BybitPublicStream::with_url(
         format!("ws://127.0.0.1:{port}"),
         vec!["BTCUSDT".into()],
         options,
@@ -945,6 +973,27 @@ async fn ack_and_pong_only_epochs_do_not_reset_reconnect_backoff() {
         .await
         .unwrap()
         .unwrap();
+    for expected_epoch in 1..=2 {
+        loop {
+            if matches!(next(&mut stream).await, StreamEvent::EpochStarted { epoch, .. } if epoch == expected_epoch)
+            {
+                break;
+            }
+        }
+        tokio::time::advance(Duration::from_millis(15)).await;
+        loop {
+            if matches!(next(&mut stream).await, StreamEvent::GapOpened { epoch, .. } if epoch == expected_epoch)
+            {
+                break;
+            }
+        }
+        tokio::time::advance(Duration::from_millis(if expected_epoch == 1 {
+            60
+        } else {
+            120
+        }))
+        .await;
+    }
     let second = tokio::time::timeout(Duration::from_secs(2), accepted_rx.recv())
         .await
         .unwrap()
@@ -961,8 +1010,9 @@ async fn ack_and_pong_only_epochs_do_not_reset_reconnect_backoff() {
     drop(stream);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn reconnect_opens_a_gap_and_clears_the_old_epoch_cache() {
+    let _io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let start = 10 * HOUR_MS;
@@ -1001,6 +1051,7 @@ async fn reconnect_opens_a_gap_and_clears_the_old_epoch_cache() {
     ));
     assert!(stream.mark_gap_repaired(1));
     assert!(stream.sample_tickers(wall_ms().unwrap(), 30_000).is_some());
+    tokio::time::advance(Duration::from_millis(100)).await;
     loop {
         if matches!(
             next(&mut stream).await,
@@ -1010,6 +1061,7 @@ async fn reconnect_opens_a_gap_and_clears_the_old_epoch_cache() {
         }
     }
     assert!(stream.sample_tickers(wall_ms().unwrap(), 30_000).is_none());
+    tokio::time::advance(Duration::from_millis(20)).await;
     loop {
         if matches!(
             next(&mut stream).await,
@@ -1030,35 +1082,6 @@ async fn reconnect_opens_a_gap_and_clears_the_old_epoch_cache() {
     let sample = stream.sample_tickers(wall_ms().unwrap(), 30_000).unwrap();
     assert_eq!(sample.rows[0].mark_price, Some(Value::from("200")));
     assert!(stream.health().queued_frames <= stream.health().queue_capacity);
-}
-
-#[tokio::test]
-#[ignore = "needs network"]
-async fn live_public_stream_accepts_btc_topics_and_delivers_a_ticker() {
-    let stream = BybitPublicStream::spawn(vec!["BTCUSDT".into()], 10_000, 250).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let health = stream.health();
-        if health.connected
-            && health.ticker_topics_accepted == 1
-            && health.kline_topics_accepted == 1
-        {
-            if let Some(sample) = stream.sample_tickers(wall_ms().unwrap(), 30_000) {
-                if sample.rows.len() == 1 && sample.rows[0].mark_price.is_some() {
-                    let complete = stream.health();
-                    assert!(complete.ticker_coverage_complete);
-                    assert_eq!(complete.ticker_topics_quarantined, 0);
-                    assert_eq!(complete.kline_topics_quarantined, 0);
-                    return;
-                }
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "Bybit public worker stream did not become complete: {health:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
 }
 
 #[test]

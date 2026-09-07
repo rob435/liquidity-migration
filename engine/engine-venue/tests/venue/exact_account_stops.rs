@@ -1,10 +1,27 @@
 use crate::support::TestServer;
 use engine_types::numeric::Exact;
 use engine_types::{AccountView, VenueGateway};
-use engine_venue::{
-    BinanceGateway, BinanceRealm, BybitGateway, HyperliquidGateway, HyperliquidRealm,
-    LighterGateway, LighterRealm, MexcGateway, MexcRealm, RealmCredentials, VenueRealm,
-};
+#[cfg(feature = "binance")]
+use engine_venue::BinanceGateway;
+#[cfg(feature = "binance")]
+use engine_venue::BinanceRealm;
+#[cfg(feature = "bybit")]
+use engine_venue::BybitGateway;
+#[cfg(feature = "hyperliquid")]
+use engine_venue::HyperliquidGateway;
+#[cfg(feature = "hyperliquid")]
+use engine_venue::HyperliquidRealm;
+#[cfg(feature = "lighter")]
+use engine_venue::LighterGateway;
+#[cfg(feature = "lighter")]
+use engine_venue::LighterRealm;
+#[cfg(feature = "mexc")]
+use engine_venue::MexcGateway;
+#[cfg(feature = "mexc")]
+use engine_venue::MexcRealm;
+use engine_venue::RealmCredentials;
+#[cfg(feature = "bybit")]
+use engine_venue::VenueRealm;
 
 const PRICE: &str = "89.99999999999999999999";
 fn assert_exact(view: AccountView, expected_quantity: &str) {
@@ -37,7 +54,8 @@ fn assert_exact(view: AccountView, expected_quantity: &str) {
         serde_json::from_slice(&serde_json::to_vec(&view).unwrap()).unwrap();
     assert_eq!(restored, view);
 }
-#[tokio::test]
+#[cfg(feature = "bybit")]
+#[tokio::test(start_paused = true)]
 async fn bybit_account_amounts_and_stop_preserve_escaped_native_decimal() {
     let server = TestServer::start(|request,_| (200, match request.path.as_str() {
         "/v5/account/wallet-balance" => r#"{"retCode":0,"result":{"list":[{"accountType":"UNIFIED","totalEquity":"1500.0000000000000000001","totalAvailableBalance":"1199.9999999999999999999","coin":[]}]}}"#.into(),
@@ -60,7 +78,8 @@ async fn bybit_account_amounts_and_stop_preserve_escaped_native_decimal() {
         "1.0000000000000000001",
     );
 }
-#[tokio::test]
+#[cfg(feature = "binance")]
+#[tokio::test(start_paused = true)]
 async fn binance_account_amounts_and_stop_preserve_bare_native_decimal() {
     let server = TestServer::start(|request,_| (200, match request.path.as_str() {
         "/fapi/v2/account" => r#"{"totalMarginBalance":"1500.0000000000000000001","availableBalance":"1199.9999999999999999999","positions":[{"symbol":"BTCUSDT","positionAmt":"1.0000000000000000001","entryPrice":"100.0000000000000000001","leverage":"6","positionSide":"BOTH"}]}"#.into(),
@@ -83,7 +102,8 @@ async fn binance_account_amounts_and_stop_preserve_bare_native_decimal() {
         "1.0000000000000000001",
     );
 }
-#[tokio::test]
+#[cfg(feature = "hyperliquid")]
+#[tokio::test(start_paused = true)]
 async fn hyperliquid_account_amounts_and_stop_preserve_bare_native_decimal() {
     let server = TestServer::start(|request,_| (200, match request.json()["type"].as_str().unwrap() {
         "clearinghouseState" => r#"{"marginSummary":{"accountValue":"1500.0000000000000000001","totalMarginUsed":"300"},"withdrawable":"1199.9999999999999999999","assetPositions":[{"position":{"coin":"BTC","szi":"1.0000000000000000001","entryPx":"100.0000000000000000001","leverage":{"type":"cross","value":20}}}]}"#.into(),
@@ -110,7 +130,8 @@ async fn hyperliquid_account_amounts_and_stop_preserve_bare_native_decimal() {
         "1.0000000000000000001",
     );
 }
-#[tokio::test]
+#[cfg(feature = "lighter")]
+#[tokio::test(start_paused = true)]
 async fn lighter_account_amounts_and_stop_preserve_bare_native_decimal() {
     let server = TestServer::start(|request,_| (200, match request.path.as_str() {
         "/api/v1/account" => r#"{"code":200,"accounts":[{"collateral":"1500.0000000000000000001","available_balance":"1199.9999999999999999999","positions":[{"market_id":0,"symbol":"BTC","sign":1,"position":"1.0000000000000000001","avg_entry_price":"100.0000000000000000001","initial_margin_fraction":"0.05"}]}]}"#.into(),
@@ -137,7 +158,9 @@ async fn lighter_account_amounts_and_stop_preserve_bare_native_decimal() {
         "1.0000000000000000001",
     );
 }
-#[tokio::test]
+#[cfg(feature = "mexc")]
+#[cfg(all(feature = "lighter", feature = "hyperliquid"))]
+#[tokio::test(start_paused = true)]
 async fn mexc_account_amounts_and_stop_preserve_bare_native_decimal() {
     let server = TestServer::start(|request,_| (200, match request.path.as_str() {
         "/api/v1/contract/detail" => r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true}]}"#.into(),
@@ -170,6 +193,7 @@ async fn mexc_account_amounts_and_stop_preserve_bare_native_decimal() {
     );
 }
 
+#[cfg(feature = "hyperliquid")]
 async fn hyperliquid_coverage(
     orders: String,
     short: bool,
@@ -195,6 +219,7 @@ async fn hyperliquid_coverage(
         .account_view(&["BTCUSDT".into()])
         .await
 }
+#[cfg(feature = "lighter")]
 async fn lighter_coverage(
     orders: String,
     short: bool,
@@ -220,14 +245,17 @@ async fn lighter_coverage(
         .account_view(&["BTCUSDT".into()])
         .await
 }
+#[cfg(all(feature = "lighter", feature = "hyperliquid"))]
 fn hyper_stop(id: u64, short: bool, quantity: &str, price: &str) -> serde_json::Value {
     serde_json::json!({"coin":"BTC","oid":id,"side":if short {"B"} else {"A"},"sz":quantity,"isTrigger":true,"reduceOnly":true,"orderType":"Stop Market","triggerPx":price})
 }
+#[cfg(all(feature = "lighter", feature = "hyperliquid"))]
 fn lighter_stop(id: u64, short: bool, quantity: &str, price: &str) -> serde_json::Value {
     serde_json::json!({"market_index":0,"order_index":id,"is_ask":!short,"remaining_base_amount":quantity,"reduce_only":true,"type":"stop-loss","trigger_price":price})
 }
 
-#[tokio::test]
+#[cfg(all(feature = "lighter", feature = "hyperliquid"))]
+#[tokio::test(start_paused = true)]
 async fn native_stop_coverage_requires_the_correct_side_and_every_canonical_unit() {
     for lighter in [false, true] {
         for short in [false, true] {
@@ -271,7 +299,8 @@ async fn native_stop_coverage_requires_the_correct_side_and_every_canonical_unit
     }
 }
 
-#[tokio::test]
+#[cfg(all(feature = "lighter", feature = "hyperliquid"))]
+#[tokio::test(start_paused = true)]
 async fn native_stop_coverage_aggregates_unique_orders_at_the_full_size_trigger() {
     for lighter in [false, true] {
         for short in [false, true] {
@@ -306,7 +335,8 @@ async fn native_stop_coverage_aggregates_unique_orders_at_the_full_size_trigger(
     }
 }
 
-#[tokio::test]
+#[cfg(feature = "lighter")]
+#[tokio::test(start_paused = true)]
 async fn lighter_account_does_not_invent_a_direction_for_malformed_native_positions() {
     for (quantity, sign) in [("1", 0), ("1", 2), ("-1", 1), ("-1", -1)] {
         let server = TestServer::start(move |request, _| {

@@ -138,7 +138,11 @@ fn a_move_reaches_the_queue_as_a_price_only_amend() {
             symbol: SYMBOL,
             client_order_id: "a".into(),
             spec: AmendSpec {
-                exact_terms: None,
+                exact_terms: Some(Box::new(ExactAmendTerms {
+                    quantity: None,
+                    limit_price: Some(strategy_decimal(100.0).unwrap()),
+                    input_policy: OrderInputPolicy::StrategyShortestDecimal,
+                })),
                 px: Some(100.0),
                 qty: None
             },
@@ -173,7 +177,11 @@ fn a_move_the_venue_refused_leaves_the_order_where_it_was() {
             symbol: SYMBOL,
             client_order_id: "a".into(),
             spec: AmendSpec {
-                exact_terms: None,
+                exact_terms: Some(Box::new(ExactAmendTerms {
+                    quantity: None,
+                    limit_price: Some(strategy_decimal(100.0).unwrap()),
+                    input_policy: OrderInputPolicy::StrategyShortestDecimal,
+                })),
                 px: Some(100.0),
                 qty: None
             },
@@ -255,7 +263,11 @@ fn a_cross_the_venue_refused_is_retried_and_does_not_count_as_crossed() {
             symbol: SYMBOL,
             client_order_id: "a".into(),
             spec: AmendSpec {
-                exact_terms: None,
+                exact_terms: Some(Box::new(ExactAmendTerms {
+                    quantity: None,
+                    limit_price: Some(strategy_decimal(102.0).unwrap()),
+                    input_policy: OrderInputPolicy::StrategyShortestDecimal,
+                })),
                 px: Some(102.0),
                 qty: None
             },

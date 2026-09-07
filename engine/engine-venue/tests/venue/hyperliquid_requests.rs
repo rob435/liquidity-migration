@@ -98,7 +98,7 @@ fn action(request: &Recorded) -> Value {
         .expect("every exchange request carries an action")
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_entry_and_its_stop_travel_in_one_signed_action() {
     // One request, so a filled entry is never briefly unprotected. The venue
     // arms the stop when the parent fills, which is what `normalTpsl` means.
@@ -140,7 +140,7 @@ async fn an_entry_and_its_stop_travel_in_one_signed_action() {
     assert_eq!(orders[1]["t"]["trigger"]["triggerPx"], "93000");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_body_carries_the_nonce_and_the_signature_beside_the_action() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
@@ -164,7 +164,7 @@ async fn the_body_carries_the_nonce_and_the_signature_beside_the_action() {
     assert!(v == 27 || v == 28, "recovery id {v}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_market_intent_asks_for_a_mid_and_crosses_from_it() {
     // This venue has no market order, so one becomes an immediate-or-cancel
     // limit priced through the book.
@@ -188,7 +188,7 @@ async fn a_market_intent_asks_for_a_mid_and_crosses_from_it() {
     assert!(px > 95_000.0, "a market buy must cross the mid: {px}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_limit_order_never_asks_for_a_mid() {
     // The round trip is only paid where it is needed. A limit order already
     // carries its price.
@@ -209,7 +209,7 @@ async fn a_limit_order_never_asks_for_a_mid() {
         .all(|r| r.json()["type"] != "allMids"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_reduce_only_order_never_carries_a_stop_even_when_handed_one() {
     // An exit has nothing left to protect, and the venue refuses the pair.
     let server = TestServer::start(|request, _| answer(request)).await;
@@ -233,7 +233,7 @@ async fn a_reduce_only_order_never_carries_a_stop_even_when_handed_one() {
     assert_eq!(action["orders"][0]["r"], true);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_cancel_names_the_order_by_the_id_the_engine_minted() {
     let server = TestServer::start(|request, _| {
         if request.path == "/exchange" {
@@ -258,7 +258,7 @@ async fn a_cancel_names_the_order_by_the_id_the_engine_minted() {
     assert_eq!(cloid.len(), 34, "a client id is 16 bytes of hex: {cloid}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_asset_the_venue_spells_in_lower_case_can_be_stopped_and_priced() {
     // kPEPE, kBONK and their kin are the venue's own spelling, and every
     // symbol reaching the engine is upper-cased. A coin folded back up from
@@ -329,7 +329,7 @@ async fn an_asset_the_venue_spells_in_lower_case_can_be_stopped_and_priced() {
     .expect("a market order priced off allMids");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_moved_stop_is_placed_before_the_old_one_is_pulled() {
     // The other order leaves the position bare for a round trip, and bare for
     // good if the placement then fails — which is the state this call exists
@@ -380,7 +380,7 @@ async fn a_moved_stop_is_placed_before_the_old_one_is_pulled() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_amend_keeps_the_half_it_was_not_asked_to_change() {
     // The venue's modify replaces the whole order, so an amend that only moves
     // the price still has to say what the size is — and it reads it back off
@@ -429,7 +429,7 @@ async fn an_amend_keeps_the_half_it_was_not_asked_to_change() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_amend_refuses_rather_than_guess_a_time_in_force() {
     // A row without a time-in-force is a row that cannot be replaced without
     // deciding whether the order may cross, and that is not a decision to make
@@ -471,7 +471,7 @@ async fn an_amend_refuses_rather_than_guess_a_time_in_force() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_amend_that_changes_nothing_is_refused_before_a_round_trip() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
@@ -493,7 +493,7 @@ async fn an_amend_that_changes_nothing_is_refused_before_a_round_trip() {
     assert!(server.to_path("/exchange").is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_position_is_unprotected_until_a_stop_order_stands_against_it() {
     // This venue keeps no stop on the position row, so the account read has to
     // look at the open orders — and a position with no stop must come back
@@ -524,7 +524,7 @@ async fn a_position_is_unprotected_until_a_stop_order_stands_against_it() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn instrument_rules_come_from_the_venues_own_asset_list() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
@@ -538,7 +538,7 @@ async fn instrument_rules_come_from_the_venues_own_asset_list() {
     assert_eq!(rule.min_notional, 10.0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refusal_buried_in_a_successful_reply_is_still_a_refusal() {
     // The trap this venue sets: the request succeeded and the order did not.
     // Reading only the envelope would log an order that never existed.
@@ -571,7 +571,7 @@ async fn a_refusal_buried_in_a_successful_reply_is_still_a_refusal() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_entry_accepted_with_its_stop_refused_is_a_refusal() {
     // The half-accepted case. Recording this as a placed order would leave the
     // engine believing a position is protected when nothing is watching it.
@@ -607,7 +607,7 @@ async fn an_entry_accepted_with_its_stop_refused_is_a_refusal() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_whole_request_failure_carries_the_venues_words() {
     let server = TestServer::start(|request, _| {
         if request.path == "/exchange" {
@@ -637,7 +637,7 @@ async fn a_whole_request_failure_carries_the_venues_words() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn leverage_is_a_whole_number_and_is_capped_at_the_assets_maximum() {
     let server = TestServer::start(|request, _| {
         if request.path == "/exchange" {
@@ -664,7 +664,7 @@ async fn leverage_is_a_whole_number_and_is_capped_at_the_assets_maximum() {
     assert_eq!(capped["leverage"], 40, "the asset's own maximum");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_account_identity_names_the_venue_the_account_and_the_realm() {
     // The account here has approved the key this host signs with, which is the
     // ordinary arrangement: an API wallet trading for an account it cannot
@@ -691,7 +691,7 @@ async fn the_account_identity_names_the_venue_the_account_and_the_realm() {
     assert_eq!(who.user_id, ACCOUNT);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_key_the_account_never_approved_stops_the_engine_before_it_trades() {
     // The key here signs as an address the account has not approved, and
     // `extraAgents` comes back empty. Every order it sent would be refused by
@@ -727,7 +727,7 @@ fn cloid_of(client_order_id: &str) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_terms_reach_signed_action_and_illegal_grid_is_refused_before_send() {
     use engine_types::numeric::Exact;
     use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
@@ -762,7 +762,7 @@ async fn exact_terms_reach_signed_action_and_illegal_grid_is_refused_before_send
     assert_eq!(server.to_path("/exchange").len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn independent_catalog_installs_asset_ids_before_a_mutation_without_another_read() {
     let server = TestServer::start(|request, _| answer(request)).await;
     let mut gw = gateway(&server);
@@ -799,7 +799,7 @@ async fn independent_catalog_installs_asset_ids_before_a_mutation_without_anothe
     assert!(other.requests().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_market_slippage_uses_the_venue_mid_lexeme_before_rounding() {
     use engine_types::numeric::Exact;
     use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
@@ -838,7 +838,7 @@ async fn exact_market_slippage_uses_the_venue_mid_lexeme_before_rounding() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exact_amend_requires_the_current_reduce_only_flag_and_keeps_remaining_quantity() {
     use engine_types::numeric::Exact;
     use engine_types::order_terms::{ExactAmendTerms, OrderInputPolicy};
@@ -884,7 +884,7 @@ async fn exact_amend_requires_the_current_reduce_only_flag_and_keeps_remaining_q
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn independent_account_recovery_uses_requested_ids_and_preserves_protection() {
     // This venue keeps no stop on the position row, so the account read has to
     // look at the open orders — and a position with no stop must come back

@@ -163,6 +163,7 @@ jobs:
         run: >-
           python3 scripts/release_artifact.py qualify
           --commit "$GITHUB_SHA"
+          --runner-class linux-x86_64
           --output "$RUNNER_TEMP/engine-binaries-${GITHUB_SHA}-qualified.tar.gz"
       - name: Upload qualified release binaries
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1

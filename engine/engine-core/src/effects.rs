@@ -90,10 +90,12 @@ impl Effects {
                     }
                 }
                 WalRecord::StrategyTransitionQueued { transition }
-                | WalRecord::StrategyProcessTransitionQueued {
-                    transition: Some(transition),
-                    ..
-                } => {
+                | WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyProcessTransitionQueued {
+                        transition: Some(transition),
+                        ..
+                    },
+                ) => {
                     if transition.id < result.next_id {
                         return Err(format!(
                             "strategy transition id {} is reused",

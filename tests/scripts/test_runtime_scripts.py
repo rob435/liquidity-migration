@@ -296,13 +296,14 @@ def test_a_realm_whose_inputs_did_not_change_is_left_running() -> None:
     assert 'systemctl is-active --quiet "$worker_unit" && systemctl is-active --quiet "$owner_unit"' in unchanged
 
     deploy_body = remote[remote.index("deploy_mode()") : remote.index("rollback_mode()")]
+    assert "if realm_unchanged demo && demo_candidate_running; then" in deploy_body
+    assert "if realm_unchanged mainnet; then" in deploy_body
     for realm in ("demo", "mainnet"):
-        assert f"if realm_unchanged {realm}; then" in deploy_body
         assert f'echo "{realm}-ok result=unchanged-left-running"' in deploy_body
         # The handover, when it runs, records what it started so the next deploy can compare.
         assert f"handover_realm {realm}" in deploy_body
-    # Nothing stops before the release is on disk; both realms stay up through install.
-    assert deploy_body.index("install_release") < deploy_body.index("handover_realm demo")
+    assert deploy_body.index("stage_demo_candidate") < deploy_body.index("handover_realm demo")
+    assert deploy_body.index("wait_demo_soak") < deploy_body.index("install_release")
     # The first gated deploy seeds the record from the commit that started the realm,
     # before anything is rendered, so it compares against what actually runs.
     assert deploy_body.index("seed_realm_fingerprints") < deploy_body.index("install_release")
@@ -797,7 +798,9 @@ def test_a_realm_start_runs_its_liveness_watchdog_after_every_unit_it_watches(
                 )
 
 
-def _run_heartbeat_gate(tmp_path: Path, name: str, crash_loop: bool) -> subprocess.CompletedProcess[str]:
+def _run_heartbeat_gate(
+    tmp_path: Path, name: str, crash_loop: bool, unhealthy: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     """`wait_fresh_heartbeat` against a stubbed unit that always writes a
     fresh heartbeat, restarting between reads only when crash_loop is set."""
 
@@ -845,7 +848,14 @@ esac
     stat.chmod(0o755)
 
     heartbeat = tmp_path / name / "heartbeat.json"
-    heartbeat.write_text("{}", encoding="utf-8")
+    import time
+    payload = {"pid": 4242, "wall_ts_ms": time.time_ns() // 1_000_000,
+               "may_open": True, "rolling_loss_tripped": False, "strategy_errors": []}
+    if unhealthy == "latched":
+        payload["may_open"] = False
+    elif unhealthy == "strategy":
+        payload["strategy_errors"] = [{"strategy": "LONG", "error": "failed reducer"}]
+    heartbeat.write_text(json.dumps(payload), encoding="utf-8")
     remote = _remote_script()
     # Defaulted, not required, so the gate's behaviour is what fails this
     # harness rather than the absence of the constant.
@@ -859,7 +869,7 @@ esac
             'fail() { echo "deploy failed: $*" >&2; exit 1; }',
             settle,
             _function(remote, "wait_fresh_heartbeat"),
-            f'wait_fresh_heartbeat unit.service "{heartbeat}" 1',
+            f'wait_fresh_heartbeat liquidity-migration-engine.service "{heartbeat}" 1',
         ]
     )
     return subprocess.run(
@@ -870,6 +880,8 @@ esac
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "LM_TEST_CRASH_LOOP": "1" if crash_loop else "0",
             "LM_TEST_RESTARTS": str(counter),
+            "PYTHON": sys.executable,
+            "REPO_DIR": str(ROOT),
         },
         text=True,
         capture_output=True,
@@ -897,8 +909,15 @@ def test_the_heartbeat_gate_accepts_a_unit_that_holds_one_process(tmp_path: Path
     result = _run_heartbeat_gate(tmp_path, "settled", crash_loop=False)
 
     assert result.returncode == 0, result.stderr
-    assert "heartbeat-ok unit=unit.service" in result.stdout
+    assert "heartbeat-ok unit=liquidity-migration-engine.service" in result.stdout
     assert "pid=4242" in result.stdout
+
+
+@pytest.mark.parametrize("unhealthy", ["latched", "strategy"])
+def test_stable_fresh_but_unhealthy_engine_cannot_pass_handover(tmp_path: Path, unhealthy: str) -> None:
+    result = _run_heartbeat_gate(tmp_path, unhealthy, crash_loop=False, unhealthy=unhealthy)
+    assert result.returncode != 0, "fresh heartbeat with a stable process incorrectly passed unhealthy handover"
+    assert "heartbeat-ok" not in result.stdout
 
 
 def test_the_heartbeat_gate_reads_unit_state_and_not_only_file_freshness() -> None:

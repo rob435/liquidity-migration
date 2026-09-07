@@ -9,7 +9,10 @@ Wants=network-online.target liquidity-migration-signal-worker-demo.service
 After=network-online.target liquidity-migration-signal-worker-demo.service
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+TimeoutStartSec=180
 User=liquidity-engine-demo
 Group=liquidity-migration
 # Not the deployed checkout. The engine's log path in engine.toml may be

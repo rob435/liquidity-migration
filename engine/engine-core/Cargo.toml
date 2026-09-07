@@ -11,11 +11,20 @@ workspace = true
 name = "engine_core"
 path = "src/lib.rs"
 
+[features]
+default = ["bybit"]
+bybit = ["engine-venue/bybit", "engine-marketdata/bybit"]
+binance = ["engine-venue/binance", "engine-marketdata/binance"]
+hyperliquid = ["engine-venue/hyperliquid", "engine-marketdata/hyperliquid"]
+lighter = ["engine-venue/lighter", "engine-marketdata/lighter"]
+mexc = ["engine-venue/mexc", "engine-marketdata/mexc"]
+variational = ["engine-venue/variational", "engine-marketdata/variational"]
+
 [dependencies]
 engine-types = { workspace = true }
 engine-wal = { workspace = true }
-engine-marketdata = { workspace = true }
-engine-venue = { workspace = true }
+engine-marketdata = { workspace = true, default-features = false }
+engine-venue = { workspace = true, default-features = false }
 engine-risk = { workspace = true }
 engine-strategies = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "macros", "sync", "signal"] }

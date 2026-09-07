@@ -126,7 +126,7 @@ pub fn venue_name(name: &str) -> Result<VenueName, VenueError> {
 
 /// The chosen venue's public market stream, subscribed to exactly what was
 /// asked.
-pub fn market_feed(name: VenueName, wanted: &[Subscription]) -> MarketFeeds {
+pub fn market_feed(name: VenueName, wanted: &[Subscription]) -> Result<MarketFeeds, VenueError> {
     MarketFeeds::build(name, wanted)
 }
 
@@ -134,15 +134,15 @@ pub fn market_feed_for_registry(
     name: VenueName,
     symbols: &[Symbol],
     wanted: &[Subscription],
-) -> MarketFeeds {
+) -> Result<MarketFeeds, VenueError> {
     let seeded = boot_subscriptions(symbols, wanted);
-    let mut feed = market_feed(name, &seeded);
+    let mut feed = market_feed(name, &seeded)?;
     for subscription in seeded {
         if !wanted.contains(&subscription) {
             engine_types::MarketFeed::retire(&mut feed, &subscription.symbol, subscription.feed);
         }
     }
-    feed
+    Ok(feed)
 }
 
 /// The chosen venue's private order stream, on the same account the gateway
@@ -326,7 +326,7 @@ pub fn strategies_for_registry(
 ) -> Result<Vec<Box<dyn Strategy>>, Box<dyn Error>> {
     one_name_per_sleeve(configured)?;
     let restored =
-        crate::strategy_process::state::CallbackState::replay(replayed, plan.state.sleeves.len())?;
+        crate::callback_recovery::state::CallbackState::replay(replayed, plan.state.sleeves.len())?;
     let mut strategies: Vec<Box<dyn Strategy>> = Vec::with_capacity(plan.slot_configs.len());
     for (slot, config) in plan.slot_configs.iter().enumerate() {
         let id = StrategyId(u16::try_from(slot)?);
@@ -486,10 +486,12 @@ max_initial_margin_usdt = 100.0
 
     #[test]
     fn registry_order_reaches_constructors_and_preserves_missing_sleeve_slots() {
-        let records = [WalRecord::Names {
-            strategies: vec!["first".into(), "second".into()],
-            symbols: vec!["BTCUSDT".into()],
-        }];
+        let records = [WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::Names {
+                strategies: vec!["first".into(), "second".into()],
+                symbols: vec!["BTCUSDT".into()],
+            },
+        )];
         let mut second = sleeve_strategy("second", "BTCUSDT");
         second
             .params
@@ -634,20 +636,22 @@ disaster_stop_fraction = 0.35
             symbol: name.to_string(),
             feed: engine_types::Feed::Quote,
         };
-        let replayed = vec![engine_wal::WalRecord::Names {
-            strategies: vec!["carry".into(), "long".into()],
-            symbols: vec![
-                "BTCUSDT".into(),
-                "ETHUSDT".into(),
-                "SOLUSDT".into(),
-                "XRPUSDT".into(),
-                "HOMEUSDT".into(),
-                "ACEUSDT".into(),
-                "DOGEUSDT".into(),
-                "LINKUSDT".into(),
-                "HYPEUSDT".into(),
-            ],
-        }];
+        let replayed = vec![engine_wal::WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::Names {
+                strategies: vec!["carry".into(), "long".into()],
+                symbols: vec![
+                    "BTCUSDT".into(),
+                    "ETHUSDT".into(),
+                    "SOLUSDT".into(),
+                    "XRPUSDT".into(),
+                    "HOMEUSDT".into(),
+                    "ACEUSDT".into(),
+                    "DOGEUSDT".into(),
+                    "LINKUSDT".into(),
+                    "HYPEUSDT".into(),
+                ],
+            },
+        )];
         let wanted = vec![
             quote("BTCUSDT"),
             quote("ETHUSDT"),
@@ -656,7 +660,8 @@ disaster_stop_fraction = 0.35
             quote("DOGEUSDT"), // the new seed the log already knows
         ];
         let symbols = symbol_order(&replayed, &wanted).unwrap();
-        let feed = market_feed(VenueName::BybitDemo, &boot_subscriptions(&symbols, &wanted));
+        let feed =
+            market_feed(VenueName::BybitDemo, &boot_subscriptions(&symbols, &wanted)).unwrap();
         for (position, name) in symbols.iter().enumerate() {
             assert_eq!(
                 feed.id_of(name),
@@ -785,7 +790,7 @@ mod retired_registry_tests {
                 feed: Feed::Depth,
             },
         ];
-        let mut feed = market_feed_for_registry(VenueName::BybitDemo, &names, &wanted);
+        let mut feed = market_feed_for_registry(VenueName::BybitDemo, &names, &wanted).unwrap();
         assert_eq!(feed.id_of("OLDUSDT"), Some(engine_types::SymbolId(0)));
         assert_eq!(feed.id_of("BTCUSDT"), Some(engine_types::SymbolId(1)));
         assert!(

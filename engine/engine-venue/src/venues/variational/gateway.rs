@@ -214,7 +214,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn every_write_refuses_and_says_why() {
         // The claim this whole module rests on. If a later change makes one of
         // these return `Ok` without an endpoint behind it, the engine would
@@ -256,7 +256,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_caps_promise_nothing_the_venue_cannot_do() {
         let caps = gateway().caps();
         assert!(!caps.native_position_stop);
@@ -264,12 +264,12 @@ mod tests {
         assert!(!caps.set_leverage);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn there_are_no_working_orders_because_nobody_can_place_one() {
         assert!(gateway().working_orders().await.unwrap().is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_account_is_named_even_though_nothing_authenticates() {
         // The lease still has to have something to be named after.
         let who = gateway().account_identity().await.unwrap();

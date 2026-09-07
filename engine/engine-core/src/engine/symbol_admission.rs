@@ -386,7 +386,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     self.symbol_admission.refresh_required = false;
                     self.symbol_admission.failure = None;
                     let names = names_record(&self.host.names, &self.books.market);
-                    self.wal.append(&names)?;
                     self.fills.learn(&names);
                 }
             },

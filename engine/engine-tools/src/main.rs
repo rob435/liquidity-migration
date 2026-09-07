@@ -153,12 +153,6 @@ engine — the execution loop
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.as_slice() == ["--strategy-worker"] {
-        return match engine_core::strategy_process::worker::run_stdio() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(_) => ExitCode::FAILURE,
-        };
-    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

@@ -24,6 +24,7 @@ async fn one_working_opening() -> (
     String,
     SymbolId,
 ) {
+    let _io = crate::test_io::IoProgress::new();
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
     let (mut engine, h) = build_with_lookups(vec![Box::new(buyer)], &["BTCUSDT"]).await;
     let symbol = engine.market().table.get("BTCUSDT").unwrap();
@@ -56,7 +57,7 @@ async fn until_ended(records: Rc<RefCell<Vec<WalRecord>>>, id: String) {
         if ended {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
     }
 }
 
@@ -168,55 +169,63 @@ async fn a_halt_cancel_the_venue_refuses_for_a_working_order_is_sent_again() {
     assert!(note_saying(&h.records, "still working at the venue").contains(&id));
 }
 
-// On the wall clock: the confirmation window reads `clock::now_ns`, which
-// paused Tokio time does not move.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_accepted_halt_cancel_the_private_stream_never_confirms_is_settled_by_a_status_read() {
-    // The cancel was taken and the private update carrying the ending was
-    // dropped. Half the confirmation window of silence is the cue to ask.
-    let (mut engine, h, id, symbol) = one_working_opening().await;
-    h.lookups.lock().unwrap().push_back(OrderLookup::Terminal {
-        status: TerminalOrderStatus::Cancelled,
-        row: row(&id, "0"),
-    });
+    crate::test_clock::with_engine_clock(async {
+        // The cancel was taken and the private update carrying the ending was
+        // dropped. Half the confirmation window of silence is the cue to ask.
+        let (mut engine, h, id, symbol) = one_working_opening().await;
+        h.lookups.lock().unwrap().push_back(OrderLookup::Terminal {
+            status: TerminalOrderStatus::Cancelled,
+            row: row(&id, "0"),
+        });
 
-    engine
-        .run(
-            &mut ScriptFeed::quotes(symbol, 0, false),
-            &mut reset(),
-            until_ended(h.records.clone(), id.clone()),
-        )
-        .await
-        .expect("the status read stands in for the dropped update");
+        engine
+            .run(
+                &mut ScriptFeed::quotes(symbol, 0, false),
+                &mut reset(),
+                until_ended(h.records.clone(), id.clone()),
+            )
+            .await
+            .expect("the status read stands in for the dropped update");
 
-    assert_eq!(h.cancels.lock().unwrap().len(), 1, "one cancel, accepted");
-    assert!(engine.in_flight_ids().is_empty());
-    assert!(note_saying(&h.records, "has not confirmed the accepted halt cancel").contains(&id));
+        assert_eq!(h.cancels.lock().unwrap().len(), 1, "one cancel, accepted");
+        assert!(engine.in_flight_ids().is_empty());
+        assert!(
+            note_saying(&h.records, "has not confirmed the accepted halt cancel").contains(&id)
+        );
+    })
+    .await;
 }
 
-// On the wall clock: the confirmation window reads `clock::now_ns`.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_halt_cancel_the_venue_cannot_settle_still_ends_the_run() {
-    // No script: every status read comes back unknown. The deadline set by
-    // the first cancel reply still ends the run for boot to reconcile.
-    let (mut engine, h, id, symbol) = one_working_opening().await;
-    h.cancel_replies
-        .lock()
-        .unwrap()
-        .push_back(Err(VenueError::Transport("reply lost".into())));
+    crate::test_clock::with_engine_clock(async {
+        // No script: every status read comes back unknown. The deadline set by
+        // the first cancel reply still ends the run for boot to reconcile.
+        let (mut engine, h, id, symbol) = one_working_opening().await;
+        h.cancel_replies
+            .lock()
+            .unwrap()
+            .push_back(Err(VenueError::Transport("reply lost".into())));
 
-    let error = engine
-        .run(
-            &mut ScriptFeed::quotes(symbol, 0, false),
-            &mut reset(),
-            tokio::time::sleep(Duration::from_secs(5)),
-        )
-        .await
-        .expect_err("an order the venue cannot settle is boot's to reconcile");
+        let error = engine
+            .run(
+                &mut ScriptFeed::quotes(symbol, 0, false),
+                &mut reset(),
+                async {
+                    for _ in 0..5_000 {
+                        tokio::time::advance(Duration::from_millis(1)).await;
+                    }
+                },
+            )
+            .await
+            .expect_err("an order the venue cannot settle is boot's to reconcile");
 
-    assert!(
-        matches!(error, EngineError::Reconcile(ref detail) if detail.contains(&id) && detail.contains("refused or unanswered")),
-        "{error}"
-    );
-    assert!(note_saying(&h.records, "asking again").contains(&id));
+        assert!(
+            matches!(error, EngineError::Reconcile(ref detail) if detail.contains(&id) && detail.contains("refused or unanswered")),
+            "{error}"
+        );
+        assert!(note_saying(&h.records, "asking again").contains(&id));
+    }).await;
 }

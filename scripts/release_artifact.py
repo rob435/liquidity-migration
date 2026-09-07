@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -14,11 +15,76 @@ import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 BINARIES = ("engine", "engine-tools", "signal-worker")
 CHECKS = ("release-tests", "account-state-soak", "engine-bench", "binary-smoke")
 METADATA = ("binaries.sha256", "qualification.json", "qualification.log")
+
+
+def _latency_budget(repo: Path, runner_class: str | None) -> dict[str, Any]:
+    import tomllib
+
+    selected = runner_class or f"{platform.system().lower()}-{platform.machine().lower()}"
+    config = tomllib.loads((repo / "docs" / "execution-latency-budgets.toml").read_text())
+    if config.get("schema_version") != 1:
+        raise ValueError("unsupported latency budget schema")
+    ratio = config.get("maximum_baseline_ratio")
+    if isinstance(ratio, bool) or not isinstance(ratio, (float, int)) or not math.isfinite(ratio) or not 1 <= ratio < 2:
+        raise ValueError("latency budget ratio must be at least 1 and less than 2")
+    baseline = config.get("runners", {}).get(selected)
+    if not isinstance(baseline, dict) or not isinstance(baseline.get("status"), str) or not baseline["status"]:
+        raise ValueError(f"latency budget has no runner class: {selected}")
+    metrics = ("decision_p99_ns", "submit_p50_ns")
+    if any(type(baseline.get(key)) is not int or baseline[key] <= 0 for key in metrics):
+        raise ValueError("latency baselines must be positive integer nanoseconds")
+    bench = config.get("bench", {})
+    if any(type(bench.get(key)) is not int or bench[key] <= 0 for key in ("events", "rate", "every")):
+        raise ValueError("latency bench events, rate and every must be positive integers")
+    symbols = bench.get("symbols")
+    if not isinstance(symbols, list) or not symbols or any(not isinstance(item, str) or not item for item in symbols):
+        raise ValueError("latency bench symbols must be nonempty strings")
+    return {
+        "runner_class": selected,
+        "baseline_status": baseline["status"],
+        "baseline_ns": {key: baseline[key] for key in metrics},
+        "limits_ns": {key: math.floor(baseline[key] * ratio) for key in metrics},
+        "maximum_baseline_ratio": ratio,
+        "bench": bench,
+    }
+
+
+def _check_latency(text: str, budget: dict[str, Any]) -> dict[str, Any]:
+    result = dict(budget)
+    result["measured_ns"], result["samples"] = {}, {}
+    scales = {"ns": 1, "us": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
+    for segment, metric, quantile in (
+        ("market to decision", "decision_p99_ns", 2),
+        ("market to submit result", "submit_p50_ns", 0),
+    ):
+        rows = re.findall(r"^\s*" + re.escape(segment) + r"\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*$", text, re.MULTILINE)
+        if len(rows) != 1 or int(rows[0][0]) <= 0:
+            raise ValueError(f"latency histogram is missing, duplicated or empty: {segment}")
+        values = []
+        for cell in rows[0][1:]:
+            match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(ns|us|ms|s)", cell)
+            if match is None:
+                raise ValueError(f"latency histogram requires a finite value with ns/us/ms/s units: {segment}: {cell}")
+            value = float(match[1]) * scales[match[2]]
+            if not math.isfinite(value):
+                raise ValueError(f"latency histogram has a nonfinite value: {segment}")
+            values.append(round(value))
+        if values != sorted(values):
+            raise ValueError(f"latency histogram quantiles are not ordered: {segment}")
+        measured = values[quantile]
+        result["measured_ns"][metric] = measured
+        result["samples"][metric] = int(rows[0][0])
+    failures = [f"{key}={value} exceeds {budget['limits_ns'][key]} ns"
+                for key, value in result["measured_ns"].items() if value > budget["limits_ns"][key]]
+    print("latency budget: " + json.dumps(result, sort_keys=True), flush=True)
+    if failures:
+        raise ValueError("latency budget failed: " + "; ".join(failures))
+    return result
 
 
 def _commit(value: str) -> str:
@@ -69,12 +135,14 @@ def _run(command: list[str], repo: Path, log: TextIO, commit: str) -> None:
             raise subprocess.CalledProcessError(process.returncode, command)
 
 
-def qualify(repo: Path, commit: str, output: Path, target: Path) -> None:
+def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: str | None = None) -> None:
     import tomllib
 
     _check_source(repo, _commit(commit))
     if output.exists():
         raise ValueError(f"output already exists: {output}")
+    budget = _latency_budget(repo, runner_class)
+    bench = budget["bench"]
     pinned = tomllib.loads((repo / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
     compiler = subprocess.check_output(
         [os.environ.get("RUSTC", "rustc"), "--version", "--verbose"], cwd=repo, text=True
@@ -144,18 +212,19 @@ def qualify(repo: Path, commit: str, output: Path, target: Path) -> None:
                 log,
                 commit,
             )
+            bench_start = log.tell()
             _run(
                 [
                     str(release / "engine"),
                     "bench",
                     "--events",
-                    "20000",
+                    str(bench["events"]),
                     "--rate",
-                    "0",
+                    str(bench["rate"]),
                     "--every",
-                    "20",
+                    str(bench["every"]),
                     "--symbols",
-                    "BTCUSDT",
+                    ",".join(bench["symbols"]),
                     "--wal",
                     str(evidence / "bench.wal"),
                 ],
@@ -163,6 +232,11 @@ def qualify(repo: Path, commit: str, output: Path, target: Path) -> None:
                 log,
                 commit,
             )
+            log.flush()
+            with (evidence / "qualification.log").open() as bench_log:
+                bench_log.seek(bench_start)
+                latency = _check_latency(bench_log.read(), budget)
+            log.write("latency budget: " + json.dumps(latency, sort_keys=True) + "\n")
             for command in (
                 [str(release / "engine"), "--help"],
                 [str(release / "engine-tools"), "--help"],
@@ -183,6 +257,7 @@ def qualify(repo: Path, commit: str, output: Path, target: Path) -> None:
             "checks": list(CHECKS),
             "binaries": hashes,
             "log_sha256": _sha256(evidence / "qualification.log"),
+            "latency_budget": latency,
         }
         (evidence / "qualification.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
         (evidence / "binaries.sha256").write_text("".join(f"{hashes[name]}  {name}\n" for name in BINARIES))
@@ -291,6 +366,7 @@ def main() -> None:
     qualify_parser.add_argument("--commit", required=True)
     qualify_parser.add_argument("--output", type=Path, required=True)
     qualify_parser.add_argument("--target-dir", type=Path)
+    qualify_parser.add_argument("--runner-class", help="latency baseline class; defaults to the native OS and architecture")
     for name in ("verify", "unpack"):
         command = commands.add_parser(name)
         command.add_argument("--artifact", type=Path, required=True)
@@ -303,7 +379,7 @@ def main() -> None:
         if args.command == "qualify":
             repo = args.repo.resolve()
             target = args.target_dir.resolve() if args.target_dir else repo / "engine" / "target"
-            qualify(repo, args.commit, args.output.resolve(), target)
+            qualify(repo, args.commit, args.output.resolve(), target, args.runner_class)
         else:
             manifest = verify(
                 args.artifact, args.commit, getattr(args, "output", None), require_platform=args.require_platform

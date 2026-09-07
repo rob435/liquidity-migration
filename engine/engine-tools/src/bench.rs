@@ -1,4 +1,4 @@
-//! `engine bench`: production callback processes, real WAL barriers and a
+//! `engine bench`: embedded production callbacks, real WAL barriers and a
 //! signed local HTTP submit. The venue omits TLS and matching-engine delay.
 
 use std::cell::Cell;
@@ -30,8 +30,6 @@ pub use wal_timing::BarrierTiming;
 #[derive(Clone, Debug)]
 pub struct BenchOptions {
     pub events: u64,
-    /// Defaults to the sibling engine executable; tests supply the built binary.
-    pub worker_executable: Option<PathBuf>,
     /// Quotes per second. Zero means as fast as the loop will take them.
     pub rate: u64,
     /// One order every this many quotes.
@@ -48,7 +46,6 @@ impl Default for BenchOptions {
     fn default() -> Self {
         BenchOptions {
             events: 20_000,
-            worker_executable: None,
             rate: 0,
             every_nth: 20,
             symbols: vec!["BTCUSDT".to_string()],
@@ -91,7 +88,7 @@ fn quantiles_json(q: Quantiles) -> serde_json::Value {
 impl BenchResult {
     pub fn table(&self) -> String {
         let mut out = format!(
-            "  callbacks: isolated process; risk: engine-risk (100x, 1M USDT gross, 9K USDT margin caps)\n  source order opportunities: {}; without a completed submit attempt: {} (coalescing, refusal or shutdown)\n",
+            "  callbacks: embedded on loop thread; risk: engine-risk (100x, 1M USDT gross, 9K USDT margin caps)\n  source order opportunities: {}; without a completed submit attempt: {} (coalescing, refusal or shutdown)\n",
             self.order_opportunities, self.orders_not_submitted,
         );
         let _ = writeln!(
@@ -207,13 +204,7 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
     if options.fills {
         venue = venue.filling(accepted);
     }
-    let executable = options
-        .worker_executable
-        .clone()
-        .map(Ok)
-        .unwrap_or_else(|| std::env::current_exe().map(|path| path.with_file_name("engine")))
-        .map_err(|error| EngineError::Boot(format!("strategy worker executable: {error}")))?;
-    let mut engine = Engine::boot_as_isolated(
+    let mut engine = Engine::boot_as_exact(
         &settings,
         &format!("bench-{}-{}", options.events, options.every_nth),
         wal,
@@ -222,7 +213,6 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
         vec![Box::new(strategy)],
         &["bench".into()],
         &[],
-        executable,
     )
     .await?;
 
@@ -290,7 +280,7 @@ fn summarise(ledger: &LatencyLedger, events: u64, orders: u64, every_nth: u64) -
     .map(|segment| (segment, ledger.quantiles(segment)))
     .collect();
     BenchResult {
-        callback_execution: "isolated",
+        callback_execution: "embedded",
         events,
         orders,
         order_opportunities: events / every_nth.max(1),

@@ -186,10 +186,12 @@ pub(crate) fn owned_records(left: &str, right: &str) -> Vec<WalRecord> {
     use engine_types::numeric::{AssetAmount, ExactNumber, ExecutionAmounts};
     use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
     use engine_types::orders::SleeveOrderEffect;
-    let mut records = vec![WalRecord::Names {
-        strategies: vec!["left".into(), "right".into()],
-        symbols: vec!["BTCUSDT".into()],
-    }];
+    let mut records = vec![WalRecord::Retained(
+        engine_types::wal::RetainedWalRecord::Names {
+            strategies: vec!["left".into(), "right".into()],
+            symbols: vec!["BTCUSDT".into()],
+        },
+    )];
     for (id, quantity, side, stop) in [(0, left, Side::Buy, "90"), (1, right, Side::Sell, "110")] {
         if quantity == "0" {
             continue;

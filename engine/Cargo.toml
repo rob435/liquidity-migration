@@ -17,12 +17,12 @@ members = [
 async-trait = { version = "0.1.89" }
 bytes = { version = "1.12.1" }
 crc32c = { version = "0.6.8" }
-engine-marketdata = { path = "engine-marketdata" }
-engine-public = { path = "engine-public" }
+engine-marketdata = { path = "engine-marketdata", default-features = false }
+engine-public = { path = "engine-public", default-features = false }
 engine-risk = { path = "engine-risk" }
 engine-strategies = { path = "engine-strategies" }
 engine-types = { path = "engine-types" }
-engine-venue = { path = "engine-venue" }
+engine-venue = { path = "engine-venue", default-features = false }
 engine-wal = { path = "engine-wal" }
 futures-util = { version = "0.3.34" }
 getrandom = { version = "0.4.3" }
@@ -36,8 +36,10 @@ hyper-util = { version = "0.1.20" }
 k256 = { version = "0.14", default-features = false }
 libc = { version = "0.2.189" }
 num-bigint = { version = "0.4" }
+num-integer = { version = "0.1" }
 num-rational = { version = "0.4" }
 num-traits = { version = "0.2" }
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 rustls = { version = "0.23.43", default-features = false }
 serde = { version = "1.0.229" }
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }

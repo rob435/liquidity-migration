@@ -391,7 +391,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             stop: None,
             reduce_only: true,
             close_position: policy == QuantityPolicy::CloseEntirePosition,
-            exact_terms: None,
+            exact_terms: Some(Box::new(terms.clone())),
             sleeve_effect: Some(SleeveOrderEffect::EmergencyNetReduction {
                 emergency_id: state.id,
             }),
@@ -914,7 +914,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             kind: intent.kind,
             stop,
             reduce_only: intent.reduce_only,
-            exact_terms: None,
+            exact_terms: Some(Box::new(terms.clone())),
             sleeve_effect: if intent.reduce_only {
                 Some(SleeveOrderEffect::Reduce)
             } else {
@@ -1088,6 +1088,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // making it wait on a round trip would be the wrong trade.
         if !intent.reduce_only {
             if let Some(want) = intent.leverage {
+                if self.leverage_at.get(&request.symbol) != Some(&want) {
+                    self.flush_strategy_prefix()?;
+                }
                 if let Err(reason) = self.ensure_leverage(request.symbol, want).await {
                     self.refuse(client_order_id, intent, &reason)?;
                     return Ok(None);

@@ -41,6 +41,12 @@ pub use engine_types::wal::{PendingBarrier, Wal, WalError, WalRecord};
 
 mod callback_reader;
 mod order_lineage;
+mod record_value;
+
+#[cfg(test)]
+thread_local! {
+    static RECORD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Magic at offset 0. The trailing digits are the format version.
 const MAGIC: [u8; 8] = *b"EWAL0001";
@@ -82,165 +88,102 @@ fn fee_payload_mut(
         .as_object_mut()
 }
 
-/// Preserve legacy fee/checkpoint encodings. Required signal gap state uses
-/// versioned records so an older reader refuses it without discarding it.
 fn write_record<W: Write>(writer: &mut W, record: &WalRecord) -> Result<(), WalError> {
-    if let WalRecord::OrderSent {
-        dispatch: None,
-        request,
-        wire_ns,
-        arrival_mid,
-    } = record
-    {
-        #[derive(serde::Serialize)]
-        struct LegacyOrder<'a> {
-            kind: &'static str,
-            request: &'a engine_types::OrderRequest,
-            wire_ns: u64,
-            arrival_mid: f64,
-        }
-        return serde_json::to_writer(
-            writer,
-            &LegacyOrder {
-                kind: "order_sent",
-                request,
-                wire_ns: *wire_ns,
-                arrival_mid: *arrival_mid,
-            },
-        )
-        .map_err(json_error);
-    }
-    let legacy_amend_tag = match record {
-        WalRecord::AmendSent { spec, .. } if spec.exact_terms.is_none() => Some("amend_sent"),
-        WalRecord::AmendResolved {
-            exact_effective_px: None,
-            ..
-        } => Some("amend_resolved"),
-        _ => None,
-    };
-    if let Some(tag) = legacy_amend_tag {
-        let mut value = serde_json::to_value(record).map_err(json_error)?;
-        value["kind"] = tag.into();
-        return serde_json::to_writer(writer, &value).map_err(json_error);
-    }
-    if let WalRecord::ExecutionHistoryCheckpoint { through_wall_ts_ms } = record {
-        let mut value = serde_json::Map::new();
-        value.insert(
-            "kind".to_string(),
-            serde_json::Value::String("note".to_string()),
-        );
-        value.insert(
-            "source".to_string(),
-            serde_json::Value::String(HISTORY_CHECKPOINT_SOURCE.to_string()),
-        );
-        value.insert(
-            "text".to_string(),
-            serde_json::Value::String(format!("through_wall_ts_ms={through_wall_ts_ms}")),
-        );
-        value.insert(
-            HISTORY_CHECKPOINT_FIELD.to_string(),
-            serde_json::Value::from(*through_wall_ts_ms),
-        );
-        return serde_json::to_writer(writer, &value).map_err(json_error);
-    }
-
-    if matches!(
-        record,
-        WalRecord::RecoveredFill {
-            callbacks: None,
-            ..
-        }
-    ) {
-        let mut value = serde_json::to_value(record).map_err(json_error)?;
-        value["kind"] = "recovered_fill".into();
-        if matches!(record, WalRecord::RecoveredFill { fee: None, .. }) {
-            let payload = fee_payload_mut(&mut value).expect("recovered fill payload");
-            payload.insert("fee".into(), serde_json::Value::from(0.0));
-            payload.insert(FEE_KNOWN_FIELD.into(), serde_json::Value::Bool(false));
-        }
-        return serde_json::to_writer(writer, &value).map_err(json_error);
-    }
-
-    if let WalRecord::OrderUpdate {
-        callbacks: None,
-        update,
-    } = record
-    {
-        if !matches!(update, engine_types::OrderUpdate::Fill { fee: None, .. }) {
+    match record {
+        WalRecord::Retained(_) => Err(WalError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "retained WAL record kinds are read-only",
+        ))),
+        WalRecord::OrderSent {
+            dispatch: None,
+            request,
+            wire_ns,
+            arrival_mid,
+        } => {
             #[derive(serde::Serialize)]
-            struct LegacyUpdate<'a> {
+            struct LegacyOrder<'a> {
                 kind: &'static str,
-                update: &'a engine_types::OrderUpdate,
+                request: &'a engine_types::OrderRequest,
+                wire_ns: u64,
+                arrival_mid: f64,
             }
-            return serde_json::to_writer(
+            serde_json::to_writer(
                 writer,
-                &LegacyUpdate {
-                    kind: "order_update",
-                    update,
+                &LegacyOrder {
+                    kind: "order_sent",
+                    request,
+                    wire_ns: *wire_ns,
+                    arrival_mid: *arrival_mid,
                 },
             )
-            .map_err(json_error);
+            .map_err(json_error)
         }
-        let mut value = serde_json::to_value(record).map_err(json_error)?;
-        value["kind"] = "order_update".into();
-        if matches!(
-            record,
-            WalRecord::OrderUpdate {
-                update: engine_types::OrderUpdate::Fill { fee: None, .. },
-                ..
+        WalRecord::AmendSent {
+            symbol,
+            client_order_id,
+            spec,
+            wire_ns,
+        } if spec.exact_terms.is_none() => {
+            #[derive(serde::Serialize)]
+            struct LegacyAmend<'a> {
+                kind: &'static str,
+                symbol: engine_types::SymbolId,
+                client_order_id: &'a str,
+                spec: &'a engine_types::AmendSpec,
+                wire_ns: u64,
             }
-        ) {
-            let payload = fee_payload_mut(&mut value).ok_or_else(|| {
-                WalError::Io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "legacy fill has no fee payload",
-                ))
-            })?;
-            payload.insert("fee".into(), serde_json::Value::from(0.0));
-            payload.insert(FEE_KNOWN_FIELD.into(), serde_json::Value::Bool(false));
+            serde_json::to_writer(
+                writer,
+                &LegacyAmend {
+                    kind: "amend_sent",
+                    symbol: *symbol,
+                    client_order_id,
+                    spec,
+                    wire_ns: *wire_ns,
+                },
+            )
+            .map_err(json_error)
         }
-        return serde_json::to_writer(writer, &value).map_err(json_error);
+        WalRecord::AmendResolved {
+            client_order_id,
+            effective_px,
+            exact_effective_px: None,
+        } => {
+            #[derive(serde::Serialize)]
+            struct LegacyResolution<'a> {
+                kind: &'static str,
+                client_order_id: &'a str,
+                effective_px: f64,
+            }
+            serde_json::to_writer(
+                writer,
+                &LegacyResolution {
+                    kind: "amend_resolved",
+                    client_order_id,
+                    effective_px: *effective_px,
+                },
+            )
+            .map_err(json_error)
+        }
+        _ => serde_json::to_writer(writer, record).map_err(json_error),
     }
-
-    let unknown_fee = matches!(
-        record,
-        WalRecord::OrderUpdate {
-            update: engine_types::OrderUpdate::Fill { fee: None, .. },
-            ..
-        } | WalRecord::RecoveredFill { fee: None, .. }
-    );
-    if !unknown_fee {
-        return serde_json::to_writer(writer, record).map_err(json_error);
-    }
-
-    let mut value = serde_json::to_value(record).map_err(json_error)?;
-    let payload = fee_payload_mut(&mut value).ok_or_else(|| {
-        WalError::Io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "unknown-fee record has no compatible fee payload",
-        ))
-    })?;
-    payload.insert("fee".to_string(), serde_json::Value::from(0.0));
-    payload.insert(FEE_KNOWN_FIELD.to_string(), serde_json::Value::Bool(false));
-    serde_json::to_writer(writer, &value).map_err(json_error)
-}
-
-fn record_kind(payload: &[u8]) -> Result<std::borrow::Cow<'_, str>, serde_json::Error> {
-    #[derive(serde::Deserialize)]
-    struct Tag<'a> {
-        #[serde(borrow)]
-        kind: std::borrow::Cow<'a, str>,
-    }
-    serde_json::from_slice::<Tag<'_>>(payload).map(|tag| tag.kind)
 }
 
 fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
-    let record = read_compatible_record(payload)?;
+    #[cfg(test)]
+    RECORD_READS.with(|count| count.set(count.get() + 1));
+    let value = record_value::parse(payload)?;
+    validate_segment_fields(&value)?;
+    let kind = value
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let record = read_compatible_record(value)?;
     if matches!(
         record,
         WalRecord::AmendResolved { .. } | WalRecord::AmendSent { .. }
     ) {
-        let kind = record_kind(payload)?;
         let missing = match &record {
             WalRecord::AmendResolved {
                 effective_px,
@@ -293,7 +236,7 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
             callbacks: None,
             ..
         }
-    ) && record_kind(payload)? == "recovered_fill_v2"
+    ) && kind == "recovered_fill_v2"
     {
         return Err(serde_json::Error::io(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -306,178 +249,166 @@ fn read_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
             callbacks: None,
             ..
         }
-    ) && record_kind(payload)? == "order_update_v2"
+    ) && kind == "order_update_v2"
     {
         return Err(serde_json::Error::io(io::Error::new(
             io::ErrorKind::InvalidData,
             "order_update_v2 is missing required callback ownership",
         )));
     }
-    if matches!(record, WalRecord::OrderSent { dispatch: None, .. })
-        && record_kind(payload)? == "order_sent_v2"
-    {
+    if matches!(record, WalRecord::OrderSent { dispatch: None, .. }) && kind == "order_sent_v2" {
         return Err(serde_json::Error::io(io::Error::new(
             io::ErrorKind::InvalidData,
             "order_sent_v2 is missing required dispatch authority",
         )));
     }
-    if matches!(record, WalRecord::SegmentBase { .. }) {
-        let value: serde_json::Value = serde_json::from_slice(payload)?;
-        if value.get("kind").and_then(serde_json::Value::as_str) == Some("segment_base_v7")
-            && !value
-                .get("legacy_signal_source_retirements")
-                .is_some_and(serde_json::Value::is_array)
-        {
-            return Err(serde_json::Error::io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "segment_base_v7 is missing required legacy source retirements",
-            )));
-        }
-        if matches!(
-            value.get("kind").and_then(serde_json::Value::as_str),
-            Some("segment_base_v6" | "segment_base_v7")
-        ) && !value
-            .get("open_trade_lots")
-            .is_some_and(serde_json::Value::is_array)
-        {
-            return Err(serde_json::Error::io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "segment_base_v6 is missing required open trade cost basis",
-            )));
-        }
-        if matches!(
-            value.get("kind").and_then(serde_json::Value::as_str),
-            Some("segment_base_v5" | "segment_base_v6" | "segment_base_v7")
-        ) {
-            for field in [
-                "strategy_callback_queues",
-                "strategy_callback_sources",
-                "signal_callback_deliveries",
-            ] {
-                if !value.get(field).is_some_and(serde_json::Value::is_array) {
-                    return Err(serde_json::Error::io(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("segment_base_v5 is missing required {field}"),
-                    )));
-                }
-            }
-            if value.get("identities").is_none() {
-                return Err(serde_json::Error::io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "segment_base_v5 is missing required identities state",
-                )));
-            }
-            if value.get("instrument_catalog").is_none() {
-                return Err(serde_json::Error::io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "segment_base_v5 is missing required instrument catalog state",
-                )));
-            }
-            if !value
-                .get("portfolio_control")
-                .is_some_and(serde_json::Value::is_object)
-            {
-                return Err(serde_json::Error::io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "segment_base_v5 is missing required portfolio control state",
-                )));
-            }
-            let rows = value
-                .get("open_orders")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| {
-                    serde_json::Error::io(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "segment_base_v5 is missing required open order state",
-                    ))
-                })?;
-            if rows.iter().any(|row| {
-                !row.get("fill_quantity")
-                    .is_some_and(serde_json::Value::is_object)
-            }) {
-                return Err(serde_json::Error::io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "segment_base_v5 is missing required typed order fill progress",
-                )));
-            }
-        }
-        if matches!(
-            value.get("kind").and_then(serde_json::Value::as_str),
-            Some("segment_base_v4" | "segment_base_v5" | "segment_base_v6" | "segment_base_v7")
-        ) {
-            for field in [
-                "signal_producers",
-                "signal_suspensions",
-                "strategy_processes",
-                "strategy_callbacks",
-                "pending_order_dispatches",
-            ] {
-                if !value.get(field).is_some_and(serde_json::Value::is_array) {
-                    return Err(serde_json::Error::io(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("segment_base_v4 is missing required {field} state"),
-                    )));
-                }
-            }
-            if !value
-                .get("portfolio")
-                .is_some_and(serde_json::Value::is_object)
-            {
-                return Err(serde_json::Error::io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "segment_base_v4 is missing required portfolio state",
-                )));
-            }
-        }
-        if matches!(
-            value.get("kind").and_then(serde_json::Value::as_str),
-            Some(
-                "segment_base_v3"
-                    | "segment_base_v4"
-                    | "segment_base_v5"
-                    | "segment_base_v6"
-                    | "segment_base_v7"
-            )
-        ) && value.get("strategy_effects").is_none()
-        {
-            return Err(serde_json::Error::io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "segment_base_v3 is missing required strategy_effects state",
-            )));
-        }
-        if matches!(
-            value.get("kind").and_then(serde_json::Value::as_str),
-            Some(
-                "segment_base_v2"
-                    | "segment_base_v3"
-                    | "segment_base_v4"
-                    | "segment_base_v5"
-                    | "segment_base_v6"
-                    | "segment_base_v7"
-            )
-        ) && value.get("signal_gaps").is_none()
-        {
-            return Err(serde_json::Error::io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "segment_base_v2 is missing required signal_gaps state",
-            )));
-        }
-    }
     Ok(record)
 }
 
-fn read_compatible_record(payload: &[u8]) -> Result<WalRecord, serde_json::Error> {
-    let has_fee_marker = payload
-        .windows(FEE_KNOWN_FIELD.len())
-        .any(|window| window == FEE_KNOWN_FIELD.as_bytes());
-    let has_checkpoint_marker = payload
-        .windows(HISTORY_CHECKPOINT_FIELD.len())
-        .any(|window| window == HISTORY_CHECKPOINT_FIELD.as_bytes());
-    if !has_fee_marker && !has_checkpoint_marker {
-        return serde_json::from_slice(payload);
+fn validate_segment_fields(value: &serde_json::Value) -> Result<(), serde_json::Error> {
+    if value.get("kind").and_then(serde_json::Value::as_str) == Some("segment_base_v7")
+        && !value
+            .get("legacy_signal_source_retirements")
+            .is_some_and(serde_json::Value::is_array)
+    {
+        return Err(serde_json::Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "segment_base_v7 is missing required legacy source retirements",
+        )));
     }
+    if matches!(
+        value.get("kind").and_then(serde_json::Value::as_str),
+        Some("segment_base_v6" | "segment_base_v7")
+    ) && !value
+        .get("open_trade_lots")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        return Err(serde_json::Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "segment_base_v6 is missing required open trade cost basis",
+        )));
+    }
+    if matches!(
+        value.get("kind").and_then(serde_json::Value::as_str),
+        Some("segment_base_v5" | "segment_base_v6" | "segment_base_v7")
+    ) {
+        for field in [
+            "strategy_callback_queues",
+            "strategy_callback_sources",
+            "signal_callback_deliveries",
+        ] {
+            if !value.get(field).is_some_and(serde_json::Value::is_array) {
+                return Err(serde_json::Error::io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("segment_base_v5 is missing required {field}"),
+                )));
+            }
+        }
+        if value.get("identities").is_none() {
+            return Err(serde_json::Error::io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "segment_base_v5 is missing required identities state",
+            )));
+        }
+        if value.get("instrument_catalog").is_none() {
+            return Err(serde_json::Error::io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "segment_base_v5 is missing required instrument catalog state",
+            )));
+        }
+        if !value
+            .get("portfolio_control")
+            .is_some_and(serde_json::Value::is_object)
+        {
+            return Err(serde_json::Error::io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "segment_base_v5 is missing required portfolio control state",
+            )));
+        }
+        let rows = value
+            .get("open_orders")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                serde_json::Error::io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "segment_base_v5 is missing required open order state",
+                ))
+            })?;
+        if rows.iter().any(|row| {
+            !row.get("fill_quantity")
+                .is_some_and(serde_json::Value::is_object)
+        }) {
+            return Err(serde_json::Error::io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "segment_base_v5 is missing required typed order fill progress",
+            )));
+        }
+    }
+    if matches!(
+        value.get("kind").and_then(serde_json::Value::as_str),
+        Some("segment_base_v4" | "segment_base_v5" | "segment_base_v6" | "segment_base_v7")
+    ) {
+        for field in [
+            "signal_producers",
+            "signal_suspensions",
+            "strategy_processes",
+            "strategy_callbacks",
+            "pending_order_dispatches",
+        ] {
+            if !value.get(field).is_some_and(serde_json::Value::is_array) {
+                return Err(serde_json::Error::io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("segment_base_v4 is missing required {field} state"),
+                )));
+            }
+        }
+        if !value
+            .get("portfolio")
+            .is_some_and(serde_json::Value::is_object)
+        {
+            return Err(serde_json::Error::io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "segment_base_v4 is missing required portfolio state",
+            )));
+        }
+    }
+    if matches!(
+        value.get("kind").and_then(serde_json::Value::as_str),
+        Some(
+            "segment_base_v3"
+                | "segment_base_v4"
+                | "segment_base_v5"
+                | "segment_base_v6"
+                | "segment_base_v7"
+        )
+    ) && value.get("strategy_effects").is_none()
+    {
+        return Err(serde_json::Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "segment_base_v3 is missing required strategy_effects state",
+        )));
+    }
+    if matches!(
+        value.get("kind").and_then(serde_json::Value::as_str),
+        Some(
+            "segment_base_v2"
+                | "segment_base_v3"
+                | "segment_base_v4"
+                | "segment_base_v5"
+                | "segment_base_v6"
+                | "segment_base_v7"
+        )
+    ) && value.get("signal_gaps").is_none()
+    {
+        return Err(serde_json::Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "segment_base_v2 is missing required signal_gaps state",
+        )));
+    }
+    Ok(())
+}
 
-    let mut value: serde_json::Value = serde_json::from_slice(payload)?;
+fn read_compatible_record(mut value: serde_json::Value) -> Result<WalRecord, serde_json::Error> {
     let checkpoint = value.get("kind").and_then(serde_json::Value::as_str) == Some("note")
         && value.get("source").and_then(serde_json::Value::as_str)
             == Some(HISTORY_CHECKPOINT_SOURCE);
@@ -621,6 +552,17 @@ impl WalWriter {
             scan_file(&mut file, len)?
         };
 
+        Self::from_scan(file, path, family, durable, scan)
+    }
+
+    fn from_scan(
+        mut file: File,
+        path: &Path,
+        family: &Path,
+        durable: bool,
+        scan: Scan,
+    ) -> Result<(Self, Vec<(u64, WalRecord)>), WalError> {
+        let len = file.metadata()?.len();
         if scan.good_end < len {
             file.set_len(scan.good_end)?;
         }
@@ -679,6 +621,7 @@ impl WalWriter {
 
 /// JSON maps nonfinite floats to null, including Some(NaN) to None. The
 /// compatible reader must preserve the record, not merely accept its bytes.
+#[cfg(debug_assertions)]
 fn reads_back(record: &WalRecord, payload: &[u8]) -> Result<(), WalError> {
     let has_null = payload.windows(4).any(|window| window == b"null");
     let has_compat_marker = payload
@@ -715,6 +658,7 @@ impl Wal for WalWriter {
             return Err(e);
         }
 
+        #[cfg(debug_assertions)]
         if let Err(e) = reads_back(record, &self.buf[start + FRAME_HEADER_LEN..]) {
             self.buf.truncate(start);
             return Err(e);
@@ -861,6 +805,7 @@ impl Wal for WalWriter {
         let mut frame: Vec<u8> = Vec::with_capacity(BUFFER_HIGH_WATER);
         frame.extend_from_slice(&[0u8; FRAME_HEADER_LEN]);
         write_record(&mut frame, base)?;
+        #[cfg(debug_assertions)]
         reads_back(base, &frame[FRAME_HEADER_LEN..])?;
         let payload = &frame[FRAME_HEADER_LEN..];
         let payload_len = payload.len() as u32;
@@ -1155,13 +1100,24 @@ pub fn open_current(
     let family = family.as_ref();
     let mut chain = segments(family)?;
     while let Some((index, path)) = chain.pop() {
-        // Read-only first: a candidate that fails the trust check must not
-        // be truncated or written to — it is either an archive or the
-        // leftover of a rotation that never finished, and both stay as
-        // evidence.
-        let (records, _) = scan_candidate(index, &path)?;
-        if trusted(index, &records) {
-            return WalWriter::open_segment(&path, family, true);
+        // Trust is decided before a candidate is opened for writing. The
+        // family lease covers reopening the same segment with the parsed prefix.
+        let mut file = File::open(&path)?;
+        let len = file.metadata()?.len();
+        if len == 0 {
+            if index <= 1 {
+                return WalWriter::open_segment(&path, family, true);
+            }
+            continue;
+        }
+        let scan = match scan_file(&mut file, len) {
+            Ok(scan) => scan,
+            Err(WalError::Corrupt { offset: 0, .. }) if index > 1 => continue,
+            Err(error) => return Err(error),
+        };
+        if trusted(index, &scan.records) {
+            let writable = OpenOptions::new().read(true).write(true).open(&path)?;
+            return WalWriter::from_scan(writable, &path, family, true, scan);
         }
     }
     // Nothing exists yet: a fresh log at the family path.
@@ -1198,18 +1154,6 @@ pub fn replay_current(family: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>
 pub fn replay_chain(family: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>, bool), WalError> {
     let family = family.as_ref();
     let chain = segments(family)?;
-    let newest_trusted = chain
-        .iter()
-        .rev()
-        .find_map(|(index, path)| {
-            let read = scan_candidate(*index, path);
-            match read {
-                Ok((records, damaged)) if trusted(*index, &records) => Some(Ok((*index, damaged))),
-                Ok(_) => None,
-                Err(e) => Some(Err(e)),
-            }
-        })
-        .transpose()?;
     let mut out: Vec<(u64, WalRecord)> = Vec::new();
     let mut damaged = false;
     for (index, path) in &chain {
@@ -1219,15 +1163,7 @@ pub fn replay_chain(family: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>, 
             // never finished. Boot never replayed it and neither do we.
             continue;
         }
-        if let Some((newest, newest_damaged)) = newest_trusted {
-            if *index == newest {
-                damaged = newest_damaged;
-            } else if torn {
-                // An archive should never be torn — rotation syncs it before
-                // the next segment exists — so damage here is worth a flag.
-                damaged = true;
-            }
-        }
+        damaged |= torn;
         for (_, record) in records {
             let seq = out.len() as u64 + 1;
             out.push((seq, record));
@@ -1439,6 +1375,31 @@ fn sample_record() -> WalRecord {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn boot_and_chain_replay_decode_each_complete_record_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("one-pass.wal");
+        let (mut wal, _) = WalWriter::open(&path).unwrap();
+        for _ in 0..3 {
+            wal.append(&sample_record()).unwrap();
+        }
+        wal.barrier().unwrap();
+        drop(wal);
+        RECORD_READS.with(|count| count.set(0));
+        let (mut writer, current) = open_current(&path).unwrap();
+        let boot_reads = RECORD_READS.with(|count| count.get());
+        assert_eq!(current.len(), 3);
+        assert_eq!(writer.append(&sample_record()).unwrap(), 4);
+        writer.barrier().unwrap();
+        drop(writer);
+        RECORD_READS.with(|count| count.set(0));
+        let (history, torn) = replay_chain(&path).unwrap();
+        let chain_reads = RECORD_READS.with(|count| count.get());
+        assert!(!torn);
+        assert_eq!(history.len(), 4);
+        assert_eq!((boot_reads, chain_reads), (3, 4));
+    }
     use super::*;
 
     fn ordinal_test_base() -> WalRecord {

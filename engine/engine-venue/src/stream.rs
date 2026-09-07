@@ -102,7 +102,7 @@ mod tests {
         assert!(memory.remember("a"));
         assert_eq!(memory.lengths(), (2, 2));
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dropping_receiver_cancels_blocked_delivery_and_drops_the_session() {
         struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
         impl Drop for Dropped {

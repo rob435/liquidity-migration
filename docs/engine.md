@@ -20,7 +20,7 @@ The engine workspace is under `engine/`:
 | **`engine-marketdata`**| Lib | Public market feeds and book rebuild per venue: quotes, trades, level-50 books, funding. |
 | **`engine-strategies`**| Lib | Pure strategy reducers (`LONG`, `CARRY`, `EXODUS`, `MAKER`) and runtime plugs, plus the `PROBE` order-path plug ([trading_logic.md](trading_logic.md) §1). |
 | **`engine-core`** | Lib | Event loop, boot recovery, command execution, controls, heartbeat, and trade reporting. |
-| **`engine-tools`** | Lib and two binaries | `engine` runs the core and child strategy protocol; `engine-tools` owns simulation, backtest, benchmark, takeover, canary, configuration and reports. Both ship together. |
+| **`engine-tools`** | Lib and two binaries | `engine` runs the core and embedded strategy callbacks; `engine-tools` owns simulation, backtest, benchmark, takeover, canary, configuration and reports. Both ship together. |
 | **`signal-worker`** | Binary (`bin`) | Credential-free public market collector and observation streamer. |
 
 
@@ -42,7 +42,7 @@ The engine workspace is under `engine/`:
 | `engine/engine-core/src/engine/order_lineage.rs`, `engine/engine-wal/src/order_lineage.rs` | Bounded terminal cache, asynchronous archive reads and durable activation before late fills |
 | `engine/engine-core/src/portfolio_control.rs`, `engine/engine-core/src/engine/portfolio_runtime.rs` | Durable sleeve exit targets, aggregate emergency phases and internal offset settlement |
 | `engine/engine-core/src/identities.rs`, `engine/engine-core/src/engine/symbol_admission.rs` | Stable sleeve/instrument identity, durable dense slots and exact instrument catalog installation |
-| `engine/engine-core/src/strategy_process/`, `engine/engine-core/src/engine/strategy_callbacks.rs` | Isolated callback workers, queued/prepared inputs, state promotion, output budgets and WAL-backed callback paging |
+| `engine/engine-core/src/callback_recovery/`, `engine/engine-core/src/engine/strategy_callbacks.rs` | Retained callback paging and migration; embedded callbacks share the live core path |
 | `engine/engine-types/src/execution_history.rs`, `engine/engine-core/src/engine/history_recovery.rs` | Disk-sorted execution windows and incremental canonical recovery |
 | `engine/engine-core/src/covers.rs` | What each strategy has sent that the account reading has not yet absorbed |
 | `engine/engine-core/src/attribution.rs` | Exact virtual sleeve quantities, cost basis, stops and asset-denominated accounting; same-symbol sleeves may share or oppose |
@@ -58,7 +58,7 @@ The engine workspace is under `engine/`:
 | `engine/engine-tools/src/backtest/` | Core loop with embedded reducers and virtual-clock recorded tape against a simulated venue |
 | `engine/engine-tools/src/sim/` | `engine sim`: the live loop on a seeded synthetic market with injected venue, private-stream and market-feed faults and process deaths; the end-of-run invariants |
 | `engine/engine-tools/src/engine.rs`, `engine/engine-tools/src/main.rs`, `engine/engine-tools/src/cli.rs` | Lean runtime executable plus companion operator CLI; existing `engine COMMAND` calls execute the companion |
-| `engine/engine-tools/src/bench.rs` | Real-clock core run with a registered child strategy, durable WAL and synthetic venue; reports workload and sample scope |
+| `engine/engine-tools/src/bench.rs` | Real-clock core run with a registered embedded strategy, durable WAL and synthetic venue; reports workload and sample scope |
 
 #### Worker ownership
 
@@ -117,19 +117,29 @@ credential, or socket is opened.
 
 Readiness labels are code policy; this table does not establish current deployment or live venue qualification.
 
+| Cargo feature | Default build | Contract |
+| --- | --- | --- |
+| `bybit` | Enabled | Public, private, market-data and runtime crates forward this feature |
+| `binance`, `hyperliquid`, `lighter`, `mexc`, `variational` | Disabled | Selecting a disabled adapter fails before credentials or sockets; per-feature CI builds and conformance qualify enabled adapters |
+| `hyperliquid` cryptography | Absent by default | `k256` and `sha3` are optional dependencies of this feature |
+
+| Private conformance scope | Verified fixture behavior |
+| --- | --- |
+| Bybit and Hyperliquid | Reconnect emits StreamReset before the next fill. REST history restores a 0.002 execution omitted during disconnect; overlapping private/history IDs retain identical exact quantities and the complete fixture totals 0.01. |
+| Binance | Reconnect emits StreamReset. Complete account-wide execution recovery explicitly refuses; the engine-run readiness policy remains blocked. |
+| Lighter and MEXC | Paced StreamReset events request account/history reconciliation; the fixture verifies the resync interval. |
+| Variational | Private updates remain silent; unsupported mutations refuse before HTTP. |
+| Sequence interpretation | The Bybit `seq` field associates fills with position updates and can repeat across transactions and symbols; it is not treated as a per-account contiguous counter. The gap fixture uses a disconnect and a known omitted execution. [Bybit execution schema](https://bybit-exchange.github.io/docs/v5/websocket/private/execution). |
+| Evidence boundary | Constructed local HTTP/WebSocket fixtures exercise adapter contracts. They do not establish live-account completeness or promote a dormant realm. |
+
+
 #### Invariants
 
-* **Must**: every realm in `VenueName::ALL` be either traded or dormant in
-  `engine/engine-venue/tests/venue/dormant_venues.rs`. That test pins which realms
-  are dormant, what dormancy means at boot per readiness class, and that every
-  dormant gateway, private stream, and realm table is still linked — deleting
-  an adapter fails to compile there rather than at somebody's order.
-* **Must**: offline request-shape conformance stay green where it exists —
-  `engine/engine-venue/tests/venue/hyperliquid_requests.rs`,
-  `engine/engine-venue/tests/venue/lighter_requests.rs`, and
-  `engine/engine-venue/tests/venue/binance_requests.rs`. Exact MEXC wire terms
-  are covered in `engine/engine-venue/tests/venue/mexc_exact_orders.rs`;
-  Variational remains a read-only adapter.
+* **Must**: every realm retain its declared readiness and feature mapping in
+  `engine/engine-venue/tests/venue/dormant_venues.rs`; disabled features refuse
+  selection before credential or socket access.
+* **Must**: `engine/engine-venue/tests/venue/conformance.rs` pass under each
+  enabled feature, alongside that adapter's exact request and private-stream tests.
 * **Must Never**: a realm move to `live-proven` without reviewed live evidence
   from that exact realm — the smallest permitted order, and its cancel or fill.
   A compiled adapter is not evidence.
@@ -171,10 +181,10 @@ A run that ends without being asked returns one `EngineError`. The supervisor re
 
 | Boundary | Implemented contract |
 | --- | --- |
-| Production callbacks | Registered reducers run in isolated child processes. The core owns inputs, committed state, timers, account state and ordered effects; worker proposals cannot dispatch venue commands. |
-| Volatile market callbacks | An unchanged callback with no actions is discarded. Any changed state, timer, subscription or action promotes its input to `StrategyCallbackQueued` and `StrategyCallbackPrepared`; `StrategyProcessTransitionQueued` commits candidate state and effects behind a WAL barrier before installation or dispatch. |
-| Ordered effects | `StrategyTransitionQueued` / `StrategyProcessTransitionQueued` retain effect order and placement IDs. `StrategyEffectCompleted` retires an index only after its required completion; a per-turn work budget retains the suffix, including reductions. |
-| Orders | `OrderDispatchQueued` and `OrderDispatchAttempted` preserve dispatch ownership through barriers and ambiguous sends. Terminal rejection/cancellation releases an exit attempt ID; the durable exit target remains until fulfilled. |
+| Production callbacks | Every harness and production uses `CallbackExecution::Embedded`. Trusted reducers run on the loop thread; `catch_unwind` faults the panicking sleeve and cancels its orders while other sleeves continue. |
+| Volatile market callbacks | Strategies read current `Books` directly. Changed checkpoints and ordered effects persist; unchanged checkpoint proposals write nothing. No current callback record contains a market snapshot. |
+| Ordered effects | `StrategyTransitionQueued` retains effect order and placement IDs; retained process-transition records replay through the same effects. `StrategyEffectCompleted` retires an index after its completion; a per-turn budget retains the suffix, including reductions. |
+| Orders | Checkpoint, `Intent`, `Verdict`, `OrderSent` and `OrderDispatchAttempted` share one barrier before dispatch. An uncached leverage mutation first flushes dependent strategy state. Ambiguous sends retain ownership; terminal rejection/cancellation releases an attempt ID while its durable exit target remains. |
 | Rotation | `segment_base_v7` restates canonical portfolio/accounting, open trade lots, pending dispatches, callbacks/effects, identities, metadata, input lifecycle, explicit legacy source retirements and retained terminal orders. Legacy segment aliases remain readable; required precision and record kinds make incompatible readers refuse without truncating the log. |
 | Accepted inputs | The channel admits at most 256 rows / 64 MiB. Durable admission retains one ordinary delivery per destination plus missing-prefix recovery ownership within byte limits; spool acknowledgement follows the acceptance barrier. |
 | Outcomes | Consumed, explicitly rejected and retained pending are distinct. Terminal payload release follows its WAL barrier; failed callbacks retain the accepted input for retry. |
@@ -182,7 +192,7 @@ A run that ends without being asked returns one `EngineError`. The supervisor re
 | Producer retirement | A generation seals its published tail before retirement. `retired_through` compacts managed generations; unresolved legacy tails keep their owner and opening restriction until reconciled. An explicit offline `LegacySignalSourceRetired` outcome can terminate a permanently stopped legacy suffix while retaining its original accepted cursor; managed sources cannot use it. Retired generations cannot reopen a cursor. |
 | Failure | Missing, malformed or I/O-failed readiness keeps required growth suspended and retries. Request-time accepted prefixes distinguish a rewind from concurrent arrivals. Reductions, protective stops and account recovery remain available. |
 | Metadata | A durable exact catalog binds native instruments to venue/environment. A retained catalog supports recovery during a failed refresh; new growth waits for an authoritative refresh, and a delisted instrument retains recovery ownership without becoming eligible for growth. |
-| Worker bounds | At most four child workers; 10 s callback deadline, 64 KiB frames, 4 MiB runtime state, 64 MiB proposal/aggregate retained-process budget and 256 timers per process. Linux also enforces 512 MiB address space, 32 descriptors and no child processes. The supervisor deadline applies to each callback; healthy child processes persist without a cumulative CPU expiry. Over-budget proposals do not install candidate state. |
+| Trusted code boundary | Embedded reducers have panic containment. They share engine memory and loop time; there is no child callback deadline or process memory sandbox. Retained process payload readers keep their bounded migration contracts. |
 
 ---
 
@@ -350,7 +360,7 @@ When performing rollouts or cold starts, state is seeded or verified while units
 
 | Identity boundary | Implemented contract |
 | --- | --- |
-| Durable ID | `StrategyId(i)` refers to the stable `SleeveKey` in `IdentityState.sleeves[i]`; `Names` projects that same durable order for legacy readers. |
+| Durable ID | `StrategyId(i)` refers to the stable `SleeveKey` in `IdentityState.sleeves[i]`; current reports learn names from that registry, while retained `Names` records remain readable. |
 | Config reorder / insertion | Configuration keys resolve into existing durable slots; a newly named sleeve appends a slot regardless of its configuration position. Boot and takeover both construct strategies in registry order. |
 | Config removal | The durable slot remains with a passive owner, preserving its fills, positions, checkpoints, stops and reduction obligations. Its ID is never reused. |
 | Rename | A new key creates a new sleeve; it does not transfer the prior key’s state. Existing runtime kind/configuration/checkpoint compatibility is checked separately. |
@@ -424,7 +434,7 @@ engine/target/release/engine-tools backtest --config CONFIG --tape TAPE \
 
 ### 10. Deterministic Simulation (`engine sim`)
 
-The core loop with embedded strategy reducers and a virtual clock on a seeded synthetic market against the backtest's simulated venue, with faults on every boundary the engine has with the world and process deaths at seeded instants. Repeated runs compare log bytes under the declared execution conditions. This qualifies reducer/accounting fault behavior; it does not measure the isolated production callback protocol.
+The core loop with embedded strategy reducers and a virtual clock on a seeded synthetic market against the backtest's simulated venue, with faults on every boundary the engine has with the world and process deaths at seeded instants. Repeated runs compare log bytes under the declared execution conditions. This exercises the same embedded callback mode as production; synthetic timing does not measure host or network latency.
 
 | Flag | Default | Meaning |
 | :--- | :--- | :--- |
@@ -457,7 +467,7 @@ The core loop with embedded strategy reducers and a virtual clock on a seeded sy
 
 The `cfg(test)` build shortens the engine's confirmation windows, so the simulator's own tests run as an integration test against the library as shipped (`engine/engine-tools/tests/integration/sim.rs`).
 
-The engine retains real-clock deadlines beside virtual-clock waits: `MUTATION_DRAIN_TIMEOUT` and `strategy_process::CALLBACK_TIMEOUT` are 10 s, and dispatch confirmation has its own deadline. Host scheduling can therefore affect fault timing; byte-identity comparisons require matching input, configuration and execution conditions.
+`MUTATION_DRAIN_TIMEOUT` is 10 s, and dispatch confirmation has its own deadline. Simulated market time and asynchronous completion scheduling remain distinct; byte-identity comparisons require matching input, configuration and execution conditions.
 
 ---
 

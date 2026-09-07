@@ -3,7 +3,8 @@
 #[cfg(test)]
 use crate::RealmCredentials;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use engine_types::VenueError;
 use futures_util::{SinkExt, StreamExt};
@@ -157,7 +158,7 @@ impl Worker {
                         socket = None;
                     }
                 }
-                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_ping)) => {
+                _ = tokio::time::sleep_until(next_ping) => {
                     if send(connected, Message::text(r#"{"op":"ping"}"#)).await.is_err() {
                         socket = None;
                     }
@@ -425,8 +426,9 @@ mod tests {
     use crate::venues::bybit::realm::VenueRealm;
     use tokio_tungstenite::accept_async;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn one_authenticated_socket_carries_the_warmup_and_order_request() {
+        let _io = crate::test_io::IoProgress::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listen");
@@ -516,8 +518,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_rejected_order_leaves_the_socket_up_for_the_next_one() {
+        let _io = crate::test_io::IoProgress::new();
         // A declined order is an answer, not a broken pipe. Dropping the
         // connection over one would make the next order pay a reconnect and a
         // re-authentication for somebody else's mistake.

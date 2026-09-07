@@ -1,4 +1,4 @@
-//! Benchmark workload reconstructed by the same worker as registered plugs.
+//! Benchmark workload delivered through the same embedded host as registered plugs.
 
 use engine_types::{
     EngineEvent, Feed, Intent, MarketEvent, OrderKind, Side, StopSpec, Strategy, StrategyCtx,

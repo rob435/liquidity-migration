@@ -850,7 +850,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_amend_is_refused_rather_than_turned_into_a_replacement() {
         let creds = MexcRealm::Mainnet.credentials_for_test("k", "s");
         let mut gw = MexcGateway::for_test(

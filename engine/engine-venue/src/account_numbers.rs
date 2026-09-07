@@ -4,6 +4,7 @@ use engine_types::numeric::ExactNumber;
 use engine_types::risk::{AccountAmounts, PositionAmounts};
 use engine_types::{PositionView, Side, Symbol, VenueError};
 use serde::Deserialize;
+#[cfg(feature = "mexc")]
 use serde_json::value::RawValue;
 use std::collections::BTreeMap;
 fn bad(e: impl std::fmt::Display) -> VenueError {
@@ -76,14 +77,17 @@ pub(crate) fn assign(
     }
     Ok(())
 }
+#[cfg(feature = "bybit")]
 #[derive(Deserialize)]
 struct BybitWallet {
     result: BybitWalletRows,
 }
+#[cfg(feature = "bybit")]
 #[derive(Deserialize)]
 struct BybitWalletRows {
     list: Vec<BybitBalance>,
 }
+#[cfg(feature = "bybit")]
 #[derive(Deserialize)]
 struct BybitBalance {
     #[serde(rename = "totalEquity")]
@@ -91,6 +95,7 @@ struct BybitBalance {
     #[serde(rename = "totalAvailableBalance")]
     available: DecimalField,
 }
+#[cfg(feature = "bybit")]
 pub(crate) fn bybit_wallet(raw: &str) -> Result<AccountAmounts, VenueError> {
     let reply: BybitWallet = decode(raw)?;
     let row = reply
@@ -101,14 +106,17 @@ pub(crate) fn bybit_wallet(raw: &str) -> Result<AccountAmounts, VenueError> {
         .ok_or_else(|| bad("wallet has no account"))?;
     money(row.equity, row.available)
 }
+#[cfg(feature = "bybit")]
 #[derive(Deserialize)]
 struct BybitPositions {
     result: BybitRows,
 }
+#[cfg(feature = "bybit")]
 #[derive(Deserialize)]
 struct BybitRows {
     list: Vec<BybitPosition>,
 }
+#[cfg(feature = "bybit")]
 #[derive(Deserialize)]
 struct BybitPosition {
     symbol: String,
@@ -118,6 +126,7 @@ struct BybitPosition {
     #[serde(default, rename = "avgPrice")]
     entry: DecimalField,
 }
+#[cfg(feature = "bybit")]
 pub(crate) fn bybit_positions(raw: &str) -> Result<Vec<NativePosition>, VenueError> {
     let reply: BybitPositions = decode(raw)?;
     let mut out = Vec::new();
@@ -138,6 +147,7 @@ pub(crate) fn bybit_positions(raw: &str) -> Result<Vec<NativePosition>, VenueErr
     }
     Ok(out)
 }
+#[cfg(feature = "binance")]
 #[derive(Deserialize)]
 struct BinanceAccount {
     #[serde(rename = "totalMarginBalance")]
@@ -146,6 +156,7 @@ struct BinanceAccount {
     available: DecimalField,
     positions: Vec<BinancePosition>,
 }
+#[cfg(feature = "binance")]
 #[derive(Deserialize)]
 struct BinancePosition {
     #[serde(default)]
@@ -155,6 +166,7 @@ struct BinancePosition {
     #[serde(default, rename = "entryPrice")]
     entry: DecimalField,
 }
+#[cfg(feature = "binance")]
 pub(crate) fn binance(raw: &str) -> Result<(AccountAmounts, Vec<NativePosition>), VenueError> {
     let reply: BinanceAccount = decode(raw)?;
     let mut out = Vec::new();
@@ -172,6 +184,7 @@ pub(crate) fn binance(raw: &str) -> Result<(AccountAmounts, Vec<NativePosition>)
     }
     Ok((money(reply.equity, reply.available)?, out))
 }
+#[cfg(feature = "hyperliquid")]
 #[derive(Deserialize)]
 struct HyperAccount {
     #[serde(rename = "marginSummary")]
@@ -180,15 +193,18 @@ struct HyperAccount {
     #[serde(rename = "assetPositions")]
     positions: Vec<HyperPositionWrapper>,
 }
+#[cfg(feature = "hyperliquid")]
 #[derive(Deserialize)]
 struct HyperMargin {
     #[serde(rename = "accountValue")]
     equity: DecimalField,
 }
+#[cfg(feature = "hyperliquid")]
 #[derive(Deserialize)]
 struct HyperPositionWrapper {
     position: HyperPosition,
 }
+#[cfg(feature = "hyperliquid")]
 #[derive(Deserialize)]
 struct HyperPosition {
     coin: String,
@@ -196,6 +212,7 @@ struct HyperPosition {
     #[serde(default, rename = "entryPx")]
     entry: DecimalField,
 }
+#[cfg(feature = "hyperliquid")]
 pub(crate) fn hyperliquid(raw: &str) -> Result<(AccountAmounts, Vec<NativePosition>), VenueError> {
     let reply: HyperAccount = decode(raw)?;
     let mut out = Vec::new();
@@ -219,16 +236,19 @@ pub(crate) fn hyperliquid(raw: &str) -> Result<(AccountAmounts, Vec<NativePositi
     }
     Ok((money(reply.margin.equity, reply.withdrawable)?, out))
 }
+#[cfg(feature = "lighter")]
 #[derive(Deserialize)]
 struct LighterAccount {
     accounts: Vec<LighterBalance>,
 }
+#[cfg(feature = "lighter")]
 #[derive(Deserialize)]
 struct LighterBalance {
     collateral: DecimalField,
     available_balance: DecimalField,
     positions: Vec<LighterPosition>,
 }
+#[cfg(feature = "lighter")]
 #[derive(Deserialize)]
 struct LighterPosition {
     symbol: String,
@@ -238,6 +258,7 @@ struct LighterPosition {
     #[serde(default)]
     avg_entry_price: DecimalField,
 }
+#[cfg(feature = "lighter")]
 pub(crate) fn lighter(raw: &str) -> Result<(AccountAmounts, Vec<NativePosition>), VenueError> {
     let reply: LighterAccount = decode(raw)?;
     let row = reply
@@ -268,10 +289,12 @@ pub(crate) fn lighter(raw: &str) -> Result<(AccountAmounts, Vec<NativePosition>)
     }
     Ok((money(row.collateral, row.available_balance)?, out))
 }
+#[cfg(feature = "mexc")]
 #[derive(Deserialize)]
 struct MexcAssets {
     data: Box<RawValue>,
 }
+#[cfg(feature = "mexc")]
 #[derive(Deserialize)]
 struct MexcBalance {
     #[serde(default)]
@@ -281,6 +304,7 @@ struct MexcBalance {
     #[serde(default, rename = "availableBalance")]
     available: DecimalField,
 }
+#[cfg(feature = "mexc")]
 pub(crate) fn mexc_assets(raw: &str) -> Result<AccountAmounts, VenueError> {
     let reply: MexcAssets = decode(raw)?;
     let rows: Vec<MexcBalance> = serde_json::from_str(reply.data.get()).map_err(bad)?;
@@ -290,10 +314,12 @@ pub(crate) fn mexc_assets(raw: &str) -> Result<AccountAmounts, VenueError> {
         .ok_or_else(|| bad("no USDT account balance"))?;
     money(row.equity, row.available)
 }
+#[cfg(feature = "mexc")]
 #[derive(Deserialize)]
 struct MexcPositions {
     data: Vec<MexcPosition>,
 }
+#[cfg(feature = "mexc")]
 #[derive(Deserialize)]
 struct MexcPosition {
     #[serde(default)]
@@ -305,6 +331,7 @@ struct MexcPosition {
     #[serde(default, rename = "positionType")]
     side: i64,
 }
+#[cfg(feature = "mexc")]
 pub(crate) fn mexc_positions(
     raw: &str,
     contracts: &engine_public::venues::mexc::contracts::Contracts,
@@ -338,7 +365,9 @@ pub(crate) fn mexc_positions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "binance")]
     use engine_types::numeric::Exact;
+    #[cfg(feature = "binance")]
     #[test]
     fn account_decimals_are_not_rounded_before_risk_sees_them() {
         let raw = r#"{"totalMarginBalance":9007199254740993.0000000000000000001,"availableBalance":"0.9999999999999999999","positions":[{"symbol":"BTCUSDT","positionAmt":9007199254740993.0000000000000000001,"entryPrice":"1.0000000000000000001"}]}"#;
@@ -352,6 +381,7 @@ mod tests {
         );
         assert_ne!(positions[0].amounts.entry_price.value, Exact::one());
     }
+    #[cfg(feature = "bybit")]
     #[test]
     fn unprojectable_position_is_never_silently_flat() {
         let raw =
@@ -359,6 +389,7 @@ mod tests {
         let rows = bybit_positions(raw).unwrap();
         assert!(assign(&mut [], rows, &["BTCUSDT".into()]).is_err());
     }
+    #[cfg(feature = "bybit")]
     #[test]
     fn missing_invalid_and_negative_account_decimals_stay_distinct() {
         for amount in ["null", "\"NaN\"", "{}", "1e5000"] {

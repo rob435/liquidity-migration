@@ -123,6 +123,13 @@ impl CanaryGateway for Venue {
     async fn venue_time(&mut self) -> Result<i64, VenueError> {
         match self {
             Venue::Bybit(gateway) => gateway.venue_time_ms().await,
+            #[cfg(any(
+                feature = "binance",
+                feature = "hyperliquid",
+                feature = "lighter",
+                feature = "mexc",
+                feature = "variational"
+            ))]
             _ => Err(VenueError::BadRequest(
                 "canary venue-time reads exist only for Bybit".to_string(),
             )),
@@ -136,6 +143,13 @@ impl CanaryGateway for Venue {
     ) -> Result<Option<BybitOrderReceipt>, VenueError> {
         match self {
             Venue::Bybit(gateway) => gateway.order_receipt(symbol, client_id).await,
+            #[cfg(any(
+                feature = "binance",
+                feature = "hyperliquid",
+                feature = "lighter",
+                feature = "mexc",
+                feature = "variational"
+            ))]
             _ => Err(VenueError::BadRequest(
                 "canary order receipts exist only for Bybit".to_string(),
             )),
@@ -179,7 +193,7 @@ pub async fn run(
         symbol: symbol.clone(),
         feed: Feed::Quote,
     };
-    let mut market_feed = assembly::market_feed(chosen, &[subscription]);
+    let mut market_feed = assembly::market_feed(chosen, &[subscription])?;
 
     let before = VenueGateway::account_identity(&mut venue).await?;
     if before.user_id != expected_user_id {
@@ -365,7 +379,14 @@ fn make_plan(
                 .into(),
         );
     }
-    let mut request = OrderRequest {
+    let terms = ExactOrderTerms {
+        quantity: strategy_decimal(qty)?,
+        limit_price: Some(strategy_decimal(px)?),
+        stop_trigger_price: Some(strategy_decimal(stop_px)?),
+        physical_stop_trigger_price: Some(strategy_decimal(stop_px)?),
+        input_policy: OrderInputPolicy::StrategyShortestDecimal,
+    };
+    let request = OrderRequest {
         client_order_id: client_id,
         strategy: StrategyId(0),
         symbol: SymbolId(0),
@@ -379,18 +400,15 @@ fn make_plan(
             trigger_px: stop_px,
         }),
         reduce_only: false,
-        exact_terms: None,
+        exact_terms: Some(Box::new(terms)),
         sleeve_effect: None,
         close_position: false,
     };
-    ExactOrderTerms {
-        quantity: strategy_decimal(qty)?,
-        limit_price: Some(strategy_decimal(px)?),
-        stop_trigger_price: Some(strategy_decimal(stop_px)?),
-        physical_stop_trigger_price: Some(strategy_decimal(stop_px)?),
-        input_policy: OrderInputPolicy::StrategyShortestDecimal,
-    }
-    .apply_projection(&mut request)?;
+    request
+        .exact_terms
+        .as_ref()
+        .unwrap()
+        .validate_projection(&request)?;
     Ok(CanaryPlan {
         request,
         close_id,
@@ -995,7 +1013,14 @@ async fn cleanup<G: CanaryGateway>(
 }
 
 fn close_request(plan: &CanaryPlan, qty: f64) -> Result<OrderRequest, Box<dyn Error>> {
-    let mut request = OrderRequest {
+    let terms = ExactOrderTerms {
+        quantity: strategy_decimal(qty)?,
+        limit_price: None,
+        stop_trigger_price: None,
+        physical_stop_trigger_price: None,
+        input_policy: OrderInputPolicy::StrategyShortestDecimal,
+    };
+    let request = OrderRequest {
         client_order_id: plan.close_id.clone(),
         strategy: plan.request.strategy,
         symbol: plan.request.symbol,
@@ -1004,18 +1029,15 @@ fn close_request(plan: &CanaryPlan, qty: f64) -> Result<OrderRequest, Box<dyn Er
         kind: OrderKind::Market,
         stop: None,
         reduce_only: true,
-        exact_terms: None,
+        exact_terms: Some(Box::new(terms)),
         sleeve_effect: None,
         close_position: true,
     };
-    ExactOrderTerms {
-        quantity: strategy_decimal(qty)?,
-        limit_price: None,
-        stop_trigger_price: None,
-        physical_stop_trigger_price: None,
-        input_policy: OrderInputPolicy::StrategyShortestDecimal,
-    }
-    .apply_projection(&mut request)?;
+    request
+        .exact_terms
+        .as_ref()
+        .unwrap()
+        .validate_projection(&request)?;
     Ok(request)
 }
 

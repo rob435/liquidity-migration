@@ -101,7 +101,7 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     // kernel if the process dies first.
     let claimed = single_writer(&mut venue).await?;
 
-    let mut market_feed = assembly::market_feed_for_registry(chosen, &symbols, &wanted);
+    let mut market_feed = assembly::market_feed_for_registry(chosen, &symbols, &wanted)?;
     let mut order_feed = assembly::order_feed(chosen, symbols)?;
 
     // Subscribe before any account/history snapshot. Once this readiness
@@ -111,7 +111,7 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     // dial or repeatedly failing authentication.
     order_feed.await_ready().await?;
 
-    let mut engine = Engine::boot_as_isolated(
+    let mut engine = Engine::boot_as_exact(
         &settings,
         &loaded.sha256,
         wal,
@@ -120,7 +120,6 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         strategies,
         &sleeves,
         &replayed,
-        std::env::current_exe()?,
     )
     .await?;
 
@@ -285,8 +284,9 @@ mod tests {
 
     // Wall clock: the signal reaches the runtime through the I/O driver, and a
     // paused clock jumps to the timeout the moment the runtime idles.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_systemd_stop_reaches_the_shutdown_path() {
+        let _io = crate::test_io::IoProgress::new();
         // The handler is registered by the call below, before the raise:
         // an unregistered SIGTERM would kill this test binary outright.
         let stop = super::stop_signal();

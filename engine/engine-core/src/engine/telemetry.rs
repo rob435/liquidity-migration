@@ -229,7 +229,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn callback_process_faults_appear_under_their_configured_sleeve() {
         let path = crate::testpath::temp_path("heartbeat-callback-error");
         let params = toml::from_str("symbol='BTCUSDT'\nevery_s=60\nenabled=false").unwrap();

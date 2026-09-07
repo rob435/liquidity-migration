@@ -66,7 +66,7 @@ fn answer(path: &str) -> (u16, String) {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn every_method_reaches_the_adapter_behind_the_name() {
     // One stub arm on the enum would be an order that silently never left.
     let server = TestServer::start(|request, _| answer(&request.path)).await;
@@ -110,7 +110,7 @@ async fn every_method_reaches_the_adapter_behind_the_name() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_chosen_venue_puts_the_same_bytes_on_the_wire_as_the_adapter() {
     let server = TestServer::start(|request, _| answer(&request.path)).await;
     let mut direct = adapter(&server);
@@ -129,7 +129,7 @@ async fn the_chosen_venue_puts_the_same_bytes_on_the_wire_as_the_adapter() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_built_venue_knows_the_name_it_was_chosen_by() {
     let server = TestServer::start(|request, _| answer(&request.path)).await;
     assert_eq!(Venue::Bybit(adapter(&server)).name().as_str(), BYBIT_DEMO);

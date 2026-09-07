@@ -22,7 +22,8 @@ use crate::stream::{hand_over, until_closed, AckMemory, Gone, Handover, Reconnec
 use crate::RealmCredentials;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use crate::wire::{self, Field, RawField};
 use engine_types::ids::{Symbol, SymbolId};
@@ -201,7 +202,7 @@ impl Worker {
     async fn pump(&mut self, mut socket: Socket, tx: &mpsc::Sender<Handover>) -> Result<(), Gone> {
         let mut last_ping = Instant::now();
         loop {
-            let deadline = tokio::time::Instant::from_std(last_ping + PING_EVERY);
+            let deadline = last_ping + PING_EVERY;
             let wake = tokio::select! {
                 frame = socket.next() => Wake::Frame(frame),
                 _ = tokio::time::sleep_until(deadline) => Wake::Ping,

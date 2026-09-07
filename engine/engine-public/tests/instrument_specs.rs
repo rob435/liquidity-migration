@@ -1,9 +1,26 @@
-use engine_public::venues::{binance, bybit, lighter, mexc};
-use engine_types::numeric::{AssetId, Exact, PricePrecision};
+#![cfg(any(
+    feature = "bybit",
+    feature = "binance",
+    feature = "lighter",
+    feature = "mexc"
+))]
+#[cfg(feature = "binance")]
+use engine_public::venues::binance;
+#[cfg(feature = "bybit")]
+use engine_public::venues::bybit;
+#[cfg(feature = "lighter")]
+use engine_public::venues::lighter;
+#[cfg(feature = "mexc")]
+use engine_public::venues::mexc;
+
+#[cfg(feature = "lighter")]
+use engine_types::numeric::PricePrecision;
+use engine_types::numeric::{AssetId, Exact};
 fn exact(text: &str) -> Exact {
     Exact::parse_decimal(text).unwrap()
 }
 
+#[cfg(feature = "bybit")]
 #[test]
 fn bybit_metadata_preserves_lexical_filters_cursor_and_explicit_currency_absence() {
     let raw = r#"{"retCode":0,"result":{"nextPageCursor":"next\u0026page","list":[{"symbol":"ODDUSDT","baseCoin":"ODD","priceFilter":{"tickSize":0.000000000000000000123456789},"lotSizeFilter":{"qtyStep":"0.0003","minOrderQty":"0.0006","maxOrderQty":"9007199254740993.1","maxMktOrderQty":"100","minNotionalValue":"5.5"}}]}}"#;
@@ -33,6 +50,7 @@ fn bybit_metadata_preserves_lexical_filters_cursor_and_explicit_currency_absence
     );
 }
 
+#[cfg(feature = "binance")]
 #[test]
 fn binance_keeps_limit_and_market_grids_separate_and_zero_price_caps_disabled() {
     let raw = r#"{"symbols":[{"symbol":"BTCUSDT","baseAsset":"BTC","quoteAsset":"USDT","marginAsset":"USDT","status":"TRADING","contractType":"PERPETUAL","filters":[{"filterType":"PRICE_FILTER","tickSize":"0.1","minPrice":"0","maxPrice":"0"},{"filterType":"LOT_SIZE","stepSize":"0.001","minQty":"0.001","maxQty":"1000"},{"filterType":"MARKET_LOT_SIZE","stepSize":"0.005","minQty":"0.010","maxQty":"100"},{"filterType":"MIN_NOTIONAL","notional":"5"}]}]}"#;
@@ -57,6 +75,7 @@ fn binance_keeps_limit_and_market_grids_separate_and_zero_price_caps_disabled() 
     );
 }
 
+#[cfg(feature = "mexc")]
 #[test]
 fn mexc_metadata_multiplies_base_quantities_without_losing_unquoted_decimals() {
     let raw = r#"{"data":[{"symbol":"ODD_TOKEN","baseCoin":"ODD","quoteCoin":"TOKEN","settleCoin":"TOKEN","contractSize":0.000000000000000000123456789,"priceUnit":"0.1","minVol":3,"maxVol":7,"limitMaxVol":11,"apiAllowed":true}]}"#;
@@ -79,6 +98,7 @@ fn mexc_metadata_multiplies_base_quantities_without_losing_unquoted_decimals() {
     assert_eq!(spec.min_notional, None);
 }
 
+#[cfg(feature = "lighter")]
 #[test]
 fn lighter_metadata_exposes_both_wire_integer_bounds_without_alias_currency_inference() {
     let raw = r#"{"code":200,"order_book_details":[{"symbol":"ODD","market_id":3,"status":"active","supported_size_decimals":3,"supported_price_decimals":2,"min_base_amount":"0.002","min_quote_amount":"10"}]}"#;
@@ -93,6 +113,7 @@ fn lighter_metadata_exposes_both_wire_integer_bounds_without_alias_currency_infe
     assert_eq!(spec.quote_asset, AssetId::Unknown);
 }
 
+#[cfg(feature = "bybit")]
 #[test]
 fn duplicate_known_metadata_fields_use_last_raw_value_and_errors_need_no_success_payload() {
     let raw = r#"{"retCode":1,"retCode":0,"result":{"list":[{"symbol":"X","priceFilter":{"tickSize":"wrong","tickSize":0.123456789012345678901},"lotSizeFilter":{"qtyStep":"1","minOrderQty":"1"}}]}}"#;

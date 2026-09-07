@@ -43,7 +43,10 @@ impl Recorded {
 pub type Handler = Arc<dyn Fn(&Recorded, usize) -> (u16, String) + Send + Sync>;
 type ResponseDelay = Arc<dyn Fn(&Recorded, usize) -> Duration + Send + Sync>;
 
+pub use crate::test_io::IoProgress;
+
 pub struct TestServer {
+    _io_progress: IoProgress,
     pub addr: SocketAddr,
     seen: Arc<Mutex<Vec<Recorded>>>,
     connections: Arc<AtomicUsize>,
@@ -109,6 +112,7 @@ impl TestServer {
         });
 
         TestServer {
+            _io_progress: IoProgress::new(),
             addr,
             seen,
             connections,

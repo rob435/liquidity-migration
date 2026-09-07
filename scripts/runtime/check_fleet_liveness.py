@@ -70,12 +70,18 @@ _DEPLOY_TRANSITIONAL_ALERT_PREFIXES = (
     "worker-spool:",
     "capture-",
     "watchdog:",
+    "engine-",
     "manifest",
 )
 _ENGINE_UNITS = {
     "liquidity-migration-engine.service",
     "liquidity-migration-engine-mainnet.service",
 }
+_ENGINE_WAL_BYTES_PER_SECOND = 1_048_576
+_ENGINE_RSS_BYTES = 1_610_612_736
+_DEMO_SOAK_SECONDS = 300
+_DEMO_SOAK_INTERVAL_SECONDS = 10
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 
 @dataclass(frozen=True)
@@ -564,6 +570,119 @@ def _wal_attribution(rows: list[FleetUnit], previous: dict[str, float], counters
     return "canonical WAL logical bytes: " + (", ".join(details) or "unavailable")
 
 
+def engine_service_sample(unit: str) -> dict[str, float]:
+    result = subprocess.run(
+        ["systemctl", "show", unit, "--property=MainPID,NRestarts,ControlGroup,ActiveState"],
+        capture_output=True, text=True, check=True, timeout=5,
+    )
+    values = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    if values.get("ActiveState") != "active" or int(values["MainPID"]) <= 0:
+        raise ValueError(f"{unit} has no active process")
+    group = values["ControlGroup"]
+    if not group.startswith("/") or ".." in Path(group).parts:
+        raise ValueError(f"{unit} has no valid cgroup")
+    memory = dict(line.split() for line in (_CGROUP_ROOT / group.lstrip("/") / "memory.stat").read_text().splitlines())
+    return {"pid": float(values["MainPID"]), "restarts": float(values["NRestarts"]), "rss": float(memory["anon"])}
+
+
+def engine_error_count(unit: str, since: float, until: float) -> int:
+    result = subprocess.run(
+        ["journalctl", "-u", unit, "--since", f"@{since:.6f}", "--until", f"@{until:.6f}",
+         "--no-pager", "--output=json"],
+        capture_output=True, text=True, check=True, timeout=5,
+    )
+    count = 0
+    for line in result.stdout.splitlines():
+        row = json.loads(line)
+        message = row.get("MESSAGE", "")
+        priority = int(row.get("PRIORITY", 6))
+        if priority <= 3 or (isinstance(message, str) and re.search(r"\bERROR\b|panicked at|^engine:", message)):
+            count += 1
+    return count
+
+
+def evaluate_engine_rates(
+    rows: list[FleetUnit], *, now: float, counters: dict[str, float],
+) -> list[Alert]:
+    alerts = []
+    for row in rows:
+        if row.unit not in _ENGINE_UNITS:
+            continue
+        prefix = f"engine-rate:{row.unit}:"
+        previous = {key.removeprefix(prefix): value for key, value in counters.items() if key.startswith(prefix)}
+        try:
+            sample = engine_service_sample(row.unit)
+            files = _wal_files(Path(row.output_artifact).with_name("engine.wal"))
+            if files is None:
+                raise ValueError("WAL family is unreadable")
+            sample.update({f"wal:{identity}": size for identity, size in files.items()})
+            sample["time"] = now
+            if sample["rss"] > _ENGINE_RSS_BYTES:
+                alerts.append(Alert(f"engine-rss:{row.unit}", "CRITICAL",
+                                    f"{row.unit} anonymous RSS {sample['rss']:.0f} bytes exceeds {_ENGINE_RSS_BYTES}"))
+            if previous:
+                elapsed = now - previous["time"]
+                if elapsed <= 0 or elapsed > 60:
+                    raise ValueError(f"resource sample gap {elapsed:.1f}s is outside (0, 60]")
+                prior_wal = {key: size for key, size in previous.items() if key.startswith("wal:")}
+                if any(key not in sample or sample[key] < size for key, size in prior_wal.items()):
+                    raise ValueError("WAL family shrank or lost a retained segment")
+                growth = sum(files.values()) - sum(prior_wal.values())
+                if growth / elapsed > _ENGINE_WAL_BYTES_PER_SECOND:
+                    alerts.append(Alert(f"engine-wal-rate:{row.unit}", "CRITICAL",
+                                        f"{row.unit} WAL {growth / elapsed:.0f} bytes/s exceeds {_ENGINE_WAL_BYTES_PER_SECOND}"))
+                if sample["pid"] != previous["pid"] or sample["restarts"] != previous["restarts"]:
+                    alerts.append(Alert(f"engine-restarts:{row.unit}", "CRITICAL",
+                                        f"{row.unit} process changed or restarted during the sample interval"))
+                errors = engine_error_count(row.unit, previous["time"], now)
+                if errors:
+                    alerts.append(Alert(f"engine-error-rate:{row.unit}", "CRITICAL",
+                                        f"{row.unit} {errors} errors in {elapsed:.1f}s ({errors / elapsed:.3f}/s); limit 0"))
+            for key in list(counters):
+                if key.startswith(prefix):
+                    del counters[key]
+            counters.update({prefix + key: value for key, value in sample.items()})
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+            alerts.append(Alert(f"engine-resource-sample:{row.unit}", "CRITICAL", f"{row.unit}: {error}"))
+            # An unavailable interval cannot establish recovery; a later pair can.
+            for key in list(counters):
+                if key.startswith(prefix):
+                    del counters[key]
+    return alerts
+
+
+def run_demo_soak() -> int:
+    rows = [row for row in load_fleet_manifest()
+            if row.realm == "demo" and (row.unit in _ENGINE_UNITS or "signal-worker" in row.unit)]
+    counters: dict[str, float] = {}
+    started = time.monotonic()
+    while True:
+        now = time.time()
+        alerts = evaluate_units("demo", rows)
+        alerts.extend(evaluate_heartbeats(rows, now=now, max_age_sec=30))
+        alerts.extend(evaluate_engine_rates(rows, now=now, counters=counters))
+        if alerts:
+            lines = [f"CRITICAL {alert.key}: {alert.message}" for alert in alerts]
+            message = "demo soak refused; mainnet remains on its incumbent runtime\n" + "\n".join(lines)
+            print(message, flush=True)
+            try:
+                if not send_telegram_message(as_block(message), channel="alerts", parse_mode="HTML"):
+                    raise RuntimeError("Telegram route is not configured")
+            except (OSError, RuntimeError, ValueError) as error:
+                print(f"CRITICAL telegram: {transport_error(error)}", flush=True)
+            try:
+                fire_incident_routine(os.environ[INCIDENT_FIRE_URL_ENV], os.environ[INCIDENT_FIRE_TOKEN_ENV],
+                                      incident_text("demo", lines, alerts))
+            except (KeyError, OSError, RuntimeError, ValueError) as error:
+                print(f"CRITICAL incident-routine: {transport_error(error)}", flush=True)
+            return 1
+        elapsed = time.monotonic() - started
+        print(f"demo-soak healthy elapsed={elapsed:.0f}s required={_DEMO_SOAK_SECONDS}s", flush=True)
+        if elapsed >= _DEMO_SOAK_SECONDS:
+            return 0
+        time.sleep(min(_DEMO_SOAK_INTERVAL_SECONDS, _DEMO_SOAK_SECONDS - elapsed))
+
+
 def evaluate_disk(
     *,
     path: str = "/var/lib",
@@ -943,6 +1062,11 @@ def _incident_units(scope: str, alerts: list[Alert]) -> list[str]:
         "strategy-errors:",
         "worker-status:",
         "worker-spool:",
+        "engine-wal-rate:",
+        "engine-rss:",
+        "engine-restarts:",
+        "engine-error-rate:",
+        "engine-resource-sample:",
     )
     units = sorted(
         {
@@ -1087,6 +1211,10 @@ def run_delivery_drill(scope: str, deadman_url: str | None) -> int:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--check-heartbeat", nargs=4, metavar=("UNIT", "PATH", "PID", "SINCE"),
+                   help="require a fresh healthy heartbeat from the process just started")
+    p.add_argument("--engine-rates", action="store_true", help="watch WAL bytes/s, errors, anonymous RSS and restarts")
+    p.add_argument("--demo-soak", action="store_true", help="require five healthy demo minutes before mainnet handover")
     p.add_argument(
         "--account-scope",
         choices=_ACCOUNT_SCOPES,
@@ -1184,6 +1312,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
+    if args.check_heartbeat:
+        unit, raw_path, raw_pid, raw_since = args.check_heartbeat
+        path = Path(raw_path)
+        try:
+            row = json.loads(path.read_bytes())
+            pid, since = int(raw_pid), float(raw_since)
+            field = "updated_at_ms" if "signal-worker" in unit else "wall_ts_ms"
+            stamp = row.get(field)
+            now = time.time()
+            if (type(row.get("pid")) is not int or row.get("pid") != pid or pid <= 0 or type(stamp) is not int
+                    or not max(since, now - 30) * 1000 <= stamp <= (now + 5) * 1000):
+                raise ValueError("heartbeat does not describe the fresh started process")
+            heartbeat_alerts = evaluate_engine_heartbeat(unit, path, now=now)
+            for alert in heartbeat_alerts:
+                print(f"{alert.severity} {alert.key}: {alert.message}")
+            return int(bool(heartbeat_alerts))
+        except (OSError, ValueError, AttributeError) as heartbeat_error:
+            print(f"heartbeat readiness failed: {heartbeat_error}", file=sys.stderr)
+            return 1
     scope = args.account_scope
     deadman_url = args.heartbeat_url or (os.environ.get("ONCALL_DEADMAN_URL") if scope == "host" else None)
     if args.require_oncall:
@@ -1198,6 +1345,11 @@ def main() -> int:
             print("delivery drill requires --require-oncall", file=sys.stderr)
             return 2
         return run_delivery_drill(scope, deadman_url)
+    if args.demo_soak:
+        if scope != "demo" or not args.require_oncall:
+            print("demo soak requires --account-scope demo --require-oncall", file=sys.stderr)
+            return 2
+        return run_demo_soak()
     now = time.time()
     # Every scope consults the lock. The transitional keys held below —
     # worker-status, worker-spool, may-open, rolling-loss, strategy-errors,
@@ -1226,6 +1378,10 @@ def main() -> int:
     if scope == "host":
         alerts.extend(evaluate_disk(counters=counters, rows=fleet_rows))
         alerts.extend(evaluate_watchdog_chain())
+    if args.engine_rates and not deploy_maintenance:
+        alerts.extend(evaluate_engine_rates(scope_units(scope, fleet_rows), now=now, counters=counters))
+    elif args.engine_rates:
+        counters = {key: value for key, value in counters.items() if not key.startswith("engine-rate:")}
     if args.host_clock_check:
         alerts.extend(evaluate_host_clock())
     if args.backup_stamp_file:
@@ -1252,7 +1408,7 @@ def main() -> int:
                 label=label,
             )
             alerts.extend(capture_alerts)
-    if scope == "host" or (capture_status_files and not deploy_maintenance):
+    if scope == "host" or args.engine_rates or (capture_status_files and not deploy_maintenance):
         save_state(counters_file, counters)
     if args.upload_stamp_file:
         alerts.extend(

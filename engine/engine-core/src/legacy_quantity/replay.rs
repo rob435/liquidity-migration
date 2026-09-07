@@ -340,7 +340,17 @@ impl<'a> Replay<'a> {
                 return Ok(None);
             };
             match record {
-                WalRecord::Names { strategies, .. } => self.names = strategies.clone(),
+                WalRecord::IdentityState { state, .. } => {
+                    self.names = state
+                        .sleeves
+                        .iter()
+                        .map(|key| key.as_str().to_owned())
+                        .collect()
+                }
+                WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
+                    strategies,
+                    ..
+                }) => self.names = strategies.clone(),
                 WalRecord::OrderSent { request, .. } => {
                     self.sender.insert(&request.client_order_id, request);
                 }

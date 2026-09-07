@@ -33,6 +33,9 @@ PREVIOUS_COMMIT_FILE=$RELEASE_DIR/previous-commit
 # that recorder running.
 CONTROLS_SUDOERS=/etc/sudoers.d/liquidity-migration-controls
 QUALIFIED_RELEASE_DIR=""
+CANDIDATE_RELEASE_DIR=""
+INCUMBENT_STAGE=""
+SOAK_OVERRIDE=20-demo-soak.conf
 # How long a unit must hold one main process after publishing a fresh
 # heartbeat. Longer than the engine's and the signal worker's restart cycle
 # (RestartSec=5 plus the seconds each spends before it aborts).
@@ -145,6 +148,9 @@ wait_fresh_heartbeat() {
                 if [ "$(systemctl show --property=ActiveState --value "$unit")" = "active" ] \
                     && [ "$(systemctl show --property=MainPID --value "$unit")" = "$pid" ] \
                     && [ "$(systemctl show --property=NRestarts --value "$unit")" = "$restarts" ]; then
+                    "$PYTHON" "$REPO_DIR/scripts/runtime/check_fleet_liveness.py" \
+                        --check-heartbeat "$unit" "$heartbeat" "$pid" "$since" \
+                        || fail "$unit published an unhealthy heartbeat after startup"
                     echo "heartbeat-ok unit=$unit age=$(( $(date +%s) - written ))s pid=$pid"
                     return 0
                 fi
@@ -340,6 +346,10 @@ install_python_environment() {
     "$PYTHON" -m pip install --disable-pip-version-check --no-deps \
         --only-binary=:all: -r "$(python_requirements_path)" \
         || fail "cannot install locked Python dependencies"
+    if [ -f "$REPO_DIR/requirements-runtime.lock" ]; then
+        "$PYTHON" "$REPO_DIR/scripts/vps/sync_runtime_dependencies.py" "$REPO_DIR/requirements-runtime.lock" \
+            || fail "cannot remove non-runtime Python dependencies"
+    fi
 }
 
 release_artifact() {
@@ -351,6 +361,10 @@ cleanup_release() {
     if [ -n "$QUALIFIED_RELEASE_DIR" ]; then
         rm -rf -- "$QUALIFIED_RELEASE_DIR"
         QUALIFIED_RELEASE_DIR=""
+    fi
+    if [ -n "$INCUMBENT_STAGE" ]; then
+        rm -rf -- "$INCUMBENT_STAGE"
+        INCUMBENT_STAGE=""
     fi
 }
 trap cleanup_release EXIT
@@ -374,6 +388,138 @@ stop_realm_units() {
         systemctl stop "$unit" || fail "cannot stop $unit for the $realm handover"
         systemctl reset-failed "$unit" 2>/dev/null || true
     done < <(lm_realm_units "$realm")
+}
+
+pin_mainnet_runtime() {
+    mainnet_armed || return 0
+    cd "$REPO_DIR" || fail "cannot read the incumbent runtime inputs"
+    local pinned="$RELEASE_DIR/incumbent-mainnet" unit binary pid source
+    if [ ! -d "$pinned" ]; then
+        INCUMBENT_STAGE="$(mktemp -d "$RELEASE_DIR/.incumbent-mainnet.XXXXXX")" \
+            || fail "cannot stage incumbent mainnet runtime"
+        chmod 0755 "$INCUMBENT_STAGE"
+        for binary in engine signal-worker; do
+            case "$binary" in
+                engine) unit=liquidity-migration-engine-mainnet.service ;;
+                signal-worker) unit=liquidity-migration-signal-worker-mainnet.service ;;
+            esac
+            pid="$(systemctl show --property=MainPID --value "$unit")"
+            source="$RELEASE_DIR/bin/$binary"
+            if [ "${pid:-0}" != 0 ]; then source="/proc/$pid/exe"; fi
+            install -o root -g "$RUNTIME_GROUP" -m 0755 "$source" "$INCUMBENT_STAGE/$binary" \
+                || fail "cannot retain the incumbent mainnet $binary"
+        done
+        "$PYTHON" - "$INCUMBENT_STAGE" "$pinned" "$ENGINE_MAINNET_CONFIG" "$SIGNAL_WORKER_MAINNET_ENV" <<'PY'
+import json
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from liquidity_migration.policy.systemd_environment import load_private_systemd_environment
+
+directory = Path(sys.argv[1])
+final_directory = Path(sys.argv[2])
+raw = subprocess.check_output([
+    "systemctl", "show", "liquidity-migration-signal-worker-mainnet.service",
+    "--property=Environment", "--value",
+], text=True)
+values = dict(word.split("=", 1) for word in shlex.split(raw) if "=" in word)
+values["ENGINE_CONFIG_FILE"] = sys.argv[3]
+values["OPERATIONAL_PROFILE_FILE"] = load_private_systemd_environment(Path(sys.argv[4]))["OPERATIONAL_PROFILE_FILE"]
+lines = []
+for key in ("SIGNAL_WORKER_CONFIG_FILE", "LONG_NATIVE_RULE_FILE", "CARRY_SIGNAL_CONFIG_FILE",
+            "ENGINE_CONFIG_FILE", "OPERATIONAL_PROFILE_FILE"):
+    source = Path(values[key])
+    if not source.is_absolute():
+        raise SystemExit(f"incumbent worker input {key} is not absolute")
+    target = directory / (key.lower() + (".toml" if key == "ENGINE_CONFIG_FILE" else ".json"))
+    shutil.copyfile(source, target)
+    target.chmod(0o640)
+    lines.append("Environment=" + json.dumps(key + "=" + str(final_directory / target.name)))
+(directory / "worker-inputs.conf").write_text("\n".join(lines) + "\n")
+PY
+        chgrp -R "$RUNTIME_GROUP" "$INCUMBENT_STAGE" || fail "cannot secure incumbent mainnet inputs"
+        mv -- "$INCUMBENT_STAGE" "$pinned" || fail "cannot publish incumbent mainnet runtime"
+        INCUMBENT_STAGE=""
+    fi
+    [ -f "$pinned/worker-inputs.conf" ] || fail "incomplete incumbent mainnet snapshot at $pinned"
+    for unit in liquidity-migration-engine-mainnet.service liquidity-migration-signal-worker-mainnet.service; do
+        install -d -m 0755 "$LM_SYSTEMD_UNIT_DIR/$unit.d"
+    done
+    cat > "$LM_SYSTEMD_UNIT_DIR/liquidity-migration-engine-mainnet.service.d/$SOAK_OVERRIDE" <<EOF
+[Service]
+Type=simple
+WatchdogSec=0
+ExecStart=
+ExecStart=$pinned/engine run --config $pinned/engine_config_file.toml
+EOF
+    {
+        cat <<EOF
+[Service]
+ExecStart=
+ExecStart=$pinned/signal-worker live --signal-config $pinned/signal_worker_config_file.json --long-rule $pinned/long_native_rule_file.json --carry-config $pinned/carry_signal_config_file.json --operational-config $pinned/operational_profile_file.json --engine-config $pinned/engine_config_file.toml --spool-dir \${SIGNAL_WORKER_SPOOL_DIR} --state-dir \${SIGNAL_WORKER_STATE_DIR} --heartbeat \${SIGNAL_WORKER_HEARTBEAT_FILE}
+EOF
+        cat "$pinned/worker-inputs.conf"
+    } > "$LM_SYSTEMD_UNIT_DIR/liquidity-migration-signal-worker-mainnet.service.d/$SOAK_OVERRIDE"
+    systemctl daemon-reload || fail "cannot pin incumbent mainnet restart paths"
+}
+
+stage_demo_candidate() {
+    CANDIDATE_RELEASE_DIR="$RELEASE_DIR/releases/$EXPECTED_COMMIT"
+    install -d -o root -g "$RUNTIME_GROUP" -m 0755 "$CANDIDATE_RELEASE_DIR"
+    local binary unit
+    for binary in engine engine-tools signal-worker; do
+        if [ -f "$CANDIDATE_RELEASE_DIR/$binary" ]; then
+            cmp -s "$QUALIFIED_RELEASE_DIR/$binary" "$CANDIDATE_RELEASE_DIR/$binary" \
+                || fail "candidate path contains different $binary bytes"
+        else
+            install -o root -g "$RUNTIME_GROUP" -m 0755 \
+                "$QUALIFIED_RELEASE_DIR/$binary" "$CANDIDATE_RELEASE_DIR/$binary" \
+                || fail "cannot stage demo $binary"
+        fi
+    done
+    for unit in liquidity-migration-engine.service liquidity-migration-signal-worker-demo.service; do
+        install -d -m 0755 "$LM_SYSTEMD_UNIT_DIR/$unit.d"
+    done
+    cat > "$LM_SYSTEMD_UNIT_DIR/liquidity-migration-engine.service.d/$SOAK_OVERRIDE" <<EOF
+[Service]
+ExecStart=
+ExecStart=$CANDIDATE_RELEASE_DIR/engine run --config \${ENGINE_CONFIG_FILE}
+EOF
+    cat > "$LM_SYSTEMD_UNIT_DIR/liquidity-migration-signal-worker-demo.service.d/$SOAK_OVERRIDE" <<EOF
+[Service]
+ExecStart=
+ExecStart=$CANDIDATE_RELEASE_DIR/signal-worker live --signal-config \${SIGNAL_WORKER_CONFIG_FILE} --long-rule \${LONG_NATIVE_RULE_FILE} --carry-config \${CARRY_SIGNAL_CONFIG_FILE} --operational-config \${OPERATIONAL_PROFILE_FILE} --engine-config \${ENGINE_CONFIG_FILE} --spool-dir \${SIGNAL_WORKER_SPOOL_DIR} --state-dir \${SIGNAL_WORKER_STATE_DIR} --heartbeat \${SIGNAL_WORKER_HEARTBEAT_FILE}
+EOF
+}
+
+clear_realm_soak_overrides() {
+    local realm="$1" unit
+    for unit in "$(lm_owner_unit "$realm")" "$(lm_signal_worker_unit "$realm")"; do
+        rm -f -- "$LM_SYSTEMD_UNIT_DIR/$unit.d/$SOAK_OVERRIDE"
+    done
+    systemctl daemon-reload || fail "cannot activate the qualified $realm restart paths"
+    if [ "$realm" = mainnet ]; then rm -rf -- "$RELEASE_DIR/incumbent-mainnet"; fi
+}
+
+clear_demo_candidate_override() { clear_realm_soak_overrides demo; }
+
+demo_candidate_running() {
+    local pid
+    pid="$(systemctl show --property=MainPID --value liquidity-migration-engine.service)"
+    [ "${pid:-0}" != 0 ] && cmp -s "/proc/$pid/exe" "$CANDIDATE_RELEASE_DIR/engine"
+}
+
+wait_demo_soak() {
+    (
+        lm_load_private_systemd_environment "$PYTHON" "$NOTIFICATIONS_ENVIRONMENT" \
+            TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID TELEGRAM_CONTROL_USER_IDS
+        lm_load_private_systemd_environment "$PYTHON" "$ONCALL_ENVIRONMENT" \
+            INCIDENT_ROUTINE_FIRE_URL INCIDENT_ROUTINE_FIRE_TOKEN ONCALL_DEADMAN_URL
+        "$PYTHON" "$REPO_DIR/scripts/runtime/check_fleet_liveness.py" \
+            --account-scope demo --require-oncall --demo-soak
+    ) || fail "demo soak refused; incumbent mainnet restart paths remain pinned"
 }
 
 install_release() {
@@ -1033,6 +1179,7 @@ handover_realm() {
     local realm="$1"
     if ! (
         stop_realm_units "$realm" \
+            && { [ "$realm" != mainnet ] || clear_realm_soak_overrides mainnet; } \
             && retire_legacy_signal_sources "$realm" \
             && import_native_strategy_state "$realm" \
             && clear_reconciliation_if_requested "$realm" \
@@ -1138,6 +1285,7 @@ PY
 deploy_mode() {
     seed_generation_record
     build_engine
+    pin_mainnet_runtime
     fetch_exact_commit
     # Re-read the manifest helpers from the exact commit this run installs. A
     # commit from before the independent lifecycle has no helper for it, and a
@@ -1148,28 +1296,26 @@ deploy_mode() {
     ensure_runtime_identities
     install_python_environment
     seed_realm_fingerprints
-    # Both realms keep running while the release lands on disk. A realm is
-    # handed over only when what it runs from changed; otherwise it is left
-    # trading and picks the new binary up at its own next restart.
-    install_release
+    stage_demo_candidate
+    ENGINE_BINARY="$CANDIDATE_RELEASE_DIR/engine"
     prepare_oncall_inputs
     install_units
     start_independent_units
     prepare_demo_inputs
-    if realm_unchanged demo; then
+    if realm_unchanged demo && demo_candidate_running; then
         echo "demo-ok result=unchanged-left-running"
     else
         handover_realm demo
     fi
+    wait_demo_soak
+    ENGINE_BINARY="$RELEASE_DIR/bin/engine"
+    install_release
+    clear_demo_candidate_override
     if mainnet_armed; then
-        # provision_mainnet renders the funded config with the binary
-        # install_release just put down, so it cannot move above it. The cost is
-        # a window where the funded engine still runs the old binary and old
-        # config while both new ones sit on disk; Restart=always means a crash
-        # in that window restarts it on the new binary against the old config.
         echo "staging mainnet configuration while live engine continues trading"
         provision_mainnet
         if realm_unchanged mainnet; then
+            clear_realm_soak_overrides mainnet
             echo "mainnet-ok result=unchanged-left-running"
         else
             echo "atomic mainnet handover: swapping binaries and state"

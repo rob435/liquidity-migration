@@ -11,7 +11,8 @@ mod recovery;
 use crate::realm_credentials::InventoryCredentials;
 use crate::RealmCredentials;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
@@ -2074,7 +2075,7 @@ mod tests {
         assert_eq!(tif_str(TimeInForce::PostOnly), "PostOnly");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_wait_reported_is_the_wait_that_was_actually_paid() {
         // The mark separates pacing this engine chose from latency the venue
         // imposed, so it has to be the real figure: zero when nothing was
@@ -2092,7 +2093,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_command_that_never_reserved_carries_no_earlier_commands_wait() {
         // Taking the mark clears it, and a send that is refused before it
         // reserves clears it too. Otherwise a batch rejected on its size would

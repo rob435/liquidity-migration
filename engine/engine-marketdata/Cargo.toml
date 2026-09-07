@@ -7,9 +7,18 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["bybit"]
+bybit = ["engine-public/bybit"]
+binance = ["engine-public/binance"]
+hyperliquid = ["engine-public/hyperliquid"]
+lighter = ["engine-public/lighter"]
+mexc = ["engine-public/mexc"]
+variational = ["engine-public/variational"]
+
 [dependencies]
 engine-types = { workspace = true }
-engine-public = { workspace = true }
+engine-public = { workspace = true, default-features = false }
 futures-util = { workspace = true }
 # The TLS provider tokio-tungstenite leaves for the caller to choose. Same
 # provider engine-venue already picked, so the workspace links one.
@@ -19,3 +28,6 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "macros", "sync"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

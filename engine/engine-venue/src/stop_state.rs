@@ -1,4 +1,6 @@
-use crate::wire::{Field, Id};
+use crate::wire::Field;
+#[cfg(feature = "mexc")]
+use crate::wire::Id;
 use engine_public::numeric_wire::{DecimalField, IntegerField};
 use engine_types::numeric::Exact;
 use engine_types::{Side, VenueError};
@@ -20,6 +22,7 @@ fn one(rows: impl Iterator<Item = (Side, Exact)>) -> Result<(Side, Exact), Venue
     }
     Ok(first)
 }
+#[cfg(any(feature = "binance", feature = "hyperliquid"))]
 fn signed(value: Exact) -> (Side, Exact) {
     (
         if value.is_negative() {
@@ -31,6 +34,7 @@ fn signed(value: Exact) -> (Side, Exact) {
     )
 }
 
+#[cfg(feature = "hyperliquid")]
 pub(crate) fn hyperliquid(raw: &str, coin: &str) -> Result<(Side, Exact), VenueError> {
     #[derive(Deserialize)]
     struct State {
@@ -61,6 +65,7 @@ pub(crate) fn hyperliquid(raw: &str, coin: &str) -> Result<(Side, Exact), VenueE
     one(rows.into_iter())
 }
 
+#[cfg(feature = "lighter")]
 pub(crate) fn lighter(
     raw: &str,
     index: i16,
@@ -134,6 +139,7 @@ pub(crate) fn lighter(
     one(out.into_iter())
 }
 
+#[cfg(feature = "bybit")]
 pub(crate) fn bybit(raw: &str, symbol: &str) -> Result<(Side, Exact), VenueError> {
     #[derive(Deserialize)]
     struct Reply {
@@ -192,6 +198,7 @@ pub(crate) fn bybit(raw: &str, symbol: &str) -> Result<(Side, Exact), VenueError
     one(out.into_iter())
 }
 
+#[cfg(feature = "mexc")]
 pub(crate) fn mexc(raw: &str, symbol: &str) -> Result<(String, Side), VenueError> {
     #[derive(Deserialize)]
     struct Reply {
@@ -247,6 +254,7 @@ pub(crate) fn mexc(raw: &str, symbol: &str) -> Result<(String, Side), VenueError
     Ok(out.remove(0))
 }
 
+#[cfg(feature = "binance")]
 pub(crate) fn binance(raw: &str, symbol: &str) -> Result<(Side, Exact), VenueError> {
     #[derive(Deserialize)]
     struct Account {

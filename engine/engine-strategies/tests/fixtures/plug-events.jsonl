@@ -1,0 +1,17 @@
+{"kind":"boot"}
+{"kind":"quote","bid":99.0,"ask":101.0}
+{"kind":"depth","bid":99.5,"ask":100.5,"quantity":4.0}
+{"kind":"trades","buy":3.0,"sell":1.0,"price":100.5}
+{"kind":"timer","id":1}
+{"kind":"refused","reduce_only":false}
+{"kind":"reject"}
+{"kind":"timer","id":2}
+{"kind":"signal","payload":"{}"}
+{"kind":"entry_permission","enabled":false}
+{"kind":"feed_reset"}
+{"kind":"quote","bid":98.0,"ask":100.0}
+{"kind":"flatten"}
+{"kind":"timer","id":1128354393}
+{"kind":"timer","id":1280265799}
+{"kind":"timer","id":1163415364}
+{"kind":"entry_permission","enabled":true}

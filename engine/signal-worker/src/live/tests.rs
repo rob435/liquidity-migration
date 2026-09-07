@@ -240,7 +240,7 @@ fn a_cold_start_still_filling_ticker_coverage_is_starting_not_degraded() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_live_epoch_adopts_the_repair_already_started_at_boot() {
     let root = temporary_root("repair-adopts-epoch");
     let _ = std::fs::remove_dir_all(&root);
@@ -267,7 +267,7 @@ async fn a_live_epoch_adopts_the_repair_already_started_at_boot() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_repair_restarted_without_an_epoch_keeps_the_live_one() {
     // The carry catch-up and the instrument lane restart the repair lane
     // with no epoch, and only `mark_gap_repaired(epoch)` closes the
@@ -328,7 +328,7 @@ async fn a_repair_restarted_without_an_epoch_keeps_the_live_one() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_heartbeat_publishes_the_frame_age_limit_it_judges_itself_by() {
     // `stream_transport_healthy` decides `degraded` on the frame age and
     // the kline topic count. A reader that cannot see the limit cannot
@@ -562,7 +562,7 @@ fn unaligned_cold_bootstrap_whale_bounds_keep_the_floor_point_fetchable() {
     .unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn repair_fetch_waits_for_commit_ack_before_retaining_the_next_result() {
     assert_eq!(LANE_COMPLETION_QUEUE_CAPACITY, 1);
 
@@ -608,7 +608,7 @@ async fn repair_fetch_waits_for_commit_ack_before_retaining_the_next_result() {
     assert!(!producer.await.expect("repair producer joins"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn whale_fetch_waits_for_commit_ack_before_retaining_the_next_result() {
     assert_eq!(LANE_COMPLETION_QUEUE_CAPACITY, 1);
 
@@ -655,7 +655,7 @@ async fn whale_fetch_waits_for_commit_ack_before_retaining_the_next_result() {
     assert!(!producer.await.expect("whale producer joins"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn malformed_source_lanes_retry_without_stopping_long() {
     let root = temporary_root("lane-source-errors");
     let _ = std::fs::remove_dir_all(&root);
@@ -875,7 +875,7 @@ async fn malformed_source_lanes_retry_without_stopping_long() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_instrument_refresh_held_off_by_funding_starts_when_that_pass_ends() {
     let root = temporary_root("instrument-cadence-deferred");
     let _ = std::fs::remove_dir_all(&root);
@@ -928,7 +928,7 @@ async fn an_instrument_refresh_held_off_by_funding_starts_when_that_pass_ends() 
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn malformed_websocket_rows_open_a_repairable_gap_without_stopping_long() {
     let root = temporary_root("websocket-source-errors");
     let _ = std::fs::remove_dir_all(&root);
@@ -997,7 +997,7 @@ async fn malformed_websocket_rows_open_a_repairable_gap_without_stopping_long() 
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn revised_source_history_is_rejected_before_durable_mutation() {
     let root = temporary_root("lane-source-rewrite");
     let _ = std::fs::remove_dir_all(&root);
@@ -1190,7 +1190,7 @@ async fn revised_source_history_is_rejected_before_durable_mutation() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn durable_lane_commit_error_still_terminates_the_shared_loop() {
     let root = temporary_root("lane-durable-error");
     let _ = std::fs::remove_dir_all(&root);
@@ -1765,7 +1765,7 @@ fn the_gate_file_is_read_whole_and_an_absent_one_is_nothing() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn live_startup_waits_for_named_destinations_and_the_durable_successor_grant() {
     use engine_types::{
         ManagedSignalSource, SignalGenerationState, SignalLifecycleRequest,
@@ -1906,7 +1906,7 @@ async fn live_startup_waits_for_named_destinations_and_the_durable_successor_gra
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_universe_refresh_hands_the_replacement_stream_the_old_transport_history() {
     // The hourly instrument lane replaces the stream whenever membership
     // moves. The gap stamp and the fault clocks belong to the process, not

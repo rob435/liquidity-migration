@@ -824,6 +824,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             })?;
         }
         let queued_ns = clock::now_ns();
+        self.flush_strategy_prefix()?;
         let command_id = self.venue.dispatch_cancels(requests.clone())?;
         self.mark_symbols_busy(requests.iter().map(|(symbol, _)| *symbol));
         self.pending_mutations.insert(
@@ -1185,7 +1186,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             (&range.low, &range.high),
             &self.books.account,
         );
-        let barrier = self.wal.barrier_begin()?;
+        let barrier = self.begin_dispatch_barrier()?;
         self.dispatches.begin(
             crate::order_dispatch::DispatchWrite::Amend(Box::new(
                 crate::order_dispatch::DurableAmend {
@@ -1317,21 +1318,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let callbacks = self
             .host
             .callbacks
-            .isolated()
+            .recovering
             .then(|| self.order_callback_owners(&update));
         if callbacks.is_some() {
             self.ensure_callback_reader(&[])?;
         }
-        if Self::journal_fast_execution(&update, &mut self.wal)? {
+        if matches!(update, OrderUpdate::FastFill { .. }) {
             let offset = self.wal.segment_size();
-            let sequence = if callbacks.is_some() {
-                self.wal.append(&WalRecord::OrderUpdate {
-                    callbacks: callbacks.clone(),
-                    update: update.clone(),
-                })?
-            } else {
-                0
-            };
+            let sequence = self.wal.append(&WalRecord::OrderUpdate {
+                callbacks: callbacks.clone(),
+                update: update.clone(),
+            })?;
             self.route_order_update(update, sequence, offset, callbacks.as_deref())?;
             return Ok(());
         }
@@ -1366,37 +1363,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         self.route_order_update(update, sequence, offset, callbacks.as_deref())?;
         Ok(())
-    }
-
-    fn journal_fast_execution(update: &OrderUpdate, wal: &mut W) -> Result<bool, EngineError> {
-        if let OrderUpdate::FastFill {
-            exec_id,
-            client_order_id,
-            venue_order_id,
-            symbol,
-            side,
-            qty,
-            px,
-            is_maker,
-            venue_ts_ms,
-            recv_ns,
-        } = update
-        {
-            wal.append(&WalRecord::FastExecution {
-                exec_id: exec_id.clone(),
-                client_order_id: client_order_id.clone(),
-                venue_order_id: venue_order_id.clone(),
-                symbol: *symbol,
-                side: *side,
-                qty: *qty,
-                px: *px,
-                is_maker: *is_maker,
-                venue_ts_ms: *venue_ts_ms,
-                recv_ns: *recv_ns,
-            })?;
-            return Ok(true);
-        }
-        Ok(false)
     }
 
     fn journal_update(
@@ -1885,47 +1851,23 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let owners = callbacks
             .map(<[StrategyId]>::to_vec)
             .unwrap_or_else(|| self.order_callback_owners(&update));
-        let ready: Vec<_> = owners
-            .iter()
-            .copied()
-            .filter(|owner| {
-                !self.host.callbacks.pending_for(*owner)
-                    && !self.host.callbacks.order_news.unread_for(*owner)
-            })
-            .collect();
         if callbacks.is_some() {
             self.host
                 .callbacks
                 .order_news
                 .record_at(sequence, offset, &owners)
                 .map_err(EngineError::State)?;
+            return Ok(());
         }
         for owner in owners {
-            let view = crate::strategy_process::order_news::OrderNews::slice(&update, owner)
+            let view = crate::callback_recovery::order_news::OrderNews::slice(&update, owner)
                 .map_err(EngineError::State)?;
-            if callbacks.is_some() {
-                if !ready.contains(&owner) {
-                    continue;
-                }
-                let origin = self
-                    .host
-                    .callbacks
-                    .order_news
-                    .origin(sequence)
-                    .map_err(EngineError::State)?;
-                if let Err(crate::strategy_process::host::EnqueueError::Fault(error)) =
-                    self.host.callbacks.enqueue_order(owner, view, origin)
-                {
-                    self.host.callbacks.faults.insert(owner, error);
-                }
-            } else {
-                self.host.feed(
-                    &self.books,
-                    owner,
-                    &EngineEvent::Order(view),
-                    clock::now_ns(),
-                );
-            }
+            self.host.feed(
+                &self.books,
+                owner,
+                &EngineEvent::Order(view),
+                clock::now_ns(),
+            );
         }
         Ok(())
     }

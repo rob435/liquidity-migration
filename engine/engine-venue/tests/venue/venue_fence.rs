@@ -24,6 +24,7 @@
 //! Every needle below is assembled from fragments at runtime, so this file
 //! never contains a hostname of its own for the scan to trip over.
 
+#[cfg(all(feature = "hyperliquid", feature = "lighter"))]
 use engine_venue::RealmCredentials;
 use std::path::{Path, PathBuf};
 
@@ -264,9 +265,12 @@ fn testnet_and_every_alternate_domain_are_absent() {
 
 #[test]
 fn the_realm_tables_are_the_shipped_ones() {
-    use engine_venue::{
-        BinanceRealm, HyperliquidRealm, LighterRealm, MexcRealm, VariationalRealm, VenueRealm,
-    };
+    use engine_venue::BinanceRealm;
+    use engine_venue::HyperliquidRealm;
+    use engine_venue::LighterRealm;
+    use engine_venue::MexcRealm;
+    use engine_venue::VariationalRealm;
+    use engine_venue::VenueRealm;
 
     let demo_rest = ["https://", &["api-demo", ".bybit", ".com"].concat()].concat();
     let demo_ws = [
@@ -447,7 +451,8 @@ fn every_public_venue_has_a_realm_table_the_fence_reads() {
 fn every_real_money_venue_name_says_that_it_is_real_money() {
     // The string an operator types into engine.toml must not be quietly
     // mistakable for a practice one, and vice versa.
-    use engine_venue::{known_venues, VenueName};
+    use engine_venue::known_venues;
+    use engine_venue::VenueName;
     assert!(!known_venues().is_empty(), "no venue is selectable");
     for name in known_venues() {
         let parsed = VenueName::parse(name).expect(name);
@@ -459,7 +464,9 @@ fn every_real_money_venue_name_says_that_it_is_real_money() {
 
 #[test]
 fn every_known_venue_name_reaches_its_own_adapter() {
-    use engine_venue::{known_venues, Venue, VenueName};
+    use engine_venue::known_venues;
+    use engine_venue::Venue;
+    use engine_venue::VenueName;
     for name in known_venues() {
         // Credentials come from the environment, which a test box may or may
         // not have; either the venue is built or it stops at the credential
@@ -500,7 +507,9 @@ fn every_known_venue_name_reaches_its_own_private_stream() {
     // The other half of the switch. A name whose feed constructor was
     // forgotten would be an engine that sends orders and never hears what
     // happened to them.
-    use engine_venue::{known_venues, OrderFeeds, VenueName};
+    use engine_venue::known_venues;
+    use engine_venue::OrderFeeds;
+    use engine_venue::VenueName;
     for name in known_venues() {
         let chosen = VenueName::parse(name).unwrap();
         match OrderFeeds::build(chosen, vec!["BTCUSDT".to_string()]) {
@@ -530,17 +539,21 @@ fn every_known_venue_name_reaches_its_own_private_stream() {
 
 #[test]
 fn the_demo_credential_variables_are_still_the_demo_ones() {
+    #[cfg(feature = "bybit")]
     assert_eq!(engine_venue::API_KEY_ENV, "BYBIT_DEMO_API_KEY");
+    #[cfg(feature = "bybit")]
     assert_eq!(engine_venue::API_SECRET_ENV, "BYBIT_DEMO_API_SECRET");
 }
 
+#[cfg(all(feature = "hyperliquid", feature = "lighter"))]
 #[test]
 fn a_credential_refusal_never_quotes_the_value_it_refused() {
     // Every venue's two variables sit in one file and all of them hold a hex
     // blob, so pasting one into the other's slot is the likely mistake. A
     // refusal that quoted the value back would then write a private key into
     // stderr and the system journal, where it outlives the process.
-    use engine_venue::{HyperliquidRealm, LighterRealm};
+    use engine_venue::HyperliquidRealm;
+    use engine_venue::LighterRealm;
     let secret = "b21a86da73de9fd10146bff211c12999db2dfe8f51f3dcfdc2d0a7d31ae278b3d1d45ae76717044e";
     for realm in [HyperliquidRealm::Testnet, HyperliquidRealm::Mainnet] {
         let creds = realm.credentials_for_test(secret, secret);
@@ -578,7 +591,8 @@ fn no_two_realms_anywhere_share_a_credential_variable() {
     //
     // Walked from the venue list rather than re-typed, because a second list is what a
     // new venue falls out of without anyone noticing.
-    use engine_venue::{known_venues, VenueName};
+    use engine_venue::known_venues;
+    use engine_venue::VenueName;
     let mut all: Vec<(&str, &str)> = Vec::new();
     for name in known_venues() {
         let (key, secret) = VenueName::parse(name).unwrap().credential_vars();

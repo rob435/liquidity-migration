@@ -155,9 +155,15 @@ impl<W: Wal> Wal for TimedWal<W> {
     fn append(&mut self, record: &WalRecord) -> Result<u64, WalError> {
         let sequence = self.inner.append(record)?;
         let kind = match record {
-            WalRecord::StrategyCallbackQueued { .. } => Some("callback input"),
-            WalRecord::StrategyCallbackPrepared { .. } => Some("callback preparation"),
-            WalRecord::StrategyProcessTransitionQueued { .. } => Some("callback commit"),
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::StrategyCallbackQueued {
+                ..
+            }) => Some("callback input"),
+            WalRecord::Retained(
+                engine_types::wal::RetainedWalRecord::StrategyCallbackPrepared { .. },
+            ) => Some("callback preparation"),
+            WalRecord::Retained(
+                engine_types::wal::RetainedWalRecord::StrategyProcessTransitionQueued { .. },
+            ) => Some("callback commit"),
             WalRecord::OrderSent {
                 dispatch: Some(_), ..
             }

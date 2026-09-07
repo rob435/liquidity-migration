@@ -120,10 +120,10 @@ mod tests {
             observation.content_sha256 = crate::signals::content_sha256(&observation);
             let (mut writer, _) = engine_wal::open_current(&wal).unwrap();
             for row in [
-                WalRecord::Names {
+                WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
                     strategies: vec!["quote_taker".into()],
                     symbols: vec![],
-                },
+                }),
                 WalRecord::SignalObservation {
                     wall_ts_ms: 2,
                     observation,
@@ -136,7 +136,7 @@ mod tests {
                     observation_id: "accepted-five".into(),
                 },
             ] {
-                writer.append(&row).unwrap();
+                crate::testpath::append_history(&mut writer, &wal, &row).unwrap();
             }
             writer.barrier().unwrap();
             Self {

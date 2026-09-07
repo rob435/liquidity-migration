@@ -33,9 +33,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if ids.is_empty() {
             return Ok(false);
         }
-        let barrier = self.wal.barrier_begin()?;
-        self.dispatches.begin(DispatchWrite::Queue(ids), barrier);
+        self.begin_order_attempt(ids)?;
         Ok(true)
+    }
+
+    fn begin_order_attempt(&mut self, ids: Vec<String>) -> Result<(), EngineError> {
+        for id in &ids {
+            self.wal.append(&WalRecord::OrderDispatchAttempted {
+                client_order_id: id.clone(),
+            })?;
+        }
+        let barrier = self.begin_dispatch_barrier()?;
+        self.dispatches.begin(DispatchWrite::Attempt(ids), barrier);
+        Ok(())
     }
 
     pub(super) async fn service_order_dispatches(&mut self) -> Result<(), EngineError> {
@@ -64,8 +74,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .map(|(id, _)| id.clone())
                 .collect();
             if !queued.is_empty() {
-                let barrier = self.wal.barrier_begin()?;
-                self.dispatches.begin(DispatchWrite::Queue(queued), barrier);
+                self.begin_order_attempt(queued)?;
             }
         }
         let now = clock::now_ns();
@@ -154,6 +163,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             task: EngineTask::DispatchDurability,
             detail: "",
         })??;
+        for owner in std::mem::take(&mut self.dispatches.strategy_runtime_retirements) {
+            self.host.callbacks.state.forget_process(owner);
+        }
         self.ledger.record(
             Segment::BarrierWait,
             clock::now_ns().saturating_sub(self.dispatches.barrier_started_ns),
@@ -167,23 +179,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             DispatchWrite::Portfolio => self.service_portfolio_controls().await?,
             DispatchWrite::Stop(stops) => self.dispatch_durable_stops(stops)?,
             DispatchWrite::Amend(amend) => self.dispatch_durable_amend(*amend)?,
-            DispatchWrite::Queue(ids) => {
-                let mut authorized = Vec::new();
-                for id in ids {
-                    if self.refuse_changed_dispatch(&id).await? {
-                        continue;
-                    }
-                    self.wal.append(&WalRecord::OrderDispatchAttempted {
-                        client_order_id: id.clone(),
-                    })?;
-                    authorized.push(id);
-                }
-                if !authorized.is_empty() {
-                    let barrier = self.wal.barrier_begin()?;
-                    self.dispatches
-                        .begin(DispatchWrite::Attempt(authorized), barrier);
-                }
-            }
             DispatchWrite::Attempt(ids) => {
                 let mut requests = Vec::new();
                 let mut timings = Vec::new();
@@ -824,56 +819,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
-    #[tokio::test(start_paused = true)]
-    async fn an_allocating_callback_cannot_hold_private_updates_or_a_committed_reduction() {
-        let (mut engine, records) = fixture().await;
-        let prepared = prepared_order(&mut engine, "independent-exit");
-        let mut command = std::process::Command::new("python3");
-        command.arg("-c").arg(include_str!(
-            "../../tests/fixtures/strategy-allocation-flood.py"
-        ));
-        let process = crate::strategy_process::StrategyProcess::spawn_command(command).unwrap();
-        let request = engine_types::strategy_process::CallbackRequest {
-            schema_version: engine_types::strategy_process::STRATEGY_PROCESS_SCHEMA,
-            callback_id: 1,
-            state: engine.host.strategies[0].runtime_state().unwrap().unwrap(),
-            event: engine_types::strategy_process::CallbackEvent::Boot,
-            snapshot: engine
-                .host
-                .snapshot(&engine.books, StrategyId(0), clock::now_ns())
-                .unwrap(),
-        };
-        let callback = process.call(request, Duration::from_secs(10));
-        let independent = async {
-            engine
-                .take_update(OrderUpdate::Ack(engine_types::OrderAck {
-                    client_order_id: "independent-private".into(),
-                    venue_order_id: "private".into(),
-                    sent_ns: 1,
-                    ack_ns: 2,
-                }))
-                .await
-                .unwrap();
-            engine.queue_order_dispatches(vec![prepared]).unwrap();
-            for _ in 0..2 {
-                let result = engine.dispatches.durable.recv().await;
-                engine.on_order_dispatch_durable(result).await.unwrap();
-            }
-            let completion =
-                tokio::time::timeout(Duration::from_secs(1), engine.venue_completions.recv())
-                    .await
-                    .unwrap()
-                    .unwrap();
-            engine.take_venue_completion(completion).await.unwrap();
-            assert!(engine.dispatches.orders.is_empty());
-            assert!(records.lock().unwrap().iter().any(|record| matches!(record, WalRecord::OrderUpdate { update: OrderUpdate::Ack(ack), .. } if ack.client_order_id == "independent-exit")));
-        };
-        let (callback, ()) = tokio::join!(callback, independent);
-        assert!(callback.is_err(), "the callback escaped its memory owner");
-        assert!(records.lock().unwrap().iter().any(|record| matches!(record, WalRecord::OrderUpdate { update: OrderUpdate::Ack(ack), .. } if ack.client_order_id == "independent-private")));
-    }
-
     #[tokio::test(start_paused = true)]
     async fn an_order_sent_record_also_owns_its_unsent_dispatch_at_the_crash_cut() {
         let (mut engine, records) = fixture().await;
@@ -926,7 +871,7 @@ mod tests {
     async fn a_failed_order_dispatch_barrier_never_reaches_the_venue() {
         let (mut engine, _) = fixture().await;
         let prepared = prepared_order(&mut engine, "queued-fail");
-        engine.wal.fail_barrier_after = Some("order_sent");
+        engine.wal.fail_barrier_after = Some("order_dispatch_attempted");
         assert!(engine.queue_order_dispatches(vec![prepared]).is_err());
         assert!(engine.pending_mutations.is_empty());
         assert_eq!(
@@ -967,7 +912,13 @@ mod tests {
         engine.on_order_dispatch_durable(result).await.unwrap();
         assert!(engine.dispatches.orders.is_empty());
         assert!(engine.pending_mutations.is_empty());
-        assert!(!records.lock().unwrap().iter().any(|record| matches!(record, WalRecord::OrderDispatchAttempted { client_order_id } if client_order_id == "queued-slow")));
+        assert!(records.lock().unwrap().iter().any(|record| matches!(record, WalRecord::OrderDispatchAttempted { client_order_id } if client_order_id == "queued-slow")));
+        assert!(
+            crate::order_dispatch::OrderDispatches::replay(&records.lock().unwrap())
+                .unwrap()
+                .orders
+                .is_empty()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -975,10 +926,8 @@ mod tests {
         let (mut engine, _) = fixture().await;
         let prepared = prepared_order(&mut engine, "lost-send-reply");
         engine.queue_order_dispatches(vec![prepared]).unwrap();
-        for _ in 0..2 {
-            let result = engine.dispatches.durable.recv().await;
-            engine.on_order_dispatch_durable(result).await.unwrap();
-        }
+        let result = engine.dispatches.durable.recv().await;
+        engine.on_order_dispatch_durable(result).await.unwrap();
         let mut completion = engine.venue_completions.recv().await.unwrap();
         if let MutationCompletion::Orders { replies, .. } = &mut completion {
             *replies = vec![Err(VenueError::Transport(
@@ -1013,8 +962,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn queued_restart_sends_once_but_attempted_unknown_restart_never_resends() {
         let (mut engine, records) = fixture().await;
-        let prepared = prepared_order(&mut engine, "queued-restart");
-        engine.queue_order_dispatches(vec![prepared]).unwrap();
+        let _prepared = prepared_order(&mut engine, "queued-restart");
         let queued_records = records.lock().unwrap().clone();
         engine.dispatches =
             crate::order_dispatch::OrderDispatches::replay(&queued_records).unwrap();

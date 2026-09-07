@@ -147,11 +147,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     /// Journal state/control actions before anything later in the same reducer
     /// wake can touch the venue. `Ok(Some(action))` is an ordinary venue action.
-    fn handle_durable_action(
-        &mut self,
-        action: Action,
-        process_committed: bool,
-    ) -> Result<Option<Action>, EngineError> {
+    fn handle_durable_action(&mut self, action: Action) -> Result<Option<Action>, EngineError> {
         match action {
             Action::RecordQuoteFill { features } => {
                 self.wal.append(&WalRecord::QuoteFill { features })?;
@@ -190,9 +186,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         symbol,
                         checkpoint: checkpoint.clone(),
                     })?;
-                    if !process_committed {
-                        self.wal.barrier()?;
-                    }
+                    self.strategy_barrier_pending = true;
                     self.host.checkpoints.insert(key, checkpoint);
                 }
                 Ok(None)
@@ -238,9 +232,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         checkpoint,
                         provenance: None,
                     })?;
-                    if !process_committed {
-                        self.wal.barrier()?;
-                    }
+                    self.strategy_barrier_pending = true;
                     self.host.global_checkpoints.insert(strategy, state);
                 }
                 Ok(None)
@@ -261,9 +253,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     wall_ts_ms: clock::wall_ms(),
                     event: event.clone(),
                 })?;
-                if !process_committed {
-                    self.wal.barrier()?;
-                }
+                self.strategy_barrier_pending = true;
                 self.host.events.insert(key, event.clone());
                 let destination = event.destination;
                 self.feed_one_strategy(
@@ -294,9 +284,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     destination,
                     event_id,
                 })?;
-                if !process_committed {
-                    self.wal.barrier()?;
-                }
+                self.strategy_barrier_pending = true;
                 self.host.events.remove(&key);
                 Ok(None)
             }
@@ -320,9 +308,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     sequence,
                     observation_id,
                 })?;
-                if !process_committed {
-                    self.wal.barrier()?;
-                }
+                self.strategy_barrier_pending = true;
                 self.signals.consume(&source, sequence);
                 Ok(None)
             }
@@ -348,9 +334,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     observation_id,
                     reason,
                 })?;
-                if !process_committed {
-                    self.wal.barrier()?;
-                }
+                self.strategy_barrier_pending = true;
                 self.signals.consume(&source, sequence);
                 Ok(None)
             }
@@ -384,9 +368,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     strategy,
                     request_id: request_id.clone(),
                 })?;
-                if !process_committed {
-                    self.wal.barrier()?;
-                }
+                self.strategy_barrier_pending = true;
                 self.runtime_control_consumed.insert(key);
                 Ok(None)
             }
@@ -564,7 +546,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         for slot in &mut due {
             let callbacks = &self.host.callbacks;
             let Some(timer) = self.host.timers.pop_due_for(now, |strategy| {
-                !callbacks.isolated() || callbacks.timer_ready(strategy)
+                callbacks.is_active(strategy) && !callbacks.faults.contains_key(&strategy)
             }) else {
                 break;
             };
@@ -905,8 +887,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // before the barrier that owns its publication has completed.
         if self.rotate_after_bytes > 0
             && self.wal.segment_size() >= self.rotate_after_bytes
-            && self.host.callbacks.write.is_none()
-            && self.host.callbacks.unwritten.is_empty()
             && !self.host.callbacks.order_news.pending()
             && !self.host.callbacks.pages.loading()
             && self.dispatches.write.is_none()
@@ -918,13 +898,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             for id in pending {
                 self.journal_transition(id)?;
             }
+            self.flush_strategy_prefix()?;
             let base = self.rotation_base(clock::wall_ms());
             if self.wal.rotate(&base)? {
                 self.books
                     .orders
                     .try_apply(&base)
                     .map_err(EngineError::State)?;
-                if self.host.callbacks.isolated() {
+                if self.host.callbacks.order_news.has_reader() {
                     let reader = self.wal.callback_reader()?.ok_or_else(|| {
                         EngineError::State("rotated WAL lost its callback reader".into())
                     })?;
@@ -1004,7 +985,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.service_order_lineage().await?;
         self.service_order_dispatches().await?;
         self.service_portfolio_controls().await?;
-        self.service_strategy_callbacks()?;
         self.pull_unconfirmed_amends()?;
         let mut progress = self.drain_progress.take().unwrap_or(DrainProgress {
             origin_ns,
@@ -1109,19 +1089,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     callback_id,
                     timing,
                 } = pending;
-                let process_committed = effect.is_some_and(|key| {
-                    self.host
-                        .effects
-                        .transitions
-                        .get(&key.transition_id)
-                        .is_some_and(|transition| {
-                            matches!(
-                                transition.origin,
-                                engine_types::wal::StrategyTransitionOrigin::Process { .. }
-                            )
-                        })
-                });
-                let Some(action) = self.handle_durable_action(action, process_committed)? else {
+                let Some(action) = self.handle_durable_action(action)? else {
                     self.complete_effect(effect)?;
                     continue;
                 };
@@ -1262,6 +1230,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 break;
             }
         }
+        self.flush_strategy_prefix()?;
         self.park_dispatch_wake(&progress);
         if progress.adding_dropped > 0 {
             tracing::error!(
@@ -1326,6 +1295,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// its durability barrier); this only keeps the flood counters and
     /// latency origin while the run loop polls account-safety inputs.
     async fn pause_drain(&mut self, progress: DrainProgress) -> Result<(), EngineError> {
+        self.flush_strategy_prefix()?;
         self.drain_progress = Some(progress);
         tokio::task::yield_now().await;
         Ok(())

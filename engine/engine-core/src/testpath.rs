@@ -45,3 +45,33 @@ pub fn temp_path(tag: &str) -> TempPath {
     let _ = std::fs::remove_file(&path);
     TempPath(path)
 }
+
+/// Frame historical fixtures without giving the current writer a retired write path.
+pub fn append_history(
+    wal: &mut engine_wal::WalWriter,
+    family: &Path,
+    record: &engine_types::WalRecord,
+) -> Result<u64, engine_types::WalError> {
+    use engine_types::{Wal, WalRecord};
+    use std::io::Write;
+
+    if !matches!(record, WalRecord::Retained(_)) {
+        return wal.append(record);
+    }
+    wal.barrier()?;
+    let sequence = wal.next_seq();
+    let segment = wal.callback_reader()?.unwrap().start().segment;
+    let path = engine_wal::segments(family)?
+        .into_iter()
+        .find(|(index, _)| *index == segment)
+        .unwrap()
+        .1;
+    let payload = serde_json::to_vec(record).unwrap();
+    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    file.write_all(&(payload.len() as u32).to_le_bytes())?;
+    file.write_all(&crc32c::crc32c(&payload).to_le_bytes())?;
+    file.write_all(&payload)?;
+    file.sync_data()?;
+    *wal = engine_wal::open_current(family)?.0;
+    Ok(sequence)
+}

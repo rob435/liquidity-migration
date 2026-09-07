@@ -16,10 +16,10 @@ fn quick_tick() -> EngineSection {
 }
 
 fn names() -> WalRecord {
-    WalRecord::Names {
+    WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
         strategies: vec!["buyer".to_string()],
         symbols: vec!["BTCUSDT".to_string()],
-    }
+    })
 }
 
 fn sent(id: &str, side: Side, qty: f64) -> WalRecord {
@@ -351,41 +351,48 @@ async fn boot_restores_the_segments_window_before_the_segments_own_closes() {
     assert!(matches!(calls[2], RollingLossCall::Clock(_)));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn every_fresh_account_reading_ages_the_window() {
-    // Nothing closes here on purpose: without a clock of its own the window
-    // would hold a losing day forever.
-    let mut refresh_every_tick = quick_tick();
-    refresh_every_tick.account_view_max_age_ms = 0;
-    let (idle, _heard) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
-    let (mut engine, h) = build_with(
-        &refresh_every_tick,
-        allow_all(),
-        vec![Box::new(idle)],
-        &["BTCUSDT"],
-        &[],
-        Vec::new(),
-    )
-    .await;
-    let at_boot = h.risk_rolling.calls().len();
-    let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    engine
-        .run(
-            &mut ScriptFeed::quotes(symbol, 1, false),
-            &mut ScriptOrderFeed::empty(),
-            tokio::time::sleep(Duration::from_millis(40)),
+    crate::test_clock::with_engine_clock(async {
+        // Nothing closes here on purpose: without a clock of its own the window
+        // would hold a losing day forever.
+        let mut refresh_every_tick = quick_tick();
+        refresh_every_tick.account_view_max_age_ms = 0;
+        let (idle, _heard) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+        let (mut engine, h) = build_with(
+            &refresh_every_tick,
+            allow_all(),
+            vec![Box::new(idle)],
+            &["BTCUSDT"],
+            &[],
+            Vec::new(),
         )
-        .await
-        .unwrap();
+        .await;
+        let at_boot = h.risk_rolling.calls().len();
+        let symbol = engine.market().table.get("BTCUSDT").unwrap();
+        engine
+            .run(
+                &mut ScriptFeed::quotes(symbol, 1, false),
+                &mut ScriptOrderFeed::empty(),
+                async {
+                    while h.risk_rolling.calls().len() == at_boot {
+                        tokio::task::yield_now().await;
+                    }
+                },
+            )
+            .await
+            .unwrap();
 
-    let after: Vec<RollingLossCall> = h.risk_rolling.calls().split_off(at_boot);
-    assert!(
-        !after.is_empty()
-            && after.iter().all(|call| {
-                matches!(call, RollingLossCall::Clock(wall_ms) if *wall_ms > 1_700_000_000_000)
-            }),
-        "the run's account readings age the window and nothing else: {after:?}"
-    );
+        let after: Vec<RollingLossCall> = h.risk_rolling.calls().split_off(at_boot);
+        assert!(
+            !after.is_empty()
+                && after.iter().all(|call| {
+                    matches!(call, RollingLossCall::Clock(wall_ms) if *wall_ms > 1_700_000_000_000)
+                }),
+            "the run's account readings age the window and nothing else: {after:?}"
+        );
+    })
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -487,10 +494,10 @@ async fn the_shipped_kernel_refuses_the_next_entry_and_still_lets_the_exit_out()
     // The whole path, with the engine's own gate in place of the mock: a log
     // whose closed trips are past the limit, read back at boot.
     let log = vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["buyer".to_string(), "exiter".to_string()],
             symbols: vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
-        },
+        }),
         sent("eng-1", Side::Buy, 10.0),
         filled("eng-1", Side::Buy, 10.0, 100.0, recent_replay_ms()),
         sent("eng-2", Side::Sell, 10.0),

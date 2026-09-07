@@ -9,10 +9,10 @@ fn scope(environment: &str) -> InstrumentScope {
 }
 
 fn names(sleeves: &[&str], symbols: &[&str]) -> WalRecord {
-    WalRecord::Names {
+    WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
         strategies: sleeves.iter().map(|value| (*value).into()).collect(),
         symbols: symbols.iter().map(|value| (*value).into()).collect(),
-    }
+    })
 }
 
 fn registry(state: IdentityState) -> WalRecord {

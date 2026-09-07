@@ -378,8 +378,9 @@ async fn a_frame_split_by_a_dropped_future_is_still_one_frame() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_client_that_dies_mid_frame_costs_only_its_own_frame() {
+    let _io = crate::test_io::IoProgress::new();
     use std::io::Write;
     use std::os::unix::net::UnixStream;
 

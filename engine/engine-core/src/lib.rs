@@ -9,6 +9,7 @@
 pub mod account_state_bench;
 pub mod assembly;
 pub mod attribution;
+pub mod callback_recovery;
 pub mod clear;
 pub mod clock;
 pub mod config;
@@ -38,7 +39,12 @@ pub mod routing;
 pub mod runner;
 mod signal_state;
 pub mod signals;
-pub mod strategy_process;
+#[cfg(test)]
+#[path = "../../test-support/clock.rs"]
+mod test_clock;
+#[cfg(test)]
+#[path = "../../test-support/io.rs"]
+mod test_io;
 pub mod trades;
 mod venue_runtime;
 pub mod working;

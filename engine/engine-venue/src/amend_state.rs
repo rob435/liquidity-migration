@@ -1,4 +1,5 @@
 use engine_public::numeric_wire::DecimalField;
+#[cfg(any(test, feature = "binance", feature = "hyperliquid"))]
 use engine_types::numeric::{Exact, ExactNumber};
 use engine_types::order_terms::ExactAmendedTerms;
 use engine_types::{OrderUpdate, VenueError};
@@ -28,6 +29,7 @@ fn news(
     })
 }
 
+#[cfg(any(test, feature = "bybit"))]
 pub(crate) fn bybit(raw: &str, id: &str, recv_ns: u64) -> Result<OrderUpdate, VenueError> {
     #[derive(Default, Deserialize)]
     #[serde(default)]
@@ -53,6 +55,7 @@ pub(crate) fn bybit(raw: &str, id: &str, recv_ns: u64) -> Result<OrderUpdate, Ve
     )
 }
 
+#[cfg(any(test, feature = "hyperliquid"))]
 pub(crate) fn hyperliquid(raw: &str, id: &str, recv_ns: u64) -> Result<OrderUpdate, VenueError> {
     #[derive(Default, Deserialize)]
     #[serde(default)]
@@ -73,6 +76,7 @@ pub(crate) fn hyperliquid(raw: &str, id: &str, recv_ns: u64) -> Result<OrderUpda
     )
 }
 
+#[cfg(any(test, feature = "binance"))]
 pub(crate) fn binance(raw: &str, id: &str, recv_ns: u64) -> Result<OrderUpdate, VenueError> {
     #[derive(Default, Deserialize)]
     #[serde(default)]
@@ -99,6 +103,7 @@ pub(crate) fn binance(raw: &str, id: &str, recv_ns: u64) -> Result<OrderUpdate, 
     )
 }
 
+#[cfg(feature = "binance")]
 pub(crate) fn resting_binance(
     raw: &str,
     symbol: &str,
@@ -123,6 +128,7 @@ pub(crate) fn resting_binance(
     ))
 }
 
+#[cfg(feature = "hyperliquid")]
 pub(crate) fn resting_hyperliquid(
     raw: &str,
     coin: &str,

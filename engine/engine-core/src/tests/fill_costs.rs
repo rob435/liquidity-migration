@@ -177,10 +177,7 @@ async fn two_sleeves_running_one_plug_are_told_apart_by_their_config_names() {
         .lock()
         .unwrap()
         .iter()
-        .find_map(|r| match r {
-            WalRecord::Names { strategies, .. } => Some(strategies.clone()),
-            _ => None,
-        })
+        .find_map(crate::replay::LogNames::strategy_table)
         .expect("the log says what its ids mean");
     assert_eq!(said, vec!["carry".to_string(), "long".to_string()]);
 }
@@ -195,10 +192,7 @@ async fn a_sleeve_with_no_name_of_its_own_keeps_the_plugs() {
         .lock()
         .unwrap()
         .iter()
-        .find_map(|r| match r {
-            WalRecord::Names { strategies, .. } => Some(strategies.clone()),
-            _ => None,
-        })
+        .find_map(crate::replay::LogNames::strategy_table)
         .expect("the log says what its ids mean");
     assert_eq!(said, vec!["buyer".to_string()], "the plug's own name");
 }

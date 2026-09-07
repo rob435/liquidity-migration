@@ -41,26 +41,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                                 engine_types::strategy_process::CallbackEvent::Signal { .. }
                             )
                     })
-                    || self.host.callbacks.unwritten.iter().any(|input| {
-                        input.strategy == sid
-                            && !matches!(
-                                input.event,
-                                engine_types::strategy_process::CallbackEvent::Signal { .. }
-                            )
-                    })
                 {
                     continue;
                 }
-                let manifest = if self.host.callbacks.isolated() {
-                    self.host
-                        .callbacks
-                        .state
-                        .committed
-                        .get(&sid)
-                        .and_then(|state| state.retained_signal_subscriptions.clone())
-                } else {
-                    self.host.strategies[sid.idx()].retained_signal_subscriptions()
-                };
+                let manifest = self.host.strategies[sid.idx()].retained_signal_subscriptions();
                 let Some(mut needed) = manifest else {
                     continue;
                 };
@@ -88,7 +72,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         .state
                         .inputs
                         .values()
-                        .chain(self.host.callbacks.unwritten.iter())
                         .filter(|input| input.strategy == sid)
                         .filter_map(|input| match &input.event {
                             engine_types::strategy_process::CallbackEvent::Signal {

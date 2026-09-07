@@ -11,10 +11,10 @@ impl OrderFeed for FiniteUpdates {
 
 fn prior() -> Vec<WalRecord> {
     vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["buyer".into()],
             symbols: vec!["BTCUSDT".into()],
-        },
+        }),
         WalRecord::OrderSent {
             dispatch: None,
             request: OrderRequest {

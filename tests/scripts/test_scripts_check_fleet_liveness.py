@@ -701,7 +701,7 @@ def test_strategy_errors_page_while_entries_remain_open_and_use_existing_inciden
         assert liveness.select_incidents_to_fire(alerts, state={}, now=1_090)[0] == alerts
 
 
-def test_trading_services_bound_repeated_starts_without_a_watchdog_protocol() -> None:
+def test_trading_services_bound_repeated_starts_and_engine_loop_stalls() -> None:
     for name in ("engine", "engine-mainnet", "signal-worker-demo", "signal-worker-mainnet"):
         config = configparser.ConfigParser(interpolation=None, strict=False)
         config.read(ROOT / "deploy" / "systemd" / f"liquidity-migration-{name}.service")
@@ -709,7 +709,12 @@ def test_trading_services_bound_repeated_starts_without_a_watchdog_protocol() ->
         assert config.getint("Unit", "StartLimitBurst") == 5
         assert config.get("Service", "Restart") == "always"
         assert config.getint("Service", "RestartSec") == 5
-        assert not config.has_option("Service", "WatchdogSec")
+        if name.startswith("engine"):
+            assert config.getint("Service", "WatchdogSec") == 30
+            assert config.get("Service", "Type") == "notify"
+            assert config.get("Service", "NotifyAccess") == "main"
+        else:
+            assert not config.has_option("Service", "WatchdogSec")
 
 
 def test_cooldown_suppresses_repeats_and_reports_resolution() -> None:

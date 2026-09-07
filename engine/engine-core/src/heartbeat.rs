@@ -169,6 +169,7 @@ pub struct Heartbeat {
     /// The last thing that went wrong, so a path that is wrong — and it is
     /// wrong every few seconds, forever — is said once.
     last_complaint: Option<String>,
+    notify: Option<std::os::unix::net::UnixDatagram>,
 }
 
 impl Heartbeat {
@@ -203,6 +204,7 @@ impl Heartbeat {
             account,
             lease_path,
             last_complaint: None,
+            notify: notify::from_environment(),
         }
     }
 
@@ -228,7 +230,14 @@ impl Heartbeat {
         self.due_ns = now_ns.saturating_add(self.every_ns);
         let text = self.render(facts, clock::wall_ms());
         match self.put(&text) {
-            Ok(()) => self.last_complaint = None,
+            Ok(()) => {
+                self.last_complaint = None;
+                if let Some(socket) = &self.notify {
+                    if let Err(error) = socket.send(b"READY=1\nWATCHDOG=1") {
+                        self.complain(format!("cannot notify systemd ({error})"));
+                    }
+                }
+            }
             Err(e) => self.complain(format!("cannot write the heartbeat ({e})")),
         }
     }
@@ -583,3 +592,5 @@ mod tests;
 
 #[cfg(test)]
 mod fill_cost_tests;
+
+mod notify;

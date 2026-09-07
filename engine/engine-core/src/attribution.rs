@@ -199,7 +199,10 @@ impl Attribution {
                     self.remember_order_stop(request);
                 }
             }
-            WalRecord::ClaimsDropped { rows, .. } => self.forget(rows),
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::ClaimsDropped {
+                rows,
+                ..
+            }) => self.forget(rows),
             WalRecord::LatchCleared {
                 restated_exposure, ..
             } => self.keep_held(restated_exposure)?,
@@ -1171,14 +1174,14 @@ mod tests {
         let log = vec![
             sent("a", CARRY, BTC),
             fill("a", BTC, Side::Buy, 2.0),
-            WalRecord::ClaimsDropped {
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::ClaimsDropped {
                 wall_ts_ms: 2,
                 rows: vec![engine_types::FilledTotal {
                     strategy: CARRY,
                     symbol: BTC,
                     signed_qty: 2.0,
                 }],
-            },
+            }),
             sent("b", LONG, BTC),
             fill("b", BTC, Side::Buy, 0.5),
         ];

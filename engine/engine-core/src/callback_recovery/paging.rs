@@ -276,7 +276,9 @@ impl CallbackPages {
                         pages.queued(input, cursor)?;
                     }
                 }
-                WalRecord::StrategyCallbackQueued { input } => {
+                WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyCallbackQueued { input },
+                ) => {
                     state.validate_input(input, count)?;
                     CallbackState::size(input)?;
                     if input.callback_id < state.next_id
@@ -291,13 +293,32 @@ impl CallbackPages {
                     state.retire_timer(input)?;
                     pages.queued(input, cursor)?;
                 }
-                WalRecord::StrategyCallbackPrepared { input } => {
+                WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyCallbackPrepared { input },
+                ) => {
                     state.validate_input(input, count)?;
                     pages.prepared(input, cursor)?;
                 }
-                WalRecord::StrategyProcessTransitionQueued {
-                    input_id, process, ..
-                } => {
+                WalRecord::StrategyTransitionQueued { transition }
+                    if matches!(
+                        transition.origin,
+                        engine_types::wal::StrategyTransitionOrigin::Embedded
+                    ) && transition.effects.iter().any(|action| {
+                        matches!(
+                            action,
+                            engine_types::Action::SetStrategyGlobalCheckpoint { .. }
+                        )
+                    }) =>
+                {
+                    state.forget_process(transition.strategy);
+                }
+                WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyProcessTransitionQueued {
+                        input_id,
+                        process,
+                        ..
+                    },
+                ) => {
                     let slot = pages
                         .slots
                         .values()
@@ -430,9 +451,15 @@ mod tests {
         );
         let active = input(1, 1, CallbackEvent::Boot);
         for input in [&inactive, &active] {
-            wal.append(&WalRecord::StrategyCallbackQueued {
-                input: input.clone(),
-            })
+            crate::testpath::append_history(
+                &mut wal,
+                &path,
+                &WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyCallbackQueued {
+                        input: input.clone(),
+                    },
+                ),
+            )
             .unwrap();
         }
         wal.barrier().unwrap();
@@ -452,11 +479,16 @@ mod tests {
         assert_eq!(state.inputs.values().collect::<Vec<_>>(), [&active]);
         assert!(pages.owner_pending(StrategyId(0)));
         let prepared = prepare(active);
-        let sequence = wal
-            .append(&WalRecord::StrategyCallbackPrepared {
-                input: prepared.clone(),
-            })
-            .unwrap();
+        let sequence = crate::testpath::append_history(
+            &mut wal,
+            &path,
+            &WalRecord::Retained(
+                engine_types::wal::RetainedWalRecord::StrategyCallbackPrepared {
+                    input: prepared.clone(),
+                },
+            ),
+        )
+        .unwrap();
         wal.barrier().unwrap();
         pages
             .prepared(
@@ -470,11 +502,17 @@ mod tests {
             .unwrap();
         state.prepared(prepared.clone()).unwrap();
         let committed = process(&prepared);
-        wal.append(&WalRecord::StrategyProcessTransitionQueued {
-            input_id: prepared.callback_id,
-            transition: None,
-            process: committed.clone(),
-        })
+        crate::testpath::append_history(
+            &mut wal,
+            &path,
+            &WalRecord::Retained(
+                engine_types::wal::RetainedWalRecord::StrategyProcessTransitionQueued {
+                    input_id: prepared.callback_id,
+                    transition: None,
+                    process: committed.clone(),
+                },
+            ),
+        )
         .unwrap();
         state.commit(prepared.callback_id, committed).unwrap();
         pages.remove(prepared.callback_id);
@@ -519,13 +557,17 @@ mod tests {
         let queued = input(0, 0, CallbackEvent::Boot);
         let prepared = prepare(queued.clone());
         let rows = vec![
-            WalRecord::StrategyCallbackQueued { input: queued },
-            WalRecord::StrategyCallbackPrepared {
-                input: prepared.clone(),
-            },
+            WalRecord::Retained(
+                engine_types::wal::RetainedWalRecord::StrategyCallbackQueued { input: queued },
+            ),
+            WalRecord::Retained(
+                engine_types::wal::RetainedWalRecord::StrategyCallbackPrepared {
+                    input: prepared.clone(),
+                },
+            ),
         ];
         for row in &rows {
-            wal.append(row).unwrap();
+            crate::testpath::append_history(&mut wal, &path, row).unwrap();
         }
         let (state, pages) = CallbackPages::replay(&rows, 2, 1).unwrap();
         let mut base = base().await;
@@ -543,11 +585,17 @@ mod tests {
         pages.returned(completion, &mut state, 0).unwrap();
         assert_eq!(state.inputs[&0], prepared);
         let committed = process(&prepared);
-        wal.append(&WalRecord::StrategyProcessTransitionQueued {
-            input_id: 0,
-            transition: None,
-            process: committed.clone(),
-        })
+        crate::testpath::append_history(
+            &mut wal,
+            &path,
+            &WalRecord::Retained(
+                engine_types::wal::RetainedWalRecord::StrategyProcessTransitionQueued {
+                    input_id: 0,
+                    transition: None,
+                    process: committed.clone(),
+                },
+            ),
+        )
         .unwrap();
         wal.barrier().unwrap();
         drop(wal);

@@ -198,12 +198,9 @@ impl CallbackState {
         Self::encoded_size(state)
     }
 
-    pub fn retained_process_bytes(&self, except: Option<StrategyId>) -> usize {
-        self.committed_bytes
-            .iter()
-            .filter(|(strategy, _)| Some(**strategy) != except)
-            .map(|(_, bytes)| bytes)
-            .sum()
+    pub fn forget_process(&mut self, strategy: StrategyId) {
+        self.committed.remove(&strategy);
+        self.committed_bytes.remove(&strategy);
     }
 
     fn process_capacity(&self, state: &StrategyProcessState) -> Result<usize, String> {
@@ -248,33 +245,6 @@ impl CallbackState {
         self.committed_bytes.insert(state.strategy, committed_size);
         self.committed.insert(state.strategy, state);
         Ok(())
-    }
-
-    pub fn promote_volatile(&mut self, input_id: u64) -> Result<u64, String> {
-        let mut input = self
-            .inputs
-            .remove(&input_id)
-            .ok_or("volatile callback is absent")?;
-        let new_id = self.next_id;
-        self.next_id = new_id
-            .checked_add(1)
-            .ok_or("strategy callback id exhausted")?;
-        input.callback_id = new_id;
-        let old_size = Self::size(&StrategyCallbackInput {
-            callback_id: input_id,
-            ..input.clone()
-        })?;
-        let new_size = Self::size(&input)?;
-        let bytes = self
-            .bytes
-            .get_mut(&input.strategy)
-            .ok_or("callback byte owner is absent")?;
-        *bytes = bytes
-            .checked_sub(old_size)
-            .and_then(|bytes| bytes.checked_add(new_size))
-            .ok_or("callback byte ownership overflow")?;
-        self.inputs.insert(new_id, input);
-        Ok(new_id)
     }
 
     pub fn discard(&mut self, input_id: u64) -> Result<(), String> {
@@ -371,7 +341,9 @@ impl CallbackState {
                         state.accept(input.clone())?;
                     }
                 }
-                WalRecord::StrategyCallbackQueued { input } => {
+                WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyCallbackQueued { input },
+                ) => {
                     state.validate_input(input, strategy_count)?;
                     if !matches!(input.preparation, CallbackPreparation::Queued) {
                         return Err("queued callback already contains a prepared invocation".into());
@@ -381,12 +353,31 @@ impl CallbackState {
                     }
                     state.accept(input.clone())?;
                 }
-                WalRecord::StrategyCallbackPrepared { input } => {
+                WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyCallbackPrepared { input },
+                ) => {
                     state.prepared(input.clone())?;
                 }
-                WalRecord::StrategyProcessTransitionQueued {
-                    input_id, process, ..
-                } => {
+                WalRecord::StrategyTransitionQueued { transition }
+                    if matches!(
+                        transition.origin,
+                        engine_types::wal::StrategyTransitionOrigin::Embedded
+                    ) && transition.effects.iter().any(|action| {
+                        matches!(
+                            action,
+                            engine_types::Action::SetStrategyGlobalCheckpoint { .. }
+                        )
+                    }) =>
+                {
+                    state.forget_process(transition.strategy);
+                }
+                WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyProcessTransitionQueued {
+                        input_id,
+                        process,
+                        ..
+                    },
+                ) => {
                     state.commit(*input_id, process.clone())?;
                 }
                 _ => {}

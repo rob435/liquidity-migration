@@ -11,10 +11,10 @@ use engine_types::ForcedClose;
 /// still holding them.
 fn bought_ten() -> Vec<WalRecord> {
     vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["buyer".to_string(), "probe".to_string()],
             symbols: vec!["BTCUSDT".to_string()],
-        },
+        }),
         WalRecord::OrderSent {
             dispatch: None,
             request: OrderRequest {

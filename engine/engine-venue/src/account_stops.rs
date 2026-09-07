@@ -1,12 +1,17 @@
 use std::collections::HashMap;
 
-use engine_public::numeric_wire::{DecimalField, IntegerField};
+use engine_public::numeric_wire::DecimalField;
+#[cfg(feature = "lighter")]
+use engine_public::numeric_wire::IntegerField;
 use engine_types::numeric::Exact;
 use engine_types::{PositionView, Side, VenueError};
 use serde::Deserialize;
+#[cfg(any(test, feature = "mexc"))]
 use serde_json::value::RawValue;
 
-use crate::wire::{Field, Id};
+use crate::wire::Field;
+#[cfg(any(test, feature = "binance", feature = "mexc"))]
+use crate::wire::Id;
 
 #[derive(Default)]
 pub(crate) struct Triggers {
@@ -37,15 +42,33 @@ impl Triggers {
         }
     }
 }
+#[cfg(any(
+    test,
+    feature = "binance",
+    feature = "hyperliquid",
+    feature = "lighter"
+))]
 #[derive(Default)]
 pub(crate) struct OrderStops {
     orders: HashMap<u64, StopOrder>,
 }
+#[cfg(any(
+    test,
+    feature = "binance",
+    feature = "hyperliquid",
+    feature = "lighter"
+))]
 struct StopOrder {
     position_side: Side,
     quantity: Exact,
     trigger: Exact,
 }
+#[cfg(any(
+    test,
+    feature = "binance",
+    feature = "hyperliquid",
+    feature = "lighter"
+))]
 impl OrderStops {
     fn add(
         &mut self,
@@ -120,6 +143,7 @@ pub(crate) fn assign(position: &mut PositionView, price: Option<&Exact>) -> Resu
     Ok(())
 }
 
+#[cfg(any(test, feature = "bybit"))]
 pub(crate) fn bybit(raw: &str) -> Result<HashMap<String, Triggers>, VenueError> {
     #[derive(Deserialize)]
     struct Reply {
@@ -153,6 +177,7 @@ pub(crate) fn bybit(raw: &str) -> Result<HashMap<String, Triggers>, VenueError> 
     Ok(out)
 }
 
+#[cfg(any(test, feature = "binance"))]
 pub(crate) fn binance(raw: &str) -> Result<HashMap<String, Triggers>, VenueError> {
     #[derive(Deserialize)]
     struct Row {
@@ -196,6 +221,7 @@ pub(crate) fn binance(raw: &str) -> Result<HashMap<String, Triggers>, VenueError
     Ok(out)
 }
 
+#[cfg(any(test, feature = "hyperliquid"))]
 pub(crate) fn hyperliquid(raw: &str) -> Result<HashMap<String, OrderStops>, VenueError> {
     #[derive(Deserialize)]
     struct Row {
@@ -248,6 +274,7 @@ pub(crate) fn hyperliquid(raw: &str) -> Result<HashMap<String, OrderStops>, Venu
     Ok(out)
 }
 
+#[cfg(feature = "lighter")]
 pub(crate) fn lighter(raw: &str) -> Result<HashMap<i16, OrderStops>, VenueError> {
     #[derive(Deserialize)]
     struct Reply {
@@ -308,6 +335,7 @@ pub(crate) fn lighter(raw: &str) -> Result<HashMap<i16, OrderStops>, VenueError>
     Ok(out)
 }
 
+#[cfg(any(test, feature = "mexc"))]
 pub(crate) fn mexc(raw: &str) -> Result<HashMap<String, Triggers>, VenueError> {
     #[derive(Deserialize)]
     struct Reply {

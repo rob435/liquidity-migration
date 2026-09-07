@@ -10,6 +10,71 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-06 — Round-3 embedded execution candidate.**
+  - Replace child strategy execution with one embedded path for production,
+    bench, simulation and backtest. Catch reducer panics, fault only their
+    sleeve and cancel its orders; unchanged state writes no callback WAL.
+    Retain historical process-callback readers and restart ownership.
+  - Combine checkpoint, intent, verdict, order and attempted-send durability
+    before dispatch. Preserve a checkpoint barrier before an uncached leverage
+    mutation. Default venue features compile Bybit; five other venues retain
+    separate feature conformance builds. Exact constructors and the single
+    main select loop follow the accepted Round-3 plan.
+  - Separate fifty writable WAL kinds from eight retained kinds; preserve
+    their original read tags, write current fee/checkpoint tags directly and
+    keep the readback assertion in debug builds. A real scan-count regression
+    observes `(6, 8)` decodes for `(3, 4)` records before the scan reuse and
+    `(3, 4)` afterward. Replay and live state project a same-direction sleeve
+    stop into native repair intent. A crash after the sleeve record now keeps
+    95.1 instead of the stale 90.0 in the regression; native repair omits a
+    covered StopSet. Uncovered and legacy repairs retain their write. The
+    failing-barrier fixture targets SleeveStopSet and still prevents the
+    native call. No retained host reader is deleted.
+  - Add registered-plug conformance, Exact/WAL properties and authenticated
+    demo private frames. The corpus includes LINK Buy 53.9 at 13.329 with
+    0.39513821 USDT fee; its replay uses the real WebSocket parser. Convert
+    async checks to paused clocks and explicit I/O or durability progress.
+    Preserve the live public-stream probe as a separate process test; it
+    passes against Bybit. Share one I/O-progress helper in each test binary.
+    Private-gap conformance now restores an omitted execution through the
+    real Bybit/Hyperliquid REST clients and reconciles overlap by execution
+    ID; Binance's unavailable account-wide recovery remains an explicit
+    refusal. All fourteen conformance cases pass with every feature enabled.
+  - Reuse callback action storage and remove immutable risk-policy parsing
+    from the pending-order loop. Normalize binary64 powers of two directly,
+    avoid a repeated product reduction and divide aggregate exact margin
+    once. Old-algorithm comparisons preserve canonical bytes and margin
+    results/refusals across changing prices and reservation lifecycle steps.
+    Group quantities by effective price and stop fraction within each fresh
+    assessment, preserving validation and price-read order. Batch rational
+    normalization across equal-denominator runs; finish produces canonical
+    Exact values. An original-algorithm oracle matches 4,096 sum prefixes,
+    including cancellation and extreme scales. Index pending signed quantities
+    per symbol; the original
+    rowwise interval matches exact values, errors and canonical bytes across
+    4,096 lifecycle steps and reconstructed books. Both decision targets pass;
+    the quantity-index cells record 5.40 ms narrow submit and 7.40 ms wide.
+    After the stop change, the cells are 5.33 ms narrow / 7.13 ms wide;
+    narrow submit still misses 5 ms, while the unchanged Mac budget passes.
+    Subsequent priced-quantity grouping and batched sums reduce the measured
+    medians to 5.03 ms narrow / 5.25 ms wide; borrowing stop-fraction keys
+    measures 5.05 / 5.41 ms. Submit acceptance remains open; all cells stay recorded.
+  - Add the accepted demo soak, watchdog, rollback and runtime-only Python
+    deployment changes. They remain local; no Round-3 handover is attempted.
+    The final developer gate passes 1,959 Rust tests (zero failed, seven ignored) and
+    1,646 Python tests. All six venue feature builds and their tests pass;
+    combined venue/public/market-data qualification passes 810 tests, with
+    strict all-feature workspace Clippy. The prior captured-WAL boot, replay,
+    rotation and stop-repair regression passes on this candidate. The release suite passes 1,957 tests, zero failed, seven ignored; all six
+    repeated heavy fault seeds pass. Both current retained families pass real-WAL boot, replay and rotation;
+    all twelve removed stops are repaired without placing orders. The fixture
+    uses Bybit catalog decoding and continuing captured quotes with mocked
+    transport, risk and collateral. Submit latency remains open. Current
+    host reads show six fully protected positions per realm and healthy
+    incumbent engines and workers.
+    [Execution measurements](docs/execution-performance.md) retain every
+    measured cell and its interference/source limits.
+
 - **2026-09-06 — Round-2 runtime cleanup and integration.**
   - Separate the funded runtime from simulation, benchmark, backtest and operator
     tools; release and install `engine`, `engine-tools` and `signal-worker` together.
@@ -112,6 +177,14 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     each and the required push gate passes 2,425 regular debug and 1,608 Python
     tests. Fresh measured workloads complete 299/587/584 submits with no risk
     refusal or barrier failure.
+  - Workflow `34055716541` deploys `bb4bc3d3` at 19:53 UTC after 2,430
+    Linux tests pass. The sanctioned handover clears both historical latches
+    after authenticated exposure agreement. Fresh 20:01 UTC reads show both
+    engines opening-enabled, no strategy errors or restarts, continuing LONG
+    checkpoints and five exact full-size native stops per realm. The 20:00
+    demo probe records PULL 1.041 ms after its deadline, down from 5.912 s;
+    dispatch follows 9.557 ms later. The focused capture omits the FIRE
+    preparation clock, so it does not establish total resting time.
 
 - **2026-09-06 08:07 UTC — Worker recovery, recorder finalization and rollback repair.**
   - Both workers on `cece1d9f` remain alive but degraded: hourly source pruning

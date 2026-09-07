@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(client.url("/v5/x", "a=1"), "http://127.0.0.1:1/v5/x?a=1");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_oversized_reply_is_rejected_before_json_parsing() {
         let body = Full::new(Bytes::from(vec![b'x'; MAX_RESPONSE_BYTES + 1]));
         let err = read_json_as::<_, Value>(Response::new(body))
@@ -283,10 +283,12 @@ mod tests {
         assert!(matches!(err, VenueError::Transport(_)));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_deadline_includes_a_stalled_reply_body() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let _io = crate::test_io::IoProgress::new();
+        let (body_started, started) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = [0_u8; 1024];
@@ -295,12 +297,16 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
                 .await
                 .unwrap();
+            body_started.send(()).unwrap();
             std::future::pending::<()>().await;
         });
 
         let mut client = HttpClient::new(format!("http://{addr}"));
         client.request_timeout = Duration::from_millis(50);
-        let err = client.get("/stall", "", &[]).await.unwrap_err();
+        let request = tokio::spawn(async move { client.get("/stall", "", &[]).await });
+        started.await.unwrap();
+        tokio::time::advance(Duration::from_millis(50)).await;
+        let err = request.await.unwrap().unwrap_err();
         assert!(
             matches!(err, VenueError::Transport(ref text) if text.contains("did not complete"))
         );

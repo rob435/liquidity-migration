@@ -393,12 +393,12 @@ pub(crate) fn durable_risk_verdict(
 /// Both id tables as a log record, so every number in the log can be turned
 /// back into a sleeve and a coin.
 pub(super) fn names_record(strategies: &[String], market: &MarketState) -> WalRecord {
-    WalRecord::Names {
+    WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
         strategies: strategies.to_vec(),
         symbols: (0..market.table.len())
             .map(|i| market.table.name(SymbolId(i as u16)).to_string())
             .collect(),
-    }
+    })
 }
 pub(super) fn validate_strategy_checkpoint(
     strategy: &dyn Strategy,

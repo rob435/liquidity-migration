@@ -686,9 +686,8 @@ pub trait Strategy {
     fn callback_enabled(&self) -> bool {
         true
     }
-    /// Complete private state for an isolated callback process. Registered
-    /// plugs include configuration and transient decision state; reducer
-    /// checkpoints alone do not capture pending requests and retry state.
+    /// Complete private state retained by historical callback WAL records.
+    /// New callbacks persist strategy checkpoints through their actions.
     fn runtime_state(
         &self,
     ) -> Result<Option<crate::strategy_process::StrategyRuntimeState>, String> {

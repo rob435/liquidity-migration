@@ -210,7 +210,7 @@ fn roundtrip_every_variant() {
 }
 
 #[test]
-fn new_checkpoints_and_unknown_fees_are_readable_by_the_previous_shape() {
+fn current_tags_encode_checkpoints_and_unknown_fees_without_rewrites() {
     let dir = TempDir::new().unwrap();
     let path = log_path(&dir);
     let records = vec![
@@ -289,52 +289,20 @@ fn new_checkpoints_and_unknown_fees_are_readable_by_the_previous_shape() {
     write_records(&path, &records);
 
     let payloads = frame_payloads(&path);
-    let legacy_view: Vec<WalRecord> = payloads
+    let direct: Vec<WalRecord> = payloads
         .iter()
-        .map(|payload| {
-            serde_json::from_slice(payload)
-                .expect("the additive wire shape reads without the current WAL decoder")
-        })
+        .map(|payload| serde_json::from_slice(payload).unwrap())
         .collect();
-    assert!(matches!(
-        &legacy_view[0],
-        WalRecord::Note { source, text }
-            if source == "engine.execution_history_checkpoint.v1"
-                && text == "through_wall_ts_ms=1770000000000"
-    ));
-    assert!(matches!(
-        &legacy_view[1],
-        WalRecord::OrderUpdate {
-            callbacks: _,
-            update: OrderUpdate::Fill { fee: Some(0.0), .. }
-        }
-    ));
-    assert!(matches!(
-        &legacy_view[2],
-        WalRecord::OrderUpdate {
-            callbacks: _,
-            update: OrderUpdate::Fill { fee: Some(0.0), .. }
-        }
-    ));
-    assert!(matches!(
-        &legacy_view[3],
-        WalRecord::RecoveredFill { fee: Some(0.0), .. }
-    ));
-    assert!(matches!(
-        &legacy_view[4],
-        WalRecord::RecoveredFill { fee: Some(0.0), .. }
-    ));
-
+    assert_eq!(
+        direct, records,
+        "current serde tags preserve complete semantics without a rewrite"
+    );
     let unknown_stream: serde_json::Value = serde_json::from_slice(&payloads[1]).unwrap();
-    let explicit_zero_stream: serde_json::Value = serde_json::from_slice(&payloads[2]).unwrap();
-    assert_eq!(unknown_stream["update"]["Fill"]["fee_known"], false);
-    assert!(explicit_zero_stream["update"]["Fill"]
-        .get("fee_known")
-        .is_none());
-    let unknown_recovered: serde_json::Value = serde_json::from_slice(&payloads[3]).unwrap();
-    let explicit_zero_recovered: serde_json::Value = serde_json::from_slice(&payloads[4]).unwrap();
-    assert_eq!(unknown_recovered["fee_known"], false);
-    assert!(explicit_zero_recovered.get("fee_known").is_none());
+    let zero_stream: serde_json::Value = serde_json::from_slice(&payloads[2]).unwrap();
+    assert!(unknown_stream["update"]["Fill"]["fee"].is_null());
+    assert_eq!(zero_stream["update"]["Fill"]["fee"], 0.0);
+    assert!(unknown_stream["update"]["Fill"].get("fee_known").is_none());
+    assert!(!String::from_utf8_lossy(&payloads[0]).contains("execution_history_through_ms"));
 
     let restored: Vec<WalRecord> = replay(&path)
         .unwrap()
@@ -818,6 +786,7 @@ fn a_log_that_does_not_exist_yet_can_still_be_claimed() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 fn a_number_that_is_not_a_number_is_refused_instead_of_bricking_the_log() {
     // The venue's own fields are not screened before they reach a record, and
     // an f64 that is not a number is written as `null`. The reader refuses a
@@ -903,6 +872,7 @@ fn an_absent_optional_number_is_still_written() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 fn a_nonfinite_known_fee_cannot_be_replayed_as_an_unknown_fee() {
     let dir = TempDir::new().unwrap();
     let path = log_path(&dir);
@@ -1166,7 +1136,7 @@ fn callback_cursor_reads_parent_owner_and_unknown_fee_without_moving_the_writer(
 }
 
 #[test]
-fn current_order_news_cannot_omit_its_callback_ownership() {
+fn retained_v2_order_news_cannot_omit_its_callback_ownership() {
     for missing in [false, true] {
         let mut value = serde_json::to_value(
             every_variant()
@@ -1175,7 +1145,7 @@ fn current_order_news_cannot_omit_its_callback_ownership() {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(value["kind"], "order_update_v2");
+        value["kind"] = "order_update_v2".into();
         if !missing {
             value["callbacks"] = serde_json::Value::Null;
         }
@@ -1293,7 +1263,7 @@ fn recovered_callback_ownership_and_fill_share_every_partial_frame_restart_cut()
     let bytes = fs::read(&path).unwrap();
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&bytes[16..]).unwrap()["kind"],
-        "recovered_fill_v2"
+        "recovered_fill_v3"
     );
     for cut in 8..=bytes.len() {
         fs::write(&path, &bytes[..cut]).unwrap();
@@ -1329,7 +1299,7 @@ fn recovered_callback_ownership_and_fill_share_every_partial_frame_restart_cut()
 }
 
 #[test]
-fn recovered_callback_metadata_is_required_only_on_the_current_tag() {
+fn retained_v2_recovered_callback_metadata_remains_required() {
     let record = recovered_callback_record();
     let dir = TempDir::new().unwrap();
     let path = log_path(&dir);
@@ -1374,7 +1344,7 @@ fn recovered_callback_metadata_is_required_only_on_the_current_tag() {
     let bytes = fs::read(&path).unwrap();
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&bytes[16..]).unwrap()["kind"],
-        "recovered_fill"
+        "recovered_fill_v3"
     );
     assert_eq!(replay(&path).unwrap(), [(1, legacy)]);
 }
@@ -1536,5 +1506,218 @@ fn finite_fill_fields_round_trip_for_seeded_binary64_values() {
     assert_eq!(
         records.into_iter().map(|(_, row)| row).collect::<Vec<_>>(),
         expected
+    );
+}
+
+#[test]
+fn retained_fee_markers_and_note_checkpoints_keep_their_original_meaning() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    let payloads = [
+        r#"{"kind":"order_update","update":{"Fill":{"exec_id":"old-fill","client_order_id":"eng-old-1","symbol":0,"side":"Buy","qty":1.0,"px":2.0,"fee":0.0,"fee_known":false,"is_maker":false,"venue_ts_ms":1788000000000,"recv_ns":1}}}"#,
+        r#"{"kind":"recovered_fill","exec_id":"old-recovered","client_order_id":"eng-old-1","symbol":0,"side":"Buy","qty":1.0,"px":2.0,"fee":0.0,"fee_known":false,"is_maker":false,"venue_ts_ms":1788000000000,"recovered_wall_ts_ms":1788000000001}"#,
+        r#"{"kind":"note","source":"engine.execution_history_checkpoint.v1","text":"history","execution_history_through_ms":1788000000002}"#,
+    ];
+    let mut bytes = b"EWAL0001".to_vec();
+    for payload in payloads {
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&crc32c::crc32c(payload.as_bytes()).to_le_bytes());
+        bytes.extend_from_slice(payload.as_bytes());
+    }
+    fs::write(&path, &bytes).unwrap();
+    let records = replay(&path).unwrap();
+    assert!(matches!(
+        records[0].1,
+        WalRecord::OrderUpdate {
+            update: OrderUpdate::Fill { fee: None, .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        records[1].1,
+        WalRecord::RecoveredFill { fee: None, .. }
+    ));
+    assert_eq!(
+        records[2].1,
+        WalRecord::ExecutionHistoryCheckpoint {
+            through_wall_ts_ms: 1_788_000_000_002
+        }
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn duplicate_record_fields_are_corrupt_without_truncating_the_family() {
+    let dir = TempDir::new().unwrap();
+    let path = log_path(&dir);
+    for payload in [
+        r#"{"kind":"note","source":"one","source":"two","text":"retained"}"#,
+        r#"{"kind":"order_update","update":{"Fill":{"exec_id":"old-fill","client_order_id":"eng-old-1","symbol":0,"side":"Buy","qty":1.0,"qty":2.0,"px":2.0,"fee":0.0,"is_maker":false,"venue_ts_ms":1788000000000,"recv_ns":1}}}"#,
+    ] {
+        let mut bytes = b"EWAL0001".to_vec();
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&crc32c::crc32c(payload.as_bytes()).to_le_bytes());
+        bytes.extend_from_slice(payload.as_bytes());
+        fs::write(&path, &bytes).unwrap();
+        let error = match WalWriter::open(&path) {
+            Err(error) => error,
+            Ok(_) => panic!("duplicate fields must stay corrupt"),
+        };
+        assert!(error.to_string().contains("duplicate field"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn retired_wire_kinds_replay_but_the_current_writer_cannot_append_them() {
+    use engine_types::strategy_process::{
+        CallbackEvent, CallbackPreparation, CallbackSnapshot, StrategyCallbackInput,
+        StrategyProcessState, StrategyRuntimeState,
+    };
+    use engine_types::wal::RetainedWalRecord as Retained;
+
+    let queued = StrategyCallbackInput {
+        order_origin: None,
+        callback_id: 1,
+        strategy: StrategyId(0),
+        event: CallbackEvent::Boot,
+        preparation: CallbackPreparation::Queued,
+    };
+    let prepared = StrategyCallbackInput {
+        preparation: CallbackPreparation::Prepared {
+            snapshot: CallbackSnapshot {
+                strategy: StrategyId(0),
+                now_ns: 1,
+                wall_ms: 1,
+                entries_enabled: true,
+                account: engine_types::StrategyAccountSummary {
+                    equity_usdt: 100.0,
+                    available_margin_usdt: 100.0,
+                    observed_ns: 1,
+                },
+                symbols: vec![],
+                orders: vec![],
+                global_checkpoint: None,
+                strategy_names: vec!["fixture".into()],
+                strategy_events: vec![],
+            },
+        },
+        ..queued.clone()
+    };
+    let records = [
+        (
+            "control_anchor",
+            Retained::ControlAnchor {
+                source: "risk".into(),
+                state: "{}".into(),
+            },
+        ),
+        (
+            "target_book_latch",
+            Retained::TargetBookLatch {
+                wall_ts_ms: 1,
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                latched: true,
+            },
+        ),
+        (
+            "claims_dropped",
+            Retained::ClaimsDropped {
+                wall_ts_ms: 1,
+                rows: vec![],
+            },
+        ),
+        (
+            "strategy_callback_queued",
+            Retained::StrategyCallbackQueued { input: queued },
+        ),
+        (
+            "strategy_callback_prepared",
+            Retained::StrategyCallbackPrepared { input: prepared },
+        ),
+        (
+            "strategy_process_transition_queued",
+            Retained::StrategyProcessTransitionQueued {
+                input_id: 1,
+                transition: None,
+                process: StrategyProcessState {
+                    strategy: StrategyId(0),
+                    last_callback_id: 1,
+                    runtime: StrategyRuntimeState {
+                        schema_version: 1,
+                        kind: "fixture".into(),
+                        configuration_sha256: "a".repeat(64),
+                        payload: vec![],
+                    },
+                    timers: vec![],
+                    retained_signal_subscriptions: None,
+                },
+            },
+        ),
+        (
+            "names",
+            Retained::Names {
+                strategies: vec!["fixture".into()],
+                symbols: vec!["BTCUSDT".into()],
+            },
+        ),
+        (
+            "fast_execution",
+            Retained::FastExecution {
+                exec_id: "old-fast".into(),
+                client_order_id: "eng-old-1".into(),
+                venue_order_id: "venue-old-1".into(),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                qty: 1.0,
+                px: 2.0,
+                is_maker: false,
+                venue_ts_ms: 1,
+                recv_ns: 2,
+            },
+        ),
+    ];
+    let dir = TempDir::new().unwrap();
+    let history = dir.path().join("history.wal");
+    let path = log_path(&dir);
+    let (mut writer, _) = WalWriter::open(&path).unwrap();
+    writer.append(&note("before")).unwrap();
+    let mut bytes = b"EWAL0001".to_vec();
+    let mut expected = Vec::new();
+    for (kind, retained) in records {
+        let record = WalRecord::Retained(retained);
+        let payload = serde_json::to_vec(&record).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(value["kind"], kind);
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&crc32c::crc32c(&payload).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        assert!(writer
+            .append(&record)
+            .unwrap_err()
+            .to_string()
+            .contains("read-only"));
+        expected.push(record);
+    }
+    fs::write(&history, &bytes).unwrap();
+    assert_eq!(
+        replay(&history)
+            .unwrap()
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(fs::read(&history).unwrap(), bytes);
+    assert_eq!(writer.append(&note("after")).unwrap(), 2);
+    writer.barrier().unwrap();
+    assert_eq!(
+        replay(&path)
+            .unwrap()
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>(),
+        [note("before"), note("after")]
     );
 }

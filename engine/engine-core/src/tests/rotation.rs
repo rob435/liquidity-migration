@@ -12,10 +12,10 @@ const STOP_ETH: f64 = 80.0;
 
 fn stop_mover_replay() -> Vec<WalRecord> {
     vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["stop-mover".into()],
             symbols: vec!["BTCUSDT".into()],
-        },
+        }),
         sent("eng-stop-owner", 0, 1.0, 80.0),
         fill("eng-stop-owner", 0, 1.0),
     ]
@@ -239,10 +239,10 @@ fn fill(id: &str, symbol: u16, qty: f64) -> WalRecord {
 /// belongs to neither trusted exposure nor a strategy.
 fn previous_log() -> Vec<WalRecord> {
     vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["buyer".to_string()],
             symbols: vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
-        },
+        }),
         WalRecord::StrategyCheckpoint {
             wall_ts_ms: recent_replay_ms(),
             strategy: StrategyId(0),
@@ -253,10 +253,10 @@ fn previous_log() -> Vec<WalRecord> {
                 payload: br#"{"phase":"done"}"#.to_vec(),
             },
         },
-        WalRecord::ControlAnchor {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::ControlAnchor {
             source: "risk".to_string(),
             state: "anchor-1".to_string(),
-        },
+        }),
         sent("eng-a", 0, 2.0, STOP_BTC),
         fill("eng-a", 0, 2.0),
         sent("eng-b", 1, 1.0, STOP_ETH),
@@ -450,10 +450,10 @@ async fn a_restart_on_a_rotated_log_still_accounts_for_its_position() {
         leverage: None,
     }];
     let log = replay_with_history_boundary(&[
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["buyer".to_string()],
             symbols: vec!["BTCUSDT".to_string()],
-        },
+        }),
         sent("eng-a", 0, 2.0, STOP_BTC),
         fill("eng-a", 0, 2.0),
     ]);
@@ -572,7 +572,7 @@ async fn a_torn_rotation_on_disk_boots_from_the_old_segment() {
     {
         let (mut wal, _) = engine_wal::WalWriter::open(&family).unwrap();
         for record in previous_log() {
-            wal.append(&record).unwrap();
+            crate::testpath::append_history(&mut wal, &family, &record).unwrap();
         }
         Wal::barrier(&mut wal).unwrap();
 
@@ -660,10 +660,10 @@ async fn rotated_open_trade_keeps_cost_basis_for_a_later_loss() {
     let opening = make_fill(Side::Buy, "3", "9007199254740993", "0.1");
     let partial = make_fill(Side::Sell, "1", "9007199254740992", "0.1");
     let log = vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec!["buyer".into()],
             symbols: vec!["BTCUSDT".into()],
-        },
+        }),
         sent("trade-basis", 0, 3.0, 90.0),
         WalRecord::OrderUpdate {
             callbacks: None,

@@ -14,6 +14,9 @@ pub mod live;
 pub mod model;
 pub mod normalize;
 pub mod store;
+#[cfg(test)]
+#[path = "../../test-support/io.rs"]
+mod test_io;
 pub mod universe;
 pub mod worker;
 

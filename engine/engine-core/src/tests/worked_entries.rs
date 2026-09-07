@@ -121,50 +121,53 @@ async fn an_exit_is_sent_as_written_even_when_it_asks_to_be_worked() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_group_flush_tick_walks_a_resting_entry_after_the_market() {
-    // The supervisor has no clock of its own: it rides the tick the loop
-    // already had.
-    let quick = WorkPolicy {
-        reprice_ms: 1,
-        ..WorkPolicy::default()
-    };
-    let (buyer, _heard) = Buyer::working("BTCUSDT", 1, 0.01, quick);
-    let tape = tape();
-    let (wal, _records) = MockWal::new(tape.clone());
-    let (venue, sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
-    let amends = venue.amends.clone();
-    let (risk, _seen) = MockRisk::with(allow_all());
-    let mut fast = settings();
-    fast.group_flush_ms = 5;
-    let mut engine = Engine::boot(&fast, "0", wal, risk, venue, vec![Box::new(buyer)], &[])
-        .await
-        .unwrap();
-    let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    // Two quotes: the first places the entry at 30_000, the second moves the
-    // bid up to 30_001 and overtakes it.
-    engine
-        .run(
-            &mut ScriptFeed::wide_quotes(symbol, 2, false),
-            &mut ScriptOrderFeed::empty(),
-            tokio::time::sleep(Duration::from_millis(60)),
-        )
-        .await
-        .unwrap();
+    crate::test_clock::with_engine_clock(async {
+        // The supervisor has no clock of its own: it rides the tick the loop
+        // already had.
+        let quick = WorkPolicy {
+            reprice_ms: 1,
+            ..WorkPolicy::default()
+        };
+        let (buyer, _heard) = Buyer::working("BTCUSDT", 1, 0.01, quick);
+        let tape = tape();
+        let (wal, _records) = MockWal::new(tape.clone());
+        let (venue, sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+        let amends = venue.amends.clone();
+        let (risk, _seen) = MockRisk::with(allow_all());
+        let mut fast = settings();
+        fast.group_flush_ms = 5;
+        let mut engine = Engine::boot(&fast, "0", wal, risk, venue, vec![Box::new(buyer)], &[])
+            .await
+            .unwrap();
+        let symbol = engine.market().table.get("BTCUSDT").unwrap();
+        // Two quotes: the first places the entry at 30_000, the second moves the
+        // bid up to 30_001 and overtakes it.
+        engine
+            .run(
+                &mut ScriptFeed::wide_quotes(symbol, 2, false),
+                &mut ScriptOrderFeed::empty(),
+                tokio::time::sleep(Duration::from_millis(60)),
+            )
+            .await
+            .unwrap();
 
-    let id = sends.lock().unwrap()[0].client_order_id.clone();
-    let amends = amends.lock().unwrap();
-    assert!(!amends.is_empty(), "the overtaken order was not moved");
-    assert_eq!(amends[0].1, id);
-    assert_eq!(
-        amends[0].2,
-        AmendSpec {
-            exact_terms: None,
-            px: Some(30_001.0),
-            qty: None
-        },
-        "back to the touch that overtook it, price only"
-    );
+        let id = sends.lock().unwrap()[0].client_order_id.clone();
+        let amends = amends.lock().unwrap();
+        assert!(!amends.is_empty(), "the overtaken order was not moved");
+        assert_eq!(amends[0].1, id);
+        assert_eq!(
+            amends[0].2,
+            AmendSpec {
+                exact_terms: None,
+                px: Some(30_001.0),
+                qty: None
+            },
+            "back to the touch that overtook it, price only"
+        );
+    })
+    .await;
 }
 
 /// Stop as soon as the supervisor's move has reached the venue. A fixed sleep
@@ -251,61 +254,64 @@ async fn the_stated_price_is_where_the_supervisor_believes_the_order_is() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn repricing_a_resting_entry_reserves_its_price_range_before_the_wire() {
-    // A price-only amend can still increase notional or stop distance. The
-    // engine therefore reserves the conservative old/new price range and
-    // makes that state durable before asking the venue to mutate the order.
-    let quick = WorkPolicy {
-        reprice_ms: 1,
-        ..WorkPolicy::default()
-    };
-    let (buyer, _heard) = Buyer::working("BTCUSDT", 1, 0.01, quick);
-    let tape = tape();
-    let (wal, _records) = MockWal::new(tape.clone());
-    let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
-    let amends = venue.amends.clone();
-    let (risk, _seen) = MockRisk::with(allow_all());
-    let mut fast = settings();
-    fast.group_flush_ms = 5;
-    let mut engine = Engine::boot(&fast, "0", wal, risk, venue, vec![Box::new(buyer)], &[])
-        .await
-        .unwrap();
-    let symbol = engine.market().table.get("BTCUSDT").unwrap();
-    engine
-        .run(
-            &mut ScriptFeed::wide_quotes(symbol, 2, false),
-            &mut ScriptOrderFeed::empty(),
-            tokio::time::sleep(Duration::from_millis(60)),
-        )
-        .await
-        .unwrap();
-    assert!(
-        !amends.lock().unwrap().is_empty(),
-        "there was a reprice to measure"
-    );
-
-    // The changed reservation and AmendSent record must reach the durability
-    // barrier before the venue sees the amend.
-    let steps = tape.lock().unwrap();
-    let mut checked = 0;
-    for (i, step) in steps.iter().enumerate() {
-        if *step != Step::Append("amend_sent".into()) {
-            continue;
-        }
-        let wire = i + steps[i..]
-            .iter()
-            .position(|s| matches!(s, Step::Amend(_)))
-            .expect("the reprice reaches the venue");
-        let barrier = i + steps[i..wire]
-            .iter()
-            .position(|s| matches!(s, Step::Barrier))
-            .expect("the amend's conservative reservation is durable");
+    crate::test_clock::with_engine_clock(async {
+        // A price-only amend can still increase notional or stop distance. The
+        // engine therefore reserves the conservative old/new price range and
+        // makes that state durable before asking the venue to mutate the order.
+        let quick = WorkPolicy {
+            reprice_ms: 1,
+            ..WorkPolicy::default()
+        };
+        let (buyer, _heard) = Buyer::working("BTCUSDT", 1, 0.01, quick);
+        let tape = tape();
+        let (wal, _records) = MockWal::new(tape.clone());
+        let (venue, _sends) = MockVenue::new(tape.clone(), &["BTCUSDT"]);
+        let amends = venue.amends.clone();
+        let (risk, _seen) = MockRisk::with(allow_all());
+        let mut fast = settings();
+        fast.group_flush_ms = 5;
+        let mut engine = Engine::boot(&fast, "0", wal, risk, venue, vec![Box::new(buyer)], &[])
+            .await
+            .unwrap();
+        let symbol = engine.market().table.get("BTCUSDT").unwrap();
+        engine
+            .run(
+                &mut ScriptFeed::wide_quotes(symbol, 2, false),
+                &mut ScriptOrderFeed::empty(),
+                tokio::time::sleep(Duration::from_millis(60)),
+            )
+            .await
+            .unwrap();
         assert!(
-            i < barrier && barrier < wire,
-            "the barrier precedes the wire"
+            !amends.lock().unwrap().is_empty(),
+            "there was a reprice to measure"
         );
-        checked += 1;
-    }
-    assert!(checked > 0, "no reprice was written down");
+
+        // The changed reservation and AmendSent record must reach the durability
+        // barrier before the venue sees the amend.
+        let steps = tape.lock().unwrap();
+        let mut checked = 0;
+        for (i, step) in steps.iter().enumerate() {
+            if *step != Step::Append("amend_sent".into()) {
+                continue;
+            }
+            let wire = i + steps[i..]
+                .iter()
+                .position(|s| matches!(s, Step::Amend(_)))
+                .expect("the reprice reaches the venue");
+            let barrier = i + steps[i..wire]
+                .iter()
+                .position(|s| matches!(s, Step::Barrier))
+                .expect("the amend's conservative reservation is durable");
+            assert!(
+                i < barrier && barrier < wire,
+                "the barrier precedes the wire"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no reprice was written down");
+    })
+    .await;
 }

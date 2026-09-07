@@ -180,6 +180,13 @@ mod tests {
     }
     fn request(id: u16, side: Side, qty: &str, stop: Option<&str>) -> OrderRequest {
         let logical = stop.map(d);
+        let terms = ExactOrderTerms {
+            quantity: d(qty),
+            limit_price: None,
+            stop_trigger_price: logical.clone(),
+            physical_stop_trigger_price: logical,
+            input_policy: OrderInputPolicy::StrategyShortestDecimal,
+        };
         let mut request = OrderRequest {
             client_order_id: "planned".into(),
             strategy: StrategyId(id),
@@ -198,17 +205,9 @@ mod tests {
                 })
                 .unwrap_or(SleeveOrderEffect::Reduce),
             ),
-            exact_terms: None,
+            exact_terms: Some(Box::new(terms.clone())),
         };
-        ExactOrderTerms {
-            quantity: d(qty),
-            limit_price: None,
-            stop_trigger_price: logical.clone(),
-            physical_stop_trigger_price: logical,
-            input_policy: OrderInputPolicy::StrategyShortestDecimal,
-        }
-        .apply_projection(&mut request)
-        .unwrap();
+        terms.apply_projection(&mut request).unwrap();
         request
     }
     fn interval(low: f64, high: f64) -> PhysicalExposureInterval {

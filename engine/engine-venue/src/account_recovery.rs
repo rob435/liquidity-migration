@@ -27,6 +27,7 @@ impl PageProgress {
         use sha2::Digest;
         self.advance(sha2::Sha256::digest(cursor.as_bytes()).into())
     }
+    #[cfg(feature = "mexc")]
     pub fn rows(&mut self, rows: &[engine_types::VenueExecution]) -> Result<(), VenueError> {
         use sha2::Digest;
         let mut hash = sha2::Sha256::new();

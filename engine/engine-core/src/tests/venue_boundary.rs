@@ -104,10 +104,12 @@ fn accepted(request: &Recorded, _: usize) -> (u16, String) {
 
 type BoundaryEngine = Engine<MockWal, MockRisk, BoundaryVenue>;
 type Records = Arc<Mutex<Vec<WalRecord>>>;
+type Sends = Arc<Mutex<Vec<OrderRequest>>>;
 
-async fn boot(wire: BybitGateway, cancel_on_fill: bool) -> (BoundaryEngine, Records) {
+async fn boot(wire: BybitGateway, cancel_on_fill: bool) -> (BoundaryEngine, Records, Sends) {
     let (wal, records) = MockWal::new(tape());
     let (mut account, _) = MockVenue::new(tape(), &["BTCUSDT"]);
+    let sends = account.sends.clone();
     let mut spec = shared_sleeves::spec();
     spec.tick_size = Some(d("0.5"));
     spec.qty_step = Some(d("0.001"));
@@ -132,7 +134,7 @@ async fn boot(wire: BybitGateway, cancel_on_fill: bool) -> (BoundaryEngine, Reco
     )
     .await
     .unwrap();
-    (engine, records)
+    (engine, records, sends)
 }
 
 fn d(value: &str) -> Exact {
@@ -179,6 +181,7 @@ async fn submit(engine: &mut BoundaryEngine) {
 }
 
 struct PrivateSocket {
+    _io: crate::test_io::IoProgress,
     feed: BybitOrderFeed,
     frames: mpsc::UnboundedSender<String>,
     server: tokio::task::JoinHandle<()>,
@@ -190,6 +193,7 @@ impl Drop for PrivateSocket {
 }
 
 async fn private_socket() -> PrivateSocket {
+    let io = crate::test_io::IoProgress::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let (frames, mut rx) = mpsc::unbounded_channel::<String>();
@@ -231,6 +235,7 @@ async fn private_socket() -> PrivateSocket {
         OrderUpdate::StreamReset { .. }
     ));
     PrivateSocket {
+        _io: io,
         feed,
         frames,
         server,
@@ -295,114 +300,65 @@ fn assert_accounted(records: &Records, id: &str, expected: &str) {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn http_timeout_keeps_exposure_until_the_late_bybit_execution_settles_once() {
-    let _engine_clock =
-        engine_types::clock::install_virtual(clock::wall_ns(), clock::now_ns()).unwrap();
-    let server = TestServer::start_with_delay(accepted, |request, _| {
-        if request.path == CREATE {
-            Duration::from_secs(30)
-        } else {
-            Duration::ZERO
-        }
-    })
-    .await;
-    let (mut engine, records) = boot(gateway(&server), false).await;
-    {
-        let mut market = ScriptFeed::quotes(SymbolId(0), 1, false);
-        let mut private = ScriptOrderFeed::empty();
-        let stop = async {
-            while !records.lock().unwrap().iter().any(|record| {
-                matches!(record,
-                WalRecord::Note { text, .. } if text.contains("still counted as in flight"))
-            }) {
-                tokio::task::yield_now().await;
+    crate::test_clock::with_engine_clock(async {
+        let server = TestServer::start_with_delay(accepted, |request, _| {
+            if request.path == CREATE {
+                Duration::from_secs(30)
+            } else {
+                Duration::ZERO
             }
-        };
-        let submission = engine.run(&mut market, &mut private, stop);
-        tokio::time::timeout(Duration::from_secs(15), submission)
-            .await
-            .unwrap()
-            .unwrap();
-    }
-    let id = server.only(CREATE).json()["orderLinkId"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_eq!(engine.in_flight_ids(), [id.as_str()]);
-    assert!(records
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|record| matches!(record, WalRecord::Note { text, .. }
-        if text.contains("did not complete") && text.contains("still counted as in flight"))));
-    let mut socket = private_socket().await;
-    let late_fill = async {
-        until(|| !server.to_path(CANCEL).is_empty()).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        socket.frames.send(execution(&id, "late", "0.01")).unwrap();
-        socket.frames.send(execution(&id, "late", "0.01")).unwrap();
-        socket.frames.send(cancelled(&id)).unwrap();
-        until(|| {
-            records.lock().unwrap().iter().any(|record| {
-                matches!(
-                    record,
-                    WalRecord::OrderUpdate {
-                        update: OrderUpdate::Cancelled { .. },
-                        ..
-                    }
-                )
-            })
         })
         .await;
-    };
-    engine
-        .run(
-            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
-            &mut socket.feed,
-            late_fill,
-        )
-        .await
-        .unwrap();
-    assert_eq!(fill_count(&records), 1);
-    assert!(engine.in_flight_ids().is_empty());
-    assert_accounted(&records, &id, "0.01");
-    assert_eq!(server.to_path(CREATE).len(), 1);
-    assert_eq!(server.to_path(CANCEL).len(), 1);
-}
-
-#[tokio::test]
-async fn bybit_partial_fill_racing_cancel_preserves_each_execution_in_both_orders() {
-    for cancel_first in [true, false] {
-        let server = TestServer::start(accepted).await;
-        let (mut engine, records) = boot(gateway(&server), true).await;
-        submit(&mut engine).await;
+        let (mut engine, records, _) = boot(gateway(&server), false).await;
+        {
+            let mut market = ScriptFeed::quotes(SymbolId(0), 1, false);
+            let mut private = ScriptOrderFeed::empty();
+            let stop = async {
+                while !records.lock().unwrap().iter().any(|record| {
+                    matches!(record,
+                WalRecord::Note { text, .. } if text.contains("still counted as in flight"))
+                }) {
+                    tokio::task::yield_now().await;
+                }
+            };
+            let submission = engine.run(&mut market, &mut private, stop);
+            let expire_http = async {
+                until(|| !server.to_path(CREATE).is_empty()).await;
+                tokio::time::advance(Duration::from_secs(10)).await;
+            };
+            let (result, ()) = tokio::join!(submission, expire_http);
+            result.unwrap();
+        }
         let id = server.only(CREATE).json()["orderLinkId"]
             .as_str()
             .unwrap()
             .to_owned();
+        assert_eq!(engine.in_flight_ids(), [id.as_str()]);
+        assert!(records
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|record| matches!(record, WalRecord::Note { text, .. }
+        if text.contains("did not complete") && text.contains("still counted as in flight"))));
         let mut socket = private_socket().await;
-        socket
-            .frames
-            .send(execution(&id, "partial-1", "0.004"))
-            .unwrap();
-        let choreography = async {
+        let late_fill = async {
             until(|| !server.to_path(CANCEL).is_empty()).await;
-            let frames = [cancelled(&id), execution(&id, "partial-2", "0.002")];
-            for index in if cancel_first { [0, 1] } else { [1, 0] } {
-                socket.frames.send(frames[index].clone()).unwrap();
-            }
+            tokio::time::advance(Duration::from_millis(100)).await;
+            socket.frames.send(execution(&id, "late", "0.01")).unwrap();
+            socket.frames.send(execution(&id, "late", "0.01")).unwrap();
+            socket.frames.send(cancelled(&id)).unwrap();
             until(|| {
-                fill_count(&records) == 2
-                    && records.lock().unwrap().iter().any(|record| {
-                        matches!(
-                            record,
-                            WalRecord::OrderUpdate {
-                                update: OrderUpdate::Cancelled { .. },
-                                ..
-                            }
-                        )
-                    })
+                records.lock().unwrap().iter().any(|record| {
+                    matches!(
+                        record,
+                        WalRecord::OrderUpdate {
+                            update: OrderUpdate::Cancelled { .. },
+                            ..
+                        }
+                    )
+                })
             })
             .await;
         };
@@ -410,19 +366,76 @@ async fn bybit_partial_fill_racing_cancel_preserves_each_execution_in_both_order
             .run(
                 &mut ScriptFeed::quotes(SymbolId(0), 0, false),
                 &mut socket.feed,
-                choreography,
+                late_fill,
             )
             .await
             .unwrap();
+        assert_eq!(fill_count(&records), 1);
         assert!(engine.in_flight_ids().is_empty());
-        assert_accounted(&records, &id, "0.006");
+        assert_accounted(&records, &id, "0.01");
         assert_eq!(server.to_path(CREATE).len(), 1);
-        assert_eq!(server.only(CANCEL).json()["orderLinkId"], id);
-    }
+        assert_eq!(server.to_path(CANCEL).len(), 1);
+    })
+    .await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
+async fn bybit_partial_fill_racing_cancel_preserves_each_execution_in_both_orders() {
+    crate::test_clock::with_engine_clock(async {
+        for cancel_first in [true, false] {
+            let server = TestServer::start(accepted).await;
+            let (mut engine, records, _) = boot(gateway(&server), true).await;
+            submit(&mut engine).await;
+            let id = server.only(CREATE).json()["orderLinkId"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let mut socket = private_socket().await;
+            socket
+                .frames
+                .send(execution(&id, "partial-1", "0.004"))
+                .unwrap();
+            let choreography = async {
+                until(|| !server.to_path(CANCEL).is_empty()).await;
+                let frames = [cancelled(&id), execution(&id, "partial-2", "0.002")];
+                for index in if cancel_first { [0, 1] } else { [1, 0] } {
+                    socket.frames.send(frames[index].clone()).unwrap();
+                }
+                until(|| {
+                    fill_count(&records) == 2
+                        && records.lock().unwrap().iter().any(|record| {
+                            matches!(
+                                record,
+                                WalRecord::OrderUpdate {
+                                    update: OrderUpdate::Cancelled { .. },
+                                    ..
+                                }
+                            )
+                        })
+                })
+                .await;
+            };
+            engine
+                .run(
+                    &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+                    &mut socket.feed,
+                    choreography,
+                )
+                .await
+                .unwrap();
+            assert!(engine.in_flight_ids().is_empty());
+            assert_accounted(&records, &id, "0.006");
+            assert_eq!(server.to_path(CREATE).len(), 1);
+            assert_eq!(server.only(CANCEL).json()["orderLinkId"], id);
+        }
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn bybit_rate_and_clock_rejections_reach_core_without_becoming_ambiguous_sends() {
+    crate::test_clock::with_engine_clock(async {
+
     for code in [10006, 10002] {
         let server = TestServer::start(move |request, _| {
             assert_eq!(request.path, CREATE);
@@ -445,7 +458,7 @@ async fn bybit_rate_and_clock_rejections_reach_core_without_becoming_ambiguous_s
             )
         })
         .await;
-        let (mut engine, records) = boot(gateway(&server), false).await;
+        let (mut engine, records, _) = boot(gateway(&server), false).await;
         submit(&mut engine).await;
         assert!(engine.in_flight_ids().is_empty());
         assert!(records.lock().unwrap().iter().any(|record| matches!(record,
@@ -459,10 +472,14 @@ async fn bybit_rate_and_clock_rejections_reach_core_without_becoming_ambiguous_s
             1
         );
     }
+
+    }).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn bybit_position_topics_do_not_duplicate_execution_accounting() {
+    crate::test_clock::with_engine_clock(async {
+
     let mut socket = private_socket().await;
     socket
         .frames
@@ -479,106 +496,133 @@ async fn bybit_position_topics_do_not_duplicate_execution_accounting() {
     assert!(
         matches!(update, OrderUpdate::Fill { ref exec_id, qty: 0.004, .. } if exec_id == "only-execution")
     );
+
+    }).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn bybit_quota_wait_is_recorded_once_by_the_engine() {
-    let server = TestServer::start(accepted).await;
-    let (mut warm_engine, warm_records) = boot(gateway(&server), false).await;
-    submit(&mut warm_engine).await;
-    let request = warm_records
-        .lock()
-        .unwrap()
-        .iter()
-        .find_map(|record| match record {
-            WalRecord::OrderSent { request, .. } => Some(request.clone()),
-            _ => None,
-        })
-        .unwrap();
-    let mut wire = gateway(&server);
-    for index in 0..10 {
-        let mut warm = request.clone();
-        warm.client_order_id = format!("warm-{index}");
-        wire.send_order(&warm).await.unwrap();
-    }
-    let (mut engine, records) = boot(wire, false).await;
-    submit(&mut engine).await;
-    let quota = engine.ledger().quantiles(crate::ledger::Segment::QuotaHold);
-    assert_eq!(quota.count, 1);
-    assert!(
-        quota.max_ns >= 100_000_000,
-        "full create quota was not observed: {quota:?}"
-    );
-    let rows = records.lock().unwrap();
-    let waits: Vec<_> = rows
-        .iter()
-        .filter_map(|row| match row {
-            WalRecord::VenueTiming {
-                operation,
-                rate_wait_ns,
-                ..
-            } if operation == "place" => *rate_wait_ns,
-            _ => None,
-        })
-        .collect();
-    assert_eq!(waits.len(), 1);
-    assert!(waits[0] >= 100_000_000);
+    crate::test_clock::with_engine_clock(async {
+        let server = TestServer::start(accepted).await;
+        let (mut warm_engine, warm_records, _) = boot(gateway(&server), false).await;
+        submit(&mut warm_engine).await;
+        let request = warm_records
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|record| match record {
+                WalRecord::OrderSent { request, .. } => Some(request.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let mut wire = gateway(&server);
+        for index in 0..10 {
+            let mut warm = request.clone();
+            warm.client_order_id = format!("warm-{index}");
+            wire.send_order(&warm).await.unwrap();
+        }
+        let (mut engine, records, sends) = boot(wire, false).await;
+        let release_quota = async {
+            until(|| !sends.lock().unwrap().is_empty()).await;
+            tokio::time::advance(Duration::from_millis(1001)).await;
+        };
+        tokio::join!(submit(&mut engine), release_quota);
+        let quota = engine.ledger().quantiles(crate::ledger::Segment::QuotaHold);
+        assert_eq!(quota.count, 1);
+        assert!(
+            quota.max_ns >= 100_000_000,
+            "full create quota was not observed: {quota:?}"
+        );
+        let rows = records.lock().unwrap();
+        let waits: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                WalRecord::VenueTiming {
+                    operation,
+                    rate_wait_ns,
+                    ..
+                } if operation == "place" => *rate_wait_ns,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(waits.len(), 1);
+        assert!(waits[0] >= 100_000_000);
+    })
+    .await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn working_reprices_gain_exact_terms_before_the_durable_amend_and_wire() {
-    let (wal, records) = MockWal::new(tape());
-    let (mut venue, _) = MockVenue::new(tape(), &["BTCUSDT"]);
-    let mut spec = shared_sleeves::spec();
-    spec.tick_size = Some(d("0.5"));
-    spec.qty_step = Some(d("0.001"));
-    spec.market_qty_step = Some(d("0.001"));
-    spec.min_qty = Some(d("0.001"));
-    spec.market_min_qty = Some(d("0.001"));
-    venue.exact_specs = Some(vec![("BTCUSDT".into(), spec)]);
-    let amends = venue.amends.clone();
-    let (buyer, _) = Buyer::working(
-        "BTCUSDT",
-        1,
-        0.01,
-        WorkPolicy {
-            reprice_ms: 1,
-            ..Default::default()
-        },
-    );
-    let (risk, _) = MockRisk::with(allow_all());
-    let mut config = settings();
-    config.group_flush_ms = 5;
-    let mut engine = Engine::boot(
-        &config,
-        "working-exact",
-        wal,
-        risk,
-        venue,
-        vec![Box::new(buyer)],
-        &[],
-    )
-    .await
-    .unwrap();
-    engine
-        .run(
-            &mut ScriptFeed::wide_quotes(SymbolId(0), 2, false),
-            &mut ScriptOrderFeed::empty(),
-            until(|| !amends.lock().unwrap().is_empty()),
+    crate::test_clock::with_engine_clock(async {
+        let (wal, records) = MockWal::new(tape());
+        let (mut venue, _) = MockVenue::new(tape(), &["BTCUSDT"]);
+        let mut spec = shared_sleeves::spec();
+        spec.tick_size = Some(d("0.5"));
+        spec.qty_step = Some(d("0.001"));
+        spec.market_qty_step = Some(d("0.001"));
+        spec.min_qty = Some(d("0.001"));
+        spec.market_min_qty = Some(d("0.001"));
+        venue.exact_specs = Some(vec![("BTCUSDT".into(), spec)]);
+        let amends = venue.amends.clone();
+        let (buyer, _) = Buyer::working(
+            "BTCUSDT",
+            1,
+            0.01,
+            WorkPolicy {
+                reprice_ms: 1,
+                ..Default::default()
+            },
+        );
+        let (risk, _) = MockRisk::with(allow_all());
+        let mut config = settings();
+        config.group_flush_ms = 5;
+        let mut engine = Engine::boot(
+            &config,
+            "working-exact",
+            wal,
+            risk,
+            venue,
+            vec![Box::new(buyer)],
+            &[],
         )
         .await
         .unwrap();
-    let sent = amends.lock().unwrap();
-    assert_eq!(sent.len(), 1);
-    let spec = &sent[0].2;
-    spec.exact_terms
-        .as_ref()
-        .unwrap()
-        .validate_projection(spec)
-        .unwrap();
-    assert!(spec.qty.is_none());
-    assert!(records.lock().unwrap().iter().any(
-        |row| matches!(row, WalRecord::AmendSent { spec: durable, .. }
+        engine
+            .run(
+                &mut ScriptFeed::wide_quotes(SymbolId(0), 2, false),
+                &mut ScriptOrderFeed::empty(),
+                async {
+                    until(|| {
+                        records.lock().unwrap().iter().any(|row| {
+                            matches!(
+                                row,
+                                WalRecord::OrderUpdate {
+                                    update: OrderUpdate::Ack(_),
+                                    ..
+                                }
+                            )
+                        })
+                    })
+                    .await;
+                    tokio::time::advance(Duration::from_millis(5)).await;
+                    until(|| !amends.lock().unwrap().is_empty()).await;
+                },
+            )
+            .await
+            .unwrap();
+        let sent = amends.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let spec = &sent[0].2;
+        spec.exact_terms
+            .as_ref()
+            .unwrap()
+            .validate_projection(spec)
+            .unwrap();
+        assert!(spec.qty.is_none());
+        assert!(records.lock().unwrap().iter().any(
+            |row| matches!(row, WalRecord::AmendSent { spec: durable, .. }
         if durable == spec)
-    ));
+        ));
+    })
+    .await;
 }

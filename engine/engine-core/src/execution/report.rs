@@ -519,10 +519,10 @@ mod tests {
 
     fn log() -> Vec<WalRecord> {
         vec![
-            WalRecord::Names {
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
                 strategies: vec!["carry".into(), "long".into()],
                 symbols: vec!["BTCUSDT".into(), "ETHUSDT".into()],
-            },
+            }),
             WalRecord::OrderSent {
                 dispatch: None,
                 request: OrderRequest {

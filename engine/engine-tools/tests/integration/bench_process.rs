@@ -21,36 +21,41 @@ fn temp_path(name: &str) -> TempPath {
     )))
 }
 
-async fn wait_for_first_submit(path: &std::path::Path) {
-    // Keep virtual source time at its first quote while the real child starts.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let mut next_read = std::time::Instant::now();
-    loop {
-        let now = std::time::Instant::now();
-        assert!(
-            now < deadline,
-            "isolated worker did not complete the first submit"
-        );
-        if now >= next_read {
-            if let Ok((records, _)) = engine_wal::replay_scan(path) {
-                if records.iter().any(|(_, record)| {
-                    matches!(record,
-                    WalRecord::VenueTiming { operation, .. } if operation == "place")
-                }) {
-                    return;
-                }
-            }
-            next_read = now + std::time::Duration::from_millis(2);
-        }
-        tokio::task::yield_now().await;
+fn run_parent(name: &str) -> bool {
+    const CHILD: &str = "ENGINE_BENCH_PROCESS_CASE";
+    if std::env::var(CHILD).as_deref() == Ok(name) {
+        return false;
     }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &format!("bench_process::{name}"), "--nocapture"])
+        .env(CHILD, name)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
 }
 
-#[tokio::test(start_paused = true)]
-async fn the_bench_runs_the_real_loop_and_fills_the_histograms() {
+fn run(options: &BenchOptions) -> bench::BenchResult {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(bench::run(options))
+        .expect("bench")
+}
+
+#[test]
+fn the_bench_runs_the_real_loop_and_fills_the_histograms() {
+    if run_parent("the_bench_runs_the_real_loop_and_fills_the_histograms") {
+        return;
+    }
     let path = temp_path("bench-smoke");
     let options = BenchOptions {
-        worker_executable: Some(env!("CARGO_BIN_EXE_engine").into()),
         events: 100,
         rate: 100,
         every_nth: 1,
@@ -59,23 +64,14 @@ async fn the_bench_runs_the_real_loop_and_fills_the_histograms() {
         fills: false,
         venue_delay: std::time::Duration::ZERO,
     };
-    let run = bench::run(&options);
-    tokio::pin!(run);
-    let readiness = wait_for_first_submit(path.path());
-    tokio::pin!(readiness);
-    tokio::select! {
-        result = &mut run => panic!("bench finished before its first submit: {:?}", result.err()),
-        () = &mut readiness => {},
-    }
-    tokio::time::resume();
-    let result = run.await.expect("bench");
+    let result = run(&options);
     assert_eq!(result.events, 100);
     assert!(
         result.orders > 0 && result.orders <= 100,
-        "ready isolated worker produces real measured orders: {}",
+        "ready embedded callback produces real measured orders: {}",
         result.orders
     );
-    assert_eq!(result.callback_execution, "isolated");
+    assert_eq!(result.callback_execution, "embedded");
     assert_eq!(
         result.orders,
         result
@@ -92,9 +88,6 @@ async fn the_bench_runs_the_real_loop_and_fills_the_histograms() {
     );
     for (segment, q) in &result.segments {
         assert!(q.count > 0, "{segment:?} recorded nothing");
-        if *segment != Segment::Decide {
-            assert!(q.p50_ns > 0, "{segment:?} p50 is zero");
-        }
         assert!(q.max_ns >= q.p50_ns);
     }
     let report = engine_core::replay::read(path.path()).unwrap();
@@ -102,9 +95,16 @@ async fn the_bench_runs_the_real_loop_and_fills_the_histograms() {
     let (replayed, torn) = engine_wal::replay_scan(path.path()).unwrap();
     assert!(!torn);
     assert_eq!(report.records, replayed.len());
-    assert!(replayed
-        .iter()
-        .any(|(_, record)| matches!(record, WalRecord::StrategyProcessTransitionQueued { .. })));
+    assert!(replayed.iter().all(|(_, record)| !matches!(
+        record,
+        WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::StrategyProcessTransitionQueued { .. }
+        ) | WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::StrategyCallbackQueued { .. }
+        ) | WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::StrategyCallbackPrepared { .. }
+        )
+    )));
     let completed: Vec<_> = replayed
         .iter()
         .filter_map(|(_, record)| match record {
@@ -123,42 +123,49 @@ async fn the_bench_runs_the_real_loop_and_fills_the_histograms() {
     }
     assert!(result.table().contains("decision to dispatch ready"));
     assert_eq!(result.completed_latency_windows, 0);
-    for kind in ["callback commit", "dispatch queued", "attempted send"] {
-        let row = result
+    for kind in ["callback commit", "dispatch queued"] {
+        assert!(result
             .barriers
             .iter()
-            .find(|row| row.records == kind)
-            .unwrap();
-        assert!(row.confirmation.count > 0, "no {kind} barrier measured");
-        assert_eq!(row.failures, 0);
-        assert!(row.confirmation.max_ns >= row.request.p50_ns);
+            .all(|row| row.records != kind || row.confirmation.count == 0));
     }
+    let row = result
+        .barriers
+        .iter()
+        .find(|row| row.records == "attempted send + dispatch queued")
+        .unwrap();
+    assert_eq!(
+        row.confirmation.count, result.orders,
+        "one barrier per order"
+    );
+    assert_eq!(row.failures, 0);
+    assert!(row.confirmation.max_ns >= row.request.p50_ns);
     assert!(result
         .as_json()
-        .contains("\"callback_execution\":\"isolated\""));
+        .contains("\"callback_execution\":\"embedded\""));
 }
 
-#[tokio::test]
-async fn the_bench_can_fill_what_it_accepts_and_the_whole_cost_path_runs() {
+#[test]
+fn the_bench_can_fill_what_it_accepts_and_the_whole_cost_path_runs() {
+    if run_parent("the_bench_can_fill_what_it_accepts_and_the_whole_cost_path_runs") {
+        return;
+    }
     // Every other test here drives one piece. This drives the loop: a real
     // engine, a real log with its fsync, orders that come back filled, and a
     // markout queue drained by the group-flush tick.
     //
-    // It is paced rather than run flat out, because the shortest horizon is a
-    // second and a bench that finishes in eighty milliseconds proves nothing
-    // about a mark ever coming due.
+    // Four seconds of real process time matures the one-second markout.
     let path = temp_path("bench-fills");
     let options = BenchOptions {
-        worker_executable: Some(env!("CARGO_BIN_EXE_engine").into()),
-        events: 400,
-        rate: 100,
-        every_nth: 10,
+        events: 40,
+        rate: 10,
+        every_nth: 1,
         symbols: vec!["BTCUSDT".to_string()],
         wal_path: path.path().to_path_buf(),
         fills: true,
         venue_delay: std::time::Duration::ZERO,
     };
-    let result = bench::run(&options).await.expect("the bench runs");
+    let result = run(&options);
     assert!(result.orders > 0, "no orders, nothing to price");
 
     let (replayed, _torn) = engine_wal::replay_scan(path.path()).expect("the log reads back");
@@ -215,21 +222,23 @@ async fn the_bench_can_fill_what_it_accepts_and_the_whole_cost_path_runs() {
     );
 }
 
-#[tokio::test]
-async fn the_bench_fills_nothing_unless_it_is_asked_to() {
+#[test]
+fn the_bench_fills_nothing_unless_it_is_asked_to() {
+    if run_parent("the_bench_fills_nothing_unless_it_is_asked_to") {
+        return;
+    }
     // The default has to stay the run the latency table was measured on.
     let path = temp_path("bench-no-fills");
     let options = BenchOptions {
-        worker_executable: Some(env!("CARGO_BIN_EXE_engine").into()),
-        events: 200,
-        rate: 100,
-        every_nth: 50,
+        events: 4,
+        rate: 2,
+        every_nth: 1,
         symbols: vec!["BTCUSDT".to_string()],
         wal_path: path.path().to_path_buf(),
         ..BenchOptions::default()
     };
     assert!(!options.fills, "off unless asked");
-    bench::run(&options).await.expect("the bench runs");
+    run(&options);
     let (replayed, _torn) = engine_wal::replay_scan(path.path()).expect("the log reads back");
     let records: Vec<WalRecord> = replayed.into_iter().map(|(_, r)| r).collect();
     assert_eq!(

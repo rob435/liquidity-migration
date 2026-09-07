@@ -86,7 +86,7 @@ fn the_clock_never_moves_backwards() {
     assert_eq!(scheduler.now_ns(), 100);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_interval_ticks_at_once_then_one_period_after_each_tick() {
     let scheduler = Scheduler::starting_at(0);
     scheduler.open();
@@ -859,7 +859,7 @@ fn liquidation_closes_everything_when_equity_reaches_maintenance() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_gateway_answers_a_round_trip_later_against_the_book_of_that_moment() {
     let (venue, scheduler) = venue(1_000_000.0, 10.0);
     let venue = Arc::new(Mutex::new(venue));
@@ -1071,7 +1071,7 @@ async fn run_once(
 /// against the book of their arrival, funding settles at its boundary, the
 /// engine's ledger and the venue's books agree, and a second run writes the
 /// same log byte for byte.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_replay_is_ordered_reconciled_and_byte_identical_on_rerun() {
     let dir = std::env::temp_dir().join(format!(
         "engine-backtest-{}-{}",
@@ -1132,7 +1132,7 @@ async fn a_replay_is_ordered_reconciled_and_byte_identical_on_rerun() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_log_with_bytes_in_it_is_refused() {
     let dir = std::env::temp_dir().join(format!(
         "engine-backtest-{}-{}",
@@ -1164,7 +1164,7 @@ async fn a_log_with_bytes_in_it_is_refused() {
 
 /// A short tape the quoter finishes flat on: the venue's realized less its
 /// closed-trip fees and the engine's own round trips must be the same money.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_replay_that_ends_flat_reconciles_the_venue_and_the_ledger_exactly() {
     let dir = std::env::temp_dir().join(format!(
         "engine-backtest-{}-{}",

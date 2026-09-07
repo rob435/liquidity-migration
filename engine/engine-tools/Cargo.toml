@@ -15,12 +15,21 @@ path = "src/engine.rs"
 name = "engine-tools"
 path = "src/main.rs"
 
+[features]
+default = ["bybit"]
+bybit = ["engine-core/bybit", "engine-venue/bybit", "engine-marketdata/bybit"]
+binance = ["engine-core/binance", "engine-venue/binance", "engine-marketdata/binance"]
+hyperliquid = ["engine-core/hyperliquid", "engine-venue/hyperliquid", "engine-marketdata/hyperliquid"]
+lighter = ["engine-core/lighter", "engine-venue/lighter", "engine-marketdata/lighter"]
+mexc = ["engine-core/mexc", "engine-venue/mexc", "engine-marketdata/mexc"]
+variational = ["engine-core/variational", "engine-venue/variational", "engine-marketdata/variational"]
+
 [dependencies]
-engine-core = { path = "../engine-core" }
+engine-core = { path = "../engine-core", default-features = false }
 engine-types = { workspace = true }
 engine-wal = { workspace = true }
-engine-marketdata = { workspace = true }
-engine-venue = { workspace = true }
+engine-marketdata = { workspace = true, default-features = false }
+engine-venue = { workspace = true, default-features = false }
 engine-risk = { workspace = true }
 engine-strategies = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "macros", "sync", "signal"] }

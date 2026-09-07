@@ -248,7 +248,7 @@ async fn drive(feed: &mut BybitOrderFeed, limit: Duration, what: &str) -> OrderU
                 Err(FeedError::Closed) => panic!("{what}: the feed reported itself closed"),
                 // A feed that errors without closing is reconnecting inside;
                 // the engine logs it and keeps waiting, so this does too.
-                Err(_) => (),
+                Err(_) => tokio::time::advance(Duration::from_millis(250)).await,
             },
             _ = flush_tick.tick() => (),
             _ = tokio::time::sleep_until(deadline) => {
@@ -266,7 +266,7 @@ async fn read(feed: &mut BybitOrderFeed, limit: Duration, what: &str) -> OrderUp
             match feed.next_update().await {
                 Ok(update) => return update,
                 Err(FeedError::Closed) => panic!("{what}: the feed reported itself closed"),
-                Err(_) => (),
+                Err(_) => tokio::time::advance(Duration::from_millis(250)).await,
             }
         }
     })
@@ -274,8 +274,9 @@ async fn read(feed: &mut BybitOrderFeed, limit: Duration, what: &str) -> OrderUp
     waited.unwrap_or_else(|_| panic!("{what}: nothing arrived in {limit:?}"))
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_feed_authenticates_subscribes_and_maps_what_arrives() {
+    let _io = crate::support::IoProgress::new();
     let order_frame = json!({
         "topic": "order",
         "id": "test",
@@ -371,8 +372,9 @@ async fn the_feed_authenticates_subscribes_and_maps_what_arrives() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn demo_does_not_request_the_mainnet_only_fast_execution_topic() {
+    let _io = crate::support::IoProgress::new();
     let (url, seen) = start(Vec::new()).await;
     let mut feed = BybitOrderFeed::for_test_realm(
         &url,
@@ -390,8 +392,9 @@ async fn demo_does_not_request_the_mainnet_only_fast_execution_topic() {
     assert_eq!(seen[1]["args"], json!(["order", "execution"]));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn malformed_account_envelope_redials_and_marks_the_gap_before_more_news() {
+    let _io = crate::support::IoProgress::new();
     let server = serve(|connection| {
         Conn::serving(if connection == 0 {
             vec![r#"{"topic":"execution","data":null}"#.into()]
@@ -420,8 +423,9 @@ async fn malformed_account_envelope_redials_and_marks_the_gap_before_more_news()
     assert_eq!(server.connections(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_auth_is_reported_not_swallowed() {
+    let _io = crate::support::IoProgress::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -447,8 +451,9 @@ async fn a_refused_auth_is_reported_not_swallowed() {
 
 /// Defect 1: the engine drops the losing `select!` branch every flush tick, so
 /// a handshake that lives inside `next_update`'s future never finishes.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_handshake_survives_the_engine_dropping_the_future_every_tick() {
+    let _io = crate::support::IoProgress::new();
     let server = serve(|_| Conn {
         // Longer than the engine's 250 ms flush tick, which is what a venue a
         // round trip away actually costs.
@@ -461,7 +466,19 @@ async fn the_handshake_survives_the_engine_dropping_the_future_every_tick() {
     .await;
     let mut feed = feed(&server.url);
 
-    match drive(&mut feed, Duration::from_secs(8), "initial reset").await {
+    let advance_auth = async {
+        while server.seen().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_millis(250)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(150)).await;
+    };
+    let (reset, ()) = tokio::join!(
+        drive(&mut feed, Duration::from_secs(8), "initial reset"),
+        advance_auth
+    );
+    match reset {
         OrderUpdate::StreamReset { .. } => (),
         other => panic!("expected initial StreamReset, got {other:?}"),
     }
@@ -477,8 +494,9 @@ async fn the_handshake_survives_the_engine_dropping_the_future_every_tick() {
 /// `Closed`, which the engine takes as "no more order news, ever". Read
 /// straight through, with no `select!` anywhere, so only this defect can fail
 /// the test.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_socket_closed_mid_auth_is_retried_not_terminal() {
+    let _io = crate::support::IoProgress::new();
     let server = serve(|n| Conn {
         auth_delay: Duration::ZERO,
         outcome: if n == 0 {
@@ -512,8 +530,9 @@ async fn a_socket_closed_mid_auth_is_retried_not_terminal() {
 
 /// A refused auth is reported and then tried again. Nothing the venue says
 /// during the handshake retires the feed.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_auth_is_retried_until_it_takes() {
+    let _io = crate::support::IoProgress::new();
     let server = serve(|n| Conn {
         auth_delay: Duration::ZERO,
         outcome: if n < 2 {
@@ -559,8 +578,9 @@ async fn a_refused_auth_is_retried_until_it_takes() {
 
 /// The socket belongs to the feed: let the feed go and the socket goes with
 /// it, rather than a task reconnecting forever to nobody.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn dropping_the_feed_takes_the_socket_with_it() {
+    let _io = crate::support::IoProgress::new();
     let server = serve(|_| Conn::serving(vec![ack_frame("eng-1")])).await;
     let mut feed = feed(&server.url);
 
@@ -571,7 +591,7 @@ async fn dropping_the_feed_takes_the_socket_with_it() {
     drop(feed);
     let gave_up = tokio::time::timeout(Duration::from_secs(5), async {
         while server.hung_up() == 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await;
@@ -582,8 +602,9 @@ async fn dropping_the_feed_takes_the_socket_with_it() {
 /// Every successful subscription owes the engine a `StreamReset` before any
 /// account row. The first establishes readiness; a reconnect also marks the
 /// interval whose updates may have been lost.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn every_subscription_announces_itself_before_the_socket_says_anything() {
+    let _io = crate::support::IoProgress::new();
     let server = serve(|n| Conn {
         auth_delay: Duration::ZERO,
         outcome: Outcome::Serve {

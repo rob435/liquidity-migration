@@ -15,7 +15,14 @@ mod json;
 mod registry;
 mod tls;
 
-pub(crate) use clock::{account_scan, mono_ns, wall_ms};
+#[cfg(any(
+    feature = "binance",
+    feature = "hyperliquid",
+    feature = "lighter",
+    feature = "mexc"
+))]
+pub(crate) use clock::account_scan;
+pub(crate) use clock::{mono_ns, wall_ms};
 
 pub use arming::{check_arming, check_arming_with, env_flag, real_money_armed, REAL_MONEY_ENV};
 pub use creds::Credentials;
@@ -24,15 +31,21 @@ pub use registry::{
     BINANCE_TESTNET, BYBIT_DEMO, BYBIT_MAINNET, HYPERLIQUID_MAINNET, HYPERLIQUID_TESTNET,
     LIGHTER_MAINNET, LIGHTER_TESTNET, MEXC_MAINNET, VARIATIONAL_MAINNET,
 };
-pub use venues::binance::{BinanceGateway, BinanceOrderFeed, BinanceRealm};
+#[cfg(feature = "binance")]
+pub use venues::binance::{BinanceGateway, BinanceOrderFeed};
+#[cfg(feature = "bybit")]
 pub use venues::bybit::{
-    BybitGateway, BybitInventoryProbe, BybitOrderFeed, BybitOrderReceipt, VenueRealm, API_KEY_ENV,
+    BybitGateway, BybitInventoryProbe, BybitOrderFeed, BybitOrderReceipt, API_KEY_ENV,
     API_SECRET_ENV,
 };
-pub use venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed, HyperliquidRealm};
-pub use venues::lighter::{LighterGateway, LighterOrderFeed, LighterRealm};
-pub use venues::mexc::{MexcGateway, MexcOrderFeed, MexcRealm};
-pub use venues::variational::{VariationalGateway, VariationalRealm};
+#[cfg(feature = "hyperliquid")]
+pub use venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed};
+#[cfg(feature = "lighter")]
+pub use venues::lighter::{LighterGateway, LighterOrderFeed};
+#[cfg(feature = "mexc")]
+pub use venues::mexc::{MexcGateway, MexcOrderFeed};
+#[cfg(feature = "variational")]
+pub use venues::variational::VariationalGateway;
 
 mod realm_credentials;
 pub use realm_credentials::RealmCredentials;
@@ -42,6 +55,7 @@ mod wire;
 
 mod order_lookup;
 
+#[cfg(any(test, feature = "binance"))]
 mod shared_budget;
 
 mod amend_state;
@@ -53,3 +67,11 @@ mod catalog_checkpoint;
 mod account_numbers;
 mod account_recovery;
 mod account_stops;
+
+pub use engine_public::{
+    BinanceRealm, HyperliquidRealm, LighterRealm, MexcRealm, VariationalRealm, VenueRealm,
+};
+
+#[cfg(all(test, feature = "bybit"))]
+#[path = "../../test-support/io.rs"]
+mod test_io;

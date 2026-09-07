@@ -199,7 +199,7 @@ mod tests {
         assert!(error.to_string().contains("10006"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn clients_and_lane_clones_share_one_request_concurrency_budget() {
         let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(2));
         let client =
@@ -215,7 +215,7 @@ mod tests {
         drop(second);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn response_body_cap_refuses_the_next_byte() {
         let response = Response::builder()
             .status(200)

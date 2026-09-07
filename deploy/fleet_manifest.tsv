@@ -10,10 +10,10 @@ liquidity-migration-host-liveness.timer|timer|shared|independent|50|always|direc
 liquidity-migration-host-liveness.service|service|shared|independent|60|job|direct|-|none|-|-|-|-|-|-|-
 liquidity-migration-forward-capture.service|service|shared|independent|90|always|direct|-|active|/var/lib/liquidity-migration/forward-market/status.json|-|-|-|-|-|-
 liquidity-migration-forward-capture-binance.service|service|shared|independent|85|always|direct|-|active|/var/lib/liquidity-migration/forward-market-binance/status.json|-|-|-|-|-|-
-liquidity-migration-chaos-drill.timer|timer|demo|downstream|50|always|none|liquidity-migration-chaos-drill.service|timer|-|liquidity-migration-chaos-drill.service|604800|604800|600|300|-
+liquidity-migration-chaos-drill.timer|timer|demo|downstream|50|always|none|liquidity-migration-chaos-drill.service|timer|-|liquidity-migration-chaos-drill.service|604800|604800|600|900|-
 liquidity-migration-chaos-drill.service|service|demo|downstream|60|job|none|liquidity-migration-engine.service|none|-|-|-|-|-|-|-
-liquidity-migration-demo-liveness.timer|timer|demo|downstream|80|always|direct|liquidity-migration-demo-liveness.service|timer|-|liquidity-migration-demo-liveness.service|60|180|15|120|-
-liquidity-migration-mainnet-liveness.timer|timer|mainnet|downstream|90|mainnet|funded|liquidity-migration-mainnet-liveness.service|timer|-|liquidity-migration-mainnet-liveness.service|60|180|15|120|-
+liquidity-migration-demo-liveness.timer|timer|demo|downstream|80|always|direct|liquidity-migration-demo-liveness.service|timer|-|liquidity-migration-demo-liveness.service|10|30|1|120|-
+liquidity-migration-mainnet-liveness.timer|timer|mainnet|downstream|90|mainnet|funded|liquidity-migration-mainnet-liveness.service|timer|-|liquidity-migration-mainnet-liveness.service|10|30|1|120|-
 liquidity-migration-llm-ledger.timer|timer|shared|downstream|100|always|direct|liquidity-migration-llm-ledger.service|timer|-|liquidity-migration-llm-ledger.service|3600|3600|120|600|-
 liquidity-migration-llm-ledger.service|service|shared|downstream|110|job|direct|-|none|-|-|-|-|-|-|-
 liquidity-migration-trade-notify.timer|timer|shared|downstream|120|always|direct|liquidity-migration-trade-notify.service|timer|-|liquidity-migration-trade-notify.service|300|300|30|120|-

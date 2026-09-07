@@ -1,19 +1,43 @@
 //! Independent lookup clients retain the same identity and failure contracts as direct reads.
 use crate::support::TestServer;
-use engine_types::numeric::{Exact, NumericProvenance};
+use engine_types::numeric::Exact;
+#[cfg(feature = "binance")]
+use engine_types::numeric::NumericProvenance;
 use engine_types::orders::{OrderLookup, TerminalOrderStatus};
 use engine_types::VenueGateway;
-use engine_venue::{
-    BinanceGateway, BinanceRealm, BybitGateway, HyperliquidGateway, HyperliquidRealm,
-    LighterGateway, LighterRealm, MexcGateway, MexcRealm, RealmCredentials, VenueRealm,
-};
+#[cfg(feature = "binance")]
+use engine_venue::BinanceGateway;
+#[cfg(feature = "binance")]
+use engine_venue::BinanceRealm;
+#[cfg(feature = "bybit")]
+use engine_venue::BybitGateway;
+#[cfg(feature = "hyperliquid")]
+use engine_venue::HyperliquidGateway;
+#[cfg(feature = "hyperliquid")]
+use engine_venue::HyperliquidRealm;
+#[cfg(feature = "lighter")]
+use engine_venue::LighterGateway;
+#[cfg(feature = "lighter")]
+use engine_venue::LighterRealm;
+#[cfg(feature = "mexc")]
+use engine_venue::MexcGateway;
+#[cfg(feature = "mexc")]
+use engine_venue::MexcRealm;
+use engine_venue::RealmCredentials;
+#[cfg(feature = "bybit")]
+use engine_venue::VenueRealm;
 
 const ID: &str = "eng-1700000000000-1";
+#[cfg(feature = "hyperliquid")]
 const HL_KEY: &str = "0x0123456789012345678901234567890123456789012345678901234567890123";
+#[cfg(feature = "hyperliquid")]
 const HL_ACCOUNT: &str = "0x0000000000000000000000000000000000000001";
+#[cfg(feature = "lighter")]
 const LIGHTER_KEY: &str =
     "0101010101010101010101010101010101010101010101010101010101010101010101010101010f";
+#[cfg(feature = "mexc")]
 const MEXC_DETAIL: &str = r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":400000,"apiAllowed":true}]}"#;
+#[cfg(feature = "lighter")]
 const LIGHTER_MARKETS: &str = r#"{"code":200,"order_book_details":[{"symbol":"BTC","market_id":0,"status":"active","supported_size_decimals":5,"supported_price_decimals":1,"min_base_amount":"0.0001","min_quote_amount":"10"}]}"#;
 fn symbols() -> Vec<String> {
     vec!["BTCUSDT".into()]
@@ -31,7 +55,8 @@ fn cancelled(lookup: OrderLookup, qty: &str) {
     assert_eq!(row.filled_qty.value, Exact::parse_decimal(qty).unwrap());
 }
 
-#[tokio::test]
+#[cfg(feature = "bybit")]
+#[tokio::test(start_paused = true)]
 async fn bybit_lookup_falls_back_to_history_and_empty_history_remains_unknown() {
     let server=TestServer::start(|request,count|{
         assert_eq!(request.method,"GET");
@@ -77,7 +102,8 @@ async fn bybit_lookup_falls_back_to_history_and_empty_history_remains_unknown() 
     );
 }
 
-#[tokio::test]
+#[cfg(feature = "binance")]
+#[tokio::test(start_paused = true)]
 async fn binance_absence_is_not_never_accepted_and_503_does_not_become_absence() {
     let server=TestServer::start(|request,count|{
         assert_eq!(request.method,"GET");assert_eq!(request.path,"/fapi/v1/order");
@@ -120,7 +146,8 @@ async fn binance_absence_is_not_never_accepted_and_503_does_not_become_absence()
     assert_eq!(server.requests().len(), 3);
 }
 
-#[tokio::test]
+#[cfg(feature = "mexc")]
+#[tokio::test(start_paused = true)]
 async fn mexc_lookup_converts_contracts_exactly_and_does_not_guess_missing_orders() {
     let server=TestServer::start(|request,count|{
         if request.path=="/api/v1/contract/detail" {return (200,MEXC_DETAIL.into());}
@@ -154,7 +181,8 @@ async fn mexc_lookup_converts_contracts_exactly_and_does_not_guess_missing_order
     assert!(server.requests().iter().all(|r| r.method == "GET"));
 }
 
-#[tokio::test]
+#[cfg(feature = "hyperliquid")]
+#[tokio::test(start_paused = true)]
 async fn hyperliquid_lookup_uses_packed_cloid_and_keeps_unknown_oid_unresolved() {
     let server=TestServer::start(|request,count|{
         assert_eq!(request.path,"/info");let body=request.json();
@@ -189,7 +217,8 @@ async fn hyperliquid_lookup_uses_packed_cloid_and_keeps_unknown_oid_unresolved()
     assert_eq!(server.requests().len(), 2);
 }
 
-#[tokio::test]
+#[cfg(feature = "lighter")]
+#[tokio::test(start_paused = true)]
 async fn lighter_lookup_checks_account_market_and_client_index_and_keeps_absence_unknown() {
     let server=TestServer::start(|request,count|{
         if request.path=="/api/v1/orderBookDetails" {return (200,LIGHTER_MARKETS.into());}
@@ -225,7 +254,8 @@ async fn lighter_lookup_checks_account_market_and_client_index_and_keeps_absence
     assert!(server.requests().iter().all(|r| r.method == "GET"));
 }
 
-#[tokio::test]
+#[cfg(feature = "binance")]
+#[tokio::test(start_paused = true)]
 async fn unknown_status_wrong_identity_and_malformed_qty_cannot_claim_known_order() {
     let server=TestServer::start(|_,count|{
         let (symbol,status,qty)=match count {0=>("BTCUSDT","NEW_VENUE_STATE","0"),1=>("ETHUSDT","NEW","0"),_=>("BTCUSDT","FILLED","null")};
@@ -259,7 +289,8 @@ async fn unknown_status_wrong_identity_and_malformed_qty_cannot_claim_known_orde
         .is_err());
 }
 
-#[tokio::test]
+#[cfg(feature = "binance")]
+#[tokio::test(start_paused = true)]
 async fn working_order_with_zero_fills_is_distinct_from_absence_and_survives_escaped_identity() {
     let server=TestServer::start(|_,_|(200,r#"{"symbol":"BTCUSDT","clientOrderId":"eng-1700000000000-\u0031","orderId":"7","status":"PARTIALLY_FILLED","executedQty":"0"}"#.to_string())).await;
     let gw = BinanceGateway::for_test(

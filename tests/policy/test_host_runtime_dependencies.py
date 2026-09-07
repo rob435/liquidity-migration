@@ -24,6 +24,7 @@ def test_host_service_imports_use_only_runtime_dependencies() -> None:
     assert len(entrypoints) == 6
     # These command handlers are imported lazily by the recorder CLI.
     entrypoints.update(("module", name) for name in ("market_tape.record", "market_tape.pack"))
+    entrypoints.add(("script", "scripts/runtime/demo_rollback.py"))
     lock = (ROOT / "requirements-runtime.lock").read_text(encoding="utf-8")
     packages = {line.split("==")[0] for line in lock.splitlines() if line and not line.startswith("#")}
     assert packages == {"websocket-client"}
@@ -39,7 +40,7 @@ import sys
 
 repository, dependency_root, entrypoints = json.loads(sys.argv[1])
 sys.path[:0] = [repository, dependency_root]
-allowed = sys.stdlib_module_names | {'liquidity_migration', 'market_tape', 'websocket'}
+allowed = sys.stdlib_module_names | {'liquidity_migration', 'market_tape', 'release_artifact', 'websocket'}
 
 class RuntimeImports(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):

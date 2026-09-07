@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use engine_types::strategy_process::{
     CallbackEvent, CallbackPreparation, CallbackReply, CallbackSnapshot, StrategyCallbackInput,
-    StrategyProcessState, MAX_PROCESS_PROPOSAL_BYTES,
+    StrategyProcessState,
 };
 use engine_types::{
     AccountView, Action, MarketEvent, MarketState, OrderUpdate, StrategyId, SymbolId, WalRecord,
@@ -15,8 +15,13 @@ use crate::ctx::{Books, Ctx, Timers};
 use crate::inflight::{LedgerOfOrders, OrderRegistry};
 
 use super::state::CallbackState;
-use super::wire::{read_record, write_record, Budget};
-use super::CallbackProposal;
+struct CallbackProposal {
+    callback_id: u64,
+    actions: Vec<Action>,
+    timers: Vec<engine_types::strategy_process::StrategyTimerState>,
+    state: engine_types::strategy_process::StrategyRuntimeState,
+    retained_signal_subscriptions: Option<Vec<engine_types::Subscription>>,
+}
 
 const LONG: StrategyId = StrategyId(1);
 const TAO: SymbolId = SymbolId(0);
@@ -45,56 +50,43 @@ fn replay(records: &[WalRecord]) -> CallbackState {
 
 fn queue(records: &mut Vec<WalRecord>, mut input: StrategyCallbackInput) {
     let preparation = std::mem::replace(&mut input.preparation, CallbackPreparation::Queued);
-    records.push(WalRecord::StrategyCallbackQueued {
-        input: input.clone(),
-    });
+    records.push(WalRecord::Retained(
+        engine_types::wal::RetainedWalRecord::StrategyCallbackQueued {
+            input: input.clone(),
+        },
+    ));
     input.preparation = preparation;
-    records.push(WalRecord::StrategyCallbackPrepared { input });
+    records.push(WalRecord::Retained(
+        engine_types::wal::RetainedWalRecord::StrategyCallbackPrepared { input },
+    ));
 }
 
 fn serve_retained(state: &CallbackState, input_id: u64) -> CallbackProposal {
     let input = state.inputs.get(&input_id).unwrap();
     let runtime = state.committed.get(&LONG).unwrap().runtime.clone();
-    let request = input.request(runtime).unwrap();
-    let mut source = Vec::new();
-    write_record(
-        &mut source,
-        &request,
-        &mut Budget::new(MAX_PROCESS_PROPOSAL_BYTES),
-    )
-    .unwrap();
-    let mut output = Vec::new();
-    super::worker::serve(&mut source.as_slice(), &mut output).unwrap();
-    let mut output = output.as_slice();
-    let mut budget = Budget::new(MAX_PROCESS_PROPOSAL_BYTES);
+    let mut strategy = engine_strategies::runtime::restore(&runtime).unwrap();
     let mut actions = Vec::new();
     let mut timers = Vec::new();
-    loop {
-        match read_record(&mut output, &mut budget).unwrap() {
-            CallbackReply::Action { action } => actions.push(action),
-            CallbackReply::Timer { timer } => timers.push(timer),
-            CallbackReply::Finished {
-                callback_id,
-                state,
-                retained_signal_subscriptions,
-            } => {
-                assert_eq!(callback_id, input_id);
-                engine_strategies::runtime::restore(&state).unwrap();
-                return CallbackProposal {
-                    callback_id,
-                    actions,
-                    timers,
-                    state,
-                    retained_signal_subscriptions,
-                };
+    let mut ctx =
+        engine_types::strategy_process::SnapshotCtx::new(input.snapshot().unwrap(), |reply| {
+            match reply {
+                CallbackReply::Action { action } => actions.push(action),
+                CallbackReply::Timer { timer } => timers.push(timer),
+                _ => (),
             }
-            CallbackReply::Aborted {
-                callback_id,
-                reason,
-            } => {
-                panic!("retained LONG callback {callback_id} aborted: {reason}")
-            }
-        }
+        })
+        .unwrap();
+    strategy.on_event(
+        &engine_types::EngineEvent::try_from(&input.event).unwrap(),
+        &mut ctx,
+    );
+    drop(ctx);
+    CallbackProposal {
+        callback_id: input_id,
+        actions,
+        timers,
+        state: strategy.runtime_state().unwrap().unwrap(),
+        retained_signal_subscriptions: strategy.retained_signal_subscriptions(),
     }
 }
 
@@ -106,17 +98,19 @@ fn commit(records: &mut Vec<WalRecord>, proposal: CallbackProposal) {
             .all(|action| !matches!(action, Action::Place(_))),
         "retained order news must not submit another TAO entry"
     );
-    records.push(WalRecord::StrategyProcessTransitionQueued {
-        input_id: proposal.callback_id,
-        transition: None,
-        process: StrategyProcessState {
-            strategy: LONG,
-            last_callback_id: proposal.callback_id,
-            runtime: proposal.state,
-            timers: proposal.timers,
-            retained_signal_subscriptions: proposal.retained_signal_subscriptions,
+    records.push(WalRecord::Retained(
+        engine_types::wal::RetainedWalRecord::StrategyProcessTransitionQueued {
+            input_id: proposal.callback_id,
+            transition: None,
+            process: StrategyProcessState {
+                strategy: LONG,
+                last_callback_id: proposal.callback_id,
+                runtime: proposal.state,
+                timers: proposal.timers,
+                retained_signal_subscriptions: proposal.retained_signal_subscriptions,
+            },
         },
-    });
+    ));
 }
 
 fn tao_state(state: &CallbackState) -> Value {
@@ -251,16 +245,20 @@ fn captured_long_ack_restarts_before_tao_fill_without_inventing_inventory(realm:
         let fill_update = fill_update.clone();
         let (fill_price, fill_wall, fill_time) = (*px, *venue_ts_ms, *recv_ns);
         let prior_id = process.last_callback_id;
-        let mut records = vec![WalRecord::Names {
-            strategies: vec!["carry".into(), "long".into()],
-            symbols: vec!["TAOUSDT".into()],
-        }];
+        let mut records = vec![WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::Names {
+                strategies: vec!["carry".into(), "long".into()],
+                symbols: vec!["TAOUSDT".into()],
+            },
+        )];
         queue(&mut records, input);
-        records.push(WalRecord::StrategyProcessTransitionQueued {
-            input_id: prior_id,
-            transition: None,
-            process,
-        });
+        records.push(WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::StrategyProcessTransitionQueued {
+                input_id: prior_id,
+                transition: None,
+                process,
+            },
+        ));
         records.extend([sent, ack.clone()]);
         let ack_snapshot = snapshot(&records, &quote, ack_time, quote.wall_ms);
         let symbol = &ack_snapshot.symbols[0];

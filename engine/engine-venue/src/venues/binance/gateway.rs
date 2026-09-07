@@ -1324,7 +1324,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_empty_amend_is_refused_before_anything_is_read() {
         let mut gw = gateway();
         let err = gw
@@ -1342,7 +1342,7 @@ mod tests {
         assert!(err.to_string().contains("neither"), "{err}");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_leverage_the_venue_cannot_take_is_refused_before_the_wire() {
         let mut gw = gateway();
         for bad in [0.5, 0.0, -3.0, 126.0, f64::NAN, f64::INFINITY] {

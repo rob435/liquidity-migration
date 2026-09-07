@@ -6,7 +6,6 @@ use engine_types::{WalError, WalRecord};
 pub(crate) enum DispatchWrite {
     Stop(Vec<crate::engine::stop_runtime::DurableStop>),
     Portfolio,
-    Queue(Vec<String>),
     Attempt(Vec<String>),
     Amend(Box<DurableAmend>),
 }
@@ -45,6 +44,7 @@ impl std::ops::DerefMut for RuntimeDispatch {
 pub(crate) struct OrderDispatches {
     pub orders: BTreeMap<String, RuntimeDispatch>,
     pub write: Option<DispatchWrite>,
+    pub strategy_runtime_retirements: BTreeSet<engine_types::StrategyId>,
     pub barrier_started_ns: u64,
     pub durable: tokio::sync::mpsc::Receiver<Result<(), WalError>>,
     complete: tokio::sync::mpsc::Sender<Result<(), WalError>>,
@@ -156,6 +156,7 @@ impl OrderDispatches {
                 })
                 .collect(),
             write: None,
+            strategy_runtime_retirements: BTreeSet::new(),
             barrier_started_ns: 0,
             durable,
             complete,
@@ -251,7 +252,14 @@ mod tests {
                 reduce_only: true,
                 close_position: false,
                 sleeve_effect: None,
-                exact_terms: None,
+                exact_terms: Some(Box::new(engine_types::order_terms::ExactOrderTerms {
+                    quantity: engine_types::numeric::Exact::parse_decimal("0.5").unwrap(),
+                    limit_price: None,
+                    stop_trigger_price: None,
+                    physical_stop_trigger_price: None,
+                    input_policy:
+                        engine_types::order_terms::OrderInputPolicy::StrategyShortestDecimal,
+                })),
             },
             intent,
             phase: OrderDispatchPhase::Queued,

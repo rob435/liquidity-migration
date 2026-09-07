@@ -82,17 +82,7 @@ pub enum WalRecord {
         strategy: StrategyId,
         event: crate::strategy_process::CallbackEvent,
     },
-    StrategyCallbackQueued {
-        input: crate::strategy_process::StrategyCallbackInput,
-    },
-    StrategyCallbackPrepared {
-        input: crate::strategy_process::StrategyCallbackInput,
-    },
-    StrategyProcessTransitionQueued {
-        input_id: u64,
-        transition: Option<StrategyTransitionState>,
-        process: crate::strategy_process::StrategyProcessState,
-    },
+
     StrategyEffectCompleted {
         transition_id: u64,
         effect_index: usize,
@@ -130,7 +120,11 @@ pub enum WalRecord {
         #[serde(default)]
         arrival_mid: f64,
     },
-    #[serde(rename = "order_update_v2", alias = "order_update")]
+    #[serde(
+        rename = "order_update_v3",
+        alias = "order_update_v2",
+        alias = "order_update"
+    )]
     OrderUpdate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         callbacks: Option<Vec<StrategyId>>,
@@ -172,25 +166,7 @@ pub enum WalRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exact_effective_px: Option<crate::numeric::ExactNumber>,
     },
-    /// What the ids in this log mean.
-    ///
-    /// Both [`StrategyId`] and [`SymbolId`] are indexes handed out by
-    /// position — the strategy's place in the config, the order a symbol was
-    /// interned in — so every other record's `strategy` and `symbol` fields
-    /// are numbers that mean nothing on their own. A log read a week later
-    /// could say an order was strategy 1's, for symbol 4, and no more. This
-    /// is the record that makes it readable.
-    ///
-    /// Written after boot interns what the strategies asked for, and again
-    /// whenever a book names a symbol the engine had never followed. The whole
-    /// table each time: ids are only ever appended, so the newest record is a
-    /// superset of every earlier one and a reader can simply keep the last.
-    Names {
-        /// `strategies[i]` is the name of `StrategyId(i)`.
-        strategies: Vec<String>,
-        /// `symbols[i]` is the name of `SymbolId(i)`.
-        symbols: Vec<String>,
-    },
+
     /// Where the market went after one of our fills.
     ///
     /// The one execution-quality number that is an observation rather than
@@ -309,32 +285,13 @@ pub enum WalRecord {
         #[serde(default)]
         core_handled_wall_ns: u64,
     },
-    /// Early fill signal from Bybit's fee-less fast stream. The ordinary
-    /// authoritative fill follows separately and owns position accounting.
-    FastExecution {
-        exec_id: String,
-        client_order_id: String,
-        venue_order_id: String,
-        symbol: SymbolId,
-        side: Side,
-        qty: f64,
-        px: f64,
-        is_maker: bool,
-        venue_ts_ms: i64,
-        recv_ns: u64,
-    },
+
     /// Free-form strategy note, tagged and rare.
     Note {
         source: String,
         text: String,
     },
-    /// Historical durable control state. The daily-loss feature that wrote
-    /// these records is retired, but the shape remains so existing logs stay
-    /// readable. New engine runs do not emit or restore it.
-    ControlAnchor {
-        source: String,
-        state: String,
-    },
+
     /// What boot found when it compared this log against the venue, and
     /// whether the engine may open new exposure afterwards.
     ///
@@ -352,7 +309,11 @@ pub enum WalRecord {
     /// inside a private-stream gap. Counted into the per-symbol exposure sum
     /// exactly like a delivered fill, so the log stays an account of what the
     /// position actually is rather than only of what this process witnessed.
-    #[serde(rename = "recovered_fill_v2", alias = "recovered_fill")]
+    #[serde(
+        rename = "recovered_fill_v3",
+        alias = "recovered_fill_v2",
+        alias = "recovered_fill"
+    )]
     RecoveredFill {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         callbacks: Option<RecoveredCallbacks>,
@@ -409,26 +370,7 @@ pub enum WalRecord {
         /// what was absorbed.
         findings: Vec<String>,
     },
-    /// Sleeve claims boot dropped because the venue held nothing in the
-    /// symbol: a close this log never got to charge (a hand close, an
-    /// inherited position wound down) leaves a sleeve's row standing forever,
-    /// and the row locks every other sleeve out of the name. Written durable
-    /// so a later boot replays the drop instead of rebuilding the residue
-    /// from the old fills — by then another sleeve may hold the symbol, and
-    /// the venue no longer being flat would make the residue undroppable.
-    ClaimsDropped {
-        wall_ts_ms: i64,
-        /// Exactly the rows as they stood when dropped, as the receipt.
-        rows: Vec<FilledTotal>,
-    },
-    /// Retired target-book follower state. Read for WAL compatibility and
-    /// ignored by current runtimes.
-    TargetBookLatch {
-        wall_ts_ms: i64,
-        strategy: StrategyId,
-        symbol: SymbolId,
-        latched: bool,
-    },
+
     /// Strategy-owned state made durable before the venue action it guards.
     StrategyCheckpoint {
         wall_ts_ms: i64,
@@ -583,7 +525,7 @@ pub enum WalRecord {
         #[serde(default)]
         portfolio: Option<crate::portfolio::PortfolioState>,
         wall_ts_ms: i64,
-        /// The id tables, same meaning as [`WalRecord::Names`].
+        /// The id tables, same meaning as [`RetainedWalRecord::Names`].
         strategies: Vec<String>,
         symbols: Vec<String>,
         /// The reconciliation latch, same meaning as
@@ -662,6 +604,65 @@ pub enum WalRecord {
         /// starting it empty. Older bases read back empty.
         #[serde(default)]
         rolling_loss_rows: Vec<ClosedTradeRow>,
+    },
+    #[serde(untagged)]
+    Retained(RetainedWalRecord),
+}
+
+/// Retained wire kinds with no current append path.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
+pub enum RetainedWalRecord {
+    /// Historical durable control state. The daily-loss feature that wrote
+    /// these records is retired, but the shape remains so existing logs stay
+    /// readable. New engine runs do not emit or restore it.
+    ControlAnchor { source: String, state: String },
+    /// Retired target-book follower state. Read for WAL compatibility and
+    /// ignored by current runtimes.
+    TargetBookLatch {
+        wall_ts_ms: i64,
+        strategy: StrategyId,
+        symbol: SymbolId,
+        latched: bool,
+    },
+    /// Historical claim removals still affect replayed sleeve quantities.
+    ClaimsDropped {
+        wall_ts_ms: i64,
+        /// Exactly the rows as they stood when dropped, as the receipt.
+        rows: Vec<FilledTotal>,
+    },
+    StrategyCallbackQueued {
+        input: crate::strategy_process::StrategyCallbackInput,
+    },
+    StrategyCallbackPrepared {
+        input: crate::strategy_process::StrategyCallbackInput,
+    },
+    StrategyProcessTransitionQueued {
+        input_id: u64,
+        transition: Option<StrategyTransitionState>,
+        process: crate::strategy_process::StrategyProcessState,
+    },
+    /// Dense id tables from families predating IdentityState.
+    Names {
+        /// `strategies[i]` is the name of `StrategyId(i)`.
+        strategies: Vec<String>,
+        /// `symbols[i]` is the name of `SymbolId(i)`.
+        symbols: Vec<String>,
+    },
+    /// Early fill signal from Bybit's fee-less fast stream. The ordinary
+    /// authoritative fill follows separately and owns position accounting.
+    FastExecution {
+        exec_id: String,
+        client_order_id: String,
+        venue_order_id: String,
+        symbol: SymbolId,
+        side: Side,
+        qty: f64,
+        px: f64,
+        is_maker: bool,
+        venue_ts_ms: i64,
+        recv_ns: u64,
     },
 }
 
@@ -1120,7 +1121,7 @@ mod tests {
         ));
         assert!(matches!(
             anchor,
-            WalRecord::ControlAnchor { source, state }
+            WalRecord::Retained(crate::wal::RetainedWalRecord::ControlAnchor { source, state })
                 if source == "risk" && state.contains("tripped")
         ));
     }

@@ -232,7 +232,7 @@ mod tests {
         row
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn future_availability_live_channel_and_replay_share_virtual_time() {
         let _clock = engine_types::clock::install_virtual(2_000_000, 2_000_000).unwrap();
         let scheduler = Scheduler::starting_at(2_000_000);
@@ -284,7 +284,7 @@ mod tests {
         live.acknowledge_last().unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn replay_defer_and_cancellation_preserve_availability_and_exact_catchup() {
         let scheduler = Scheduler::starting_at(2_000_000);
         scheduler.open();
@@ -351,7 +351,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn replay_prioritizes_only_already_available_missing_rows() {
         let scheduler = Scheduler::starting_at(5_000_000);
         scheduler.open();
@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(feed.next_observation().await.unwrap(), other);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn replay_withholds_new_generations_until_the_required_old_prefix_is_complete() {
         let scheduler = Scheduler::starting_at(5_000_000);
         scheduler.open();

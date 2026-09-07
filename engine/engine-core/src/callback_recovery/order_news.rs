@@ -104,7 +104,10 @@ impl OrderNews {
             }
         }
         for record in records {
-            if let WalRecord::StrategyCallbackQueued { input } = record {
+            if let WalRecord::Retained(
+                engine_types::wal::RetainedWalRecord::StrategyCallbackQueued { input },
+            ) = record
+            {
                 if let Some(origin) = input.order_origin {
                     if origin.segment == 0
                         || origin.sequence == 0
@@ -176,7 +179,7 @@ impl OrderNews {
         Ok(CallbackOrderOrigin {
             segment: self
                 .start
-                .ok_or("isolated callbacks have no WAL source reader")?
+                .ok_or("retained callbacks have no WAL source reader")?
                 .segment,
             sequence,
         })
@@ -443,7 +446,7 @@ mod tests {
                 update: parent.clone(),
             }
         };
-        wal.append(&source).unwrap();
+        crate::testpath::append_history(&mut wal, &path, &source).unwrap();
         wal.barrier().unwrap();
         drop(wal);
         let (mut wal, rows) = engine_wal::WalWriter::open(&path).unwrap();
@@ -471,8 +474,14 @@ mod tests {
             event: CallbackEvent::Order { update: view },
             preparation: CallbackPreparation::Queued,
         };
-        wal.append(&WalRecord::StrategyCallbackQueued { input })
-            .unwrap();
+        crate::testpath::append_history(
+            &mut wal,
+            &path,
+            &WalRecord::Retained(
+                engine_types::wal::RetainedWalRecord::StrategyCallbackQueued { input },
+            ),
+        )
+        .unwrap();
         wal.barrier().unwrap();
         drop(news);
         drop(wal);
@@ -511,7 +520,10 @@ mod tests {
             1
         );
         let mut wrong = rows.clone();
-        let WalRecord::StrategyCallbackQueued { input } = &mut wrong[1] else {
+        let WalRecord::Retained(engine_types::wal::RetainedWalRecord::StrategyCallbackQueued {
+            input,
+        }) = &mut wrong[1]
+        else {
             unreachable!()
         };
         input.event = CallbackEvent::Order { update: parent };
@@ -555,7 +567,7 @@ mod paging_tests {
             },
         ];
         for row in &rows {
-            wal.append(row).unwrap();
+            crate::testpath::append_history(&mut wal, &path, row).unwrap();
         }
         let mut news = OrderNews::default();
         news.attach(wal.callback_reader().unwrap().unwrap(), &rows, 2)
@@ -572,15 +584,21 @@ mod paging_tests {
                         segment: cursor.segment,
                         sequence: cursor.sequence,
                     };
-                    wal.append(&WalRecord::StrategyCallbackQueued {
-                        input: StrategyCallbackInput {
-                            callback_id: 0,
-                            strategy: owner,
-                            order_origin: Some(origin),
-                            event: source,
-                            preparation: CallbackPreparation::Queued,
-                        },
-                    })
+                    crate::testpath::append_history(
+                        &mut wal,
+                        &path,
+                        &WalRecord::Retained(
+                            engine_types::wal::RetainedWalRecord::StrategyCallbackQueued {
+                                input: StrategyCallbackInput {
+                                    callback_id: 0,
+                                    strategy: owner,
+                                    order_origin: Some(origin),
+                                    event: source,
+                                    preparation: CallbackPreparation::Queued,
+                                },
+                            },
+                        ),
+                    )
                     .unwrap();
                     news.accepted(owner, origin);
                 }
@@ -635,15 +653,21 @@ mod paging_tests {
             segment: cursor.segment,
             sequence: cursor.sequence,
         };
-        wal.append(&WalRecord::StrategyCallbackQueued {
-            input: StrategyCallbackInput {
-                callback_id: 1,
-                strategy: owner,
-                order_origin: Some(origin),
-                event: event("paused-owner"),
-                preparation: CallbackPreparation::Queued,
-            },
-        })
+        crate::testpath::append_history(
+            &mut wal,
+            &path,
+            &WalRecord::Retained(
+                engine_types::wal::RetainedWalRecord::StrategyCallbackQueued {
+                    input: StrategyCallbackInput {
+                        callback_id: 1,
+                        strategy: owner,
+                        order_origin: Some(origin),
+                        event: event("paused-owner"),
+                        preparation: CallbackPreparation::Queued,
+                    },
+                },
+            ),
+        )
         .unwrap();
         wal.barrier().unwrap();
         drop(wal);
@@ -680,7 +704,7 @@ mod paging_tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_deferred_live_source_starts_at_its_frame_after_direct_delivery() {
         let path = crate::testpath::temp_path("live-source-large-prefix");
         let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
@@ -689,11 +713,15 @@ mod paging_tests {
         news.attach(wal.callback_reader().unwrap().unwrap(), &[], 1)
             .unwrap();
         unrelated_prefix(&mut wal);
-        let first = wal.append(&ack_source("first", vec![owner])).unwrap();
+        let first =
+            crate::testpath::append_history(&mut wal, &path, &ack_source("first", vec![owner]))
+                .unwrap();
         news.record(first, &[owner]).unwrap();
         news.accepted(owner, news.origin(first).unwrap());
         unrelated_prefix(&mut wal);
-        let second = wal.append(&ack_source("second", vec![owner])).unwrap();
+        let second =
+            crate::testpath::append_history(&mut wal, &path, &ack_source("second", vec![owner]))
+                .unwrap();
         news.record(second, &[owner]).unwrap();
         wal.flush().unwrap();
         news.start_read();
@@ -709,7 +737,7 @@ mod paging_tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn caught_up_owner_moves_to_new_source_while_other_owner_keeps_first_unread() {
         let path = crate::testpath::temp_path("live-source-distinct-owner-frontiers");
         let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
@@ -718,15 +746,21 @@ mod paging_tests {
             .unwrap();
         unrelated_prefix(&mut wal);
         let owners = [StrategyId(0), StrategyId(1)];
-        let first = wal
-            .append(&ack_source("shared-first", owners.to_vec()))
-            .unwrap();
+        let first = crate::testpath::append_history(
+            &mut wal,
+            &path,
+            &ack_source("shared-first", owners.to_vec()),
+        )
+        .unwrap();
         news.record(first, &owners).unwrap();
         news.accepted(owners[0], news.origin(first).unwrap());
         unrelated_prefix(&mut wal);
-        let second = wal
-            .append(&ack_source("shared-second", owners.to_vec()))
-            .unwrap();
+        let second = crate::testpath::append_history(
+            &mut wal,
+            &path,
+            &ack_source("shared-second", owners.to_vec()),
+        )
+        .unwrap();
         news.record(second, &owners).unwrap();
         wal.flush().unwrap();
         for (owner, expected) in [(owners[0], second), (owners[1], first)] {
@@ -742,7 +776,7 @@ mod paging_tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn directly_positioned_source_still_checks_its_real_frame_crc() {
         use std::os::unix::fs::FileExt;
         let path = crate::testpath::temp_path("live-source-corrupt-crc");
@@ -753,7 +787,9 @@ mod paging_tests {
             .unwrap();
         unrelated_prefix(&mut wal);
         let offset = wal.segment_size();
-        let sequence = wal.append(&ack_source("bad-crc", vec![owner])).unwrap();
+        let sequence =
+            crate::testpath::append_history(&mut wal, &path, &ack_source("bad-crc", vec![owner]))
+                .unwrap();
         news.record(sequence, &[owner]).unwrap();
         wal.flush().unwrap();
         let file = std::fs::OpenOptions::new()
@@ -773,7 +809,7 @@ mod paging_tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn live_byte_cursor_reads_the_exact_target_and_survives_a_serialized_frontier() {
         struct ExactCursorReader {
             inner: Box<dyn CallbackWalReader>,
@@ -799,9 +835,12 @@ mod paging_tests {
         let owner = StrategyId(0);
         unrelated_prefix(&mut wal);
         let offset = wal.segment_size();
-        let sequence = wal
-            .append(&ack_source("exact-offset", vec![owner]))
-            .unwrap();
+        let sequence = crate::testpath::append_history(
+            &mut wal,
+            &path,
+            &ack_source("exact-offset", vec![owner]),
+        )
+        .unwrap();
         let reader = wal.callback_reader().unwrap().unwrap();
         let expected = CallbackWalCursor {
             segment: reader.start().segment,

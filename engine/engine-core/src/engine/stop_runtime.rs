@@ -335,11 +335,30 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(());
         }
         for stop in &stops {
-            self.wal.append(&WalRecord::StopSet {
-                symbol: stop.symbol,
-                trigger_px: stop.trigger_px,
-                wall_ts_ms: clock::wall_ms(),
-            })?;
+            let covered = stop.exact.as_ref().is_some_and(|terms| {
+                self.intended_stops
+                    .get(&stop.symbol)
+                    .is_some_and(|old| old.side == stop.side && old.trigger_px == stop.trigger_px)
+                    && self
+                        .books
+                        .attribution
+                        .snapshot()
+                        .positions
+                        .iter()
+                        .any(|row| {
+                            row.symbol == stop.symbol
+                                && !row.signed_qty.is_zero()
+                                && row.signed_qty.is_positive() == (stop.side == Side::Buy)
+                                && row.stop_px.as_ref() == Some(&terms.trigger_price)
+                        })
+            });
+            if !covered {
+                self.wal.append(&WalRecord::StopSet {
+                    symbol: stop.symbol,
+                    trigger_px: stop.trigger_px,
+                    wall_ts_ms: clock::wall_ms(),
+                })?;
+            }
             self.intended_stops.insert(
                 stop.symbol,
                 reconcile::IntendedPositionStop {
@@ -348,7 +367,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 },
             );
         }
-        let barrier = self.wal.barrier_begin()?;
+        let barrier = self.begin_dispatch_barrier()?;
         self.portfolio_dirty = false;
         self.dispatches
             .begin(crate::order_dispatch::DispatchWrite::Stop(stops), barrier);

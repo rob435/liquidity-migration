@@ -1102,7 +1102,7 @@ impl SleeveStateContract for SleeveState {
     }
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::mock_ctx::{MockCtx, RestingSeed};
     use crate::native_common::DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION;
@@ -1141,7 +1141,7 @@ mod tests {
         assert_eq!(plug.retained_signal_subscriptions(), Some(Vec::new()));
     }
 
-    fn config() -> StrategyConfig {
+    pub(crate) fn config() -> StrategyConfig {
         serde_json::from_value(json!({
             "schema_version": 1,
             "profile_name": "carry_hold_v7_live_v1",

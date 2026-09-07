@@ -989,7 +989,10 @@ impl Fills {
                 } => me.stream_gap(),
                 // A claim boot found the venue does not back. There is no
                 // exit price for it, so it is forgotten rather than reported.
-                WalRecord::ClaimsDropped { rows, .. } => {
+                WalRecord::Retained(engine_types::wal::RetainedWalRecord::ClaimsDropped {
+                    rows,
+                    ..
+                }) => {
                     let gone: Vec<(String, String)> = rows
                         .iter()
                         .map(|row| (me.names.strategy(row.strategy), me.names.symbol(row.symbol)))

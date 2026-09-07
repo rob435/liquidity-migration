@@ -20,7 +20,7 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-HELPER = ROOT / "scripts" / "release_artifact.py"
+HELPER = Path(os.environ.get("R3_QUALIFICATION_SOURCE", str(ROOT / "scripts" / "release_artifact.py")))
 COMMIT = "a" * 40
 BINARIES = ("engine", "engine-tools", "signal-worker")
 
@@ -70,6 +70,7 @@ build_engine
             "DEPLOYED_COMMIT_FILE": str(release / "deployed-commit"),
             "CARGO_CALLED": str(tmp_path / "cargo-called"),
             "QUALIFIED_RELEASE_DIR": "",
+            "INCUMBENT_STAGE": "",
             **environment,
         },
     )
@@ -124,6 +125,19 @@ def qualification_workspace(
     (repo / "engine").mkdir(parents=True)
     (repo / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.90.0"\n')
     (repo / "engine" / "Cargo.toml").write_text("# fixture source\n")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "execution-latency-budgets.toml").write_text(f'''schema_version = 1
+maximum_baseline_ratio = 1.5
+[bench]
+events = 2000
+rate = 100
+every = 20
+symbols = ["BTCUSDT"]
+[runners.{platform.system().lower()}-{platform.machine().lower()}]
+status = "measured-fixture"
+decision_p99_ns = 40000
+submit_p50_ns = 4000000
+''')
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
     subprocess.run(
@@ -164,6 +178,10 @@ def qualification_workspace(
                 binary = release / name
                 binary.write_bytes(f"{name} at {commit}\n".encode())
                 binary.chmod(0o755)
+        if len(command) > 1 and command[1] == "bench":
+            log.write(behavior.get("bench", """  market to decision               100        20.0us        30.0us         40.0us        50.0us     50.0us
+  market to submit result          100        4.00ms        5.00ms         6.00ms        7.00ms     7.00ms
+"""))
         if phase == behavior.get("fail"):
             raise subprocess.CalledProcessError(7, command)
         if phase == "signal-worker":
@@ -174,6 +192,58 @@ def qualification_workspace(
 
     monkeypatch.setattr(artifact_module, "_run", run)
     return repo, commit, target, calls, behavior
+
+
+@pytest.mark.parametrize("fault", ["double-decision", "double-submit", "missing", "empty", "unit", "duplicate", "nan", "unordered"])
+def test_unqualified_latency_cannot_publish_an_artifact(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]], fault: str,
+) -> None:
+    repo, commit, target, _, behavior = qualification_workspace
+    decision = "  market to decision               100        20.0us        30.0us         40.0us        50.0us     50.0us\n"
+    submit = "  market to submit result          100        4.00ms        5.00ms         6.00ms        7.00ms     7.00ms\n"
+    if fault == "double-decision":
+        decision = decision.replace("40.0us", "80.0us").replace("50.0us", "90.0us")
+    elif fault == "double-submit":
+        submit = submit.replace("4.00ms", "8.00ms").replace("5.00ms", "9.00ms").replace("6.00ms", "10.00ms").replace("7.00ms", "11.00ms")
+    elif fault == "missing":
+        submit = ""
+    elif fault == "empty":
+        submit = submit.replace("100", "0")
+    elif fault == "unit":
+        submit = submit.replace("4.00ms", "4.00")
+    elif fault == "duplicate":
+        submit += submit
+    elif fault == "nan":
+        submit = submit.replace("4.00ms", "NaNms")
+    else:
+        submit = submit.replace("5.00ms", "3.00ms")
+    behavior["bench"] = decision + submit
+    output = tmp_path / "unqualified.tar.gz"
+    with pytest.raises(ValueError, match="latency"):
+        artifact_module.qualify(repo, commit, output, target)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("ratio", ["2", "nan", "true", "0.5"])
+def test_latency_budget_cannot_allow_a_twofold_regression(
+    artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]], ratio: str,
+) -> None:
+    repo, *_ = qualification_workspace
+    path = repo / "docs/execution-latency-budgets.toml"
+    path.write_text(path.read_text().replace("maximum_baseline_ratio = 1.5", f"maximum_baseline_ratio = {ratio}"))
+    with pytest.raises(ValueError, match="latency budget ratio"):
+        artifact_module._latency_budget(repo, None)
+
+
+def test_latency_units_are_converted_to_nanoseconds(artifact_module: ModuleType) -> None:
+    budget = {"limits_ns": {"decision_p99_ns": 60000, "submit_p50_ns": 6000000}}
+    measured = artifact_module._check_latency(
+        "market to decision 100 20000ns 0.03ms 40us 0.00005s 50000ns\n"
+        "market to submit result 100 4000us 0.005s 6000000ns 7ms 7ms\n", budget,
+    )
+    assert measured["measured_ns"] == {"decision_p99_ns": 40000, "submit_p50_ns": 4000000}
 
 
 def test_qualification_runs_on_demand_and_uploads_only_after_it_passes() -> None:
@@ -189,6 +259,7 @@ def test_qualification_runs_on_demand_and_uploads_only_after_it_passes() -> None
     assert qualify < upload
     assert not steps[qualify].get("continue-on-error", False)
     assert "rust-soak-bench" not in workflow["jobs"]
+    assert "--runner-class linux-x86_64" in steps[qualify]["run"]
 
 
 def test_deploy_missing_qualified_artifact_never_compiles_on_host(tmp_path: Path) -> None:
@@ -348,6 +419,10 @@ def test_qualification_packages_the_tested_native_bytes_without_rebuilding(
     assert manifest["checks"] == ["release-tests", "account-state-soak", "engine-bench", "binary-smoke"]
     assert manifest["target"] == "fixture-host"
     assert manifest["wal_compatibility"] == "not_assessed"
+    latency = manifest["latency_budget"]
+    assert latency["measured_ns"] == {"decision_p99_ns": 40000, "submit_p50_ns": 4000000}
+    assert latency["limits_ns"] == {"decision_p99_ns": 60000, "submit_p50_ns": 6000000}
+    assert latency["samples"] == {"decision_p99_ns": 100, "submit_p50_ns": 100}
     cargo_calls = [command for command in calls if command[0] == "cargo"]
     assert [command[1] for command in cargo_calls] == ["build", "test"]
     for command in cargo_calls:
@@ -358,6 +433,8 @@ def test_qualification_packages_the_tested_native_bytes_without_rebuilding(
     release = target / "fixture-host" / "release"
     bench = next(command for command in calls if len(command) > 1 and command[1] == "bench")
     assert bench[0] == str(release / "engine")
+    assert bench[bench.index("--events") + 1] == "2000"
+    assert bench[bench.index("--rate") + 1] == "100"
     for name in BINARIES:
         assert (tmp_path / "verified" / name).read_bytes() == (release / name).read_bytes()
 

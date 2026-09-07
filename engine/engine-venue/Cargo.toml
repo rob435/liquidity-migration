@@ -7,8 +7,17 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["bybit"]
+bybit = ["engine-public/bybit"]
+binance = ["engine-public/binance"]
+hyperliquid = ["engine-public/hyperliquid", "dep:k256", "dep:sha3"]
+lighter = ["engine-public/lighter"]
+mexc = ["engine-public/mexc"]
+variational = ["engine-public/variational"]
+
 [dependencies]
-engine-public = { workspace = true }
+engine-public = { workspace = true, default-features = false }
 serde = { workspace = true, features = ["derive"] }
 engine-types = { workspace = true }
 futures-util = { workspace = true }
@@ -22,8 +31,8 @@ libc = { workspace = true }
 # digest, ECDSA, and the recovery id the venue needs to name the signer. The
 # RustCrypto pair rather than a C binding, so the order path stays one
 # toolchain and one build.
-k256 = { workspace = true, features = ["ecdsa", "std"] }
-sha3 = { workspace = true }
+k256 = { workspace = true, optional = true, features = ["ecdsa", "std"] }
+sha3 = { workspace = true, optional = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "macros", "sync"] }

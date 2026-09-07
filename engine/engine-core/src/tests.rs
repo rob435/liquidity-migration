@@ -4,11 +4,9 @@
 //! was written and the order sent, but that they happened in that order —
 //! which is the whole promise of the durability barrier.
 //!
-//! Tokio's clock starts paused (`start_paused = true`): a stop future of
-//! `sleep(40 ms)` resolves as soon as the engine has nothing left to do, and
-//! one input gives one interleaving. A test stays on the wall clock only when
-//! it drives a real socket, or when it waits on an engine timer or deadline,
-//! because those read `clock::now_ns`, which paused tokio time does not move.
+//! Tokio time starts paused. Tests that drive engine deadlines also align
+//! the thread-local engine clock; physical disk waits use explicit completion
+//! or the independent test worker.
 
 use std::collections::VecDeque;
 use std::sync::{Arc as Rc, Mutex as RefCell};
@@ -72,12 +70,18 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::SleeveStopSet { .. } => "sleeve_stop_set",
         WalRecord::SignalAdmissionChanged { .. } => "signal_admission_changed",
         WalRecord::StrategyCallbackSource { .. } => "strategy_callback_source",
-        WalRecord::StrategyCallbackQueued { .. } => "strategy_callback_queued",
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::StrategyCallbackQueued {
+            ..
+        }) => "strategy_callback_queued",
         WalRecord::OrderDispatchQueued { .. } => "order_dispatch_queued",
         WalRecord::OrderDispatchAttempted { .. } => "order_dispatch_attempted",
         WalRecord::OrderDispatchCompleted { .. } => "order_dispatch_completed",
-        WalRecord::StrategyCallbackPrepared { .. } => "strategy_callback_prepared",
-        WalRecord::StrategyProcessTransitionQueued { .. } => "strategy_process_transition_queued",
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::StrategyCallbackPrepared {
+            ..
+        }) => "strategy_callback_prepared",
+        WalRecord::Retained(
+            engine_types::wal::RetainedWalRecord::StrategyProcessTransitionQueued { .. },
+        ) => "strategy_process_transition_queued",
         WalRecord::InstrumentCatalogCheckpoint { .. } => "instrument_catalog_checkpoint",
         WalRecord::IdentityState { .. } => "identity_state",
         WalRecord::SignalProducerLifecycle { .. } => "signal_producer_lifecycle",
@@ -88,16 +92,20 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::OrderUpdate { .. } => "order_update",
         WalRecord::Markout { .. } => "markout",
         WalRecord::QuoteFill { .. } => "quote_fill",
-        WalRecord::Names { .. } => "names",
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names { .. }) => "names",
         WalRecord::StopSet { .. } => "stop_set",
         WalRecord::CancelSent { .. } => "cancel_sent",
         WalRecord::AmendSent { .. } => "amend_sent",
         WalRecord::AmendResolved { .. } => "amend_resolved",
         WalRecord::LatencyLedger { .. } => "latency_ledger",
         WalRecord::VenueTiming { .. } => "venue_timing",
-        WalRecord::FastExecution { .. } => "fast_execution",
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::FastExecution { .. }) => {
+            "fast_execution"
+        }
         WalRecord::Note { .. } => "note",
-        WalRecord::ControlAnchor { .. } => "control_anchor",
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::ControlAnchor { .. }) => {
+            "control_anchor"
+        }
         WalRecord::Reconciled { .. } => "reconciled",
         WalRecord::ExecutionPrecisionV1 => "execution_precision_v1",
         WalRecord::OrderIdEpoch { .. } => "order_id_epoch",
@@ -106,8 +114,12 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::RecoveredFill { .. } => "recovered_fill",
         WalRecord::ExecutionHistoryCheckpoint { .. } => "execution_history_checkpoint",
         WalRecord::LatchCleared { .. } => "latch_cleared",
-        WalRecord::ClaimsDropped { .. } => "claims_dropped",
-        WalRecord::TargetBookLatch { .. } => "target_book_latch",
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::ClaimsDropped { .. }) => {
+            "claims_dropped"
+        }
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::TargetBookLatch { .. }) => {
+            "target_book_latch"
+        }
         WalRecord::StrategyTransitionQueued { .. } => "strategy_transition_queued",
         WalRecord::StrategyEffectCompleted { .. } => "strategy_effect_completed",
         WalRecord::StrategyCheckpoint { .. } => "strategy_checkpoint",
@@ -216,6 +228,7 @@ pub(crate) struct MockWal {
     tape: Tape,
     records: Rc<RefCell<Vec<WalRecord>>>,
     seq: u64,
+    barrier_seq: u64,
     fail_on: Option<String>,
     pub(crate) fail_barrier_after: Option<&'static str>,
     /// A tape the barrier's own thread can also write to. The ordinary tape
@@ -245,6 +258,7 @@ impl MockWal {
                 tape,
                 records: records.clone(),
                 seq: 0,
+                barrier_seq: 0,
                 fail_on: None,
                 fail_barrier_after: None,
                 crossing_tape: None,
@@ -293,8 +307,12 @@ impl engine_types::strategy_process::CallbackWalReader for MockCallbackReader {
         let records = self.0.lock().unwrap();
         let input = match records.get(cursor.sequence as usize - 1) {
             Some(
-                WalRecord::StrategyCallbackQueued { input }
-                | WalRecord::StrategyCallbackPrepared { input },
+                WalRecord::Retained(engine_types::wal::RetainedWalRecord::StrategyCallbackQueued {
+                    input,
+                })
+                | WalRecord::Retained(
+                    engine_types::wal::RetainedWalRecord::StrategyCallbackPrepared { input },
+                ),
             ) if input.callback_id == callback_id => Some(input),
             Some(WalRecord::SegmentBase {
                 strategy_callbacks, ..
@@ -381,11 +399,13 @@ impl Wal for MockWal {
             self.records
                 .lock()
                 .unwrap()
-                .last()
-                .is_some_and(|record| kind_of(record) == kind)
+                .iter()
+                .skip(self.barrier_seq as usize)
+                .any(|record| kind_of(record) == kind)
         }) {
             return Err(WalError::Io(std::io::Error::other("test barrier failure")));
         }
+        self.barrier_seq = self.seq;
         Ok(())
     }
 
@@ -507,6 +527,8 @@ pub(crate) struct MockVenue {
     rules: Vec<(Symbol, InstrumentRule)>,
     exact_specs: Option<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>>,
     catalog_client: Option<Arc<dyn engine_types::orders::InstrumentCatalogClient>>,
+    catalog_adapter: Option<Box<dyn VenueGateway>>,
+    identity: Option<AccountIdentity>,
     sends: Rc<RefCell<Vec<OrderRequest>>>,
     cancels: Rc<RefCell<Vec<(SymbolId, String)>>>,
     amends: Rc<RefCell<Vec<(SymbolId, String, AmendSpec)>>>,
@@ -576,6 +598,8 @@ impl MockVenue {
                 rules,
                 exact_specs: None,
                 catalog_client: None,
+                catalog_adapter: None,
+                identity: None,
                 sends: sends.clone(),
                 cancels: Rc::new(RefCell::new(Vec::new())),
                 amends: Rc::new(RefCell::new(Vec::new())),
@@ -621,6 +645,9 @@ impl VenueGateway for MockVenue {
         &self,
         checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
     ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        if let Some(adapter) = &self.catalog_adapter {
+            return adapter.restore_instrument_catalog(checkpoint);
+        }
         checkpoint.validate_bounds()?;
         if checkpoint.cache.kind != "mock-native-map" {
             return Err(VenueError::BadReply("wrong mock catalog owner".into()));
@@ -637,6 +664,12 @@ impl VenueGateway for MockVenue {
         &mut self,
         catalog: &engine_types::orders::InstrumentCatalog,
     ) -> Result<(), VenueError> {
+        if let Some(adapter) = &mut self.catalog_adapter {
+            adapter.install_instrument_catalog(catalog)?;
+            self.rules = catalog.rules.clone();
+            self.exact_specs = Some(catalog.specs.clone());
+            return Ok(());
+        }
         let cache = catalog
             .cache
             .as_ref()
@@ -695,6 +728,9 @@ impl VenueGateway for MockVenue {
     }
 
     async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
+        if let Some(identity) = &self.identity {
+            return Ok(identity.clone());
+        }
         Ok(AccountIdentity {
             venue: "mock".to_string(),
             user_id: "7000001".to_string(),
@@ -1310,10 +1346,10 @@ fn owned_exit_fixture(
     };
     let id = "eng-owned-exit-fixture".to_string();
     let records = vec![
-        WalRecord::Names {
+        WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
             strategies: vec![strategy.into()],
             symbols: vec!["BTCUSDT".into()],
-        },
+        }),
         WalRecord::OrderSent {
             dispatch: None,
             request: OrderRequest {
@@ -1690,9 +1726,10 @@ fn assemble_fixture_names(
         .iter()
         .rev()
         .find_map(|record| match record {
-            WalRecord::Names { strategies, .. } | WalRecord::SegmentBase { strategies, .. } => {
-                Some(strategies.clone())
-            }
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
+                strategies, ..
+            })
+            | WalRecord::SegmentBase { strategies, .. } => Some(strategies.clone()),
             _ => None,
         })
         .unwrap_or_default();
@@ -1715,7 +1752,7 @@ fn assemble_fixture_names(
         && !framed.iter().any(|record| {
             matches!(
                 record,
-                WalRecord::Names { .. }
+                WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names { .. })
                     | WalRecord::SegmentBase { .. }
                     | WalRecord::IdentityState { .. }
             )
@@ -1723,10 +1760,10 @@ fn assemble_fixture_names(
     {
         framed.insert(
             0,
-            WalRecord::Names {
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
                 strategies: names.clone(),
                 symbols: symbols.iter().map(|symbol| (*symbol).to_string()).collect(),
-            },
+            }),
         );
     }
     (strategies, names, replay_with_history_boundary(&framed))
@@ -1849,27 +1886,15 @@ pub(crate) async fn callback_test_fixture(
     (engine, harness.records)
 }
 
-pub(crate) async fn callback_kernel_fixture(
+pub(crate) async fn callback_cancellation_fixture(
     strategies: Vec<Box<dyn Strategy>>,
 ) -> (
-    Engine<MockWal, engine_risk::Kernel, MockVenue>,
+    Engine<MockWal, MockRisk, MockVenue>,
     Arc<Mutex<Vec<WalRecord>>>,
+    Arc<Mutex<Vec<(SymbolId, String)>>>,
 ) {
-    let tape = tape();
-    let (wal, records) = MockWal::new(tape.clone());
-    let (venue, _) = MockVenue::new(tape, &["BTCUSDT"]);
-    let engine = Engine::boot(
-        &settings(),
-        "0",
-        wal,
-        shared_sleeves::kernel(),
-        venue,
-        strategies,
-        &[],
-    )
-    .await
-    .unwrap();
-    (engine, records)
+    let (engine, harness) = build(allow_all(), strategies, &["BTCUSDT"], &[]).await;
+    (engine, harness.records, harness.cancels)
 }
 
 impl MockWal {

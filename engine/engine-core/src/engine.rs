@@ -1,7 +1,7 @@
 //! The loop.
 //!
 //! The current-thread runtime owns account, risk and durable state. Registered
-//! callbacks run in supervised child processes. Venue mutations and independent
+//! callbacks run embedded on the loop thread. Venue mutations and independent
 //! status lookups return through bounded completion channels.
 //!
 //! What the loop waits on, all in one `select!`:
@@ -24,7 +24,7 @@
 //! requires authoritative venue disposition. Callback state commits with its
 //! ordered effects, whose suffix remains owned until every disposition commits.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::task::Poll;
 use std::time::Duration;
@@ -203,10 +203,6 @@ pub enum EngineTask {
     Venue,
     /// Makes order dispatches durable before they leave.
     DispatchDurability,
-    /// Makes strategy callback results durable before they apply.
-    CallbackDurability,
-    /// Runs strategy callbacks and returns their completions.
-    StrategyHost,
 }
 
 impl std::fmt::Display for EngineTask {
@@ -214,8 +210,6 @@ impl std::fmt::Display for EngineTask {
         f.write_str(match self {
             EngineTask::Venue => "venue task",
             EngineTask::DispatchDurability => "dispatch durability task",
-            EngineTask::CallbackDurability => "callback durability task",
-            EngineTask::StrategyHost => "strategy host",
         })
     }
 }
@@ -571,6 +565,8 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// gap's edge must not come back as recovered.
     recent_fills: std::collections::VecDeque<(String, i64, f64)>,
     group_flush: Duration,
+    strategy_barrier_pending: bool,
+    strategy_runtime_retirements: BTreeSet<StrategyId>,
     refresh_after_ns: u64,
     account_refresh_requested_after: Option<u64>,
     account_refresh_started_ns: u64,
@@ -820,18 +816,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 dispatch = self.dispatches.durable.recv(), if self.dispatches.write.is_some() => {
                     self.on_order_dispatch_durable(dispatch).await?;
                 }
-                durable = self.host.callbacks.durable.recv(), if self.host.callbacks.write.is_some() => {
-                    self.on_callback_durable(durable)?;
-                }
-                callback_page = self.host.callbacks.pages.completed.recv(), if self.host.callbacks.pages.loading() && self.host.callbacks.write.is_none() => {
-                    self.on_callback_page(callback_page.ok_or_else(|| EngineError::State("callback page reader stopped".into()))?)?;
-                }
-                order_source = self.host.callbacks.order_news.completed.recv(), if self.host.callbacks.order_news.pending() => {
-                    self.on_order_callback_source(order_source.ok_or_else(|| EngineError::State("order callback reader stopped".into()))?)?;
-                }
-                callback = self.host.callbacks.completions.recv(), if self.host.callbacks.running() && self.host.callbacks.write.is_none() => {
-                    self.on_strategy_callback(callback)?;
-                }
+
                 completion = self.venue_completions.recv(), if !self.pending_mutations.is_empty() => {
                     if drain_mode {
                         let completion = completion.ok_or(EngineError::TaskStopped { task: EngineTask::Venue, detail: "with mutations outstanding" })?;
@@ -939,10 +924,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 // refresh a stale account view, and only then resume the wake.
                 // Keeping those phases separate means a ready private update
                 // cannot hide a simultaneously due account refresh.
-                let private_update = tokio::select! {
-                    biased;
-                    update = order_feed.next_update(), if !self.order_lineage.waiting() => Some(update),
-                    _ = std::future::ready(()) => None,
+                let private_update = if self.order_lineage.waiting() {
+                    None
+                } else {
+                    let update = order_feed.next_update();
+                    tokio::pin!(update);
+                    std::future::poll_fn(|cx| {
+                        Poll::Ready(match update.as_mut().poll(cx) {
+                            Poll::Ready(update) => Some(update),
+                            Poll::Pending => None,
+                        })
+                    })
+                    .await
                 };
                 if let Some(update) = private_update {
                     match self.on_order_feed(update, false, &timer).await? {
@@ -967,10 +960,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
                 // Preserve the ordinary group-tick work when its timer is
                 // already ready. Both branches call `drain` exactly once.
-                tokio::select! {
-                    biased;
-                    _ = flush_tick.tick() => self.on_tick().await?,
-                    _ = std::future::ready(()) => self.drain(now).await?,
+                let tick_ready = {
+                    let tick = flush_tick.tick();
+                    tokio::pin!(tick);
+                    std::future::poll_fn(|cx| Poll::Ready(tick.as_mut().poll(cx).is_ready())).await
+                };
+                if tick_ready {
+                    self.on_tick().await?;
+                } else {
+                    self.drain(now).await?;
                 }
             }
 
@@ -1153,9 +1151,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.drain(clock::now_ns()).await?;
         }
         self.deliver_pending_signal_callbacks();
-        if self.host.callbacks.isolated() {
-            self.drain(clock::now_ns()).await?;
-        }
         self.maintain_signal_routes(market_feed)?;
         self.advance_signal_lifecycles(signal_feed)?;
         self.update_signal_requests(signal_feed)?;
@@ -1192,20 +1187,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.on_recovery_completion(completion).await?;
             }
         }
-        loop {
-            self.service_strategy_callbacks()?;
-            if self.host.callbacks.write.is_none() {
-                break;
-            }
-            let result =
-                tokio::time::timeout(MUTATION_DRAIN_TIMEOUT, self.host.callbacks.durable.recv())
-                    .await
-                    .map_err(|_| {
-                        EngineError::TimedOut("callback durability during graceful stop".into())
-                    })?;
-            self.on_callback_durable(result)?;
-        }
-        self.host.callbacks.stop().await;
         while self.dispatches.write.is_some()
             || !self.pending_mutations.is_empty()
             || !self.ready_actions.is_empty()
@@ -1415,14 +1396,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             strategy_callbacks: if self.host.callbacks.pages.enabled() {
                 Vec::new()
             } else {
-                self.host
-                    .callbacks
-                    .state
-                    .inputs
-                    .values()
-                    .filter(|input| !self.host.callbacks.volatile.contains(&input.callback_id))
-                    .cloned()
-                    .collect()
+                self.host.callbacks.state.inputs.values().cloned().collect()
             },
             portfolio: Some(self.books.attribution.snapshot()),
             wall_ts_ms,

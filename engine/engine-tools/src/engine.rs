@@ -6,12 +6,6 @@ use std::process::{Command, ExitCode};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.as_slice() == ["--strategy-worker"] {
-        return match engine_core::strategy_process::worker::run_stdio() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(_) => ExitCode::FAILURE,
-        };
-    }
     if args.is_empty() || matches!(args[0].as_str(), "help" | "--help" | "-h") {
         println!("engine run --config PATH\nRun the execution engine.\n\nOperator commands: engine-tools --help\nExisting engine COMMAND invocations execute the companion engine-tools binary.");
         return ExitCode::SUCCESS;
