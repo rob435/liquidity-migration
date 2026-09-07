@@ -85,6 +85,23 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     have zero failures and seven ignored tests. Both copied-WAL fixtures pass
     separately in release, repairing all twelve deliberately removed stops.
     Six heavy seeds with two crashes each produce byte-identical repeat WALs.
+    Workflow `34081612658` deploys `fc2ad99c` after 300 demo seconds through
+    04:18:23 UTC, then hands over mainnet at 04:18:24 and completes at
+    04:18:56. Hosted debug passes 1,964 tests. The 04:19:36 read verifies
+    both loaded image pairs and all twelve full-size native stops, with zero
+    restarts/OOMs. Every retained WAL filename survives without shrinking.
+    The existing drill requires identical runtime source, so its earlier
+    `a4189a48`/`32858587` success does not qualify the changed `fc2ad99c`/
+    `32858587` pair. Reopen changed-runtime rollback acceptance without
+    attempting the known-refused drill or altering mainnet.
+    Hosted qualification `34081614240` passes 1,962 release tests and
+    account-state workloads, then fails decision p99 at 9.3 µs against
+    9.0 µs. Submit p50 1.16 ms passes; all 100 opportunities complete with
+    one barrier each and zero failures. No qualified archive is uploaded.
+    Retain the failed sample and unchanged limits.
+    Add a temporary manual eight-cell same-worker comparison of the qualified
+    baseline archive and a fresh candidate build to investigate calibration;
+    retain raw measurements and remove the workflow after the experiment.
   - Add the accepted demo soak, watchdog, rollback and runtime-only Python
     deployment changes. Workflow `34074541111` deploys `a4189a48` on
     2026-09-07: demo passes all 300 seconds from 02:06:41 to 02:11:41 UTC

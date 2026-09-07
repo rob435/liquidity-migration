@@ -8,8 +8,8 @@ State measured execution workloads, timing boundaries and resource limits for th
 
 | Decision | Current evidence |
 | --- | --- |
-| Deployed engine | Generation `32858587`; demo loads its artifact, mainnet retains identical-runtime `a4189a48`; embedded callbacks and default Bybit features; dated host evidence lives in [STATE.md](../STATE.md) |
-| Qualification | Local debug/release, all six venue features and hosted debug checks pass; deployment passes the 300-second demo gate. Hosted release tests pass; the unchanged-runtime calibrated repeat fails decision p99 |
+| Deployed engine | Both realms load generation `fc2ad99c`, with embedded callbacks and default Bybit features; the 300-second demo soak passes before mainnet handover. Dated host evidence lives in [STATE.md](../STATE.md) |
+| Qualification | The deployed follow-up passes local debug/release and hosted debug checks plus the 300-second demo gate. Hosted release tests pass; its separate qualification fails decision p99 at 9.3 µs against 9.0 µs. Both this failure and the earlier unchanged-runtime failure remain recorded |
 | Target gaps | Both decision targets and one-barrier-plus-1-ms pass. Narrow submit repeats are 4.981 / 5.083 / 4.989 ms; the 5 ms target is met in two of three repeats, not consistently |
 | Latest source boundary | Callback-buffer reuse, direct binary64 normalization, immutable envelope policy, reduced products, aggregate margin division, grouped pending risk and per-symbol pending quantity totals, covered native-stop writes, fresh priced-quantity grouping and batched exact sums; borrowed prices, reused order projections, temporary route-membership bitsets, exact storage bit bounds and a venue-actor yield; normal release builds carry no temporary profiling |
 
@@ -236,6 +236,7 @@ Latency cells are milliseconds, `p50 / p99 / p99.9`; MiB means 1,048,576 bytes.
 
 | Boundary | Evidence |
 | --- | --- |
+| Temporary diagnostic | Manual `r3-latency-diagnostic.yml` compares the qualified `a4189a48` archive (A) with a fresh native-target `fc2ad99c` build (B) on one worker in fixed order `A B B A B A A B`, using the unchanged 2,000-event recipe and budgets. All eight raw logs and WALs are retained. B does not replace the failed qualification or identify its unavailable bytes. Remove the workflow after the experiment |
 | Source / runner | `a4189a4897409e65acba7a2078b964986ceea928`, Rust 1.90.0, `ubuntu-latest`, `x86_64-unknown-linux-gnu`; [run 34074530152](https://github.com/rob435/liquidity-migration/actions/runs/34074530152) |
 | Build scope | The qualification job builds and tests its own release binaries with an explicit native target. Their hashes differ from the separately built deployment artifact; these measurements bind to the qualification artifact and source commit |
 | Recipe | 2,000 events / 100 Hz / BTCUSDT / every 20; 100 completed submits, 100 dispatch barriers, zero barrier failures |
@@ -246,6 +247,8 @@ Latency cells are milliseconds, `p50 / p99 / p99.9`; MiB means 1,048,576 bytes.
 | Artifact | `/tmp/r3-hosted-qualified-a4189a48/engine-binaries-a4189a4897409e65acba7a2078b964986ceea928-qualified.tar.gz`; verified checksums and embedded qualification log. Raw log: `/tmp/r3-hosted-qualification-raw.log` |
 | Scope | One hosted runner sample is not a Mac result, venue-network latency or a universal Linux bound. The Mac submit target remains open |
 | Calibrated repeat | [Run 34076340582](https://github.com/rob435/liquidity-migration/actions/runs/34076340582), source `32858587` with identical runtime inputs: 100/100 submits, 100 barriers, zero failures. Decision p50 / p99 3.9 / 16.6 µs; submit p50 / p99 1.51 / 149.16 ms; barrier p50 / p99 987.6 µs / 148.64 ms. Decision p99 fails the 9.0 µs limit; submit p50 passes 1.635 ms. The failed job uploads no qualified artifact. Raw log `/tmp/r3-hosted-calibrated-qualification.log` |
+| Runner comparison | The successful qualification uses worker `d47b96e7-a977-4ae7-a736-c8a3302651c0` in `eastus`; the failing qualification uses `1ea9fbaa-7e54-433c-8657-5a073e9b6d45` in `westus3`. Both report Ubuntu 24.04.4 and image `20260831.293.1`; CPU and filesystem identity are absent. Replaying both logs through the current checker reproduces their original verdicts. Different workers limit the comparison but do not identify the cause |
+| Deployed-source qualification | [Run 34081614240](https://github.com/rob435/liquidity-migration/actions/runs/34081614240), source `fc2ad99c`, passes 1,962 release tests, zero failed, seven ignored, plus two million account-state operations and repeated history workloads. Its separate native-target build completes 100/100 submits with 100 barriers and zero failures. Decision p50 / p99 is 5.8 / 9.3 µs; submit p50 / p99 is 1.16 / 3.53 ms; barrier p50 / p99 is 628.2 µs / 3.04 ms. Decision p99 fails the unchanged 9.0 µs limit; submit passes 1.635 ms. No qualified archive is uploaded. Raw log `/tmp/r3-fc2ad99c-hosted-qualification.log`; these are different build bytes from the deployed archive |
 | Calibration status | R3-06 remains open. The unchanged-runtime result establishes variation, not its cause; the budget remains unchanged pending investigation |
 
 ## Invariants

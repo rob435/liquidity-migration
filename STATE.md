@@ -8,26 +8,25 @@ Record the latest verified host snapshot and the source of each operational sett
 
 | Observation | Value |
 | --- | --- |
-| Verified at | 2026-09-07 02:49:28 UTC authenticated native positions/stops, service state, heartbeats, disk and loaded images |
-| Evidence | [Deploy run `34076341887`](https://github.com/rob435/liquidity-migration/actions/runs/34076341887); native read `/tmp/r3-native-post-drill.json`; services and images `/tmp/r3-host-post-drill.json`; workflow log `/tmp/r3-deploy-32858587-complete.log`; rollback log `/tmp/r3-compatible-demo-drill.log` |
+| Verified at | 2026-09-07 04:19:36 UTC authenticated native positions/stops, service state, heartbeats, disk and loaded images |
+| Evidence | [Deploy run `34081612658`](https://github.com/rob435/liquidity-migration/actions/runs/34081612658); native read `/tmp/r3-native-post-fc2ad99c.json`; services and images `/tmp/r3-host-post-fc2ad99c.json`; workflow log `/tmp/r3-deploy-fc2ad99c-complete.log` |
 | Host | `208.84.103.4`; 4 vCPU, 8 GiB RAM, 118 GB disk |
-| Deployed commit | Completed generation and checkout `32858587f70755980332a3fefd048446980659d8`; demo loads its release engine. Mainnet retains the `a4189a48` engine because runtime inputs are identical; the workflow leaves its PID and image unchanged |
-| Funded permission | `REAL_MONEY=true`; `scripts/ops.sh status` reports armed at 02:13 UTC |
+| Deployed commit | Completed generation, checkout and both loaded engine/worker pairs are `fc2ad99c64cfa6652739caccd9da2ced2dc37583`; loaded hashes match the verified default-Bybit deployment archive |
+| Funded permission | Mainnet deployment preflight passes at 04:18:24 UTC; funded entry permissions remain enabled |
 | Runtime state | Both engines and workers are active; workers report ready. Engine heartbeats are under five seconds old; both report `may_open=true`, `strategy_errors=[]` and zero stream resets. All four cgroups have zero OOM events and services have zero restarts. Authenticated reads match six positions to six exact full-size native stops in each realm |
-| Execution | Both engines run embedded callbacks with no strategy children. Both engine units use `Type=notify`, `WatchdogSec=30s`; anonymous memory is 211.0 MiB demo / 107.1 MiB mainnet. The invalid filled-state repair remains deployed |
-| Stored previous commit | `a4189a4897409e65acba7a2078b964986ceea928`; the sanctioned demo drill passes predecessor/current loaded-image and readiness checks at 02:47:01 / 02:48:03 UTC. Mainnet PIDs stay unchanged; configuration and durable state are retained |
-| Disk | 26.51 GiB free on `/var/lib`; watchdog minimum 25 GiB. A 30-second demo soak sample measures 28,537 WAL bytes/s, zero engine errors and no process change; this is a workload sample, not a capacity guarantee. |
-| Timer observation | The natural 02:15 embedded demo probe `eng-1788746775000-1` records decision-to-cancel dispatch 2000.955 ms and cancel dispatch-to-Cancelled 12.074 ms; no fill appears in the pinned segment. Its one-order window measures source-to-submit 12.59 ms including the venue network. One sample is not a latency distribution; the Rust WAL reader validates segment 000056 (`/tmp/r3-embedded-probe-wal-validation.log`) |
+| Execution | Both engines run embedded callbacks with no strategy children. Both engine units use `Type=notify`, `WatchdogSec=30s`; anonymous memory is 109.1 MiB demo / 71.2 MiB mainnet. The invalid filled-state repair remains deployed |
+| Stored previous commit | `32858587f70755980332a3fefd048446980659d8`; the existing demo drill refuses this pair because runtime inputs differ. The completed 02:47–02:48 drill covers `a4189a48`/`32858587` only; it does not qualify this predecessor pair |
+| Disk | 29.26 GiB free on `/var/lib`; watchdog minimum 25 GiB. Every pre-deploy WAL filename remains present and nonshrinking: 58 demo files; mainnet grows from 56 to 57 files. No retained reader is removed |
+| Timer observation | The natural 04:15 demo probe records one source-to-submit sample of 19.84 ms including venue network; decision 137.1 µs and observed barrier 1.11 ms. One sample is not a latency distribution (`/tmp/r3-fc2ad99c-demo-probe-journal.log`) |
 | Entry permissions | CARRY/LONG/EXODUS enabled in both realms, demo PROBE enabled; original permissions survive handover |
-| Current implementation | Round-3 embedded/default-Bybit execution is deployed. The first embedded handover passes 300 demo seconds before mainnet at 02:11:42 UTC; generation `32858587` passes another 300 seconds through 02:43:42 UTC, then leaves the unchanged mainnet runtime running. Host Python contains only pip 24.0 and websocket-client 1.9.1. [Implementation checkpoint](docs/tier1-round-handoff.md); [Round-3 plan](docs/tier1-audit-round-3.md) |
-| Qualified local follow-up | Borrowed exact prices, reused order projections, fresh route membership bits, exact storage bit bounds and earlier venue-actor scheduling pass 1,962 developer Rust tests, 1,646 Python tests, 1,961 release tests, repeated heavy crash simulations and copied-WAL restart/stop-repair fixtures. This source is pending workflow deployment; it does not change the host observation above |
+| Current implementation | Borrowed exact prices, reused order projections, fresh route membership bits, exact storage bit bounds and earlier venue-actor scheduling are deployed. Demo passes 300 seconds through 04:18:23 UTC before mainnet handover at 04:18:24; deploy completes 04:18:56. Host Python contains only pip 24.0 and websocket-client 1.9.1. [Implementation checkpoint](docs/tier1-round-handoff.md); [Round-3 plan](docs/tier1-audit-round-3.md) |
+| Qualified local follow-up | The deployed source passes 1,962 developer Rust tests, 1,646 Python tests, 1,961 local release tests, repeated heavy crash simulations and copied-WAL restart/stop-repair fixtures. Hosted debug passes 1,964 tests and hosted release tests pass 1,962. Separate hosted latency qualification fails decision p99 at 9.3 µs versus 9.0 µs; submit p50 1.16 ms passes |
 
 | Release image | SHA256 |
 | --- | --- |
-| Engine, mainnet retained from `a4189a48` | `6d8a0765aadae6ecf2bfe23825108c36b2dfe81c9b5f34a9c516827abc7bdd87` |
-| Engine, demo and installed companion generation `32858587` | `beccaa74534db544ba57d091bd3420a6537d812d7487bf89dc152cf444fb851f` |
-| Signal worker, loaded in both realms | `e77bb2b88ac32fbac1b4f61574c2eabb41a818f8ab33e92ed1c0a155394e0e5e` |
-| Engine tools, installed companion | `1ecdb1bdd2754813fa51d703d9ed9b65fee445c3f150ce0b1034c152d477c1a9` |
+| Engine, loaded in both realms | `6d59459580fae52b0bc972009d55dbb16a4232642b12cb6844c0955719b0b95f` |
+| Signal worker, loaded in both realms | `36cf9d8d3a3b9d831be90c29f9b435c59690413e7a1d0cc8cddead76575e69af` |
+| Engine tools, installed companion | `a83a55a90865f3d26b5ae9c05b79356b84a0c411b4a8b8f739bb3806bd5810cb` |
 
 | Open long position | Demo quantity / native stop | Mainnet quantity / native stop |
 | --- | --- | --- |
