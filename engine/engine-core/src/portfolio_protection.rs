@@ -62,7 +62,7 @@ pub(crate) fn plan(
                 .sleeve_stop()
                 .and_then(|stop| Exact::from_legacy_f64(stop.trigger_px).ok())
         });
-    let mut candidates = Vec::new();
+    let mut trigger = None;
     let mut owner_seen = false;
     for row in portfolio
         .positions
@@ -85,24 +85,26 @@ pub(crate) fn plan(
         if quantity.is_zero() || quantity.is_positive() != (side == Side::Buy) {
             continue;
         }
-        candidates.push(stop.ok_or("a surviving sleeve has no durable stop")?);
+        trigger = tighter(
+            side,
+            trigger,
+            Some(stop.ok_or("a surviving sleeve has no durable stop")?),
+        );
     }
     if !owner_seen && !request.is_sleeve_reduction() {
-        candidates.push(logical_stop.ok_or("the new sleeve has no durable stop")?);
+        trigger = tighter(
+            side,
+            trigger,
+            Some(logical_stop.ok_or("the new sleeve has no durable stop")?),
+        );
     }
-    candidates.extend(
-        other_stops
-            .into_iter()
-            .filter(|(stop_side, _)| *stop_side == side)
-            .map(|(_, stop)| stop),
-    );
-    let trigger = candidates
+    for (_, stop) in other_stops
         .into_iter()
-        .reduce(|a, b| match side {
-            Side::Buy => a.max(b),
-            Side::Sell => a.min(b),
-        })
-        .ok_or("physical growth has no surviving sleeve protection")?;
+        .filter(|(stop_side, _)| *stop_side == side)
+    {
+        trigger = tighter(side, trigger, Some(stop));
+    }
+    let trigger = trigger.ok_or("physical growth has no surviving sleeve protection")?;
     let mut reference = reference.clone();
     if let OrderKind::Limit { px, .. } = request.kind {
         let limit = request
@@ -305,3 +307,6 @@ mod tests {
         assert_eq!(request.sleeve_stop().unwrap().trigger_px, 85.0);
     }
 }
+
+#[cfg(test)]
+pub(crate) mod equivalence_tests;

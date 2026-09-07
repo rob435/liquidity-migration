@@ -25,8 +25,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .chain(
                     self.books
                         .orders
-                        .in_flight()
-                        .iter()
+                        .iter_in_flight()
                         .map(|order| order.request.symbol),
                 )
                 .chain(

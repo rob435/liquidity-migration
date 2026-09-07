@@ -604,7 +604,11 @@ impl LedgerOfOrders {
     }
 
     pub fn in_flight(&self) -> Vec<&OrderRec> {
-        self.orders.values().filter(|o| o.in_flight()).collect()
+        self.iter_in_flight().collect()
+    }
+
+    pub fn iter_in_flight(&self) -> impl Iterator<Item = &OrderRec> + '_ {
+        self.orders.values().filter(|order| order.in_flight())
     }
 
     pub fn in_flight_ids(&self) -> Vec<&str> {
@@ -1069,6 +1073,54 @@ mod tests {
         let ledger = LedgerOfOrders::from_records(&log);
         assert_eq!(ledger.in_flight_ids(), vec!["a"]);
         assert!(ledger.orders["a"].acked);
+    }
+
+    #[test]
+    fn in_flight_keeps_live_orders_in_key_order_with_terminal_rows_retained() {
+        assert!(LedgerOfOrders::default().in_flight().is_empty());
+        let ledger = LedgerOfOrders::from_records(&[
+            sent("z-sent", 2.0),
+            sent("m-partial", 2.0),
+            sent("a-acked", 1.0),
+            sent("b-filled", 1.0),
+            sent("c-cancelled", 1.0),
+            sent("d-rejected", 1.0),
+            fill("m-partial", 1.0),
+            fill("b-filled", 1.0),
+            WalRecord::OrderUpdate {
+                callbacks: None,
+                update: OrderUpdate::Ack(OrderAck {
+                    client_order_id: "a-acked".into(),
+                    venue_order_id: "venue-a".into(),
+                    sent_ns: 1,
+                    ack_ns: 2,
+                }),
+            },
+            WalRecord::OrderUpdate {
+                callbacks: None,
+                update: OrderUpdate::Cancelled {
+                    client_order_id: "c-cancelled".into(),
+                    recv_ns: 3,
+                },
+            },
+            WalRecord::OrderUpdate {
+                callbacks: None,
+                update: OrderUpdate::Reject {
+                    client_order_id: "d-rejected".into(),
+                    code: 7,
+                    reason: "rejected".into(),
+                },
+            },
+        ]);
+        assert_eq!(ledger.orders.len(), 6);
+        assert_eq!(
+            ledger
+                .in_flight()
+                .iter()
+                .map(|order| order.request.client_order_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a-acked", "m-partial", "z-sent"]
+        );
     }
 
     fn recovered(id: &str, qty: f64) -> WalRecord {

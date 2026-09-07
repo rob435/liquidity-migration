@@ -660,6 +660,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let allowed_qty = allowed_qty
             .to_f64()
             .map_err(|error| EngineError::State(error.to_string()))?;
+        #[cfg(not(test))]
+        let _ = allowed_qty;
         // The risk kernel requires a position-opening intent to carry a stop.
         // A venue that keeps no stop of its own would leave that rule
         // unenforced without ever saying so: the order goes out, the log
@@ -677,15 +679,29 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if let Some(spec) = self.instrument_specs.get(&intent.symbol).cloned() {
             return self.quantize_exact_order(approval, &spec);
         }
-        if self.require_exact_instruments {
-            self.refuse(
-                client_order_id,
-                intent,
-                "exact instrument metadata is unavailable for this symbol",
-            )?;
-            return Ok(None);
+        #[cfg(test)]
+        if !self.require_exact_instruments {
+            return self.quantize_legacy_order_fixture(approval, allowed_qty);
         }
+        self.refuse(
+            client_order_id,
+            intent,
+            "exact instrument metadata is unavailable for this symbol",
+        )?;
+        Ok(None)
+    }
 
+    #[cfg(test)]
+    fn quantize_legacy_order_fixture(
+        &mut self,
+        approval: RiskApprovedIntent,
+        allowed_qty: f64,
+    ) -> Result<Option<LegalOrder>, EngineError> {
+        let RiskApprovedIntent {
+            ref intent,
+            ref client_order_id,
+            ..
+        } = approval;
         let Some(rule) = self
             .books
             .rules
@@ -985,6 +1001,23 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         spec: &engine_types::numeric::ExactInstrumentSpec,
         excluding: Option<&str>,
     ) -> Result<crate::portfolio_protection::ProtectionPlan, String> {
+        use engine_types::numeric::Exact;
+        use std::borrow::Cow;
+
+        fn retain_stop<'a>(
+            stops: &mut [Option<Cow<'a, Exact>>; 2],
+            side: Side,
+            stop: Cow<'a, Exact>,
+        ) {
+            let retained = &mut stops[usize::from(side == Side::Sell)];
+            if retained.as_ref().is_none_or(|prior| match side {
+                Side::Buy => stop.as_ref() > prior.as_ref(),
+                Side::Sell => stop.as_ref() < prior.as_ref(),
+            }) {
+                *retained = Some(stop);
+            }
+        }
+
         let interval = match excluding {
             Some(id) => self.risk.physical_exposure_interval_excluding(
                 id,
@@ -1002,8 +1035,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .ok_or("no reference price for physical protection")?;
         let reference =
             engine_types::order_terms::strategy_decimal(reference).map_err(|e| e.to_string())?;
-        let mut stops = Vec::new();
-        for order in self.books.orders.in_flight().into_iter().filter(|order| {
+        let mut stops = [None, None];
+        for order in self.books.orders.iter_in_flight().filter(|order| {
             order.request.symbol == request.symbol
                 && excluding != Some(order.request.client_order_id.as_str())
                 && !order.request.is_sleeve_reduction()
@@ -1012,15 +1045,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .request
                 .exact_terms
                 .as_ref()
-                .and_then(|terms| terms.stop_trigger_price.clone())
+                .and_then(|terms| terms.stop_trigger_price.as_ref())
             {
-                stops.push((order.request.side, stop));
+                retain_stop(&mut stops, order.request.side, Cow::Borrowed(stop));
             } else if let Some(stop) = order.request.sleeve_stop() {
-                stops.push((
+                retain_stop(
+                    &mut stops,
                     order.request.side,
-                    engine_types::numeric::Exact::from_legacy_f64(stop.trigger_px)
-                        .map_err(|e| e.to_string())?,
-                ));
+                    Cow::Owned(Exact::from_legacy_f64(stop.trigger_px).map_err(|e| e.to_string())?),
+                );
             }
         }
         for position in self
@@ -1030,11 +1063,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .iter()
             .filter(|position| position.symbol == request.symbol && position.stop_attached)
         {
-            stops.push((
+            retain_stop(
+                &mut stops,
                 position.side,
-                engine_types::numeric::Exact::from_legacy_f64(position.stop_px)
-                    .map_err(|e| e.to_string())?,
-            ));
+                Cow::Owned(Exact::from_legacy_f64(position.stop_px).map_err(|e| e.to_string())?),
+            );
         }
         let plan = crate::portfolio_protection::plan(
             &self.books.attribution.snapshot(),
@@ -1042,7 +1075,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             interval,
             spec,
             &reference,
-            stops,
+            stops
+                .into_iter()
+                .zip([Side::Buy, Side::Sell])
+                .filter_map(|(stop, side)| stop.map(|stop| (side, stop.into_owned()))),
         )?;
         if !plan.reduce_only {
             if self.stop_repairs_pending.contains(&request.symbol) {
@@ -1526,3 +1562,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .unwrap_or(0.0)
     }
 }
+
+#[cfg(test)]
+mod stop_candidates_tests;
+
+#[cfg(test)]
+mod admission_compatibility_tests;

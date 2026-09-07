@@ -101,11 +101,25 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
             return Ok(());
         }
-        if self.require_exact_instruments {
-            self.wal
-                .append(&refuse("exact instrument metadata is unavailable"))?;
-            return Ok(());
+        #[cfg(test)]
+        if !self.require_exact_instruments {
+            return self.process_legacy_set_stop_fixture(symbol, trigger_px);
         }
+        self.wal
+            .append(&refuse("exact instrument metadata is unavailable"))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn process_legacy_set_stop_fixture(
+        &mut self,
+        symbol: SymbolId,
+        trigger_px: f64,
+    ) -> Result<(), EngineError> {
+        let refuse = |reason: &str| WalRecord::Note {
+            source: "engine".into(),
+            text: format!("stop on {} not moved to {trigger_px}: {reason}", symbol.0),
+        };
         let rows: Vec<_> = self
             .books
             .account
@@ -592,6 +606,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     }
 }
 
+#[cfg(test)]
 fn tighter(side: Side, a: f64, b: f64) -> f64 {
     match side {
         Side::Buy => a.max(b),

@@ -81,7 +81,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         })
                         .flat_map(|row| row.subscriptions.iter().cloned()),
                 );
-                let protected: std::collections::BTreeSet<_> = self
+                let mut protected = std::collections::BTreeSet::new();
+                for symbol in self
                     .books
                     .attribution
                     .symbols(sid)
@@ -96,8 +97,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .chain(
                         self.books
                             .orders
-                            .in_flight()
-                            .iter()
+                            .iter_in_flight()
                             .filter(|order| order.request.strategy == sid)
                             .map(|order| order.request.symbol),
                     )
@@ -109,7 +109,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             .filter(|position| position.qty != 0.0)
                             .map(|position| position.symbol),
                     )
-                    .collect();
+                {
+                    protected.insert(symbol);
+                }
                 route.subscriptions.retain(|subscription| {
                     let keep = needed.contains(subscription)
                         || self

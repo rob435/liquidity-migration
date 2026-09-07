@@ -984,14 +984,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             })?;
             return Ok(false);
         };
-        let Some(rule) = self.books.rules.get(symbol.0 as usize).copied().flatten() else {
+        let rule = self.books.rules.get(symbol.0 as usize).copied().flatten();
+        if rule.is_none() {
             self.wal.append(&WalRecord::Note {
                 source: "engine".into(),
                 text: format!("{client_order_id} not amended: instrument rules are unavailable"),
             })?;
             return Ok(false);
-        };
-        let requested_px = if let Some(instrument) = self.instrument_specs.get(&symbol) {
+        }
+        #[cfg(test)]
+        let rule = rule.expect("instrument rule checked above");
+        let mut requested_px = None;
+        if let Some(instrument) = self.instrument_specs.get(&symbol) {
             let reference = self.reference_px(symbol, &OrderKind::Market);
             let terms = match engine_types::order_terms::quantize_amend(
                 instrument,
@@ -1011,17 +1015,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             terms
                 .apply_projection(&mut spec)
                 .map_err(|e| EngineError::State(e.to_string()))?;
-            spec.px.expect("price amendment retains price")
-        } else {
-            if self.require_exact_instruments || existing.request.exact_terms.is_some() {
-                self.wal.append(&WalRecord::Note {
-                    source: "engine".into(),
-                    text: format!(
-                        "{client_order_id} not amended: exact instrument metadata is unavailable"
-                    ),
-                })?;
-                return Ok(false);
-            }
+            requested_px = Some(spec.px.expect("price amendment retains price"));
+        }
+        #[cfg(test)]
+        if requested_px.is_none()
+            && !self.require_exact_instruments
+            && existing.request.exact_terms.is_none()
+        {
             let px = quantize::quantize_px(
                 spec.px.expect("positive price checked above"),
                 existing.request.side,
@@ -1029,7 +1029,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             );
             spec.px = Some(px);
             spec.exact_terms = None;
-            px
+            requested_px = Some(px);
+        }
+        let Some(requested_px) = requested_px else {
+            self.wal.append(&WalRecord::Note {
+                source: "engine".into(),
+                text: format!(
+                    "{client_order_id} not amended: exact instrument metadata is unavailable"
+                ),
+            })?;
+            return Ok(false);
         };
         if requested_px == old_px
             && spec

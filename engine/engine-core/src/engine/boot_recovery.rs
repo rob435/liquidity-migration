@@ -153,6 +153,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     ///
     /// Strategy plug names are acceptable for simple callers. Fleet assembly
     /// uses [`Engine::boot_as_exact`] so logs and heartbeats carry sleeve names.
+    #[cfg(test)]
     pub async fn boot(
         settings: &EngineSection,
         config_sha256: &str,
@@ -181,6 +182,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// entry that is empty, falls back to that strategy's plug name. This is
     /// what goes in the log's id table and in the heartbeat, so `engine fills`
     /// can say which sleeve's trading cost what.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn boot_as(
         settings: &EngineSection,

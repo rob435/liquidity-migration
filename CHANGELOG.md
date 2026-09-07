@@ -163,6 +163,65 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     p99s. All 400 orders complete with one barrier and valid unchanged readbacks.
     The control does not attribute the earlier submit increase to this change;
     R3-13 remains open.
+    Commit `937ba60d` passes the mandatory pinned developer gate with 1,974 Rust
+    tests, zero failed, eight ignored, and 1,718 Python tests, then pushes directly
+    to main. Qualification `34119432164` and deployment `34119441979` target that SHA.
+    The 11:54:39 authenticated predeploy read preserves all fourteen exact full-size
+    stops; both engines and workers remain ready without restarts or OOMs. Deployment
+    completes at 12:16:29 after all 31 demo observations pass through 12:15:56.
+    Both native-state checks report already-complete. The 12:18:33 host read
+    verifies Stage B images in both realms, ready workers, fourteen unchanged
+    full-size exact stops and zero restarts/OOMs. All earlier WAL paths remain
+    without shrinking; compatible Stage A images and archive remain unchanged.
+    Isolated qualification `34119432164` passes 1,974 release tests, zero failed,
+    eight ignored, account/history workloads and all eight fixed cells. Candidate
+    medians 5,950 ns decision p99 / 1,115,000 ns submit p50 pass both absolute
+    and relative budgets. The separate qualified Linux archive and embedded log
+    verify; its bytes differ from the deployed ordinary archive. Remove completed
+    R3-16 and R3-19 rows; the Mac submit target remains open.
+    Add R3-21 before streaming portfolio route inputs: native sampling finds
+    repeated vector growth in route maintenance. The sampled narrow run remains
+    a diagnostic (5.919/588.287 µs decision p50/p99, 5.324799 ms submit p50),
+    with all 100 orders and one barrier each; no timing-boundary change is made.
+    Stream live-order references and insert route symbols directly into the ordered
+    set. Preserve fresh walks and output/refusal/feed-effect order without a cache.
+    The same thirteen focused checks pass before/after; strict core Clippy passes.
+    The 12:13:00–12:14:20 ordinary pair measures narrow decision 6.211 µs,
+    wide decision p99 18.591 µs and narrow submit 5.386239 ms; submit remains
+    above 5 ms. All 700 orders keep one barrier and valid readbacks. The fixed
+    after-sample removes the identified vector allocation branch; its 5.091327 ms
+    submit median remains diagnostic and is not used for acceptance.
+    One buffered critical-path diagnostic records every unchanged order boundary,
+    with all 100 timelines and WAL clocks agreeing. It measures 4.780031 ms
+    submit p50 and does not reproduce the ordinary miss. Fresh physical protection
+    grows from 37.708 to 66.791 µs across order-count quarters. Restore all five
+    temporary source files exactly; the ordinary rebuild reproduces `ae8c86fb`.
+    Add R3-22 before folding repeated owned physical-stop candidate buffers.
+    Replace repeated owned candidate buffers with borrowed per-side extrema and
+    a running planner extremum. The same 846 cases match actual prior code; twelve
+    distinct focused tests and strict core Clippy pass. Ordinary narrow/wide cells
+    pass decision targets at 5.711 / 10.919 µs but narrow submit misses at
+    6.094847 ms; its observed barrier median is 5.267455 ms. All 700 orders
+    complete with one barrier and unchanged valid readbacks. Retain the miss and
+    unproven storage attribution. Add R3-23 before restricting optional admission
+    constructors to deliberate test fixtures and migrating the account-state soak.
+    Ordinary builds now expose exact boot only; optional boot and scalar order,
+    amendment and explicit-stop construction stay test-only. Preserve the original
+    early quantity-conversion error order and missing-metadata refusals. Historical
+    fixtures and protective/archive/grid recovery remain unchanged. Thirty-five
+    focused checks pass before/after, plus one exact metadata test; ten matched
+    soak boots keep holdings, covered stops and may_open. Native binding adds one
+    identity record per boot; full-boot timing includes the exact metadata path.
+    Strict core Clippy passes after marking a remaining scalar helper test-only.
+    Freeze the final ordinary image, then clear 5.3 GiB of rebuildable release
+    cache while retaining all captured data and binaries. One fixed old/new
+    narrow/wide comparison keeps the old submit miss at 5.283839 ms. Final
+    source meets the point targets: decision p50 7.959 µs, wide decision p99
+    26.431 µs and narrow submit p50 4.882431 ms. All 1,400 comparison orders
+    complete with one barrier and valid unchanged readbacks. The comparison
+    does not establish a stable bound or attribute the submit difference solely
+    to code. Remove completed R3-21, R3-22 and R3-23 rows; final integration and
+    R3-13 hosted qualification remain pending.
   - Add R3-20 before fixing nondeterministic portfolio retry timing. Heavy seed 7
     reconciles twice but first differs at WAL index 3816: emergency 46 and a deferred
     quote change order after identical cancel completion. Retry deadlines use real

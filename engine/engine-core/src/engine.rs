@@ -29,14 +29,16 @@ use std::future::Future;
 use std::task::Poll;
 use std::time::Duration;
 
+#[cfg(test)]
+use engine_types::{quantize, StopSpec};
+
 use engine_types::{
-    quantize, AccountView, Action, AmendSpec, DenyReason, EngineEvent, Feed, FeedError,
-    InstrumentRule, Intent, MarketEvent, MarketFeed, MarketState, OrderFeed, OrderKind,
-    OrderRequest, OrderUpdate, RiskKernel, RiskVerdict, RuntimeControlError, RuntimeControlFeed,
-    RuntimeControlRequest, Side, SignalError, SignalFeed, SignalObservation, StopSpec, Strategy,
-    StrategyCheckpoint, StrategyEvent, StrategyGlobalCheckpointState, StrategyId, Subscription,
-    SymbolId, SymbolTable, TimeInForce, VenueError, VenueGateway, Wal, WalError, WalRecord,
-    WorkPolicy,
+    AccountView, Action, AmendSpec, DenyReason, EngineEvent, Feed, FeedError, InstrumentRule,
+    Intent, MarketEvent, MarketFeed, MarketState, OrderFeed, OrderKind, OrderRequest, OrderUpdate,
+    RiskKernel, RiskVerdict, RuntimeControlError, RuntimeControlFeed, RuntimeControlRequest, Side,
+    SignalError, SignalFeed, SignalObservation, Strategy, StrategyCheckpoint, StrategyEvent,
+    StrategyGlobalCheckpointState, StrategyId, Subscription, SymbolId, SymbolTable, TimeInForce,
+    VenueError, VenueGateway, Wal, WalError, WalRecord, WorkPolicy,
 };
 
 use crate::attribution::Attribution;

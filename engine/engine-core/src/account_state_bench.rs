@@ -370,13 +370,14 @@ async fn recovery_once(history_rows: usize) -> Result<u64, Error> {
     };
 
     let started = Instant::now();
-    let engine = Engine::boot(
+    let engine = Engine::boot_as_exact(
         &settings,
         "account-state-soak",
         wal,
         PermitAll,
         venue,
         vec![Box::new(SoakStrategy)],
+        &[],
         &replayed,
     )
     .await?;
@@ -388,6 +389,8 @@ async fn recovery_once(history_rows: usize) -> Result<u64, Error> {
             recovered.get()
         )));
     }
+    #[cfg(test)]
+    tests::assert_recovered_state(&engine, history_rows);
     Ok(elapsed)
 }
 
@@ -498,6 +501,17 @@ struct CountingWal {
 impl Wal for CountingWal {
     fn append(&mut self, record: &WalRecord) -> Result<u64, WalError> {
         self.sequence += 1;
+        #[cfg(test)]
+        match record {
+            WalRecord::IdentityState { .. } => eprintln!("soak auxiliary record: identity_state"),
+            WalRecord::InstrumentCatalogCheckpoint { .. } => {
+                eprintln!("soak auxiliary record: instrument_catalog_checkpoint")
+            }
+            WalRecord::LegacyQuantityGridAdopted { .. } => {
+                eprintln!("soak auxiliary record: legacy_quantity_grid_adopted")
+            }
+            _ => {}
+        }
         if matches!(record, WalRecord::RecoveredFill { .. }) {
             self.recovered.set(self.recovered.get() + 1);
         }
@@ -533,6 +547,29 @@ struct PermitAll;
 impl RiskKernel for PermitAll {
     fn assess(&mut self, intent: &Intent, _account: &AccountView, _now_ns: u64) -> RiskVerdict {
         RiskVerdict::Allow { qty: intent.qty }
+    }
+
+    fn physical_exposure_interval(
+        &mut self,
+        symbol: SymbolId,
+        account: &AccountView,
+    ) -> Result<engine_types::risk::PhysicalExposureInterval, engine_types::DenyReason> {
+        use engine_types::numeric::Exact;
+        let mut net = Exact::zero();
+        for position in account.positions.iter().filter(|row| row.symbol == symbol) {
+            let quantity =
+                position
+                    .quantity()
+                    .map_err(|error| engine_types::DenyReason::UnknownState {
+                        detail: error.to_string(),
+                    })?;
+            net += if position.side == Side::Buy {
+                quantity
+            } else {
+                -quantity
+            };
+        }
+        engine_types::risk::PhysicalExposureInterval::from_exact(net.clone(), net)
     }
 
     fn on_update(&mut self, _update: &OrderUpdate) {}
@@ -631,6 +668,37 @@ impl VenueGateway for HistoryVenue {
         Ok(self.account.clone())
     }
 
+    async fn instrument_specs(
+        &mut self,
+    ) -> Result<Vec<(String, engine_types::numeric::ExactInstrumentSpec)>, VenueError> {
+        use engine_types::numeric::{AssetId, Exact, ExactInstrumentSpec, PricePrecision};
+        let decimal =
+            |text| Exact::parse_decimal(text).expect("declared synthetic instrument rule");
+        Ok(vec![(
+            SYMBOL.to_string(),
+            ExactInstrumentSpec {
+                native_symbol: SYMBOL.to_string(),
+                base_asset: AssetId::Unknown,
+                quote_asset: AssetId::Unknown,
+                settlement_asset: AssetId::Unknown,
+                tick_size: Some(decimal("0.5")),
+                min_price: None,
+                max_price: None,
+                price_precision: PricePrecision::Tick,
+                qty_step: Some(decimal("0.001")),
+                min_qty: Some(decimal("0.001")),
+                market_qty_step: Some(decimal("0.001")),
+                market_min_qty: Some(decimal("0.001")),
+                max_qty: None,
+                max_market_qty: None,
+                min_notional: Some(decimal("5")),
+                contract_multiplier: None,
+                fee_assets: None,
+                fee_step: None,
+            },
+        )])
+    }
+
     async fn instrument_rules(&mut self) -> Result<Vec<(String, InstrumentRule)>, VenueError> {
         Ok(vec![(
             SYMBOL.to_string(),
@@ -663,6 +731,113 @@ impl VenueGateway for HistoryVenue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    pub(super) fn assert_recovered_state(
+        engine: &Engine<CountingWal, PermitAll, HistoryVenue>,
+        history_rows: usize,
+    ) {
+        use engine_types::numeric::{AssetId, Exact};
+        let WalRecord::SegmentBase {
+            portfolio: Some(portfolio),
+            logged_exposure,
+            intended_stops,
+            open_orders,
+            may_open,
+            ..
+        } = engine.rotation_base(clock::wall_ms())
+        else {
+            panic!("recovered canonical state");
+        };
+        assert!(may_open, "covered synthetic position must remain admitted");
+        let expected = Exact::parse_decimal(&history_rows.to_string()).unwrap();
+        if history_rows == 0 {
+            assert!(portfolio.positions.is_empty());
+            assert!(logged_exposure.is_empty());
+            assert!(open_orders.is_empty());
+        } else {
+            let [position] = portfolio.positions.as_slice() else {
+                panic!("one synthetic sleeve position");
+            };
+            assert_eq!(position.strategy, StrategyId(0));
+            assert_eq!(position.symbol, SymbolId(0));
+            assert_eq!(position.signed_qty, expected);
+            assert_eq!(
+                position.entry_value,
+                Some(&expected * Exact::parse_decimal("100").unwrap())
+            );
+            assert_eq!(position.stop_px, Some(Exact::parse_decimal("99").unwrap()));
+            assert_eq!(position.settlement_asset, AssetId::Unknown);
+            assert_eq!(logged_exposure.len(), 1);
+            assert_eq!(logged_exposure[0].exact_quantity().unwrap(), expected);
+            assert_eq!(intended_stops.len(), 1);
+            assert_eq!(intended_stops[0].side, Some(Side::Buy));
+            assert_eq!(intended_stops[0].trigger_px, 99.0);
+            let [order] = open_orders.as_slice() else {
+                panic!("one retained completed synthetic order");
+            };
+            assert_eq!(order.request.client_order_id, ORDER_ID);
+            assert_eq!(order.request.exact_terms, None);
+            assert_eq!(order.filled_qty, history_rows as f64);
+            assert_eq!(
+                order.terminal.as_ref().unwrap().ending,
+                engine_types::wal::OrderEnding::Filled
+            );
+        }
+        eprintln!("soak recovery rows={history_rows} exact_holding={expected} may_open={may_open} stop_covered={}", history_rows != 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovered_counts_holdings_and_stops_match_at_every_existing_history_size() {
+        for history_rows in Options::default().history_rows {
+            recovery_once(history_rows).await.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exact_synthetic_metadata_preserves_the_declared_rules_and_unknowns() {
+        use engine_types::numeric::AssetId;
+        let mut venue = HistoryVenue {
+            executions: Default::default(),
+            account: prior_state(0, clock::wall_ms()).1,
+        };
+        let specs = venue.instrument_specs().await.unwrap();
+        let rules = venue.instrument_rules().await.unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(rules.len(), 1);
+        let (name, spec) = &specs[0];
+        let (rule_name, rule) = &rules[0];
+        assert_eq!(name, rule_name);
+        assert_eq!(spec.native_symbol, *name);
+        assert_eq!(
+            spec.tick_size.as_ref().unwrap().to_f64().unwrap(),
+            rule.tick_size
+        );
+        assert_eq!(
+            spec.qty_step.as_ref().unwrap().to_f64().unwrap(),
+            rule.qty_step
+        );
+        assert_eq!(
+            spec.min_qty.as_ref().unwrap().to_f64().unwrap(),
+            rule.min_qty
+        );
+        assert_eq!(
+            spec.min_notional.as_ref().unwrap().to_f64().unwrap(),
+            rule.min_notional
+        );
+        assert_eq!(spec.market_qty_step, spec.qty_step);
+        assert_eq!(spec.market_min_qty, spec.min_qty);
+        assert_eq!(
+            (&spec.base_asset, &spec.quote_asset, &spec.settlement_asset),
+            (&AssetId::Unknown, &AssetId::Unknown, &AssetId::Unknown)
+        );
+        assert_eq!(spec.min_price, None);
+        assert_eq!(spec.max_price, None);
+        assert_eq!(spec.max_qty, None);
+        assert_eq!(spec.max_market_qty, None);
+        assert_eq!(spec.contract_multiplier, None);
+        assert_eq!(spec.fee_assets, None);
+        assert_eq!(spec.fee_step, None);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn fixed_state_soak_and_recovery_sweep_cover_the_declared_work() {
