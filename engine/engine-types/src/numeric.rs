@@ -354,6 +354,10 @@ impl Exact {
         Ok(Self(BigRational::new(n, d)))
     }
     pub fn validate_storage(&self) -> Result<(), ExactError> {
+        // At most 3N bits implies fewer than 10^N: 2^(3N) = 8^N < 10^N.
+        if self.0.numer().bits().max(self.0.denom().bits()) <= (MAX_RATIO_DIGITS * 3) as u64 {
+            return Ok(());
+        }
         if self.0.numer().bits() > (MAX_RATIO_DIGITS * 4) as u64
             || self.0.denom().bits() > (MAX_RATIO_DIGITS * 4) as u64
             || self.0.numer().to_string().trim_start_matches('-').len() > MAX_RATIO_DIGITS
@@ -876,5 +880,66 @@ mod tests {
             serde_json::from_str::<Exact>(&serde_json::to_string(&tiny).unwrap()).unwrap(),
             tiny
         );
+    }
+    #[test]
+    fn storage_validation_matches_original_bit_and_decimal_boundaries() {
+        fn original(value: &Exact) -> Result<(), ExactError> {
+            if value.0.numer().bits() > (MAX_RATIO_DIGITS * 4) as u64
+                || value.0.denom().bits() > (MAX_RATIO_DIGITS * 4) as u64
+                || value.0.numer().to_string().trim_start_matches('-').len() > MAX_RATIO_DIGITS
+                || value.0.denom().to_string().len() > MAX_RATIO_DIGITS
+            {
+                return Err(ExactError::InputTooLarge);
+            }
+            Ok(())
+        }
+
+        let check = |value: Exact| {
+            let expected = original(&value);
+            assert_eq!(value.validate_storage(), expected);
+            if expected.is_ok() {
+                let encoded = serde_json::to_string(&value).unwrap();
+                assert_eq!(
+                    encoded,
+                    format!(
+                        "{{\"n\":\"{}\",\"d\":\"{}\"}}",
+                        value.0.numer(),
+                        value.0.denom()
+                    )
+                );
+                assert_eq!(serde_json::from_str::<Exact>(&encoded).unwrap(), value);
+            } else {
+                assert!(serde_json::to_string(&value).is_err());
+            }
+        };
+        let mut boundaries = vec![BigInt::zero(), BigInt::one()];
+        for bits in [
+            63,
+            64,
+            MAX_RATIO_DIGITS * 3 - 1,
+            MAX_RATIO_DIGITS * 3,
+            MAX_RATIO_DIGITS * 3 + 1,
+            MAX_RATIO_DIGITS * 4 - 1,
+            MAX_RATIO_DIGITS * 4,
+            MAX_RATIO_DIGITS * 4 + 1,
+        ] {
+            let edge = BigInt::one() << bits;
+            for offset in [-1, 0, 1] {
+                boundaries.push(&edge + offset);
+            }
+        }
+        let edge = BigInt::from(10u8).pow(MAX_RATIO_DIGITS as u32);
+        for offset in [-1, 0, 1] {
+            boundaries.push(&edge + offset);
+        }
+        for value in boundaries {
+            for sign in [-1, 1] {
+                check(Exact(BigRational::from_integer(&value * sign)));
+                if value.is_positive() {
+                    check(Exact(BigRational::new(BigInt::from(sign), value.clone())));
+                    check(Exact(BigRational::new((&value + 1) * sign, value.clone())));
+                }
+            }
+        }
     }
 }

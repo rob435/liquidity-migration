@@ -214,6 +214,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             queued_ns,
                         },
                     );
+                    // The venue actor shares this executor; start I/O before route maintenance.
+                    tokio::task::yield_now().await;
                 }
             }
         }

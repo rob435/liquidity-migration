@@ -170,8 +170,8 @@ impl Kernel {
                 continue;
             }
             let stop = row.stop_px.as_ref().ok_or(DenyReason::MissingStop)?;
-            if remaining.is_positive() && *stop >= current
-                || remaining.is_negative() && *stop <= current
+            if remaining.is_positive() && stop >= current
+                || remaining.is_negative() && stop <= current
             {
                 return Err(DenyReason::MissingStop);
             }
@@ -198,19 +198,19 @@ impl Kernel {
             let current = self
                 .book
                 .px(row.symbol)
-                .or_else(|| row.entry_px.clone())
+                .or(row.entry_px.as_ref())
                 .ok_or_else(|| unknown("portfolio position has no market price or entry value"))?;
-            let entry = row.entry_px.as_ref().unwrap_or(&current);
-            let price = current.clone().max(entry.clone());
-            let low = current.clone().min(entry.clone());
+            let entry = row.entry_px.as_ref().unwrap_or(current);
+            let price = current.max(entry);
+            let low = current.min(entry);
             let stop = row.stop_px.as_ref().ok_or(DenyReason::MissingStop)?;
             let distance = match row.qty.is_positive() {
-                true if *stop < current => &price - stop,
-                false if *stop > current => stop - low,
+                true if stop < current => price - stop,
+                false if stop > current => stop - low,
                 _ => return Err(DenyReason::MissingStop),
             };
             let fraction = distance
-                .checked_div(&price)
+                .checked_div(price)
                 .map_err(|e| unknown(e.to_string()))?;
             let notional = row.qty.abs() * price;
             projected.add(&notional);

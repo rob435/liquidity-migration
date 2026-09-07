@@ -1002,6 +1002,7 @@ async fn an_order_the_log_has_ended_leaves_the_strategys_book() {
         code: 110007,
         message: "not enough balance".into(),
     });
+    venue.send_delay = Duration::from_millis(1);
     let (risk, _seen) = MockRisk::with(allow_all());
     let mut engine = Engine::boot(
         &settings(),

@@ -395,68 +395,74 @@ impl ExactOrderTerms {
         Ok(())
     }
 
-    pub fn validate_storage(&self) -> Result<(), OrderLegalityError> {
-        for value in std::iter::once(&self.quantity)
-            .chain(self.limit_price.iter())
-            .chain(self.stop_trigger_price.iter())
-            .chain(self.physical_stop_trigger_price.iter())
-        {
+    fn projection(&self) -> Result<OrderProjection, OrderLegalityError> {
+        fn project(value: &Exact) -> Result<f64, OrderLegalityError> {
             decimal_wire(value)?;
-            value.to_f64()?;
+            Ok(value.to_f64()?)
         }
-        Ok(())
+        Ok(OrderProjection {
+            quantity: project(&self.quantity)?,
+            limit_price: self.limit_price.as_ref().map(project).transpose()?,
+            sleeve_stop: self.stop_trigger_price.as_ref().map(project).transpose()?,
+            physical_stop: self
+                .physical_stop_trigger_price
+                .as_ref()
+                .map(project)
+                .transpose()?,
+        })
+    }
+
+    pub fn validate_storage(&self) -> Result<(), OrderLegalityError> {
+        self.projection().map(|_| ())
     }
 
     pub fn validate_projection(&self, request: &OrderRequest) -> Result<(), OrderLegalityError> {
-        self.validate_storage()?;
-        let price = match request.kind {
+        self.projection()?.validate(request)
+    }
+
+    pub fn apply_projection(&self, request: &mut OrderRequest) -> Result<(), OrderLegalityError> {
+        let projection = self.projection()?;
+        request.qty = projection.quantity;
+        match (&mut request.kind, projection.limit_price) {
+            (OrderKind::Market, None) => (),
+            (OrderKind::Limit { px, .. }, Some(exact)) => *px = exact,
+            _ => return Err(OrderLegalityError::Projection),
+        }
+        request.stop = projection
+            .physical_stop
+            .map(|trigger_px| StopSpec { trigger_px });
+        if let Some(SleeveOrderEffect::Increase { stop }) = &mut request.sleeve_effect {
+            *stop = projection
+                .sleeve_stop
+                .map(|trigger_px| StopSpec { trigger_px })
+                .ok_or(OrderLegalityError::Projection)?;
+        }
+        request.exact_terms = Some(Box::new(self.clone()));
+        projection.validate(request)
+    }
+}
+
+struct OrderProjection {
+    quantity: f64,
+    limit_price: Option<f64>,
+    sleeve_stop: Option<f64>,
+    physical_stop: Option<f64>,
+}
+
+impl OrderProjection {
+    fn validate(&self, request: &OrderRequest) -> Result<(), OrderLegalityError> {
+        let limit = match request.kind {
             OrderKind::Market => None,
             OrderKind::Limit { px, .. } => Some(px),
         };
-        let sleeve_stop = request.sleeve_stop().map(|s| s.trigger_px);
-        if self.quantity.to_f64()? != request.qty
-            || self.limit_price.as_ref().map(Exact::to_f64).transpose()? != price
-            || self
-                .stop_trigger_price
-                .as_ref()
-                .map(Exact::to_f64)
-                .transpose()?
-                != sleeve_stop
-            || self
-                .physical_stop_trigger_price
-                .as_ref()
-                .map(Exact::to_f64)
-                .transpose()?
-                != request.stop.map(|stop| stop.trigger_px)
+        if self.quantity != request.qty
+            || self.limit_price != limit
+            || self.sleeve_stop != request.sleeve_stop().map(|stop| stop.trigger_px)
+            || self.physical_stop != request.stop.map(|stop| stop.trigger_px)
         {
             return Err(OrderLegalityError::Projection);
         }
         Ok(())
-    }
-
-    pub fn apply_projection(&self, request: &mut OrderRequest) -> Result<(), OrderLegalityError> {
-        self.validate_storage()?;
-        request.qty = self.quantity.to_f64()?;
-        match (&mut request.kind, &self.limit_price) {
-            (OrderKind::Market, None) => (),
-            (OrderKind::Limit { px, .. }, Some(exact)) => *px = exact.to_f64()?,
-            _ => return Err(OrderLegalityError::Projection),
-        }
-        let stop = self
-            .stop_trigger_price
-            .as_ref()
-            .map(|px| px.to_f64().map(|trigger_px| StopSpec { trigger_px }))
-            .transpose()?;
-        request.stop = self
-            .physical_stop_trigger_price
-            .as_ref()
-            .map(|px| px.to_f64().map(|trigger_px| StopSpec { trigger_px }))
-            .transpose()?;
-        if let Some(SleeveOrderEffect::Increase { stop: held }) = &mut request.sleeve_effect {
-            *held = stop.ok_or(OrderLegalityError::Projection)?;
-        }
-        request.exact_terms = Some(Box::new(self.clone()));
-        self.validate_projection(request)
     }
 }
 
@@ -1114,3 +1120,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "order_terms_projection_tests.rs"]
+mod projection_tests;

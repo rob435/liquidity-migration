@@ -93,6 +93,81 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         market: &mut M,
     ) -> Result<(), EngineError> {
         let needed = self.required_portfolio_routes()?;
+        fn bit(feed: Feed) -> u8 {
+            match feed {
+                Feed::Quote => 1,
+                Feed::Depth => 2,
+                Feed::Trades => 4,
+                Feed::Ticker => 8,
+            }
+        }
+        const SUBSCRIBED: usize = 0;
+        const RETAINED: usize = 1;
+        const REQUIRED: usize = 2;
+        let mut membership = vec![[0u8; 3]; self.books.market.table.len()];
+        for (group, routes) in [&self.subscriptions, &self.portfolio_subscriptions, &needed]
+            .into_iter()
+            .enumerate()
+        {
+            for route in routes {
+                if let Some(symbol) = self.books.market.table.get(&route.symbol) {
+                    membership[symbol.idx()][group] |= bit(route.feed);
+                }
+            }
+        }
+        for route in &needed {
+            let expected = self
+                .books
+                .market
+                .table
+                .get(&route.symbol)
+                .expect("validated portfolio route");
+            let feeds = &mut membership[expected.idx()];
+            let feed = bit(route.feed);
+            if feeds[SUBSCRIBED] & feed != 0 {
+                continue;
+            }
+            match market.admit(&route.symbol, route.feed) {
+                Some(id) if id == expected => {
+                    feeds[SUBSCRIBED] |= feed;
+                    self.subscriptions.push(route.clone());
+                }
+                Some(id) => {
+                    return Err(EngineError::State(format!(
+                        "portfolio feed assigned {} to {}, expected {}",
+                        id.0, route.symbol, expected.0
+                    )))
+                }
+                None if feeds[RETAINED] & feed == 0 => {
+                    tracing::warn!(symbol = %route.symbol, feed = ?route.feed, "portfolio market demand is pending feed admission")
+                }
+                None => {}
+            }
+        }
+        for route in &self.portfolio_subscriptions {
+            let symbol = self
+                .books
+                .market
+                .table
+                .get(&route.symbol)
+                .expect("retained portfolio route");
+            if membership[symbol.idx()][REQUIRED] & bit(route.feed) != 0 {
+                continue;
+            }
+            if !self.routing.listens(symbol, route.feed) && market.retire(&route.symbol, route.feed)
+            {
+                self.subscriptions.retain(|known| known != route);
+            }
+        }
+        self.portfolio_subscriptions = needed;
+        Ok(())
+    }
+    #[cfg(test)]
+    pub(super) fn reference_maintain_portfolio_routes<M: MarketFeed>(
+        &mut self,
+        market: &mut M,
+    ) -> Result<(), EngineError> {
+        let needed = self.required_portfolio_routes()?;
         for route in &needed {
             if self.subscriptions.contains(route) {
                 continue;

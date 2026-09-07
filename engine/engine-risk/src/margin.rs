@@ -27,7 +27,7 @@ pub(crate) struct MarginBook {
     retired: BTreeMap<SymbolId, Retired>,
     frontier_ns: u64,
 }
-fn max_price(a: Option<Exact>, b: Option<Exact>) -> Option<Exact> {
+fn max_price<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
@@ -118,18 +118,18 @@ impl MarginBook {
         self.retired
             .retain(|_, row| row.confirmed_ns == 0 || row.confirmed_ns > self.frontier_ns);
     }
-    pub(crate) fn required(
-        &self,
+    pub(crate) fn required<'a>(
+        &'a self,
         ns: u64,
         leverage: &Exact,
-        price: impl Fn(SymbolId) -> Option<Exact>,
+        price: impl Fn(SymbolId) -> Option<&'a Exact>,
     ) -> Result<Exact, &'static str> {
         if ns < self.frontier_ns {
             return Err("account query predates the margin confirmation frontier");
         }
-        let mut quantities = BTreeMap::<Exact, ExactSum>::new();
+        let mut quantities = BTreeMap::<&Exact, ExactSum>::new();
         let mut add =
-            |symbol, qty: &Option<Exact>, px: &Option<Exact>| -> Result<(), &'static str> {
+            |symbol, qty: &Option<Exact>, px: &'a Option<Exact>| -> Result<(), &'static str> {
                 let qty = qty
                     .as_ref()
                     .ok_or("an order's incremental physical margin is unknown")?;
@@ -139,8 +139,8 @@ impl MarginBook {
                 if qty.is_zero() {
                     return Ok(());
                 }
-                let px = max_price(px.clone(), price(symbol))
-                    .filter(Exact::is_positive)
+                let px = max_price(px.as_ref(), price(symbol))
+                    .filter(|px| px.is_positive())
                     .ok_or("no price for unreflected order margin")?;
                 if leverage.is_zero() {
                     return Err("unreadable leverage");
@@ -254,18 +254,23 @@ mod tests {
                     Exact::from_i64(-2),
                     Exact::from_ratio("17", "3").unwrap(),
                 ] {
-                    let quote = |symbol: SymbolId| {
-                        if step.is_multiple_of(4) {
-                            return Some(Exact::from_u64(10000));
-                        }
-                        (!(step + u64::from(symbol.0)).is_multiple_of(5)).then(|| {
-                            Exact::from_ratio(&(step + u64::from(symbol.0) + 1).to_string(), "7")
-                                .unwrap()
+                    let quotes: BTreeMap<_, _> = (0..7)
+                        .filter_map(|symbol| {
+                            let price = if step.is_multiple_of(4) {
+                                Exact::from_u64(10000)
+                            } else if !(step + u64::from(symbol)).is_multiple_of(5) {
+                                Exact::from_ratio(&(step + u64::from(symbol) + 1).to_string(), "7")
+                                    .unwrap()
+                            } else {
+                                return None;
+                            };
+                            Some((SymbolId(symbol), price))
                         })
-                    };
+                        .collect();
+                    let quote = |symbol: SymbolId| quotes.get(&symbol);
                     assert_eq!(
                         book.required(ns, &leverage, quote),
-                        reference_required(&book, ns, &leverage, quote),
+                        reference_required(&book, ns, &leverage, |symbol| quote(symbol).cloned()),
                         "step {step}, query {ns}, leverage {leverage}"
                     );
                 }

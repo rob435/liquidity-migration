@@ -8,10 +8,10 @@ State measured execution workloads, timing boundaries and resource limits for th
 
 | Decision | Current evidence |
 | --- | --- |
-| Deployed engine | `a4189a48`; embedded callbacks and default Bybit features; dated host evidence lives in [STATE.md](../STATE.md) |
-| Qualification | Local debug/release, all six venue features and hosted debug checks pass; deployment passes the 300-second demo gate. Hosted release tests and latency calibration pass |
-| Target gaps | Latest uncontended cells pass narrow decision p50 and wide decision p99; submit p50 remains above target |
-| Latest source boundary | Callback-buffer reuse, direct binary64 normalization, immutable envelope policy, reduced products, aggregate margin division, grouped pending risk and per-symbol pending quantity totals, covered native-stop writes, fresh priced-quantity grouping and batched exact sums; normal release builds carry no temporary profiling |
+| Deployed engine | Generation `32858587`; demo loads its artifact, mainnet retains identical-runtime `a4189a48`; embedded callbacks and default Bybit features; dated host evidence lives in [STATE.md](../STATE.md) |
+| Qualification | Local debug/release, all six venue features and hosted debug checks pass; deployment passes the 300-second demo gate. Hosted release tests pass; the unchanged-runtime calibrated repeat fails decision p99 |
+| Target gaps | Both decision targets and one-barrier-plus-1-ms pass. Narrow submit repeats are 4.981 / 5.083 / 4.989 ms; the 5 ms target is met in two of three repeats, not consistently |
+| Latest source boundary | Callback-buffer reuse, direct binary64 normalization, immutable envelope policy, reduced products, aggregate margin division, grouped pending risk and per-symbol pending quantity totals, covered native-stop writes, fresh priced-quantity grouping and batched exact sums; borrowed prices, reused order projections, temporary route-membership bitsets, exact storage bit bounds and a venue-actor yield; normal release builds carry no temporary profiling |
 
 ### Retained Round-2 baseline
 
@@ -103,6 +103,23 @@ Latency cells are milliseconds, `p50 / p99 / p99.9`; MiB means 1,048,576 bytes.
 | Borrowed positive quantities, 270 symbols | 600 / 600 | 4.5 µs / 11.8 µs | 5.25 ms / 6.42 ms | 600 | 1,176,694 |
 | Borrowed stop fractions, unloaded | 100 / 100 | 4.9 µs / 12.0 µs | 5.05 ms / 6.93 ms | 100 | 189,739 |
 | Borrowed stop fractions, 270 symbols | 600 / 600 | 4.9 µs / 11.9 µs | 5.41 ms / 6.57 ms | 600 | 1,176,680 |
+| Before borrowed prices, unloaded | 100 / 100 | 4.4 µs / 15.0 µs | 5.07 ms / 6.54 ms | 100 | 189,739 |
+| Before borrowed prices, 270 symbols | 600 / 600 | 4.3 µs / 11.3 µs | 5.37 ms / 6.25 ms | 600 | 1,176,695 |
+| Borrowed prices, unloaded | 100 / 100 | 4.5 µs / 9.7 µs | 5.05 ms / 8.79 ms | 100 | 189,751 |
+| Borrowed prices, 270 symbols | 600 / 600 | 4.5 µs / 11.0 µs | 5.35 ms / 6.70 ms | 600 | 1,176,695 |
+| Reused order projections, unloaded | 100 / 100 | 4.8 µs / 16.1 µs | 5.07 ms / 8.07 ms | 100 | 189,759 |
+| Reused order projections, 270 symbols | 600 / 600 | 4.8 µs / 10.6 µs | 5.35 ms / 6.77 ms | 600 | 1,176,681 |
+| Subscription hash sets, unloaded | 100 / 100 | 4.7 µs / 9.8 µs | 5.04 ms / 7.87 ms | 100 | 189,759 |
+| Subscription hash sets, 270 symbols | 600 / 600 | 4.6 µs / 11.0 µs | 5.36 ms / 6.22 ms | 600 | 1,176,681 |
+| Subscription bitsets, unloaded | 100 / 100 | 4.3 µs / 15.3 µs | 5.04 ms / 6.18 ms | 100 | 189,742 |
+| Subscription bitsets, 270 symbols | 600 / 600 | 4.4 µs / 11.6 µs | 5.24 ms / 6.64 ms | 600 | 1,176,697 |
+| Exact storage bit bound, unloaded | 100 / 100 | 4.6 µs / 11.4 µs | 5.02 ms / 6.30 ms | 100 | 189,747 |
+| Exact storage bit bound, 270 symbols | 600 / 600 | 4.4 µs / 11.6 µs | 5.18 ms / 6.46 ms | 600 | 1,176,695 |
+| Venue actor yield, unloaded | 100 / 100 | 4.3 µs / 13.4 µs | 5.03 ms / 6.78 ms | 100 | 189,740 |
+| Venue actor yield, 270 symbols | 600 / 600 | 4.3 µs / 13.3 µs | 5.14 ms / 6.53 ms | 600 | 1,176,684 |
+| Venue actor yield, unloaded repeat 1 | 100 / 100 | 4.5 µs / 14.3 µs | 4.98 ms / 6.37 ms | 100 | 189,734 |
+| Venue actor yield, unloaded repeat 2 | 100 / 100 | 4.7 µs / 23.9 µs | 5.08 ms / 6.48 ms | 100 | 189,737 |
+| Venue actor yield, unloaded repeat 3 | 100 / 100 | 4.2 µs / 7.5 µs | 4.99 ms / 6.21 ms | 100 | 189,734 |
 
 | Candidate boundary | Observation |
 | --- | --- |
@@ -140,13 +157,20 @@ Latency cells are milliseconds, `p50 / p99 / p99.9`; MiB means 1,048,576 bytes.
 | Covered stop output | `/tmp/r3-covered-stop-{unloaded,wide-270}.log` and matching WALs; normal release build `/tmp/r3-covered-stop-release-build.log`. No compiler or test process runs during either cell. All 700 opportunities complete, with one barrier each and zero failures. The quantity-index cells are the before boundary. |
 | Covered stop scope | The synthetic bench requests no standalone stop moves, so these cells qualify the combined source without measuring the record savings. The stop fixture proves that a matching exact sleeve stop suppresses StopSet; replay and rotation retain 95.1 instead of the stale 90.0 repair level. Both assertions fail before the change (`/tmp/r3-covered-stop-before.log`); all 809 core tests pass afterward, one ignored (`/tmp/r3-covered-stop-core.log`). |
 | Covered stop acceptance | Both decision targets and the unchanged Mac budget pass (`/tmp/r3-covered-stop-budget-check.log`). Narrow submit p50 still misses 5 ms; barrier medians are 4.02 / 3.98 ms. Submit remains above one barrier plus 1 ms. |
-| Current developer qualification | `scripts/dev.sh check` passes 1,959 Rust tests (zero failed, seven ignored), 1,646 Python tests, formatting and strict workspace Clippy; `/tmp/r3-developer-check-8.log`. All six individual feature builds/suites and the combined 810-test venue/public/market-data suite pass; strict all-feature Clippy passes. The release suite passes 1,957 tests, zero failed, seven ignored (`/tmp/r3-release-qualification.log`). The complete retained-family rehearsal passes both realms through the production exact-instrument embedded boot entry point, with real WAL readers/writer/rotation and mocked transport/risk/collateral, preserving exact ownership, accounting, lots and all 12 stops (`/tmp/r3-exact-boot-fixtures.log`). The updated older-fixture regression also passes. The final developer gate passes with the latest test-only support changes. |
+| Current developer qualification | `scripts/dev.sh check` passes 1,962 Rust tests (zero failed, seven ignored), 1,646 Python tests, formatting and strict workspace Clippy (`/tmp/r3-latency-followup-developer-check.log`). Release all-target tests pass 1,961 tests, zero failed, seven ignored (`/tmp/r3-latency-followup-release-tests.log`). Both copied-WAL fixtures pass separately in release, including all 12 missing-stop repairs and full-prefix/rotated reboot (`/tmp/r3-latency-followup-boot-fixtures.log`); transport, risk and collateral are mocked. All six heavy seeds pass with two crashes each and byte-identical repeat WALs (`/tmp/r3-latency-followup-heavy-sim.log`). The six individual venue feature builds/suites, combined 810-test venue/public/market-data suite and strict all-feature Clippy qualify the earlier embedded boundary; this follow-up has default-Bybit qualification. |
 | Priced quantity grouping | Fresh assessments group quantities by effective price and stop fraction before notional multiplication; margin groups quantities by effective price. Validation and price-read ordering remain unchanged. `/tmp/r3-priced-quantities-{unloaded,wide-270}.log` and matching WALs; build `/tmp/r3-priced-quantities-release-build.log`. The preceding covered-stop cells are the before boundary. |
 | Priced quantity parity | The original rowwise valuation matches exact totals, errors, canonical bytes and price-read order across 512 lifecycle steps and three price-query cases. The existing 1,024-step margin comparison includes repeated prices across symbols. Both comparisons pass before and after; all 161 risk tests pass. |
 | Batched rational sums | ExactSum combines equal-denominator runs and reduces before a denominator change and at finish. Stored Exact values remain canonical. The original rational sum matches values and canonical bytes at 4,096 prefixes, including cancellation and extreme scales. All 226 type/risk checks pass. `/tmp/r3-batched-ratios-{unloaded,wide-270}.log` and matching WALs; build `/tmp/r3-batched-ratios-release-build.log`. |
 | Borrowed positive quantities | Grouping borrows nonnegative quantities; negative quantities retain their exact magnitude. All 161 risk tests pass. `/tmp/r3-borrowed-quantities-{unloaded,wide-270}.log` and matching WALs; build `/tmp/r3-borrowed-quantities-release-build.log`. |
 | Measurement scope | These six cells run without a concurrent test or compiler. All 2,100 opportunities complete with one barrier each and zero failures. Both decision targets pass throughout. Narrow submit medians remain above 5 ms; barrier medians are 4.20 / 4.14 ms, 4.20 / 4.15 ms and 4.19 / 4.15 ms respectively. |
 | Borrowed stop fractions | Assessment keys borrow the immutable stop fraction and clone only distinct output groups. All 161 risk tests and strict type/risk Clippy pass. `/tmp/r3-borrowed-fractions-{unloaded,wide-270}.log` and matching WALs; build `/tmp/r3-borrowed-fractions-release-build.log`. All 700 opportunities complete with one barrier each and zero failures; no compiler/test runs concurrently. Barrier medians are 4.19 / 4.17 ms. Both decision targets and the unchanged Mac budget pass, but narrow submit still exceeds 5 ms and wide submit exceeds one barrier plus 1 ms. |
+| Borrowed prices | Fresh risk and margin grouping borrow effective prices and clone only retained/output values. All 161 risk tests and strict risk Clippy pass. `/tmp/r3-before-borrowed-prices-{unloaded,wide-270}.log` and `/tmp/r3-borrowed-prices-{unloaded,wide-270}.log`, matching WALs and executable hashes retain both boundaries. All 1,400 opportunities complete with one barrier each and zero failures, without a concurrent compiler/test. Barrier medians are 4.20 / 4.16 ms before and after. Submit medians improve 20 µs each; narrow 5 ms and wide one-barrier-plus-1-ms acceptance remain unmet. Narrow after p99 includes an 8.28 ms barrier tail; no sample is discarded. |
+| Reused order projections | Validation and application compute decimal validity and f64 projections once per operation. The 512-case original implementation comparison covers storage errors, projection errors, partial request updates and canonical bytes across both order kinds and three sleeve effects. It passes before and after; all 227 type/risk tests and strict type/risk Clippy pass. `/tmp/r3-projection-{unloaded,wide-270}.log`, matching WALs and executable hash; no concurrent compiler/test. All 700 opportunities complete, one barrier each, zero failures. Barrier medians are 4.20 / 4.16 ms. These cells establish no end-to-end improvement over the borrowed-price boundary; both submit targets remain open. |
+| Subscription hash-set attempt | `/tmp/r3-route-membership-{unloaded,wide-270}.log` and matching WALs; all 700 opportunities complete, one barrier each, zero failures, without concurrent compiler/tests. Narrow/wide barrier medians remain 4.20 / 4.16 ms. Wide dispatch queue rises from 164.5 to 187.6 µs and submit changes from 5.35 to 5.36 ms; this attempt establishes no improvement. The temporary membership representation is replaced under R3-15. |
+| Subscription bitsets | Fresh per-symbol feed bits represent current, retained and required membership. Route iteration and partial admission updates stay in their original order. The comparison covers 270 interned names, first/later admission failure, retries and retirement; the inactive-sleeve restart/settlement case also passes. Strict core Clippy passes. `/tmp/r3-route-bitsets-{unloaded,wide-270}.log` and matching WALs; all 700 opportunities complete, one barrier each, zero failures, without concurrent compiler/tests. Barrier medians are 4.19 / 4.16 ms; wide dispatch queue falls to 107.5 µs. Wide submit improves 0.11 ms from the original projection boundary; narrow submit remains 5.04 ms. |
+| Exact storage bit bound | Magnitudes with at most 3N bits have at most N decimal digits because 8^N < 10^N. The existing decimal boundary and serialization remain unchanged. The original validator matches signed numerator/denominator cases around both bit thresholds and the decimal limit, including canonical bytes and readback. The comparison passes before and after; 12 order-term tests, all 161 risk tests and strict type/risk Clippy pass. `/tmp/r3-bitbound-{unloaded,wide-270}.log` and matching WALs; all 700 opportunities complete, one barrier each, zero failures, without concurrent compiler/tests. Barrier medians are 4.21 / 4.17 ms. Submit p50 improves to 5.02 / 5.18 ms; wide dispatch queue remains 106.8 µs. |
+| Venue actor yield | Yield after durable authorization and complete mutation registration, before route maintenance. The full core suite passes 810 tests, zero failed, two ignored (`/tmp/r3-dispatch-yield-core-tests-final.log`). Its first run exposes a test that expects a pending rejection from an immediate mock reply; the fixture now creates that condition with a 1 ms virtual delay, retaining every assertion. `/tmp/r3-dispatch-yield-{unloaded,wide-270}.log` and matching WALs; all 700 opportunities complete, one barrier each, zero failures, without concurrent compiler/tests. Barrier medians are 4.20 / 4.16 ms. Wide dispatch queue falls to 4.4 µs and submit to 5.14 ms, passing one barrier plus 1 ms. Narrow submit remains 5.03 ms; three unchanged narrow repeats assess this remaining boundary. |
+| Unchanged narrow repeats | Three runs are declared before execution; `/tmp/r3-dispatch-yield-repeat-{1,2,3}.log` and matching WALs retain all cells. The Rust WAL reader validates all five final WALs. Exact stored submit p50 is 4,980,735 / 5,083,135 / 4,988,927 ns; median of those run medians is 4,988,927 ns, not a pooled percentile. One run misses 5 ms; its decision p99 also exceeds the unchanged Mac CI budget. All 1,000 opportunities across the final pair and three repeats complete, with one barrier each and zero failures. Each submit median is at most its own dispatch-barrier median plus 1 ms. `/tmp/r3-dispatch-yield-exact-quantiles.jsonl` contains the extracted quantiles from the validated WAL notes. |
 
 | Initial embedded stage profile | Median µs | First / last ten orders, median µs |
 | --- | --- | --- |
@@ -177,6 +201,37 @@ Latency cells are milliseconds, `p50 / p99 / p99.9`; MiB means 1,048,576 bytes.
 | Source and scope | Grouped-risk source, before the quantity index; same 2,000-event / 100 Hz recipe. Temporary stage timing records median admission 326.771 µs, quantization/protection 161.875 µs and pre-send recheck 404.812 µs (`/tmp/r3-grouped-profile-unloaded.log`). |
 | Detailed capture | `/tmp/r3-detailed-risk-profile-unloaded.log`; per-call timers and stderr output make this diagnostic. Source instrumentation is removed and the normal release is rebuilt before the quantity-index cells. |
 
+| Buffered borrowed-price profile | Median per call µs | Calls / 100 orders |
+| --- | --- | --- |
+| Prepare intent, inclusive | 294.772 | 100 |
+| Assess intent | 112.604 | 100 |
+| Quantize order and physical protection | 115.229 | 100 |
+| Commit prepared order | 46.291 | 100 |
+| Pre-send risk/protection recheck | 150.750 | 100 |
+| Risk inventory evaluation | 83.145 | 200 |
+| Pending risk rows | 12.313 | 200 |
+| Unreflected margin | 14.709 | 200 |
+
+| Profile boundary | Contract |
+| --- | --- |
+| Buffered capture | `/tmp/r3-buffered-price-profile.log`, `/tmp/r3-buffered-price-profile-summary.txt`; same 2,000-event workload. In-memory samples print after the run. Timing and locking overhead remains; nested rows overlap and cannot be summed |
+| Rejected diagnostic | Per-call stderr in `/tmp/r3-borrowed-price-profile.log` inflates parent spans; its inclusive totals do not support an optimization claim |
+| Restoration | Every temporary source file is restored with hash checks. `/tmp/r3-borrowed-prices-normal-rebuild.log` rebuilds the normal release before further acceptance measurements |
+
+| Wide post-projection profile | Median per call µs | Calls |
+| --- | --- | --- |
+| After-turn work | 139.375 | 13,438 |
+| Portfolio route maintenance, included above | 136.875 | 13,438 |
+| Required portfolio routes, included above | 38.583 | 13,439 |
+| Risk assessment | 172.833 | 600 |
+| Order quantization and physical protection | 91.062 | 600 |
+| Pre-send risk/protection recheck | 207.730 | 600 |
+
+| Profile boundary | Contract |
+| --- | --- |
+| Capture | `/tmp/r3-wide-stage-profile.log`, `/tmp/r3-wide-stage-profile-summary.txt`; 12,000 events / 270 symbols / 200 Hz, with buffered temporary timing. Nested spans overlap; this is diagnostic. Source is restored by hash before implementation continues |
+| Follow-up | Fresh membership bitsets replace repeated linear scans. The uninstrumented projection cell records wide dispatch queue p50 164.5 µs; bitsets measure 107.5 µs, and the subsequent venue yield measures 4.4 µs |
+
 ### Hosted Linux qualification
 
 | Boundary | Evidence |
@@ -190,6 +245,8 @@ Latency cells are milliseconds, `p50 / p99 / p99.9`; MiB means 1,048,576 bytes.
 | Calibration boundary | The first run passes provisional 75,000 / 7,500,000 ns limits. Its unmodified log also passes the calibrated limits; the budget update has no runtime change |
 | Artifact | `/tmp/r3-hosted-qualified-a4189a48/engine-binaries-a4189a4897409e65acba7a2078b964986ceea928-qualified.tar.gz`; verified checksums and embedded qualification log. Raw log: `/tmp/r3-hosted-qualification-raw.log` |
 | Scope | One hosted runner sample is not a Mac result, venue-network latency or a universal Linux bound. The Mac submit target remains open |
+| Calibrated repeat | [Run 34076340582](https://github.com/rob435/liquidity-migration/actions/runs/34076340582), source `32858587` with identical runtime inputs: 100/100 submits, 100 barriers, zero failures. Decision p50 / p99 3.9 / 16.6 µs; submit p50 / p99 1.51 / 149.16 ms; barrier p50 / p99 987.6 µs / 148.64 ms. Decision p99 fails the 9.0 µs limit; submit p50 passes 1.635 ms. The failed job uploads no qualified artifact. Raw log `/tmp/r3-hosted-calibrated-qualification.log` |
+| Calibration status | R3-06 remains open. The unchanged-runtime result establishes variation, not its cause; the budget remains unchanged pending investigation |
 
 ## Invariants
 

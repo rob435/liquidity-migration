@@ -43,7 +43,7 @@ fn signed(side: Side, qty: &Exact) -> Exact {
         -qty
     }
 }
-fn max_price(a: Option<Exact>, b: Option<Exact>) -> Option<Exact> {
+fn max_price<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
@@ -115,7 +115,7 @@ impl Kernel {
         first: Option<Exact>,
         second: Option<Exact>,
     ) {
-        let observed = self.book.px(intent.symbol);
+        let observed = self.book.px(intent.symbol).cloned();
         let high = max_price(max_price(first.clone(), second.clone()), observed.clone());
         let low = first.into_iter().chain(second).chain(observed).min();
         let fraction = if intent.reduce_only {
@@ -258,7 +258,7 @@ impl Kernel {
     fn rolling_loss_limit(&self) -> Exact {
         policy(self.cfg.max_rolling_loss_fraction) * self.envelope.reference_usdt()
     }
-    fn price_for(&self, symbol: SymbolId, view: &ViewFacts) -> Option<Exact> {
+    fn price_for<'a>(&'a self, symbol: SymbolId, view: &'a ViewFacts) -> Option<&'a Exact> {
         max_price(self.book.px(symbol), view.entry_px(symbol))
     }
     fn held_stop_fraction(&self, symbol: SymbolId, view: &ViewFacts) -> Result<Exact, DenyReason> {
@@ -268,12 +268,12 @@ impl Kernel {
             .iter()
             .filter(|(held, _, _, _)| *held == symbol.0)
         {
-            let current = self.book.px(symbol).unwrap_or_else(|| entry.clone());
-            let low = current.clone().min(entry.clone());
-            let high = current.clone().max(entry.clone());
+            let current = self.book.px(symbol).unwrap_or(entry);
+            let low = current.min(entry);
+            let high = current.max(entry);
             let distance = match side {
-                Side::Buy if *stop < current => &high - stop,
-                Side::Sell if *stop > current => stop - low,
+                Side::Buy if stop < current => high - stop,
+                Side::Sell if stop > current => stop - low,
                 _ => {
                     return Err(unknown(
                         "held position stop is not on the protective side of plausible prices",
@@ -281,7 +281,7 @@ impl Kernel {
                 }
             };
             let fraction = distance
-                .checked_div(&high)
+                .checked_div(high)
                 .map_err(|e| unknown(e.to_string()))?;
             worst = Some(
                 worst.map_or_else(|| fraction.clone(), |old: Exact| old.max(fraction.clone())),
@@ -542,8 +542,10 @@ impl Kernel {
             unknown("limit price is not a positive number or disagrees with its canonical value")
         })?;
         match (quoted, self.price_for(intent.symbol, view)) {
-            (Some(a), Some(b)) => Ok((a.clone().min(b.clone()), a.max(b))),
-            (Some(a), None) | (None, Some(a)) => Ok((a.clone(), a)),
+            (Some(a), Some(b)) if &a <= b => Ok((a, b.clone())),
+            (Some(a), Some(b)) => Ok((b.clone(), a)),
+            (Some(a), None) => Ok((a.clone(), a)),
+            (None, Some(a)) => Ok((a.clone(), a.clone())),
             _ => Err(unknown("no price to value this symbol")),
         }
     }
@@ -962,11 +964,11 @@ impl ViewFacts {
             .find(|(s, _)| *s == symbol.0)
             .map_or_else(Exact::zero, |(_, q)| q.clone())
     }
-    fn entry_px(&self, symbol: SymbolId) -> Option<Exact> {
+    fn entry_px(&self, symbol: SymbolId) -> Option<&Exact> {
         self.entry_px
             .iter()
             .find(|(s, _)| *s == symbol.0)
-            .map(|(_, px)| px.clone())
+            .map(|(_, px)| px)
     }
     fn exposures(&self) -> impl Iterator<Item = (SymbolId, &Exact)> {
         self.net.iter().map(|(s, q)| (SymbolId(*s), q))

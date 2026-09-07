@@ -61,8 +61,8 @@ impl Book {
             self.px.insert(symbol.0, px);
         }
     }
-    pub(crate) fn px(&self, symbol: SymbolId) -> Option<Exact> {
-        self.px.get(&symbol.0).cloned()
+    pub(crate) fn px(&self, symbol: SymbolId) -> Option<&Exact> {
+        self.px.get(&symbol.0)
     }
     pub(crate) fn register(&mut self, id: &str, pending: Pending) {
         self.forget(id);
@@ -206,11 +206,11 @@ impl Book {
     pub(crate) fn prune_through(&mut self, observed_ns: u64) {
         self.recent_fills.retain(|(ns, _, _, _)| *ns > observed_ns);
     }
-    pub(crate) fn pending_risk_rows(
-        &self,
-        price: impl Fn(SymbolId) -> Option<Exact>,
+    pub(crate) fn pending_risk_rows<'a>(
+        &'a self,
+        price: impl Fn(SymbolId) -> Option<&'a Exact>,
     ) -> Result<Vec<(Exact, Exact)>, &'static str> {
-        let mut quantities = BTreeMap::<(Exact, &Exact), ExactSum>::new();
+        let mut quantities = BTreeMap::<(&Exact, &Exact), ExactSum>::new();
         for pending in self.pending.values() {
             let qty = pending
                 .signed_qty
@@ -224,9 +224,9 @@ impl Book {
                 .as_ref()
                 .ok_or("an in-flight opening order has no readable stop distance")?;
             let px = match (price(pending.symbol), pending.px.as_ref()) {
-                (Some(a), Some(b)) => a.max(b.clone()),
+                (Some(a), Some(b)) => a.max(b),
                 (Some(a), None) => a,
-                (None, Some(b)) => b.clone(),
+                (None, Some(b)) => b,
                 (None, None) => return Err("no price for an in-flight opening order"),
             };
             let total = quantities.entry((px, fraction)).or_default();
@@ -438,13 +438,18 @@ mod tests {
             for query in 0..3 {
                 let actual_reads = RefCell::new(Vec::new());
                 let expected_reads = RefCell::new(Vec::new());
-                let price = |symbol: SymbolId| match query {
-                    0 => None,
-                    1 => Some(Exact::from_u64(10000)),
-                    _ => Some(
-                        Exact::from_ratio(&(step + u64::from(symbol.0)).to_string(), "7").unwrap(),
-                    ),
-                };
+                let quotes: BTreeMap<_, _> = (0..7)
+                    .filter_map(|symbol| {
+                        let price = match query {
+                            0 => return None,
+                            1 => Exact::from_u64(10000),
+                            _ => Exact::from_ratio(&(step + u64::from(symbol)).to_string(), "7")
+                                .unwrap(),
+                        };
+                        Some((SymbolId(symbol), price))
+                    })
+                    .collect();
+                let price = |symbol: SymbolId| quotes.get(&symbol);
                 let actual = book
                     .pending_risk_rows(|symbol| {
                         actual_reads.borrow_mut().push(symbol);
@@ -453,7 +458,7 @@ mod tests {
                     .map(|rows| envelope.pending_totals(&rows));
                 let expected = reference_pending_risk_rows(&book, |symbol| {
                     expected_reads.borrow_mut().push(symbol);
-                    price(symbol)
+                    price(symbol).cloned()
                 })
                 .map(|rows| {
                     rows.iter().fold(
@@ -488,8 +493,9 @@ mod tests {
             book.pending.keys().map(String::as_str).collect::<Vec<_>>(),
             ["a-1", "b-2", "m-5", "z-9"]
         );
+        let price = Exact::from_u64(10);
         assert_eq!(
-            book.pending_risk_rows(|_| Some(Exact::from_u64(10)))
+            book.pending_risk_rows(|_| Some(&price))
                 .unwrap()
                 .into_iter()
                 .fold(Exact::zero(), |sum, (notional, _)| sum + notional),

@@ -58,7 +58,33 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     narrow submit still misses 5 ms, while the unchanged Mac budget passes.
     Subsequent priced-quantity grouping and batched sums reduce the measured
     medians to 5.03 ms narrow / 5.25 ms wide; borrowing stop-fraction keys
-    measures 5.05 / 5.41 ms. Submit acceptance remains open; all cells stay recorded.
+    measures 5.05 / 5.41 ms. Borrowed price keys then measure 5.05 / 5.35 ms,
+    a 20 µs improvement in each fresh paired cell. Reuse validated order-term
+    projections within each operation; original/current comparisons preserve
+    canonical bytes, errors and partial request updates across 512 cases and
+    six order-kind/sleeve-effect combinations. All 227 type/risk tests pass.
+    Projection cells measure 5.07 / 5.35 ms and establish no end-to-end gain.
+    Fresh subscription hash sets do not improve the wide path; replace them
+    with temporary per-symbol feed bitsets, preserving admission attempts,
+    retries, retirement order and partial updates against the original loop.
+    The bitsets measure 5.04 / 5.24 ms and wide dispatch queue 107.5 µs.
+    Accept ordinary exact storage values by the unchanged digit bound implied
+    by their bit lengths; retain decimal checks at the boundary. Original
+    signed numerator/denominator comparisons and canonical roundtrips pass.
+    Those cells measure 5.02 / 5.18 ms. Yield after durable authorization and
+    venue-command registration so its actor can start I/O before route work.
+    The full core suite exposes a fixture that expected a pending rejection
+    from an immediate mock reply; give that fixture a 1 ms virtual delay.
+    The final core suite passes 810 tests, zero failed, two ignored. The yield
+    measures 5.03 / 5.14 ms; wide queue falls from 106.8 to 4.4 µs. Three
+    unchanged narrow repeats measure 4.981 / 5.083 / 4.989 ms. Every final
+    cell passes one barrier plus 1 ms, but narrow 5 ms is not consistent.
+    All cells, including the failed hosted calibration, stay recorded.
+    The follow-up developer gate passes 1,962 Rust tests and 1,646 Python
+    tests; release all-target qualification passes 1,961 tests. Both profiles
+    have zero failures and seven ignored tests. Both copied-WAL fixtures pass
+    separately in release, repairing all twelve deliberately removed stops.
+    Six heavy seeds with two crashes each produce byte-identical repeat WALs.
   - Add the accepted demo soak, watchdog, rollback and runtime-only Python
     deployment changes. Workflow `34074541111` deploys `a4189a48` on
     2026-09-07: demo passes all 300 seconds from 02:06:41 to 02:11:41 UTC
@@ -73,7 +99,15 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     account-state workloads. Its separately built Linux artifact measures
     decision p99 6.0 µs and submit p50 1.09 ms, replacing the provisional
     Linux budget with measured references and 1.5× limits. Doubling either
-    measured segment fails the validator. A compatible demo rollback remains open.
+    measured segment fails the validator. The calibrated repeat `34076340582` fails decision p99 at 16.6 µs
+    against 9.0 µs, despite unchanged runtime source; submit p50 1.51 ms passes.
+    Retain the failure and unchanged budget; calibration acceptance reopens.
+    Workflow `34076341887` completes generation `32858587` after a second
+    300-second demo soak through 02:43:42 UTC, leaving identical-runtime
+    mainnet on its prior PID and image. The sanctioned demo drill activates
+    predecessor `a4189a48` at 02:47:01 and restores `32858587` at 02:48:03,
+    verifying each loaded image and readiness without rewinding durable state.
+    Mainnet PIDs remain unchanged. Native reads at 02:49:28 verify all twelve stops.
     The final developer gate passes 1,959 Rust tests (zero failed, seven ignored) and
     1,646 Python tests. All six venue feature builds and their tests pass;
     combined venue/public/market-data qualification passes 810 tests, with
