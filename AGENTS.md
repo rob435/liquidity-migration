@@ -94,14 +94,14 @@ When sources disagree, read the primary artifact and fix the stale source.
 - A number is real by physics, not process: causal inputs, executable economics,
   reconstructable accounting, an honest shaped-versus-graded data note. A miss
   makes the result a diagnostic.
-- Explore freely on seen data; grade a committed config on the forward days that
-  postdate its commit, and record the change point in a short promotion note. The
-  commit is the registration — there is no separate filing step.
+- Explore freely on seen data; record config/source identities, data reuse and
+  the operational change point. Historical comparisons and observed live outcomes
+  do not require a rolling forward ledger or a post-commit grading job.
 - Grade a rule on data it did not shape. Report every grid cell and era split.
   Put costs next to gross. Negative results are priors, not prohibitions, and
   `docs/research/backtesting_errors_we_never_repeat.md` is a failure-mode reference.
-- The full Progressive Evidence Model — two lanes, the six-item evidence note,
-  the five-line promotion note — is [`docs/research/governance.md`](docs/research/governance.md).
+- Evidence notes and operational decision records follow
+  [`docs/research/governance.md`](docs/research/governance.md).
 
 ## Change Discipline
 

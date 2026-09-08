@@ -142,12 +142,11 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     ran on the host: both timers came back through `start_realm`'s ordinary path.
     The fix is proven in CI only, and its first host exercise is the next failed
     handover.
-  - Still required from the owner: `rolling_loss_tripped=true` at
-    `-10.30624956` against the `10` USDT limit, so every mainnet sleeve reads
-    `entries_enabled=false` and the restored watchdog pages `rolling-loss:` every
-    30 seconds. Only the limit or the window clears that.
+  - The independent rolling-loss restriction remains active at 10.30624956
+    USDT loss against a 10 USDT limit. Its calculation and limit remain
+    unchanged; clearing the reconciliation latch does not clear this restriction.
 
-- **2026-09-08 — Incident `mainnet-ac90e31c207bc0da`: the funded engine is latched reduce-only.**
+- **2026-09-08 — Incident `mainnet-ac90e31c207bc0da`: a venue timeout latches funded openings.**
   - From 15:00:23 UTC the mainnet watchdog pages `CRITICAL
     may-open:liquidity-migration-engine-mainnet.service:
     liquidity-migration-engine-mainnet.service cannot open positions` every
@@ -173,8 +172,10 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `may_open=false` with `stream_resets=0` and `strategy_errors=[]`, and every
     sleeve `entries_enabled=false`. The latch was written between 14:59:16 and
     15:00:23 by the engine that preceded it and survives the restart by design.
-    Which finding it carries is unread: it is in the WAL's `Reconciled` record,
-    which `engine-tools`/`clear` prints under the log lock on the host.
+    The WAL locates the original latch at 14:59:26.744 UTC: `execution history
+    is unavailable during recovery: venue transport: request did not complete
+    within 10s`. The 15:10:29 restart also records crossed-stop findings for
+    ACE/JUP while their full protective exits are already pending.
   - Only an operator clears the latch. Deploy
     [`34241185290`](https://github.com/rob435/liquidity-migration/actions/runs/34241185290)
     replaces demo at 15:04:48, soaks 300 seconds, replaces mainnet at 15:10:29
@@ -187,7 +188,8 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     JUPUSDT `-3.3078038`, long ARBUSDT `-2.65691923` USDT — taking rolling loss
     to `-10.30624956` against the `10` USDT mainnet limit, so
     `rolling-loss:liquidity-migration-engine-mainnet.service` is critical
-    independently of the latch and stays so until the 24-hour window rolls off.
+    independently of the latch. Later admission follows the unchanged rolling
+    loss calculation, including closed results and negative open P&L.
     Six positions remain per realm; demo reads `may_open=true`.
   - Every latch site now says so in the journal. A `Reconciled
     { may_open: false }` reached the WAL and, at seven of eight sites, nothing
@@ -196,11 +198,24 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     at every site. One regression fails before the change; behaviour is
     otherwise unchanged, and this ships with the owner's forward repair rather
     than a deploy of its own.
-  - Not changed, for the owner to decide: `account_recovery.rs` latches on any
-    error from the execution-history leg, a plain transport timeout included,
-    while the account leg retries the identical error. That asymmetry is why
-    demo stayed open and mainnet latched under one network event.
-    `MUTATION_DRAIN_TIMEOUT` is 10 s against a measured 15 s venue round trip.
+  - The recovery fix retries transport failures on the existing history delay
+    without advancing its checkpoint or confirming drift from a failed history
+    read. Private readiness stays false until recovery completes; prior genuine
+    latches and non-transport failures retain their existing behavior. The
+    crossed-stop fix preserves full protective exits through replay. Both
+    regressions fail before their fixes; see the daily-holding and execution
+    recovery entries for the implementation and validation.
+  - At 15:53:32.338 UTC, the existing stopped-engine reconciliation command
+    records `LatchCleared` with no findings and six exact owned/native quantity
+    matches: WLD 73.3, TAO 0.248, LTC 1.7, INJ 4.6, HEMI 1161 and LINK 4.2.
+    Both realms report `may_open=true` at 15:53:48. The note intended for the
+    combined recovery release is consumed by the already-running `ce2b1299`
+    handover before withdrawal reaches it; this clear therefore belongs to
+    deploy `34246230385`, not the later recovery-code deployment. No second
+    clear runs. WAL segment `000071`, byte `57490967`, has a verified CRC;
+    the applied note SHA256 is
+    `97ddc6af2ded9701344d4a8b6e7d05f53f57e04ba1a044306746f0f2cf633b62`.
+    Holdings, strategy checkpoints and risk restrictions remain intact.
 
 - **2026-09-08 — Restore CARRY daily holding at owner direction.**
   - Render both realms with intraday funding and pre-settlement exits disabled.
@@ -238,6 +253,21 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     exit; the exit remains pending through replay. Missing or partial closes
     still fail protection checks. The long/short regression fails before this
     change and all five stop-runtime tests pass afterward.
+  - [Deployment `34247719025`](https://github.com/rob435/liquidity-migration/actions/runs/34247719025)
+    completes at 16:11:35.448 UTC on `cecff2e2`, following 31 healthy demo
+    observations over 300 seconds. Both loaded engines and workers match the
+    verified release archive. At 16:16:53.904 UTC both workers are ready and all
+    70 host/account checks pass. CARRY retains HEMI quantity 14131 in demo and
+    1161 in mainnet; `early_exit_enabled` and `presettlement_exit_enabled`
+    are false, the FLOCK exit tombstone survives, and all six positions per realm have exact matching native stops.
+    Earlier post-startup readings include bounded repair/freshness recovery;
+    the final snapshot does not claim uninterrupted readiness. Mainnet's
+    10.30624956 USDT rolling loss still restricts new entries against its
+    unchanged 10 USDT limit. Local/hosted checks pass 2079/2081 Rust tests and
+    1744 Python tests; the first integrated local run's synthetic replay hits
+    `StorageFull`, then passes after unused compiler cache is removed.
+    Evidence remains under
+    `~/SHARED_DATA/bybit_full_pit/reports/carry_daily_20260908/`.
 
 - **2026-09-08 — Repair execution recovery, account limits and research costs.**
   - Research defaults read `configs/bybit_fee_rates.json` or
@@ -321,9 +351,23 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     cannot confirm position drift; genuine prior reconciliation latches remain
     closed. The timeout regression fails before the fix; eight recovery tests pass.
     EXODUS checkpoint bytes and quantities remain identical;
-    its tighter stop adds a restart restop effect. Local checks pass: 1,723 Python tests (one skip), 2,049 Rust
-    tests (eight existing ignores), repository doctor, Ruff, ShellCheck, mypy,
-    Rust 1.90 rustfmt and strict Clippy. Deployment remains pending.
+    its tighter stop adds a restart restop effect. Local checks pass: 1,744 Python
+    tests (one skip), 2,079 Rust tests (eight existing ignores), repository doctor,
+    Ruff, ShellCheck, mypy, Rust 1.90 rustfmt and strict Clippy. Linux passes
+    1,744 Python and 2,081 Rust tests with the same skip/ignore counts.
+  - Deploy `cecff2e2` through [run `34247719025`](https://github.com/rob435/liquidity-migration/actions/runs/34247719025):
+    31 healthy demo observations over 300 seconds; `deploy-ok` at 16:11:35 UTC.
+    At 16:14:56 UTC, all 70 independent host/account checks pass: both workers
+    ready, all four loaded images and the installed tools match the verified
+    archive, all ten manifest timers active/enabled, and 141 prior WAL paths
+    retain their inodes and at least their original bytes. Each realm has six
+    positions with matching full-size native stops within the configured cap.
+    Both reconciliation latches permit openings; mainnet's unchanged rolling-loss
+    breaker still restricts entries at 10.30624956 USDT loss against a 10 USDT limit.
+    The 16:02 backup run reports 347 matching remote files and zero differences;
+    the 16:08 clock probe reports no alert (+8.94 ms offset, ±11.10 ms uncertainty).
+    Source, regression, release and host receipts remain in
+    `~/SHARED_DATA/bybit_full_pit/reports/infra_20260908/`.
 
 - **2026-09-08 — Work LONG demo entries for 30 seconds and recover resting entries after restart.**
   - LONG demo joins the near touch, including one-tick spreads, for 30 s with
