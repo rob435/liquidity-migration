@@ -73,6 +73,12 @@ CONTROL_SPOOL_ROOT=/var/lib/liquidity-migration/controls
 DISK_REPORT_ROOTS=${DISK_REPORT_ROOTS:-/ /var/lib /var/lib/liquidity-migration /var/log/journal /opt}
 #: Directory totals printed per `verify_mode`, largest first.
 DISK_REPORT_LINES=${DISK_REPORT_LINES:-30}
+# `verify_mode` reads journals for the units it expects to be running, so a
+# failed unit outside that list — the backup, the tape upload, a research
+# timer — reaches an on-call session as a name under `systemctl --failed` and
+# nothing else. These bound one journal read per failed fleet unit.
+FAILED_UNIT_JOURNAL_LINES=${FAILED_UNIT_JOURNAL_LINES:-20}
+FAILED_UNIT_REPORT_MAX=${FAILED_UNIT_REPORT_MAX:-5}
 
 PYTHON="$REPO_DIR/.venv/bin/python"
 
@@ -1127,6 +1133,27 @@ verify_mode() {
     done < <(lm_expected_systemd_units)
     df -h /var/lib | tail -1
     report_disk_usage
+    report_failed_units
+}
+
+# Why each failed fleet unit failed, as `failed-unit <id>` then its result
+# properties and the tail of its journal. Only `liquidity-migration-*` units
+# are read, so an unrelated system unit's journal never reaches a diagnose run.
+report_failed_units() {
+    local unit count=0
+    while IFS= read -r unit; do
+        [ -n "$unit" ] || continue
+        count=$((count + 1))
+        if [ "$count" -gt "$FAILED_UNIT_REPORT_MAX" ]; then
+            echo "failed-unit-report truncated at $FAILED_UNIT_REPORT_MAX units"
+            break
+        fi
+        echo "failed-unit $unit"
+        systemctl show "$unit" \
+            --property=Id,Result,ExecMainStatus,ExecMainCode,NRestarts,InactiveEnterTimestamp \
+            --no-pager 2>/dev/null || true
+        journalctl -u "$unit" -n "$FAILED_UNIT_JOURNAL_LINES" --no-pager -o short-iso 2>/dev/null || true
+    done < <(systemctl list-units 'liquidity-migration-*' --state=failed --plain --no-legend --no-pager 2>/dev/null | awk '{print $1}')
 }
 
 # Allocated bytes rounded to KiB; only directory totals reach diagnostics.

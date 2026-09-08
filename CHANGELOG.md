@@ -115,8 +115,63 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     Keep other state independent and preserve rsync replacement semantics.
     The complete backup regression fails on the original script and passes
     with the fix; active appends, unequal snapshots and repeat runs are tested.
-    No live WAL or remote backup is pruned. Host activation and measured
-    space recovery remain in the deployment verification.
+    No live WAL or remote backup is pruned. Deployed at 01:07:47 UTC in run
+    [`34174591340`](https://github.com/rob435/liquidity-migration/actions/runs/34174591340)
+    on `a7e96e8`; the reclaim runs inside the backup job, which is failing
+    below, so no staged block is released yet.
+  - **The page re-fires at 00:44:49 UTC because the repair was committed, not
+    shipped.** Incident `host-ecbac293ecc90d5e`, scope `host`,
+    `new_critical_refs=capture-disk,capture-disk:forward-market-binance`. Both
+    recorders block — Bybit 00:43:25, Binance 00:43:49 — and drop 200,061 /
+    28,170 frames in one watchdog interval. The host runs `0ebfc45`, deployed
+    00:00:28 → 00:16:43, which predates `51beedc` by twelve minutes. Diagnose
+    [`34174373585`](https://github.com/rob435/liquidity-migration/actions/runs/34174373585)
+    at 00:45:54 UTC clears the funded engine: `engine-mainnet` active on a 3 s
+    heartbeat, both workers `ready` with `spool_backpressured=false`, zero
+    failed units. Only research tape is lost.
+  - **The whole filesystem is named, and the ~43 GiB the 00:01 reading left
+    unattributed is engine state.** Same run, 00:46:00 UTC:
+
+    | Directory | Bytes |
+    | :--- | ---: |
+    | `/` | 93 636 464 640 |
+    | `/var/lib` | 83 094 859 776 |
+    | `/var/lib/liquidity-migration/backup` | 34 115 317 760 |
+    | `/var/lib/liquidity-migration-engine` | 17 312 976 896 |
+    | `/var/lib/liquidity-migration-engine-mainnet` | 17 243 029 504 |
+    | `/var/lib/liquidity-migration-wal-quarantine` | 7 851 503 616 |
+    | `/opt` | 6 031 826 944 |
+    | `/var/lib/liquidity-migration/forward-market` | 4 218 232 832 |
+    | `/var/lib/liquidity-migration/forward-market-binance` | 731 377 664 |
+
+    Both tape roots hold 4.61 GiB against 78 GB of `max_disk_gb`. No current
+    source names `wal-quarantine`.
+  - **What ends the block is tape, not the repair.** Retention deletes until
+    free passes the floor: `forward-market` 3.93 → 1.18 GiB and
+    `forward-market-binance` 0.68 → 0.20 GiB by 01:07:40 UTC, `/` free 25G →
+    28G. Diagnose
+    [`34175732869`](https://github.com/rob435/liquidity-migration/actions/runs/34175732869)
+    at 01:08:41 UTC reads `ok scope=host warnings-present-no-critical`: both
+    `capture-disk` refs are gone and only the cumulative dropped-frame
+    warnings remain. So ~3.3 GiB of research tape paid for a floor that
+    31.77 GiB of duplicated backup holds.
+  - **Two units are failed at 01:10:14 UTC and the read-only page cannot say
+    why.** `systemctl --failed` lists `liquidity-migration-backup.service` —
+    the job that owns the reclaim and the WAL's only off-box copy — and
+    `liquidity-migration-execution-study.service`, on its first run after this
+    deploy. `verify_mode` reads journals for the units it expects to be
+    running, so a failed unit outside that list arrives as a name and nothing
+    else. `report_failed_units` (`scripts/vps/deploy_remote.sh`) now prints
+    `failed-unit <id>`, its result properties and 20 journal lines for each
+    failed `liquidity-migration-*` unit, capped at five units. The diagnostic
+    is piped from the runner's checkout, so this takes effect on the next
+    `mode=diagnose` with no deploy.
+  - **Tests.** `tests/scripts/test_diagnose_failed_units.py`, six cases over
+    stubbed `systemctl`/`journalctl`: the unit named with its result and
+    journal, every failed unit reported, a healthy host silent, the journal
+    tail bounded per unit, the unit count truncated with a line saying so, and
+    `verify_mode` taking the reading. All six fail on the previous
+    `deploy_remote.sh` and pass on this one.
 
 - **2026-09-07 — Historical source adapters and explicit sparse-data execution.**
   - Separate recorder decoding/Bybit book reconstruction, normalized events,
