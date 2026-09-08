@@ -152,6 +152,20 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     before any retained previous config is considered; the rebind test now
     holds a WAL, and a new test pins the first boot of a realm whose config was
     retained while it was stopped.
+  - Repair receipt.
+    [Deploy run `34276974179`](https://github.com/rob435/liquidity-migration/actions/runs/34276974179)
+    (`22794ad1`) initializes the realm at 21:05:56 UTC —
+    `native-state-ok realm=mexc result=initialized-empty` on account
+    `key-e3b03c8170d1fc6b`, `engine.wal` seeded and verified — then reports
+    `heartbeat-ok` for `signal-worker-mexc` at 21:06:11 (pid `3440405`) and
+    `engine-mexc` at 21:06:23 (pid `3440463`), re-enables
+    `liquidity-migration-mexc-liveness.timer`, and prints
+    `deploy-ok commit=22794ad1`, `mexc armed`, `mexc readiness=live-proven`.
+    The 21:06:24 verify table lists all three engines, all three workers and
+    every timer active, mexc heartbeats at 4 s and 3 s: the five references the
+    incident paged are cleared. Demo and mainnet kept the processes their
+    20:35:17 and 20:40:52 handovers started, since only shell and test files
+    changed.
   - Evidence boundary: one order lifecycle (create, `New`, cancel,
     `Cancelled`) observed on the funded account; no fill, so `isTaker` on a
     deal push, the position-level stop body (`/stoporder/place`) and a
