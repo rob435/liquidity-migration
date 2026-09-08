@@ -162,7 +162,10 @@ fn answer(
                 "binance" => (400, json!({"code":if scenario == Scenario::ClockSkew {-1021} else {-2010},"msg":message}).to_string()),
                 "hyperliquid" => (200, json!({"status":"err","response":message}).to_string()),
                 "lighter" => (200, json!({"code":400,"message":message}).to_string()),
-                "mexc" => (200, json!({"success":false,"code":510,"message":message}).to_string()),
+                // 600 is a real refusal ("Parameter error"); 510 is MEXC's rate
+                // limit and reads as a transport failure, which is the
+                // RateLimit scenario above.
+                "mexc" => (200, json!({"success":false,"code":600,"message":message}).to_string()),
                 _ => unreachable!(),
             };
         }

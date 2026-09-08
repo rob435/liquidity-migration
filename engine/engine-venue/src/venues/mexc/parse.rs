@@ -52,8 +52,20 @@ pub(crate) fn venue_result(body: &Value) -> Result<&Value, VenueError> {
         .and_then(Value::as_str)
         .unwrap_or("(no message)")
         .to_string();
+    if code == RATE_LIMITED {
+        // "Requests are too frequent": the venue did not act on the request
+        // and will take it again later. Every caller already treats a
+        // transport failure that way; a rejection here would be read as the
+        // venue's answer and, during recovery, latched.
+        return Err(VenueError::Transport(format!(
+            "venue rate limit ({code}): {message}"
+        )));
+    }
     Err(VenueError::Rejected { code, message })
 }
+
+/// MEXC's own code for a request refused only for its timing.
+const RATE_LIMITED: i64 = 510;
 
 /// An id that may arrive as a JSON string or as a JSON number.
 pub(crate) fn id_text(obj: &Value, name: &str) -> Option<String> {
@@ -436,6 +448,15 @@ mod tests {
 
     #[test]
     fn a_refusal_becomes_a_typed_rejection_carrying_the_venues_own_code() {
+        let limited = venue_result(&json!({
+            "success": false, "code": 510,
+            "message": "Requests are too frequent, please try again later"
+        }))
+        .unwrap_err();
+        assert!(
+            matches!(&limited, VenueError::Transport(text) if text.contains("510")),
+            "a rate limit read as the venue's answer: {limited:?}"
+        );
         let err = venue_result(&json!({"success": false, "code": 1002, "message": "bad param"}))
             .unwrap_err();
         match err {

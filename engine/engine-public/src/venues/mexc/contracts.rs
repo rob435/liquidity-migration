@@ -198,20 +198,30 @@ impl Contracts {
             .map(|(symbol, _)| symbol)
     }
 
+    /// Sorted by symbol: the checkpoint compares these rows as a sequence,
+    /// and a map's iteration order differs between two tables built from the
+    /// same page.
     pub fn rules(&self) -> Vec<(Symbol, InstrumentRule)> {
-        self.by_symbol
+        let mut rows = self
+            .by_symbol
             .iter()
             .map(|(symbol, contract)| (symbol.clone(), contract.rule()))
-            .collect()
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
     }
 
-    /// Every contract as (the engine's spelling, the venue's), for a caller
-    /// that needs only the mapping — the price feed, which holds no key.
+    /// Every contract as (the engine's spelling, the venue's), sorted by
+    /// symbol, for a caller that needs only the mapping — the price feed,
+    /// which holds no key.
     pub fn symbol_pairs(&self) -> Vec<(Symbol, String)> {
-        self.by_symbol
+        let mut rows = self
+            .by_symbol
             .iter()
             .map(|(symbol, c)| (symbol.clone(), c.venue_symbol.clone()))
-            .collect()
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
     }
 
     pub fn instrument_specs(&self) -> Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)> {
@@ -355,6 +365,38 @@ mod tests {
 
     fn table() -> Contracts {
         Contracts::parse(&serde_json::from_str(DETAIL).unwrap()).unwrap()
+    }
+
+    /// A page the size of the live one, in shape: enough rows that two maps
+    /// built from it never happen to iterate in the same order.
+    fn wide_page(rows: usize) -> String {
+        let body = (0..rows)
+            .map(|i| {
+                format!(
+                    r#"{{"symbol":"C{i}_USDT","baseCoin":"C{i}","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.01,"priceUnit":0.001,"minVol":1,"maxVol":1000,"maxLeverage":50,"apiAllowed":true,"state":0,"amountScale":2,"priceScale":3}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"success":true,"code":0,"data":[{body}]}}"#)
+    }
+
+    #[test]
+    fn two_tables_from_one_page_enumerate_the_same_rows_in_the_same_order() {
+        // Observed live on 2026-09-08: the catalog checkpoint compares rule rows
+        // as a sequence, and a table's map order differs between two parses of
+        // one page, so the engine refused its own checkpoint every second.
+        let page = wide_page(200);
+        let first = Contracts::parse_raw(&page).unwrap();
+        let second = Contracts::parse_raw(&page).unwrap();
+        assert_eq!(first.rules(), second.rules());
+        assert_eq!(first.symbol_pairs(), second.symbol_pairs());
+        assert_eq!(first.instrument_specs(), second.instrument_specs());
+        let symbols: Vec<_> = first.rules().into_iter().map(|(s, _)| s).collect();
+        let mut sorted = symbols.clone();
+        sorted.sort();
+        assert_eq!(symbols, sorted, "rules are not sorted by symbol");
+        assert_eq!(symbols.len(), 200);
     }
 
     #[test]

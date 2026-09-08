@@ -50,6 +50,49 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     for a notification change while both engines hold positions and mainnet's
     restriction stands at `-12.25522256` USDT against its `10` USDT limit.
 
+- **2026-09-08 — Incident `mexc-first-start`: the new engine refused its own catalog every second and latched itself off on the venue's rate limit.**
+  - Start. [Deploy run `34276974179`](https://github.com/rob435/liquidity-migration/actions/runs/34276974179)
+    installs `22794ad1` with `deploy-ok` at 21:06:23 UTC; the mexc engine boots
+    at 21:05:57, takes its lease, logs `mexc private stream logged in and
+    filtered`, subscribes 132 symbols, and its watchdog reads `ok scope=mexc
+    units-and-heartbeats-healthy` from 21:06:34.
+  - Fault 1. From 21:07:00 every admission pass logs `symbol admission
+    retained; existing symbols remain usable failure=instrument catalog
+    unavailable: venue reply unreadable: catalog checkpoint rows disagree with
+    native metadata` and seven `has no authoritative native symbol binding`
+    lines (`1000PEPEUSDT`, `ARCUSDT`, `FILUSDT`, `MONUSDT`, `RAYDIUMUSDT`,
+    `SHIB1000USDT`, `TRUMPUSDT`, which MEXC does not list), then refetches the
+    1,194-row contract table one second later: 35 fetches a minute, 371 WARN
+    lines in the first two minutes. Cause: `Contracts::rules()` and
+    `symbol_pairs()` enumerated a `HashMap`, so the rule rows stored in the
+    catalog checkpoint and the rows rebuilt from the checkpoint's own page came
+    out in different orders and `catalog_checkpoint::check` compared them as
+    sequences. Every fixture had one row.
+  - Fault 2. The refetch storm shares the account's request budget; from
+    21:08:00 MEXC answers the execution-history recovery `venue rejected (510):
+    Requests are too frequent, please try again later`, and
+    `account_recovery` treats any non-transport error as final: `ERROR this
+    engine will not open new positions until an operator clears it`, a durable
+    latch, written 38 times by 21:10; the heartbeat reads `may_open=false`
+    from 21:08.
+  - Holding action. `systemctl stop liquidity-migration-engine-mexc.service`
+    at 21:10:40 UTC (`orders_sent: 0`, zero positions, venue positions and
+    open orders both empty by signed read), and the mexc watchdog timer
+    disabled so the stopped units do not page. The worker keeps running.
+  - Fix. `rules()` and `symbol_pairs()` sort by symbol like
+    `instrument_specs()` already did; MEXC's code 510 maps to
+    `VenueError::Transport` in `venue_result`, so recovery retains it for
+    retry the way every caller treats a transport failure; the conformance
+    fixture's generic MEXC refusal moves from 510 to 600. Tests: a 200-row page
+    parsed twice yields equal, sorted rows; a checkpoint restores against a
+    200-row page through `MexcGateway`; 510 is a `Transport`. Both catalog
+    tests fail without the sort. A `reconcile-clear` note clears the latch on
+    the redeploy: the log and the venue agree at zero.
+  - Not fixed, proposed: Bybit's `10006` rate limit reaches the same
+    history-recovery latch (`execution.rs` keeps it `Rejected`); admission
+    retries a failed catalog every second with no backoff; `LookupClient::lookup`
+    fetches the whole contract table per order lookup.
+
 - **2026-09-08 — Wire MEXC USDT perpetuals as the fleet's third realm.**
   - Owner direction: trade MEXC alongside Bybit because Bybit's 3.6 / 10 bp
     maker / taker fees are too high; MEXC charges 0 maker and 0–2 bp taker on

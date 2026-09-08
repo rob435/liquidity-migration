@@ -60,6 +60,43 @@ async fn exact_contracts_and_prices_reach_wire_and_fractional_contracts_are_refu
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_catalog_checkpoint_restores_against_a_page_the_size_of_the_live_table() {
+    // Observed live on 2026-09-08 with 1,194 contracts: the checkpoint's rule
+    // rows and the rows rebuilt from its own page compared unequal, so every
+    // admission pass refused the catalog and refetched it a second later.
+    let rows = (0..200)
+        .map(|i| format!(r#"{{"symbol":"C{i}_USDT","baseCoin":"C{i}","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.01,"priceUnit":0.001,"minVol":1,"maxVol":1000,"maxLeverage":50,"apiAllowed":true,"state":0,"amountScale":2,"priceScale":3}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let page = format!(r#"{{"success":true,"code":0,"data":[{rows}]}}"#);
+    let server = TestServer::start(move |request, _| {
+        if request.path == "/api/v1/contract/detail" {
+            (200, page.clone())
+        } else {
+            (200, r#"{"success":true,"code":0,"data":"7"}"#.into())
+        }
+    })
+    .await;
+    let gw = MexcGateway::for_test(
+        &server.base_url(),
+        MexcRealm::Mainnet,
+        MexcRealm::Mainnet.credentials_for_test("key", "secret"),
+        vec!["C1USDT".into()],
+    );
+    let catalog = gw
+        .instrument_catalog_client()
+        .unwrap()
+        .fetch()
+        .await
+        .unwrap();
+    assert_eq!(catalog.rules.len(), 200);
+    let checkpoint = catalog.checkpoint().unwrap();
+    let restored = gw.restore_instrument_catalog(&checkpoint).unwrap();
+    assert_eq!(restored.rules, checkpoint.rules);
+    assert_eq!(restored.specs, checkpoint.specs);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_cancel_names_one_order_as_an_object_and_reads_the_orders_own_result() {
     // Observed live on 2026-09-08: `cancel_with_external` takes one object and
     // answers `{"data":{"externalOid":..,"errorCode":0,"errorMsg":"success"}}`;
