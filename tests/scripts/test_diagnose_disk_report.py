@@ -90,6 +90,20 @@ def test_a_root_that_does_not_exist_is_skipped_rather_than_failing_the_read(
     assert any(line.endswith(str(state / "forward-market")) for line in lines), lines
 
 
+def test_nested_roots_name_each_directory_once(tmp_path: Path) -> None:
+    parent = tmp_path / "var-lib"
+    state = parent / "liquidity-migration"
+    state.mkdir(parents=True)
+    _tape(state, "forward-market", 2)
+
+    lines = _report([parent, state])
+
+    paths = [line.split()[2] for line in lines]
+    assert len(paths) == len(set(paths)), lines
+    assert str(state) in paths
+    assert str(state / "forward-market") in paths
+
+
 def test_the_report_is_bounded_so_one_page_cannot_flood_the_run(tmp_path: Path) -> None:
     state = tmp_path / "liquidity-migration"
     state.mkdir()

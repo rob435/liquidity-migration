@@ -1130,12 +1130,16 @@ verify_mode() {
 }
 
 # Allocated bytes rounded to KiB; only directory totals reach diagnostics.
+# The roots nest, so a path walked as a root and again as a parent's child
+# reports twice; the first line of each path wins and the rest are dropped,
+# because a duplicate spends a line of the cap without naming a new consumer.
 report_disk_usage() {
     local root
     for root in $DISK_REPORT_ROOTS; do
         [ -d "$root" ] || continue
         du -kx -d 1 "$root" 2>/dev/null || true
-    done | sort -rn | head -n "$DISK_REPORT_LINES" | awk '{printf "disk %.0f %s\n", $1 * 1024, $2}'
+    done | sort -rn | awk '!seen[$2]++' | head -n "$DISK_REPORT_LINES" \
+        | awk '{printf "disk %.0f %s\n", $1 * 1024, $2}'
 }
 
 # ----------------------------------------------------------- mainnet stops
