@@ -26,9 +26,7 @@ wal_path = "engine.wal"
 #   mexc_mainnet         MEXC's funded futures account. REAL MONEY, and the
 #                        ONLY MEXC name — the venue publishes no testnet host,
 #                        so there is no practice spelling of this one.
-#                        LIVE-CANARY: `engine canary-order` runs here with
-#                        REAL_MONEY armed, and `engine run` is refused until
-#                        that canary's evidence is reviewed.
+#                        Live-proven since its 2026-09-08 canary lifecycle.
 #   binance_testnet      Binance USD-M futures testnet. PRODUCTION BLOCKED:
 #                        public protocol and offline adapter checks pass, but
 #                        the private stop lifecycle still needs a signed run.

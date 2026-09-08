@@ -123,13 +123,39 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     open orders. The adapter now sends the object and treats a non-zero
     `data.errorCode` inside a success envelope as the refusal; the fixture
     refuses a list body the way the venue does.
-  - Evidence boundary: one order has been placed and cancelled on MEXC, the
-    cancel by hand. The canary
-    (`scripts/ops.sh canary-order --environment mexc --symbol BTCUSDT
-    --expected-user-id key-e3b03c8170d1fc6b --execute`) is the owner's step;
-    its receipt is what moves the realm to `live-proven`. Login, order push and
-    `create` are observed live; `isTaker` on a fill and the position-level
-    stop body are documented, not yet observed.
+    [Deploy run `34271232630`](https://github.com/rob435/liquidity-migration/actions/runs/34271232630)
+    installs `32f27d4b` at 20:07:33 UTC.
+  - Canary PASS, 20:16:27 UTC on `32f27d4b`, run by the owner:
+    `create=accepted client_id=lmcan-1a082aa31f4-3c07-0000
+    venue_order_id=852400800159322624`, `private_order=New`, `cancel=accepted`,
+    `private_order=Cancelled`, `order_status=Cancelled cumulative_filled_qty=0`,
+    four clean scans, `result=PASS create_ack=true new_confirmed=true
+    cancel_confirmed=private cleanup_scans=2`.
+  - Promotion. `VenueName::MexcMainnet` moves to `live-proven` on that receipt;
+    `engine run` takes the realm and `engine canary-order` refuses it. Deploy's
+    readiness gate therefore starts the mexc units on the next deploy with the
+    switch armed.
+  - Evidence boundary: one order lifecycle (create, `New`, cancel,
+    `Cancelled`) observed on the funded account; no fill, so `isTaker` on a
+    deal push, the position-level stop body (`/stoporder/place`) and a
+    reduce-only exit are documented, not yet observed. The engine holds new
+    risk back if a stop cannot be placed.
+
+- **2026-09-08 — A worked-entry test ran its 1 ms reprice gate on wall time.**
+  - `tests::worked_entries::the_stated_price_is_where_the_supervisor_believes_the_order_is`
+    failed in the `checks` run for `32f27d4b` (`rust`, 19:54:09 UTC:
+    `the order came down before the venue could state its price`) and passed
+    in the six previous runs. The supervisor paces `reprice_ms` on the engine's
+    monotonic clock while the test's waits ran on tokio's paused clock, so on a
+    slow runner extra amends passed the gate before the venue's price statement
+    was consumed, spent the budget, escalated and cancelled. The test now runs
+    under `with_engine_clock` like its siblings.
+  - Wrapping it exposed a second fault: the shared test clock started at the
+    process's first monotonic reading, 0 ns in a fresh test process, and
+    `intent_admission` reads a quote `recv_ns` of 0 as never quoted and denies
+    the intent as `StaleQuote`; 6 of 40 fresh-process runs failed. The clock
+    now starts no earlier than one second. 80 fresh-process and 40 concurrent
+    runs pass; engine-core 851 green.
 
 - **2026-09-08 — Incident `mainnet-014ec4a90a2fde5f`: a normal worker boot pages
   the funded realm. The boot repair gap now has its own bound.**

@@ -263,11 +263,15 @@ impl VenueName {
     /// a newly added venue cannot silently inherit somebody else's status.
     pub fn readiness(self) -> VenueReadiness {
         match self {
-            VenueName::BybitDemo | VenueName::BybitMainnet => VenueReadiness::LiveProven,
+            // `mexc_mainnet`: one canary lifecycle observed on the funded
+            // account on 2026-09-08 20:16 UTC, venue order 852400800159322624
+            // (create, `New`, cancel, `Cancelled`, two clean scans).
+            VenueName::BybitDemo | VenueName::BybitMainnet | VenueName::MexcMainnet => {
+                VenueReadiness::LiveProven
+            }
             VenueName::HyperliquidTestnet | VenueName::LighterTestnet => {
                 VenueReadiness::TestnetCanary
             }
-            VenueName::MexcMainnet => VenueReadiness::LiveCanary,
             VenueName::HyperliquidMainnet
             | VenueName::LighterMainnet
             | VenueName::BinanceTestnet

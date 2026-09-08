@@ -35,7 +35,7 @@ Entry-point wrapper for all operational workflows. Prefix `liquidity-migration-`
 | **Preflight** | `scripts/ops.sh real-money preflight` | Read-only | Validates all funded Bybit credentials, IP bindings, and profile dials. |
 | **MEXC preflight** | `scripts/ops.sh real-money preflight-mexc` | Read-only | Validates the MEXC credential file, its arming switch, and the mexc worker source. |
 | **Verify Identity** | `scripts/ops.sh verify-account-identity --environment <demo\|mainnet\|mexc>` | Read-only | Authenticates the realm's GET-only probe and binds it to `EXPECTED_ENGINE_ACCOUNT_USER_ID`; a mismatch prints the id the credentials answered as. |
-| **Canary Order** | `scripts/ops.sh canary-order --environment <demo\|mexc> --symbol SYMBOL --expected-user-id ID [--execute]` | Mutating with `--execute` | One bounded live order lifecycle through the realm's own credential file: one venue-minimum post-only order 0.5% under the bid, cancelled, the account proved clean twice. Refused on `bybit_mainnet` and on any realm that is not `live-canary` or the Bybit demo. |
+| **Canary Order** | `scripts/ops.sh canary-order --environment <demo\|mexc> --symbol SYMBOL --expected-user-id ID [--execute]` | Mutating with `--execute` | One bounded live order lifecycle through the realm's own credential file: one venue-minimum post-only order 0.5% under the bid, cancelled, the account proved clean twice. The engine accepts it on the Bybit demo and on `live-canary` realms only; `mexc_mainnet` is `live-proven`, so it is refused there today. |
 | **Deploy** | `scripts/ops.sh deploy [mode]` | Mutating | Executes exact-commit deployment (`deploy`, `rollback`, `verify`, `stop-mainnet`, `disarm-mainnet`, `stop-mexc`, `disarm-mexc`). |
 
 ### Venue-Confirmed Trade Accounting
@@ -258,16 +258,15 @@ nothing.
 | Rendered config | `/etc/liquidity-migration/engine-mexc.toml`, rendered by deploy |
 | Sleeves | LONG entries on; CARRY and EXODUS entries rendered off. CARRY scores Bybit funding, MEXC funding differs per symbol. No maker, no probe |
 | Public data | Bybit mainnet, exactly as the other realms (`configs/signal-worker.mexc.json`, `public_market_realm` `mainnet`) |
-| Source readiness | `mexc_mainnet` is `live-canary`: `engine canary-order` runs, `engine run` refuses. `engine venues` prints the current value |
+| Source readiness | `mexc_mainnet` is `live-proven` (canary lifecycle 2026-09-08 20:16 UTC): `engine run` takes the realm, `engine canary-order` refuses it. `engine venues` prints the current value |
 
 **Must** obtain `EXPECTED_ENGINE_ACCOUNT_USER_ID` from an authenticated venue
 reply; MEXC exposes no numeric account id, and the engine derives `key-` plus
 the first eight bytes of `sha256(api key)` in hex.
-**Must** arm `REAL_MONEY=true` in `mexc-mainnet.env` before the canary: the
-gateway refuses to build unarmed, and MEXC has no practice realm. Deploy reads
-`engine venues` from the installed binary and leaves the mexc units stopped
-while `mexc_mainnet` is `live-canary`; only `live-proven` provisions and starts
-the realm. `verify` prints the value as `mexc readiness=...`.
+**Must** know that `REAL_MONEY=true` in `mexc-mainnet.env` starts the realm on
+the next deploy: deploy reads `engine venues` from the installed binary, and a
+`live-proven` realm with an armed switch is provisioned and handed over like
+mainnet. `verify` prints the value as `mexc readiness=...`.
 **Must Never** set the switch without explicit owner instruction.
 
 Arming, in order:
@@ -280,33 +279,27 @@ install -o root -g root -m 0600 deploy/mexc-mainnet.env.template \
   /etc/liquidity-migration/mexc-mainnet.env
 install -o root -g root -m 0600 deploy/engine.mexc.env.template \
   /etc/liquidity-migration/engine-mexc.env
-# fill in MEXC_REAL_API_KEY, MEXC_REAL_API_SECRET and REAL_MONEY=true; the
-# realm stays stopped until the source is promoted, whatever this says.
+# fill in MEXC_REAL_API_KEY and MEXC_REAL_API_SECRET; leave REAL_MONEY=false
+# until the identity is bound.
 
-# 3. Deploy once: with the switch armed, deploy renders engine-mexc.toml and
-#    projects the worker env, and leaves every mexc unit stopped while the
-#    realm is live-canary.
+# 3. Deploy once with the switch off: deploy installs the units and leaves
+#    them stopped. Then read the account id the gateway binds: the template's
+#    placeholder `key-` mismatches on purpose and the message prints the id
+#    the credentials answered as. Write it into engine-mexc.env and rerun
+#    until it passes, then prove the account clean.
+gh workflow run vps-deploy.yml --ref main -f mode=deploy
+scripts/ops.sh verify-account-identity --environment mexc
+scripts/ops.sh attest-flat --environment mexc
+
+# 4. Arm REAL_MONEY=true in mexc-mainnet.env, then deploy; that deploy
+#    renders engine-mexc.toml, projects the worker env and starts the realm.
 scripts/ops.sh real-money preflight-mexc
 gh workflow run vps-deploy.yml --ref main -f mode=deploy
-
-# 4. Read the account id the gateway binds. The template's placeholder
-#    `key-` mismatches on purpose; the message prints the id the credentials
-#    answered as. Write it into engine-mexc.env and rerun until it passes.
-scripts/ops.sh verify-account-identity --environment mexc
-
-# 5. The live evidence step: one venue-minimum post-only BTCUSDT order, its
-#    cancel, and two clean account scans, through the realm's credential file.
-scripts/ops.sh canary-order --environment mexc --symbol BTCUSDT \
-  --expected-user-id key-<16 hex> --execute
-
-# 6. Record the canary receipt in CHANGELOG.md, move mexc_mainnet to
-#    live-proven in engine/engine-public/src/registry.rs, push, and deploy
-#    again; that deploy starts the realm.
 ```
 
-Both engine subcommands run on the host under `systemd-run` as
-`liquidity-engine-mexc` with `mexc-mainnet.env` and `engine-mexc.env` loaded;
-the identity check drops `REAL_MONEY`, the canary keeps it.
+`verify-account-identity`, `attest-flat` and `canary-order` run on the host
+under `systemd-run` as the realm's user with its credential file loaded; the
+read-only modes drop `REAL_MONEY`, the canary keeps it.
 
 ---
 

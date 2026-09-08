@@ -1308,10 +1308,10 @@ mod tests {
             .is_err());
         #[cfg(feature = "mexc")]
         {
-            // The realm this command exists to gather evidence for; `engine
-            // run` on it stays refused.
-            VenueName::MexcMainnet.require_canary_ready().unwrap();
-            assert!(VenueName::MexcMainnet.require_engine_run_ready().is_err());
+            // Promoted to live-proven on its 2026-09-08 canary: `engine run`
+            // takes the realm now, and the canary no longer does.
+            assert!(VenueName::MexcMainnet.require_canary_ready().is_err());
+            VenueName::MexcMainnet.require_engine_run_ready().unwrap();
         }
     }
 

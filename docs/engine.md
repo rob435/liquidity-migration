@@ -111,7 +111,7 @@ credential, or socket is opened.
 | `bybit_mainnet` | `live-proven` | yes | Mainnet realm credentials, account lease and `REAL_MONEY` arming. |
 | `hyperliquid_testnet` | `testnet-canary` | yes | Testnet realm only. |
 | `lighter_testnet` | `testnet-canary` | yes | Testnet realm only. |
-| `mexc_mainnet` | `live-canary` | no | Canary permitted with `REAL_MONEY` armed; engine run refused until the canary evidence is reviewed and the realm moves to live-proven. |
+| `mexc_mainnet` | `live-proven` | yes | Funded MEXC futures account, `REAL_MONEY` arming and account lease. Evidence boundary: the 2026-09-08 20:16 UTC canary lifecycle (venue order `852400800159322624`); no fill, stop trigger or `isTaker` push observed yet. |
 | `hyperliquid_mainnet` | `production-blocked` | no | Refused before credential or socket access. |
 | `lighter_mainnet` | `production-blocked` | no | Refused before credential or socket access. |
 | `binance_testnet` | `production-blocked` | no | Refused before credential or socket access. |

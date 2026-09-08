@@ -121,8 +121,8 @@ engine — the execution loop
 
   engine canary-order --config engine.toml --symbol XRPUSDT
                       --expected-user-id 579580669 --execute
-      On bybit_demo and on any live-canary realm (mexc_mainnet, with
-      REAL_MONEY armed), take the account lease, rest one minimum-value
+      On bybit_demo and on any live-canary realm (with REAL_MONEY
+      armed), take the account lease, rest one minimum-value
       post-only order away from the touch with an attached stop, cancel it,
       and prove the derivative account clean twice. Any fill is closed in full
       and makes the command fail after cleanup. Without --execute, no
