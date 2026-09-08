@@ -8,15 +8,16 @@ Record the latest verified host snapshot and the source of each operational sett
 
 | Observation | Value |
 | --- | --- |
-| Verified at | 2026-09-08 16:54:58 UTC unit state, both worker and both engine heartbeats, watchdog journals and disk, read over the `diagnose` workflow. No authenticated account, native-stop, WAL or image-hash reading is taken at that time; the 16:16:53.904 host/image and 16:12:39–40 authenticated rows below are the last such |
-| Evidence | [Diagnose run `34253894947`](https://github.com/rob435/liquidity-migration/actions/runs/34253894947) for the current reading and [deploy run `34251758369`](https://github.com/rob435/liquidity-migration/actions/runs/34251758369) for what is installed. Earlier: [deploy run `34247719025`](https://github.com/rob435/liquidity-migration/actions/runs/34247719025); durable evidence root `~/SHARED_DATA/bybit_full_pit/reports/carry_daily_20260908/`: `host-after.json`, `account-{demo,mainnet}-after.json`, `state-after.json`, `release-verify.json`, `host-verification.json`, `daily-verification.json`, `qualification.json`, `deploy.log`; independent infrastructure receipts under `reports/infra_20260908/` |
+| Verified at | 2026-09-08 17:24:50 UTC services, PIDs, heartbeats, loaded images, failed units, disk and the mexc realm's units/config, read over SSH after the 17:23:13 `deploy-ok`; authenticated MEXC identity and two-scan flatness at 17:24 UTC. Worker readiness, rolling-loss and watchdog rows are the 16:54 UTC `diagnose` reading; Bybit positions, stops, WAL inventory and CARRY checkpoint rows are the 16:12–16:16 UTC read. Neither is re-read here |
+| Evidence | [Deploy run `34255009973`](https://github.com/rob435/liquidity-migration/actions/runs/34255009973) (`512b1007`, `deploy-ok` 17:23:13 UTC) for what is installed; [diagnose run `34253894947`](https://github.com/rob435/liquidity-migration/actions/runs/34253894947) for the 16:54 reading; earlier [deploy run `34251758369`](https://github.com/rob435/liquidity-migration/actions/runs/34251758369) and [deploy run `34247719025`](https://github.com/rob435/liquidity-migration/actions/runs/34247719025); durable evidence root `~/SHARED_DATA/bybit_full_pit/reports/carry_daily_20260908/`: `host-after.json`, `account-{demo,mainnet}-after.json`, `state-after.json`, `release-verify.json`, `host-verification.json`, `daily-verification.json`, `qualification.json`, `deploy.log`; independent infrastructure receipts under `reports/infra_20260908/` |
 | Host | `208.84.103.4` |
-| Deployed commit | Completed generation and checkout are `0e2827afe7fc784cb7c975c6a60c55c0c950bf56`, deployed at 16:47:13 demo and 16:52:50 mainnet with `deploy-ok` at 16:53:21; both engine heartbeats identify it. Stored previous generation: `cecff2e27aedf66bd4e013d030d29e37e24db778`, whose release archive the 16:16:53 reading verified image by image. No image-hash or archive reading is taken since, and later source commits are not evidence of installation |
-| Source / installed boundary | The worker boot-repair reporting change is installed: `a167beee` and the two follow-ups are inside `0e2827af`. The MEXC realm work in `6773d221` is merged and not installed: the 16:54:49 reading prints `mexc off` with `mexc readiness=unknown`, and no MEXC unit appears in its unit listing |
+| Deployed commit | Completed generation and checkout are `512b1007d777cb153a97acd30d3026fbb7e28634`, deployed at 17:17:09 demo and 17:22:47 mainnet with `deploy-ok` at 17:23:13; the demo engine runs `releases/512b1007…/engine` and mainnet `bin/engine`, and the loaded image hashes are the table below, read at 17:25. Stored previous generation: `0e2827afe7fc784cb7c975c6a60c55c0c950bf56`. Later source and documentation commits are not evidence of installation |
+| Source / installed boundary | The worker boot-repair reporting change `a167beee`, its two follow-ups and the MEXC realm `6773d221` are all inside the installed `512b1007`. The 17:23:13 verify table prints `mexc armed` and `mexc readiness=live-canary` and lists the four mexc units inactive |
+| MEXC realm | `mexc_mainnet` is armed in `/etc/liquidity-migration/mexc-mainnet.env` and the installed engine reports it `live-canary`, so `liquidity-migration-engine-mexc`, `signal-worker-mexc` and `mexc-liveness` are installed, disabled and inactive; `engine-mexc.toml` is rendered with LONG entries on and CARRY/EXODUS entries off. Account `key-e3b03c8170d1fc6b`: identity bound and `flat=true samples=2 positions=0 open_orders=0` at 17:24 UTC; 52.6207 USDT equity at 17:05 UTC. No order has been sent; the canary is the owner's step and its receipt promotes the realm |
 | Funded permission | Mainnet remains armed with sole leverage authority; configured CARRY/LONG/EXODUS entries remain enabled in both realms, with demo PROBE enabled. Both engines report `may_open=true`. Mainnet’s rolling-loss restriction remains active: 10.30624956 USDT loss against a 10 USDT limit; demo’s restriction is not tripped |
 | CARRY holding | Both realms hold fixed quantity targets until the next daily decision; intraday funding, upcoming-book drop and pre-settlement exits are disabled. Current HEMI anchors remain demo `14131` / mainnet `1161`; native stops and explicit reductions remain active. The `FLOCKUSDT` exit tombstone for decision `1788825600000` remains intact; no new pre-settlement fires feed EXODUS |
-| Runtime state | Engine PIDs demo `3365378` / mainnet `3366550`; worker PIDs `3365321` / `3366494`, all four from the 16:47/16:52 handovers. All four services are active with heartbeats under three seconds and zero restarts. Both engines report `strategy_errors=[]`, `stream_resets=0` and six positions; mainnet reads `may_open=true` with `rolling_loss_tripped=true`, every sleeve `entries_enabled=false` and six `inside_resize_band` blockers; demo reads `may_open=true` with all four sleeves enabled |
-| Readiness boundary | No failed units at 16:54:58 (`systemctl --failed` lists none) and every manifest timer active, the mainnet liveness and execution-study timers included. Both workers read `status=ready` at 16:54:54 with complete ticker coverage, `bybit_ws_gap_open=false` and no spool backpressure, 124 s after the mainnet worker's boot; the mainnet watchdog's 16:53:31, 16:54:02 and 16:54:32 passes page only the standing rolling-loss reference. The 70 host/account checks are the earlier 16:16:53 observation. Earlier post-startup samples include bounded `recovering` states, including a mark-freshness lapse after gap repair. These are sampled observations, not uninterrupted-readiness or complete production-day proof |
+| Runtime state | Engine PIDs demo `3378289` / mainnet `3379536`; worker PIDs `3378232` / `3379479`, all four from the 17:17/17:22 handovers. All four services are active with heartbeats under four seconds and zero restarts; `systemctl --failed` lists none. Both engines report `may_open=true` and `strategy_errors=[]`. Rolling-loss state is not re-read at 17:24; the 16:54 reading had mainnet `rolling_loss_tripped=true` with every sleeve `entries_enabled=false` and six positions per realm |
+| Readiness boundary | No failed units at 17:24:50 and every Bybit manifest timer active in the 17:23:13 verify table; the mexc timer and units are inactive by design while the realm is `live-canary`. Worker `status=ready`, complete ticker coverage and the standing rolling-loss page are the 16:54 reading; the 70 host/account checks are the 16:16:53 observation. Earlier post-startup samples include bounded `recovering` states, including a mark-freshness lapse after gap repair. These are sampled observations, not uninterrupted-readiness or complete production-day proof |
 | Execution | Embedded callbacks, default Bybit binary; both engines use `Type=notify`, `WatchdogSec=30s`. All four processes have zero swap. LONG uses 30-second PostOnly entry work in both realms; terminal order lookup and exact fill recovery precede an IOC remainder |
 | Demo soak | All 31 observations pass from 16:06:00.607 through 16:11:00.615 UTC, reaching 300 seconds before mainnet handover. `deploy-ok` is recorded at 16:11:35.448 UTC |
 | Disk and WAL | 42.310 GiB free on `/var/lib`; tape reserves 25 GiB. All 141 pre-handover WAL inventory paths retain their inodes and at least their original bytes; current inventory has 143 paths. No live WAL is pruned |
@@ -36,9 +37,9 @@ Record the latest verified host snapshot and the source of each operational sett
 
 | Release image | SHA256 |
 | --- | --- |
-| Final engine, loaded in both realms | `76cfe7b7c5ea392defe71b6efbd9719c907a462cac3119c8cd632760c2d1df3d` |
-| Final signal worker, loaded in both realms | `3151b73f6019d29de1be60dcdd15291d00d167e28122af307828ca8fafe5a6cc` |
-| Final engine tools, installed | `6322be62998832c2a872320438e13b244c946ec1721b51e605b6984ac85299f2` |
+| Final engine, loaded in both realms | `fcaea5f8192e59c4af49812157aae8b1846a9b2fe7e490e3ea4d9ce4e2a44629` |
+| Final signal worker, loaded in both realms | `f8706abf06226b7e0e1a6e1cf466b4270618c13c8b912b3cc8eefcd92b127c6b` |
+| Final engine tools, installed | `650d35cd8178aa0cbbe37e157375c26615478d4e206d3055aefbcaa4cafd1794` |
 | Final downloaded release archive | `b10e4f83b99dd6342855072958251a58f0669bc7a6c3e59b3f2f68b80e82e344` |
 | Retained Stage A engine, retained | `9fc63d5344c9190cb700cef151b6af8c1082eecb64ee347395c1c01302f01ae6` |
 | Retained Stage A signal worker, retained | `96fb34e84f174baa1acd931a35202f3d42009b3b8ac099e3916c4fabfa44caf8` |
@@ -54,12 +55,12 @@ Record the latest verified host snapshot and the source of each operational sett
 | TAOUSDT | long / 3.031 / 231.82 | long / 0.248 / 232 |
 | WLDUSDT | long / 852.7 / 0.4044 | long / 73.3 / 0.4055 |
 
-| Sleeve ID | Mainnet | Demo | Repository authority |
-| --- | --- | --- | --- |
-| 0 | CARRY | CARRY | `configs/lane2_carry_hold_v7.json` |
-| 1 | LONG | LONG | `configs/long_native_v12.json` |
-| 2 | EXODUS | EXODUS | `configs/lane2_exodus_short_v1.json` |
-| 3 | MAKER, quoting disabled | PROBE, enabled | `deploy/engine.mainnet.toml.template`, `deploy/engine.demo.toml.template` |
+| Sleeve ID | Mainnet | Demo | MEXC (installed, stopped) | Repository authority |
+| --- | --- | --- | --- | --- |
+| 0 | CARRY | CARRY | CARRY, entries off | `configs/lane2_carry_hold_v7.json` |
+| 1 | LONG | LONG | LONG, entries on | `configs/long_native_v12.json` |
+| 2 | EXODUS | EXODUS | EXODUS, entries off | `configs/lane2_exodus_short_v1.json` |
+| 3 | MAKER, quoting disabled | PROBE, enabled | none | `deploy/engine.mainnet.toml.template`, `deploy/engine.demo.toml.template`, `deploy/engine.mexc.toml.template` |
 
 | Setting | Repository authority |
 | --- | --- |

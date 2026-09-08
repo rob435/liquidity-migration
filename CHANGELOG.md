@@ -49,10 +49,25 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     realm's own credential file), liveness scope `mexc`, Telegram
     pause/resume, trade notifier, backup sources and the equity recorder
     follow the manifest.
-  - Evidence boundary: offline fixtures and the public contract table only. No
-    MEXC credential was found locally or on the host at 16:00 UTC, so no live
-    order, cancel, identity or private-stream login has been observed; the
-    realm remains `live-canary` and its units stay stopped through deploy.
+  - Credentials. The owner's MEXC pair, left in the tracked `deploy/sleeves.env`
+    at 17:01 UTC, is moved to root-owned `/etc/liquidity-migration/mexc-mainnet.env`
+    with `REAL_MONEY=true` at 17:05 UTC and the tracked file is restored; the key
+    never enters git history. Signed read-only calls from the host succeed:
+    52.6207 USDT equity, no positions, no open orders.
+  - Deploy. [Run `34255009973`](https://github.com/rob435/liquidity-migration/actions/runs/34255009973)
+    installs `512b1007` at 17:23:13 UTC (`deploy-ok`): demo handover, soak,
+    mainnet handover, then `mexc armed but the installed engine reports
+    mexc_mainnet readiness=live-canary: units stay stopped`. `engine-mexc.toml`
+    is rendered, `preflight-mexc` passes, the four mexc units are installed,
+    disabled and inactive. At 17:24 UTC `verify-account-identity` binds
+    `key-e3b03c8170d1fc6b` and `attest-flat` reads `flat=true samples=2
+    positions=0 open_orders=0` through the installed engine.
+  - Evidence boundary: no order has been sent to MEXC. The canary
+    (`scripts/ops.sh canary-order --environment mexc --symbol BTCUSDT
+    --expected-user-id key-e3b03c8170d1fc6b --execute`) is the owner's step;
+    its receipt is what moves the realm to `live-proven`. The private-stream
+    login, `isTaker` spelling and the position-level stop body are documented,
+    not yet observed live.
 
 - **2026-09-08 — Incident `mainnet-014ec4a90a2fde5f`: a normal worker boot pages
   the funded realm. The boot repair gap now has its own bound.**
