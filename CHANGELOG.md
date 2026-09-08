@@ -157,13 +157,29 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     for `hyperliquid` and `real-money preflight-hyperliquid`, liveness scope
     `hyperliquid`, Telegram pause/resume, trade notifier tag `HL`, backup
     sources and the equity recorder follow the manifest.
-  - Evidence boundary: offline fixtures and today's public reads only. The
-    funded master account was read — `extraAgents` lists the approved agent,
-    the perpetual account value is 0, and 52.41 USDC sits in SPOT, which the
-    owner must move to Perps before any order can rest. No live order, cancel,
-    identity binding on the host, or private-stream login has been observed on
-    Hyperliquid; the realm stays `live-canary` and its units stay stopped
-    through deploy.
+  - Deploy. [Run `34289829877`](https://github.com/rob435/liquidity-migration/actions/runs/34289829877)
+    (`d00e82b2`) reached `deploy-ok` at 23:33:01 UTC; all three running realms
+    were handed over (engine tree changed) with zero restarts. Deploy staged
+    the hyperliquid configuration, passed `preflight-hyperliquid`, rendered
+    `engine-hyperliquid.toml` and printed `hyperliquid armed but the installed
+    engine reports hyperliquid_mainnet readiness=live-canary: units stay
+    stopped until the canary evidence promotes it`; the four hyperliquid units
+    are installed, disabled and inactive. On the host, `ops.sh
+    verify-account-identity --environment hyperliquid` prints
+    `account-identity-ok`; `attest-flat` reports one `wallet_asset` blocker,
+    0.00230994 HYPE of spot dust.
+  - Account. The owner's Hyperliquid account was in the venue's new
+    `unifiedAccount` mode (`/info {"type":"userAbstraction"}`), the default for
+    new accounts, under which the perps `clearinghouseState` the adapter reads
+    for equity is not meaningful; the owner switched it to manual
+    (`disabled`) at 23:05 UTC. The 52.4 USDC then went Spot → the `xyz` HIP-3
+    dex by a mis-directed transfer; the main perps balance reads 0 until the
+    owner moves it. Unified-account support in the adapter is proposed, not
+    built.
+  - Evidence boundary: offline fixtures, today's public reads and the host's
+    read-only identity and inventory reads. No live order, cancel or
+    private-stream login has been observed on Hyperliquid; the realm stays
+    `live-canary` and its units stay stopped through deploy.
 
 - **2026-09-08 — Reclassify the rolling-loss restriction: a `NOTICE`, not a page.**
   - Owner direction: `CRITICAL` means a program fault somebody has to fix. A
