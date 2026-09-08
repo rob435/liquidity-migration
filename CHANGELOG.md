@@ -63,12 +63,34 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     held for the mainnet WAL. Free space has fallen 27G → 25G since the
     2026-09-05 08:36 deploy, so the two tape caps (60 + 18 GB) plus the rest
     of the host no longer fit under 118G with a 26.8 GB reserve.
-  - **What the evidence cannot settle, and why.** Whether the 88G is tape at
-    its `max_disk_gb` caps (a repository config change) or a foreign writer
+  - **What the evidence could not settle, and why.** Whether the 88G was tape
+    at its `max_disk_gb` caps (a repository config change) or a foreign writer
     leaking (an owner action) turns on per-directory usage. `verify_mode`
     printed one `df -h /var/lib` line and nothing else, and the routine has no
     SSH key, so every page from this floor has had to hand the owner a `du`
     recipe to run by hand. That gap is the repository defect fixed here.
+  - **The reading, and the answer: it is not the tape.** Diagnose run
+    `34171910942` at 00:01:03 UTC, the first to carry `report_disk_usage`:
+
+    | Directory | Bytes | Note |
+    | :--- | ---: | :--- |
+    | `/var/lib/liquidity-migration/backup` | 34 115 317 760 | 31.8 GiB, 97% of the state root |
+    | `/opt` | 5 949 329 408 | toolchain, release, build target |
+    | `/var/lib/liquidity-migration/forward-market` | 604 639 232 | Bybit tape, cap 60 GB |
+    | `/var/log/journal` | 296 947 712 | |
+    | `/var/lib/liquidity-migration/forward-market-binance` | 114 565 120 | Binance tape, cap 18 GB |
+
+    Both tape roots together hold 691 MiB against 78 GB of allowed cap, so
+    `max_disk_gb` is not what binds and the sliding window is working; the
+    consumer is `backup`, taken up by *Root cause and repair* below. The same
+    reading explains the silence the payload shows on the Binance pruner: with
+    109 MiB of tape and nothing expired, `prune` has nothing to delete, so no
+    `retention removed` line can appear however often a blocked tick arms it.
+  - **Not accounted for.** `/` read 84G used at 00:01:01 while the three roots
+    above total ~41 GiB, so ~43 GiB sat outside them. `DISK_REPORT_ROOTS` now
+    also carries `/` and `/var/lib` at depth 1 so the next reading closes.
+    The diagnostic is piped to the host from the runner's checkout, so this
+    takes effect on the next `mode=diagnose` with no deploy.
   - **Fix.** `report_disk_usage` (`scripts/vps/deploy_remote.sh`), called from
     `verify_mode`, prints `disk <bytes> <path>` for one level under
     `/var/lib/liquidity-migration`, `/var/log/journal` and `/opt`, largest

@@ -67,9 +67,12 @@ CONTROL_SPOOL_ROOT=/var/lib/liquidity-migration/controls
 # on which writer holds the disk — the recorders block above a floor they share
 # with every other writer — and the `df` line alone cannot name one. Read-only,
 # one level deep, no filenames: directory totals only.
-DISK_REPORT_ROOTS=${DISK_REPORT_ROOTS:-/var/lib/liquidity-migration /var/log/journal /opt}
+# `/` and `/var/lib` are here so the totals account for the whole filesystem:
+# without them a consumer outside the fleet's own trees is invisible, and the
+# page cannot be closed. `du -x` keeps each walk on this filesystem.
+DISK_REPORT_ROOTS=${DISK_REPORT_ROOTS:-/ /var/lib /var/lib/liquidity-migration /var/log/journal /opt}
 #: Directory totals printed per `verify_mode`, largest first.
-DISK_REPORT_LINES=${DISK_REPORT_LINES:-20}
+DISK_REPORT_LINES=${DISK_REPORT_LINES:-30}
 
 PYTHON="$REPO_DIR/.venv/bin/python"
 
