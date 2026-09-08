@@ -164,6 +164,13 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     heartbeat/resource failures still block deployment. Both failing readiness
     regressions pass after the correction. Alert wording reflects rolling loss,
     which includes negative open P&L, rather than attributing it all to closes.
+  - Mainnet's 15:10:53 UTC handover check retains the opening latch from the
+    14:59:26.744 UTC history transport timeout. Its new protective closes also
+    record `stop crosses current reference` for symbols 11 and 88. A crossed
+    native stop now waits when every crossed candidate has a durable full-close
+    exit; the exit remains pending through replay. Missing or partial closes
+    still fail protection checks. The long/short regression fails before this
+    change and all five stop-runtime tests pass afterward.
 
 - **2026-09-08 — Repair execution recovery, account limits and research costs.**
   - Research defaults read `configs/bybit_fee_rates.json` or

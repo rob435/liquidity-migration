@@ -1,6 +1,79 @@
 use super::*;
 
 #[tokio::test(start_paused = true)]
+async fn crossed_tightened_stop_keeps_its_exit_without_latching_the_account() {
+    for side in [Side::Buy, Side::Sell] {
+        let mut engine = crate::tests::shared_sleeves::exact_single_sleeve_engine("1", None).await;
+        let mut state = engine.books.attribution.snapshot();
+        let row = &mut state.positions[0];
+        row.signed_qty = if side == Side::Buy {
+            Exact::one()
+        } else {
+            -Exact::one()
+        };
+        row.stop_px = Some(Exact::from_u64(if side == Side::Buy { 80 } else { 120 }));
+        engine.books.attribution = crate::attribution::Attribution::restore(&state).unwrap();
+        let position = &mut engine.books.account.positions[0];
+        position.side = side;
+        position.leverage = Some(10.0);
+        position.stop_px = if side == Side::Buy { 80.0 } else { 120.0 };
+        position.exact_stop_px = Some(Box::new(state.positions[0].stop_px.clone().unwrap()));
+        engine.private_stream_ready = true;
+        engine.books.account.observed_ns = clock::now_ns();
+        engine.books.market.quotes[0] = engine_types::Quote {
+            bid_px: if side == Side::Buy { 94.0 } else { 106.0 },
+            ask_px: if side == Side::Buy { 94.1 } else { 106.1 },
+            bid_qty: 10.0,
+            ask_qty: 10.0,
+            recv_ns: clock::now_ns(),
+            ..Default::default()
+        };
+        let base = engine.rotation_base(clock::wall_ms());
+        let before = engine.wal.snapshot_records().len();
+        assert!(engine.prepare_position_stops().unwrap());
+        assert!(
+            engine.may_open,
+            "a durable protective exit must not become a permanent account latch"
+        );
+        let exit = &engine.portfolio_controls.exits[&(StrategyId(0), SymbolId(0))];
+        assert_eq!(exit.position_side, side);
+        assert!(exit.target_remaining.is_zero());
+        assert!(engine.stop_repairs_pending.contains(&SymbolId(0)));
+        assert!(matches!(
+            engine.native_stop_plan(SymbolId(0)),
+            Ok(NativeStopPlan::Waiting)
+        ));
+        let records = engine.wal.snapshot_records();
+        assert!(!records[before..].iter().any(|r| matches!(
+            r,
+            WalRecord::Reconciled {
+                may_open: false,
+                ..
+            }
+        )));
+        let mut replay = vec![base];
+        replay.extend_from_slice(&records[before..]);
+        let replayed = crate::portfolio_control::PortfolioControls::replay(&replay).unwrap();
+        assert_eq!(replayed.exits, engine.portfolio_controls.exits);
+        engine
+            .portfolio_controls
+            .exits
+            .get_mut(&(StrategyId(0), SymbolId(0)))
+            .unwrap()
+            .target_remaining = Exact::parse_decimal("0.5").unwrap();
+        assert!(
+            engine.native_stop_plan(SymbolId(0)).is_err(),
+            "a partial reduction does not cover the crossed stop"
+        );
+        engine.portfolio_controls.exits.clear();
+        assert!(
+            engine.native_stop_plan(SymbolId(0)).is_err(),
+            "an unowned close cannot excuse a crossed stop"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn legacy_owned_stops_use_matching_venue_entry_without_inventing_cost_basis() {
     for side in [Side::Buy, Side::Sell] {
         let mut engine = crate::tests::shared_sleeves::exact_single_sleeve_engine("1", None).await;

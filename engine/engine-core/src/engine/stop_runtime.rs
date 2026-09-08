@@ -216,11 +216,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 && !row.signed_qty.is_zero()
                 && row.signed_qty.is_positive() == (side == Side::Buy)
         }) {
-            candidates.push(
+            let closing = self
+                .portfolio_controls
+                .exits
+                .get(&(row.strategy, symbol))
+                .is_some_and(|exit| exit.position_side == side && exit.target_remaining.is_zero());
+            candidates.push((
                 row.stop_px
                     .clone()
                     .ok_or("surviving sleeve has no durable stop")?,
-            );
+                closing,
+            ));
         }
         for order in self.books.orders.in_flight().into_iter().filter(|order| {
             order.request.symbol == symbol
@@ -239,13 +245,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .ok_or("working sleeve has no durable stop")?;
                 Exact::from_legacy_f64(legacy.trigger_px).map_err(|e| e.to_string())?
             };
-            candidates.push(stop);
+            candidates.push((stop, false));
         }
         if candidates.is_empty() {
             return Ok(NativeStopPlan::Satisfied);
         }
         let trigger = candidates
-            .into_iter()
+            .iter()
+            .map(|(stop, _)| stop.clone())
             .reduce(|a, b| match side {
                 Side::Buy => a.max(b),
                 Side::Sell => a.min(b),
@@ -259,6 +266,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             Ok(reference) => reference,
             Err(_) => return Ok(NativeStopPlan::Waiting),
         };
+        let crossed = |stop: &Exact| match side {
+            Side::Buy => stop >= &reference,
+            Side::Sell => stop <= &reference,
+        };
+        if crossed(&trigger)
+            && candidates
+                .iter()
+                .filter(|(stop, _)| crossed(stop))
+                .all(|(_, closing)| *closing)
+        {
+            // The durable close owns this crossed stop until fills remove its exposure.
+            return Ok(NativeStopPlan::Waiting);
+        }
         let terms = ExactStopTerms::quantize(spec, side, &trigger, &reference)
             .map_err(|e| e.to_string())?;
         Ok(NativeStopPlan::Required(DurableStop {
