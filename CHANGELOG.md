@@ -32,8 +32,10 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     10/3.6 bp taker/maker for most observed symbols and 11/4 for CAP/HEMI;
     generic defaults use the maximum observed rates, explicit scenarios remain
     available, and symbol-specific missing rates raise. No published-rate
-    fallback or claim of coverage for unobserved symbols. Bybit support and
-    institutional DCP eligibility remain pending owner login/residency input;
+    fallback or claim of coverage for unobserved symbols. The owner confirms
+    Ukrainian identity verification; Bybit's Ukrainian VIP-0 table matches
+    10/3.6 bp. Lower pricing and institutional DCP eligibility remain pending
+    authenticated Bybit support access;
     the authenticated DCP query succeeds with an empty `dcpInfos` list.
   - Remove the daily forward-grading runner, financed-LONG forward scorer,
     ledger eligibility metadata and governance requirement. Preserve market
