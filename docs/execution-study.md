@@ -15,6 +15,7 @@ Compare execution costs for actual directional order intentions using recorded b
 | Market source | Closed hours under `/var/lib/liquidity-migration/forward-market/YYYY-MM-DD/HH/SYMBOL/`; Bybit L50 books and public trades |
 | Optional archive backfill | Same relative paths under `output_dir/tape/`; primary recorder files take precedence; source hashes appear in the report |
 | Account rates | Authenticated `GET /v5/account/fee-rate` per symbol, refreshed every 24 h after account identity verification; unavailable rates exclude that symbol |
+| Published-rate discrepancy | [English base schedule](https://www.bybit.com/en/help-center/article/Trading-Fee-Structure) lists 5.5/2 bp taker/maker and permits regional differences; [Russian](https://www.bybit.com/ru-RU/help-center/article/Benefits-of-the-VIP-Program) and [Ukrainian](https://www.bybit.com/uk-UA/help-center/article/Benefits-of-the-VIP-Program) VIP-0 tables list 10/3.6 bp, matching the account sample. Regional assignment is a hypothesis; account-specific confirmation remains pending |
 | Offline rates | Optional `fee_snapshot_path`: JSON `account_id`, `realm`, `rates: {SYMBOL: {maker, taker, observed_ns}}`; rates are decimal fractions, not basis points |
 | Service | `liquidity-migration-execution-study.service`; `liquidity-engine-mainnet:liquidity-migration`; mainnet downstream timer job |
 | Schedule / resources | 120 s after boot; 900 s after completion; 30 s timer accuracy; 600 s timeout; 384 MiB memory; one CPU maximum; nice 15 / idle I/O |
@@ -62,13 +63,14 @@ Compare execution costs for actual directional order intentions using recorded b
 
 | Runtime execution | Contract |
 | --- | --- |
-| LONG demo openings | `WorkPolicy::passive_entry_30s()` selected by `render-native-config`; the generated demo template carries the complete policy |
-| LONG mainnet openings | Market entries; no `entry_work_policy` override |
-| Order type | GTC at the near touch, not PostOnly; a moving book can make the initial order or an amend take liquidity |
+| LONG openings, both realms | `WorkPolicy::passive_entry_30s()` selected by `render-native-config`; both generated templates carry the complete policy |
+| Passive order | PostOnly at the near touch; a marketable arrival is rejected rather than charged taker |
+| Cross remainder | Cancel, confirm terminal state through independent REST lookup, reconcile exact cumulative fills, then admit one IOC remainder against a fresh quote |
+| Transport | Mainnet trade WS; demo REST because demo trade WS is unavailable. A demo observation does not measure mainnet transport latency |
 | Reductions / other sleeves | Existing policy selection; protective exits and LONG reductions do not acquire the new entry patience |
 | Restart | `OrderSent.dispatch.intent.work` is retained in `OpenOrderState.entry_work` across rotation. Boot schedules cancellation of the venue-confirmed worked opening remainder through the existing paced cancel path without waiting for a quote; the old monotonic deadline is not resumed |
 | Older snapshots | Missing `entry_work` remains readable as unknown; boot does not invent a policy for an old snapshot that discarded it |
-| Evidence boundary | Demo selection is an execution experiment. Recorded-book comparisons are seen data; annual bar returns do not establish maker fill probability or realized savings |
+| Evidence boundary | The rest/cross policy requires measured fills in each realm. Recorded-book comparisons are seen data; annual bar returns do not establish maker fill probability or realized savings |
 
 ## Invariants
 
@@ -80,7 +82,7 @@ Compare execution costs for actual directional order intentions using recorded b
 - Must not interpret passive reductions as permission to delay protective exits or strategy deadlines.
 - Must not interpret queue scenarios as guaranteed bounds; aggregate displayed data cannot reconstruct exact venue queue position.
 - Must keep completed results attached to their code/config/input identities; partial or absent public tape stays unscored.
-- Must label development data as seen; only subsequent days after a committed rule can grade that rule, and correlated orders are not independent samples.
+- Must identify which data shaped the rule and which data evaluates it; reused observations and correlated orders do not become independent evidence.
 - Must not claim a selected execution policy or a strategy return from this diagnostic alone.
 
 ## Operational Recipes
@@ -95,8 +97,8 @@ scripts/ops.sh start execution-study.service
 scripts/ops.sh logs execution-study.service 40
 
 # Local tests on the pinned toolchain.
-rustup run 1.90.0 cargo test --manifest-path engine/Cargo.toml -p engine-tools execution_study
-rustup run 1.90.0 cargo test --manifest-path engine/Cargo.toml -p engine-venue fee_rate_tests
+PATH="$(rustup which --toolchain 1.90.0 cargo | xargs dirname):$PATH" cargo test --manifest-path engine/Cargo.toml -p engine-tools execution_study
+PATH="$(rustup which --toolchain 1.90.0 cargo | xargs dirname):$PATH" cargo test --manifest-path engine/Cargo.toml -p engine-venue fee_rate_tests
 
 # Offline: use a config with copied WAL/tape paths, a separate output directory,
 # and an explicit fee_snapshot_path in the schema above.
