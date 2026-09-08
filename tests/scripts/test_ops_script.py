@@ -202,6 +202,12 @@ def test_canary_order_keeps_the_arming_switch_and_refuses_the_funded_bybit_accou
     # keeps it, because a live-canary gateway refuses to build unarmed.
     canary_arm = payload.split("  canary-order)", 1)[1].split(";;", 1)[0]
     assert "grep -vx REAL_MONEY" in canary_arm
+    # The account lease is a kernel lock under the fleet lock root; the
+    # read-only modes leave the sandbox read-only, the canary opens that root.
+    assert "writable_paths=/run/lock/liquidity-migration" in canary_arm
+    assert '--property="ReadWritePaths=$writable_paths"' in payload
+    read_only_arms = payload.split("  attest-flat|verify-account-identity)", 1)[1].split(";;", 1)[0]
+    assert "writable_paths=" not in read_only_arms
     assert 'liquidity-migration-${mode}-${realm}-$$' in payload
 
     dry = _run(

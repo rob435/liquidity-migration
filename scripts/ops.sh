@@ -181,10 +181,14 @@ case "$realm" in
   *) echo "invalid engine-control realm: $realm" >&2; exit 2 ;;
 esac
 
+# The read-only modes write nothing, so the sandbox stays read-only. The canary
+# takes the account lease, a kernel lock on a file under the fleet lock root.
+writable_paths=""
 case "$mode" in
   attest-flat|verify-account-identity) ;;
   canary-order)
     unset_environment="$(printf "%s\n" $unset_environment | grep -vx REAL_MONEY | tr "\n" " ")"
+    writable_paths=/run/lock/liquidity-migration
     ;;
   *) echo "invalid engine-control mode: $mode" >&2; exit 2 ;;
 esac
@@ -212,6 +216,7 @@ exec systemd-run --quiet --wait --pipe --collect --service-type=exec \
     --property=NoNewPrivileges=true \
     --property=PrivateTmp=true \
     --property=ProtectSystem=strict \
+    --property="ReadWritePaths=$writable_paths" \
     --property=ProtectHome=true \
     --property=UMask=0027 \
     "$engine_binary" "$mode" ${engine_args[@]+"${engine_args[@]}"}
