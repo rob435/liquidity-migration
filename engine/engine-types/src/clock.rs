@@ -147,10 +147,19 @@ mod tests {
 
     #[test]
     fn wall_stamps_share_the_unix_epoch() {
+        let before_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         let ms = wall_ms().max(0) as u64;
+        std::thread::sleep(std::time::Duration::from_millis(3));
         let ns = wall_ns();
-        assert!(ns / 1_000_000 >= ms.saturating_sub(1));
-        assert!(ns / 1_000_000 <= ms.saturating_add(1));
+        let after_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!((before_ms..=after_ms).contains(&ms));
+        assert!((before_ms..=after_ms).contains(&(ns / 1_000_000)));
     }
 
     #[test]

@@ -10,6 +10,13 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-08 — Check clock units without assuming sub-millisecond scheduling.**
+  - The local push gate fails `wall_stamps_share_the_unix_epoch` at
+    `ns / 1_000_000 <= ms.saturating_add(1)`. A forced 3 ms scheduling gap
+    reproduces the failure. Bracket both readings with independent system
+    timestamps; the same gap passes while checking both epoch and units.
+    Runtime clock functions are unchanged.
+
 - **2026-09-08 — Measure one-sided execution against actual order intentions.**
   - Add the Rust `execution-study` command and a fifteen-minute mainnet timer:
     incremental CRC-checked WAL reads, account-specific fee observations,
