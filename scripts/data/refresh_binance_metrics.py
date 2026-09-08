@@ -33,6 +33,7 @@ import io
 import json
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -71,7 +72,7 @@ def fetch_one(job: tuple[str, str]) -> str:
         return "skip"
     url = (
         "https://data.binance.vision/data/futures/um/daily/metrics/"
-        f"{sym}/{sym}-metrics-{date}.zip"
+        f"{urllib.parse.quote(sym, safe='')}/{urllib.parse.quote(sym, safe='')}-metrics-{date}.zip"
     )
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:

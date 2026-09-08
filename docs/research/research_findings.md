@@ -11,9 +11,10 @@ Data tiers, roots, and PIT membership: [docs/data.md](../data.md).
 
 | Strategy / Hypothesis | Evaluation Window | Net Sharpe | Max Drawdown | Verdict | Summary & Core Physics |
 | :--- | :--- | :---: | :---: | :---: | :--- |
+| **[Annual LONG / CARRY rebuild](annual-execution-2026-09-08.md)** | 2025-09-08–2026-09-07 | **1.70 / −0.06** | **−7.58% / −30.57%** | **SEEN / DIAGNOSTIC** | LONG minute +83.86% at $100 / 6×, concentrated in August; CARRY daily +275.90% on 364 days versus hourly −9.11% on 365 at 14.36 bp per side. Disabling intraday funding exits in the same hourly model yields +148.69%; missing live pre-settlement observations prevent a live-exit verdict. |
 | **LONG (`long_native_v12`)** | 2021–2026 Bybit PIT | **1.47** | **-4.6%** | **PROMOTED** | Momentum breakouts on top turnover USDT perps; decaying ATR stop; 3d hold. |
-| **CARRY (`carry_hold_v7`)** | 2021–2026 Bybit PIT | **1.59** | **-17.0%** | **PROMOTED** | Sticky 48h hold on extreme negative funding crowd fees ($\le -10\text{ bp}$). |
-| **EXODUS (`exodus_short_v1`)** | Event-driven | - | - | **PROMOTED** | Pre-settlement short on distressed CARRY pairs ($S+5\text{m} \to S+60\text{m}$). |
+| **CARRY (`carry_hold_v7`)** | Daily cross-venue research panel, 2021–2026 | **1.59** | See annual comparison | **LIVE / SEEN RESEARCH** | Daily research holdings remain profitable after the July funding correction; the native hourly lifecycle produces a materially different curve. [Comparison](annual-execution-2026-09-08.md). |
+| **EXODUS (`exodus_short_v1`)** | CARRY pre-settlement event | - | - | **LIVE / TRIGGER EVIDENCE INCOMPLETE** | Short at the durable CARRY fire; cover at S+60m. S+5m is the entry cutoff. Historical proxy validation has 7 false fires out of 49; [evidence](annual-execution-2026-09-08.md). |
 | **MAKER (`quoter_v1`)** | 2-day live tape | Negative | - | **DISABLED** | Microstructural quoter; negative net of fees on seen tape. |
 | **Time-Series Trend (MOP)** | 10 liquid perps | 0.68 | -54.0% | **REJECTED** | 14d L/S fails significance bar ($t = 1.6$); long/flat lost money in 2022. |
 | **Cross-Sectional Momentum** | Alt perps 7–182d | 0.59 | -54.0% | **REJECTED** | Large-name direction agrees, but decays below $t \ge 2.5$ after costs. |

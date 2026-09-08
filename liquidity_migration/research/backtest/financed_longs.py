@@ -1395,6 +1395,7 @@ def research_equity_chart(
     window = scores.filter((pl.col("bar_ts_ms") >= start_ms) & (pl.col("bar_ts_ms") < end_ms)).sort("bar_ts_ms")
     if window.height < 2:
         raise FinancedLongsError(f"{config_id}: fewer than 2 scored days in [{start}, {end})")
+    window.write_csv(out / f"{config_id}_daily_scores.csv")
 
     returns = window["net_bp"].to_numpy() / 1e4
     equity_values = np.cumprod(1.0 + returns)
@@ -1455,6 +1456,13 @@ def research_equity_chart(
     )
     payload = {
         "run_label": run_label,
+        "scope": {
+            "start": start,
+            "end_exclusive": end,
+            "first_scored_day": days[0],
+            "last_scored_day": days[-1],
+            "scored_days": len(days),
+        },
         "summary": {
             "total_return": total,
             "max_drawdown": drawdown,

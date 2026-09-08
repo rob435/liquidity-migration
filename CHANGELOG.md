@@ -18,7 +18,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     and other sleeves' policies are unchanged. The exact native policy joins
     all eight latency/queue cells in the mainnet execution study.
   - Boot discards the working-order supervisor while the venue may still hold
-    its entries. At 09:45 UTC the new boot regression reproduces the missing
+    its entries. At 09:46 UTC the new boot regression reproduces the missing
     cancellation: `left: []`, `right: [(SymbolId(0), "eng-1700000000000-6")]`.
     Preserve the originating work policy in order snapshots, and cancel the
     confirmed worked remainder after boot through the existing paced path.
@@ -31,6 +31,33 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     multiplier again. The September 8 annual artifacts live at
     `~/SHARED_DATA/bybit_full_pit/reports/annual_20260908/`; these are seen-data
     reconstructions, not evidence that the new execution policy earns the return.
+  - The completed 365-day minute LONG rebuild returns +83.8648% after fees,
+    slippage and funding at the declared $100 / 6× scale; August contributes
+    most of the gain. CARRY's notional-normalized hourly reconstruction loses
+    9.1114% at 14.357519 bp per side and breaks even at 5.320282 bp. Missing
+    pre-settlement observations and unpriced target attempts remain explicit.
+    Daily CARRY score ledgers now retain gross, turnover and cost beside equity.
+    Full results and era/cost cells: [annual review](docs/research/annual-execution-2026-09-08.md).
+  - Deploy `441811eb` through [run `34213632476`](https://github.com/rob435/liquidity-migration/actions/runs/34213632476):
+    31 healthy demo observations over 300 s; `deploy-ok` at 10:23:36 UTC.
+    All loaded images match the verified release; nine positions per realm
+    have eighteen exact full-size native stops. Local/hosted Rust totals are
+    2,042/2,044; Python 1,719, with eight Rust ignores and one Python skip.
+  - Reconcile the owner's earlier profitable CARRY results: the July 28
+    double-funding correction predates the later positive runs. On refreshed
+    inputs the daily v7 comparator still returns +275.9041% at the same all-in
+    cost over 364 days. The hourly −9.1114% result changes the position path
+    and cannot establish that fees erased CARRY's edge. Disabling only the
+    hourly harness's intraday funding exits yields +148.6933% on all 365 days
+    at unchanged costs; missing live pre-settlement observations prevent a
+    live-exit recommendation. Retained EXODUS proxy
+    validation has seven false fires out of 49; no annual live-trigger return
+    is reconstructed from settled funding alone.
+  - Repeated Binance metrics downloads fail for five unicode symbols:
+    `UnicodeEncodeError: 'ascii' codec can't encode characters in position 35-37`.
+    Encode URL path components while preserving native symbols on disk. The
+    regression fails before the fix and passes afterward; retry retrieves 62
+    symbol-days, with 48 HTTP 404 absences and no remaining request failures.
 
 - **2026-09-08 — Check clock units without assuming sub-millisecond scheduling.**
   - The local push gate fails `wall_stamps_share_the_unix_epoch` at
