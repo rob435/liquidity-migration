@@ -1106,17 +1106,10 @@ ensure_native_strategy_state() {
         return 0
     fi
 
-    local deployed previous_config
-    deployed="$(cat "$DEPLOYED_COMMIT_FILE" 2>/dev/null || true)"
-    previous_config="$RELEASE_DIR/checkpoint-configs/$deployed/engine.$realm.toml"
-    if [ -n "$deployed" ] && [ -f "$previous_config" ]; then
-        run_engine_takeover_command "$realm" "$config" rebind-native-strategy-state \
-            --previous-config "$previous_config" --execute \
-            && run_engine_takeover_command "$realm" "$config" verify-native-strategy-state \
-            && return 0
-        fail "$realm native checkpoint configuration change is incompatible"
-    fi
-
+    # A realm with no state yet is initialized, whatever configs were retained
+    # for it: deploy renders and retains a funded realm's config on every armed
+    # run, including the runs where the realm stayed stopped, so a retained
+    # previous config does not mean the realm has ever run.
     for source in \
         "$long_state" "$carry_checkpoint" "$carry_book" "$exodus_identity" "$exodus_state"; do
         [ -e "$source" ] && required_present=$((required_present + 1))
@@ -1128,6 +1121,17 @@ ensure_native_strategy_state() {
             || fail "initialized $realm native strategy state failed verification"
         echo "native-state-ok realm=$realm result=initialized-empty"
         return 0
+    fi
+
+    local deployed previous_config
+    deployed="$(cat "$DEPLOYED_COMMIT_FILE" 2>/dev/null || true)"
+    previous_config="$RELEASE_DIR/checkpoint-configs/$deployed/engine.$realm.toml"
+    if [ -n "$deployed" ] && [ -f "$previous_config" ]; then
+        run_engine_takeover_command "$realm" "$config" rebind-native-strategy-state \
+            --previous-config "$previous_config" --execute \
+            && run_engine_takeover_command "$realm" "$config" verify-native-strategy-state \
+            && return 0
+        fail "$realm native checkpoint configuration change is incompatible"
     fi
     fail "$realm canonical native strategy state is unavailable; recover retained legacy snapshots with the compatible retained release before deployment"
 }

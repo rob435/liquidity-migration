@@ -707,6 +707,32 @@ def test_native_initialization_requires_empty_wal_and_no_legacy_sources(
 
 
 @pytest.mark.parametrize("realm", ["demo", "mainnet"])
+@pytest.mark.parametrize("wal_exists", [False, True])
+def test_a_realm_that_never_ran_is_initialized_even_when_a_previous_config_was_retained(
+    tmp_path: Path, realm: str, wal_exists: bool,
+) -> None:
+    # Deploy renders and retains a funded realm's config on every armed run,
+    # including the runs where the realm stayed stopped; the first handover
+    # then finds a retained previous config and an empty WAL. That is a first
+    # boot, not a configuration change to rebind.
+    wal, _ = _native_state_paths(tmp_path, realm)
+    if wal_exists:
+        wal.parent.mkdir(parents=True)
+        wal.touch()
+    (tmp_path / "deployed").write_text("a" * 40, encoding="utf-8")
+    previous = tmp_path / "release" / "checkpoint-configs" / ("a" * 40) / f"engine.{realm}.toml"
+    previous.parent.mkdir(parents=True)
+    previous.write_text("retained while the realm was stopped\n", encoding="utf-8")
+    result, calls = _ensure_native_state(tmp_path, realm, rebind_status=1)
+    assert result.returncode == 0, result.stderr
+    assert calls == [
+        f"{realm} {realm}.toml {command}" for command in
+        ("verify-native-strategy-state", "initialize-native-strategy-state", "verify-native-strategy-state")
+    ]
+    assert "result=initialized-empty" in result.stdout
+
+
+@pytest.mark.parametrize("realm", ["demo", "mainnet"])
 @pytest.mark.parametrize("existing", ["wal", "long", "carry-checkpoint", "carry-book", "exodus-identity", "exodus-state", "all-legacy"])
 def test_unverified_native_state_never_initializes_over_retained_state(
     tmp_path: Path, realm: str, existing: str,
@@ -1306,6 +1332,11 @@ def test_an_explicit_older_deploy_cannot_bypass_rollback_compatibility(tmp_path:
 def test_native_rebind_uses_retained_config_without_initializing_state(
     tmp_path: Path, realm: str, rebind_status: int,
 ) -> None:
+    # A realm that has run: its WAL holds state, and the retained previous
+    # config is what that state was written under.
+    wal, _ = _native_state_paths(tmp_path, realm)
+    wal.parent.mkdir(parents=True)
+    wal.write_bytes(b"canonical WAL")
     (tmp_path / "deployed").write_text("a" * 40)
     source = tmp_path / "release/checkpoint-configs" / ("a" * 40) / f"engine.{realm}.toml"
     source.parent.mkdir(parents=True)

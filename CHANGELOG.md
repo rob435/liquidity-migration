@@ -135,6 +135,23 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `engine run` takes the realm and `engine canary-order` refuses it. Deploy's
     readiness gate therefore starts the mexc units on the next deploy with the
     switch armed.
+  - First armed deploy after promotion,
+    [run `34274722547`](https://github.com/rob435/liquidity-migration/actions/runs/34274722547),
+    fails at 20:41:23 UTC after the demo and mainnet handovers: `deploy failed:
+    mexc native checkpoint configuration change is incompatible`, then
+    `rollback refused ... use a forward repair`. `ensure_native_strategy_state`
+    took the rebind branch because the 32f27d4b deploy had retained
+    `checkpoint-configs/32f27d4b/engine.mexc.toml` while the realm stayed
+    stopped, and `rebind-native-strategy-state` cannot run on an empty WAL
+    (`the nonempty WAL has no Names strategy table`). Demo and mainnet stay up on
+    the `21bd9227` bits with `deployed-commit` still `32f27d4b`; the mexc units
+    never started; the restored mexc watchdog pages `unit:` and `heartbeat:`
+    every 30 s from 20:42:35 until its timer is disabled by hand at 20:46 as a
+    holding action (the switch stays armed; the next handover re-enables the
+    timer). Fix: a realm with an empty WAL and no legacy sources is initialized
+    before any retained previous config is considered; the rebind test now
+    holds a WAL, and a new test pins the first boot of a realm whose config was
+    retained while it was stopped.
   - Evidence boundary: one order lifecycle (create, `New`, cancel,
     `Cancelled`) observed on the funded account; no fill, so `isTaker` on a
     deal push, the position-level stop body (`/stoporder/place`) and a
