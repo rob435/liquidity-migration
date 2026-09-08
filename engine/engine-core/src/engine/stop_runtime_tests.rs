@@ -1,6 +1,75 @@
 use super::*;
 
 #[tokio::test(start_paused = true)]
+async fn legacy_owned_stops_use_matching_venue_entry_without_inventing_cost_basis() {
+    for side in [Side::Buy, Side::Sell] {
+        let mut engine = crate::tests::shared_sleeves::exact_single_sleeve_engine("1", None).await;
+        let mut state = engine.books.attribution.snapshot();
+        let row = &mut state.positions[0];
+        row.entry_value = None;
+        row.signed_qty = if side == Side::Buy {
+            Exact::one()
+        } else {
+            -Exact::one()
+        };
+        row.stop_px = Some(Exact::from_u64(if side == Side::Buy { 80 } else { 120 }));
+        engine.books.attribution = crate::attribution::Attribution::restore(&state).unwrap();
+        let position = &mut engine.books.account.positions[0];
+        position.side = side;
+        position.leverage = Some(10.0);
+        let prior_records = engine.wal.snapshot_records().len();
+        engine.cap_owned_stop_distances().unwrap();
+        let capped = engine.books.attribution.snapshot();
+        assert_eq!(
+            capped.positions[0].stop_px,
+            Some(Exact::from_u64(if side == Side::Buy { 95 } else { 105 }))
+        );
+        assert_eq!(capped.positions[0].entry_value, None);
+        let mut replayed = crate::attribution::Attribution::restore(&state).unwrap();
+        let records = engine.wal.snapshot_records();
+        assert!(records[prior_records..]
+            .iter()
+            .any(|r| matches!(r, WalRecord::SleeveStopSet { .. })));
+        for record in &records[prior_records..] {
+            let record: WalRecord =
+                serde_json::from_slice(&serde_json::to_vec(record).unwrap()).unwrap();
+            replayed
+                .apply_record(&record, &Default::default(), &[])
+                .unwrap();
+        }
+        assert_eq!(replayed.snapshot(), capped);
+
+        engine.books.attribution = crate::attribution::Attribution::restore(&state).unwrap();
+        engine.books.account.positions[0].side = side.flipped();
+        engine.cap_owned_stop_distances().unwrap();
+        assert_eq!(engine.books.attribution.snapshot(), state);
+        engine.books.account.positions[0].side = side;
+
+        let mut shared = state.clone();
+        let mut other = shared.positions[0].clone();
+        other.strategy = StrategyId(1);
+        shared.positions.push(other);
+        engine.books.attribution = crate::attribution::Attribution::restore(&shared).unwrap();
+        engine.cap_owned_stop_distances().unwrap();
+        assert_eq!(engine.books.attribution.snapshot(), shared);
+
+        engine.books.attribution = crate::attribution::Attribution::restore(&state).unwrap();
+        engine.books.account.positions[0].qty = 2.0;
+        engine.books.account.positions[0]
+            .exact_amounts
+            .as_deref_mut()
+            .unwrap()
+            .quantity = engine_types::numeric::ExactNumber::venue_decimal("2").unwrap();
+        engine.cap_owned_stop_distances().unwrap();
+        assert_eq!(
+            engine.books.attribution.snapshot(),
+            state,
+            "foreign inventory must not supply a sleeve cost basis"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn held_lot_stops_tighten_to_leverage_and_liquidation_and_survive_replay() {
     use engine_types::numeric::ExactNumber;
     let mut engine = crate::tests::shared_sleeves::exact_single_sleeve_engine("1", None).await;

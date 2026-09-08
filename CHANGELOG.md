@@ -76,6 +76,12 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     protection. EXODUS/CARRY defaults move from 35% to 10%; LONG ATR requests
     are capped at admission. Closed 24-hour loss includes current account open
     losses. These change execution economics and require separate research.
+    The 14:34 UTC authenticated demo read exposes a retained LONG LTC lot with
+    no stored cost basis, leaving its stop at 47.11 against a 54.64 entry.
+    Held-stop capping now uses the exact venue entry when one sleeve owns the
+    entire matching physical position, without inventing accounting cost.
+    Long/short and serialized-WAL regressions reproduce the skipped cap;
+    foreign inventory, opposing sides and shared ownership cannot use this fallback.
   - The owner confirms no hand trading; mainnet keeps sole leverage authority.
     A proven own-lot reduction may
     pass the opening latch when it grows the physical net behind a hand trade;

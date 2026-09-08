@@ -549,12 +549,39 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             let Some(cap) = self.symbol_stop_distance_cap(row.symbol, None) else {
                 continue;
             };
-            let Some(cost) = row.entry_value else {
-                continue;
+            let entry = if let Some(cost) = row.entry_value {
+                cost.checked_div(&row.signed_qty.abs())
+                    .map_err(|e| EngineError::State(e.to_string()))?
+            } else {
+                // Legacy lots lack cost basis; use venue entry only for a fully owned position.
+                let Some(position) = venue.filter(|position| {
+                    self.books.attribution.sole_owner(row.symbol) == Some(row.strategy)
+                        && self
+                            .books
+                            .account
+                            .positions
+                            .iter()
+                            .filter(|p| p.symbol == row.symbol && p.qty > 0.0)
+                            .count()
+                            == 1
+                        && position.exact_amounts.is_some()
+                }) else {
+                    continue;
+                };
+                if position
+                    .quantity()
+                    .map_err(|e| EngineError::State(e.to_string()))?
+                    != row.signed_qty.abs()
+                {
+                    continue;
+                }
+                position
+                    .entry_price()
+                    .map_err(|e| EngineError::State(e.to_string()))?
             };
-            let entry = cost
-                .checked_div(&row.signed_qty.abs())
-                .map_err(|e| EngineError::State(e.to_string()))?;
+            if !entry.is_positive() {
+                continue;
+            }
             let fraction = engine_types::order_terms::strategy_decimal(cap)
                 .map_err(|e| EngineError::State(e.to_string()))?;
             let mut trigger = &entry
