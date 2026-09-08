@@ -541,13 +541,28 @@ impl VenueGateway for MexcGateway {
             .tradable(&name)?
             .venue_symbol
             .clone();
-        // The endpoint takes a list even for one order.
-        let body = json!([{ "symbol": venue_symbol, "externalOid": client_order_id }]);
+        // One order, as an object. The list form belongs to the batch
+        // endpoint `/order/cancel`, which takes venue ids; this one refuses a
+        // list with `600 Parameter error`.
+        let body = json!({ "symbol": venue_symbol, "externalOid": client_order_id });
         let reply = self
             .rest
             .post_signed(PATH_ORDER_CANCEL_EXTERNAL, &body)
             .await?;
-        venue_result(&reply)?;
+        let data = venue_result(&reply)?;
+        // The envelope says the request parsed; the order's own result is
+        // inside it, and a non-zero code there is the refusal.
+        let error_code = data.get("errorCode").and_then(Value::as_i64).unwrap_or(0);
+        if error_code != 0 {
+            return Err(VenueError::Rejected {
+                code: error_code,
+                message: data
+                    .get("errorMsg")
+                    .and_then(Value::as_str)
+                    .unwrap_or("(no errorMsg)")
+                    .to_string(),
+            });
+        }
         Ok(())
     }
 

@@ -60,6 +60,50 @@ async fn exact_contracts_and_prices_reach_wire_and_fractional_contracts_are_refu
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_cancel_names_one_order_as_an_object_and_reads_the_orders_own_result() {
+    // Observed live on 2026-09-08: `cancel_with_external` takes one object and
+    // answers `{"data":{"externalOid":..,"errorCode":0,"errorMsg":"success"}}`;
+    // a list body is refused with `600 Parameter error` and the order rests on.
+    let server = TestServer::start(|request, _| {
+        if request.path == "/api/v1/contract/detail" {
+            return (200, r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true}]}"#.into());
+        }
+        if request.path == "/api/v1/private/order/cancel_with_external" {
+            let body: serde_json::Value = serde_json::from_str(&request.body).unwrap_or_default();
+            let Some(object) = body.as_object() else {
+                return (200, r#"{"success":false,"code":600,"message":"Parameter error"}"#.into());
+            };
+            if object.get("externalOid").and_then(|v| v.as_str()) == Some("gone") {
+                return (200, r#"{"success":true,"code":0,"data":{"externalOid":"gone","errorCode":2005,"errorMsg":"order not exist"}}"#.into());
+            }
+            return (200, r#"{"success":true,"code":0,"data":{"externalOid":"lmcan-1","errorCode":0,"errorMsg":"success"}}"#.into());
+        }
+        (200, r#"{"success":true,"code":0,"data":"7"}"#.into())
+    })
+    .await;
+    let mut gw = MexcGateway::for_test(
+        &server.base_url(),
+        MexcRealm::Mainnet,
+        MexcRealm::Mainnet.credentials_for_test("key", "secret"),
+        vec!["BTCUSDT".into()],
+    );
+    gw.cancel_order(SymbolId(0), "lmcan-1").await.unwrap();
+    let sent = server.to_path("/api/v1/private/order/cancel_with_external");
+    assert_eq!(sent.len(), 1);
+    let body = sent[0].json();
+    assert!(body.is_object(), "cancel body was {body}");
+    assert_eq!(body["symbol"], "BTC_USDT");
+    assert_eq!(body["externalOid"], "lmcan-1");
+
+    // A success envelope around a per-order refusal is still a refusal.
+    let err = gw.cancel_order(SymbolId(0), "gone").await.unwrap_err();
+    assert!(
+        matches!(err, engine_types::VenueError::Rejected { code: 2005, .. }),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn independent_catalog_installs_contract_multipliers_before_a_mutation_without_another_read()
 {
     let server = TestServer::start(|request, _| if request.path == "/api/v1/contract/detail" {

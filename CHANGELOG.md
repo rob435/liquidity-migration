@@ -72,12 +72,24 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     no touch sizes and the canary demanded them. The plan now accepts zero
     sizes and refuses negative or non-finite ones; the engine's working
     supervisor already treated absent sizes as no lean.
-  - Evidence boundary: no order has been sent to MEXC. The canary
+    19:38:29 UTC, third attempt on `c2cd1c8a`: the quote is priced (`bid=78436.9
+    ask=78437 order_px=78044.7 qty=0.0001 stop=66338`), `create=accepted`
+    with `venue_order_id=852391264644057600`, and the private push reads
+    `New`; every cancel is then refused `venue rejected (600): Parameter
+    error` and the canary exits 1 at 19:39:41 with the bid resting. The adapter
+    sent `cancel_with_external` a JSON list of one object; the venue takes one
+    object. A hand-signed object cancel from the host at 19:40:38 UTC succeeds
+    (`errorCode 0`); the order reads `state 4`, `dealVol 0`, no position, no
+    open orders. The adapter now sends the object and treats a non-zero
+    `data.errorCode` inside a success envelope as the refusal; the fixture
+    refuses a list body the way the venue does.
+  - Evidence boundary: one order has been placed and cancelled on MEXC, the
+    cancel by hand. The canary
     (`scripts/ops.sh canary-order --environment mexc --symbol BTCUSDT
     --expected-user-id key-e3b03c8170d1fc6b --execute`) is the owner's step;
-    its receipt is what moves the realm to `live-proven`. The private-stream
-    login is observed live; `isTaker` on a fill and the position-level stop body
-    are documented, not yet observed.
+    its receipt is what moves the realm to `live-proven`. Login, order push and
+    `create` are observed live; `isTaker` on a fill and the position-level
+    stop body are documented, not yet observed.
 
 - **2026-09-08 — Incident `mainnet-014ec4a90a2fde5f`: a normal worker boot pages
   the funded realm. The boot repair gap now has its own bound.**
