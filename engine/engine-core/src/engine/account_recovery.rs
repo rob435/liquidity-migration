@@ -290,6 +290,21 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         foreign: Vec::new(),
                     }));
                 }
+                Some(Err(error)) if matches!(&error, VenueError::Transport(_)) => {
+                    self.private_stream_ready = false;
+                    self.recovery.history_requested = true;
+                    self.recovery.history_generation = None;
+                    tracing::warn!(%error, "execution history recovery retained for retry");
+                    // The account read cannot confirm drift against a history request that failed.
+                    self.publish_history(
+                        Query {
+                            history: None,
+                            ..query
+                        },
+                        result.account,
+                        None,
+                    )?;
+                }
                 Some(Err(error)) => {
                     self.may_open = false;
                     record_latch(
@@ -540,8 +555,87 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn failed_history_preserves_the_checkpoint_and_private_updates_until_retry() {
+    async fn transient_history_failure_retries_without_persisting_an_opening_latch() {
+        for account_drift in [false, true] {
+            let (mut engine, records) = crate::tests::callback_test_fixture(Vec::new()).await;
+            assert!(engine.may_open);
+            engine.recovery =
+                Recovery::new(Some(Box::new(SharedReadClient(Arc::new(ReadClient {
+                    delay_ms: AtomicU64::new(0),
+                    fail_history: true,
+                    started: Default::default(),
+                })))));
+            let before = engine.recovered_until_ms;
+            let prior_records = records.lock().unwrap().len();
+            engine.recovery.reconnected();
+            engine.launch_account_recovery(true);
+            let mut completion = engine.recovery.completed.recv().await.unwrap();
+            if account_drift {
+                let Completion::Read(result) = &mut completion else {
+                    unreachable!()
+                };
+                result
+                    .account
+                    .as_mut()
+                    .unwrap()
+                    .positions
+                    .push(engine_types::PositionView {
+                        exact_amounts: None,
+                        exact_stop_px: None,
+                        symbol: SymbolId(0),
+                        side: Side::Buy,
+                        qty: 1.0,
+                        entry_px: 100.0,
+                        stop_attached: true,
+                        stop_px: 90.0,
+                        leverage: Some(5.0),
+                    });
+            }
+            engine.on_recovery_completion(completion).await.unwrap();
+            let completion = engine.recovery.completed.recv().await.unwrap();
+            engine.on_recovery_completion(completion).await.unwrap();
+            assert!(
+                engine.may_open,
+                "a transient history timeout became a permanent latch"
+            );
+            assert!(!engine.private_stream_ready && engine.recovery.history_requested);
+            assert_eq!(engine.recovered_until_ms, before);
+            assert!(engine.recovery.retry_after_ns > clock::now_ns());
+            engine.launch_account_recovery(true);
+            assert!(matches!(engine.recovery.phase, Phase::Idle));
+            assert!(!records.lock().unwrap()[prior_records..]
+                .iter()
+                .any(|r| matches!(
+                    r,
+                    WalRecord::Reconciled {
+                        may_open: false,
+                        ..
+                    }
+                )));
+            engine.recovery.client = Some(Arc::new(SharedReadClient(Arc::new(ReadClient {
+                delay_ms: AtomicU64::new(0),
+                fail_history: false,
+                started: Default::default(),
+            }))));
+            engine.recovery.retry_after_ns = 0;
+            engine.renew_execution_history().await.unwrap();
+            assert!(engine.may_open && engine.private_stream_ready);
+            assert!(!engine.recovery.history_requested);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_history_preserves_a_prior_latch_and_private_updates_until_retry() {
         let (mut engine, records) = crate::tests::callback_test_fixture(Vec::new()).await;
+        engine.may_open = false;
+        engine
+            .wal
+            .append(&WalRecord::Reconciled {
+                wall_ts_ms: clock::wall_ms(),
+                findings: vec!["unexplained foreign exposure".into()],
+                may_open: false,
+            })
+            .unwrap();
         engine.recovery = Recovery::new(Some(Box::new(SharedReadClient(Arc::new(ReadClient {
             delay_ms: AtomicU64::new(0),
             fail_history: true,
@@ -594,6 +688,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_recovery_timeout_releases_the_read_owner_without_advancing_history() {
         let (mut engine, _) = crate::tests::callback_test_fixture(Vec::new()).await;
+        assert!(engine.may_open);
         let client = Arc::new(ReadClient {
             delay_ms: AtomicU64::new(20_000),
             fail_history: false,
@@ -622,6 +717,7 @@ mod tests {
         assert!(matches!(engine.recovery.phase, Phase::Idle));
         assert!(engine.recovery.history_requested);
         assert_eq!(engine.recovered_until_ms, before);
+        assert!(engine.may_open && !engine.private_stream_ready);
     }
 
     #[tokio::test(start_paused = true)]

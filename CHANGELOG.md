@@ -239,7 +239,14 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     wide stops, open-loss and margin admission, shared exits, symbol limits,
     routine drift, price collars, reject storms and serial reprices. The
     production venue wrapper also reproduces the serial reprice fallback before
-    its forwarding fix. EXODUS checkpoint bytes and quantities remain identical;
+    its forwarding fix. At 14:59:26.744 UTC the incumbent mainnet engine records
+    `execution history is unavailable during recovery: venue transport: request
+    did not complete within 10s` and permanently latches openings. Transport
+    failures now retain the history checkpoint, block entries until private
+    recovery completes and retry after the existing delay. Failed history reads
+    cannot confirm position drift; genuine prior reconciliation latches remain
+    closed. The timeout regression fails before the fix; eight recovery tests pass.
+    EXODUS checkpoint bytes and quantities remain identical;
     its tighter stop adds a restart restop effect. Local checks pass: 1,723 Python tests (one skip), 2,049 Rust
     tests (eight existing ignores), repository doctor, Ruff, ShellCheck, mypy,
     Rust 1.90 rustfmt and strict Clippy. Deployment remains pending.
