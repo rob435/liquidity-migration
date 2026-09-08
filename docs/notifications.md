@@ -22,7 +22,7 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | :--- | :--- | :--- |
 | Realm | Unit state | Expected manifest unit is not active |
 | Realm | Heartbeat | Engine or signal-worker artifact exceeds 60 s, is not a JSON object, or omits its producer-specific health verdict |
-| Realm | Signal worker | `starting` is allowed for at most 120 min during cold fill; `recovering` is allowed for at most 2 min for a live gap, repair, or coverage miss. Both require a connected, fresh stream with every topic accepted and none refused. Disconnected, stale, mismatched, or quarantined transport is immediately `degraded`; `degraded`, `stopped`, an unknown verdict, or spool backpressure is `CRITICAL` |
+| Realm | Signal worker | `starting` is allowed for at most 120 min during cold fill; `recovering` is allowed for at most 2 min for a live gap, repair, or coverage miss, and for at most 10 min for the boot repair — the first repair of a process that has never been `ready`, with coverage already full. All require a connected, fresh stream with every topic accepted and none refused. Disconnected, stale, mismatched, or quarantined transport is immediately `degraded`; `degraded`, `stopped`, an unknown verdict, or spool backpressure is `CRITICAL` |
 | Realm | Admission | Engine reports `may_open != true` |
 | Realm | Circuit breaker | Engine reports `rolling_loss_tripped=true` |
 | Realm | Strategy errors | A nonempty engine `strategy_errors` list is `CRITICAL`, including when `may_open=true`; one reference per realm includes the sleeve details and engine journal |
