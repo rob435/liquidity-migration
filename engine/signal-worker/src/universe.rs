@@ -21,7 +21,7 @@ pub const CRYPTO_SYMBOL_TYPES: [&str; 2] = ["", "innovation"];
 
 /// Venues whose listing a universe may be bounded by. Each name is one the
 /// worker knows how to ask.
-pub const LISTING_VENUES: [&str; 1] = ["hyperliquid"];
+pub const LISTING_VENUES: [&str; 2] = ["hyperliquid", "mexc"];
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]

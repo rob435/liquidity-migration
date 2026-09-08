@@ -264,6 +264,7 @@ dial written in either is read by nothing.
 | Rendered config | `/etc/liquidity-migration/engine-mexc.toml`, rendered by deploy |
 | Sleeves | LONG entries on; CARRY and EXODUS entries rendered off. CARRY scores Bybit funding, MEXC funding differs per symbol. No maker, no probe |
 | Public data | Bybit mainnet, exactly as the other realms (`configs/signal-worker.mexc.json`, `public_market_realm` `mainnet`) |
+| Symbols the venue does not list | Dropped before ranking: `universe.listed_on` is `mexc`, so the worker reads `GET /api/v1/contract/detail` on `live.instrument_cadence_ms` and keeps the USDT-settled, API-tradable contracts in the engine's spelling (`BTC_USDT` is `BTCUSDT`; Bybit's `1000PEPEUSDT` is not MEXC's `PEPEUSDT`). A name that still reaches the engine waits at admission and is said once |
 | Source readiness | `mexc_mainnet` is `live-proven` (canary lifecycle 2026-09-08 20:16 UTC): `engine run` takes the realm, `engine canary-order` refuses it. `engine venues` prints the current value |
 
 **Must** obtain `EXPECTED_ENGINE_ACCOUNT_USER_ID` from an authenticated venue

@@ -39,21 +39,14 @@
   },
   "universe": {
     "exclude_symbols": [
-      "1000PEPEUSDT",
-      "ARCUSDT",
       "BUSDUSDT",
       "DAIUSDT",
       "FDUSDUSDT",
-      "FILUSDT",
       "FRAXUSDT",
       "GUSDUSDT",
       "LUSDUSDT",
-      "MONUSDT",
       "PYUSDUSDT",
-      "RAYDIUMUSDT",
-      "SHIB1000USDT",
       "SUSDUSDT",
-      "TRUMPUSDT",
       "TUSDUSDT",
       "USD1USDT",
       "USDCUSDT",
@@ -63,6 +56,7 @@
       "USDYUSDT",
       "USTCUSDT"
     ],
+    "listed_on": "mexc",
     "long": {
       "min_turnover_24h_usdt": 2000000.0,
       "min_listing_age_days": 30,

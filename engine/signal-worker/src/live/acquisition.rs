@@ -25,12 +25,14 @@ pub(super) fn spawn_instrument_lane(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ListingVenue {
     Hyperliquid,
+    Mexc,
 }
 
 impl ListingVenue {
     pub(super) fn parse(value: &str) -> Result<Self, WorkerError> {
         match value {
             "hyperliquid" => Ok(Self::Hyperliquid),
+            "mexc" => Ok(Self::Mexc),
             other => Err(WorkerError::config(format!(
                 "universe listed_on {other:?} names no venue this worker can ask"
             ))),
@@ -42,6 +44,9 @@ impl ListingVenue {
     fn host(self) -> &'static str {
         match self {
             Self::Hyperliquid => engine_public::HyperliquidRealm::Mainnet
+                .rest_base()
+                .trim_start_matches("https://"),
+            Self::Mexc => engine_public::MexcRealm::Mainnet
                 .rest_base()
                 .trim_start_matches("https://"),
         }
@@ -90,8 +95,58 @@ impl ListingSource {
                     .await?;
                 hyperliquid_listed_symbols(&payload)
             }
+            ListingVenue::Mexc => {
+                let (payload, _) = self.client.get("/api/v1/contract/detail", "").await?;
+                mexc_listed_symbols(&payload)
+            }
         }
     }
+}
+
+/// Every USDT-settled perpetual MEXC takes API orders on, in the engine's
+/// spelling: the venue says `BTC_USDT`, the engine says `BTCUSDT`, the same
+/// rule as `engine-public/src/venues/mexc/contracts.rs`. A row the engine's
+/// own table reader would drop (inverse, not API-tradable, not in the normal
+/// state) is not listed here either, so the two agree on the name set.
+pub(super) fn mexc_listed_symbols(payload: &Value) -> Result<BTreeSet<String>, WorkerError> {
+    let rows = payload
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| WorkerError::network("MEXC contract detail lacks data"))?;
+    let mut listed = BTreeSet::new();
+    for row in rows {
+        let text = |key: &str| {
+            row.get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        };
+        let (Some(base), Some(quote), Some(settle)) =
+            (text("baseCoin"), text("quoteCoin"), text("settleCoin"))
+        else {
+            continue;
+        };
+        if quote != "USDT" || settle != quote {
+            continue;
+        }
+        if !row
+            .get("apiAllowed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if row.get("state").and_then(Value::as_i64).unwrap_or(-1) != 0 {
+            continue;
+        }
+        listed.insert(format!("{}{}", base, quote).to_ascii_uppercase());
+    }
+    if listed.is_empty() {
+        return Err(WorkerError::network(
+            "MEXC contract detail listed no tradable USDT perpetual",
+        ));
+    }
+    Ok(listed)
 }
 
 /// Every perpetual Hyperliquid lists, in the engine's spelling. The venue says

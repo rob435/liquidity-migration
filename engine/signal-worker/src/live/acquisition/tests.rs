@@ -255,6 +255,53 @@ fn the_hyperliquid_meta_reply_becomes_engine_symbols() {
     );
 }
 
+#[test]
+fn the_mexc_contract_table_becomes_engine_symbols() {
+    // Real shapes from the live table: a linear USDT perpetual, an inverse
+    // contract (settled in the coin), one the venue will not take API orders
+    // on, one not in the normal state, and one the engine spells without the
+    // venue's underscore.
+    let detail = serde_json::json!({"success": true, "code": 0, "data": [
+        {"symbol": "BTC_USDT", "baseCoin": "BTC", "quoteCoin": "USDT", "settleCoin": "USDT", "apiAllowed": true, "state": 0},
+        {"symbol": "BTC_USD", "baseCoin": "BTC", "quoteCoin": "USD", "settleCoin": "BTC", "apiAllowed": true, "state": 0},
+        {"symbol": "BULLCOIN_USDT", "baseCoin": "BULLCOIN", "quoteCoin": "USDT", "settleCoin": "USDT", "apiAllowed": false, "state": 0},
+        {"symbol": "PAUSED_USDT", "baseCoin": "PAUSED", "quoteCoin": "USDT", "settleCoin": "USDT", "apiAllowed": true, "state": 3},
+        {"symbol": "PEPE_USDT", "baseCoin": "PEPE", "quoteCoin": "USDT", "settleCoin": "USDT", "apiAllowed": true, "state": 0}
+    ]});
+    let listed = mexc_listed_symbols(&detail).unwrap();
+    assert_eq!(
+        listed,
+        BTreeSet::from(["BTCUSDT".to_owned(), "PEPEUSDT".to_owned()])
+    );
+    // Bybit's 1000PEPEUSDT is a different contract and is not in this set.
+    assert!(!listed.contains("1000PEPEUSDT"));
+    assert!(mexc_listed_symbols(&serde_json::json!({})).is_err());
+    assert!(mexc_listed_symbols(&serde_json::json!({"data": []})).is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_mexc_listing_is_one_public_get() {
+    let _io = crate::test_io::IoProgress::new();
+    let (client, mut requests, server) = http_source(|path| match path {
+        p if p.starts_with("/api/v1/contract/detail") => serde_json::json!({"success": true, "code": 0, "data": [
+            {"symbol": "BTC_USDT", "baseCoin": "BTC", "quoteCoin": "USDT", "settleCoin": "USDT", "apiAllowed": true, "state": 0}
+        ]}),
+        _ => serde_json::json!({"retCode": 0, "result": {"list": []}}),
+    })
+    .await;
+    let source = ListingSource {
+        venue: ListingVenue::Mexc,
+        client,
+    };
+    assert_eq!(
+        source.fetch().await.unwrap(),
+        BTreeSet::from(["BTCUSDT".to_owned()])
+    );
+    let asked = requests.recv().await.unwrap();
+    assert!(asked.starts_with("/api/v1/contract/detail"), "{asked}");
+    server.abort();
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_listing_is_one_meta_post_and_an_empty_reply_is_retryable() {
     let _io = crate::test_io::IoProgress::new();

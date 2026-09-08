@@ -234,14 +234,17 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     venue's USDT futures wallet reads `equity 0` at 22:40 UTC against 52.62
     USDT at 17:05, with nothing traded from here, so entries cannot size until
     it is funded.
-  - Not fixed, proposed: the durable form of that interim is a venue-listing
-    filter in the mexc signal worker's universe (read MEXC's public contract
-    table, keep the Bybit names it lists), so a future entrant MEXC does not
-    list never reaches the engine; until then such an entrant stalls the LONG
-    source on MEXC until it is excluded. Also: Bybit's `10006` rate limit
-    reaches the same history-recovery latch; boot still exits on a transport
-    failure of the first history read; `LookupClient::lookup` fetches the whole
-    contract table per order lookup.
+  - Durable form of the interim. The worker's `universe.listed_on` filter
+    (`d00e82b2`, written for Hyperliquid) now accepts `mexc`: the mexc worker
+    reads `GET /api/v1/contract/detail` on its instrument cadence and keeps
+    the USDT-settled, API-tradable contracts in the engine's spelling, so a
+    universe entrant MEXC does not list never reaches the engine. The seven
+    static exclusions come out of `configs/signal-worker.mexc.json`. Takes
+    effect on the next deploy.
+  - Not fixed, proposed: Bybit's `10006` rate limit reaches the same
+    history-recovery latch; boot still exits on a transport failure of the
+    first history read; `LookupClient::lookup` fetches the whole contract table
+    per order lookup.
   - Host action. The mexc units stay stopped and their timer disabled from the
     21:10:40 holding action; this commit changes that state not at all. No
     deploy is dispatched from the on-call routine: starting the funded MEXC

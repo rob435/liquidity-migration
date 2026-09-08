@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 bytes = { workspace = true }
 engine-types = { workspace = true }
-engine-public = { workspace = true, features = ["bybit", "hyperliquid"] }
+engine-public = { workspace = true, features = ["bybit", "hyperliquid", "mexc"] }
 engine-strategies = { workspace = true }
 futures-util = { workspace = true }
 getrandom = { workspace = true }
