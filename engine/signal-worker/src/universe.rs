@@ -19,9 +19,19 @@ use crate::DAY_MS;
 /// zone; every other `symbolType` is outside the strategy domain.
 pub const CRYPTO_SYMBOL_TYPES: [&str; 2] = ["", "innovation"];
 
+/// Venues whose listing a universe may be bounded by. Each name is one the
+/// worker knows how to ask.
+pub const LISTING_VENUES: [&str; 1] = ["hyperliquid"];
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct UniverseRules {
+    /// The venue the realm's engine trades, when it is not the venue the
+    /// instruments and tickers are read from. Names it does not list are
+    /// dropped before ranking, so a batch never asks the engine for a symbol
+    /// its venue cannot admit. Absent leaves the source venue's domain whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listed_on: Option<String>,
     pub exclude_symbols: Vec<String>,
     pub long: SleeveUniverseRule,
     pub carry: SleeveUniverseRule,
@@ -43,6 +53,13 @@ pub struct SleeveUniverseRule {
 
 impl UniverseRules {
     pub fn validate(&self) -> Result<(), WorkerError> {
+        if let Some(venue) = &self.listed_on {
+            if !LISTING_VENUES.contains(&venue.as_str()) {
+                return Err(WorkerError::config(format!(
+                    "universe listed_on must be one of {LISTING_VENUES:?}, got {venue:?}"
+                )));
+            }
+        }
         let excluded: BTreeSet<&str> = self.exclude_symbols.iter().map(String::as_str).collect();
         if excluded.len() != self.exclude_symbols.len()
             || self
@@ -78,6 +95,9 @@ pub struct UniverseInputs<'a> {
     pub available_at_ms: i64,
     pub instruments: &'a [InstrumentObservation],
     pub tickers: &'a [TickerObservation],
+    /// What the `listed_on` venue lists, in the engine's spelling. Required
+    /// whenever the rule names a venue, ignored when it does not.
+    pub listing: Option<&'a BTreeSet<String>>,
     /// The universe in force before this refresh, for the leave-rank
     /// hysteresis. `None` on a cold start.
     pub previous: Option<&'a UniverseIdentity>,
@@ -113,7 +133,11 @@ pub fn same_membership(left: &UniverseIdentity, right: &UniverseIdentity) -> boo
         && left.carry_symbols == right.carry_symbols
 }
 
-fn in_crypto_perpetual_domain(row: &InstrumentObservation, excluded: &BTreeSet<&str>) -> bool {
+fn in_crypto_perpetual_domain(
+    row: &InstrumentObservation,
+    excluded: &BTreeSet<&str>,
+    listing: Option<&BTreeSet<String>>,
+) -> bool {
     let symbol_type = row
         .symbol_type
         .as_deref()
@@ -126,6 +150,7 @@ fn in_crypto_perpetual_domain(row: &InstrumentObservation, excluded: &BTreeSet<&
         && row.delivery_time_ms.is_none_or(|clock| clock <= 0)
         && CRYPTO_SYMBOL_TYPES.contains(&symbol_type.as_str())
         && !excluded.contains(row.symbol.as_str())
+        && listing.is_none_or(|listed| listed.contains(&row.symbol))
 }
 
 fn eligible(
@@ -169,11 +194,20 @@ pub fn derive_universe(
     if !is_realm(inputs.environment) || inputs.endpoint.trim().is_empty() {
         return Err(WorkerError::input("universe realm or endpoint is invalid"));
     }
+    let listing = match (rules.listed_on.as_deref(), inputs.listing) {
+        (Some(venue), None) => {
+            return Err(WorkerError::input(format!(
+                "universe refresh has no {venue} listing to bound the domain"
+            )))
+        }
+        (Some(_), listed) => listed,
+        (None, _) => None,
+    };
     let excluded: BTreeSet<&str> = rules.exclude_symbols.iter().map(String::as_str).collect();
     let domain: BTreeMap<&str, &InstrumentObservation> = inputs
         .instruments
         .iter()
-        .filter(|row| in_crypto_perpetual_domain(row, &excluded))
+        .filter(|row| in_crypto_perpetual_domain(row, &excluded, listing))
         .map(|row| (row.symbol.as_str(), row))
         .collect();
     let mut turnover: BTreeMap<&str, f64> = BTreeMap::new();
@@ -282,6 +316,7 @@ mod tests {
 
     fn rules() -> UniverseRules {
         UniverseRules {
+            listed_on: None,
             exclude_symbols: vec!["USDCUSDT".into()],
             long: SleeveUniverseRule {
                 min_turnover_24h_usdt: 2_000_000.0,
@@ -351,8 +386,18 @@ mod tests {
         tickers: &[TickerObservation],
         previous: Option<&UniverseIdentity>,
     ) -> Result<UniverseIdentity, WorkerError> {
+        derive_with(&rules(), instruments, tickers, None, previous)
+    }
+
+    fn derive_with(
+        rules: &UniverseRules,
+        instruments: &[InstrumentObservation],
+        tickers: &[TickerObservation],
+        listing: Option<&BTreeSet<String>>,
+        previous: Option<&UniverseIdentity>,
+    ) -> Result<UniverseIdentity, WorkerError> {
         derive_universe(
-            &rules(),
+            rules,
             UniverseInputs {
                 environment: "demo",
                 endpoint: "api-demo.bybit.com",
@@ -360,9 +405,14 @@ mod tests {
                 available_at_ms: 1000 * DAY_MS + 5,
                 instruments,
                 tickers,
+                listing,
                 previous,
             },
         )
+    }
+
+    fn listed(symbols: [&str; 3]) -> BTreeSet<String> {
+        symbols.into_iter().map(str::to_owned).collect()
     }
 
     #[test]
@@ -528,5 +578,78 @@ mod tests {
         dirty.exclude_symbols = vec!["usdc".into()];
         assert!(dirty.validate().is_err());
         assert!(rules().validate().is_ok());
+    }
+
+    #[test]
+    fn rules_refuse_a_listing_venue_the_worker_cannot_ask() {
+        let mut unknown = rules();
+        unknown.listed_on = Some("bybit".into());
+        let error = unknown.validate().unwrap_err().to_string();
+        assert!(error.contains("listed_on"), "{error}");
+        for venue in LISTING_VENUES {
+            let mut known = rules();
+            known.listed_on = Some(venue.to_owned());
+            known.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn an_unlisted_name_leaves_the_domain_and_the_ranks_close_over_it() {
+        let instruments = vec![
+            instrument("AAAUSDT", 400),
+            instrument("BBBUSDT", 400),
+            instrument("CCCUSDT", 400),
+            instrument("DDDUSDT", 400),
+        ];
+        let tickers = vec![
+            ticker("AAAUSDT", 9e6),
+            ticker("BBBUSDT", 8e6),
+            ticker("CCCUSDT", 7e6),
+            ticker("DDDUSDT", 6e6),
+        ];
+        let mut filtered = rules();
+        filtered.listed_on = Some("hyperliquid".into());
+        let listing = listed(["AAAUSDT", "CCCUSDT", "DDDUSDT"]);
+        let universe =
+            derive_with(&filtered, &instruments, &tickers, Some(&listing), None).unwrap();
+        // BBB is not listed, so it is out of the domain before ranking: CCC
+        // takes rank 2 and enters LONG, which it could not do among all four.
+        assert_eq!(universe.symbols, ["AAAUSDT", "CCCUSDT", "DDDUSDT"]);
+        assert_eq!(universe.long_symbols, ["AAAUSDT", "CCCUSDT"]);
+        // The same listing without the rule changes nothing.
+        let unfiltered =
+            derive_with(&rules(), &instruments, &tickers, Some(&listing), None).unwrap();
+        assert_eq!(
+            unfiltered.symbols,
+            ["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT"]
+        );
+        assert_eq!(unfiltered.long_symbols, ["AAAUSDT", "BBBUSDT"]);
+    }
+
+    #[test]
+    fn a_rule_that_names_a_venue_refuses_to_derive_without_its_listing() {
+        let instruments = vec![instrument("AAAUSDT", 400), instrument("BBBUSDT", 400)];
+        let tickers = vec![ticker("AAAUSDT", 9e6), ticker("BBBUSDT", 8e6)];
+        let mut filtered = rules();
+        filtered.listed_on = Some("hyperliquid".into());
+        let error = derive_with(&filtered, &instruments, &tickers, None, None).unwrap_err();
+        assert!(
+            error.is_lane_local_source_failure(),
+            "a missing listing must be retried, not fatal: {error}"
+        );
+        assert!(error.to_string().contains("hyperliquid listing"), "{error}");
+    }
+
+    #[test]
+    fn the_listing_venue_is_part_of_the_identity() {
+        let instruments = vec![instrument("AAAUSDT", 400), instrument("BBBUSDT", 400)];
+        let tickers = vec![ticker("AAAUSDT", 9e6), ticker("BBBUSDT", 8e6)];
+        let listing = listed(["AAAUSDT", "BBBUSDT", "CCCUSDT"]);
+        let mut filtered = rules();
+        filtered.listed_on = Some("hyperliquid".into());
+        let with = derive_with(&filtered, &instruments, &tickers, Some(&listing), None).unwrap();
+        let without = derive_with(&rules(), &instruments, &tickers, Some(&listing), None).unwrap();
+        assert!(same_membership(&with, &without));
+        assert_ne!(with.artifact_sha256, without.artifact_sha256);
     }
 }

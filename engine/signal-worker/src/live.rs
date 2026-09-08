@@ -140,6 +140,12 @@ pub struct LiveRunner {
     /// venue.
     bybit_instruments: PublicHttpClient,
     binance: PublicHttpClient,
+    /// Present exactly when `universe.listed_on` names a venue.
+    listing_source: Option<ListingSource>,
+    /// The last listing that arrived. It stands through a failed fetch, and
+    /// until the first one arrives the universe cannot be derived at all.
+    last_listing: Option<BTreeSet<String>>,
+    listing_missing_reported: bool,
     heartbeat_path: PathBuf,
     last_gate_decision_ts_ms: Option<i64>,
     last_gate_candidates: usize,
@@ -211,6 +217,9 @@ struct FetchedInstruments {
 struct FetchedUniverseInputs {
     instruments: FetchedInstruments,
     tickers: FetchedTickers,
+    /// `None` when no rule names a listing venue; `Err` when that venue's
+    /// listing fetch failed and the last good listing has to stand.
+    listing: Option<Result<BTreeSet<String>, WorkerError>>,
 }
 
 /// One read of the LLM gate's candidates file.
@@ -258,6 +267,26 @@ struct FetchedFunding {
 type FundingJob = (String, i64, i64, bool);
 type KlineJob = (String, i64, i64);
 type WhaleJob = (String, i64, i64);
+
+fn open_listing_source(
+    config: &SignalWorkerConfig,
+    request_budget: Arc<Semaphore>,
+) -> Result<Option<ListingSource>, WorkerError> {
+    config
+        .universe
+        .listed_on
+        .as_deref()
+        .map(|venue| {
+            ListingSource::new(
+                ListingVenue::parse(venue)?,
+                config.live.request_timeout_ms,
+                config.live.request_retries,
+                config.live.retry_base_ms,
+                request_budget,
+            )
+        })
+        .transpose()
+}
 
 fn lane_source_failure(label: &str, error: WorkerError) -> Result<(), WorkerError> {
     if !error.is_lane_local_source_failure() {
@@ -505,6 +534,7 @@ impl LiveRunner {
             config.live.retry_base_ms,
             Arc::clone(&request_budget),
         )?;
+        let listing_source = open_listing_source(&config, Arc::clone(&request_budget))?;
         let binance = PublicHttpClient::new(
             &config.sources.binance_host,
             config.live.request_timeout_ms,
@@ -519,6 +549,9 @@ impl LiveRunner {
             bybit,
             bybit_instruments,
             binance,
+            listing_source,
+            last_listing: None,
+            listing_missing_reported: false,
             heartbeat_path: options.heartbeat,
             last_gate_decision_ts_ms: None,
             last_gate_candidates: 0,
@@ -564,6 +597,7 @@ impl LiveRunner {
             config.live.retry_base_ms,
             Arc::clone(&request_budget),
         )?;
+        let listing_source = open_listing_source(&config, Arc::clone(&request_budget))?;
         let binance = PublicHttpClient::new(
             &config.sources.binance_host,
             config.live.request_timeout_ms,
@@ -584,6 +618,9 @@ impl LiveRunner {
             bybit,
             bybit_instruments,
             binance,
+            listing_source,
+            last_listing: None,
+            listing_missing_reported: false,
             heartbeat_path: options.heartbeat,
             last_gate_decision_ts_ms: None,
             last_gate_candidates: 0,
@@ -754,6 +791,7 @@ impl LiveRunner {
             lane_tx.clone(),
             self.bybit_instruments.clone(),
             self.bybit.clone(),
+            self.listing_source.clone(),
             self.config.sources.bybit_category.clone(),
             self.config.live.instrument_max_pages,
         );
@@ -1320,6 +1358,7 @@ impl LiveRunner {
             lane_tx.clone(),
             self.bybit_instruments.clone(),
             self.bybit.clone(),
+            self.listing_source.clone(),
             self.config.sources.bybit_category.clone(),
             self.config.live.instrument_max_pages,
         );
@@ -1475,12 +1514,40 @@ impl LiveRunner {
         let fetched = fetch_universe_inputs(
             self.bybit_instruments.clone(),
             self.bybit.clone(),
+            self.listing_source.clone(),
             self.config.sources.bybit_category.clone(),
             self.config.live.instrument_max_pages,
         )
         .await?;
         self.commit_universe_inputs(fetched)?;
         self.validate_candidate_instruments()
+    }
+
+    /// Install a fresh listing, or keep the last good one when the fetch
+    /// failed. Said once each way: a lane that logged every cadence would say
+    /// the same thing every hour for as long as the venue is down.
+    fn absorb_listing(&mut self, listing: Option<Result<BTreeSet<String>, WorkerError>>) {
+        match listing {
+            Some(Ok(listed)) => {
+                if self.listing_missing_reported {
+                    eprintln!(
+                        "signal-worker: venue listing back with {} symbols",
+                        listed.len()
+                    );
+                    self.listing_missing_reported = false;
+                }
+                self.last_listing = Some(listed);
+            }
+            Some(Err(error)) => {
+                if !self.listing_missing_reported {
+                    eprintln!(
+                        "signal-worker: venue listing fetch failed, keeping the last one: {error}"
+                    );
+                    self.listing_missing_reported = true;
+                }
+            }
+            None => {}
+        }
     }
 
     /// Derive the universe from a fresh venue page pair, install it when its
@@ -1491,6 +1558,7 @@ impl LiveRunner {
         &mut self,
         fetched: FetchedUniverseInputs,
     ) -> Result<(), WorkerError> {
+        self.absorb_listing(fetched.listing);
         validate_instrument_source_against_state(
             self.durable.worker().state(),
             &fetched.instruments,
@@ -1534,6 +1602,7 @@ impl LiveRunner {
                     .max(fetched.tickers.available_at_ms),
                 instruments: &instruments,
                 tickers: &tickers,
+                listing: self.last_listing.as_ref(),
                 previous: current_resolved.then_some(&previous),
             },
         )?;

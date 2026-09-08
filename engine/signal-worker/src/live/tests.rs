@@ -25,7 +25,7 @@ use crate::worker::{SignalWorker, WorkerError};
 use crate::SCHEMA_VERSION;
 use crate::{DAY_MS, HOUR_MS};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -804,6 +804,113 @@ async fn whale_fetch_waits_for_commit_ack_before_retaining_the_next_result() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_realm_that_names_a_listing_venue_holds_until_the_listing_arrives() {
+    let root = temporary_root("listing-filter");
+    let _ = std::fs::remove_dir_all(&root);
+    let config = checked_hyperliquid_config();
+    let options = LiveRunOptions {
+        state_dir: root.join("state"),
+        spool_dir: root.join("spool"),
+        heartbeat: root.join("heartbeat.json"),
+    };
+    let universe = crate::universe::unresolved_universe(
+        &config.live.environment,
+        crate::worker::realm_endpoint(&config),
+    );
+    let mut runner = LiveRunner::new_with_universe(config, universe, options).unwrap();
+    assert_eq!(
+        runner.listing_source.as_ref().map(|source| source.venue()),
+        Some(super::ListingVenue::Hyperliquid)
+    );
+    let mut stream = BybitPublicStream::inert_for_test(vec!["BTCUSDT".into()]).unwrap();
+    let mut pending = BTreeMap::new();
+    let (lane_tx, _lane_rx) = tokio::sync::mpsc::channel(1);
+    let available_at_ms = 100 * DAY_MS;
+    let fetched = |listing| {
+        FetchedUniverseInputs {
+            instruments: FetchedInstruments {
+                observed_ts_ms: available_at_ms,
+                available_at_ms,
+                rows: vec![
+                    instrument_wire("BTCUSDT", "Trading", DAY_MS, Some(0)),
+                    instrument_wire("NOTONHLUSDT", "Trading", DAY_MS, Some(0)),
+                ],
+            },
+            tickers: FetchedTickers {
+                request_started_at_ms: available_at_ms,
+                observed_ts_ms: available_at_ms,
+                available_at_ms,
+                // NOTONHL outranks BTC on turnover, so a rank taken over the
+                // whole Bybit domain would put it in both sleeves.
+                rows: vec![
+                    turnover_ticker("BTCUSDT", "9000000"),
+                    turnover_ticker("NOTONHLUSDT", "90000000"),
+                ],
+            },
+            listing,
+        }
+    };
+    let mut deliver =
+        |runner: &mut LiveRunner,
+         lanes: &mut LaneState,
+         listing: Option<Result<BTreeSet<String>, WorkerError>>| {
+            runner.handle_lane_completion(
+                LaneCompletion::Instruments(Ok(fetched(listing))),
+                LaneContext {
+                    stream: &mut stream,
+                    pending: &mut pending,
+                    lane_tx: &lane_tx,
+                    lanes,
+                },
+            )
+        };
+    let mut lanes = LaneState {
+        instruments: true,
+        funding: true,
+        repair: true,
+        ..LaneState::default()
+    };
+
+    deliver(
+        &mut runner,
+        &mut lanes,
+        Some(Err(WorkerError::network("hyperliquid is unreachable"))),
+    )
+    .expect("a listing the venue would not give is retried, not fatal");
+    assert!(!lanes.instruments, "the instrument cadence can retry");
+    assert!(runner.listing_missing_reported);
+    assert!(!crate::universe::universe_is_resolved(
+        &runner.durable.worker().state().universe
+    ));
+
+    deliver(
+        &mut runner,
+        &mut lanes,
+        Some(Ok(BTreeSet::from(["BTCUSDT".to_owned()]))),
+    )
+    .expect("the listing resolves the universe");
+    assert!(!runner.listing_missing_reported);
+    let resolved = &runner.durable.worker().state().universe;
+    assert_eq!(resolved.symbols, ["BTCUSDT"]);
+    assert_eq!(resolved.long_symbols, ["BTCUSDT"]);
+
+    // The venue goes away again: the last good listing stands and the
+    // membership does not move.
+    deliver(
+        &mut runner,
+        &mut lanes,
+        Some(Err(WorkerError::network("hyperliquid is unreachable"))),
+    )
+    .expect("a lost listing keeps the last one");
+    assert!(runner.listing_missing_reported);
+    assert_eq!(
+        runner.durable.worker().state().universe.symbols,
+        ["BTCUSDT"]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(start_paused = true)]
 async fn malformed_source_lanes_retry_without_stopping_long() {
     let root = temporary_root("lane-source-errors");
     let _ = std::fs::remove_dir_all(&root);
@@ -848,6 +955,7 @@ async fn malformed_source_lanes_retry_without_stopping_long() {
                     available_at_ms,
                     rows: Vec::new(),
                 },
+                listing: None,
             })),
             LaneContext {
                 stream: &mut stream,
@@ -1685,6 +1793,26 @@ fn durable_carry_catchup_crosses_delivery_without_post_delivery_refetch() {
         .iter()
         .all(|(symbol, _, through)| symbol != "BTCUSDT" || *through <= 210 * DAY_MS));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+fn checked_hyperliquid_config() -> SignalWorkerConfig {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    SignalWorkerConfig::load(
+        root.join("configs/signal-worker.hyperliquid.json"),
+        root.join("configs/long_native_v12.json"),
+        root.join("configs/lane2_carry_hold_v7.json"),
+        root.join("configs/operational.json"),
+        root.join("deploy/engine.hyperliquid.toml.template"),
+    )
+    .unwrap()
+}
+
+fn turnover_ticker(symbol: &str, turnover: &str) -> BybitTickerWire {
+    BybitTickerWire {
+        symbol: symbol.into(),
+        turnover24h: Some(Value::from(turnover)),
+        ..ticker_wire_with_mark("100")
+    }
 }
 
 fn checked_demo_config() -> SignalWorkerConfig {

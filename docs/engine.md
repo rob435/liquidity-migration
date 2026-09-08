@@ -69,6 +69,7 @@ The engine workspace is under `engine/`:
 | --- | --- | --- |
 | `engine/signal-worker/src/worker.rs` | Sequenced public inputs, per-event transition handlers, observation creation, durable batch preparation/commit, producer readiness response | `WorkerState` checkpoint schema is unchanged; candidate state is installed after journal/checkpoint commit |
 | `engine/signal-worker/src/history.rs` | Row identity and causal coverage operations | Kline coverage replacement revokes an empty frontier; no inferred coverage |
+| `engine/signal-worker/src/universe.rs` | Tradable domain, turnover ranking with enter/leave hysteresis, and the optional `universe.listed_on` filter to what the engine's own venue lists | An unknown `listed_on` value is a config refusal at load; a rule that names one derives no universe until that venue's listing arrives, and the last good listing stands through a failed fetch |
 | `engine/signal-worker/src/live.rs` | Cadence, stream events, live publication and health | One runner commits accepted acquisition results |
 | `engine/signal-worker/src/live/lanes.rs` | Instrument, ticker, funding, whale, gate and repair completion handlers | `LaneContext` lends only current stream/pending/lane state; failed chunk acknowledgement retains existing retry behavior |
 | `engine/signal-worker/src/live/acquisition.rs` | Public requests, bounded source windows and response normalization | Returns fetched inputs; cannot mutate a `LiveRunner` |

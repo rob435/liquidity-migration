@@ -81,6 +81,25 @@ impl PublicHttpClient {
     }
 
     pub async fn get(&self, path: &str, query: &str) -> Result<(Value, i64), WorkerError> {
+        self.send("GET", path, query, Bytes::new()).await
+    }
+
+    /// Hyperliquid's public `/info` reads are POSTs carrying a JSON body; every
+    /// other public source here is a GET. Same timeout, retries and request
+    /// budget.
+    pub async fn post_json(&self, path: &str, body: &Value) -> Result<(Value, i64), WorkerError> {
+        let bytes = serde_json::to_vec(body)
+            .map_err(|error| WorkerError::json("encode public request body", error))?;
+        self.send("POST", path, "", Bytes::from(bytes)).await
+    }
+
+    async fn send(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        body: Bytes,
+    ) -> Result<(Value, i64), WorkerError> {
         let url = if query.is_empty() {
             format!("{}{}", self.base, path)
         } else {
@@ -88,12 +107,16 @@ impl PublicHttpClient {
         };
         let mut last = None;
         for attempt in 0..self.retries {
-            let request = Request::builder()
-                .method("GET")
+            let mut builder = Request::builder()
+                .method(method)
                 .uri(&url)
                 .header("Accept", "application/json")
-                .header("User-Agent", "liquidity-migration-signal-worker/1")
-                .body(Full::new(Bytes::new()))
+                .header("User-Agent", "liquidity-migration-signal-worker/1");
+            if !body.is_empty() {
+                builder = builder.header("Content-Type", "application/json");
+            }
+            let request = builder
+                .body(Full::new(body.clone()))
                 .map_err(|error| WorkerError::network(format!("build public request: {error}")))?;
             let exchange = async {
                 let response =

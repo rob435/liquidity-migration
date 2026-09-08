@@ -22,9 +22,22 @@ async fn http_source(
                 request.push(byte);
             }
             let request = String::from_utf8(request).unwrap();
-            let path = request.split_whitespace().nth(1).unwrap();
-            requests.send(path.to_owned()).unwrap();
-            let body = respond(path).to_string();
+            let path = request.split_whitespace().nth(1).unwrap().to_owned();
+            let length: usize = request
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .or_else(|| {
+                    request
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Content-Length: "))
+                })
+                .map_or(0, |value| value.trim().parse().unwrap());
+            let mut sent = vec![0_u8; length];
+            socket.read_exact(&mut sent).await.unwrap();
+            requests
+                .send(format!("{path} {}", String::from_utf8(sent).unwrap()))
+                .unwrap();
+            let body = respond(&path).to_string();
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -205,6 +218,78 @@ async fn whale_job_preserves_complete_day_and_its_coverage() {
         }]
     );
     server.abort();
+}
+
+/// The config validates `listed_on` against `LISTING_VENUES` and the runner
+/// turns it into a `ListingVenue`. A value the first accepts and the second
+/// refuses would pass `check-config` and then refuse to boot.
+#[test]
+fn every_listing_venue_the_config_accepts_is_one_the_worker_can_ask() {
+    for venue in crate::universe::LISTING_VENUES {
+        ListingVenue::parse(venue).unwrap();
+    }
+    assert!(ListingVenue::parse("bybit").is_err());
+}
+
+#[test]
+fn the_hyperliquid_meta_reply_becomes_engine_symbols() {
+    let meta = serde_json::json!({"universe": [
+        {"name": "BTC", "szDecimals": 5, "maxLeverage": 40},
+        {"name": "kPEPE", "szDecimals": 0, "maxLeverage": 10},
+        {"name": "GONE", "szDecimals": 2, "maxLeverage": 3, "isDelisted": true},
+        {"name": "ETH", "szDecimals": 4, "maxLeverage": 25}
+    ]});
+    let listed = hyperliquid_listed_symbols(&meta).unwrap();
+    assert_eq!(
+        listed,
+        BTreeSet::from([
+            "BTCUSDT".to_owned(),
+            "ETHUSDT".to_owned(),
+            "KPEPEUSDT".to_owned()
+        ])
+    );
+    assert!(hyperliquid_listed_symbols(&serde_json::json!({})).is_err());
+    assert!(hyperliquid_listed_symbols(&serde_json::json!({"universe": []})).is_err());
+    assert!(
+        hyperliquid_listed_symbols(&serde_json::json!({"universe": [{"szDecimals": 1}]})).is_err()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_listing_is_one_meta_post_and_an_empty_reply_is_retryable() {
+    let _io = crate::test_io::IoProgress::new();
+    let (client, mut requests, server) = http_source(|path| match path {
+        "/info" => serde_json::json!({"universe": [{"name": "BTC", "szDecimals": 5}]}),
+        _ => serde_json::json!({"retCode": 0, "result": {"list": []}}),
+    })
+    .await;
+    let source = ListingSource {
+        venue: ListingVenue::Hyperliquid,
+        client: client.clone(),
+    };
+    assert_eq!(
+        source.fetch().await.unwrap(),
+        BTreeSet::from(["BTCUSDT".to_owned()])
+    );
+    let asked = requests.recv().await.unwrap();
+    assert!(asked.starts_with("/info "), "{asked}");
+    assert!(asked.contains(r#""type":"meta""#), "{asked}");
+    server.abort();
+
+    // A venue that answers with nothing is a retryable source failure, so
+    // `fetch_universe_inputs` hands it back for the last listing to stand
+    // rather than ending the run.
+    let (empty, _requests, empty_server) =
+        http_source(|_| serde_json::json!({"universe": []})).await;
+    let error = ListingSource {
+        venue: ListingVenue::Hyperliquid,
+        client: empty,
+    }
+    .fetch()
+    .await
+    .unwrap_err();
+    assert!(error.is_lane_local_source_failure(), "{error}");
+    empty_server.abort();
 }
 
 #[tokio::test(start_paused = true)]

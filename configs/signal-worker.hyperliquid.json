@@ -38,6 +38,7 @@
     "instrument_max_pages": 10
   },
   "universe": {
+    "listed_on": "hyperliquid",
     "exclude_symbols": [
       "BUSDUSDT",
       "DAIUSDT",

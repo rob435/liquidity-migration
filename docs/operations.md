@@ -332,7 +332,7 @@ read-only modes drop `REAL_MONEY`, the canary keeps it.
 | A stop is a separate reduce-only trigger order, not a field on the position | It appears in the working-order list of every scan, and a position with no such order reads as unprotected |
 | Minimum order notional 10 USD | An order under it is refused at admission (`engine/engine-core/src/engine/intent_admission.rs`), not sent |
 | Limit orders only | A market intent goes to the venue as an IOC limit through the book |
-| Symbols the venue does not list | Refused at admission; the worker's universe is Bybit mainnet's |
+| Symbols the venue does not list | Dropped before ranking: `universe.listed_on` is `hyperliquid` in `configs/signal-worker.hyperliquid.json`, so the worker filters Bybit mainnet's domain to `POST /info {"type":"meta"}` on `live.instrument_cadence_ms`. A name that still reaches the engine is refused at admission |
 | Base fees on the funded account today | 4.5 bp taker, 1.5 bp maker (`userFees`: `userCrossRate 0.00045`, `userAddRate 0.00015`) |
 
 **Must** set `EXPECTED_ENGINE_ACCOUNT_USER_ID` to the MASTER account address,

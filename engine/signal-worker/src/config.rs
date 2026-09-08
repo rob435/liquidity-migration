@@ -203,6 +203,7 @@ impl LlmGateConfig {
 impl Default for UniverseRules {
     fn default() -> Self {
         Self {
+            listed_on: None,
             exclude_symbols: Vec::new(),
             long: crate::universe::SleeveUniverseRule {
                 min_turnover_24h_usdt: 0.0,

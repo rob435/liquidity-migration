@@ -10,6 +10,33 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-08 — Filter the worker's universe to what the engine's venue lists.**
+  - Why. A LONG batch naming a symbol the venue does not list stays pending in
+    the engine and holds every later batch from that source. MEXC works around
+    it with seven static `exclude_symbols`; Hyperliquid lists 168 of Bybit's
+    758 USDT perps (95 above the LONG 2 M turnover floor), so a static list
+    would be hundreds of rotating names.
+  - Change. `universe.listed_on` (optional; only `hyperliquid` is accepted, an
+    unknown value refuses at config load) makes the signal worker fetch the
+    venue's listing on `live.instrument_cadence_ms` — Hyperliquid `POST /info
+    {"type":"meta"}`, delisted rows dropped, `kPEPE` spelled `KPEPEUSDT` as the
+    engine does — and drop unlisted names from the domain before ranking, so
+    ranks close over listed names. With `listed_on` set, no universe derives
+    until the first listing arrives (the cold-start hold on the instrument
+    lane); a failed fetch keeps the last good listing and is said once. The host
+    comes from the realm table in `engine-public`; the fence still passes.
+    `configs/signal-worker.hyperliquid.json` sets it; demo, mainnet and mexc
+    carry no key and their `universe_rules` bytes and artifact hashes are
+    unchanged.
+  - Consequence. On Hyperliquid the LONG rank window (120/160) and CARRY's
+    (150/200) now admit essentially every listed eligible name; the dials stop
+    binding there. Tightening them is a separate decision.
+  - Proof. `universe::tests::an_unlisted_name_leaves_the_domain_and_the_ranks_close_over_it`
+    and `live::tests::a_realm_that_names_a_listing_venue_holds_until_the_listing_arrives`
+    fail with the filter stubbed out and pass with it; workspace 2,317 Rust
+    tests, fmt, clippy, the venue fence and `render-native-config --check` on
+    the hyperliquid template pass.
+
 - **2026-09-08 — Wire Hyperliquid perpetuals as the fleet's fourth realm.**
   - Owner direction: trade Hyperliquid alongside Bybit and MEXC. The funded
     account's base fees today are 4.5 bp taker and 1.5 bp maker (`userFees`:

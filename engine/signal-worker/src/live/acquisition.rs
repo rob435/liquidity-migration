@@ -4,14 +4,125 @@ pub(super) fn spawn_instrument_lane(
     lane_tx: mpsc::Sender<LaneCompletion>,
     instrument_client: PublicHttpClient,
     ticker_client: PublicHttpClient,
+    listing: Option<ListingSource>,
     category: String,
     max_pages: usize,
 ) {
     tokio::spawn(async move {
-        let result =
-            fetch_universe_inputs(instrument_client, ticker_client, category, max_pages).await;
+        let result = fetch_universe_inputs(
+            instrument_client,
+            ticker_client,
+            listing,
+            category,
+            max_pages,
+        )
+        .await;
         let _ = lane_tx.send(LaneCompletion::Instruments(result)).await;
     });
+}
+
+/// A venue whose listing bounds the universe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ListingVenue {
+    Hyperliquid,
+}
+
+impl ListingVenue {
+    pub(super) fn parse(value: &str) -> Result<Self, WorkerError> {
+        match value {
+            "hyperliquid" => Ok(Self::Hyperliquid),
+            other => Err(WorkerError::config(format!(
+                "universe listed_on {other:?} names no venue this worker can ask"
+            ))),
+        }
+    }
+
+    /// The host comes from that venue's realm table in `engine-public`. No
+    /// venue host is written down here.
+    fn host(self) -> &'static str {
+        match self {
+            Self::Hyperliquid => engine_public::HyperliquidRealm::Mainnet
+                .rest_base()
+                .trim_start_matches("https://"),
+        }
+    }
+}
+
+/// The listing client, on the same timeout, retry and request budget as every
+/// other public source.
+#[derive(Clone)]
+pub(super) struct ListingSource {
+    venue: ListingVenue,
+    client: PublicHttpClient,
+}
+
+impl ListingSource {
+    pub(super) fn new(
+        venue: ListingVenue,
+        timeout_ms: u64,
+        retries: usize,
+        retry_base_ms: u64,
+        request_budget: Arc<Semaphore>,
+    ) -> Result<Self, WorkerError> {
+        Ok(Self {
+            venue,
+            client: PublicHttpClient::new(
+                venue.host(),
+                timeout_ms,
+                retries,
+                retry_base_ms,
+                request_budget,
+            )?,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn venue(&self) -> ListingVenue {
+        self.venue
+    }
+
+    pub(super) async fn fetch(&self) -> Result<BTreeSet<String>, WorkerError> {
+        match self.venue {
+            ListingVenue::Hyperliquid => {
+                let (payload, _) = self
+                    .client
+                    .post_json("/info", &serde_json::json!({"type": "meta"}))
+                    .await?;
+                hyperliquid_listed_symbols(&payload)
+            }
+        }
+    }
+}
+
+/// Every perpetual Hyperliquid lists, in the engine's spelling. The venue says
+/// `BTC` and `kPEPE`; the engine says `BTCUSDT` and `KPEPEUSDT`, the same rule
+/// as `engine-venue/src/venues/hyperliquid/assets.rs::symbol_of`.
+pub(super) fn hyperliquid_listed_symbols(payload: &Value) -> Result<BTreeSet<String>, WorkerError> {
+    let rows = payload
+        .get("universe")
+        .and_then(Value::as_array)
+        .ok_or_else(|| WorkerError::network("Hyperliquid meta lacks universe"))?;
+    let mut listed = BTreeSet::new();
+    for row in rows {
+        if row
+            .get("isDelisted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let name = row
+            .get("name")
+            .and_then(Value::as_str)
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| WorkerError::network("Hyperliquid meta row lacks name"))?;
+        listed.insert(format!("{}USDT", name.to_ascii_uppercase()));
+    }
+    if listed.is_empty() {
+        return Err(WorkerError::network("Hyperliquid meta listed no perpetual"));
+    }
+    Ok(listed)
 }
 
 pub(super) fn spawn_gate_lane(lane_tx: mpsc::Sender<LaneCompletion>, path: PathBuf) {
@@ -93,15 +204,25 @@ pub(super) fn read_gate_candidates(path: &Path) -> Result<Option<FetchedGate>, W
 pub(super) async fn fetch_universe_inputs(
     instrument_client: PublicHttpClient,
     ticker_client: PublicHttpClient,
+    listing_source: Option<ListingSource>,
     category: String,
     max_pages: usize,
 ) -> Result<FetchedUniverseInputs, WorkerError> {
     let instruments =
         fetch_instrument_snapshot(instrument_client, category.clone(), max_pages).await?;
     let tickers = fetch_ticker_page(ticker_client, category).await?;
+    let listing = match listing_source {
+        Some(source) => match source.fetch().await {
+            Ok(listed) => Some(Ok(listed)),
+            Err(error) if error.is_lane_local_source_failure() => Some(Err(error)),
+            Err(error) => return Err(error),
+        },
+        None => None,
+    };
     Ok(FetchedUniverseInputs {
         instruments,
         tickers,
+        listing,
     })
 }
 
