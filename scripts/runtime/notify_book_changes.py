@@ -14,8 +14,8 @@ carry four significant figures: past that they are texture, and the percent
 figure already says what moved. Returns read as percent of the position,
 never basis points. Builders write plain text; `as_block` escapes it.
 
-Every message names its account: RM is the funded account (real money), DEMO
-is the demo.
+Every message names its account: RM is the funded Bybit account (real money),
+MEXC is the funded MEXC account, DEMO is the demo.
 
 **Net here is after the venue's fees and nothing else.** The crowd fee
 (funding) is settled into the wallet on the venue's own clock and the engine
@@ -65,6 +65,8 @@ class Account:
     #: Prefixed to the sleeve in every message from this account. Empty for
     #: the one whose messages need no explaining.
     tag: str
+    #: The realm string the engine stamps into its heartbeat, which is the
+    #: venue-qualified name for every venue added after Bybit.
     realm: str
     heartbeat: str
     #: Where the engine appends one JSON line per closed position. If it is
@@ -93,6 +95,13 @@ ACCOUNTS = (
         realm="mainnet",
         heartbeat="/var/lib/liquidity-migration-engine-mainnet/heartbeat.json",
         trades="/var/lib/liquidity-migration-engine-mainnet/trades.jsonl",
+    ),
+    Account(
+        name="mexc",
+        tag="MEXC ",
+        realm="mexc_mainnet",
+        heartbeat="/var/lib/liquidity-migration-engine-mexc/heartbeat.json",
+        trades="/var/lib/liquidity-migration-engine-mexc/trades.jsonl",
     ),
 )
 
@@ -550,7 +559,7 @@ def main() -> int:
 
 
 def trades_of_day(day: str) -> list[dict]:
-    """Every closed position stamped inside one UTC day, both accounts."""
+    """Every closed position stamped inside one UTC day, every account."""
 
     midnight = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     start = int(midnight.timestamp()) * 1000

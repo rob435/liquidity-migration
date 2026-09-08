@@ -7,7 +7,7 @@ set -Eeuo pipefail
 
 usage() {
     cat >&2 <<'USAGE'
-usage: flatten_account.sh --environment demo|mainnet [--reason TEXT] [--execute]
+usage: flatten_account.sh --environment demo|mainnet|mexc [--reason TEXT] [--execute]
 
   Without --execute: show the durable controls that would be submitted.
   With --execute:    disable entries for LONG, CARRY, and Exodus, submit one
@@ -41,10 +41,13 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# ENGINE_REALM is the venue realm the engine stamps into its heartbeat and its
+# identity contract, which is not always the fleet realm's name.
 case "$ENVIRONMENT" in
     demo)
         ENGINE_UNIT=liquidity-migration-engine.service
         ENGINE_USER=liquidity-engine-demo
+        ENGINE_REALM=demo
         ENGINE_CONFIG="${FLATTEN_ENGINE_CONFIG_PATH:-/etc/liquidity-migration/engine.toml}"
         ENGINE_ENV="${FLATTEN_ENGINE_ENV_PATH:-/etc/liquidity-migration/engine.env}"
         HEARTBEAT="${FLATTEN_HEARTBEAT_PATH:-/var/lib/liquidity-migration-engine/heartbeat.json}"
@@ -52,11 +55,20 @@ case "$ENVIRONMENT" in
     mainnet)
         ENGINE_UNIT=liquidity-migration-engine-mainnet.service
         ENGINE_USER=liquidity-engine-mainnet
+        ENGINE_REALM=mainnet
         ENGINE_CONFIG="${FLATTEN_ENGINE_CONFIG_PATH:-/etc/liquidity-migration/engine-mainnet.toml}"
         ENGINE_ENV="${FLATTEN_ENGINE_ENV_PATH:-/etc/liquidity-migration/engine-mainnet.env}"
         HEARTBEAT="${FLATTEN_HEARTBEAT_PATH:-/var/lib/liquidity-migration-engine-mainnet/heartbeat.json}"
         ;;
-    *) echo "--environment must be demo or mainnet, and has no default" >&2; usage ;;
+    mexc)
+        ENGINE_UNIT=liquidity-migration-engine-mexc.service
+        ENGINE_USER=liquidity-engine-mexc
+        ENGINE_REALM=mexc_mainnet
+        ENGINE_CONFIG="${FLATTEN_ENGINE_CONFIG_PATH:-/etc/liquidity-migration/engine-mexc.toml}"
+        ENGINE_ENV="${FLATTEN_ENGINE_ENV_PATH:-/etc/liquidity-migration/engine-mexc.env}"
+        HEARTBEAT="${FLATTEN_HEARTBEAT_PATH:-/var/lib/liquidity-migration-engine-mexc/heartbeat.json}"
+        ;;
+    *) echo "--environment must be demo, mainnet or mexc, and has no default" >&2; usage ;;
 esac
 
 case "$WAIT_SECONDS" in
@@ -71,7 +83,7 @@ RUNTIME_GROUP=liquidity-migration
 STRATEGIES=(long carry exodus)
 
 heartbeat_state() {
-    python3 - "$HEARTBEAT" "$ENGINE_ENV" "$ENVIRONMENT" "$MAX_HEARTBEAT_AGE_SECONDS" "$@" <<'PY'
+    python3 - "$HEARTBEAT" "$ENGINE_ENV" "$ENGINE_REALM" "$MAX_HEARTBEAT_AGE_SECONDS" "$@" <<'PY'
 import json
 import math
 import sys

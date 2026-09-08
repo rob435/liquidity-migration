@@ -43,7 +43,7 @@ pub use venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed};
 #[cfg(feature = "lighter")]
 pub use venues::lighter::{LighterGateway, LighterOrderFeed};
 #[cfg(feature = "mexc")]
-pub use venues::mexc::{MexcGateway, MexcOrderFeed};
+pub use venues::mexc::{MexcGateway, MexcInventoryProbe, MexcOrderFeed};
 #[cfg(feature = "variational")]
 pub use venues::variational::VariationalGateway;
 

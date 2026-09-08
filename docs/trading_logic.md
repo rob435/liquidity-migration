@@ -12,9 +12,9 @@ block appends, nothing is inserted, and the two realms' tails differ.
 
 | ID | Crate / Reducer | Sleeve | Realm | Deployed State | Core Mandate |
 | :---: | :--- | :--- | :--- | :--- | :--- |
-| **0** | `carry_native` | **CARRY** | demo, mainnet | Active | Holds the daily negative-funding book until the next daily decision. |
-| **1** | `long_native` | **LONG** | demo, mainnet | Active | Momentum breakouts on top turnover liquid perpetuals. |
-| **2** | `exodus_native` | **EXODUS** | demo, mainnet | Active | Short entry on distressed CARRY pairs prior to settlement. |
+| **0** | `carry_native` | **CARRY** | demo, mainnet; mexc with entries disabled | Active | Holds the daily negative-funding book until the next daily decision. Off on MEXC: its funding signal is Bybit's, and MEXC funding differs per symbol. |
+| **1** | `long_native` | **LONG** | demo, mainnet, mexc | Active | Momentum breakouts on top turnover liquid perpetuals. On MEXC the signals are Bybit-derived; a symbol MEXC does not list is refused at admission, not sent. |
+| **2** | `exodus_native` | **EXODUS** | demo, mainnet; mexc with entries disabled | Active | Short entry on distressed CARRY pairs prior to settlement. Off on MEXC with CARRY. |
 | **3** | `quoter` | **MAKER** | mainnet | Disabled | High-frequency two-sided liquidity provision around fair mid. |
 | **3** | `probe` | **PROBE** | demo | Active | Order-path benchmark, not a trading sleeve: one venue-minimum post-only `BTCUSDT` buy 0.5% under the bid every 15 min on the wall clock, pulled 2 s later, so `decide`/`durable`/`wire`/`ack`/`end_to_end` are measured on a day no sleeve trades. A fill is closed at market at once and shows only as an entry blocker; it never raises a strategy error or a Telegram message. Skips the symbol while any other sleeve holds it: a Bybit entry's `stopLoss` (`tpslMode: Full`) names the whole position's stop, and the probe's sits far from the market. |
 
@@ -27,7 +27,7 @@ Every directional sleeve executes via the same deterministic state loop:
 2. **WAL Barrier**: Engine syncs observation to disk *before* triggering reducers.
 3. **Pure Reducer**: Evaluates current checkpoint + observation $\to$ outputs target state & effects (zero I/O).
 4. **Risk Admission**: Kernel validates gross exposure, quote freshness, and 24h loss ceiling.
-5. **Order Dispatch**: Dispatches signed orders over the mainnet trade WebSocket or demo REST; Bybit demo has no trade WebSocket.
+5. **Order Dispatch**: Dispatches signed orders over the Bybit mainnet trade WebSocket, Bybit demo REST (no trade WebSocket there), or MEXC REST (`/api/v1/private/order/create`, quantities in contracts).
 
 ---
 

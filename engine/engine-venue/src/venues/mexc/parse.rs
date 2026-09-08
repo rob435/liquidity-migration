@@ -21,7 +21,7 @@ use engine_types::VenueExecution;
 use std::collections::HashMap;
 
 use engine_types::ids::SymbolId;
-use engine_types::orders::{Side, VenueOrder};
+use engine_types::orders::{AccountOrder, AccountPosition, Side, VenueOrder};
 use engine_types::risk::PositionView;
 use engine_types::VenueError;
 use serde_json::Value;
@@ -106,6 +106,124 @@ pub(crate) fn parse_assets(data: &Value) -> Result<(f64, f64), VenueError> {
             VenueError::BadReply("the balance row carried no availableBalance".into())
         })?;
     Ok((equity, available))
+}
+
+/// Everything the futures wallet holds that is not deployable settle cash.
+///
+/// A balance in any other currency carries price risk, and a negative settle
+/// balance is a liability, so both are exposure a flatness proof must show.
+pub(crate) fn parse_inventory_assets(data: &Value) -> Result<Vec<AccountPosition>, VenueError> {
+    let rows = data
+        .as_array()
+        .ok_or_else(|| VenueError::BadReply("account assets was not a list".into()))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let currency = str_field(row, "currency")?;
+        if currency.trim().is_empty() {
+            return Err(VenueError::BadReply(
+                "account assets carries an unnamed currency".into(),
+            ));
+        }
+        let equity = num_field(row, "equity")?;
+        let is_cash = currency == SETTLE_CURRENCY;
+        if equity != 0.0 && (!is_cash || equity < 0.0) {
+            out.push(AccountPosition {
+                product: "wallet_asset".to_string(),
+                symbol: currency,
+                side: if equity > 0.0 { Side::Buy } else { Side::Sell },
+                qty: equity.abs(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Every open position on the credential, whichever contract it is on.
+///
+/// Unlike [`parse_positions`] this does not need the position's symbol to be
+/// in the engine's configured table — an account-wide scan has to see the
+/// contracts nobody configured. It does still need the contract, because a
+/// size in contracts is not a size until the multiplier is known.
+pub(crate) fn parse_inventory_positions(
+    data: &Value,
+    contracts: &Contracts,
+) -> Result<Vec<AccountPosition>, VenueError> {
+    let rows = data
+        .as_array()
+        .ok_or_else(|| VenueError::BadReply("open positions was not a list".into()))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let hold_vol = num_field(row, "holdVol")?;
+        if hold_vol == 0.0 {
+            continue;
+        }
+        let venue_symbol = str_field(row, "symbol")?;
+        if hold_vol < 0.0 {
+            return Err(VenueError::BadReply(format!(
+                "position in {venue_symbol} has a negative contract size {hold_vol}"
+            )));
+        }
+        let (symbol, contract) = contracts
+            .symbol_of(&venue_symbol)
+            .and_then(|symbol| Some((symbol, contracts.any(symbol)?)))
+            .ok_or_else(|| {
+                VenueError::BadReply(format!(
+                    "position in {venue_symbol} has no contract metadata, so the account scan cannot state its size"
+                ))
+            })?;
+        let side = match row.get("positionType").and_then(Value::as_i64) {
+            Some(1) => Side::Buy,
+            Some(2) => Side::Sell,
+            other => {
+                return Err(VenueError::BadReply(format!(
+                    "position in {venue_symbol} has unknown positionType {other:?}"
+                )))
+            }
+        };
+        out.push(AccountPosition {
+            product: "linear".to_string(),
+            // The engine's spelling, not MEXC's: this is compared against the
+            // configured symbol table by every caller that reads the scan.
+            symbol: symbol.clone(),
+            side,
+            qty: contract.base_for(hold_vol),
+        });
+    }
+    Ok(out)
+}
+
+/// Position-bound take-profit/stop-loss records, which are standing
+/// automation with no order behind them.
+///
+/// A record naming an `orderId` can only fire if that order fills, and the
+/// open-order scan already lists that order; counting it here would report the
+/// same one thing twice. `parse_position_stops` reads the same field the same
+/// way.
+pub(crate) fn parse_inventory_stop_orders(
+    data: &Value,
+    contracts: &Contracts,
+) -> Result<(Vec<AccountOrder>, usize), VenueError> {
+    let rows =
+        rows_of(data).ok_or_else(|| VenueError::BadReply("stop orders carried no rows".into()))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let order_id = id_text(row, "orderId").unwrap_or_default();
+        if !(order_id.is_empty() || order_id == "0") {
+            continue;
+        }
+        let record_id = id_text(row, "id")
+            .ok_or_else(|| VenueError::BadReply("a position stop record carries no id".into()))?;
+        let venue_symbol = str_field(row, "symbol")?;
+        let symbol = contracts.symbol_of(&venue_symbol).ok_or_else(|| {
+            VenueError::BadReply(format!("stop record names unknown contract {venue_symbol}"))
+        })?;
+        out.push(AccountOrder {
+            product: "position_stop".to_string(),
+            symbol: symbol.clone(),
+            client_order_id: format!("stoporder-{record_id}"),
+        });
+    }
+    Ok((out, rows.len()))
 }
 
 /// The live stop for each position, keyed by the venue's position id.
@@ -606,6 +724,66 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn the_account_scan_counts_every_balance_that_is_not_deployable_settle_cash() {
+        let data = json!([
+            {"currency":"USDT","equity":32.8,"availableBalance":32.8},
+            {"currency":"MX","equity":0.996,"availableBalance":0.996},
+            {"currency":"ETH","equity":0.0,"availableBalance":0.0}
+        ]);
+        let out = parse_inventory_assets(&data).unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].symbol, "MX");
+        assert_eq!(out[0].product, "wallet_asset");
+        assert_eq!(out[0].side, Side::Buy);
+
+        // A negative settle balance is a liability, not spendable cash.
+        let owed = json!([{"currency":"USDT","equity":-4.0,"availableBalance":0.0}]);
+        let out = parse_inventory_assets(&owed).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].side, Side::Sell);
+        assert_eq!(out[0].qty, 4.0);
+
+        assert!(parse_inventory_assets(&json!([{"currency":"USDT"}])).is_err());
+    }
+
+    #[test]
+    fn the_account_scan_sees_positions_no_config_named_and_refuses_ones_it_cannot_size() {
+        let data = json!([{"symbol":"BTC_USDT","holdVol":5,"positionType":2}]);
+        // Empty configured symbol table on purpose: an account-wide scan must
+        // see contracts nobody configured.
+        let out = parse_inventory_positions(&data, &contracts()).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].product, "linear");
+        assert_eq!(out[0].symbol, "BTCUSDT", "the engine's spelling");
+        assert_eq!(out[0].side, Side::Sell);
+        assert_eq!(out[0].qty, 0.0005);
+
+        let unlisted = json!([{"symbol":"NOTLISTED_USDT","holdVol":5,"positionType":1}]);
+        assert!(parse_inventory_positions(&unlisted, &contracts()).is_err());
+        let flat = json!([{"symbol":"NOTLISTED_USDT","holdVol":0}]);
+        assert!(parse_inventory_positions(&flat, &contracts())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn the_account_scan_counts_position_stops_and_not_the_ones_bound_to_an_order() {
+        let data = json!({"resultList":[
+            {"id":357859177,"orderId":"0","symbol":"BTC_USDT","positionId":"42","stopLossPrice":101000.0},
+            {"id":357859178,"orderId":"720733527158642176","symbol":"BTC_USDT","stopLossPrice":101000.0}
+        ]});
+        let (out, raw_count) = parse_inventory_stop_orders(&data, &contracts()).unwrap();
+        assert_eq!(raw_count, 2, "paging counts the venue's own rows");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].product, "position_stop");
+        assert_eq!(out[0].symbol, "BTCUSDT");
+        assert_eq!(out[0].client_order_id, "stoporder-357859177");
+
+        let nameless = json!([{"id":1,"orderId":"0","symbol":"NOTLISTED_USDT"}]);
+        assert!(parse_inventory_stop_orders(&nameless, &contracts()).is_err());
     }
 
     #[test]

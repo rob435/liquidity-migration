@@ -100,10 +100,10 @@ fn rounding_matches_binary_value_python_results() {
 }
 
 #[test]
-fn manifest_owns_all_six_sources_and_their_order() {
+fn manifest_owns_all_eight_sources_and_their_order() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/fleet_manifest.tsv");
     let sources = read_sources(&path).unwrap();
-    assert_eq!(sources.len(), 6);
+    assert_eq!(sources.len(), 8);
     assert_eq!(
         sources
             .iter()
@@ -114,13 +114,19 @@ fn manifest_owns_all_six_sources_and_their_order() {
             ("recorder", "binance"),
             ("worker", "demo"),
             ("worker", "mainnet"),
+            ("worker", "mexc"),
             ("engine", "demo"),
-            ("engine", "mainnet")
+            ("engine", "mainnet"),
+            ("engine", "mexc")
         ]
     );
     assert_eq!(
-        sources[5].path,
+        sources[6].path,
         Path::new("/var/lib/liquidity-migration-engine-mainnet/heartbeat.json")
+    );
+    assert_eq!(
+        sources[7].path,
+        Path::new("/var/lib/liquidity-migration-engine-mexc/heartbeat.json")
     );
     let dir = tempdir().unwrap();
     let bad = dir.path().join("manifest");

@@ -111,9 +111,9 @@ credential, or socket is opened.
 | `bybit_mainnet` | `live-proven` | yes | Mainnet realm credentials, account lease and `REAL_MONEY` arming. |
 | `hyperliquid_testnet` | `testnet-canary` | yes | Testnet realm only. |
 | `lighter_testnet` | `testnet-canary` | yes | Testnet realm only. |
+| `mexc_mainnet` | `live-canary` | no | Canary permitted with `REAL_MONEY` armed; engine run refused until the canary evidence is reviewed and the realm moves to live-proven. |
 | `hyperliquid_mainnet` | `production-blocked` | no | Refused before credential or socket access. |
 | `lighter_mainnet` | `production-blocked` | no | Refused before credential or socket access. |
-| `mexc_mainnet` | `production-blocked` | no | Refused before credential or socket access. |
 | `binance_testnet` | `production-blocked` | no | Refused before credential or socket access. |
 | `binance_mainnet` | `production-blocked` | no | Private engine run refused; public market clients are separate. |
 | `variational_mainnet` | `read-only` | no | No trading API in the adapter. |
@@ -122,15 +122,22 @@ Readiness labels are code policy; this table does not establish current deployme
 
 | Cargo feature | Default build | Contract |
 | --- | --- | --- |
-| `bybit` | Enabled | Public, private, market-data and runtime crates forward this feature |
-| `binance`, `hyperliquid`, `lighter`, `mexc`, `variational` | Disabled | Selecting a disabled adapter fails before credentials or sockets; per-feature CI builds and conformance qualify enabled adapters |
+| `bybit`, `mexc` | Enabled | Public, private, market-data and runtime crates forward these features |
+| `binance`, `hyperliquid`, `lighter`, `variational` | Disabled | Selecting a disabled adapter fails before credentials or sockets; per-feature CI builds and conformance qualify enabled adapters |
 | `hyperliquid` cryptography | Absent by default | `k256` and `sha3` are optional dependencies of this feature |
+
+#### Operator tooling per realm
+
+| Command | Realms it accepts | Contract |
+| --- | --- | --- |
+| `engine canary-order` | `bybit_demo`, and every `live-canary` realm (`VenueName::require_canary_ready`) | One minimum-lot post-only order away from the touch, cancelled, with two flat account scans; any fill is closed in full and fails the command. Client ids are at most 30 characters, inside MEXC's 32-character `externalOid`. Venue clock: `/v5/market/time` on Bybit, `/api/v1/contract/ping` on MEXC. Terminal proof: Bybit's order receipt, otherwise `VenueGateway::order_status`. |
+| `engine verify-account-identity`, `engine attest-flat` | Realms with an `InventoryProbe`: `bybit_demo`, `bybit_mainnet`, `mexc_mainnet` | Read-only credentials, no order/cancel/amend/stop API on the probe type. MEXC's `AccountIdentity.user_id` is `key-<first 8 bytes of sha256(api key)>`; its scan covers futures balances, positions, working orders and position-bound stop records, and says so in `AccountInventory.scope`. |
 
 | Private conformance scope | Verified fixture behavior |
 | --- | --- |
-| Bybit and Hyperliquid | Reconnect emits StreamReset before the next fill. REST history restores a 0.002 execution omitted during disconnect; overlapping private/history IDs retain identical exact quantities and the complete fixture totals 0.01. |
+| Bybit, Hyperliquid and MEXC | Reconnect emits StreamReset before the next fill. REST history restores a 0.002 execution omitted during disconnect; overlapping private/history IDs retain identical exact quantities and the complete fixture totals 0.01. MEXC additionally pins the login frame (`apiKey` + `reqTime` signature, `subscribe:false`), the `personal.filter` frame, the 15 s keep-alive, and the contract-count conversion; a refused login keeps the 5 s paced StreamReset running while the socket retries. |
 | Binance | Reconnect emits StreamReset. Complete account-wide execution recovery explicitly refuses; the engine-run readiness policy remains blocked. |
-| Lighter and MEXC | Paced StreamReset events request account/history reconciliation; the fixture verifies the resync interval. |
+| Lighter | Paced StreamReset events request account/history reconciliation; the fixture verifies the resync interval. |
 | Variational | Private updates remain silent; unsupported mutations refuse before HTTP. |
 | Sequence interpretation | The Bybit `seq` field associates fills with position updates and can repeat across transactions and symbols; it is not treated as a per-account contiguous counter. The gap fixture uses a disconnect and a known omitted execution. [Bybit execution schema](https://bybit-exchange.github.io/docs/v5/websocket/private/execution). |
 | Evidence boundary | Constructed local HTTP/WebSocket fixtures exercise adapter contracts. They do not establish live-account completeness or promote a dormant realm. |
@@ -148,6 +155,9 @@ Readiness labels are code policy; this table does not establish current deployme
   A compiled adapter is not evidence.
 * **Must Never**: real capital reach a `production-blocked` or `read-only`
   realm. The boot gate refuses the run; there is no override flag.
+* **Must Never**: `engine run` start on a `live-canary` realm. That state
+  admits `engine canary-order` and nothing else, and it exists only for a
+  venue with no practice host.
 
 ---
 

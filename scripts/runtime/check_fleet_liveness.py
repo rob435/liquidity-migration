@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Liveness watchdog for the deployed fleet and for the host itself.
 
-Scope is ``demo``, ``mainnet``, or ``host``. The realm scopes read the fleet
+Scope is ``demo``, ``mainnet``, ``mexc``, or ``host``. The realm scopes read the fleet
 manifest, require every always-on unit in the realm to be active, require each
 heartbeat-bearing unit's heartbeat file to be fresh, require each signal worker
 to leave its bounded startup and report ready, and alert when an engine reports
@@ -57,7 +57,10 @@ _DEPLOY_LOCK = Path("/run/liquidity-migration/deploy.lock")
 _MAX_DEPLOY_AGE_SEC = 1_800.0
 _DISK_FORECAST_SEC = 195.0  # Host timer: 180-second cadence plus 15-second accuracy.
 _BOOT_ID_FILE = Path("/proc/sys/kernel/random/boot_id")
-_ACCOUNT_SCOPES = ("demo", "mainnet", "host")
+_ACCOUNT_SCOPES = ("demo", "mainnet", "mexc", "host")
+#: Realms whose units run only while their own credential file is armed. Their
+#: watchdog timers are expected up only once enabled or once their engine runs.
+_FUNDED_REALMS = ("mainnet", "mexc")
 _SIGNAL_WORKER_HEARTBEAT_KIND = "liquidity_migration_signal_worker_heartbeat"
 _DEPLOY_TRANSITIONAL_ALERT_PREFIXES = (
     "unit:",
@@ -77,6 +80,7 @@ _DEPLOY_TRANSITIONAL_ALERT_PREFIXES = (
 _ENGINE_UNITS = {
     "liquidity-migration-engine.service",
     "liquidity-migration-engine-mainnet.service",
+    "liquidity-migration-engine-mexc.service",
 }
 _ENGINE_WAL_BYTES_PER_SECOND = 1_048_576
 _ENGINE_RSS_BYTES = 1_610_612_736
@@ -130,11 +134,11 @@ def load_fleet_manifest(path: Path = _MANIFEST) -> list[FleetUnit]:
 
 def scope_units(scope: str, rows: list[FleetUnit]) -> list[FleetUnit]:
     # Host watches the independent units and nothing else. Demo watches demo
-    # and shared fleet units; mainnet watches only its own realm, so one cause
-    # cannot page two scopes.
+    # and shared fleet units; each funded realm watches only its own realm, so
+    # one cause cannot page two scopes.
     if scope == "host":
         return [row for row in rows if row.lifecycle == "independent"]
-    realms = {"demo", "shared"} if scope == "demo" else {"mainnet"}
+    realms = {"demo", "shared"} if scope == "demo" else {scope}
     wanted = []
     for row in rows:
         if row.lifecycle == "independent" or row.realm not in realms:
@@ -676,7 +680,7 @@ def run_demo_soak() -> int:
         alerts = deployment_blockers(alerts)
         if alerts:
             lines = [f"CRITICAL {alert.key}: {alert.message}" for alert in alerts]
-            message = "demo soak refused; mainnet remains on its incumbent runtime\n" + "\n".join(lines)
+            message = "demo soak refused; funded realms remain on their incumbent runtimes\n" + "\n".join(lines)
             print(message, flush=True)
             try:
                 if not send_telegram_message(as_block(message), channel="alerts", parse_mode="HTML"):
@@ -832,8 +836,8 @@ def evaluate_watchdog_chain(
 
     The deploy's existing exclusive lock is the maintenance boundary. A bounded
     lock suppresses transitional timer states; a stuck lock pages. Outside that
-    boundary, demo is always required and mainnet is required while either its
-    timer is enabled or its funded engine is running.
+    boundary, demo is always required and each funded realm is required while
+    either its timer is enabled or its engine is running.
     """
 
     checked_at = time.time() if now is None else now
@@ -859,16 +863,20 @@ def evaluate_watchdog_chain(
         ]
 
     timers = {
-        "demo": "liquidity-migration-demo-liveness.timer",
-        "mainnet": "liquidity-migration-mainnet-liveness.timer",
+        realm: f"liquidity-migration-{realm}-liveness.timer"
+        for realm in ("demo", *_FUNDED_REALMS)
     }
-    mainnet_engine = "liquidity-migration-engine-mainnet.service"
-    active = unit_states([*timers.values(), mainnet_engine])
+    engines = {
+        "mainnet": "liquidity-migration-engine-mainnet.service",
+        "mexc": "liquidity-migration-engine-mexc.service",
+    }
+    active = unit_states([*timers.values(), *engines.values()])
     alerts: list[Alert] = []
     for realm, timer in timers.items():
         enabled = unit_enabled_state(timer)
         expected = realm == "demo" or enabled.startswith("enabled")
-        if realm == "mainnet" and active.get(mainnet_engine) == "active":
+        engine = engines.get(realm)
+        if engine is not None and active.get(engine) == "active":
             expected = True
         if not expected:
             continue
@@ -1249,7 +1257,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--check-heartbeat", nargs=4, metavar=("UNIT", "PATH", "PID", "SINCE"),
                    help="require a fresh healthy heartbeat from the process just started")
     p.add_argument("--engine-rates", action="store_true", help="watch WAL bytes/s, errors, anonymous RSS and restarts")
-    p.add_argument("--demo-soak", action="store_true", help="require five healthy demo minutes before mainnet handover")
+    p.add_argument("--demo-soak", action="store_true", help="require five healthy demo minutes before any funded handover")
     p.add_argument(
         "--account-scope",
         choices=_ACCOUNT_SCOPES,

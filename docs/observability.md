@@ -33,7 +33,7 @@ declares and appends one line per artifact per run.
 | `worker-<realm>-<YYYY-MM>.jsonl` | always, one line per realm per minute |
 | `recorder-<venue>-<YYYY-MM>.jsonl` | always, one line per tape recorder per minute |
 
-Six lines a minute, about 7 KB: **10 MB a day, 3.7 GB a year**, in monthly
+Eight lines a minute, about 9 KB: **13 MB a day, 4.9 GB a year**, in monthly
 files. Nothing rotates or prunes them — next to 1.7 TB a month of tape this is
 noise, and the history is the point.
 
@@ -178,7 +178,7 @@ sampler.
 ### Diagnostic Commands
 
 ```bash
-scripts/ops.sh curve mainnet
+scripts/ops.sh curve mainnet   # or demo, or mexc
 scripts/ops.sh logs equity-recorder.service 50
 scripts/ops.sh units | grep equity-recorder
 

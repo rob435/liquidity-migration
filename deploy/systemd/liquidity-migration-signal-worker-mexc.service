@@ -1,27 +1,29 @@
 [Unit]
 StartLimitIntervalSec=300
 StartLimitBurst=5
-Description=liquidity-migration credential-free Rust directional signal worker (mainnet)
+Description=liquidity-migration credential-free Rust directional signal worker (mexc)
 Wants=network-online.target
-Before=liquidity-migration-engine-mainnet.service
+Before=liquidity-migration-engine-mexc.service
 After=network-online.target
 
 [Service]
 Type=simple
 User=liquidity-signal-worker
 Group=liquidity-migration
-StateDirectory=liquidity-migration-signal-worker-mainnet
+StateDirectory=liquidity-migration-signal-worker-mexc
 StateDirectoryMode=0750
-WorkingDirectory=/var/lib/liquidity-migration-signal-worker-mainnet
-EnvironmentFile=/etc/liquidity-migration/signal-worker-mainnet.env
+WorkingDirectory=/var/lib/liquidity-migration-signal-worker-mexc
+EnvironmentFile=/etc/liquidity-migration/signal-worker-mexc.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
-Environment=SIGNAL_WORKER_CONFIG_FILE=/opt/liquidity-migration/configs/signal-worker.mainnet.json
+# Public market data comes from Bybit mainnet for every realm; only the account
+# owner this worker feeds trades MEXC.
+Environment=SIGNAL_WORKER_CONFIG_FILE=/opt/liquidity-migration/configs/signal-worker.mexc.json
 Environment=LONG_NATIVE_RULE_FILE=/opt/liquidity-migration/configs/long_native_v12.json
 Environment=CARRY_SIGNAL_CONFIG_FILE=/opt/liquidity-migration/configs/lane2_carry_hold_v7.json
-Environment=ENGINE_CONFIG_FILE=/etc/liquidity-migration/engine-mainnet.toml
-Environment=SIGNAL_WORKER_SPOOL_DIR=/var/lib/liquidity-migration/signals/mainnet
-Environment=SIGNAL_WORKER_STATE_DIR=/var/lib/liquidity-migration-signal-worker-mainnet
-Environment=SIGNAL_WORKER_HEARTBEAT_FILE=/var/lib/liquidity-migration-signal-worker-mainnet/heartbeat.json
+Environment=ENGINE_CONFIG_FILE=/etc/liquidity-migration/engine-mexc.toml
+Environment=SIGNAL_WORKER_SPOOL_DIR=/var/lib/liquidity-migration/signals/mexc
+Environment=SIGNAL_WORKER_STATE_DIR=/var/lib/liquidity-migration-signal-worker-mexc
+Environment=SIGNAL_WORKER_HEARTBEAT_FILE=/var/lib/liquidity-migration-signal-worker-mexc/heartbeat.json
 ExecStart=/opt/liquidity-migration-engine/bin/signal-worker live \
     --signal-config ${SIGNAL_WORKER_CONFIG_FILE} \
     --long-rule ${LONG_NATIVE_RULE_FILE} \
@@ -46,7 +48,7 @@ ProcSubset=pid
 ProtectSystem=strict
 ProtectHome=true
 UMask=0027
-ReadWritePaths=/var/lib/liquidity-migration-signal-worker-mainnet /var/lib/liquidity-migration/signals/mainnet
+ReadWritePaths=/var/lib/liquidity-migration-signal-worker-mexc /var/lib/liquidity-migration/signals/mexc
 MemoryMax=1024M
 MemorySwapMax=384M
 LimitNOFILE=65536

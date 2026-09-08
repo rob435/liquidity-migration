@@ -44,8 +44,17 @@ fn conformance_local_fixtures_do_not_promote_dormant_realms() {
                 ));
                 name.require_engine_run_ready().unwrap();
             }
+            VenueReadiness::LiveCanary => {
+                assert!(matches!(name, VenueName::MexcMainnet));
+                // Funded capital, and the operator canary is the only thing
+                // this state opens.
+                assert!(name.is_real_money());
+                name.require_canary_ready().unwrap();
+                assert!(name.require_engine_run_ready().is_err());
+            }
             VenueReadiness::ProductionBlocked | VenueReadiness::ReadOnly => {
                 assert!(name.require_engine_run_ready().is_err());
+                assert!(name.require_canary_ready().is_err());
             }
         }
     }

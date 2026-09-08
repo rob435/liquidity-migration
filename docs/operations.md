@@ -30,10 +30,13 @@ Entry-point wrapper for all operational workflows. Prefix `liquidity-migration-`
 | **Units** | `scripts/ops.sh units` | Read-only | Lists all fleet systemd units and timers. |
 | **Logs** | `scripts/ops.sh logs <unit> [lines]` | Read-only | Tails journal for a specific unit (default 100 lines). |
 | **Start / Stop** | `scripts/ops.sh <start\|stop\|restart> <unit...>` | Mutating | Controls individual fleet units. |
-| **Flatten** | `scripts/ops.sh flatten --environment <demo\|mainnet> [--execute]` | Mutating | Orders reducers to close attributed exposure. Read-only without `--execute`. |
-| **Attest Flat** | `scripts/ops.sh attest-flat --environment <demo\|mainnet>` | Read-only | Two-scan venue proof that the account holds zero open positions. |
-| **Preflight** | `scripts/ops.sh real-money preflight` | Read-only | Validates all funded credentials, IP bindings, and profile dials. |
-| **Deploy** | `scripts/ops.sh deploy [mode]` | Mutating | Executes exact-commit deployment (`deploy`, `rollback`, `verify`, `disarm-mainnet`). |
+| **Flatten** | `scripts/ops.sh flatten --environment <demo\|mainnet\|mexc> [--execute]` | Mutating | Orders reducers to close attributed exposure. Read-only without `--execute`. |
+| **Attest Flat** | `scripts/ops.sh attest-flat --environment <demo\|mainnet\|mexc>` | Read-only | Two-scan venue proof that the account holds zero open positions. Bybit and MEXC implement the GET-only credential-wide probe; MEXC's scan covers the futures account (assets, positions, open orders, position stops). |
+| **Preflight** | `scripts/ops.sh real-money preflight` | Read-only | Validates all funded Bybit credentials, IP bindings, and profile dials. |
+| **MEXC preflight** | `scripts/ops.sh real-money preflight-mexc` | Read-only | Validates the MEXC credential file, its arming switch, and the mexc worker source. |
+| **Verify Identity** | `scripts/ops.sh verify-account-identity --environment <demo\|mainnet\|mexc>` | Read-only | Authenticates the realm's GET-only probe and binds it to `EXPECTED_ENGINE_ACCOUNT_USER_ID`; a mismatch prints the id the credentials answered as. |
+| **Canary Order** | `scripts/ops.sh canary-order --environment <demo\|mexc> --symbol SYMBOL --expected-user-id ID [--execute]` | Mutating with `--execute` | One bounded live order lifecycle through the realm's own credential file: one venue-minimum post-only order 0.5% under the bid, cancelled, the account proved clean twice. Refused on `bybit_mainnet` and on any realm that is not `live-canary` or the Bybit demo. |
+| **Deploy** | `scripts/ops.sh deploy [mode]` | Mutating | Executes exact-commit deployment (`deploy`, `rollback`, `verify`, `stop-mainnet`, `disarm-mainnet`, `stop-mexc`, `disarm-mexc`). |
 
 ### Venue-Confirmed Trade Accounting
 Reconciles engine WAL fills, orders, and fees against authenticated venue history:
@@ -84,9 +87,12 @@ The existing reconciliation report includes `observed_window`. Its `complete_pro
 | Systemd Unit | Realm | User / Group | Activation Policy | Role |
 | :--- | :--- | :--- | :--- | :--- |
 | `liquidity-migration-engine.service` | Demo | `liquidity-engine-demo:liquidity-migration` | `multi-user.target` | Execution engine on demo account. |
-| `liquidity-migration-engine-mainnet.service` | Mainnet | `liquidity-engine-mainnet:liquidity-migration`| `manual` (requires `REAL_MONEY`) | Execution engine on funded account. |
+| `liquidity-migration-engine-mainnet.service` | Mainnet | `liquidity-engine-mainnet:liquidity-migration`| `manual` (requires `REAL_MONEY`) | Execution engine on funded Bybit account. |
+| `liquidity-migration-engine-mexc.service` | MEXC | `liquidity-engine-mexc:liquidity-migration` | `manual` (requires `REAL_MONEY` in `mexc-mainnet.env`) | Execution engine on the MEXC USDT-perp account. |
 | `liquidity-migration-signal-worker-demo.service` | Demo | `liquidity-signal-worker:liquidity-migration`| `multi-user.target` | Public feature ingestion & IPC. |
 | `liquidity-migration-signal-worker-mainnet.service`| Mainnet | `liquidity-signal-worker:liquidity-migration`| `multi-user.target` | Public feature ingestion & IPC. |
+| `liquidity-migration-signal-worker-mexc.service` | MEXC | `liquidity-signal-worker:liquidity-migration`| `manual` (with its realm) | Public feature ingestion & IPC; the features are Bybit mainnet's. |
+| `liquidity-migration-mexc-liveness.timer` | MEXC | `liquidity-observer:liquidity-migration` | Timer (every 30 s while armed) | MEXC engine and worker watchdog. |
 | `liquidity-migration-forward-capture.service` | Global | `liquidity-capture:liquidity-migration` | `independent` (boot) | Continuous Bybit tick & L2 capture. |
 | `liquidity-migration-forward-capture-binance.service`| Global | `liquidity-capture:liquidity-migration` | `independent` (boot) | Continuous Binance tick & L2 capture. |
 | `liquidity-migration-telegram-controls.service` | Global | `liquidity-controls:liquidity-controls` | `multi-user.target` | Interactive Telegram operator bot. |
@@ -118,7 +124,7 @@ EXPECTED_COMMIT=<40-hex-commit> scripts/ops.sh deploy
 | Dispatch `deploy` | Python gate, Rust debug gate, release artifact, VPS deploy | Installs the exact `main` SHA after every gate succeeds |
 | Dispatch `qualify` | Rust debug gate, release tests, soak, benchmark | None |
 | Dispatch `verify`, `rollback` | No build | Reads or restores production through the pinned VPS job |
-| Dispatch `diagnose`, `disarm-mainnet` | No build | Reads incident state or persistently disarms funded trading |
+| Dispatch `diagnose`, `disarm-mainnet`, `disarm-mexc` | No build | Reads incident state or persistently disarms one funded realm |
 
 - **Must** keep account state, credentials and private operational evidence outside the public repository.
 - **Must** run `scripts/dev.sh check` before a direct push to `main`.
@@ -206,12 +212,19 @@ scripts/ops.sh attest-flat --environment mainnet
 ```
 
 ### 3. Real-Money Disarm (Complete Shutdown)
-Persistently stops funded trading and disables the arming switch:
+Persistently stops one funded realm and disables its arming switch:
 ```bash
 scripts/ops.sh deploy disarm-mainnet
+scripts/ops.sh deploy disarm-mexc
 ```
-* Sets `REAL_MONEY=false` in `/etc/liquidity-migration/bybit-mainnet.env`.
-* Stops `liquidity-migration-engine-mainnet.service`.
+
+| Mode | Sets `REAL_MONEY=false` in | Stops and disables |
+| :--- | :--- | :--- |
+| `disarm-mainnet` | `/etc/liquidity-migration/bybit-mainnet.env` | every `mainnet` realm unit |
+| `disarm-mexc` | `/etc/liquidity-migration/mexc-mainnet.env` | every `mexc` realm unit |
+
+`stop-mainnet` and `stop-mexc` stop the same units without touching the switch.
+Neither mode flattens exposure.
 
 ---
 
@@ -224,6 +237,76 @@ Configured in `/etc/liquidity-migration/bybit-mainnet.env` (`0600`, root-owned):
 | `REAL_MONEY` | `false` | Required `true` | Master arming switch for the funded engine. |
 | `RM_CARRY_STOP_LOSS_FRACTION` | `0.10` | `0 < fraction < 1/5` | Declared CARRY stop ceiling; the engine may tighten it for leverage or known liquidation price. |
 | `RM_ROLLING_LOSS_FRACTION` | `0.10` | Positive ratio | Maximum fraction of reference lost in closed 24h PnL plus current account open losses before entry admission trips. |
+
+These dials serve every realm: deploy renders one operational profile from this
+file and installs the identical bytes in each realm's signal-worker source
+directory. `mexc-mainnet.env` holds no dials and a dial written there is read by
+nothing.
+
+---
+
+### MEXC Realm
+
+| Property | Value |
+| :--- | :--- |
+| Fleet realm | `mexc` |
+| Engine venue name | `mexc_mainnet` (`venue` in `deploy/engine.mexc.toml.template`) |
+| Heartbeat realm / lease realm | `mexc_mainnet`; heartbeat venue is `mexc` |
+| Practice realm | none — MEXC publishes no futures testnet, so every order is real |
+| Credential file | `/etc/liquidity-migration/mexc-mainnet.env`, root-owned `0600`, written by hand |
+| Unit environment | `/etc/liquidity-migration/engine-mexc.env`, root-owned `0600`, written by hand |
+| Rendered config | `/etc/liquidity-migration/engine-mexc.toml`, rendered by deploy |
+| Sleeves | LONG entries on; CARRY and EXODUS entries rendered off. CARRY scores Bybit funding, MEXC funding differs per symbol. No maker, no probe |
+| Public data | Bybit mainnet, exactly as the other realms (`configs/signal-worker.mexc.json`, `public_market_realm` `mainnet`) |
+| Source readiness | `mexc_mainnet` is `live-canary`: `engine canary-order` runs, `engine run` refuses. `engine venues` prints the current value |
+
+**Must** obtain `EXPECTED_ENGINE_ACCOUNT_USER_ID` from an authenticated venue
+reply; MEXC exposes no numeric account id, and the engine derives `key-` plus
+the first eight bytes of `sha256(api key)` in hex.
+**Must** arm `REAL_MONEY=true` in `mexc-mainnet.env` before the canary: the
+gateway refuses to build unarmed, and MEXC has no practice realm. Deploy reads
+`engine venues` from the installed binary and leaves the mexc units stopped
+while `mexc_mainnet` is `live-canary`; only `live-proven` provisions and starts
+the realm. `verify` prints the value as `mexc readiness=...`.
+**Must Never** set the switch without explicit owner instruction.
+
+Arming, in order:
+
+```sh
+# 1. On MEXC: create a key with futures order placement (KYC-gated), no
+#    withdrawal, IP-allowlisted to this VPS.
+# 2. On the host, by hand:
+install -o root -g root -m 0600 deploy/mexc-mainnet.env.template \
+  /etc/liquidity-migration/mexc-mainnet.env
+install -o root -g root -m 0600 deploy/engine.mexc.env.template \
+  /etc/liquidity-migration/engine-mexc.env
+# fill in MEXC_REAL_API_KEY, MEXC_REAL_API_SECRET and REAL_MONEY=true; the
+# realm stays stopped until the source is promoted, whatever this says.
+
+# 3. Deploy once: with the switch armed, deploy renders engine-mexc.toml and
+#    projects the worker env, and leaves every mexc unit stopped while the
+#    realm is live-canary.
+scripts/ops.sh real-money preflight-mexc
+gh workflow run vps-deploy.yml --ref main -f mode=deploy
+
+# 4. Read the account id the gateway binds. The template's placeholder
+#    `key-` mismatches on purpose; the message prints the id the credentials
+#    answered as. Write it into engine-mexc.env and rerun until it passes.
+scripts/ops.sh verify-account-identity --environment mexc
+
+# 5. The live evidence step: one venue-minimum post-only BTCUSDT order, its
+#    cancel, and two clean account scans, through the realm's credential file.
+scripts/ops.sh canary-order --environment mexc --symbol BTCUSDT \
+  --expected-user-id key-<16 hex> --execute
+
+# 6. Record the canary receipt in CHANGELOG.md, move mexc_mainnet to
+#    live-proven in engine/engine-public/src/registry.rs, push, and deploy
+#    again; that deploy starts the realm.
+```
+
+Both engine subcommands run on the host under `systemd-run` as
+`liquidity-engine-mexc` with `mexc-mainnet.env` and `engine-mexc.env` loaded;
+the identity check drops `REAL_MONEY`, the canary keeps it.
 
 ---
 
@@ -279,7 +362,7 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | Accepted legacy cursor already skipped history | The missing history is not recoverable from the cursor; assess the producer/account evidence separately |
 | Binary rollback | Required WAL records and `segment_base_v7` make incompatible readers refuse; deployment permits predecessor recovery only when its runtime inputs match. Preserve all durable state and repair forward otherwise |
 
-Must never delete later-generation rows, rewrite accepted hashes, or edit a live cursor to clear a gap. Inspect logs read-only before selecting a recovery action (`<realm>` is `demo` or `mainnet`):
+Must never delete later-generation rows, rewrite accepted hashes, or edit a live cursor to clear a gap. Inspect logs read-only before selecting a recovery action (`<realm>` is `demo`, `mainnet`, or `mexc`):
 
 ```bash
 journalctl -u liquidity-migration-signal-worker-<realm> -n 100 --no-pager

@@ -35,23 +35,36 @@ Operator commands:
   equity [ARGS...]             standard descriptive equity curves (research)
   execution-study [--json]     read the latest paired execution cost report
   curve [REALM] [SAMPLES]      the live account's recorded equity curve, read
-                               on the host (default: mainnet, 240 minutes)
-  flatten --environment demo|mainnet [--reason TEXT] [--execute]
+                               on the host (default: mainnet, 240 minutes;
+                               REALM is demo, mainnet or mexc)
+  flatten --environment demo|mainnet|mexc [--reason TEXT] [--execute]
                                ask each native directional reducer to close its
                                attributed exposure through durable Rust control
                                commands. Reports without --execute; the signal
                                worker stays live while exits complete
-  attest-flat --environment demo|mainnet
+  attest-flat --environment demo|mainnet|mexc
                                run the installed Rust adapter's credential-wide
                                two-scan flatness proof (read-only)
+  verify-account-identity --environment demo|mainnet|mexc
+                               authenticate the realm's read-only probe and
+                               print the account id the engine binds
+  canary-order --environment demo|mexc --symbol SYMBOL
+               --expected-user-id ID [--execute]
+                               one bounded live order lifecycle on the realm's
+                               account: rest one minimum post-only order away
+                               from the touch, cancel it, prove the account
+                               clean twice. Without --execute nothing is sent
   research-refresh [ARGS...]   append-first data/features/backtest workflow
-  real-money preflight         report every remaining arming step (read-only)
+  real-money preflight         report every remaining arming step for the
+                               funded Bybit account (read-only)
+  real-money preflight-mexc    the same for the MEXC account (read-only)
   real-money render-profile [--execute --output PATH]
                                render the operational profile from the
                                RM_* dials in the funded credential file
   deploy [MODE]                MODE is deploy (default)|rollback|verify|
-                               stop-mainnet|disarm-mainnet; rollback deploys
-                               the last commit whose deploy finished
+                               stop-mainnet|disarm-mainnet|stop-mexc|
+                               disarm-mexc; rollback deploys the last commit
+                               whose deploy finished
   help                         show this help and do nothing else
 
 A UNIT that does not already start with `liquidity-migration-` gets the prefix:
@@ -117,10 +130,17 @@ remote_python_module() {
 exec .venv/bin/python -m "${REMOTE_ARGS[@]}"' "$module" "$@"
 }
 
+# remote_engine_control REALM MODE [ARGS...]
+#   attest-flat and verify-account-identity are read-only and run with the
+#   arming switch removed. canary-order keeps REAL_MONEY: a live-canary realm's
+#   gateway refuses to build without it, and the command places one order.
 remote_engine_control() {
   local realm="$1"
+  shift
   remote_exec '
 realm="${REMOTE_ARGS[0]}"
+mode="${REMOTE_ARGS[1]}"
+engine_args=("${REMOTE_ARGS[@]:2}")
 engine_binary=/opt/liquidity-migration-engine/bin/engine
 
 case "$realm" in
@@ -143,12 +163,30 @@ case "$realm" in
     runtime_user=liquidity-engine-mainnet
     state_dir=/var/lib/liquidity-migration-engine-mainnet
     if [ "$inventory_credential_set" = attestor ]; then
-      unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+      unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET MEXC_REAL_API_KEY MEXC_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
     else
-      unset_environment="BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+      unset_environment="BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET MEXC_REAL_API_KEY MEXC_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
     fi
     ;;
+  mexc)
+    env_file=/etc/liquidity-migration/engine-mexc.env
+    credential_file=/etc/liquidity-migration/mexc-mainnet.env
+    # MEXC has no separate read-only attestor key; this is the execution pair,
+    # and the Rust inventory type it reaches exposes no mutation method.
+    inventory_credential_set=execution
+    runtime_user=liquidity-engine-mexc
+    state_dir=/var/lib/liquidity-migration-engine-mexc
+    unset_environment="BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+    ;;
   *) echo "invalid engine-control realm: $realm" >&2; exit 2 ;;
+esac
+
+case "$mode" in
+  attest-flat|verify-account-identity) ;;
+  canary-order)
+    unset_environment="$(printf "%s\n" $unset_environment | grep -vx REAL_MONEY | tr "\n" " ")"
+    ;;
+  *) echo "invalid engine-control mode: $mode" >&2; exit 2 ;;
 esac
 
 [ -x "$engine_binary" ] \
@@ -159,11 +197,11 @@ for path in "$env_file" "$credential_file"; do
 done
 
 # systemd parses the private EnvironmentFiles, then drops privileges. The
-# command receives one explicitly selected credential file. Even when that
-# is the execution file, the Rust inventory type exposes no mutation method.
-# Secrets never enter this router or its argv.
+# command receives one explicitly selected credential file. For the read-only
+# modes the Rust inventory type exposes no mutation method even on the
+# execution file. Secrets never enter this router or its argv.
 exec systemd-run --quiet --wait --pipe --collect --service-type=exec \
-    --unit="liquidity-migration-attest-flat-${realm}-$$" \
+    --unit="liquidity-migration-${mode}-${realm}-$$" \
     --property="User=$runtime_user" \
     --property="Group=liquidity-migration" \
     --property="WorkingDirectory=$state_dir" \
@@ -176,8 +214,8 @@ exec systemd-run --quiet --wait --pipe --collect --service-type=exec \
     --property=ProtectSystem=strict \
     --property=ProtectHome=true \
     --property=UMask=0027 \
-    "$engine_binary" attest-flat
-' "$realm"
+    "$engine_binary" "$mode" ${engine_args[@]+"${engine_args[@]}"}
+' "$realm" "$@"
 }
 
 command="${1:-help}"
@@ -225,8 +263,8 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     # research backtests -- that is `equity` above.
     curve_realm="${1:-mainnet}"
     case "$curve_realm" in
-      demo|mainnet) ;;
-      *) die_usage "curve realm must be demo or mainnet" ;;
+      demo|mainnet|mexc) ;;
+      *) die_usage "curve realm must be demo, mainnet or mexc" ;;
     esac
     curve_samples="${2:-240}"
     [[ "$curve_samples" =~ ^[1-9][0-9]*$ ]] || die_usage "curve samples must be a positive integer"
@@ -257,8 +295,8 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
       set -- preflight
     fi
     case "${1:-}" in
-      preflight|render-profile) ;;
-      *) die_usage "real-money subcommand must be preflight or render-profile" ;;
+      preflight|preflight-mexc|render-profile) ;;
+      *) die_usage "real-money subcommand must be preflight, preflight-mexc or render-profile" ;;
     esac
     # LOCAL=1 runs it against this checkout instead of the VPS, so the dials
     # can be proved before anything is copied to the host.
@@ -290,12 +328,44 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     ;;
   attest-flat)
     [[ "$#" -eq 2 && "$1" == "--environment" ]] \
-      || die_usage "attest-flat requires --environment demo|mainnet"
+      || die_usage "attest-flat requires --environment demo|mainnet|mexc"
     case "$2" in
-      demo|mainnet) ;;
-      *) die_usage "attest-flat environment must be demo or mainnet" ;;
+      demo|mainnet|mexc) ;;
+      *) die_usage "attest-flat environment must be demo, mainnet or mexc" ;;
     esac
-    remote_engine_control "$2"
+    remote_engine_control "$2" attest-flat
+    ;;
+  verify-account-identity)
+    [[ "$#" -eq 2 && "$1" == "--environment" ]] \
+      || die_usage "verify-account-identity requires --environment demo|mainnet|mexc"
+    case "$2" in
+      demo|mainnet|mexc) ;;
+      *) die_usage "verify-account-identity environment must be demo, mainnet or mexc" ;;
+    esac
+    remote_engine_control "$2" verify-account-identity
+    ;;
+  canary-order)
+    canary_environment="" canary_symbol="" canary_user_id="" canary_execute=""
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        --environment) canary_environment="${2:-}"; shift 2 ;;
+        --symbol) canary_symbol="${2:-}"; shift 2 ;;
+        --expected-user-id) canary_user_id="${2:-}"; shift 2 ;;
+        --execute) canary_execute=1; shift ;;
+        *) die_usage "canary-order does not take '$1'" ;;
+      esac
+    done
+    # bybit_mainnet is live-proven and never the canary's account; the engine
+    # refuses it too, but a typo should stop here, before the host.
+    case "$canary_environment" in
+      demo|mexc) ;;
+      *) die_usage "canary-order requires --environment demo|mexc" ;;
+    esac
+    [[ -n "$canary_symbol" && -n "$canary_user_id" ]] \
+      || die_usage "canary-order requires --symbol SYMBOL and --expected-user-id ID"
+    remote_engine_control "$canary_environment" canary-order \
+      --symbol "$canary_symbol" --expected-user-id "$canary_user_id" \
+      ${canary_execute:+--execute}
     ;;
   deploy)
     # A leading --execute is accepted and discarded, for callers that still pass it.
@@ -303,8 +373,8 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
       shift
     fi
     case "${1:-deploy}" in
-      deploy|rollback|verify|stop-mainnet|disarm-mainnet) ;;
-      *) die_usage "deploy mode must be deploy, rollback, verify, stop-mainnet, or disarm-mainnet" ;;
+      deploy|rollback|verify|stop-mainnet|disarm-mainnet|stop-mexc|disarm-mexc) ;;
+      *) die_usage "deploy mode must be deploy, rollback, verify, stop-mainnet, disarm-mainnet, stop-mexc, or disarm-mexc" ;;
     esac
     exec "$ROOT_DIR/scripts/deploy_vps_live.sh" "${1:-deploy}"
     ;;

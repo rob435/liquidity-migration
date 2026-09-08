@@ -827,7 +827,7 @@ fn validate_config(
         ));
     }
     let live = &machine.live;
-    if !matches!(live.environment.as_str(), "demo" | "mainnet")
+    if !is_realm(&live.environment)
         || live.public_market_realm != "mainnet"
         || live.request_timeout_ms == 0
         || live.request_retries == 0
@@ -928,6 +928,14 @@ fn f64_at(value: &Value, key: &str) -> Result<f64, WorkerError> {
     Ok(out)
 }
 
+/// The realms a worker may publish for. `mexc` reads the same Bybit mainnet
+/// public data as `mainnet` and feeds the engine that trades MEXC.
+pub const REALMS: [&str; 3] = ["demo", "mainnet", "mexc"];
+
+pub fn is_realm(value: &str) -> bool {
+    REALMS.contains(&value)
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
@@ -943,7 +951,7 @@ pub fn is_sha256(value: &str) -> bool {
 mod tests {
     use super::{
         carry_source_history_hours, sha256_hex, validate_source_history_bounds, SignalWorkerConfig,
-        MAX_CARRY_SOURCE_HISTORY_HOURS, MAX_LONG_COLD_START_LOOKBACK_DAYS,
+        MAX_CARRY_SOURCE_HISTORY_HOURS, MAX_LONG_COLD_START_LOOKBACK_DAYS, REALMS,
         SOURCE_HISTORY_PADDING_HOURS,
     };
     use engine_strategies::native_carry::plan::{
@@ -956,7 +964,7 @@ mod tests {
 
     #[test]
     fn checked_in_realm_configs_derive_native_fingerprints() {
-        for realm in ["demo", "mainnet"] {
+        for realm in REALMS {
             validate_realm(realm);
         }
     }

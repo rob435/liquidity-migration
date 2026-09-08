@@ -95,7 +95,7 @@ engine — the execution loop
   engine strategies
       List every strategy plug that a [[strategy]] config block can load.
 
-  engine render-native-config --realm demo|mainnet
+  engine render-native-config --realm demo|mainnet|mexc
              --signal-config PATH --long-rule PATH --carry-rule PATH
              --exodus-rule PATH --operational-config PATH [--maker-rule PATH]
              --long-entries-enabled true|false
@@ -110,16 +110,19 @@ engine — the execution loop
   engine attest-flat --config engine.toml
       Read every account position and open order surface known by the venue
       adapter. Succeeds only when the credential-wide inventory is fresh and
-      empty. Sends no orders and changes no venue state.
+      empty. Sends no orders and changes no venue state. Available on
+      bybit_demo, bybit_mainnet and mexc_mainnet.
 
   engine verify-account-identity --config engine.toml
       Authenticate the narrow inventory reader and bind it to the config's
       venue, realm, and EXPECTED_ENGINE_ACCOUNT_USER_ID. Reads no WAL or
-      account inventory and changes no venue state.
+      account inventory and changes no venue state. MEXC publishes no account
+      number, so its user id is key-<first 8 bytes of sha256(api key)>.
 
   engine canary-order --config engine.toml --symbol XRPUSDT
                       --expected-user-id 579580669 --execute
-      On Bybit Demo only, take the account lease, rest one minimum-value
+      On bybit_demo and on any live-canary realm (mexc_mainnet, with
+      REAL_MONEY armed), take the account lease, rest one minimum-value
       post-only order away from the touch with an attached stop, cancel it,
       and prove the derivative account clean twice. Any fill is closed in full
       and makes the command fail after cleanup. Without --execute, no

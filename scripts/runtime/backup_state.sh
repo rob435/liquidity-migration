@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Off-box copy of the state that cannot be rebuilt: the engines' logs, closed
 # trades, and heartbeats, the workers' checkpoints, the target books and
-# spools, the retired producers' takeover sources, and the two rendered engine
-# configs whose hashes the logs name. Code lives in git and market data is
+# spools, the retired producers' takeover sources, and every rendered engine
+# config whose hash the logs name. Code lives in git and market data is
 # re-captured; the WAL is the account's own memory, and without this copy it
 # exists on exactly one disk.
 #
@@ -31,13 +31,16 @@ RCLONE="${RCLONE_BIN:-/usr/bin/rclone}"
 RSYNC="${RSYNC_BIN:-rsync}"
 DEFAULT_SOURCES="/var/lib/liquidity-migration-engine \
 /var/lib/liquidity-migration-engine-mainnet \
+/var/lib/liquidity-migration-engine-mexc \
 /var/lib/liquidity-migration-signal-worker-demo \
 /var/lib/liquidity-migration-signal-worker-mainnet \
+/var/lib/liquidity-migration-signal-worker-mexc \
 /var/lib/liquidity-migration/targets \
 /var/lib/liquidity-migration/signals \
 /var/lib/liquidity-migration/controls \
 /etc/liquidity-migration/engine.toml \
-/etc/liquidity-migration/engine-mainnet.toml"
+/etc/liquidity-migration/engine-mainnet.toml \
+/etc/liquidity-migration/engine-mexc.toml"
 SOURCES="${BACKUP_SOURCES:-$DEFAULT_SOURCES}"
 
 case "$REMOTE" in

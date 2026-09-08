@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::sha256_hex;
+use crate::config::{is_realm, sha256_hex};
 use crate::model::{InstrumentObservation, TickerObservation, UniverseIdentity, UniverseMode};
 use crate::normalize::normalized_symbol;
 use crate::worker::WorkerError;
@@ -166,7 +166,7 @@ pub fn derive_universe(
     if inputs.snapshot_ts_ms <= 0 || inputs.available_at_ms < inputs.snapshot_ts_ms {
         return Err(WorkerError::input("universe refresh clock is invalid"));
     }
-    if !matches!(inputs.environment, "demo" | "mainnet") || inputs.endpoint.trim().is_empty() {
+    if !is_realm(inputs.environment) || inputs.endpoint.trim().is_empty() {
         return Err(WorkerError::input("universe realm or endpoint is invalid"));
     }
     let excluded: BTreeSet<&str> = rules.exclude_symbols.iter().map(String::as_str).collect();

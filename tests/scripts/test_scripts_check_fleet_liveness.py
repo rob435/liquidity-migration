@@ -304,12 +304,20 @@ def test_manifest_loads_and_scopes_are_disjoint() -> None:
     rows = liveness.load_fleet_manifest()
     demo = {row.unit for row in liveness.scope_units("demo", rows)}
     mainnet = {row.unit for row in liveness.scope_units("mainnet", rows)}
-    assert demo and mainnet
-    assert not demo & mainnet
+    mexc = {row.unit for row in liveness.scope_units("mexc", rows)}
+    assert demo and mainnet and mexc
+    assert not demo & mainnet and not demo & mexc and not mainnet & mexc
     assert "liquidity-migration-engine.service" in demo
     assert "liquidity-migration-engine-mainnet.service" in mainnet
-    # Demo never watches funded units; one cause must not page both scopes.
-    assert all("mainnet" not in unit for unit in demo)
+    assert "liquidity-migration-engine-mexc.service" in mexc
+    assert "liquidity-migration-signal-worker-mexc.service" in mexc
+    # Demo never watches funded units; one cause must not page two scopes.
+    assert all("mainnet" not in unit and "mexc" not in unit for unit in demo)
+    assert liveness._ENGINE_UNITS >= {
+        "liquidity-migration-engine-mexc.service",
+        "liquidity-migration-engine-mainnet.service",
+    }
+    assert "mexc" in liveness._ACCOUNT_SCOPES
 
 
 def test_inactive_unit_is_a_critical_alert(monkeypatch) -> None:
@@ -1121,6 +1129,53 @@ def test_active_deploy_age_reads_the_kernel_lock_table(tmp_path: Path) -> None:
 
     lock_table.write_text("", encoding="utf-8")
     assert liveness.active_deploy_age(lock, now=1_000.0, lock_table=lock_table) is None
+
+
+def test_host_watchdog_chain_covers_every_funded_realms_timer(monkeypatch) -> None:
+    """A second funded realm gets the same supervision as the first: its
+    watchdog is required while its own engine runs, even with its timer off."""
+
+    queried: list[str] = []
+
+    def states(units: list[str]) -> dict[str, str]:
+        queried.extend(units)
+        return {
+            unit: ("inactive" if unit == "liquidity-migration-mexc-liveness.timer" else "active")
+            for unit in units
+        }
+
+    monkeypatch.setattr(liveness, "active_deploy_age", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(liveness, "unit_states", states)
+    monkeypatch.setattr(
+        liveness,
+        "unit_enabled_state",
+        lambda unit: "disabled" if "mexc" in unit else "enabled",
+    )
+    monkeypatch.setattr(liveness, "unit_result", lambda _unit: "success")
+
+    alerts = liveness.evaluate_watchdog_chain()
+
+    assert {alert.key for alert in alerts} == {"watchdog:mexc"}
+    assert "liquidity-migration-engine-mexc.service" in queried
+
+
+def test_a_disabled_watchdog_for_a_stopped_funded_realm_is_not_a_fault(monkeypatch) -> None:
+    monkeypatch.setattr(liveness, "active_deploy_age", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        liveness,
+        "unit_states",
+        lambda units: {
+            unit: ("active" if "demo" in unit else "inactive") for unit in units
+        },
+    )
+    monkeypatch.setattr(
+        liveness,
+        "unit_enabled_state",
+        lambda unit: "enabled" if "demo" in unit else "disabled",
+    )
+    monkeypatch.setattr(liveness, "unit_result", lambda _unit: "success")
+
+    assert liveness.evaluate_watchdog_chain() == []
 
 
 def test_host_watchdog_chain_still_catches_a_disabled_timer_while_engine_runs(

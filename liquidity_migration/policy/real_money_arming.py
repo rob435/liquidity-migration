@@ -22,14 +22,17 @@ from liquidity_migration.policy.real_money_profile import (
 )
 from liquidity_migration.policy.systemd_environment import parse_systemd_environment_bytes
 
-__all__ = ["CheckResult", "preflight", "main"]
+__all__ = ["CheckResult", "preflight", "preflight_mexc", "main"]
 
 MAINNET_CREDENTIAL_ENV = Path("/etc/liquidity-migration/bybit-mainnet.env")
 MAINNET_SIGNAL_SOURCE_ENV = Path(
     "/etc/liquidity-migration/signal-worker-mainnet-source.env"
 )
+MEXC_CREDENTIAL_ENV = Path("/etc/liquidity-migration/mexc-mainnet.env")
+MEXC_SIGNAL_SOURCE_ENV = Path("/etc/liquidity-migration/signal-worker-mexc-source.env")
 
 _CREDENTIAL_KEYS = ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET")
+_MEXC_CREDENTIAL_KEYS = ("MEXC_REAL_API_KEY", "MEXC_REAL_API_SECRET")
 _SIGNAL_PATH_KEYS = ("OPERATIONAL_PROFILE_FILE",)
 
 
@@ -231,15 +234,17 @@ def _installed_profile_matches_dials(
     )
 
 
-def _signal_checks(values: Mapping[str, str]) -> list[CheckResult]:
+def _signal_checks(
+    values: Mapping[str, str], *, expected_realm: str = "mainnet"
+) -> list[CheckResult]:
     results: list[CheckResult] = []
     realm = values.get("SIGNAL_WORKER_REALM", "").strip()
     results.append(
         CheckResult(
             "SIGNAL_WORKER_REALM",
-            realm == "mainnet",
+            realm == expected_realm,
             f"is {realm!r}",
-            "set SIGNAL_WORKER_REALM=mainnet" if realm != "mainnet" else "",
+            f"set SIGNAL_WORKER_REALM={expected_realm}" if realm != expected_realm else "",
         )
     )
     for key in _SIGNAL_PATH_KEYS:
@@ -282,6 +287,78 @@ def preflight(
                     dial_values=credentials, installed_path=installed_profile
                 )
             )
+    return results
+
+
+def _mexc_credential_checks(values: Mapping[str, str]) -> list[CheckResult]:
+    results: list[CheckResult] = []
+    for key in _MEXC_CREDENTIAL_KEYS:
+        present = bool(values.get(key, "").strip())
+        results.append(
+            CheckResult(
+                key,
+                present,
+                "set" if present else "empty",
+                "" if present else f"set {key} in the MEXC credential file",
+            )
+        )
+    stray = sorted(key for key in values if key.startswith("BYBIT_"))
+    results.append(
+        CheckResult(
+            "bybit keys",
+            not stray,
+            "absent, as required" if not stray else f"present: {', '.join(stray)}",
+            "" if not stray else "remove every BYBIT_ key from the MEXC credential file",
+        )
+    )
+    raw = values.get("REAL_MONEY", "").strip().lower()
+    armed = raw in TRUE_ENV_VALUES
+    if raw and not armed and raw not in FALSE_ENV_VALUES:
+        detail, fix = "REAL_MONEY has an unrecognised value", f"use one of {sorted(TRUE_ENV_VALUES)} to arm"
+    elif armed:
+        detail, fix = "armed by the owner", ""
+    else:
+        detail, fix = "not armed", "set REAL_MONEY=true by hand when MEXC trading is intended"
+    results.append(CheckResult("REAL_MONEY", armed, detail, fix))
+    missing_alert = [
+        key
+        for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+        if not values.get(key, "").strip()
+    ]
+    results.append(
+        CheckResult(
+            "notifications",
+            not missing_alert,
+            "Telegram is configured" if not missing_alert else f"missing: {', '.join(missing_alert)}",
+            "" if not missing_alert else "set both values before activation",
+        )
+    )
+    return results
+
+
+def preflight_mexc(
+    *,
+    credential_env: Path = MEXC_CREDENTIAL_ENV,
+    signal_env: Path = MEXC_SIGNAL_SOURCE_ENV,
+) -> list[CheckResult]:
+    """Read every MEXC arming input and report all failures.
+
+    Deliberately smaller than the funded Bybit preflight: MEXC declares no host
+    IP allowlist variable, exposes no account-wide bot list to acknowledge, and
+    takes no operational dials — those live in the funded Bybit credential file
+    and render one profile for every realm.
+    """
+
+    results: list[CheckResult] = []
+    credentials, credential_result = _read_environment(credential_env)
+    results.append(credential_result)
+    if credentials is not None:
+        results.extend(_mexc_credential_checks(credentials))
+
+    signal, signal_result = _read_environment(signal_env)
+    results.append(signal_result)
+    if signal is not None:
+        results.extend(_signal_checks(signal, expected_realm="mexc"))
     return results
 
 
@@ -397,10 +474,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    check = subparsers.add_parser("preflight", help="Report every arming input")
+    check = subparsers.add_parser("preflight", help="Report every funded Bybit arming input")
     check.add_argument("--credential-env", default=str(MAINNET_CREDENTIAL_ENV))
     check.add_argument("--signal-env", default=str(MAINNET_SIGNAL_SOURCE_ENV))
     check.add_argument("--json", action="store_true")
+
+    mexc = subparsers.add_parser("preflight-mexc", help="Report every MEXC arming input")
+    mexc.add_argument("--credential-env", default=str(MEXC_CREDENTIAL_ENV))
+    mexc.add_argument("--signal-env", default=str(MEXC_SIGNAL_SOURCE_ENV))
+    mexc.add_argument("--json", action="store_true")
 
     render = subparsers.add_parser("render-profile", help="Render the operational profile")
     render.add_argument("--from-env", default=str(MAINNET_CREDENTIAL_ENV))
@@ -431,7 +513,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"render failed: {exc}", file=sys.stderr)
             return 2
 
-    results = preflight(
+    reader = preflight_mexc if args.command == "preflight-mexc" else preflight
+    results = reader(
         credential_env=Path(args.credential_env),
         signal_env=Path(args.signal_env),
     )
@@ -442,8 +525,9 @@ def main(argv: list[str] | None = None) -> int:
             print(row.render())
         print()
         outstanding = sum(not row.ok for row in results)
+        realm = "MEXC" if args.command == "preflight-mexc" else "real money"
         print(
-            f"{outstanding} step(s) remaining before real money can trade."
+            f"{outstanding} step(s) remaining before {realm} can trade."
             if outstanding
             else "Every precondition is met."
         )

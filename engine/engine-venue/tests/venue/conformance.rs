@@ -125,6 +125,11 @@ fn bybit(body: Value) -> (u16, String) {
         json!({"retCode":0,"retMsg":"OK","result":body,"time":1700000000000_i64}).to_string(),
     )
 }
+/// One contract, at the size that makes a contract count and a coin count
+/// different numbers: 100 contracts is the 0.01 BTC this file orders.
+fn mexc_contract_detail() -> Value {
+    json!({"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":1000,"apiAllowed":true}]})
+}
 fn mutation(name: VenueName, r: &Recorded) -> bool {
     match name.venue() {
         "bybit" => r.path.starts_with("/v5/order/") && r.method == "POST",
@@ -206,7 +211,7 @@ fn answer(
         }.to_string()),
         "mexc" => (200, match r.path.as_str() {
             path if path.starts_with("/api/v1/private/order/external/") => json!({"success":true,"code":0,"data":{"symbol":"BTC_USDT","externalOid":CLIENT,"orderId":"41","state":if filled {3} else if terminal {4} else {2},"dealVol":if filled {100} else if partial {40} else {0}}}),
-            "/api/v1/contract/detail" => json!({"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":1000,"apiAllowed":true}]}),
+            "/api/v1/contract/detail" => mexc_contract_detail(),
             _ => json!({"success":true,"code":0,"data":"41"}),
         }.to_string()),
         "variational" => (200, json!({"listings":[]}).to_string()),
@@ -466,7 +471,12 @@ fixture!(
     VariationalMainnet
 );
 
-#[cfg(any(feature = "bybit", feature = "binance", feature = "hyperliquid"))]
+#[cfg(any(
+    feature = "bybit",
+    feature = "binance",
+    feature = "hyperliquid",
+    feature = "mexc"
+))]
 fn private_frame(name: VenueName, execution: u64, qty: &str) -> Value {
     match name.venue() {
         "bybit" => {
@@ -477,6 +487,12 @@ fn private_frame(name: VenueName, execution: u64, qty: &str) -> Value {
         }
         "hyperliquid" => {
             json!({"channel":"userFills","data":{"user":HL_ACCOUNT,"fills":[{"coin":"BTC","px":"95000","sz":qty,"side":"B","time":1700000000000_i64,"fee":"0.01","tid":execution,"crossed":false,"oid":41,"cloid":"0x01018bcfe56800000000000100000000"}]}})
+        }
+        // MEXC counts contracts, 0.0001 BTC each, so the same fill is a
+        // different number here than on every other venue in this table.
+        "mexc" => {
+            let vol = (qty.parse::<f64>().unwrap() / 0.0001).round() as i64;
+            json!({"channel":"push.personal.order.deal","data":{"id":execution,"symbol":"BTC_USDT","side":1,"vol":vol,"price":95000,"fee":0.01,"feeCurrency":"USDT","profit":0,"isTaker":false,"category":1,"orderId":41,"isSelf":false,"externalOid":CLIENT,"timestamp":1700000000000_i64},"ts":1700000000000_i64})
         }
         _ => unreachable!(),
     }
@@ -493,19 +509,11 @@ async fn stream_lifecycle(name: VenueName) {
         }
     });
     let _io_progress = AbortOnDrop(io_progress);
-    #[cfg(any(feature = "lighter", feature = "mexc"))]
-    if matches!(name.venue(), "lighter" | "mexc") {
-        let mut feed: OrderFeeds = match name.venue() {
-            #[cfg(feature = "lighter")]
-            "lighter" => OrderFeeds::Lighter(engine_venue::LighterOrderFeed::with_period(
-                Duration::from_secs(5),
-            )),
-            #[cfg(feature = "mexc")]
-            "mexc" => OrderFeeds::Mexc(engine_venue::MexcOrderFeed::with_period(
-                Duration::from_secs(5),
-            )),
-            _ => unreachable!(),
-        };
+    #[cfg(feature = "lighter")]
+    if name.venue() == "lighter" {
+        let mut feed = OrderFeeds::Lighter(engine_venue::LighterOrderFeed::with_period(
+            Duration::from_secs(5),
+        ));
         assert!(matches!(
             feed.next_update().await.unwrap(),
             OrderUpdate::StreamReset { .. }
@@ -525,7 +533,12 @@ async fn stream_lifecycle(name: VenueName) {
         assert!(futures_util::poll!(Box::pin(feed.next_update())).is_pending());
         return;
     }
-    #[cfg(any(feature = "bybit", feature = "binance", feature = "hyperliquid"))]
+    #[cfg(any(
+        feature = "bybit",
+        feature = "binance",
+        feature = "hyperliquid",
+        feature = "mexc"
+    ))]
     {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
@@ -569,6 +582,22 @@ async fn stream_lifecycle(name: VenueName) {
                         ))
                         .await
                         .unwrap();
+                } else if name.venue() == "mexc" {
+                    let login = socket.next().await.unwrap().unwrap();
+                    let login: Value = serde_json::from_str(login.to_text().unwrap()).unwrap();
+                    assert_eq!(login["method"], "login");
+                    assert_eq!(login["subscribe"], false);
+                    socket
+                        .send(Message::Text(
+                            json!({"channel":"rs.login","data":"success","ts":"1700000000000"})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                    let filter = socket.next().await.unwrap().unwrap();
+                    let filter: Value = serde_json::from_str(filter.to_text().unwrap()).unwrap();
+                    assert_eq!(filter["method"], "personal.filter");
                 }
                 // Execution 2 occurs during the disconnect and is available only in REST history.
                 let execution = if connection == 0 { 1 } else { 3 };
@@ -600,6 +629,15 @@ async fn stream_lifecycle(name: VenueName) {
                     match name.venue() {
                         "bybit" => frame["data"][0].clone(),
                         "hyperliquid" => frame["data"]["fills"][0].clone(),
+                        // Same fill, and the maker flag changes name between
+                        // the two transports: `isTaker` on the socket,
+                        // `taker` on the history endpoint.
+                        "mexc" => {
+                            let mut row = frame["data"].clone();
+                            row["taker"] = row["isTaker"].clone();
+                            row.as_object_mut().unwrap().remove("isTaker");
+                            row
+                        }
                         other => panic!("unexpected history transport: {other}"),
                     }
                 })
@@ -613,6 +651,14 @@ async fn stream_lifecycle(name: VenueName) {
                     assert_eq!(request.json()["type"], "userFillsByTime");
                     (200, json!(fills).to_string())
                 }
+                "mexc" => match request.path.as_str() {
+                    "/api/v1/contract/detail" => (200, mexc_contract_detail().to_string()),
+                    "/api/v1/private/order/list/order_deals/v3" => (
+                        200,
+                        json!({"success":true,"code":0,"data":{"resultList":fills}}).to_string(),
+                    ),
+                    other => panic!("unexpected MEXC history request {other}"),
+                },
                 _ => unreachable!(),
             }
         })
@@ -644,6 +690,24 @@ async fn stream_lifecycle(name: VenueName) {
                 )
                 .unwrap(),
             ),
+            #[cfg(feature = "mexc")]
+            VenueName::MexcMainnet => {
+                let mut feed = engine_venue::MexcOrderFeed::for_test(
+                    &url,
+                    engine_venue::MexcRealm::Mainnet.credentials_for_test("key", "secret"),
+                );
+                // The socket names `BTC_USDT`; the id and the contract size
+                // both reach its decoder through the instrument catalogue.
+                let (_, spec) = engine_public::venues::mexc::contracts::Contracts::parse_raw(
+                    &mexc_contract_detail().to_string(),
+                )
+                .unwrap()
+                .instrument_specs()
+                .pop()
+                .unwrap();
+                feed.learn_instrument(SymbolId(0), &spec);
+                OrderFeeds::Mexc(feed)
+            }
             _ => unreachable!(),
         };
         assert!(matches!(
@@ -763,7 +827,7 @@ stream_fixture!(
     conformance_lighter_private_recovery_only,
     LighterTestnet
 );
-stream_fixture!("mexc", conformance_mexc_private_recovery_only, MexcMainnet);
+stream_fixture!("mexc", conformance_mexc_private_reconnect_gap, MexcMainnet);
 stream_fixture!(
     "variational",
     conformance_variational_private_silent,

@@ -81,11 +81,11 @@ def test_deployed_shell_entrypoints_are_executable() -> None:
         assert os.access(path, os.X_OK), f"{relative} is not executable"
 
 
-def test_deploy_modes_are_exactly_the_five_operations() -> None:
+def test_deploy_modes_are_exactly_the_seven_operations() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     match = re.search(r"case \"\$MODE\" in\n\s+(\S+)\)", text)
     assert match is not None
-    assert "deploy|rollback|verify|stop-mainnet|disarm-mainnet" in text
+    assert "deploy|rollback|verify|stop-mainnet|disarm-mainnet|stop-mexc|disarm-mexc" in text
     for retired in ("install)", "activate)", "staged)", "rollout)", "--profile"):
         assert retired not in text
 
@@ -155,12 +155,55 @@ def test_disarm_rewrite_refuses_an_ambiguous_credential(tmp_path: Path) -> None:
     assert "REAL_MONEY=true" in credential.read_text(encoding="utf-8")
 
 
-def test_deploy_starts_the_funded_realm_only_when_armed() -> None:
+def test_deploy_starts_each_funded_realm_only_when_its_own_switch_is_armed() -> None:
     remote = _remote_script()
     deploy_body = remote[remote.index("deploy_mode()") :]
     assert "if mainnet_armed; then" in deploy_body
     assert "handover_realm mainnet" in deploy_body
     assert "real-money off: funded units stay stopped" in deploy_body
+    assert "if ! mexc_armed; then" in deploy_body
+    assert "if ! realm_run_ready mexc; then" in deploy_body
+    # The config is rendered whenever the switch is armed, so the canary has a
+    # file to run against; only the start waits for the engine's readiness.
+    assert deploy_body.index("provision_mexc") < deploy_body.index("if ! realm_run_ready mexc; then")
+    assert "handover_realm mexc" in deploy_body
+    assert "real-money off: mexc units stay stopped" in deploy_body
+    assert "units stay stopped until the canary evidence promotes it" in deploy_body
+    # Each realm reads its own credential file; one arming switch never implies
+    # the other.
+    armed = _function_body(remote, "mexc_armed")
+    assert "$MEXC_CREDENTIAL_ENV" in armed
+
+
+@pytest.mark.parametrize(
+    ("readiness", "ready"),
+    [("live-proven", True), ("live-canary", False), ("production-blocked", False), ("", False)],
+)
+def test_mexc_handover_waits_for_the_engines_own_live_proven_readiness(
+    tmp_path: Path, readiness: str, ready: bool
+) -> None:
+    # The installed binary decides. An armed switch alone must not start a
+    # realm `engine run` would refuse at boot.
+    engine = tmp_path / "engine"
+    rows = ["name\tvenue\trealm\treal_money\treadiness", "bybit_mainnet\tbybit\tmainnet\ttrue\tlive-proven"]
+    if readiness:
+        rows.append(f"mexc_mainnet\tmexc\tmexc_mainnet\ttrue\t{readiness}")
+    engine.write_text("#!/bin/sh\n" + "\n".join(f"printf '%s\\n' '{row}'" for row in rows) + "\n", encoding="utf-8")
+    engine.chmod(0o755)
+    remote = _remote_script()
+    harness = "\n".join([
+        "set -euo pipefail",
+        'fail() { echo "$*" >&2; exit 1; }',
+        _function_body(remote, "realm_run_ready"),
+        'if realm_run_ready mexc; then echo "ready=$FUNDED_REALM_READINESS"; else echo "blocked=$FUNDED_REALM_READINESS"; fi',
+    ])
+    result = subprocess.run(
+        ["bash", "-c", harness], env={**os.environ, "ENGINE_BINARY": str(engine)},
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    expected = readiness or "unknown"
+    assert result.stdout.strip() == (f"ready={expected}" if ready else f"blocked={expected}")
 
 
 def test_deploy_prepares_oncall_routes_before_starting_independent_watchdog() -> None:
@@ -187,6 +230,7 @@ def test_observers_load_dedicated_notification_files_not_venue_credentials() -> 
     units = [
         "liquidity-migration-demo-liveness.service",
         "liquidity-migration-mainnet-liveness.service",
+        "liquidity-migration-mexc-liveness.service",
         "liquidity-migration-host-liveness.service",
         "liquidity-migration-trade-notify.service",
         "liquidity-migration-telegram-controls.service",
@@ -196,7 +240,7 @@ def test_observers_load_dedicated_notification_files_not_venue_credentials() -> 
         assert "EnvironmentFile=/etc/liquidity-migration/notifications.env" in text
         assert "EnvironmentFile=/etc/liquidity-migration/bybit-demo.env" not in text
         assert "EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env" not in text
-    for realm in ("demo", "mainnet", "host"):
+    for realm in ("demo", "mainnet", "mexc", "host"):
         text = (SYSTEMD / f"liquidity-migration-{realm}-liveness.service").read_text(encoding="utf-8")
         assert "EnvironmentFile=/etc/liquidity-migration/oncall.env" in text
         assert "--require-oncall" in text
@@ -215,29 +259,53 @@ def test_every_service_execstart_is_an_absolute_committed_command() -> None:
 def test_engine_units_unset_credentials_they_must_not_see() -> None:
     demo = (SYSTEMD / "liquidity-migration-engine.service").read_text(encoding="utf-8")
     assert "UnsetEnvironment=" in demo
-    for secret in ("BYBIT_REAL_API_KEY", "REAL_MONEY", "TELEGRAM_BOT_TOKEN"):
+    for secret in ("BYBIT_REAL_API_KEY", "MEXC_REAL_API_KEY", "REAL_MONEY", "TELEGRAM_BOT_TOKEN"):
         assert secret in demo
-    for realm in ("demo", "mainnet"):
+    for realm in ("demo", "mainnet", "mexc"):
         worker = (SYSTEMD / f"liquidity-migration-signal-worker-{realm}.service").read_text(encoding="utf-8")
         assert "bybit-demo.env" not in worker
         assert "bybit-mainnet.env" not in worker
+        assert "mexc-mainnet.env" not in worker
+    # An engine loads exactly one venue's credential file and unsets the others.
+    mainnet = (SYSTEMD / "liquidity-migration-engine-mainnet.service").read_text(encoding="utf-8")
+    mexc = (SYSTEMD / "liquidity-migration-engine-mexc.service").read_text(encoding="utf-8")
+    assert "EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env" in mainnet
+    assert "MEXC_REAL_API_KEY MEXC_REAL_API_SECRET" in mainnet
+    assert "EnvironmentFile=/etc/liquidity-migration/mexc-mainnet.env" in mexc
+    assert "bybit-mainnet.env" not in mexc
+    for secret in (
+        "BYBIT_DEMO_API_KEY",
+        "BYBIT_REAL_API_KEY",
+        "BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID",
+        "TELEGRAM_BOT_TOKEN",
+    ):
+        assert secret in mexc.split("UnsetEnvironment=", 1)[1].splitlines()[0]
 
 
 def test_control_helper_parses_and_keeps_the_fixed_action_surface() -> None:
     helper = ROOT / "deploy" / "telegram_control_helper.sh"
     subprocess.run(["bash", "-n", str(helper)], check=True)
     text = helper.read_text(encoding="utf-8")
-    for action in ("pause-demo", "resume-demo", "pause-mainnet", "resume-mainnet", "status-fleet"):
+    for action in ("pause-demo", "resume-demo", "pause-mainnet", "resume-mainnet",
+                   "pause-mexc", "resume-mexc", "status-fleet"):
         assert action in text
+    sudoers = (ROOT / "deploy" / "liquidity-controls.sudoers").read_text(encoding="utf-8")
+    for action in ("pause-mexc", "resume-mexc"):
+        assert f"telegram-control-helper {action}\n" in sudoers
     assert "engine.release" not in text
     assert "activation.complete" not in text
 
 
 def test_ci_workflow_dispatch_covers_operations_and_fast_diagnostics() -> None:
     workflow = (ROOT / ".github" / "workflows" / "vps-deploy.yml").read_text(encoding="utf-8")
-    assert "options: [deploy, qualify, rollback, verify, diagnose, disarm-mainnet]" in workflow
+    assert (
+        "options: [deploy, qualify, rollback, verify, diagnose, disarm-mainnet, disarm-mexc]"
+        in workflow
+    )
     assert "deploy|rollback|verify) ;;" in workflow
-    assert "disarm-mainnet" in workflow
+    # One safety interrupt per funded realm, each routed to its own mode.
+    assert "disarm-mainnet|disarm-mexc) ;;" in workflow
+    assert 'scripts/deploy_vps_live.sh "$DISARM_MODE_INPUT"' in workflow
     diagnose = workflow[workflow.index("\n  diagnose:\n") : workflow.index("\n  vps:\n")]
     assert "scripts/deploy_vps_live.sh verify" in diagnose
     assert "journalctl" in diagnose

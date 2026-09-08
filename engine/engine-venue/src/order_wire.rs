@@ -1,4 +1,4 @@
-#[cfg(any(feature = "lighter", feature = "mexc"))]
+#[cfg(feature = "lighter")]
 use engine_types::numeric::Exact;
 use engine_types::order_terms::{decimal_wire, ExactOrderTerms, OrderLegalityError};
 use engine_types::{OrderRequest, VenueError};
@@ -46,7 +46,7 @@ pub(crate) fn stop(request: &OrderRequest, legacy: f64) -> Result<String, VenueE
         None => crate::fmt::venue_num(legacy),
     }
 }
-#[cfg(any(feature = "lighter", feature = "mexc"))]
+#[cfg(feature = "lighter")]
 pub(crate) fn scaled(value: &Exact, decimals: u32, max: u64) -> Result<u64, VenueError> {
     if decimals > 4096 {
         return Err(error("integer scale is out of range"));

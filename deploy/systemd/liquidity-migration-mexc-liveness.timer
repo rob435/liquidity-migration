@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the liquidity-migration mexc watchdog every 30 seconds
+
+[Timer]
+OnActiveSec=10s
+OnUnitActiveSec=30s
+AccuracySec=1s
+# Persistent applies only to calendar timers, not this monotonic schedule.
+
+[Install]
+WantedBy=timers.target

@@ -186,14 +186,18 @@ fn verify_account_identity(args: &[String]) -> Result<(), Box<dyn Error>> {
     runtime()?.block_on(engine_tools::flatness::verify_account_identity(&config))
 }
 
-#[cfg(not(feature = "bybit"))]
+#[cfg(not(any(feature = "bybit", feature = "mexc")))]
 fn canary_order(_args: &[String]) -> Result<(), Box<dyn Error>> {
-    Err("canary-order requires the bybit Cargo feature".into())
+    Err("canary-order requires the bybit or mexc Cargo feature".into())
 }
 
-#[cfg(feature = "bybit")]
+#[cfg(any(feature = "bybit", feature = "mexc"))]
 fn canary_order(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
+    let config = PathBuf::from(
+        value(args, "--config")
+            .or_else(|| std::env::var("ENGINE_CONFIG_FILE").ok())
+            .unwrap_or_else(|| "engine.toml".into()),
+    );
     let symbol = value(args, "--symbol").ok_or("canary-order needs --symbol SYMBOL")?;
     let expected_user_id =
         value(args, "--expected-user-id").ok_or("canary-order needs --expected-user-id USER_ID")?;

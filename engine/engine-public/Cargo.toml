@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [features]
-default = ["bybit"]
+default = ["bybit", "mexc"]
 bybit = []
 binance = []
 hyperliquid = []

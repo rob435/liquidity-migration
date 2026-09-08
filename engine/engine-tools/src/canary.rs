@@ -1,10 +1,11 @@
-//! One bounded order lifecycle on the Bybit practice account.
+//! One bounded order lifecycle on a realm the readiness table admits.
 //!
-//! This is an operator proof, not a strategy. It can only select the compiled
-//! demo realm, takes the fleet's account lease, proves the exact account id,
-//! rests one minimum-value post-only order away from the touch, cancels it,
-//! and reads the account twice before letting go. Any fill is closed in full
-//! and makes the command fail after cleanup.
+//! This is an operator proof, not a strategy. It runs on the Bybit practice
+//! account and on the `live-canary` realms whose venue publishes no practice
+//! host, takes the fleet's account lease, proves the exact account id, rests
+//! one minimum-value post-only order away from the touch, cancels it, and
+//! reads the account twice before letting go. Any fill is closed in full and
+//! makes the command fail after cleanup.
 
 use std::error::Error;
 use std::path::Path;
@@ -12,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use engine_types::order_terms::{strategy_decimal, ExactOrderTerms, OrderInputPolicy};
+use engine_types::orders::{OrderLookup, OrderLookupRow, TerminalOrderStatus};
 use engine_types::quantize::{quantize_px, round_clean, steps};
 use engine_types::{
     AccountInventory, Feed, FeedError, InstrumentRule, MarketEvent, MarketFeed, OrderAck,
@@ -19,7 +21,7 @@ use engine_types::{
     Subscription, SymbolId, TimeInForce, VenueError, VenueExecution, VenueGateway, VenueOrder,
 };
 use engine_venue::lease;
-use engine_venue::{BybitOrderReceipt, Venue, VenueName};
+use engine_venue::Venue;
 
 use crate::{assembly, config};
 
@@ -31,6 +33,9 @@ const CLEAN_SCAN_ATTEMPTS: usize = 30;
 const MIN_CLEAN_OBSERVATION: Duration = Duration::from_secs(5);
 const MAX_QUOTE_AGE_MS: i64 = 30_000;
 const MAX_INVENTORY_AGE_MS: i64 = 30_000;
+/// Below the tightest client-id field this command can be pointed at: MEXC
+/// caps `externalOid` at 32 characters, Bybit's `orderLinkId` at 36.
+const MAX_CLIENT_ID_LEN: usize = 30;
 
 #[derive(Copy, Clone)]
 struct Timings {
@@ -74,6 +79,75 @@ struct CleanupOutcome {
     original_cancelled: bool,
 }
 
+/// One order's disposition as the venue states it, whichever endpoint said so.
+///
+/// `status` is the venue's own word where the venue has one, because it is
+/// printed for the operator and `Cancelled` is the exact state this command
+/// has to distinguish from every other terminal one.
+#[derive(Clone, Debug, PartialEq)]
+struct OrderReceipt {
+    status: String,
+    cumulative_filled_qty: f64,
+    terminal: bool,
+}
+
+impl OrderReceipt {
+    fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+
+    fn has_fill(&self) -> bool {
+        self.cumulative_filled_qty > 0.0
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.status == "Cancelled"
+    }
+}
+
+/// A status lookup read as a receipt, for venues with no receipt endpoint of
+/// their own. Absence of proof is never read as absence of the order: only
+/// `NeverAccepted`, which the adapter owes endpoint-specific evidence for,
+/// becomes `None`.
+fn receipt_from_lookup(lookup: OrderLookup) -> Result<Option<OrderReceipt>, VenueError> {
+    fn filled(row: &OrderLookupRow) -> Result<f64, VenueError> {
+        row.filled_qty.value.to_f64().map_err(|error| {
+            VenueError::BadReply(format!(
+                "order status filled quantity is unreadable: {error}"
+            ))
+        })
+    }
+    Ok(match lookup {
+        OrderLookup::Working(row) => Some(OrderReceipt {
+            status: "Working".to_string(),
+            cumulative_filled_qty: filled(&row)?,
+            terminal: false,
+        }),
+        OrderLookup::Terminal { status, row } => Some(OrderReceipt {
+            status: match status {
+                TerminalOrderStatus::Filled => "Filled",
+                TerminalOrderStatus::Cancelled => "Cancelled",
+                TerminalOrderStatus::Rejected => "Rejected",
+            }
+            .to_string(),
+            cumulative_filled_qty: filled(&row)?,
+            terminal: true,
+        }),
+        OrderLookup::NeverAccepted => None,
+        OrderLookup::Unknown { reason } => {
+            return Err(VenueError::BadReply(format!(
+                "the venue cannot state this order's disposition: {reason}"
+            )))
+        }
+        OrderLookup::Unavailable => {
+            return Err(VenueError::BadRequest(
+                "this venue has no exact order-status lookup, so a canary cannot be proved clean"
+                    .to_string(),
+            ))
+        }
+    })
+}
+
 #[allow(async_fn_in_trait)]
 trait CanaryGateway {
     async fn send(&mut self, request: &OrderRequest) -> Result<OrderAck, VenueError>;
@@ -90,7 +164,7 @@ trait CanaryGateway {
         &mut self,
         symbol: SymbolId,
         client_id: &str,
-    ) -> Result<Option<BybitOrderReceipt>, VenueError>;
+    ) -> Result<Option<OrderReceipt>, VenueError>;
 }
 
 impl CanaryGateway for Venue {
@@ -122,16 +196,19 @@ impl CanaryGateway for Venue {
 
     async fn venue_time(&mut self) -> Result<i64, VenueError> {
         match self {
+            #[cfg(feature = "bybit")]
             Venue::Bybit(gateway) => gateway.venue_time_ms().await,
+            #[cfg(feature = "mexc")]
+            Venue::Mexc(gateway) => gateway.venue_time_ms().await,
             #[cfg(any(
                 feature = "binance",
                 feature = "hyperliquid",
                 feature = "lighter",
-                feature = "mexc",
                 feature = "variational"
             ))]
             _ => Err(VenueError::BadRequest(
-                "canary venue-time reads exist only for Bybit".to_string(),
+                "this venue publishes no clock read the canary can bound its history with"
+                    .to_string(),
             )),
         }
     }
@@ -140,9 +217,19 @@ impl CanaryGateway for Venue {
         &mut self,
         symbol: SymbolId,
         client_id: &str,
-    ) -> Result<Option<BybitOrderReceipt>, VenueError> {
+    ) -> Result<Option<OrderReceipt>, VenueError> {
         match self {
-            Venue::Bybit(gateway) => gateway.order_receipt(symbol, client_id).await,
+            #[cfg(feature = "bybit")]
+            Venue::Bybit(gateway) => {
+                Ok(gateway
+                    .order_receipt(symbol, client_id)
+                    .await?
+                    .map(|receipt| OrderReceipt {
+                        terminal: receipt.is_terminal(),
+                        status: receipt.status,
+                        cumulative_filled_qty: receipt.cumulative_filled_qty,
+                    }))
+            }
             #[cfg(any(
                 feature = "binance",
                 feature = "hyperliquid",
@@ -150,15 +237,16 @@ impl CanaryGateway for Venue {
                 feature = "mexc",
                 feature = "variational"
             ))]
-            _ => Err(VenueError::BadRequest(
-                "canary order receipts exist only for Bybit".to_string(),
-            )),
+            other => {
+                receipt_from_lookup(VenueGateway::order_status(other, symbol, client_id).await?)
+            }
         }
     }
 }
 
-/// Submit and cancel one demo order. `--execute` and the expected account id
-/// are required by the CLI before this reaches credentials or a socket.
+/// Submit and cancel one order on the configured realm. `--execute` and the
+/// expected account id are required by the CLI before this reaches credentials
+/// or a socket.
 pub async fn run(
     config_path: &Path,
     symbol: &str,
@@ -167,7 +255,7 @@ pub async fn run(
 ) -> Result<(), Box<dyn Error>> {
     let loaded = config::load(config_path)?;
     let chosen = assembly::venue_name(&loaded.config.engine.venue)?;
-    require_demo(chosen)?;
+    chosen.require_canary_ready()?;
     if !execute {
         return Err(
             "canary-order changes venue state; inspect the command, then add --execute"
@@ -198,14 +286,14 @@ pub async fn run(
     let before = VenueGateway::account_identity(&mut venue).await?;
     if before.user_id != expected_user_id {
         return Err(format!(
-            "demo credentials reach user {}, not --expected-user-id {}",
+            "these credentials reach user {}, not --expected-user-id {}",
             before.user_id, expected_user_id
         )
         .into());
     }
     if before.venue != chosen.venue() || before.realm != chosen.realm() {
         return Err(format!(
-            "demo identity says venue={} realm={}, expected venue={} realm={}",
+            "account identity says venue={} realm={}, expected venue={} realm={}",
             before.venue,
             before.realm,
             chosen.venue(),
@@ -269,16 +357,6 @@ pub async fn run(
     result
 }
 
-fn require_demo(chosen: VenueName) -> Result<(), Box<dyn Error>> {
-    if chosen != VenueName::BybitDemo {
-        return Err(format!(
-            "canary-order is compiled for bybit_demo only; config selects {chosen}"
-        )
-        .into());
-    }
-    Ok(())
-}
-
 fn normalized_symbol(raw: &str) -> Result<String, Box<dyn Error>> {
     let symbol = raw.trim().to_ascii_uppercase();
     if symbol.len() < 4
@@ -288,8 +366,11 @@ fn normalized_symbol(raw: &str) -> Result<String, Box<dyn Error>> {
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     {
+        // The engine's spelling of a linear USDT perpetual, on every venue.
+        // MEXC writes the same contract `BTC_USDT` and its adapter does that
+        // translation itself.
         return Err(format!(
-            "canary symbol must be one uppercase/digit Bybit linear USDT name, not {raw:?}"
+            "canary symbol must be one uppercase/digit USDT perpetual name in the engine's spelling, such as BTCUSDT, not {raw:?}"
         )
         .into());
     }
@@ -372,12 +453,11 @@ fn make_plan(
     }
 
     let (client_id, close_id) = order_ids();
-    if client_id.len() > 36 || close_id.len() > 36 {
-        return Err(
-            "generated canary order id exceeds Bybit's 36-character limit"
-                .to_string()
-                .into(),
-        );
+    if client_id.len() > MAX_CLIENT_ID_LEN || close_id.len() > MAX_CLIENT_ID_LEN {
+        return Err(format!(
+            "generated canary order id exceeds the {MAX_CLIENT_ID_LEN} characters every venue this command runs on accepts"
+        )
+        .into());
     }
     let terms = ExactOrderTerms {
         quantity: strategy_decimal(qty)?,
@@ -417,9 +497,12 @@ fn make_plan(
     })
 }
 
+/// Milliseconds rather than nanoseconds: four fewer hex digits is what keeps
+/// these inside MEXC's 32-character `externalOid`. The process id and the
+/// nonce are what make them unique inside one millisecond.
 fn order_ids() -> (String, String) {
     static NONCE: AtomicU64 = AtomicU64::new(0);
-    let stamp = engine_types::clock::wall_ns();
+    let stamp = engine_types::clock::wall_ms();
     let process = std::process::id() & 0xffff;
     let nonce = NONCE.fetch_add(1, Ordering::Relaxed) & 0xffff;
     (
@@ -436,7 +519,10 @@ fn validate_rule(rule: InstrumentRule) -> Result<(), Box<dyn Error>> {
         || rule.tick_size <= 0.0
         || rule.qty_step <= 0.0
         || rule.min_qty <= 0.0
-        || rule.min_notional <= 0.0
+        // Zero is a real rule, not a missing field: MEXC states no minimum
+        // order value at all, and one minimum contract is the whole floor.
+        // `min_qty` above is what has to be positive for that to be sizeable.
+        || rule.min_notional < 0.0
     {
         return Err(format!("venue returned an unusable instrument rule: {rule:?}").into());
     }
@@ -721,7 +807,7 @@ async fn read_original_receipt<G: CanaryGateway>(
             let terminal = receipt.is_terminal();
             if terminal {
                 state.original = OriginalDisposition::Terminal {
-                    cancelled: receipt.status == "Cancelled",
+                    cancelled: receipt.is_cancelled(),
                 };
                 println!(
                     "canary order_status={} cumulative_filled_qty={}",
@@ -1054,6 +1140,7 @@ mod tests {
 
     use super::*;
     use engine_types::{AccountOrder, AccountPosition};
+    use engine_venue::VenueName;
 
     fn quote() -> Quote {
         Quote {
@@ -1171,14 +1258,12 @@ mod tests {
             &mut self,
             _symbol: SymbolId,
             client_id: &str,
-        ) -> Result<Option<BybitOrderReceipt>, VenueError> {
+        ) -> Result<Option<OrderReceipt>, VenueError> {
             if let Some(scripted) = self.receipt_script.pop_front() {
-                return Ok(scripted.map(|status| BybitOrderReceipt {
-                    symbol: "XRPUSDT".into(),
-                    client_order_id: client_id.into(),
+                return Ok(scripted.map(|status| OrderReceipt {
+                    terminal: status != "New",
                     status: status.into(),
                     cumulative_filled_qty: 0.0,
-                    updated_ms: engine_types::clock::wall_ms(),
                 }));
             }
             let Some(request) = self
@@ -1193,12 +1278,10 @@ mod tests {
                 .iter()
                 .any(|fill| fill.client_order_id == client_id)
                 || request.close_position;
-            Ok(Some(BybitOrderReceipt {
-                symbol: "XRPUSDT".into(),
-                client_order_id: client_id.into(),
+            Ok(Some(OrderReceipt {
                 status: if filled { "Filled" } else { "Cancelled" }.into(),
                 cumulative_filled_qty: if filled { request.qty } else { 0.0 },
-                updated_ms: engine_types::clock::wall_ms(),
+                terminal: true,
             }))
         }
     }
@@ -1213,10 +1296,63 @@ mod tests {
     }
 
     #[test]
-    fn only_the_practice_realm_can_reach_the_command() {
-        assert!(require_demo(VenueName::BybitDemo).is_ok());
-        assert!(require_demo(VenueName::BybitMainnet).is_err());
-        assert!(require_demo(VenueName::HyperliquidTestnet).is_err());
+    fn only_the_practice_realm_and_a_live_canary_realm_can_reach_the_command() {
+        assert!(VenueName::BybitDemo.require_canary_ready().is_ok());
+        assert!(VenueName::BybitMainnet.require_canary_ready().is_err());
+        assert!(VenueName::HyperliquidTestnet
+            .require_canary_ready()
+            .is_err());
+        #[cfg(feature = "mexc")]
+        {
+            // The realm this command exists to gather evidence for; `engine
+            // run` on it stays refused.
+            VenueName::MexcMainnet.require_canary_ready().unwrap();
+            assert!(VenueName::MexcMainnet.require_engine_run_ready().is_err());
+        }
+    }
+
+    #[test]
+    fn a_status_lookup_reads_as_a_receipt_and_absence_of_proof_is_not_absence() {
+        let row = OrderLookupRow {
+            symbol: "BTCUSDT".into(),
+            client_order_id: "lmcan-1".into(),
+            venue_order_id: "7".into(),
+            filled_qty: engine_types::numeric::ExactNumber::venue_decimal("0.0002").unwrap(),
+        };
+        let working = receipt_from_lookup(OrderLookup::Working(row.clone()))
+            .unwrap()
+            .unwrap();
+        assert!(!working.is_terminal());
+        assert!(working.has_fill());
+
+        let cancelled = receipt_from_lookup(OrderLookup::Terminal {
+            status: TerminalOrderStatus::Cancelled,
+            row: OrderLookupRow {
+                filled_qty: engine_types::numeric::ExactNumber::venue_decimal("0").unwrap(),
+                ..row.clone()
+            },
+        })
+        .unwrap()
+        .unwrap();
+        assert!(cancelled.is_terminal() && cancelled.is_cancelled() && !cancelled.has_fill());
+
+        let rejected = receipt_from_lookup(OrderLookup::Terminal {
+            status: TerminalOrderStatus::Rejected,
+            row,
+        })
+        .unwrap()
+        .unwrap();
+        assert!(rejected.is_terminal() && !rejected.is_cancelled());
+
+        assert_eq!(
+            receipt_from_lookup(OrderLookup::NeverAccepted).unwrap(),
+            None
+        );
+        assert!(receipt_from_lookup(OrderLookup::Unknown {
+            reason: "no retained order".into()
+        })
+        .is_err());
+        assert!(receipt_from_lookup(OrderLookup::Unavailable).is_err());
     }
 
     #[test]
@@ -1274,15 +1410,55 @@ mod tests {
     }
 
     #[test]
-    fn order_ids_are_unique_and_fit_the_venue_limit() {
+    fn order_ids_are_unique_and_fit_every_venue_this_command_runs_on() {
+        // MEXC caps `externalOid` at 32 characters; Bybit's `orderLinkId` cap
+        // is 36. Both are asserted so a wider id fails here rather than at the
+        // venue, on an order that is already live.
+        const MEXC_MAX: usize = 32;
+        const BYBIT_MAX: usize = 36;
         let mut ids = std::collections::HashSet::new();
         for _ in 0..10_000 {
             let (entry, close) = order_ids();
-            assert!(entry.len() <= 36, "entry id was {entry:?}");
-            assert!(close.len() <= 36, "close id was {close:?}");
+            for id in [&entry, &close] {
+                assert!(id.len() <= MAX_CLIENT_ID_LEN, "id was {id:?}");
+                assert!(id.len() <= MEXC_MAX, "id was {id:?}");
+                assert!(id.len() <= BYBIT_MAX, "id was {id:?}");
+            }
             assert!(ids.insert(entry));
             assert!(ids.insert(close));
         }
+    }
+
+    #[test]
+    fn a_venue_with_no_minimum_order_value_is_sized_at_exactly_one_minimum_lot() {
+        // MEXC's BTC_USDT: one contract is 0.0001 BTC, and the venue states no
+        // minimum notional at all.
+        let mexc_rule = InstrumentRule {
+            tick_size: 0.1,
+            qty_step: 0.0001,
+            min_qty: 0.0001,
+            min_notional: 0.0,
+        };
+        let quote = Quote {
+            bid_px: 80_000.0,
+            bid_qty: 5.0,
+            ask_px: 80_000.1,
+            ask_qty: 5.0,
+            venue_ts_ms: 1_000_000,
+            recv_ns: 1,
+            seq: 1,
+        };
+        validate_rule(mexc_rule).unwrap();
+        let plan = make_plan("BTCUSDT", mexc_rule, quote, 1_000_100).unwrap();
+        assert_eq!(plan.request.qty, mexc_rule.min_qty);
+        assert!(limit_px(&plan.request) < quote.bid_px);
+
+        // A negative floor is still an unusable rule.
+        let broken = InstrumentRule {
+            min_notional: -1.0,
+            ..mexc_rule
+        };
+        assert!(validate_rule(broken).is_err());
     }
 
     #[test]
@@ -1343,6 +1519,114 @@ mod tests {
             "execution history did not use the venue clock: {:?}",
             gateway.execution_ends
         );
+    }
+
+    /// MEXC's private stream reports no per-order Ack or Cancelled: it paces
+    /// a resync request instead, and everything the canary proves has to come
+    /// from the working-order list, the order status, and the account scans.
+    fn stream_reset_only() -> FakeFeed {
+        FakeFeed {
+            updates: VecDeque::from([
+                Ok(OrderUpdate::StreamReset { recv_ns: 1 }),
+                Ok(OrderUpdate::StreamReset { recv_ns: 2 }),
+            ]),
+        }
+    }
+
+    fn resting(plan: &CanaryPlan) -> VenueOrder {
+        VenueOrder {
+            client_order_id: plan.request.client_order_id.clone(),
+            symbol: "XRPUSDT".into(),
+            side: plan.request.side,
+            qty: plan.request.qty,
+            filled_qty: 0.0,
+            reduce_only: false,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_that_only_paces_resets_still_proves_the_new_cancelled_lifecycle() {
+        let plan = plan();
+        let mut gateway = FakeGateway {
+            sends: Vec::new(),
+            inventories: VecDeque::from([flat(), flat()]),
+            working: vec![resting(&plan)],
+            executions: Vec::new(),
+            cancel_ok: true,
+            create_error: false,
+            close_error: false,
+            receipt_script: VecDeque::new(),
+            cancel_ids: Vec::new(),
+            execution_ends: Vec::new(),
+        };
+
+        execute_claimed(
+            &mut gateway,
+            &mut stream_reset_only(),
+            "XRPUSDT",
+            &plan,
+            timings(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(gateway.sends, vec![plan.request.clone()]);
+        assert!(gateway.cancel_ids.contains(&plan.request.client_order_id));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_fill_no_private_update_ever_named_is_still_closed_and_reported() {
+        let plan = plan();
+        let mut exposed = flat();
+        exposed.positions.push(AccountPosition {
+            product: "linear".into(),
+            symbol: "XRPUSDT".into(),
+            side: Side::Buy,
+            qty: plan.request.qty,
+        });
+        let fill = VenueExecution {
+            amounts: None,
+            exec_id: "fill-only-in-history".into(),
+            client_order_id: plan.request.client_order_id.clone(),
+            symbol: "XRPUSDT".into(),
+            side: Side::Buy,
+            qty: plan.request.qty,
+            px: limit_px(&plan.request),
+            fee: Some(0.0),
+            is_maker: true,
+            forced_close: None,
+            venue_ts_ms: 1,
+        };
+        let mut gateway = FakeGateway {
+            sends: Vec::new(),
+            inventories: VecDeque::from([exposed, flat(), flat()]),
+            working: vec![resting(&plan)],
+            executions: vec![fill],
+            cancel_ok: true,
+            create_error: false,
+            close_error: false,
+            receipt_script: VecDeque::new(),
+            cancel_ids: Vec::new(),
+            execution_ends: Vec::new(),
+        };
+
+        let error = execute_claimed(
+            &mut gateway,
+            &mut stream_reset_only(),
+            "XRPUSDT",
+            &plan,
+            timings(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("filled"), "{error}");
+        assert_eq!(gateway.sends.len(), 2);
+        let close = gateway.sends.last().unwrap();
+        assert_eq!(close.client_order_id, plan.close_id);
+        assert!(close.reduce_only && close.close_position);
+        assert_eq!(close.side, Side::Sell);
     }
 
     #[tokio::test(start_paused = true)]

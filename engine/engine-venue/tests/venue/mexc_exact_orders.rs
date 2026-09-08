@@ -4,7 +4,7 @@ use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
 use engine_types::{
     OrderKind, OrderRequest, Side, StopSpec, StrategyId, SymbolId, TimeInForce, VenueGateway,
 };
-use engine_venue::{MexcGateway, MexcRealm, RealmCredentials};
+use engine_venue::{MexcGateway, MexcInventoryProbe, MexcRealm, RealmCredentials};
 
 #[tokio::test(start_paused = true)]
 async fn exact_contracts_and_prices_reach_wire_and_fractional_contracts_are_refused() {
@@ -201,4 +201,158 @@ async fn recovery_catalog_install_refreshes_native_units_without_metadata_reads(
         matches!(other_gateway.account_recovery_client().unwrap().install_instrument_catalog(&catalog), Err(engine_types::VenueError::BadRequest(reason)) if reason == "recovery catalog belongs to another endpoint")
     );
     assert!(other.requests().is_empty());
+}
+
+const CONTRACT_DETAIL: &str = r#"{"success":true,"code":0,"data":[
+    {"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT",
+     "contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true},
+    {"symbol":"ETH_USDT","baseCoin":"ETH","quoteCoin":"USDT","settleCoin":"USDT",
+     "contractSize":0.01,"priceUnit":0.01,"minVol":1,"maxVol":100,"apiAllowed":true}]}"#;
+
+#[tokio::test(start_paused = true)]
+async fn the_public_ping_is_the_clock_a_history_window_is_bounded_by() {
+    let server = TestServer::start(|request, seen| match (request.path.as_str(), seen) {
+        ("/api/v1/contract/ping", 0) => (
+            200,
+            r#"{"success":true,"code":0,"data":1787492334852}"#.into(),
+        ),
+        ("/api/v1/contract/ping", _) => (200, r#"{"success":true,"code":0,"data":0}"#.into()),
+        _ => panic!(
+            "the clock read is public and touches nothing else: {}",
+            request.path
+        ),
+    })
+    .await;
+    let gw = MexcGateway::for_test(
+        &server.base_url(),
+        MexcRealm::Mainnet,
+        MexcRealm::Mainnet.credentials_for_test("key", "secret"),
+        vec!["BTCUSDT".into()],
+    );
+
+    assert_eq!(gw.venue_time_ms().await.unwrap(), 1787492334852);
+    // A clock the venue did not state is never a zero the caller can subtract.
+    assert!(gw.venue_time_ms().await.is_err());
+    let sent = server.to_path("/api/v1/contract/ping");
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].method, "GET");
+    assert_eq!(sent[0].header("request-key"), None, "the ping is unsigned");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_inventory_probe_names_the_account_by_its_key_and_never_signs_a_mutation() {
+    let server = TestServer::start(|request, _| match request.path.as_str() {
+        "/api/v1/private/account/assets" => (
+            200,
+            r#"{"success":true,"code":0,"data":[{"currency":"USDT","equity":32.8,"availableBalance":32.8}]}"#.into(),
+        ),
+        other => panic!("identity must read one endpoint, not {other}"),
+    })
+    .await;
+    let creds = MexcRealm::Mainnet.credentials_for_test("theKey", "secret");
+    let mut probe = MexcInventoryProbe::for_test(&server.base_url(), MexcRealm::Mainnet, creds);
+    let who = probe.account_identity().await.unwrap();
+
+    assert_eq!(who.venue, "mexc");
+    assert_eq!(who.realm, "mexc_mainnet");
+    // MEXC publishes no account number, so the key names the account. The
+    // probe and the gateway must derive the same one from the same key.
+    assert!(who.user_id.starts_with("key-"), "{}", who.user_id);
+    assert_eq!(who.user_id.len(), "key-".len() + 16);
+    let mut gateway = MexcGateway::for_test(
+        &server.base_url(),
+        MexcRealm::Mainnet,
+        MexcRealm::Mainnet.credentials_for_test("theKey", "othersecret"),
+        vec![],
+    );
+    assert_eq!(
+        VenueGateway::account_identity(&mut gateway).await.unwrap(),
+        who
+    );
+
+    let mut other = MexcInventoryProbe::for_test(
+        &server.base_url(),
+        MexcRealm::Mainnet,
+        MexcRealm::Mainnet.credentials_for_test("anotherKey", "secret"),
+    );
+    assert_ne!(other.account_identity().await.unwrap().user_id, who.user_id);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_inventory_probe_scans_balances_positions_orders_and_position_stops() {
+    let server = TestServer::start(|request, _| {
+        let body = match request.path.as_str() {
+            "/api/v1/contract/detail" => CONTRACT_DETAIL.to_string(),
+            "/api/v1/private/account/assets" => r#"{"success":true,"code":0,"data":[
+                {"currency":"USDT","equity":32.8,"availableBalance":32.8},
+                {"currency":"MX","equity":0.996,"availableBalance":0.996}]}"#
+                .to_string(),
+            "/api/v1/private/position/open_positions" => r#"{"success":true,"code":0,"data":[
+                {"positionId":"42","symbol":"ETH_USDT","holdVol":5,"positionType":2,
+                 "holdAvgPrice":3000.0,"leverage":2}]}"#
+                .to_string(),
+            "/api/v1/private/order/list/open_orders" => r#"{"success":true,"code":0,"data":[
+                {"orderId":"7","symbol":"BTC_USDT","side":1,"vol":3,"dealVol":0,
+                 "externalOid":"lmcan-1"}]}"#
+                .to_string(),
+            "/api/v1/private/stoporder/open_orders" => r#"{"success":true,"code":0,"data":[
+                {"id":91,"orderId":"0","symbol":"ETH_USDT","positionId":"42","stopLossPrice":2900.0},
+                {"id":92,"orderId":"7","symbol":"BTC_USDT","stopLossPrice":70000.0}]}"#
+                .to_string(),
+            other => panic!("the probe reached {other}"),
+        };
+        (200, body)
+    })
+    .await;
+    let mut probe = MexcInventoryProbe::for_test(
+        &server.base_url(),
+        MexcRealm::Mainnet,
+        MexcRealm::Mainnet.credentials_for_test("key", "secret"),
+    );
+
+    let inventory = probe.account_inventory().await.unwrap();
+
+    assert!(inventory.observed_ms > 0);
+    assert!(
+        inventory.scope.contains("MEXC futures"),
+        "{}",
+        inventory.scope
+    );
+    let positions: Vec<_> = inventory
+        .positions
+        .iter()
+        .map(|p| (p.product.as_str(), p.symbol.as_str(), p.side, p.qty))
+        .collect();
+    assert_eq!(
+        positions,
+        vec![
+            ("linear", "ETHUSDT", Side::Sell, 0.05),
+            ("wallet_asset", "MX", Side::Buy, 0.996),
+        ],
+        "settle cash is not exposure; every other balance is"
+    );
+    let orders: Vec<_> = inventory
+        .open_orders
+        .iter()
+        .map(|o| {
+            (
+                o.product.as_str(),
+                o.symbol.as_str(),
+                o.client_order_id.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        orders,
+        vec![
+            ("linear", "BTCUSDT", "lmcan-1"),
+            ("position_stop", "ETHUSDT", "stoporder-91"),
+        ],
+        "the stop bound to order 7 is that order, counted once"
+    );
+    // Reads only: nothing the probe can call is a POST.
+    assert!(
+        server.requests().iter().all(|sent| sent.method == "GET"),
+        "the inventory probe issued a mutation"
+    );
 }

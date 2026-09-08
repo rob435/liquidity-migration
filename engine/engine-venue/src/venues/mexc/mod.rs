@@ -18,7 +18,7 @@ mod rest;
 mod sign;
 mod ws;
 
-pub use gateway::MexcGateway;
+pub use gateway::{MexcGateway, MexcInventoryProbe};
 pub use realm::MexcRealm;
 pub use ws::MexcOrderFeed;
 

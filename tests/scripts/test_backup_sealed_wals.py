@@ -94,6 +94,26 @@ def test_a_link_refused_for_any_other_reason_still_fails_the_run(
         MODULE.link_sealed(stage, [source])
 
 
+def test_every_realms_engine_state_and_rendered_config_is_a_default_source() -> None:
+    """A realm whose WAL is not in the default sources exists on one disk."""
+
+    script = (ROOT / "scripts/runtime/backup_state.sh").read_text()
+    sources = script.split("DEFAULT_SOURCES=", 1)[1].split('"', 2)[1].split()
+    manifest = (ROOT / "deploy/fleet_manifest.tsv").read_text().splitlines()
+    realms = {
+        row.split("|")[2]
+        for row in manifest
+        if not row.startswith("#") and row.split("|")[3] == "owner"
+    }
+    assert realms == {"demo", "mainnet", "mexc"}
+    for realm in realms:
+        suffix = "" if realm == "demo" else f"-{realm}"
+        config = "engine.toml" if realm == "demo" else f"engine-{realm}.toml"
+        assert f"/var/lib/liquidity-migration-engine{suffix}" in sources
+        assert f"/var/lib/liquidity-migration-signal-worker-{realm}" in sources
+        assert f"/etc/liquidity-migration/{config}" in sources
+
+
 def test_backup_checks_the_remote_before_linking_and_never_uses_inplace_rsync() -> None:
     script = (ROOT / "scripts/runtime/backup_state.sh").read_text()
     assert script.index('"$RCLONE" check') < script.index('/link_sealed_backup_wals.py')

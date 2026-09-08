@@ -12,11 +12,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Deploy, qualify, roll back, verify, collect diagnostics, or disarm funded trading.
+        description: Deploy, qualify, roll back, verify, collect diagnostics, or disarm one funded realm.
         required: true
         default: verify
         type: choice
-        options: [deploy, qualify, rollback, verify, diagnose, disarm-mainnet]
+        options: [deploy, qualify, rollback, verify, diagnose, disarm-mainnet, disarm-mexc]
 
 permissions:
   contents: read
@@ -43,7 +43,7 @@ concurrency:
     ${{ github.event_name == 'pull_request'
         || github.event_name == 'push'
         || github.event_name == 'workflow_dispatch' && inputs.mode == 'qualify'
-        || github.event_name == 'workflow_dispatch' && inputs.mode == 'disarm-mainnet' }}
+        || github.event_name == 'workflow_dispatch' && startsWith(inputs.mode, 'disarm-') }}
 
 jobs:
   ci:
@@ -179,7 +179,7 @@ jobs:
   disarm:
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      inputs.mode == 'disarm-mainnet' &&
+      startsWith(inputs.mode, 'disarm-') &&
       github.repository == 'rob435/liquidity-migration' &&
       github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -198,14 +198,20 @@ jobs:
         env:
           VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
         run: bash scripts/vps/configure_ci_ssh.sh
-      - name: Stop and persistently disarm mainnet
+      - name: Stop and persistently disarm one funded realm
+        env:
+          DISARM_MODE_INPUT: ${{ inputs.mode }}
         run: |
           set -euo pipefail
+          case "$DISARM_MODE_INPUT" in
+            disarm-mainnet|disarm-mexc) ;;
+            *) exit 2 ;;
+          esac
           EXPECTED_COMMIT="$GITHUB_SHA" \
           BRANCH=main \
           SSH_TARGET="$VPS_USER@$VPS_HOST" \
           SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3" \
-          scripts/deploy_vps_live.sh disarm-mainnet
+          scripts/deploy_vps_live.sh "$DISARM_MODE_INPUT"
 
   diagnose:
     if: >-

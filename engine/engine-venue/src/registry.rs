@@ -48,7 +48,7 @@ use crate::venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed, Hyper
 #[cfg(feature = "lighter")]
 use crate::venues::lighter::{LighterGateway, LighterOrderFeed, LighterRealm};
 #[cfg(feature = "mexc")]
-use crate::venues::mexc::{MexcGateway, MexcOrderFeed, MexcRealm};
+use crate::venues::mexc::{MexcGateway, MexcInventoryProbe, MexcOrderFeed, MexcRealm};
 #[cfg(feature = "variational")]
 use crate::venues::variational::{VariationalGateway, VariationalRealm};
 
@@ -78,13 +78,18 @@ pub enum Venue {
 /// Deliberately separate from [`Venue`]: a disarmed funded account must still
 /// be readable for a flatness proof, but the resulting value must not carry a
 /// method that can place, cancel, amend, or otherwise mutate an order.
+// Built once per command; keeping the probes inline preserves static dispatch.
+#[allow(clippy::large_enum_variant)]
 pub enum InventoryProbe {
     #[cfg(feature = "bybit")]
     Bybit(BybitInventoryProbe),
+    #[cfg(feature = "mexc")]
+    Mexc(MexcInventoryProbe),
 }
 
 impl InventoryProbe {
     pub fn build(name: VenueName) -> Result<Self, VenueError> {
+        #[allow(unreachable_patterns)]
         match name {
             #[cfg(feature = "bybit")]
             VenueName::BybitDemo => Ok(Self::Bybit(BybitInventoryProbe::new(VenueRealm::Demo)?)),
@@ -92,6 +97,8 @@ impl InventoryProbe {
             VenueName::BybitMainnet => {
                 Ok(Self::Bybit(BybitInventoryProbe::new(VenueRealm::Mainnet)?))
             }
+            #[cfg(feature = "mexc")]
+            VenueName::MexcMainnet => Ok(Self::Mexc(MexcInventoryProbe::new(MexcRealm::Mainnet)?)),
             other => Err(VenueError::BadRequest(format!(
                 "{} has no credential-wide inventory probe; flatness cannot be attested",
                 other.as_str()
@@ -103,6 +110,8 @@ impl InventoryProbe {
         match *self {
             #[cfg(feature = "bybit")]
             Self::Bybit(ref mut probe) => probe.account_identity().await,
+            #[cfg(feature = "mexc")]
+            Self::Mexc(ref mut probe) => probe.account_identity().await,
         }
     }
 
@@ -110,6 +119,8 @@ impl InventoryProbe {
         match *self {
             #[cfg(feature = "bybit")]
             Self::Bybit(ref mut probe) => probe.account_inventory().await,
+            #[cfg(feature = "mexc")]
+            Self::Mexc(ref mut probe) => probe.account_inventory().await,
         }
     }
 }
@@ -736,10 +747,10 @@ pub enum OrderFeeds {
     /// venue's execution history — see `venues/lighter/ws.rs`.
     #[cfg(feature = "lighter")]
     Lighter(LighterOrderFeed),
-    /// Not a socket either, and for a different reason from Lighter's: MEXC's
-    /// private channel does carry the engine's own order id, but it is entered
-    /// by a login frame that cannot be exercised anywhere except a funded
-    /// account. See `venues/mexc/ws.rs`.
+    /// A real socket: the logged-in `push.personal.order` and
+    /// `push.personal.order.deal` channels, with a paced resync behind them
+    /// because the venue's execution history stays the accounting authority.
+    /// See `venues/mexc/ws.rs`.
     #[cfg(feature = "mexc")]
     Mexc(MexcOrderFeed),
     /// A real socket: the listen-key user-data stream, which the venue's
@@ -999,9 +1010,14 @@ mod tests {
                     assert_eq!(venue.readiness(), VenueReadiness::TestnetCanary);
                     venue.require_engine_run_ready().unwrap();
                 }
+                VenueName::MexcMainnet => {
+                    assert_eq!(venue.readiness(), VenueReadiness::LiveCanary);
+                    let error = venue.require_engine_run_ready().unwrap_err().to_string();
+                    assert!(error.contains("live-canary"), "{error}");
+                    assert!(error.contains("canary-order"), "{error}");
+                }
                 VenueName::HyperliquidMainnet
                 | VenueName::LighterMainnet
-                | VenueName::MexcMainnet
                 | VenueName::BinanceTestnet
                 | VenueName::BinanceMainnet => {
                     assert_eq!(venue.readiness(), VenueReadiness::ProductionBlocked);
@@ -1014,5 +1030,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_canary_runs_on_the_practice_realm_and_on_every_live_canary_realm() {
+        for venue in VenueName::ALL.into_iter().filter(|name| name.compiled()) {
+            let permitted =
+                venue == VenueName::BybitDemo || venue.readiness() == VenueReadiness::LiveCanary;
+            assert_eq!(venue.require_canary_ready().is_ok(), permitted, "{venue}");
+            if !permitted {
+                let error = venue.require_canary_ready().unwrap_err().to_string();
+                assert!(error.contains(venue.readiness().as_str()), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_live_canary_realm_may_take_the_canary_and_never_the_engine() {
+        // The whole point of the state: funded capital, one bounded operator
+        // proof permitted, and the strategy loop still refused.
+        assert!(!VenueReadiness::LiveCanary.permits_engine_run());
+        assert_eq!(VenueReadiness::LiveCanary.as_str(), "live-canary");
     }
 }

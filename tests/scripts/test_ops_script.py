@@ -41,6 +41,8 @@ def test_help_lists_only_current_operator_routes() -> None:
         "equity",
         "flatten",
         "attest-flat",
+        "verify-account-identity",
+        "canary-order",
         "real-money",
         "deploy",
     ):
@@ -65,12 +67,18 @@ def test_curve_routes_the_selected_history_to_the_rust_companion(tmp_path: Path)
     assert '--show "${REMOTE_ARGS[0]}" --samples "${REMOTE_ARGS[1]}"' in payload
     for realm, samples in (("unknown", "1"), ("demo", "0"), ("mainnet", "1;false")):
         assert _run("curve", realm, samples, env=environment).returncode == 2
+    # The recorder is manifest-driven: a new realm needs no recorder change.
+    assert _run("curve", "mexc", "60", env=environment).returncode == 0
+    assert "REMOTE_ARGS=( mexc 60 )" in capture.read_text()
 
 
-def test_deploy_allowlists_the_four_modes() -> None:
+def test_deploy_allowlists_one_stop_and_disarm_mode_per_funded_realm(tmp_path: Path) -> None:
     result = _run("deploy", "definitely-not-a-mode")
     assert result.returncode == 2
     assert "deploy mode must be" in result.stderr
+    _, environment = _ssh_capture(tmp_path)
+    for mode in ("stop-mainnet", "disarm-mainnet", "stop-mexc", "disarm-mexc"):
+        assert _run("deploy", mode, env=environment).returncode == 0, mode
 
 
 def test_execution_study_reads_only_the_selected_report(tmp_path: Path) -> None:
@@ -146,9 +154,70 @@ def test_flatness_control_uses_the_installed_rust_engine(tmp_path: Path) -> None
     assert "bybit-mainnet-attestor.env" in payload
 
 
+def test_flatness_control_reaches_the_mexc_account_owner(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+    result = _run("attest-flat", "--environment", "mexc", env=environment)
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert "/etc/liquidity-migration/mexc-mainnet.env" in payload
+    assert "/etc/liquidity-migration/engine-mexc.env" in payload
+    assert "runtime_user=liquidity-engine-mexc" in payload
+    # The whole router travels; the realm picks its own arm. That arm unsets
+    # every Bybit key and the arming switch for the read-only run.
+    mexc_arm = payload.split("  mexc)", 1)[1].split(";;", 1)[0]
+    assert "BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET" in mexc_arm
+    assert "REAL_MONEY" in mexc_arm
+    assert "bybit" not in mexc_arm.replace("BYBIT_", "")
+
+
 def test_flatness_control_rejects_incomplete_arguments() -> None:
     assert _run("attest-flat").returncode == 2
     assert _run("attest-flat", "--environment", "prod").returncode == 2
+
+
+def test_identity_check_routes_through_the_read_only_engine_control(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+    result = _run("verify-account-identity", "--environment", "mexc", env=environment)
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert "REMOTE_ARGS=( mexc verify-account-identity )" in payload
+    assert '"$engine_binary" "$mode"' in payload
+    assert _run("verify-account-identity").returncode == 2
+    assert _run("verify-account-identity", "--environment", "prod").returncode == 2
+
+
+def test_canary_order_keeps_the_arming_switch_and_refuses_the_funded_bybit_account(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+    result = _run(
+        "canary-order", "--environment", "mexc", "--symbol", "BTCUSDT",
+        "--expected-user-id", "key-0123456789abcdef", "--execute", env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert (
+        "REMOTE_ARGS=( mexc canary-order --symbol BTCUSDT --expected-user-id key-0123456789abcdef --execute )"
+        in payload
+    )
+    # The read-only modes drop REAL_MONEY; the canary is the one mode that
+    # keeps it, because a live-canary gateway refuses to build unarmed.
+    canary_arm = payload.split("  canary-order)", 1)[1].split(";;", 1)[0]
+    assert "grep -vx REAL_MONEY" in canary_arm
+    assert 'liquidity-migration-${mode}-${realm}-$$' in payload
+
+    dry = _run(
+        "canary-order", "--environment", "demo", "--symbol", "XRPUSDT",
+        "--expected-user-id", "579580669", env=environment,
+    )
+    assert dry.returncode == 0, dry.stderr
+    assert "--execute" not in capture.read_text(encoding="utf-8").split("REMOTE_ARGS=(", 1)[1].split(")", 1)[0]
+
+    for bad in (
+        ("canary-order", "--environment", "mainnet", "--symbol", "BTCUSDT", "--expected-user-id", "1"),
+        ("canary-order", "--environment", "mexc", "--symbol", "BTCUSDT"),
+        ("canary-order", "--environment", "mexc", "--expected-user-id", "key-1"),
+        ("canary-order", "--symbol", "BTCUSDT", "--expected-user-id", "key-1"),
+    ):
+        assert _run(*bad).returncode == 2, bad
 
 
 def test_real_money_allowlist_covers_the_arming_subcommands(tmp_path: Path) -> None:
@@ -159,3 +228,9 @@ def test_real_money_allowlist_covers_the_arming_subcommands(tmp_path: Path) -> N
     assert "liquidity_migration.policy.real_money_arming" in payload
     assert "REMOTE_ARGS=( liquidity_migration.policy.real_money_arming preflight )" in payload
     assert _run("real-money", "set-real-money", env=environment).returncode == 2
+    result = _run("real-money", "preflight-mexc", env=environment)
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert (
+        "REMOTE_ARGS=( liquidity_migration.policy.real_money_arming preflight-mexc )" in payload
+    )

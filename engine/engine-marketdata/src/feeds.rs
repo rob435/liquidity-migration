@@ -38,6 +38,8 @@ use crate::mexc::MexcPublicFeed;
 #[cfg(feature = "variational")]
 use crate::variational::VariationalPublicFeed;
 
+// Built once at boot; keeping the feeds inline preserves static dispatch.
+#[allow(clippy::large_enum_variant)]
 pub enum MarketFeeds {
     #[cfg(feature = "bybit")]
     Bybit(BybitPublicFeed),

@@ -9,7 +9,7 @@ Directory structure, invocation roles, naming conventions, and decision-parity t
 | Path | Primary Operator | Purpose & Mandate | Reference |
 | :--- | :--- | :--- | :--- |
 | **`dev.sh`** | Developer | Local development pre-flight: `doctor` and `check` (ruff, shellcheck, mypy, pytest, rustfmt, clippy). | CLI |
-| **`ops.sh`** | Operator / VPS | Fleet management router: status, logs, deploy, rollback, flatten, attest-flat. | [`docs/operations.md`](../docs/operations.md) |
+| **`ops.sh`** | Operator / VPS | Fleet management router: status, logs, deploy, rollback, flatten, attest-flat and verify-account-identity per realm (`demo`, `mainnet`, `mexc`), canary-order on `demo` and `mexc`, and stop/disarm per funded realm. | [`docs/operations.md`](../docs/operations.md) |
 | **`deploy_vps_live.sh`** | CI / Ops | Deployment engine: decoupled handover, binary unpacking, state takeover, rollback. | [`docs/operations.md`](../docs/operations.md) |
 | **`runtime/`** | Systemd daemons | Service wrappers: liveness checks, Telegram notifications, Google Drive backup (`backup_state.sh`). | Systemd units |
 | **`data/`** | Refresh jobs | Data pipelines: PIT manifests, Bybit candidate-window mark tapes, Binance metrics refresh. | [`docs/data.md`](../docs/data.md) |

@@ -13,9 +13,9 @@ cannot arm a funded account or override a strategy disabled in config.
 There is no ``close`` button. ``scripts/ops.sh flatten --execute`` submits
 durable reducer flatten requests and requires separate operator intent.
 
-The mainnet pause row appears only while the mainnet owner is active. The panel
-does not expose funded resume; the trusted helper retains that exact action for
-explicit recovery flows and still cannot change ``REAL_MONEY``.
+A funded realm's pause row appears only while that realm's owner is active. The
+panel does not expose funded resume; the trusted helper retains those exact
+actions for explicit recovery flows and still cannot change ``REAL_MONEY``.
 
 Authorization: only updates from the configured chat are honored. Button
 presses additionally require the presser to be the chat itself (a private
@@ -54,11 +54,26 @@ __all__ = [
 CONTROL_HELPER = "/opt/liquidity-migration-engine/bin/telegram-control-helper"
 CONTROL_COMMANDS: dict[str, tuple[str, ...]] = {
     action: ("/usr/bin/sudo", "-n", CONTROL_HELPER, action)
-    for action in ("pause-demo", "resume-demo", "pause-mainnet", "resume-mainnet", "status-fleet")
+    for action in (
+        "pause-demo",
+        "resume-demo",
+        "pause-mainnet",
+        "resume-mainnet",
+        "pause-mexc",
+        "resume-mexc",
+        "status-fleet",
+    )
 }
 CONTROLS_STATE_DIR = Path("/var/lib/liquidity-migration-telegram-controls")
 
-_ENVIRONMENTS = ("demo", "mainnet")
+_ENVIRONMENTS = ("demo", "mainnet", "mexc")
+#: How each funded realm is named in an operator message.
+_FUNDED_LABELS = {"mainnet": "Real-money", "mexc": "MEXC"}
+#: Realms whose owner and worker rows the helper always reports, and whose
+#: entry permissions it must therefore always know. A realm outside this set
+#: reports entry rows only while its engine publishes a heartbeat, which is
+#: only while its own credential file is armed.
+_REQUIRED_ENVIRONMENTS = ("demo", "mainnet")
 
 
 class ControlApiError(RuntimeError):
@@ -281,7 +296,10 @@ def _parse_fleet_status(text: str) -> _FleetStatus:
         signals = [unit for unit in units if unit.realm == realm and unit.role == "signal"]
         if len(owners) != 1 or len(signals) != 1:
             raise RuntimeError("privileged control helper returned incomplete fleet inventory")
-        if set(entries[realm]) != {"long", "carry", "exodus"}:
+        reported = set(entries[realm])
+        if reported not in ({"long", "carry", "exodus"}, set()):
+            raise RuntimeError("privileged control helper returned incomplete entry state")
+        if not reported and realm in _REQUIRED_ENVIRONMENTS:
             raise RuntimeError("privileged control helper returned incomplete entry state")
     derived_demo_pause = not any(entries["demo"].values())
     if paused != derived_demo_pause:
@@ -311,17 +329,20 @@ class VpsFleet:
     def _fleet_status(self) -> _FleetStatus:
         return _parse_fleet_status(self._control("status-fleet"))
 
-    def mainnet_present(self) -> bool:
-        return self._fleet_status().owner("mainnet").active == "active"
+    def funded_present(self) -> tuple[str, ...]:
+        """The funded realms whose account owner is running right now."""
+        status = self._fleet_status()
+        return tuple(
+            realm for realm in _FUNDED_LABELS if status.owner(realm).active == "active"
+        )
 
     def pause(self, environment: str) -> str:
-        action = {"demo": "pause-demo", "mainnet": "pause-mainnet"}.get(environment)
-        if action is None:
+        if environment not in _ENVIRONMENTS:
             raise ValueError(f"unsupported environment: {environment}")
-        self._control(action)
-        if environment == "mainnet":
+        self._control(f"pause-{environment}")
+        if environment != "demo":
             return (
-                "⏸ Real-money entries are paused for LONG, CARRY, and Exodus.\n"
+                f"⏸ {_FUNDED_LABELS[environment]} entries are paused for LONG, CARRY, and Exodus.\n"
                 "The engine and signal worker remain live; exits and covers continue."
             )
         return (
@@ -331,15 +352,16 @@ class VpsFleet:
         )
 
     def resume(self, environment: str) -> str:
-        if environment == "mainnet":
-            self._control("resume-mainnet")
+        if environment not in _ENVIRONMENTS:
+            raise ValueError(f"unsupported environment: {environment}")
+        if environment != "demo":
+            self._control(f"resume-{environment}")
             return (
-                "▶️ Real-money entry permissions resumed for LONG, CARRY, and Exodus.\n"
-                "The helper proved the funded account owner is live. Arming is "
+                f"▶️ {_FUNDED_LABELS[environment]} entry permissions resumed for "
+                "LONG, CARRY, and Exodus.\n"
+                "The helper proved that account owner is live. Arming is "
                 "unchanged — REAL_MONEY is not touched."
             )
-        if environment != "demo":
-            raise ValueError(f"unsupported environment: {environment}")
         self._control("resume-demo")
         names = ", ".join(name for name, state in sorted(self._fleet_status().sleeves.items()) if state == "on")
         return f"▶️ Demo entry permissions resumed: {names or 'no sleeve resolves on'}."
@@ -358,21 +380,23 @@ class VpsFleet:
                 f"{'on' if status.entries['demo'][strategy] else 'off'}{configured_text}"
             )
         lines.append("demo trading: PAUSED by controls" if status.demo_paused else "demo trading: on")
-        mainnet_owner = status.owner("mainnet")
-        if mainnet_owner.active == "active":
-            entry_states = ", ".join(
-                f"{strategy}={'on' if status.entries['mainnet'][strategy] else 'off'}"
-                for strategy in ("long", "carry", "exodus")
-            )
-            lines.append(
-                f"real money: owner active; signal {status.signal('mainnet').active}; "
-                f"entries {entry_states}"
-            )
-        else:
-            lines.append(
-                f"real money: owner {mainnet_owner.active}; "
-                f"signal {status.signal('mainnet').active}; not armed"
-            )
+        for realm, label in _FUNDED_LABELS.items():
+            name = "real money" if realm == "mainnet" else realm
+            owner = status.owner(realm)
+            if owner.active == "active" and status.entries[realm]:
+                entry_states = ", ".join(
+                    f"{strategy}={'on' if status.entries[realm][strategy] else 'off'}"
+                    for strategy in ("long", "carry", "exodus")
+                )
+                lines.append(
+                    f"{name}: owner active; signal {status.signal(realm).active}; "
+                    f"entries {entry_states}"
+                )
+            else:
+                lines.append(
+                    f"{name}: owner {owner.active}; "
+                    f"signal {status.signal(realm).active}; not armed"
+                )
         return "\n".join(lines)
 
 
@@ -404,12 +428,9 @@ class ControlPanel:
                 {"text": "▶️ Resume demo", "callback_data": "resume:demo"},
             ],
         ]
-        if self._fleet.mainnet_present():
-            rows.append(
-                [
-                    {"text": "⏸ Pause real money", "callback_data": "pause:mainnet"},
-                ]
-            )
+        for realm in self._fleet.funded_present():
+            label = "real money" if realm == "mainnet" else _FUNDED_LABELS[realm]
+            rows.append([{"text": f"⏸ Pause {label}", "callback_data": f"pause:{realm}"}])
         return rows
 
     def send_panel(self) -> None:

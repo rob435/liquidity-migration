@@ -71,16 +71,23 @@ pub enum VenueName {
 
 /// Evidence state attached to every selectable venue realm.
 ///
-/// A compiled adapter is not production evidence. Moving a realm from
-/// `ProductionBlocked` to `LiveProven` is a reviewed source change made only
-/// after the smallest permitted order and cancel/fill lifecycle has been
-/// observed on that exact venue.
+/// A compiled adapter is not production evidence. Moving a realm to
+/// `LiveProven` is a reviewed source change made only after the smallest
+/// permitted order and cancel/fill lifecycle has been observed on that exact
+/// venue. `LiveCanary` is the state between: the realm has no practice
+/// sibling, so `engine canary-order` is the only way to obtain that
+/// lifecycle, and it is permitted with `REAL_MONEY` armed while the execution
+/// engine stays refused.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub enum VenueReadiness {
     LiveProven,
     /// Offline conformance is green; this practice realm exists to gather the
     /// missing live evidence with test funds.
     TestnetCanary,
+    /// Offline conformance is green and the venue publishes no practice host,
+    /// so the missing evidence can only be taken on funded capital.
+    /// `engine canary-order` may run here; `engine run` may not.
+    LiveCanary,
     /// Real capital is blocked until exact-venue live evidence exists.
     ProductionBlocked,
     /// Public data only; no trading API is available to this adapter.
@@ -92,6 +99,7 @@ impl VenueReadiness {
         match self {
             Self::LiveProven => "live-proven",
             Self::TestnetCanary => "testnet-canary",
+            Self::LiveCanary => "live-canary",
             Self::ProductionBlocked => "production-blocked",
             Self::ReadOnly => "read-only",
         }
@@ -259,9 +267,9 @@ impl VenueName {
             VenueName::HyperliquidTestnet | VenueName::LighterTestnet => {
                 VenueReadiness::TestnetCanary
             }
+            VenueName::MexcMainnet => VenueReadiness::LiveCanary,
             VenueName::HyperliquidMainnet
             | VenueName::LighterMainnet
-            | VenueName::MexcMainnet
             | VenueName::BinanceTestnet
             | VenueName::BinanceMainnet => VenueReadiness::ProductionBlocked,
             VenueName::VariationalMainnet => VenueReadiness::ReadOnly,
@@ -274,11 +282,36 @@ impl VenueName {
         if !self.compiled() {
             return Err(self.disabled_error());
         }
-        if self.readiness().permits_engine_run() {
+        let readiness = self.readiness();
+        if readiness.permits_engine_run() {
+            return Ok(());
+        }
+        Err(VenueError::BadRequest(match readiness {
+            VenueReadiness::LiveCanary => format!(
+                "{} readiness is {}; the missing evidence is one reviewed `engine canary-order` lifecycle on this exact realm, and the execution engine stays refused until that review moves it to live-proven",
+                self.as_str(),
+                readiness.as_str()
+            ),
+            other => format!(
+                "{} readiness is {}; the execution engine is blocked until this exact realm has reviewed live order lifecycle evidence",
+                self.as_str(),
+                other.as_str()
+            ),
+        }))
+    }
+
+    /// Refuse the operator canary on any realm it is not the right instrument
+    /// for: the practice account it was written against, and the funded realms
+    /// whose only route to live evidence it is.
+    pub fn require_canary_ready(self) -> Result<(), VenueError> {
+        if !self.compiled() {
+            return Err(self.disabled_error());
+        }
+        if self == VenueName::BybitDemo || self.readiness() == VenueReadiness::LiveCanary {
             return Ok(());
         }
         Err(VenueError::BadRequest(format!(
-            "{} readiness is {}; the execution engine is blocked until this exact realm has reviewed live order lifecycle evidence",
+            "canary-order runs on {BYBIT_DEMO} and on live-canary realms; {} readiness is {}",
             self.as_str(),
             self.readiness().as_str()
         )))

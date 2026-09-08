@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use crate::config::is_sha256;
+use crate::config::{is_realm, is_sha256};
 use crate::model::{
     BinanceWhaleObservation, BinanceWhaleWire, BybitFundingWire, BybitInstrumentWire,
     BybitTickerWire, HourlyKline, InstrumentObservation, SettledFunding, TickerObservation,
@@ -335,7 +335,7 @@ pub fn validate_universe(
         || !is_sha256(&universe.artifact_sha256)
         || !is_sha256(&universe.file_sha256)
         || universe.symbols.is_empty()
-        || !matches!(universe.environment.as_str(), "demo" | "mainnet")
+        || !is_realm(&universe.environment)
         || universe.endpoint.trim().is_empty()
     {
         return Err(WorkerError::input(

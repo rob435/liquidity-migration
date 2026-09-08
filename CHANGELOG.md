@@ -10,6 +10,50 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-08 — Wire MEXC USDT perpetuals as the fleet's third realm.**
+  - Owner direction: trade MEXC alongside Bybit because Bybit's 3.6 / 10 bp
+    maker / taker fees are too high; MEXC charges 0 maker and 0–2 bp taker on
+    the sleeves' symbols. MEXC lists 25 of Bybit's top-30 turnover perps and
+    79 of the top-100; the rest are refused at admission without counting
+    toward the venue reject limit.
+  - Engine: `mexc` joins the default Cargo features, so the fleet binary can
+    select `mexc_mainnet`. New readiness `live-canary` replaces
+    `production-blocked` for that realm: `engine canary-order` may run with
+    `REAL_MONEY` armed, `engine run` still refuses until a reviewed canary
+    receipt moves it to `live-proven`. The canary is venue-neutral (server
+    time from `/api/v1/contract/ping`, terminal state from the order lookup,
+    ids ≤ 30 characters against MEXC's 32-character `externalOid` cap, a zero
+    minimum notional sizes at `minVol`). `MexcInventoryProbe` gives
+    `verify-account-identity` and `attest-flat` a GET-only reader; the account
+    id is `key-` plus eight bytes of `sha256(api key)`.
+  - Private stream: `MexcOrderFeed` is an authenticated socket on
+    `wss://contract.mexc.com/edge` (login, `personal.filter` for `order` and
+    `order.deal`, 15 s pings) decoding `push.personal.order` and
+    `push.personal.order.deal` into acks, cancels, rejects and fills in base
+    coin; a 60 s paced `StreamReset` reconciles against REST history while
+    connected and the old 5 s pacer runs when the login is refused. Login
+    frame, `isTaker` spelling and filter acknowledgement are documented, not
+    yet observed live.
+  - Signals: the worker and the native config renderer accept realm `mexc`
+    (`configs/signal-worker.mexc.json`, Bybit mainnet public data). LONG
+    entries render on; CARRY and EXODUS entries render off because their
+    funding signal is Bybit's.
+  - Fleet: `liquidity-migration-engine-mexc`, `signal-worker-mexc` and
+    `mexc-liveness` units, user `liquidity-engine-mexc`, spool and control
+    directories, `mexc-mainnet.env` as the only arming file, `engine-mexc.env`
+    and `engine.mexc.toml.template`; deploy renders the realm whenever its
+    switch is armed and starts it only when the installed engine reports
+    `mexc_mainnet` as `live-proven`; `stop-mexc` / `disarm-mexc`,
+    `ops.sh curve|flatten|attest-flat|verify-account-identity|canary-order`
+    for `mexc` (the last two run the engine subcommands on the host under the
+    realm's own credential file), liveness scope `mexc`, Telegram
+    pause/resume, trade notifier, backup sources and the equity recorder
+    follow the manifest.
+  - Evidence boundary: offline fixtures and the public contract table only. No
+    MEXC credential was found locally or on the host at 16:00 UTC, so no live
+    order, cancel, identity or private-stream login has been observed; the
+    realm remains `live-canary` and its units stay stopped through deploy.
+
 - **2026-09-08 — Incident `mainnet-014ec4a90a2fde5f`: a normal worker boot pages
   the funded realm. The boot repair gap now has its own bound.**
   - Alert, mainnet scope, `ip-208-84-103-4`: `CRITICAL

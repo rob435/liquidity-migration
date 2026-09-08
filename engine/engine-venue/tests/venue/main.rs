@@ -17,6 +17,8 @@ mod hyperliquid_requests;
 mod lighter_requests;
 #[cfg(feature = "mexc")]
 mod mexc_exact_orders;
+#[cfg(feature = "mexc")]
+mod mexc_private_stream;
 mod order_lookup_lane;
 mod order_lookups;
 #[cfg(feature = "bybit")]

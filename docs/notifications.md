@@ -12,9 +12,10 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | :--- | :--- | :--- | :--- | :--- |
 | Trade updates | `liquidity-migration-trade-notify.timer` | 5 min | Telegram main chat | Read-only openings, closes, and daily digest |
 | Demo liveness | `liquidity-migration-demo-liveness.timer` | 3 min | Telegram alerts + incident routine | Demo engine, signal worker, timers, heartbeats, admission |
-| Mainnet liveness | `liquidity-migration-mainnet-liveness.timer` | 3 min while armed | Telegram alerts + incident routine | Funded engine, signal worker, timers, heartbeats, admission |
+| Mainnet liveness | `liquidity-migration-mainnet-liveness.timer` | 3 min while armed | Telegram alerts + incident routine | Funded Bybit engine, signal worker, timers, heartbeats, admission |
+| MEXC liveness | `liquidity-migration-mexc-liveness.timer` | 3 min while armed | Telegram alerts + incident routine | MEXC engine, signal worker, timers, heartbeats, admission |
 | Host liveness | `liquidity-migration-host-liveness.timer` | 3 min, independent | Telegram alerts + incident routine + external dead-man | Recorders, upload, backup, equity sampler, disk, clock, realm watchdogs |
-| Operator controls | `liquidity-migration-telegram-controls.service` | Continuous | Telegram main chat | Pause demo, resume demo, pause mainnet, status |
+| Operator controls | `liquidity-migration-telegram-controls.service` | Continuous | Telegram main chat | Pause demo, resume demo, pause each running funded realm, status |
 
 ### Alert Conditions
 
@@ -33,7 +34,7 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Host | Machine | `/var/lib` has less than 5 GB free (`evaluate_disk` default, decimal GB) or NTP is unsynchronised; deployed overrides require a separate host observation |
 | Host | Disk consumption | `WARNING` when positive observed filesystem consumption projects the 5 GB floor within 195 seconds, the host timer's 180-second cadence plus 15-second accuracy. A fresh same-boot/device interval is required; this is a forecast, not an IO limit |
 | Host | WAL attribution | Metadata-only totals/deltas for canonical `engine.wal` families beside manifest heartbeats; arbitrary runtime path overrides are outside this attribution. WAL bytes are not added to filesystem consumption a second time; missing/replaced/truncated files make their delta unavailable |
-| Host | Watchdog plane | Demo watchdog is required; funded watchdog is required while enabled or while its engine runs; a disabled/inactive timer or failed last run is `CRITICAL` outside a deploy |
+| Host | Watchdog plane | Demo watchdog is required; each funded realm's watchdog is required while its timer is enabled or its engine runs; a disabled/inactive timer or failed last run is `CRITICAL` outside a deploy |
 | Host | Deployment | The existing exclusive deploy lock suppresses transition-prone unit, heartbeat, recorder, and realm-watchdog checks for 30 min; delivery state is preserved, while disk, clock, upload, backup, and dead-man checks continue; a longer-held or unreadable lock is `CRITICAL` |
 | External | Host watchdog | `ONCALL_DEADMAN_URL` receives no healthy host-scope ping |
 
@@ -43,15 +44,15 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | :--- | :--- |
 | Telegram | New alert immediately; active alert repeats every 60 min; resolution once; failed delivery retries next 3-min run and does not consume cooldown |
 | Incident routine | One run per active `CRITICAL` reference; failed fire retries next 3-min run; the reference rearms only after resolution |
-| External dead-man | Host scope alone pings on a run with no `CRITICAL`; demo and mainnet never ping it |
+| External dead-man | Host scope alone pings on a run with no `CRITICAL`; no realm scope ever pings it |
 | Systemd result | Health fault with accepted routes exits 0; invalid configuration or failed route exits non-zero |
 
 ### Private Environment Files
 
 | Path | Mode | Keys | Loaded By |
 | :--- | :---: | :--- | :--- |
-| `/etc/liquidity-migration/notifications.env` | `root:root 0600` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_ALERT_CHAT_ID`, optional `TELEGRAM_CONTROL_USER_IDS` | Trade notifier, controls, three liveness scopes |
-| `/etc/liquidity-migration/oncall.env` | `root:root 0600` | `INCIDENT_ROUTINE_FIRE_URL`, `INCIDENT_ROUTINE_FIRE_TOKEN`, `ONCALL_DEADMAN_URL` | Three liveness scopes |
+| `/etc/liquidity-migration/notifications.env` | `root:root 0600` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_ALERT_CHAT_ID`, optional `TELEGRAM_CONTROL_USER_IDS` | Trade notifier, controls, every liveness scope |
+| `/etc/liquidity-migration/oncall.env` | `root:root 0600` | `INCIDENT_ROUTINE_FIRE_URL`, `INCIDENT_ROUTINE_FIRE_TOKEN`, `ONCALL_DEADMAN_URL` | Every liveness scope |
 
 `INCIDENT_ROUTINE_FIRE_URL` must be an HTTPS
 `api.anthropic.com/v1/claude_code/routines/<id>/fire` endpoint. The dead-man
@@ -79,10 +80,10 @@ inaccessible after launch.
 | Opening | Fresh heartbeat contains a newly attributed `LONG`, `CARRY`, or `EXODUS` position |
 | Close | `trades.jsonl` gains a closed round trip; message includes sleeve, symbol, side, hold, net realized PnL, return, and slippage |
 | `maker_canary`, `probe` | Recorded but excluded from Telegram trade messages; neither is a directional sleeve, so neither can produce an Opening |
-| Daily digest | 00:00 UTC realized totals split by demo and mainnet |
+| Daily digest | 00:00 UTC realized totals split by account: `DEMO`, `RM` (funded Bybit), `MEXC` |
 | `/status` | Unit, heartbeat, and entry-permission summary |
 | `/pause_demo` / `/resume_demo` | Disable or restore demo entries; exits and settlement continue |
-| `/pause_mainnet` | Disable funded entries while the engine continues managing existing positions |
+| `/pause_mainnet`, `/pause_mexc` | Disable that funded realm's entries while its engine continues managing existing positions. The button appears only while that realm's owner is active |
 
 ## 3. Invariants
 
@@ -92,7 +93,7 @@ inaccessible after launch.
 - **Must** supervise realm watchdog results from the independent host scope; a timer cannot prove its own continued execution.
 - **Must** suppress transition-prone checks only while the sanctioned deploy owns `/run/liquidity-migration/deploy.lock`, preserve their delivery state rather than emitting false resolutions, and continue independent disk, clock, upload, backup, and dead-man checks. A held lock older than 30 minutes is a fault. The bound covers the measured 12–19 min host-build fallback without hiding a stuck deploy indefinitely.
 - **Must** keep a restarted recorder inside the deploy boundary until its status names the new systemd process, at least one shard is connected, and a market frame has arrived.
-- **Must** catch a disabled mainnet watchdog while the funded engine still runs.
+- **Must** catch a disabled funded watchdog while that realm's engine still runs.
 - **Must** fail closed when a known engine or signal worker publishes a fresh JSON object without its required health verdict.
 - **Must** treat a fresh but self-reported `degraded` signal-worker heartbeat as a fault after its bounded, transport-healthy startup or recovery and attach that worker's journal to the incident payload.
 - **Must** name, in a `degraded` signal-worker page, the transport input that decided the verdict: kline topics accepted against `bybit_ws_ticker_capacity`, and the frame age against the worker's own `bybit_ws_max_frame_age_ms`. The gap age and cycle lines are consequences; a page carrying only those cannot be diagnosed off-host.
@@ -131,6 +132,7 @@ gh workflow run vps-deploy.yml --ref main -f mode=diagnose
 scripts/ops.sh logs trade-notify.service 100
 scripts/ops.sh logs demo-liveness.service 100
 scripts/ops.sh logs mainnet-liveness.service 100
+scripts/ops.sh logs mexc-liveness.service 100
 scripts/ops.sh logs host-liveness.service 100
 scripts/ops.sh logs telegram-controls.service 100
 ```

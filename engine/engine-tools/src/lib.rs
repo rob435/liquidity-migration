@@ -16,7 +16,7 @@ pub mod wal_conversion;
 #[cfg(test)]
 mod testpath;
 
-#[cfg(feature = "bybit")]
+#[cfg(any(feature = "bybit", feature = "mexc"))]
 pub mod canary;
 pub mod flatness;
 pub mod takeover;

@@ -159,7 +159,6 @@ async fn lighter_account_amounts_and_stop_preserve_bare_native_decimal() {
     );
 }
 #[cfg(feature = "mexc")]
-#[cfg(all(feature = "lighter", feature = "hyperliquid"))]
 #[tokio::test(start_paused = true)]
 async fn mexc_account_amounts_and_stop_preserve_bare_native_decimal() {
     let server = TestServer::start(|request,_| (200, match request.path.as_str() {

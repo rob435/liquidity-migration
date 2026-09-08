@@ -28,6 +28,15 @@ def test_default_funded_account_reads_its_engine_heartbeat() -> None:
     assert funded.heartbeat.endswith("/liquidity-migration-engine-mainnet/heartbeat.json")
 
 
+def test_the_mexc_account_matches_the_venue_qualified_realm_its_engine_writes() -> None:
+    account = next(account for account in notify.ACCOUNTS if account.name == "mexc")
+    # The engine stamps its venue realm, not the fleet realm's short name.
+    assert account.realm == "mexc_mainnet"
+    assert account.tag == "MEXC "
+    assert account.heartbeat.endswith("/liquidity-migration-engine-mexc/heartbeat.json")
+    assert account.trades.endswith("/liquidity-migration-engine-mexc/trades.jsonl")
+
+
 def _heartbeat(tmp: Path, rows: list[dict], *, realm: str = "demo") -> str:
     p = tmp / "heartbeat.json"
     p.write_text(
@@ -94,6 +103,16 @@ class TestReadAttributedPositions:
         path = _heartbeat(tmp_path, [], realm="mainnet")
         assert notify.read_attributed_positions(path, realm="demo", now_ms=1_001_000) is None
         assert notify.read_attributed_positions(path, realm="mainnet", now_ms=2_000_000) is None
+
+    def test_a_mexc_heartbeat_is_read_only_under_its_venue_qualified_realm(
+        self, tmp_path: Path
+    ) -> None:
+        path = _heartbeat(tmp_path, [], realm="mexc_mainnet")
+        assert notify.read_attributed_positions(path, realm="mexc", now_ms=1_001_000) is None
+        assert (
+            notify.read_attributed_positions(path, realm="mexc_mainnet", now_ms=1_001_000)
+            is not None
+        )
 
 
 class TestPositionDiff:

@@ -24,7 +24,8 @@ use std::collections::HashMap;
 
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
-    AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce, VenueOrder,
+    AccountInventory, AccountOrder, AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest,
+    Side, TimeInForce, VenueOrder,
 };
 use engine_types::risk::AccountView;
 use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
@@ -33,17 +34,19 @@ use sha2::{Digest, Sha256};
 
 use super::contracts::{Ceiling, Contracts};
 use super::parse::{
-    id_text, parse_assets, parse_open_orders, parse_order_ack, parse_position_stops,
-    parse_positions, venue_result,
+    id_text, parse_assets, parse_inventory_assets, parse_inventory_positions,
+    parse_inventory_stop_orders, parse_open_orders, parse_order_ack, parse_position_stops,
+    parse_positions, venue_result, SETTLE_CURRENCY,
 };
 use super::realm::MexcRealm;
 use super::rest::RestClient;
 use super::VENUE_NAME;
 use crate::creds::Credentials;
 use crate::fmt::venue_num;
-use crate::{account_scan, mono_ns};
+use crate::{account_scan, mono_ns, wall_ms};
 
 const PATH_CONTRACT_DETAIL: &str = "/api/v1/contract/detail";
+const PATH_PING: &str = "/api/v1/contract/ping";
 const PATH_ASSETS: &str = "/api/v1/private/account/assets";
 const PATH_POSITIONS: &str = "/api/v1/private/position/open_positions";
 const PATH_OPEN_ORDERS: &str = "/api/v1/private/order/list/open_orders";
@@ -223,6 +226,94 @@ impl MexcGateway {
         self.realm
     }
 
+    /// The venue's own millisecond clock. Public, so this answers before the
+    /// gateway has signed anything, and it is what bounds an execution-history
+    /// window in the venue's time rather than this host's.
+    pub async fn venue_time_ms(&self) -> Result<i64, VenueError> {
+        let body: Value = self.rest.get_public_as(PATH_PING, "").await?;
+        let data = venue_result(&body)?;
+        match data {
+            Value::Number(value) => value.as_i64(),
+            Value::String(value) => value.parse().ok(),
+            _ => None,
+        }
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            VenueError::BadReply("ping reply has no millisecond server clock".to_string())
+        })
+    }
+
+    /// Every surface this credential's futures account can carry, as one
+    /// scan. Reads only; nothing here can create exposure.
+    async fn account_scan(&mut self) -> Result<AccountInventory, VenueError> {
+        // Stamp the beginning, not the end. The caller's freshness bound then
+        // rejects a scan whose first read has gone stale while later pages
+        // were still arriving.
+        let observed_ms = wall_ms();
+        self.contracts().await?;
+
+        let assets = {
+            let body = self.rest.get_signed(PATH_ASSETS, &[]).await?;
+            parse_inventory_assets(venue_result(&body)?)?
+        };
+        let positions = {
+            let body = self.rest.get_signed(PATH_POSITIONS, &[]).await?;
+            parse_inventory_positions(venue_result(&body)?, &self.contracts)?
+        };
+        let mut open_orders: Vec<AccountOrder> = VenueGateway::working_orders(self)
+            .await?
+            .into_iter()
+            .map(|order| {
+                let symbol = self.contracts.symbol_of(&order.symbol).ok_or_else(|| {
+                    VenueError::BadReply(format!(
+                        "working order names unknown contract {}",
+                        order.symbol
+                    ))
+                })?;
+                Ok(AccountOrder {
+                    product: "linear".to_string(),
+                    symbol: symbol.clone(),
+                    client_order_id: order.client_order_id,
+                })
+            })
+            .collect::<Result<_, VenueError>>()?;
+
+        let mut stops_complete = false;
+        for page in 1..=MAX_PAGES {
+            let body = self
+                .rest
+                .get_signed(
+                    PATH_STOP_OPEN,
+                    &[
+                        ("page_num", page.to_string()),
+                        ("page_size", PAGE_SIZE.to_string()),
+                    ],
+                )
+                .await?;
+            let (rows, raw_count) =
+                parse_inventory_stop_orders(venue_result(&body)?, &self.contracts)?;
+            open_orders.extend(rows);
+            if raw_count < PAGE_SIZE as usize {
+                stops_complete = true;
+                break;
+            }
+        }
+        if !stops_complete {
+            return Err(VenueError::BadReply(format!(
+                "stop-order listing still had pages after {MAX_PAGES}"
+            )));
+        }
+
+        Ok(AccountInventory {
+            scope: format!(
+                "credential account: MEXC futures — {SETTLE_CURRENCY} and every other wallet balance, open positions and working orders on every listed contract, and position-bound stop records. MEXC's spot and other product accounts are on a separate API this adapter does not sign for and are not covered."
+            ),
+            positions: positions.into_iter().chain(assets).collect(),
+            open_orders,
+            observed_ms,
+        })
+    }
+
     fn build(realm: MexcRealm, base_url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
         Self {
             realm,
@@ -351,6 +442,10 @@ impl VenueGateway for MexcGateway {
             user_id: format!("key-{}", hex::encode(&digest[..8])),
             realm: self.realm.as_str().to_string(),
         })
+    }
+
+    async fn account_inventory(&mut self) -> Result<AccountInventory, VenueError> {
+        self.account_scan().await
     }
 
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
@@ -681,6 +776,49 @@ impl VenueGateway for MexcGateway {
             end_ms,
         )
         .await
+    }
+}
+
+/// A deliberately narrow live capability for deployment attestation.
+///
+/// Its gateway is private and this type exposes no order, cancel, amend,
+/// leverage, stop, or websocket API. That is why it may authenticate a
+/// disarmed funded account: proving old exposure absent is not authority to
+/// create new exposure. MEXC has one credential pair, so the same key that
+/// trades is the key that reads — the narrowing is in this type's surface, not
+/// in a second key.
+pub struct MexcInventoryProbe {
+    gateway: MexcGateway,
+}
+
+impl MexcInventoryProbe {
+    pub fn new(realm: MexcRealm) -> Result<Self, VenueError> {
+        let (key_var, secret_var) = realm.credential_vars();
+        let credentials = Credentials::from_env_read_only(
+            realm.as_str(),
+            realm.is_real_money(),
+            key_var,
+            secret_var,
+        )?;
+        Ok(Self {
+            gateway: MexcGateway::build(realm, realm.rest_base(), credentials, Vec::new()),
+        })
+    }
+
+    /// Point the probe at a local server. Tests only; the live path is
+    /// [`MexcInventoryProbe::new`].
+    pub fn for_test(base_url: &str, realm: MexcRealm, creds: Credentials) -> Self {
+        Self {
+            gateway: MexcGateway::build(realm, base_url, creds, Vec::new()),
+        }
+    }
+
+    pub async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
+        VenueGateway::account_identity(&mut self.gateway).await
+    }
+
+    pub async fn account_inventory(&mut self) -> Result<AccountInventory, VenueError> {
+        self.gateway.account_scan().await
     }
 }
 

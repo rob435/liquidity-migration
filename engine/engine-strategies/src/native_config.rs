@@ -18,6 +18,9 @@ use crate::native_long::plan::{
 };
 
 const HOUR_MS: i64 = 3_600_000;
+/// The realms a native config can be rendered for; each has a
+/// `configs/signal-worker.<realm>.json` and a `deploy/engine.<realm>.toml.template`.
+pub const NATIVE_REALMS: [&str; 3] = ["demo", "mainnet", "mexc"];
 pub const NATIVE_BLOCKS_BEGIN: &str = "# BEGIN GENERATED NATIVE DIRECTIONAL STRATEGIES";
 pub const NATIVE_BLOCKS_END: &str = "# END GENERATED NATIVE DIRECTIONAL STRATEGIES";
 pub const MAKER_RULE_BEGIN: &str =
@@ -60,8 +63,8 @@ pub struct NativeConfigRender {
 pub fn render_native_config(
     sources: NativeConfigSources<'_>,
 ) -> Result<NativeConfigRender, String> {
-    if !matches!(sources.realm, "demo" | "mainnet") {
-        return Err("native config realm must be demo or mainnet".to_owned());
+    if !NATIVE_REALMS.contains(&sources.realm) {
+        return Err("native config realm must be demo, mainnet or mexc".to_owned());
     }
     let signal = parse_json(sources.signal_config, "signal config")?;
     validate_signal(&signal, sources.realm)?;
@@ -780,7 +783,7 @@ mod tests {
             .parent()
             .and_then(std::path::Path::parent)
             .expect("repository root");
-        for realm in ["demo", "mainnet"] {
+        for realm in NATIVE_REALMS {
             let signal = std::fs::read(root.join(format!("configs/signal-worker.{realm}.json")))
                 .expect("signal config");
             let long = std::fs::read(root.join("configs/long_native_v12.json")).expect("LONG rule");

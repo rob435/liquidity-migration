@@ -89,12 +89,12 @@ class FakeApi:
 
 
 class FakeFleet:
-    def __init__(self, *, mainnet: bool = False) -> None:
-        self.mainnet = mainnet
+    def __init__(self, *, funded: tuple[str, ...] = ()) -> None:
+        self.funded = funded
         self.calls: list[tuple[str, str]] = []
 
-    def mainnet_present(self) -> bool:
-        return self.mainnet
+    def funded_present(self) -> tuple[str, ...]:
+        return self.funded
 
     def status_text(self) -> str:
         return "status"
@@ -112,10 +112,10 @@ class FakeFleet:
         return "closed"
 
 
-def make_panel(tmp_path: Path, *, mainnet: bool = False, now: list[float] | None = None):
+def make_panel(tmp_path: Path, *, funded: tuple[str, ...] = (), now: list[float] | None = None):
     config = make_config(tmp_path)
     api = FakeApi()
-    fleet = FakeFleet(mainnet=mainnet)
+    fleet = FakeFleet(funded=funded)
     clock = now if now is not None else [0.0]
     panel = ControlPanel(config, api, fleet, monotonic=lambda: clock[0])  # type: ignore[arg-type]
     return panel, api, fleet, clock
@@ -144,10 +144,22 @@ def test_controls_command_sends_panel_without_mainnet_rows(tmp_path: Path) -> No
 
 
 def test_panel_grows_mainnet_rows_when_owner_is_active(tmp_path: Path) -> None:
-    panel, api, _, _ = make_panel(tmp_path, mainnet=True)
+    panel, api, _, _ = make_panel(tmp_path, funded=("mainnet",))
     panel.send_panel()
     flat = json.dumps(api.sent[-1]["keyboard"])
     assert "pause:mainnet" in flat
+    assert "pause:mexc" not in flat
+
+
+def test_panel_grows_one_row_per_running_funded_realm(tmp_path: Path) -> None:
+    panel, api, _, _ = make_panel(tmp_path, funded=("mainnet", "mexc"))
+    panel.send_panel()
+    flat = json.dumps(api.sent[-1]["keyboard"])
+    assert "pause:mainnet" in flat
+    assert "pause:mexc" in flat
+    # Resume stays a shell action for every funded realm.
+    assert "resume:mainnet" not in flat
+    assert "resume:mexc" not in flat
     assert "resume:mainnet" not in flat
     assert "close" not in flat
 
@@ -223,6 +235,10 @@ def fleet_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                     "unit|demo|signal|directional|liquidity-migration-signal-worker-demo.service|active\n"
                     "unit|mainnet|owner|-|liquidity-migration-engine-mainnet.service|active\n"
                     "unit|mainnet|signal|directional|liquidity-migration-signal-worker-mainnet.service|active\n"
+                    # The mexc realm is in the manifest and unarmed: unit rows,
+                    # no heartbeat, therefore no entry rows.
+                    "unit|mexc|owner|-|liquidity-migration-engine-mexc.service|inactive\n"
+                    "unit|mexc|signal|directional|liquidity-migration-signal-worker-mexc.service|inactive\n"
                 ),
                 stderr="",
             )
@@ -297,6 +313,27 @@ def test_mainnet_pause_and_resume_each_reach_exactly_their_own_action(fleet_env)
     assert "REAL_MONEY is not touched" in message
 
 
+def test_mexc_pause_and_resume_each_reach_exactly_their_own_action(fleet_env) -> None:
+    _config, fleet, commands = fleet_env
+    fleet.pause("mexc")
+    message = fleet.resume("mexc")
+    assert commands == [
+        list(tc.CONTROL_COMMANDS["pause-mexc"]),
+        list(tc.CONTROL_COMMANDS["resume-mexc"]),
+    ]
+    assert "REAL_MONEY is not touched" in message
+
+
+def test_an_unarmed_funded_realm_reports_units_without_entry_rows(fleet_env) -> None:
+    """An unarmed realm publishes no heartbeat, so the helper reports no entry
+    permissions for it. That is a status line, not a broken panel."""
+
+    _config, fleet, _commands = fleet_env
+    status = fleet.status_text()
+    assert "mexc: owner inactive; signal inactive; not armed" in status
+    assert fleet.funded_present() == ("mainnet",)
+
+
 def test_control_action_allowlist_cannot_forward_paths_units_or_environment(fleet_env) -> None:
     _config, fleet, commands = fleet_env
     with pytest.raises(ValueError, match="unsupported control action"):
@@ -307,6 +344,8 @@ def test_control_action_allowlist_cannot_forward_paths_units_or_environment(flee
         "resume-demo",
         "pause-mainnet",
         "resume-mainnet",
+        "pause-mexc",
+        "resume-mexc",
         "status-fleet",
     }
     for action, command in tc.CONTROL_COMMANDS.items():

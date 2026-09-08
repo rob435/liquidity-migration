@@ -16,7 +16,7 @@ name = "engine-tools"
 path = "src/main.rs"
 
 [features]
-default = ["bybit"]
+default = ["bybit", "mexc"]
 bybit = ["engine-core/bybit", "engine-venue/bybit", "engine-marketdata/bybit"]
 binance = ["engine-core/binance", "engine-venue/binance", "engine-marketdata/binance"]
 hyperliquid = ["engine-core/hyperliquid", "engine-venue/hyperliquid", "engine-marketdata/hyperliquid"]

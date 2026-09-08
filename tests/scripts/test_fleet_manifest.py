@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+#: Every realm that owns a venue account, in the order the operator surfaces
+#: report them.
+REALMS = ("demo", "mainnet", "mexc")
+FUNDED_REALMS = ("mainnet", "mexc")
 MANIFEST = ROOT / "deploy" / "fleet_manifest.tsv"
 SYSTEMD = ROOT / "deploy" / "systemd"
 
@@ -74,14 +78,13 @@ def test_manifest_is_strict_and_exactly_names_the_systemd_inventory() -> None:
 
 
 def test_directional_runtime_units_are_manifest_derived() -> None:
-    assert _helper("lm_signal_worker_unit demo") == [
-        "liquidity-migration-signal-worker-demo.service"
-    ]
-    assert _helper("lm_signal_worker_unit mainnet") == [
-        "liquidity-migration-signal-worker-mainnet.service"
-    ]
+    for realm in REALMS:
+        assert _helper(f"lm_signal_worker_unit {realm}") == [
+            f"liquidity-migration-signal-worker-{realm}.service"
+        ]
     assert _helper("lm_owner_unit demo") == ["liquidity-migration-engine.service"]
     assert _helper("lm_owner_unit mainnet") == ["liquidity-migration-engine-mainnet.service"]
+    assert _helper("lm_owner_unit mexc") == ["liquidity-migration-engine-mexc.service"]
 
 
 def test_heartbeat_artifacts_are_manifest_derived() -> None:
@@ -105,7 +108,7 @@ def test_operator_status_inventory_is_exactly_manifest_derived() -> None:
             )
         ),
         key=lambda row: (
-            0 if row.realm == "demo" else 1,
+            REALMS.index(row.realm),
             0 if row.lifecycle == "owner" else 1,
             "-" if row.lifecycle == "owner" else "directional",
             row.unit,
@@ -127,8 +130,8 @@ def test_activation_unit_sets_and_immediate_jobs_are_manifest_derived() -> None:
     rows = _manifest()
 
     def expected_activation(realm: str) -> list[str]:
-        activation = "always" if realm == "demo" else "mainnet"
-        realms = {"demo", "shared"} if realm == "demo" else {"mainnet"}
+        activation = "always" if realm == "demo" else realm
+        realms = {"demo", "shared"} if realm == "demo" else {realm}
         return [
             row.unit
             for row in sorted(rows, key=lambda row: row.stop_order, reverse=True)
@@ -140,7 +143,7 @@ def test_activation_unit_sets_and_immediate_jobs_are_manifest_derived() -> None:
             and row.artifact is None
         ]
 
-    for realm in ("demo", "mainnet"):
+    for realm in REALMS:
         expected = expected_activation(realm)
         assert _helper(f"lm_activation_units {realm} start") == expected
         assert _helper(f"lm_activation_units {realm} stop") == list(reversed(expected))
@@ -161,10 +164,15 @@ def test_activation_unit_sets_and_immediate_jobs_are_manifest_derived() -> None:
 
 def test_realm_units_cover_the_funded_stop_surface() -> None:
     rows = _manifest()
-    mainnet_units = set(_helper("lm_realm_units mainnet"))
-    assert mainnet_units == {row.unit for row in rows if row.realm == "mainnet"}
+    for realm in FUNDED_REALMS:
+        assert set(_helper(f"lm_realm_units {realm}")) == {
+            row.unit for row in rows if row.realm == realm
+        }
     deploy = (ROOT / "scripts" / "vps" / "deploy_remote.sh").read_text(encoding="utf-8")
-    assert "lm_realm_units mainnet" in deploy
+    # One stop surface per funded realm, taken from the manifest.
+    assert 'lm_realm_units "$realm"' in deploy
+    assert 'stop_funded_units "${MODE#stop-}"' in deploy
+    assert 'disarm-mainnet|disarm-mexc) disarm_funded_mode "${MODE#disarm-}"' in deploy
 
 
 def test_each_realm_has_one_credential_free_signal_worker() -> None:
@@ -175,7 +183,7 @@ def test_each_realm_has_one_credential_free_signal_worker() -> None:
         if row.kind == "service"
         and row.unit.startswith("liquidity-migration-signal-worker-")
     ]
-    assert {row.realm for row in workers} == {"demo", "mainnet"}
+    assert {row.realm for row in workers} == set(REALMS)
     for row in workers:
         assert row.health == "active"
         assert row.artifact == (
@@ -184,7 +192,10 @@ def test_each_realm_has_one_credential_free_signal_worker() -> None:
         unit = (SYSTEMD / row.unit).read_text(encoding="utf-8")
         assert "UnsetEnvironment=" in unit
         assert "REAL_MONEY" in unit
+        # No worker may see any venue's execution key, whichever venue its
+        # account owner trades.
         assert "BYBIT_REAL_API_KEY" in unit
+        assert "MEXC_REAL_API_KEY" in unit
         assert (
             "ExecStart=/opt/liquidity-migration-engine/bin/signal-worker live" in unit
         )
@@ -211,6 +222,6 @@ def test_independent_units_are_shared_never_stopped_by_a_realm_and_recorder_firs
     assert ordered == [
         row.unit for row in sorted(independent, key=lambda row: row.stop_order, reverse=True)
     ]
-    for realm in ("demo", "mainnet"):
+    for realm in REALMS:
         assert not set(_helper(f"lm_activation_units {realm} start")) & set(ordered)
         assert not set(_helper(f"lm_realm_units {realm}")) & set(ordered)
