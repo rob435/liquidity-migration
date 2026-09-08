@@ -403,14 +403,18 @@ fn make_plan(
     now_ms: i64,
 ) -> Result<CanaryPlan, Box<dyn Error>> {
     validate_rule(rule)?;
+    // The plan prices off the touch and never sizes against it, so a feed that
+    // states no quantities (MEXC's ticker carries prices only; its feed reports
+    // zero for "not stated") is still usable. A negative or non-finite quantity
+    // is a broken frame and is not.
     if !quote.bid_px.is_finite()
         || !quote.ask_px.is_finite()
         || !quote.bid_qty.is_finite()
         || !quote.ask_qty.is_finite()
+        || quote.bid_qty < 0.0
+        || quote.ask_qty < 0.0
         || quote.bid_px <= 0.0
         || quote.ask_px <= quote.bid_px
-        || quote.bid_qty <= 0.0
-        || quote.ask_qty <= 0.0
     {
         return Err(format!("unusable public quote for {symbol}: {quote:?}").into());
     }
@@ -1459,6 +1463,38 @@ mod tests {
             ..mexc_rule
         };
         assert!(validate_rule(broken).is_err());
+    }
+
+    #[test]
+    fn a_feed_that_states_no_touch_sizes_still_prices_the_canary() {
+        // MEXC's ticker carries bid1/ask1 prices and no sizes; its feed reports
+        // zero for "not stated". The plan prices off the touch and never sizes
+        // against it, so the quote is usable. A broken size still is not.
+        let unstated = Quote {
+            bid_qty: 0.0,
+            ask_qty: 0.0,
+            ..quote()
+        };
+        let plan = make_plan("XRPUSDT", rule(), unstated, 1_000_100).unwrap();
+        assert!(limit_px(&plan.request) < unstated.bid_px);
+        for broken in [-1.0, f64::NAN, f64::INFINITY] {
+            let bad_bid = Quote {
+                bid_qty: broken,
+                ..quote()
+            };
+            assert!(
+                make_plan("XRPUSDT", rule(), bad_bid, 1_000_100).is_err(),
+                "a bid size of {broken} was accepted"
+            );
+            let bad_ask = Quote {
+                ask_qty: broken,
+                ..quote()
+            };
+            assert!(
+                make_plan("XRPUSDT", rule(), bad_ask, 1_000_100).is_err(),
+                "an ask size of {broken} was accepted"
+            );
+        }
     }
 
     #[test]

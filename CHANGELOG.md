@@ -62,12 +62,22 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     disabled and inactive. At 17:24 UTC `verify-account-identity` binds
     `key-e3b03c8170d1fc6b` and `attest-flat` reads `flat=true samples=2
     positions=0 open_orders=0` through the installed engine.
+  - Canary attempts by the owner. 17:50 UTC: `engine: cannot open the account
+    lease ... Read-only file system`; the engine-control sandbox left
+    `/run/lock/liquidity-migration` read-only, and only the canary mode now opens
+    it (`55c408b7`). 18:14:48 UTC: the lease is taken, `mexc private stream
+    logged in and filtered` is observed live, the derivative pre-check passes and
+    the market feed subscribes; the plan then refuses `Quote { bid_px: 78640.0,
+    bid_qty: 0.0, ask_px: 78640.1, ask_qty: 0.0 }` because MEXC's ticker states
+    no touch sizes and the canary demanded them. The plan now accepts zero
+    sizes and refuses negative or non-finite ones; the engine's working
+    supervisor already treated absent sizes as no lean.
   - Evidence boundary: no order has been sent to MEXC. The canary
     (`scripts/ops.sh canary-order --environment mexc --symbol BTCUSDT
     --expected-user-id key-e3b03c8170d1fc6b --execute`) is the owner's step;
     its receipt is what moves the realm to `live-proven`. The private-stream
-    login, `isTaker` spelling and the position-level stop body are documented,
-    not yet observed live.
+    login is observed live; `isTaker` on a fill and the position-level stop body
+    are documented, not yet observed.
 
 - **2026-09-08 — Incident `mainnet-014ec4a90a2fde5f`: a normal worker boot pages
   the funded realm. The boot repair gap now has its own bound.**
