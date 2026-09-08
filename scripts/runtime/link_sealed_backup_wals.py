@@ -42,12 +42,8 @@ def link_sealed(stage: Path, sources: list[Path]) -> tuple[int, int, int]:
             except OSError as exc:
                 if exc.errno != errno.EXDEV:
                     raise
-                # `link` needs one mount, not one filesystem: the kernel
-                # refuses it across a mount boundary even where `st_dev`
-                # matches, which the unit's own `StateDirectory` for the stage
-                # is. A stage that cannot hold a link is not a failed backup —
-                # the off-box copy is already checked by here, and the count
-                # below is what says the duplicate blocks are still there.
+                # Hard links require one mount even when device IDs match.
+                # The verified remote backup remains valid without this link.
                 unlinkable += 1
                 break
             try:

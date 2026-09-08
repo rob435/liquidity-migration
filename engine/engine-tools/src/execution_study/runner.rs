@@ -214,94 +214,127 @@ pub fn run(path: &Path) -> Result<()> {
         let mut books = 0_u64;
         let mut trades = 0_u64;
         let mut symbol_sources = BTreeMap::new();
-        for file in files.into_values() {
-            let mut reader = TapeReader::open(&file)?;
-            while let Some((at, row)) = reader.next_row()? {
-                if at < last_at {
-                    return Err(format!("symbol tape regressed in {}", file.display()).into());
-                }
-                last_at = at;
-                let row_symbol = match &row {
-                    TapeRow::Book(r) => &r.symbol,
-                    TapeRow::Trade(r) => &r.symbol,
-                    TapeRow::Ticker(r) => &r.symbol,
-                };
-                if row_symbol != &symbol {
-                    return Err(
-                        format!("unexpected symbol {row_symbol} in {}", file.display()).into(),
-                    );
-                }
-                let depth = builder.is_valid().then(|| *builder.depth());
-                for (_, trial) in &mut trials {
-                    if at > trial.start_ns + 480 * SECOND {
-                        continue;
+        let tape_result: Result<()> = (|| {
+            for file in files.into_values() {
+                symbol_sources.insert(file.display().to_string(), file_hash(&file)?);
+                let mut reader = TapeReader::open(&file)
+                    .map_err(|error| format!("{}: {error}", file.display()))?;
+                while let Some((at, row)) = reader
+                    .next_row()
+                    .map_err(|error| format!("{}: {error}", file.display()))?
+                {
+                    if at < last_at {
+                        return Err(format!("symbol tape regressed in {}", file.display()).into());
                     }
-                    while let Some(wake) = trial.next_wake().filter(|wake| *wake <= at) {
-                        trial.advance(wake, depth.as_ref());
+                    last_at = at;
+                    let row_symbol = match &row {
+                        TapeRow::Book(r) => &r.symbol,
+                        TapeRow::Trade(r) => &r.symbol,
+                        TapeRow::Ticker(r) => &r.symbol,
+                    };
+                    if row_symbol != &symbol {
+                        return Err(format!(
+                            "unexpected symbol {row_symbol} in {}",
+                            file.display()
+                        )
+                        .into());
                     }
-                }
-                match row {
-                    TapeRow::Book(book) if book.depth == 50 => {
-                        books += 1;
-                        let depth = builder.apply(&book).copied();
-                        if let Some(d) = depth.as_ref().filter(|d| d.bid_len > 0 && d.ask_len > 0) {
-                            let mid = (d.bids[0].px + d.asks[0].px) / 2.0;
-                            for result in &mut results[base..] {
-                                let sign =
-                                    if result.observed.request.side == engine_types::Side::Buy {
+                    let depth = builder.is_valid().then(|| *builder.depth());
+                    for (_, trial) in &mut trials {
+                        if at > trial.start_ns + 480 * SECOND {
+                            continue;
+                        }
+                        while let Some(wake) = trial.next_wake().filter(|wake| *wake <= at) {
+                            trial.advance(wake, depth.as_ref());
+                        }
+                    }
+                    match row {
+                        TapeRow::Book(book) if book.depth == 50 => {
+                            books += 1;
+                            let depth = builder.apply(&book).copied();
+                            if let Some(d) =
+                                depth.as_ref().filter(|d| d.bid_len > 0 && d.ask_len > 0)
+                            {
+                                let mid = (d.bids[0].px + d.asks[0].px) / 2.0;
+                                for result in &mut results[base..] {
+                                    let sign = if result.observed.request.side
+                                        == engine_types::Side::Buy
+                                    {
                                         1.0
                                     } else {
                                         -1.0
                                     };
-                                for (id, fill) in &result.observed.fills {
-                                    let marks = result
-                                        .actual_markouts_bp
-                                        .get_mut(id)
-                                        .expect("fill keys initialized");
-                                    for (index, seconds) in [1, 15, 60, 300].into_iter().enumerate()
-                                    {
-                                        let due = fill.at_ns + seconds * SECOND;
-                                        if at >= due
-                                            && at - due <= 2 * SECOND
-                                            && marks[index].is_none()
+                                    for (id, fill) in &result.observed.fills {
+                                        let marks = result
+                                            .actual_markouts_bp
+                                            .get_mut(id)
+                                            .expect("fill keys initialized");
+                                        for (index, seconds) in
+                                            [1, 15, 60, 300].into_iter().enumerate()
                                         {
-                                            marks[index] =
-                                                Some(sign * (mid - fill.price) / fill.price * 1e4);
+                                            let due = fill.at_ns + seconds * SECOND;
+                                            if at >= due
+                                                && at - due <= 2 * SECOND
+                                                && marks[index].is_none()
+                                            {
+                                                marks[index] = Some(
+                                                    sign * (mid - fill.price) / fill.price * 1e4,
+                                                );
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                        for (_, trial) in &mut trials {
-                            if at <= trial.start_ns + 480 * SECOND {
-                                trial.book(at, depth.as_ref());
+                            for (_, trial) in &mut trials {
+                                if at <= trial.start_ns + 480 * SECOND {
+                                    trial.book(at, depth.as_ref());
+                                }
                             }
                         }
-                    }
-                    TapeRow::Trade(trade) => {
-                        trades += 1;
-                        let depth = builder.is_valid().then(|| builder.depth());
-                        for (_, trial) in &mut trials {
-                            if at + 30 * SECOND >= trial.start_ns
-                                && at <= trial.start_ns + 480 * SECOND
-                            {
-                                trial.trade(
-                                    at,
-                                    trade.price,
-                                    trade.qty,
-                                    trade.buyer_aggressor,
-                                    depth,
-                                );
+                        TapeRow::Trade(trade) => {
+                            trades += 1;
+                            let depth = builder.is_valid().then(|| builder.depth());
+                            for (_, trial) in &mut trials {
+                                if at + 30 * SECOND >= trial.start_ns
+                                    && at <= trial.start_ns + 480 * SECOND
+                                {
+                                    trial.trade(
+                                        at,
+                                        trade.price,
+                                        trade.qty,
+                                        trade.buyer_aggressor,
+                                        depth,
+                                    );
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
-            symbol_sources.insert(file.display().to_string(), file_hash(&file)?);
-        }
+            Ok(())
+        })();
+        let tape_error = tape_result.err().map(|error| error.to_string());
         for (index, trial) in trials {
-            results[index].hypothetical.push(trial.outcome());
+            let mut outcome = trial.outcome();
+            if tape_error.is_some() {
+                outcome.incomplete = Some("symbol_tape_error".into());
+                outcome.total_shortfall_bp = None;
+                outcome.missed_opportunity_bp = None;
+                outcome.mark_ns = None;
+                for fill in &mut outcome.fills {
+                    fill.signed_markouts_bp = [None; 4];
+                }
+            }
+            results[index].hypothetical.push(outcome);
+        }
+        if let Some(error) = &tape_error {
+            for result in &mut results[base..] {
+                result.unavailable = Some(error.clone());
+                for marks in result.actual_markouts_bp.values_mut() {
+                    *marks = [None; 4];
+                }
+            }
         }
         for result in &results[base..] {
             if !result.hypothetical.is_empty()
@@ -325,7 +358,7 @@ pub fn run(path: &Path) -> Result<()> {
         source_files.extend(symbol_sources);
         symbols_report.insert(
             symbol,
-            json!({"book_rows":books,"trade_rows":trades,"last_tape_ns":last_at}),
+            json!({"book_rows":books,"trade_rows":trades,"last_tape_ns":last_at,"input_error":tape_error}),
         );
     }
     results.sort_by_key(|r| r.observed.decision_ns);
@@ -562,6 +595,7 @@ pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::io::Write;
 
     fn append(file: &mut fs::File, row: serde_json::Value) {
@@ -693,6 +727,7 @@ mod tests {
             );
         }
         let cursor = report["wal_cursor"].clone();
+        let healthy_tape = fs::read_to_string(directory.join("segment-000000.jsonl")).unwrap();
         fs::remove_dir_all(&config.tape_root).unwrap();
         run(&path).unwrap();
         let again: serde_json::Value =
@@ -702,5 +737,79 @@ mod tests {
         assert_eq!(again["orders"], report["orders"]);
         assert_eq!(again["cached_orders"], 1);
         assert_eq!(again["source_files_sha256"], report["source_files_sha256"]);
+
+        append(
+            &mut wal,
+            json!({"kind":"names","symbols":["XUSDT","YUSDT"],"strategies":["long"]}),
+        );
+        append(
+            &mut wal,
+            json!({"kind":"instrument_catalog_checkpoint","checkpoint":{"rules":[["YUSDT",{"tick_size":1.0,"qty_step":1.0,"min_qty":1.0,"min_notional":1.0}]]}}),
+        );
+        append(
+            &mut wal,
+            json!({"kind":"order_sent_v2","request":{"client_order_id":"bad-tape","strategy":0,"symbol":1,"side":"Buy","qty":2.0,"kind":"Market","stop":null,"reduce_only":false},"wire_ns":100,"arrival_mid":100.0}),
+        );
+        append(
+            &mut wal,
+            json!({"kind":"venue_timing","operation":"place","client_order_id":"bad-tape","socket_write_ns":100,"ack_ns":150,"core_handled_ns":200,"core_handled_wall_ns":at+100}),
+        );
+        wal.flush().unwrap();
+        let rate_path = config.fee_snapshot_path.as_ref().unwrap();
+        let mut rates: Value = serde_json::from_slice(&fs::read(rate_path).unwrap()).unwrap();
+        rates["rates"]["YUSDT"] = rates["rates"]["XUSDT"].clone();
+        atomic_json(rate_path, &rates).unwrap();
+        let bad_directory = directory.with_file_name("YUSDT");
+        fs::create_dir_all(&bad_directory).unwrap();
+        let bad_path = bad_directory.join("segment-000000.jsonl");
+        let repaired = healthy_tape.replace("XUSDT", "YUSDT");
+        let mut reversed: Vec<_> = repaired.lines().take(2).collect();
+        reversed.reverse();
+        fs::write(&bad_path, reversed.join("\n") + "\n").unwrap();
+        run(&path).expect("one corrupt symbol must not suppress the report");
+        let partial: Value =
+            serde_json::from_slice(&fs::read(config.output_dir.join("latest.json")).unwrap())
+                .unwrap();
+        assert_eq!(partial["cached_orders"], 1);
+        assert!(partial["symbols"]["YUSDT"]["input_error"]
+            .as_str()
+            .unwrap()
+            .contains("before the previous row"));
+        assert!(partial["source_files_sha256"]
+            .get(bad_path.display().to_string())
+            .is_some());
+        let bad = partial["orders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["observed"]["symbol"] == "YUSDT")
+            .unwrap();
+        assert_eq!(bad["hypothetical"].as_array().unwrap().len(), 42);
+        assert!(bad["hypothetical"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|o| o["total_shortfall_bp"].is_null() && o["incomplete"] == "symbol_tape_error"));
+        assert_eq!(
+            partial["metrics"]["paired_by_slice"],
+            report["metrics"]["paired_by_slice"]
+        );
+
+        fs::write(&bad_path, repaired).unwrap();
+        run(&path).unwrap();
+        let repaired: Value =
+            serde_json::from_slice(&fs::read(config.output_dir.join("latest.json")).unwrap())
+                .unwrap();
+        assert_eq!(repaired["cached_orders"], 1);
+        assert!(repaired["symbols"]["YUSDT"]["input_error"].is_null());
+        assert!(repaired["orders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|o| o["hypothetical"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["incomplete"].is_null())));
     }
 }

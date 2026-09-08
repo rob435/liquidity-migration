@@ -22,6 +22,8 @@ Compare execution costs for actual directional order intentions using recorded b
 | Writes | `/var/lib/liquidity-migration/execution-study/` only; no WAL, engine config, spool, or account mutation |
 | Reports | `latest.txt`, `latest.json`; per-order records under `orders/CONFIG_SHA256/CODE_COMMIT/UTC_DAY-ORDER_ID_SHA256.json` |
 | Restart / retention | `observed.json` resumes at a complete frame; partial active tails retry; `replay-cache.json` preserves complete comparisons after recorder files expire; retained projection/cache cover the rolling window, per-order reports persist |
+| Invalid symbol tape | File read, parse, symbol or time-order errors leave that symbol's uncached arms unscored; preserve the error and available source hashes, continue other symbols, and retry incomplete results |
+| Off-host retention | Host `backup.env` includes the study output directory in the existing checked engine-state backup |
 | Operator read | `scripts/ops.sh execution-study [--json]` |
 
 | Policy | Hypothetical behavior |

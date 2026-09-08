@@ -36,6 +36,12 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     actual-fill calibration and cache reuse after tape expiry. Source and
     deployment status are recorded in [the study contract](docs/execution-study.md)
     and [STATE](STATE.md); no directional policy or arming setting is changed.
+  - The first host run at 01:08:39 UTC finds an archived receive-time
+    regression: `tape line 8263: local_receive_ts_ns 1788698566254491806
+    is before the previous row's 1788698566261663423`. Keep that symbol's
+    comparisons unscored, record its file/error, and continue the report for
+    other symbols. The complete-command regression fails before this fix;
+    it also verifies healthy cached results survive and repaired input retries.
 
 - **2026-09-07 22:56 UTC — The `capture-disk` page returns, and the read-only
   diagnostic still cannot name the writer holding the disk. The recorders are
@@ -115,6 +121,12 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     Keep other state independent and preserve rsync replacement semantics.
     The complete backup regression fails on the original script and passes
     with the fix; active appends, unequal snapshots and repeat runs are tested.
+    At 01:04:04 UTC the first host run verifies all 198 remote files, then
+    fails with `OSError: [Errno 18] Invalid cross-device link`. systemd's
+    backup `StateDirectory` creates a distinct mount despite matching device
+    IDs. Let the script create `backup/` and retain systemd's `receipts/`
+    directory. An isolated root/systemd fixture reproduces the failure with
+    the original unit and passes with the corrected unit.
     No live WAL or remote backup is pruned. Deployed at 01:07:47 UTC in run
     [`34174591340`](https://github.com/rob435/liquidity-migration/actions/runs/34174591340)
     on `a7e96e8`; the reclaim runs inside the backup job, which is failing

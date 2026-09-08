@@ -54,12 +54,6 @@ def test_an_older_or_different_snapshot_is_not_replaced(tmp_path: Path) -> None:
 def test_a_stage_that_cannot_hold_a_link_leaves_the_backup_successful(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Incident `host-ecbac293ecc90d5e`: `os.link` returned `EXDEV` at 01:04:05
-    UTC on `/var/lib/liquidity-migration-engine/engine.wal.000002`, whose
-    `st_dev` matches the stage's, and the whole backup exited 1 — so the
-    off-box copy landed with no receipt written and no history retention run.
-    """
-
     source = tmp_path / "engine"
     stage = tmp_path / "stage"
     source.mkdir()

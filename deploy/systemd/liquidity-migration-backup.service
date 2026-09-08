@@ -28,7 +28,9 @@ Environment=BACKUP_STAMP_FILE=/var/lib/liquidity-migration/receipts/backup.last-
 Environment=BACKUP_STAGE_DIR=/var/lib/liquidity-migration/backup/stage
 Environment=RCLONE_CONFIG=/var/lib/liquidity-migration/backup/rclone.conf
 Environment=RCLONE_CONFIG_SEED=/etc/liquidity-migration/rclone.conf
-StateDirectory=liquidity-migration/backup liquidity-migration/receipts
+# backup_state.sh creates the backup directory on the source filesystem;
+# a StateDirectory bind mount would prevent hard links to sealed source WALs.
+StateDirectory=liquidity-migration/receipts
 NoNewPrivileges=true
 PrivateTmp=true
 MemoryMax=512M

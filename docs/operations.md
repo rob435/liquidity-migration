@@ -243,6 +243,7 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | Physical disk usage | Linking releases duplicate blocks without pruning the live WAL or cloud history; `du` on the stage alone still counts shared blocks |
 | Stage on its own mount | `link` needs one mount, not one matching `st_dev`: a stage the kernel refuses a link into keeps both copies, counts `unlinkable_roots=` in the run's last line, and leaves the backup successful |
 | Implementation | `scripts/runtime/backup_state.sh`, `scripts/runtime/link_sealed_backup_wals.py`; the existing backup lock covers staging, verification and linking |
+| Mount namespace | The script creates `backup/` on the same mount as source WALs; systemd manages only `receipts/` through `StateDirectory`, because a separate backup bind mount prevents hard links even when device IDs match |
 * **Security Invariant**: Backup scripts explicitly reject `*.env` files to prevent credentials from ever leaving the host.
 
 ---
