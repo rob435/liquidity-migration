@@ -60,7 +60,7 @@ cat "$study/matched_comparison.csv"
 cat "$study/comparison_identity.json"
 # The new checkout and result directory must not exist.
 git worktree add --detach /tmp/carry-frozen-46d93345 46d9334549c80c423ab73e322027719f3299f273
-CARGO_INCREMENTAL=0 rustup run 1.90.0 cargo build --manifest-path /tmp/carry-frozen-46d93345/engine/Cargo.toml -p engine-strategies --bin strategy_contract
+PATH="$(rustup which --toolchain 1.90.0 cargo | xargs dirname):$PATH" CARGO_INCREMENTAL=0 cargo build --manifest-path /tmp/carry-frozen-46d93345/engine/Cargo.toml -p engine-strategies --bin strategy_contract
 LIQUIDITY_MIGRATION_STRATEGY_CONTRACT_BIN=/tmp/carry-frozen-46d93345/engine/target/debug/strategy_contract .venv/bin/python "$study/compare_carry.py" /tmp/carry-frozen-46d93345 "$study/recomputed"
 .venv/bin/python "$study/summarize_comparison.py" "$study/recomputed"
 ```

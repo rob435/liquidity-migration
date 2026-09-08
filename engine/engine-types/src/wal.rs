@@ -216,9 +216,7 @@ pub enum WalRecord {
         durable_p99_ns: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         durable_p999_ns: Option<u64>,
-        /// What the order path actually waited for the disk. The barrier runs
-        /// beside the send, so this is the residue: how often, and by how
-        /// much, the disk outlasted the flight to the venue.
+        /// Time waiting for disk durability before venue dispatch.
         #[serde(default)]
         barrier_wait_p50_ns: u64,
         #[serde(default)]

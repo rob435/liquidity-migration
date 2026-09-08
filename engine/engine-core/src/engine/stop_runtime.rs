@@ -546,7 +546,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .positions
                 .iter()
                 .find(|p| p.symbol == row.symbol && p.side == side);
-            let Some(cap) = self.risk.stop_distance_cap(venue.and_then(|p| p.leverage)) else {
+            let Some(cap) = self.symbol_stop_distance_cap(row.symbol, None) else {
                 continue;
             };
             let Some(cost) = row.entry_value else {

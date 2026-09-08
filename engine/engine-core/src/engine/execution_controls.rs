@@ -4,21 +4,29 @@ use engine_types::orders::IntentPrices;
 use engine_types::StopSpec;
 
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
-    pub(super) fn cap_entry_stop_distance(&self, intent: &mut Intent) -> Result<(), String> {
-        if intent.reduce_only {
-            return Ok(());
-        }
+    pub(super) fn symbol_stop_distance_cap(
+        &self,
+        symbol: SymbolId,
+        requested_leverage: Option<f64>,
+    ) -> Option<f64> {
         let leverage = self
             .books
             .account
             .positions
             .iter()
-            .filter(|position| position.symbol == intent.symbol)
+            .filter(|position| position.symbol == symbol)
             .filter_map(|position| position.leverage)
-            .chain(intent.leverage)
+            .chain(requested_leverage)
             .filter(|value| value.is_finite() && *value > 0.0)
             .reduce(f64::max);
-        let Some(cap) = self.risk.stop_distance_cap(leverage) else {
+        self.risk.stop_distance_cap(leverage)
+    }
+
+    pub(super) fn cap_entry_stop_distance(&self, intent: &mut Intent) -> Result<(), String> {
+        if intent.reduce_only {
+            return Ok(());
+        }
+        let Some(cap) = self.symbol_stop_distance_cap(intent.symbol, intent.leverage) else {
             return Ok(());
         };
         let Some(stop) = intent.stop_price().map_err(|e| e.to_string())? else {

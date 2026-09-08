@@ -81,9 +81,8 @@ pub struct Facts<'a> {
     pub venue_task: Quantiles,
     pub core_resume: Quantiles,
     pub end_to_end: Quantiles,
-    /// What the order path actually waited for the disk (the barrier runs
-    /// beside the send), and how long commands were held to stay inside the
-    /// venue's request quota. Both are pacing stories, not venue latency.
+    /// Disk-barrier wait before dispatch and hold time for the venue quota.
+    /// Neither interval measures venue latency.
     pub barrier_wait: Quantiles,
     pub quota_hold: Quantiles,
     /// Since boot: amends whose working price the venue stated, against

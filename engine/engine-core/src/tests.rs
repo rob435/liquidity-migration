@@ -231,9 +231,8 @@ pub(crate) struct MockWal {
     barrier_seq: u64,
     fail_on: Option<String>,
     pub(crate) fail_barrier_after: Option<&'static str>,
-    /// A tape the barrier's own thread can also write to. The ordinary tape
-    /// is an `Rc` and cannot leave this thread, and the whole point of a
-    /// barrier that runs beside the send is that something else finishes it.
+    /// A tape the barrier's worker thread can write to; the ordinary `Rc`
+    /// tape cannot cross threads.
     /// Set by `defer_barriers`; `None` keeps barriers synchronous.
     crossing_tape: Option<Arc<Mutex<Vec<&'static str>>>>,
     /// How long the deferred barrier takes. Long enough that a caller which

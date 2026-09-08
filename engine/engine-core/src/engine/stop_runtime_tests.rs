@@ -39,6 +39,19 @@ async fn held_lot_stops_tighten_to_leverage_and_liquidation_and_survive_replay()
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn an_opposing_physical_position_still_bounds_owned_stop_distance_by_its_leverage() {
+    let mut engine = crate::tests::shared_sleeves::exact_single_sleeve_engine("1", None).await;
+    engine.books.account.positions[0].side = Side::Sell;
+    engine.books.account.positions[0].stop_px = 110.0;
+    engine.books.account.positions[0].leverage = Some(10.0);
+    engine.cap_owned_stop_distances().unwrap();
+    assert_eq!(
+        engine.books.attribution.snapshot().positions[0].stop_px,
+        Some(Exact::parse_decimal("95").unwrap())
+    );
+}
+
 // Frozen equivalence reference: keep its decisions and operation order unchanged.
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     async fn reference_enforce_position_stop_intent(&mut self) -> Result<(), EngineError> {
