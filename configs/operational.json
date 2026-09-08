@@ -9,9 +9,10 @@
     "expand_dead_band_fraction": 0.05
   },
   "account_risk": {
+    "max_symbol_notional_usdt": 50.0,
     "max_component_gross_notional_usdt": 500.0,
     "max_account_gross_notional_usdt": 500.0,
-    "max_initial_margin_usdt": 100.0,
+    "max_initial_margin_usdt": 70.0,
     "max_leverage": 5.0,
     "max_rolling_loss_fraction": 0.1,
     "quantity_tolerance": 1e-12
@@ -25,7 +26,7 @@
   "carry": {
     "notional_multiplier": 3.0,
     "entry_leverage": 5.0,
-    "declared_stop_loss_fraction": 0.35,
+    "declared_stop_loss_fraction": 0.1,
     "max_new_entries_per_cycle": 10
   },
   "hedge": {

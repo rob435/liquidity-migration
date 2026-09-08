@@ -241,6 +241,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             };
             candidates.push(stop);
         }
+        if candidates.is_empty() {
+            return Ok(NativeStopPlan::Satisfied);
+        }
         let trigger = candidates
             .into_iter()
             .reduce(|a, b| match side {
@@ -526,10 +529,85 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         Ok(())
     }
 
+    fn cap_owned_stop_distances(&mut self) -> Result<(), EngineError> {
+        let mut updates = Vec::new();
+        for row in self.books.attribution.snapshot().positions {
+            if row.signed_qty.is_zero() {
+                continue;
+            }
+            let side = if row.signed_qty.is_positive() {
+                Side::Buy
+            } else {
+                Side::Sell
+            };
+            let venue = self
+                .books
+                .account
+                .positions
+                .iter()
+                .find(|p| p.symbol == row.symbol && p.side == side);
+            let Some(cap) = self.risk.stop_distance_cap(venue.and_then(|p| p.leverage)) else {
+                continue;
+            };
+            let Some(cost) = row.entry_value else {
+                continue;
+            };
+            let entry = cost
+                .checked_div(&row.signed_qty.abs())
+                .map_err(|e| EngineError::State(e.to_string()))?;
+            let fraction = engine_types::order_terms::strategy_decimal(cap)
+                .map_err(|e| EngineError::State(e.to_string()))?;
+            let mut trigger = &entry
+                * if side == Side::Buy {
+                    Exact::one() - &fraction
+                } else {
+                    Exact::one() + &fraction
+                };
+            if let Some(amounts) = venue.and_then(|p| p.exact_amounts.as_deref()) {
+                if let Some(liquidation) = &amounts.liquidation_price {
+                    let mark = amounts.mark_price.as_ref().map_or(&entry, |p| &p.value);
+                    let boundary = (mark + &liquidation.value)
+                        .checked_div(&Exact::from_u64(2))
+                        .map_err(|e| EngineError::State(e.to_string()))?;
+                    trigger = if side == Side::Buy {
+                        trigger.max(boundary)
+                    } else {
+                        trigger.min(boundary)
+                    };
+                }
+            }
+            if let Some(old) = row.stop_px {
+                if side == Side::Buy && old >= trigger || side == Side::Sell && old <= trigger {
+                    continue;
+                }
+            }
+            updates.push(WalRecord::SleeveStopSet {
+                strategy: row.strategy,
+                symbol: row.symbol,
+                side,
+                trigger_price: trigger,
+                wall_ts_ms: clock::wall_ms(),
+            });
+        }
+        for update in updates {
+            let symbol = match &update {
+                WalRecord::SleeveStopSet { symbol, .. } => *symbol,
+                _ => unreachable!(),
+            };
+            self.append_portfolio_control(update)?;
+            self.observe_virtual_stops(&MarketEvent::Quote {
+                symbol,
+                quote: *self.books.market.quote(symbol),
+            })?;
+        }
+        Ok(())
+    }
+
     fn prepare_position_stops(&mut self) -> Result<bool, EngineError> {
         if self.dispatches.write.is_some() {
             return Ok(false);
         }
+        self.cap_owned_stop_distances()?;
         let symbols: std::collections::BTreeSet<_> = self
             .books
             .account

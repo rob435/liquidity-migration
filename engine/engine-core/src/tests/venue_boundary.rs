@@ -13,6 +13,87 @@ use http_support::{Recorded, TestServer};
 const CREATE: &str = "/v5/order/create";
 const CANCEL: &str = "/v5/order/cancel";
 
+#[tokio::test]
+async fn queued_repricings_reach_bybit_before_any_ack_and_keep_their_results() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        socket.next().await.unwrap().unwrap();
+        socket
+            .send(Message::text(r#"{"op":"auth","retCode":0}"#))
+            .await
+            .unwrap();
+        let mut requests = Vec::new();
+        for _ in 0..10 {
+            let message = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            let request: Value = serde_json::from_str(&message).unwrap();
+            assert_eq!(request["op"], "order.amend");
+            requests.push(request);
+        }
+        for request in requests.into_iter().rev() {
+            let rejected = request["args"][0]["orderLinkId"] == "reprice-4";
+            socket
+                .send(Message::text(
+                    json!({ "reqId": request["reqId"], "op": "order.amend",
+                "retCode": if rejected { 110001 } else { 0 }, "retMsg": "fixture",
+                "data": {}, "retExtInfo": {} })
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+        }
+        std::future::pending::<()>().await;
+    });
+    let wire = BybitGateway::for_test_with_trade_transport(
+        "http://127.0.0.1:1",
+        &format!("ws://{address}"),
+        VenueRealm::Mainnet,
+        VenueRealm::Mainnet.credentials_for_test("fixture", "fixture"),
+        vec!["BTCUSDT".into()],
+    );
+    let (mut client, mut completions) =
+        crate::venue_runtime::VenueClient::spawn(engine_venue::Venue::Bybit(wire));
+    let ids: Vec<_> = (0..10)
+        .map(|index| {
+            client
+                .dispatch_amend(
+                    SymbolId(0),
+                    format!("reprice-{index}"),
+                    AmendSpec {
+                        px: Some(100.0 + index as f64),
+                        qty: None,
+                        exact_terms: None,
+                    },
+                )
+                .unwrap()
+        })
+        .collect();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        for (index, expected) in ids.into_iter().enumerate() {
+            let crate::venue_runtime::MutationCompletion::Amend {
+                command_id, reply, ..
+            } = completions.recv().await.unwrap()
+            else {
+                panic!("wrong completion");
+            };
+            assert_eq!(command_id, expected);
+            if index == 4 {
+                assert!(matches!(
+                    reply,
+                    Err(VenueError::Rejected { code: 110001, .. })
+                ));
+            } else {
+                reply.unwrap();
+            }
+        }
+    })
+    .await
+    .expect("ten queued reprices must not wait for ten serial round trips");
+    server.abort();
+}
+
 // Account boot is controlled; create/cancel requests and private frames use Bybit's real adapters.
 struct BoundaryVenue {
     account: MockVenue,

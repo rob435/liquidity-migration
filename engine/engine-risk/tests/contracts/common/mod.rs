@@ -45,6 +45,7 @@ pub fn demo_config() -> KernelConfig {
             // their orders before the control under test ran.
             // tests/account_caps.rs sets each cap to the binding one instead.
             max_component_gross_notional_usdt: 500_000.0,
+            max_symbol_notional_usdt: 500_000.0,
             max_initial_margin_usdt: 250_000.0,
         },
         leverage: 2.0,

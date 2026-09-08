@@ -10,7 +10,6 @@ from pathlib import Path
 
 from liquidity_migration.research.backtest.long_live_physics import (
     DEFAULT_SLIPPAGE_BPS,
-    DEFAULT_TAKER_FEE_BPS,
     EvidenceProvenance,
     LivePhysicsAssumptions,
     run_long_live_physics_research,
@@ -45,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
             "dead bands; use a verified live value or name the normalized scale"
         ),
     )
-    parser.add_argument("--taker-fee-bps", type=float, default=DEFAULT_TAKER_FEE_BPS)
+    parser.add_argument("--taker-fee-bps", type=float, default=None)
     parser.add_argument("--slippage-bps", type=float, default=DEFAULT_SLIPPAGE_BPS)
     parser.add_argument(
         "--venue-min-notional-usdt",
@@ -74,13 +73,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.taker_fee_bps is None:
+        from liquidity_migration.core.fee_snapshot import default_taker_fee_bps
+
+        args.taker_fee_bps = default_taker_fee_bps()
     assumptions = LivePhysicsAssumptions(
         initial_equity_usdt=args.initial_equity_usdt,
         taker_fee_bps=args.taker_fee_bps,
         slippage_bps=args.slippage_bps,
         venue_min_notional_usdt=args.venue_min_notional_usdt,
         evidence=EvidenceProvenance(
-            lane="lane_1_exploratory",
             shaped_data=args.shaped_data,
             graded_data=args.graded_data,
         ),

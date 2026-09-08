@@ -71,6 +71,7 @@ class AccountRiskSettings:
     max_component_gross_notional_usdt: float
     max_account_gross_notional_usdt: float
     max_initial_margin_usdt: float
+    max_symbol_notional_usdt: float
     max_leverage: float
     #: Share of the capital reference the engine's own closed trades may lose,
     #: net of venue fees, inside any rolling 24 hours before the engine refuses
@@ -157,6 +158,7 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
         "max_component_gross_notional_usdt",
         "max_account_gross_notional_usdt",
         "max_initial_margin_usdt",
+        "max_symbol_notional_usdt",
         "max_leverage",
         "max_rolling_loss_fraction",
         "quantity_tolerance",
@@ -180,6 +182,7 @@ def _parse_account_risk(value: object) -> AccountRiskSettings:
             row["max_initial_margin_usdt"],
             label="account_risk.max_initial_margin_usdt",
         ),
+        max_symbol_notional_usdt=_positive_float(row["max_symbol_notional_usdt"], label="account_risk.max_symbol_notional_usdt"),
         max_leverage=_positive_float(row["max_leverage"], label="account_risk.max_leverage"),
         max_rolling_loss_fraction=rolling_loss,
         quantity_tolerance=_positive_float(row["quantity_tolerance"], label="account_risk.quantity_tolerance"),
@@ -272,8 +275,10 @@ def _validate_profile_envelopes(profile: OperationalProfile) -> None:
         raise ValueError("strategy leverage exceeds account_risk.max_leverage: " + ", ".join(excessive))
     if risk.max_account_gross_notional_usdt > profile.capital_reference_usdt * risk.max_leverage + tolerance:
         raise ValueError("account_risk account gross cap exceeds capital_reference_usdt * max_leverage")
-    if risk.max_initial_margin_usdt > profile.capital_reference_usdt + tolerance:
-        raise ValueError("account_risk initial-margin cap exceeds capital_reference_usdt")
+    if risk.max_initial_margin_usdt >= profile.capital_reference_usdt:
+        raise ValueError("account_risk initial-margin cap must be below capital_reference_usdt")
+    if profile.carry.declared_stop_loss_fraction * profile.carry.entry_leverage >= 1.0:
+        raise ValueError("carry stop distance must be below 1 / entry_leverage")
 
 
 def _parse_capital_reference(value: object) -> CapitalReferenceSettings:

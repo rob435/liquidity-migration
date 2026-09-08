@@ -265,6 +265,8 @@ fn reduction_direction_does_not_multiply_tiny_quantities_to_zero() {
         SEC,
     );
     account.positions[0].exact_amounts = Some(Box::new(engine_types::risk::PositionAmounts {
+        liquidation_price: None,
+        mark_price: None,
         quantity: engine_types::numeric::ExactNumber::venue_decimal("1e-200").unwrap(),
         entry_price: engine_types::numeric::ExactNumber::venue_decimal("10").unwrap(),
     }));

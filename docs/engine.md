@@ -244,6 +244,26 @@ Bounded acquisition envelopes prevent runaway memory during cold starts:
 | `[risk]` | Gross capital reference, leverage, order size bounds and rolling-loss limit. |
 | `[[strategy]]` | Sleeve configurations (`CARRY`, `LONG`, `EXODUS`, `MAKER`) resolved by stable key into durable ID order. |
 
+#### Execution and account limits
+
+| Control | Runtime contract |
+|---|---|
+| Entry work | LONG in both realms rests PostOnly for 30 s. Crossing cancels first; an independent terminal REST lookup must agree exactly with recovered fills before one fresh IOC remainder is admitted. Restart cancels recovered entries, including sleeve growth that reduces the physical position |
+| Mark collar | `engine.execution_limits.mark_collar_bps = 100`; market requests become bounded IOC limits before risk admission. Limits and amendments outside the mark band are refused; mark age is bounded by `max_quote_age_ms`. Durable exits retry unfilled remainders |
+| Venue-native stops | Bybit Full-position stops remain exchange-hosted market orders. Bybit does not permit this custom collar on their trigger execution; it therefore does not guarantee a maximum liquidation fill price |
+| Rejections | Five distinct engine order IDs rejected within 10 s latch `may_open=false` durably and cancel remaining openings. Repeated reports for one ID do not multiply the count; owned reductions remain eligible |
+| Symbol cap | Gross owned sleeve exposure, manual residual and pending openings share a cap of 0.50 × reference per symbol; opposing sleeves count separately |
+| Margin cap | Initial-margin allowance is 0.70 × reference. Account IM ratio at or above this fraction or MM ratio at or above 1 refuses growth |
+| Stop distance | Opening and held sleeve stops use at most `min(disaster_stop_fraction, 0.5 / max(configured_leverage, observed_leverage))`; default 10% at 5×. Held same-side stops tighten further toward the midpoint of known `markPrice` and `liqPrice`. Tighter existing stops remain |
+| Account metrics | Optional exact `accountIMRate`, `accountMMRate`, `markPrice`, `liqPrice` survive serialization and appear under heartbeat `account_metrics`. Blank/zero liquidation prices remain unknown |
+| Routine drift | Account reads every 2.5 s compare physical exposure after outstanding mutation generations settle. A mismatch requests execution history; a confirmed unexplained residual latches openings |
+| Shared authority | Mainnet uses shared leverage authority. Proven own-lot reductions may increase the physical net behind a hand position; the opening latch does not block them. Existing hand-side stops remain; the existing virtual sleeve stop owns an opposing logical lot |
+| Public book gap | Invalidate and resubscribe only the affected L1/L50 topic; healthy symbols retain quotes |
+| Trade WebSocket | Ping every 20 s; missing pong for 10 s causes proactive reconnect with backoff. Sent requests with uncertain outcomes are resolved independently, never blindly resent |
+| Reprices | Up to ten adjacent distinct amendments enter the Bybit transport before replies; IDs route out-of-order results. Cancels and other intervening commands retain ordering |
+| CARRY clock | The midnight decision becomes eligible at receipt time 00:20 UTC with complete midnight data; the 60 s worker cadence and source readiness may delay publication. Historical hourly replay does not prove fills at 00:20 |
+| Cancel on disconnect | No account DCP configuration is present in the authenticated September 8 query. Bybit institutional enablement and private-stream `dcp` subscription are prerequisites; a local reconnect is not exchange DCP |
+
 #### Config Rendering Recipe
 Configs are generated from registered rules and profiles:
 ```bash
@@ -305,7 +325,7 @@ The risk kernel (`engine-risk`) gates every order before it reaches the venue ad
 | Legacy removal condition | Both realms must boot and rotate canonical state, and no retained WAL replay/rollback contract may depend on the writers. Normalized legacy contributions must remain distinguishable from native exact accounting. Archive reactivation, legacy inventory, book-simulator binary64 fills and protective repair still require compatibility. The accepted outcome of zero `exact_terms: None` occurrences in non-test engine-core and deletion of legacy modules remains unmet; deletion is stopped while these dependencies remain. |
 | Emergency exits | Durable phases resolve outstanding orders, close physical net exposure in legal exact chunks, then settle opposing virtual offsets. Rejection/cancellation retains the obligation with a new attempt; ambiguous sends keep their existing identity until resolved. |
 | Client order identity | Normal, general-exit and emergency orders use `eng-<whole-second-ms>-<counter>`. A durable logical boot epoch advances beyond prior epochs even if wall time moves backward; the 18-bit counter remains reversible through Lighter’s native client index. |
-| Cost basis / Loss | Exact open trade lots, entry cash and proportional fees survive rotation. Closed canonical net amounts feed the exact rolling-loss sum. Missing cost basis or an unvalued settlement/fee asset produces an unpriced row, never a fabricated zero or USDT value. Funding is outside this closed-fill loss calculation. |
+| Cost basis / Loss | Exact open trade lots, entry cash and proportional fees survive rotation. Closed canonical net amounts plus `min(current account open PnL, 0)` feed the exact rolling-loss sum. Missing cost basis or an unvalued settlement/fee asset produces an unpriced row, never a fabricated zero or USDT value. Funding is outside this closed-fill loss calculation. |
 | Prospective portfolio risk | A sleeve with unknown historical cost uses the latest accepted market price for gross exposure and stop distance; the accounting basis remains unknown. Known cost retains conservative entry/current-price valuation. Missing both market price and basis, missing/crossed stops, and breached gross limits refuse openings. Shared and opposing sleeves count separately. |
 
 | State owner | Key / purpose |
@@ -320,7 +340,7 @@ The risk kernel (`engine-risk`) gates every order before it reaches the venue ad
 
 #### Rolling-Loss Circuit Breaker Invariant
 
-* **Must** compare exact net closed PnL with `max_rolling_loss_fraction × capital_reference` over the last 24 hours.
+* **Must** compare exact net closed PnL plus current account open losses with `max_rolling_loss_fraction × capital_reference` over the last 24 hours.
 * **Must** restore exact open trade basis and loss rows across restart; process restart cannot clear a loss trip or unknown valuation.
 * **Must** release valid expiring loss/unpriced rows as their venue timestamps leave the 24-hour window; malformed canonical money remains invalid rather than expiring as a valid loss row.
 * **Must Never** treat absent fees, foreign fee assets without valuation, or missing entry basis as known zero net PnL.

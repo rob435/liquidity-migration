@@ -58,6 +58,8 @@ async fn boot(
             qty: 0.5,
             entry_px: 100.0,
             exact_amounts: Some(Box::new(engine_types::risk::PositionAmounts {
+                liquidation_price: None,
+                mark_price: None,
                 quantity: ExactNumber::venue_decimal("0.5").unwrap(),
                 entry_price: ExactNumber::venue_decimal("100").unwrap(),
             })),

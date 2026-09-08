@@ -114,9 +114,8 @@ pub fn render_native_config(
         resize_floor_usdt: 1.0,
         resize_floor_fraction: 0.05,
         engine_entry_cutoff_ms: 900_000,
-        rest_entries: sources.realm == "demo",
-        entry_work_policy: (sources.realm == "demo")
-            .then(engine_types::WorkPolicy::passive_entry_30s),
+        rest_entries: true,
+        entry_work_policy: Some(engine_types::WorkPolicy::passive_entry_30s()),
         hold_decision_price: false,
         give_up_instead_of_crossing: false,
     };
@@ -628,6 +627,17 @@ fn validate_operational(value: &Value) -> Result<(), String> {
     if reference <= 0.0 {
         return Err("operational capital reference is invalid".to_owned());
     }
+    if f64_path(value, &["account_risk", "max_initial_margin_usdt"])? >= reference {
+        return Err(
+            "operational initial-margin cap must be below capital_reference_usdt".to_owned(),
+        );
+    }
+    if f64_path(value, &["carry", "declared_stop_loss_fraction"])?
+        * f64_path(value, &["carry", "entry_leverage"])?
+        >= 1.0
+    {
+        return Err("carry stop distance must be below 1 / entry_leverage".to_owned());
+    }
     Ok(())
 }
 
@@ -800,10 +810,10 @@ mod tests {
             assert_eq!(rendered.exodus.rule_sha256, rendered.exodus_rule_sha256);
             assert_eq!(rendered.carry.exodus_sleeve_name, EXODUS_SLEEVE_NAME);
             assert_eq!(rendered.exodus.carry_sleeve_name, CARRY_SLEEVE_NAME);
-            assert_eq!(rendered.long.rest_entries, realm == "demo");
+            assert!(rendered.long.rest_entries);
             assert_eq!(
                 rendered.long.entry_work_policy,
-                (realm == "demo").then(engine_types::WorkPolicy::passive_entry_30s)
+                Some(engine_types::WorkPolicy::passive_entry_30s())
             );
             let mut market_long = rendered.long.clone();
             market_long.rest_entries = false;

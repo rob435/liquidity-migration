@@ -1,7 +1,6 @@
 {
   "config_id": "lane2_carry_hold_v1",
   "registered": "2026-07-26",
-  "lane": 2,
   "surface": "research-only",
   "authorizes": "nothing; this config has no runtime, no venue access, and no REAL_MONEY implication",
   "claim": "A long-only Bybit book that holds top-100 names while their settled funding is deeply negative (enter < -10 bp/8h, exit when it recovers above -3 bp/8h; per-name cap 0.10, total gross cap 1.0) earns the crowded-short funding premium plus squeeze pressure, net of settlement-exact funding and measured-turnover taker costs. Measured attribution over 2021-2026 is +13.06 units of capital from funding against -3.86 from price: the return IS collected funding, not a price anomaly. On the benchmark window (2023-03-13..2026-07-16) it earns Sharpe 2.76 raw / 2.98 vol-targeted versus the deployed CONTINUOUS sl35 render's 1.84, with t 4.70 on 1,059 days.",
@@ -35,16 +34,26 @@
     "measured_fee_side_bp": 7.78,
     "charging": "measured one-way turnover x fee per side, per day (mean one-way turnover 0.35 units/day, i.e. ~2.7 bp/day), NOT a flat round trip per period",
     "funding": "settlement_exact",
-    "not_modelled": ["slippage beyond the taker fee", "market impact", "partial fills", "borrow", "margin cost", "venue outage"],
+    "not_modelled": [
+      "slippage beyond the taker fee",
+      "market impact",
+      "partial fills",
+      "borrow",
+      "margin cost",
+      "venue outage"
+    ],
     "provenance": "7.78 bp/side measured 2026-07-25 from 85 forward demo fills (all taker); see liquidity_migration.research.panels.cross_section.MEASURED_ROUND_TRIP_BP"
   },
   "scoring_recipe": {
     "metric": "mean net bp per day, and annualised Sharpe on raw and vol-targeted daily series",
-    "secondary": ["compounded total return", "compounded max drawdown", "worst single day", "mean one-way turnover"],
-    "comparator": "the deployed CONTINUOUS sl35 render (Sharpe 1.84, +15.85% over 2023-03-13..2026-07-16) and zero",
+    "secondary": [
+      "compounded total return",
+      "compounded max drawdown",
+      "worst single day",
+      "mean one-way turnover"
+    ],
+    "comparator": "Historical paired daily differences against predecessor configs on identical data and costs; all selection and coverage limits reported.",
     "grid": "none; single committed configuration",
-    "cadence": "one row per completed UTC day after the registration commit",
-    "eligibility": "only days strictly after the registration commit date count as forward evidence",
     "reproduce_with": "liquidity_migration.research.backtest.financed_longs.score_carry_hold(panel, CarryHoldConfig.from_json(this_file))"
   },
   "measured_at_registration": {
@@ -58,7 +67,14 @@
     "max_drawdown_vt_pct": 17.3,
     "worst_day_vt_pct": -9.45,
     "mean_oneway_turnover": 0.35,
-    "era_net_bp_per_day": {"2021": 25.4, "2022": 19.1, "2023": 54.3, "2024": 32.9, "2025": 77.6, "2026": 71.5},
+    "era_net_bp_per_day": {
+      "2021": 25.4,
+      "2022": 19.1,
+      "2023": 54.3,
+      "2024": 32.9,
+      "2025": 77.6,
+      "2026": 71.5
+    },
     "benchmark_window_2023_03_13_to_2026_07_16": {
       "basis_note": "PRIMARY basis is full-calendar: flat days (book in cash) count as zero in the daily series, exactly as the benchmark's own Sharpe counts ITS flat days (CONTINUOUS is in-market 38% of days). Corrected 2026-07-26 after registration; the active-day figures first quoted are retained below, labelled.",
       "full_calendar": {
@@ -77,7 +93,11 @@
         "days_active_of_grid": "1059/1221",
         "note": "per-deployed-capital view; NOT comparable to the benchmark Sharpe"
       },
-      "benchmark_continuous_sl35": {"sharpe": 1.84, "total_return_pct": 15.85, "max_dd_pct": -2.85},
+      "benchmark_continuous_sl35": {
+        "sharpe": 1.84,
+        "total_return_pct": 15.85,
+        "max_dd_pct": -2.85
+      },
       "verdict": "beats the benchmark on Sharpe AND return on both raw and vol-targeted full-calendar bases"
     },
     "validation": {

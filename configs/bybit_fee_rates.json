@@ -1,0 +1,81 @@
+{
+  "rates": {
+    "ACEUSDT": {
+      "maker": 0.00036,
+      "observed_ns": 1788829713260644810,
+      "taker": 0.001
+    },
+    "ARBUSDT": {
+      "maker": 0.00036,
+      "observed_ns": 1788829713530768490,
+      "taker": 0.001
+    },
+    "BNBUSDT": {
+      "maker": 0.00036,
+      "observed_ns": 1788858483985944969,
+      "taker": 0.001
+    },
+    "CAPUSDT": {
+      "maker": 0.0004,
+      "observed_ns": 1788829713801402405,
+      "taker": 0.0011
+    },
+    "HEMIUSDT": {
+      "maker": 0.0004,
+      "observed_ns": 1788829714071053230,
+      "taker": 0.0011
+    },
+    "INJUSDT": {
+      "maker": 0.00036,
+      "observed_ns": 1788848258671421935,
+      "taker": 0.001
+    },
+    "JUPUSDT": {
+      "maker": 0.00036,
+      "observed_ns": 1788829714336017260,
+      "taker": 0.001
+    },
+    "LAUSDT": {
+      "maker": 0.00036,
+      "observed_ns": 1788829714601367423,
+      "taker": 0.001
+    },
+    "LINKUSDT": {
+      "maker": 0.00036,
+      "observed_ns": 1788829714866298843,
+      "taker": 0.001
+    },
+    "LITUSDT": {
+      "maker": 0.00036,
+      "observed_ns": 1788829715137043909,
+      "taker": 0.001
+    },
+    "NEARUSDT": {
+      "maker": 0.00036,
+      "observed_ns": 1788829715403250051,
+      "taker": 0.001
+    },
+    "TAOUSDT": {
+      "maker": 0.00036,
+      "observed_ns": 1788829715674645093,
+      "taker": 0.001
+    },
+    "WLDUSDT": {
+      "maker": 0.00036,
+      "observed_ns": 1788829715941161588,
+      "taker": 0.001
+    },
+    "XCNUSDT": {
+      "maker": 0.00036,
+      "observed_ns": 1788829716206753523,
+      "taker": 0.001
+    },
+    "ZECUSDT": {
+      "maker": 0.00036,
+      "observed_ns": 1788829716471945824,
+      "taker": 0.001
+    }
+  },
+  "realm": "mainnet",
+  "unavailable": {}
+}

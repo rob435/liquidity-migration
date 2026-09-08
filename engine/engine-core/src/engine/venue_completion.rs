@@ -620,6 +620,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 })?;
             }
             Err(VenueError::Rejected { code, message }) => {
+                self.note_order_rejection(&client_order_id)?;
                 self.resolve_amend(
                     &client_order_id,
                     &amended_intent,
@@ -943,6 +944,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     "{client_order_id} not amended: order is terminal or names a different symbol"
                 ),
             })?;
+            return Ok(false);
+        }
+        if let Err(reason) = self.collar_amend(symbol, &spec) {
+            self.wal.append(&WalRecord::Note {
+                source: "risk".into(),
+                text: format!("{client_order_id} not amended: {reason}"),
+            })?;
+            self.enqueue_halt_cancel(symbol, client_order_id.to_owned());
             return Ok(false);
         }
         if existing.price_is_ambiguous() {
@@ -1373,6 +1382,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let offset = journaled.offset;
         let callbacks = journaled.callbacks.clone();
         let update = self.apply_journaled_update(journaled)?;
+        if let OrderUpdate::Reject {
+            client_order_id, ..
+        } = &update
+        {
+            self.note_order_rejection(client_order_id)?;
+        }
         self.observe_order_dispatch(&update)?;
         if stream_reset {
             self.refresh_private_stream_after_gap().await?;

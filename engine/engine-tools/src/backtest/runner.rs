@@ -45,8 +45,8 @@ pub struct BacktestOptions {
     pub equity_path: Option<PathBuf>,
     pub report_path: Option<PathBuf>,
     pub initial_capital_usdt: f64,
-    pub taker_fee_rate: f64,
-    pub maker_fee_rate: f64,
+    pub taker_fee_rate: Option<f64>,
+    pub maker_fee_rate: Option<f64>,
     pub order_rtt_ms: u64,
     pub private_latency_ms: u64,
     pub maintenance_margin_rate: f64,
@@ -70,11 +70,9 @@ impl Default for BacktestOptions {
             equity_path: None,
             report_path: None,
             initial_capital_usdt: 10_000.0,
-            // Bybit VIP0 linear perpetuals.
-            taker_fee_rate: 0.00055,
-            maker_fee_rate: 0.0002,
-            // `engine bench` doc: the venue round trip from the host is about
-            // 175 ms and no rebuild changes that.
+            taker_fee_rate: None,
+            maker_fee_rate: None,
+            // Explicit simulation latency; live RTT is measured per transport.
             order_rtt_ms: 175,
             private_latency_ms: 60,
             // Bybit's lowest linear maintenance margin tier.
@@ -112,6 +110,7 @@ pub struct Reconciliation {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct BacktestReport {
+    pub fees: super::fees::Fees,
     pub source: Option<HistoryHeader>,
     pub execution: ExecutionModel,
     pub execution_limitations: Vec<String>,
@@ -397,12 +396,18 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
             ));
         }
     }
+    let fees = super::fees::resolve(
+        opts.taker_fee_rate,
+        opts.maker_fee_rate,
+        &super::fees::default_path(),
+    )
+    .map_err(EngineError::Boot)?;
     let scheduler = Scheduler::default();
     let venue = Arc::new(Mutex::new(SimulatedVenue::new(
         VenueParams {
             initial_cash_usdt: opts.initial_capital_usdt,
-            taker_fee_rate: opts.taker_fee_rate,
-            maker_fee_rate: opts.maker_fee_rate,
+            taker_fee_rate: fees.taker,
+            maker_fee_rate: fees.maker,
             order_rtt_ns: Duration::from_millis(opts.order_rtt_ms).as_nanos() as u64,
             private_latency_ns: Duration::from_millis(opts.private_latency_ms).as_nanos() as u64,
             default_leverage: loaded
@@ -525,6 +530,7 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
     };
     drop(market_feed);
     let report = BacktestReport {
+        fees,
         source: source_header,
         execution: opts.execution.clone(),
         execution_limitations: source::limitations(&opts.execution),

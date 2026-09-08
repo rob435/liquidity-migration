@@ -20,7 +20,7 @@ pub enum Applied {
     Event(MarketEvent),
     /// Absorbed; there is nothing for a strategy to see.
     Nothing,
-    /// Continuity is broken. Reconnect, resubscribe, take fresh snapshots.
+    /// Continuity is broken; the affected topic needs a fresh snapshot.
     Resync(ResyncReason),
 }
 
@@ -110,9 +110,13 @@ impl FeedState {
         }
     }
 
-    pub(crate) fn reset_quote(&mut self, symbol: &str) {
+    pub(crate) fn reset_book(&mut self, symbol: &str, depth: u8) {
         if let Some(id) = self.table.get(symbol) {
-            self.books[id.0 as usize] = BookState::default();
+            match depth {
+                1 => self.books[id.0 as usize] = BookState::default(),
+                50 => self.depths[id.0 as usize] = BookState::default(),
+                _ => {}
+            }
         }
     }
 
@@ -558,7 +562,7 @@ mod tests {
         let ticker_snapshot = r#"{"topic":"tickers.BTCUSDT","type":"snapshot","data":{"symbol":"BTCUSDT","lastPrice":"100.0","markPrice":"100.1","indexPrice":"100.2"},"cs":1,"ts":500}"#;
         apply(&mut state, ticker_snapshot);
 
-        state.reset_quote("BTCUSDT");
+        state.reset_book("BTCUSDT", 1);
         assert_eq!(
             apply(&mut state, &ob(101, "delta", r#"[["10.0","1.0"]]"#, "[]")),
             Applied::Resync(ResyncReason::DeltaBeforeSnapshot)

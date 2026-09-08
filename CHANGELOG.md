@@ -10,6 +10,75 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-08 — Repair execution recovery, account limits and research costs.**
+  - Research defaults read `configs/bybit_fee_rates.json` or
+    `LIQUIDITY_MIGRATION_FEE_SNAPSHOT`. The authenticated sample contains
+    10/3.6 bp taker/maker for most observed symbols and 11/4 for CAP/HEMI;
+    generic defaults use the maximum observed rates, explicit scenarios remain
+    available, and symbol-specific missing rates raise. No published-rate
+    fallback or claim of coverage for unobserved symbols. Bybit support and
+    institutional DCP eligibility remain pending owner login/residency input;
+    the authenticated DCP query succeeds with an empty `dcpInfos` list.
+  - Remove the daily forward-grading runner, financed-LONG forward scorer,
+    ledger eligibility metadata and governance requirement. Preserve market
+    capture, historical reports, stable rule IDs and honest data-reuse limits.
+  - Run daily-weight and hourly native CARRY scoring over matched historical
+    days from 2021-11-20 through 2026-09-06 at 7.78 and 14.36 bp per side.
+    The 1,752-day [comparison](docs/research/carry-scorer-comparison.md) retains
+    all eras, gross/net, raw series, frozen pre-change sources and missing-data
+    limits. At 14.36 bp, matched 2026 daily/hourly results are +172.85%/−19.06%
+    on notional base. Neither is a funded-account result or a grade of the new
+    stop policy.
+  - LONG uses 30-second PostOnly rest in both realms. Crossing cancels the
+    passive order, obtains an independent terminal lookup and recovers every
+    exact fill before admitting one IOC remainder. Cancel acknowledgement
+    alone cannot cross. Restart cancels recovered worked sleeve openings even
+    when they reduce an opposing physical position. Mainnet remains WS and
+    demo REST because Bybit does not offer demo trade WS. The observed sample
+    has six LONG opening orders/17 fills, all taker; 14 measured order RTTs
+    have a 9.77 ms median. That sample does not establish future maker share.
+  - Account reads retain exact liquidation/mark prices and IM/MM ratios.
+    Initial-margin cap is 70% of reference; per-symbol gross cap is 50%.
+    Opening and held stops use at most half inverse leverage (10% at 5×),
+    tighten further for known liquidation proximity, and never loosen existing
+    protection. EXODUS/CARRY defaults move from 35% to 10%; LONG ATR requests
+    are capped at admission. Closed 24-hour loss includes current account open
+    losses. These change execution economics and require separate research.
+  - Mainnet uses shared leverage authority. A proven own-lot reduction may
+    pass the opening latch when it grows the physical net behind a hand trade;
+    exact owned quantity still bounds it. Preserve existing hand-side venue
+    stops; existing virtual stops protect opposing owned lots.
+  - Apply a 100 bp mark collar to entries, exits and amendments; market intents
+    become bounded IOC limits, including exact full-position dust closes.
+    Five distinct rejected engine IDs in 10 seconds durably latch openings
+    and cancel remaining entries. Routine account reads compare venue exposure
+    and recover history before latching unexplained drift. Bybit Full-position
+    native stops still execute as venue market orders without this custom collar.
+  - A Bybit book sequence gap invalidates and refreshes only its L1/L50 topic.
+    Trade WS pings every 20 seconds, reconnects after a missing 10-second pong
+    deadline and routes concurrent requests by ID. Up to ten adjacent distinct
+    reprices reach Bybit before replies; intervening cancel/order commands retain
+    ordering. Uncertain sent requests are never blindly resent.
+  - CARRY decision eligibility uses receipt wall time rather than an hour-floored
+    watermark: complete midnight data is eligible at 00:20, subject to the
+    existing minute cadence and source readiness. Historical hourly replay does
+    not establish 00:20 fills. Correct recorder ownership and serial WAL-barrier
+    comments; record RTT only with its measurement scope.
+  - Backup starts every 15 minutes with a 10-minute run budget and 30-minute
+    completed-copy age alert. Host liveness measures venue clock offset with RTT
+    uncertainty. The [storage/standby cutover](docs/infrastructure-layout.md)
+    remains unexecuted: the host has one writable 119 GiB disk and no standby;
+    provider/budget input is required for actual separation.
+  - Regressions reproduce missing pong redial, whole-socket book resets,
+    00:20 clock delay, hardcoded research fees, exact late-fill crossing,
+    wide stops, open-loss and margin admission, shared exits, symbol limits,
+    routine drift, price collars, reject storms and serial reprices. The
+    production venue wrapper also reproduces the serial reprice fallback before
+    its forwarding fix. EXODUS checkpoint bytes and quantities remain identical;
+    its tighter stop adds a restart restop effect. Local checks pass: 1,723 Python tests (one skip), 2,049 Rust
+    tests (eight existing ignores), repository doctor, Ruff, ShellCheck, mypy,
+    Rust 1.90 rustfmt and strict Clippy. Deployment remains pending.
+
 - **2026-09-08 — Work LONG demo entries for 30 seconds and recover resting entries after restart.**
   - LONG demo joins the near touch, including one-tick spreads, for 30 s with
     at most one passive amend at the existing 15 s cadence. The remaining

@@ -163,6 +163,8 @@ fn held(cell: (&str, &str, &str, &str)) -> Vec<engine_types::PositionView> {
         qty: d(cell.0).to_f64().unwrap(),
         entry_px: d(cell.1).to_f64().unwrap(),
         exact_amounts: Some(Box::new(engine_types::risk::PositionAmounts {
+            liquidation_price: None,
+            mark_price: None,
             quantity: ExactNumber::venue_decimal(cell.0).unwrap(),
             entry_price: ExactNumber::venue_decimal(cell.1).unwrap(),
         })),

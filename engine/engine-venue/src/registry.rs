@@ -354,6 +354,26 @@ impl VenueGateway for Venue {
         }
     }
 
+    async fn amend_orders(
+        &mut self,
+        requests: &[(SymbolId, String, AmendSpec)],
+    ) -> Vec<Result<(), VenueError>> {
+        match self {
+            #[cfg(feature = "bybit")]
+            Venue::Bybit(gw) => gw.amend_orders(requests).await,
+            #[cfg(feature = "hyperliquid")]
+            Venue::Hyperliquid(gw) => gw.amend_orders(requests).await,
+            #[cfg(feature = "lighter")]
+            Venue::Lighter(gw) => gw.amend_orders(requests).await,
+            #[cfg(feature = "mexc")]
+            Venue::Mexc(gw) => gw.amend_orders(requests).await,
+            #[cfg(feature = "binance")]
+            Venue::Binance(gw) => gw.amend_orders(requests).await,
+            #[cfg(feature = "variational")]
+            Venue::Variational(gw) => gw.amend_orders(requests).await,
+        }
+    }
+
     async fn set_stop_exact(
         &mut self,
         symbol: SymbolId,

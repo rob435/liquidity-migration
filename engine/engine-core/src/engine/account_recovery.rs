@@ -384,6 +384,23 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     self.request_account_refresh_after(frontier.max(clock::now_ns()));
                     return Ok(());
                 }
+                if self.may_open && !history_account_matches(&view, &self.logged_exposure)? {
+                    if query.history.is_none() {
+                        self.recovery.history_requested = true;
+                        self.recovery.history_generation = None;
+                        self.private_stream_ready = false;
+                    } else {
+                        self.may_open = false;
+                        self.wal.append(&WalRecord::Reconciled {
+                            wall_ts_ms: clock::wall_ms(),
+                            findings: vec![
+                                "venue position drift remains after execution-history recovery"
+                                    .into(),
+                            ],
+                            may_open: false,
+                        })?;
+                    }
+                }
                 self.adopt_view(view);
                 self.account_refresh_started_ns = query.started_ns;
                 if self
@@ -413,6 +430,40 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[tokio::test]
+    async fn routine_account_refresh_detects_position_drift_before_the_daily_checkpoint() {
+        let (mut engine, _) = crate::tests::callback_test_fixture(Vec::new()).await;
+        let mut account = engine.account().clone();
+        account.positions.push(engine_types::PositionView {
+            exact_amounts: None,
+            exact_stop_px: None,
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 1.0,
+            entry_px: 100.0,
+            stop_attached: true,
+            stop_px: 90.0,
+            leverage: Some(5.0),
+        });
+        let query = Query {
+            started_ns: clock::now_ns().saturating_add(1),
+            generation: engine.recovery.generation,
+            history: None,
+        };
+        engine
+            .adopt_recovery_account(query, Ok(account))
+            .await
+            .unwrap();
+        assert!(
+            engine.recovery.history_requested,
+            "ordinary account refresh missed position drift"
+        );
+        assert!(
+            !engine.private_stream_ready,
+            "entries cannot trust unexplained physical exposure"
+        );
+    }
 
     struct ReadClient {
         delay_ms: AtomicU64,

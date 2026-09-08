@@ -125,7 +125,7 @@ pub(super) fn render(heartbeat: &Heartbeat, facts: &Facts, wall_ts_ms: i64) -> S
             or_null(
                 facts
                     .rolling_loss
-                    .filter(|window| window.trades > 0)
+                    .filter(|window| window.trades > 0 || window.net_usdt != 0.0)
                     .map(|window| amount(window.net_usdt)),
             ),
         ),

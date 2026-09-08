@@ -133,6 +133,26 @@ impl Book {
                         .abs())
             })
     }
+    pub(crate) fn pending_symbol_notional(
+        &self,
+        symbol: SymbolId,
+        price: &Exact,
+    ) -> Result<Exact, &'static str> {
+        self.pending
+            .values()
+            .filter(|p| p.symbol == symbol && !p.reduce_only)
+            .try_fold(Exact::zero(), |sum, p| {
+                Ok(sum
+                    + p.signed_qty
+                        .as_ref()
+                        .ok_or("pending order quantity is unknown")?
+                        .abs()
+                        * p.px
+                            .as_ref()
+                            .ok_or("pending order price is unknown")?
+                            .max(price))
+            })
+    }
     pub(crate) fn pending_reduce_qty(&self, symbol: SymbolId) -> Result<Exact, &'static str> {
         self.quantity(|p| p.reduce_only && p.symbol == symbol)
     }
@@ -404,6 +424,7 @@ mod tests {
             gross_notional_multiple: 10.0,
             disaster_stop_fraction: 0.35,
             max_component_gross_notional_usdt: 10000.0,
+            max_symbol_notional_usdt: 10000.0,
             max_initial_margin_usdt: 1000.0,
         });
         let mut book = Book::default();

@@ -481,6 +481,7 @@ fn only_the_window_binds() -> engine_risk::KernelConfig {
             gross_notional_multiple: 2.0,
             disaster_stop_fraction: 0.35,
             max_component_gross_notional_usdt: 500_000.0,
+            max_symbol_notional_usdt: 500_000.0,
             max_initial_margin_usdt: 250_000.0,
         },
         leverage: 2.0,

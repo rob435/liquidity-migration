@@ -19,6 +19,7 @@ pub struct Kernel {
     envelope: Envelope,
     book: Book,
     loss_window: LossWindow,
+    open_pnl_usdt: Option<Exact>,
     margin: MarginBook,
 }
 fn unknown(detail: impl Into<String>) -> DenyReason {
@@ -71,6 +72,7 @@ impl Kernel {
             envelope,
             book: Book::default(),
             loss_window: LossWindow::default(),
+            open_pnl_usdt: Some(Exact::zero()),
             margin: MarginBook::default(),
         })
     }
@@ -240,13 +242,15 @@ impl Kernel {
     }
     pub fn rolling_loss(&self) -> RollingLossView {
         let limit = self.rolling_loss_limit();
-        let net = self.loss_window.net_usdt();
+        let net = self.risk_net_usdt();
         RollingLossView {
             window_ms: ROLLING_LOSS_WINDOW_MS,
             trades: self.loss_window.trades(),
-            net_usdt: net.map_or(0.0, report),
+            net_usdt: net.as_ref().map_or(0.0, report),
             limit_usdt: report(&limit),
-            tripped: !self.loss_window.valid() || net.is_some_and(|net| net <= &-limit),
+            tripped: !self.loss_window.valid()
+                || net.is_none()
+                || net.is_some_and(|net| net <= -limit),
         }
     }
     pub fn rolling_loss_rows(&self) -> Vec<ClosedTradeRow> {
@@ -254,6 +258,12 @@ impl Kernel {
     }
     pub fn restore_rolling_loss_rows(&mut self, rows: &[ClosedTradeRow]) {
         self.loss_window.restore(rows);
+    }
+    fn risk_net_usdt(&self) -> Option<Exact> {
+        Some(
+            self.loss_window.net_usdt().cloned().unwrap_or_default()
+                + self.open_pnl_usdt.as_ref()?.clone().min(Exact::zero()),
+        )
     }
     fn rolling_loss_limit(&self) -> Exact {
         policy(self.cfg.max_rolling_loss_fraction) * self.envelope.reference_usdt()
@@ -377,10 +387,11 @@ impl Kernel {
                 "closed-trade account-unit valuation is unavailable or invalid",
             ));
         }
+        self.open_pnl_usdt = Some(account_open_pnl(account)?);
         let limit = self.rolling_loss_limit();
-        if let Some(net) = self.loss_window.net_usdt().filter(|net| *net <= &-&limit) {
+        if let Some(net) = self.risk_net_usdt().filter(|net| net <= &-&limit) {
             return Err(DenyReason::RollingLossTripped {
-                window_net_usdt: report(net),
+                window_net_usdt: report(&net),
                 limit_usdt: report(&limit),
                 window_ms: ROLLING_LOSS_WINDOW_MS,
             });
@@ -402,7 +413,7 @@ impl Kernel {
         }
         let (low, px) = self.entry_prices(intent, &view)?;
         let fraction = read_stop(intent, &low, &px)?;
-        let notional = &ask * px;
+        let notional = &ask * &px;
         let projected = if let Some(portfolio) = portfolio {
             self.projected_portfolio(&notional, &fraction, account, &view, portfolio)?
         } else {
@@ -416,7 +427,70 @@ impl Kernel {
             });
         }
         self.account_caps(&notional, &projected, &view)?;
+        let held_qty = portfolio.map_or_else(
+            || physical.abs(),
+            |p| p.symbol_gross_quantity(intent.symbol, &physical),
+        );
+        let held_price = self
+            .price_for(intent.symbol, &view)
+            .map_or_else(|| px.clone(), |p| p.max(&px).clone());
+        let symbol_notional = &notional
+            + held_qty * &held_price
+            + self
+                .book
+                .pending_symbol_notional(intent.symbol, &held_price)
+                .map_err(unknown)?;
+        let symbol_cap = policy(self.cfg.envelope.max_symbol_notional_usdt) * self.envelope.scale();
+        if symbol_notional > symbol_cap {
+            return Err(DenyReason::SymbolNotionalBreached {
+                symbol: intent.symbol,
+                notional_usdt: report(&symbol_notional),
+                cap_usdt: report(&symbol_cap),
+            });
+        }
+        if &fraction * policy(self.cfg.leverage) >= Exact::one() {
+            return Err(unknown("stop distance must be below 1 / leverage"));
+        }
+        self.check_venue_margin_and_liquidation(account)?;
         Ok(ask)
+    }
+    fn check_venue_margin_and_liquidation(&self, account: &AccountView) -> Result<(), DenyReason> {
+        if let Some(amounts) = &account.exact_amounts {
+            let cap = policy(self.cfg.envelope.max_initial_margin_usdt)
+                .checked_div(&policy(self.cfg.envelope.reference_usdt))
+                .map_err(|e| unknown(e.to_string()))?;
+            if optional_number(amounts.initial_margin_rate.as_ref())?
+                .is_some_and(|rate| rate >= cap)
+                || optional_number(amounts.maintenance_margin_rate.as_ref())?
+                    .is_some_and(|rate| rate >= Exact::one())
+            {
+                return Err(unknown("venue margin ratio leaves no capacity for growth"));
+            }
+        }
+        for position in &account.positions {
+            if !position
+                .quantity()
+                .map_err(|e| unknown(e.to_string()))?
+                .is_positive()
+            {
+                continue;
+            }
+            let Some(amounts) = &position.exact_amounts else {
+                continue;
+            };
+            if let Some(liquidation) = optional_number(amounts.liquidation_price.as_ref())? {
+                let stop = position.stop_price().map_err(|e| unknown(e.to_string()))?;
+                if !position.stop_attached
+                    || match position.side {
+                        Side::Buy => stop <= liquidation,
+                        Side::Sell => stop >= liquidation,
+                    }
+                {
+                    return Err(unknown("held stop is beyond the venue liquidation price"));
+                }
+            }
+        }
+        Ok(())
     }
     fn projected_book(
         &mut self,
@@ -551,6 +625,14 @@ impl Kernel {
     }
 }
 impl RiskKernel for Kernel {
+    fn stop_distance_cap(&self, observed_leverage: Option<f64>) -> Option<f64> {
+        let leverage = observed_leverage
+            .filter(|l| l.is_finite() && *l > 0.0)
+            .unwrap_or(self.cfg.leverage)
+            .max(self.cfg.leverage);
+        Some(self.cfg.envelope.disaster_stop_fraction.min(0.5 / leverage))
+    }
+
     fn assess(&mut self, intent: &Intent, account: &AccountView, now_ns: u64) -> RiskVerdict {
         match self
             .evaluate(intent, account, now_ns)
@@ -751,6 +833,7 @@ impl RiskKernel for Kernel {
         Kernel::observe_price(self, symbol, px);
     }
     fn observe_account_view(&mut self, account: &AccountView) {
+        self.open_pnl_usdt = account_open_pnl(account).ok();
         if let Ok(view) = ViewFacts::read(account, &Exact::zero()) {
             self.book.prune_through(account.observed_ns);
             self.margin.observe(account.observed_ns);
@@ -837,6 +920,42 @@ impl RiskKernel for Kernel {
     ) {
         Kernel::register_order_price_range(self, id, intent, qty, low, high);
     }
+}
+fn optional_number(
+    number: Option<&engine_types::numeric::ExactNumber>,
+) -> Result<Option<Exact>, DenyReason> {
+    number
+        .map(|number| {
+            number
+                .validate_provenance()
+                .map_err(|e| unknown(e.to_string()))?;
+            number
+                .value
+                .validate_storage()
+                .map_err(|e| unknown(e.to_string()))?;
+            if number.value.is_negative() {
+                return Err(unknown("negative venue margin or price metric"));
+            }
+            Ok(number.value.clone())
+        })
+        .transpose()
+}
+fn account_open_pnl(account: &AccountView) -> Result<Exact, DenyReason> {
+    account
+        .positions
+        .iter()
+        .try_fold(Exact::zero(), |pnl, position| {
+            let mark = optional_number(
+                position
+                    .exact_amounts
+                    .as_ref()
+                    .and_then(|a| a.mark_price.as_ref()),
+            )?;
+            let Some(mark) = mark else { return Ok(pnl) };
+            let entry = position.entry_price().map_err(|e| unknown(e.to_string()))?;
+            let quantity = position.quantity().map_err(|e| unknown(e.to_string()))?;
+            Ok(pnl + (mark - entry) * signed(position.side, &quantity))
+        })
 }
 fn fill_amounts(
     qty: f64,

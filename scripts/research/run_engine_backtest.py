@@ -56,8 +56,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--signals", type=Path, default=None, help="signal spool directory to replay")
     parser.add_argument("--out-dir", type=Path, required=True, help="where the run's files go; must not hold a log already")
     parser.add_argument("--capital", type=float, default=10_000.0)
-    parser.add_argument("--taker-fee", type=float, default=0.00055)
-    parser.add_argument("--maker-fee", type=float, default=0.0002)
+    parser.add_argument("--taker-fee", type=float, default=None)
+    parser.add_argument("--maker-fee", type=float, default=None)
     parser.add_argument("--rtt-ms", type=int, default=175)
     parser.add_argument("--private-latency-ms", type=int, default=60)
     parser.add_argument("--mmr", type=float, default=0.005)
@@ -92,10 +92,6 @@ def run_engine(args: argparse.Namespace) -> Path:
         str(report),
         "--capital",
         str(args.capital),
-        "--taker-fee",
-        str(args.taker_fee),
-        "--maker-fee",
-        str(args.maker_fee),
         "--rtt-ms",
         str(args.rtt_ms),
         "--private-latency-ms",
@@ -103,6 +99,10 @@ def run_engine(args: argparse.Namespace) -> Path:
         "--mmr",
         str(args.mmr),
     ]
+    for kind in ("taker", "maker"):
+        rate = getattr(args, f"{kind}_fee")
+        if rate is not None:
+            cmd.extend([f"--{kind}-fee", str(rate)])
     if args.signals is not None:
         cmd.extend(["--signals", str(args.signals)])
     if args.durable_log:

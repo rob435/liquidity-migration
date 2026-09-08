@@ -1,5 +1,44 @@
 use super::*;
 
+#[tokio::test(start_paused = true)]
+async fn held_lot_stops_tighten_to_leverage_and_liquidation_and_survive_replay() {
+    use engine_types::numeric::ExactNumber;
+    let mut engine = crate::tests::shared_sleeves::exact_single_sleeve_engine("1", None).await;
+    engine.books.account.positions[0].leverage = Some(10.0);
+    engine.cap_owned_stop_distances().unwrap();
+    let stop =
+        |engine: &Engine<crate::tests::MockWal, engine_risk::Kernel, crate::tests::MockVenue>| {
+            engine.books.attribution.snapshot().positions[0]
+                .stop_px
+                .clone()
+                .unwrap()
+        };
+    assert_eq!(stop(&engine), Exact::parse_decimal("95").unwrap());
+    let amounts = engine.books.account.positions[0]
+        .exact_amounts
+        .as_deref_mut()
+        .unwrap();
+    amounts.mark_price = Some(ExactNumber::venue_decimal("100").unwrap());
+    amounts.liquidation_price = Some(ExactNumber::venue_decimal("98").unwrap());
+    engine.cap_owned_stop_distances().unwrap();
+    assert_eq!(stop(&engine), Exact::parse_decimal("99").unwrap());
+    let state = engine.books.attribution.snapshot();
+    let replayed = engine.books.attribution.replay_clone().unwrap();
+    assert_eq!(replayed.snapshot(), state);
+    engine.books.account.positions[0].leverage = Some(2.0);
+    engine.books.account.positions[0]
+        .exact_amounts
+        .as_deref_mut()
+        .unwrap()
+        .liquidation_price = None;
+    engine.cap_owned_stop_distances().unwrap();
+    assert_eq!(
+        stop(&engine),
+        Exact::parse_decimal("99").unwrap(),
+        "a relaxed venue limit must not loosen a durable stop"
+    );
+}
+
 // Frozen equivalence reference: keep its decisions and operation order unchanged.
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     async fn reference_enforce_position_stop_intent(&mut self) -> Result<(), EngineError> {

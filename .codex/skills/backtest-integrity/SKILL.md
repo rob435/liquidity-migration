@@ -1,12 +1,12 @@
 ---
 name: backtest-integrity
-description: Assess whether a backtest, research run, strategy or feature change, or result interpretation produces evidence that is real, under the Progressive Evidence Model. Use before designing decision-influencing research, when judging a report, or before an alpha, robustness, candidate, or deployment claim. Apply docs/research/governance.md and the failure taxonomy in docs/research/backtesting_errors_we_never_repeat.md; keep the physics, skip the ceremony.
+description: Assess whether a backtest, research run, strategy or feature change, or result interpretation produces evidence that is real, under the research evidence rules. Use before designing decision-influencing research, when judging a report, or before an alpha, robustness, candidate, or deployment claim. Apply docs/research/governance.md and the failure taxonomy in docs/research/backtesting_errors_we_never_repeat.md; keep the physics, skip the ceremony.
 ---
 
 # Backtest & Evidence Integrity
 
 ## 1. Purpose
-Specify validation criteria, evidence grading mechanics, and causality verification required to assess backtests, research runs, and alpha claims under the Progressive Evidence Model.
+Specify validation criteria, evidence grading mechanics, and causality verification required to assess backtests, research runs, and alpha claims under the research evidence rules.
 
 ---
 
@@ -22,12 +22,13 @@ Specify validation criteria, evidence grading mechanics, and causality verificat
 | **Accounting** | Continuous cash, position, fee, and funding reconciliation. | Phantom equity jumps, double-counted funding, margin drift. | Accounting failure; requires complete recalculation. |
 | **Data Provenance** | Immutable artifact hashes, commit IDs, and root paths recorded. | Unreproducible results, untracked manual CSV edits. | Non-citable diagnostic. |
 
-### Progressive Evidence Model Lanes
+### Evaluation Scope
 
-| Lane | Purpose | Permitted Data | Registration Gate | Evidentiary Weight |
-| :--- | :--- | :--- | :--- | :--- |
-| **Lane 1: Exploration** | Hypothesis generation, parameter sweeps, prototypes. | Seen historical data. | Commit with provenance note; no formal filing. | Exploratory only; never confirmatory. |
-| **Lane 2: Graded Record** | Production candidates, forward tracking. | Rolling forward days post-commit. | Exact config commit; forward days must strictly postdate commit. | Confirmatory decision-grade evidence. |
+| Scope | Evidence |
+| --- | --- |
+| Selection data | Exploratory comparisons only |
+| Independent data | State the exact untouched inputs and evaluated rule |
+| Runtime outcomes | Venue/WAL accounting is account authority |
 
 ### Six-Item Evidence Note Schema
 
@@ -44,7 +45,7 @@ Specify validation criteria, evidence grading mechanics, and causality verificat
 
 ## 3. Invariants
 
-- **Must Never Conflate Lanes**: Lane-1 exploratory runs on seen data *must never* be cited as confirmatory proof for production deployment.
+- **Must Distinguish Selection Data**: Runs on data that shaped the rule cannot establish independent confirmation.
 - **Must Place Costs Next to Gross**: Every performance metric *must* report gross return alongside net return inclusive of maker/taker fees and funding rates.
 - **Must Split by Era**: All long-term backtests *must* report metrics segmented by regime/era (e.g. per-calendar-year); never rely on pooled metrics that mask decay.
 - **Must Treat Research as Non-Authorizing**: Research validation *must never* be treated as authorization to trade real money; funded trading requires the physical host arming switch (`REAL_MONEY=true`).

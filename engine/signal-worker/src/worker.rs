@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{carry_source_history_hours, sha256_hex, ConfigIdentity, SignalWorkerConfig};
 use crate::features::{
-    build_carry_features, build_carry_features_at, build_carry_replay_features,
-    build_long_features, FundingHistory, KlineHistory, WhaleHistory,
+    build_carry_features_at, build_carry_replay_features, build_long_features, carry_decision_at,
+    FundingHistory, KlineHistory, WhaleHistory,
 };
 use crate::history::{merge_row, CoverageMut, CoverageRef};
 use crate::model::{
@@ -1251,12 +1251,22 @@ impl SignalWorker {
         if !include_carry {
             return Ok(out);
         }
-        let mut carry = build_carry_features(
+        let decision_ts_ms = carry_decision_at(
+            available_at_ms,
+            self.config.carry.decision_phase_ms,
+            self.config.carry.decision_kline_lag_ms,
+        )
+        .unwrap_or(0)
+        .min(
+            carry_decision_at(data_through_ms, self.config.carry.decision_phase_ms, 0).unwrap_or(0),
+        );
+        let mut carry = build_carry_features_at(
             &self.state.klines,
             &self.state.funding,
             &self.state.whales,
             &active_carry_symbols,
-            data_through_ms,
+            decision_ts_ms,
+            available_at_ms,
             &self.config.carry,
         );
         carry
@@ -3051,13 +3061,21 @@ impl DurableSignalWorker {
                 }
             }
             WireEvent::CarryWatermark {
-                data_through_ms, ..
+                observed_ts_ms,
+                data_through_ms,
+                ..
             } => {
                 let decision_ts_ms = carry_decision_at(
-                    *data_through_ms,
+                    *observed_ts_ms,
                     self.worker.config.carry.decision_phase_ms,
                     self.worker.config.carry.decision_kline_lag_ms,
-                );
+                )
+                .zip(carry_decision_at(
+                    *data_through_ms,
+                    self.worker.config.carry.decision_phase_ms,
+                    0,
+                ))
+                .map(|(available, covered)| available.min(covered));
                 let scorer_is_behind = decision_ts_ms.is_some_and(|decision| {
                     self.worker
                         .state
@@ -3381,19 +3399,6 @@ fn spool_class_byte_soft_threshold(class: &str) -> u64 {
         "catchup" => CATCHUP_SPOOL_BYTE_SOFT_THRESHOLD,
         _ => OTHER_SPOOL_BYTE_SOFT_THRESHOLD,
     }
-}
-
-fn carry_decision_at(
-    observed_ts_ms: i64,
-    decision_phase_ms: i64,
-    decision_kline_lag_ms: i64,
-) -> Option<i64> {
-    let day = observed_ts_ms.saturating_sub(observed_ts_ms.rem_euclid(DAY_MS));
-    let mut decision_ts_ms = day.saturating_add(decision_phase_ms);
-    if observed_ts_ms < decision_ts_ms.saturating_add(decision_kline_lag_ms) {
-        decision_ts_ms = decision_ts_ms.saturating_sub(DAY_MS);
-    }
-    (decision_ts_ms > 0).then_some(decision_ts_ms)
 }
 
 fn encode_observations(observations: &[NormalizedObservation]) -> Result<Vec<String>, WorkerError> {

@@ -52,6 +52,8 @@ pub struct EnvelopeConfig {
     /// A second account-wide gross ceiling, below the gross cap the allowance
     /// above is derived from. Set the two equal and this one never binds.
     pub max_component_gross_notional_usdt: f64,
+    /// Gross exposure in one symbol, across sleeves, manual residuals and pending entries.
+    pub max_symbol_notional_usdt: f64,
     /// Most margin the whole book may commit.
     pub max_initial_margin_usdt: f64,
 }
@@ -81,6 +83,7 @@ impl EnvelopeConfig {
             "max_component_gross_notional_usdt",
         )?;
         positive(self.max_initial_margin_usdt, "max_initial_margin_usdt")?;
+        positive(self.max_symbol_notional_usdt, "max_symbol_notional_usdt")?;
         // The tolerance is not slack, it is arithmetic. The account cap is
         // held as a multiple and rebuilt as `reference * multiple`, while this
         // number was read straight from the profile — and both shipped

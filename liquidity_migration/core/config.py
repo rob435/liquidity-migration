@@ -6,6 +6,7 @@ from typing import Any
 
 import yaml
 
+from liquidity_migration.core.fee_snapshot import default_maker_fee_bps, default_taker_fee_bps
 from liquidity_migration.core.env_flags import FALSE_ENV_VALUES, TRUE_ENV_VALUES
 
 _CONSUMED_TOP_LEVEL_KEYS = frozenset({"exchange", "universe", "cost_model", "data_root"})
@@ -69,8 +70,8 @@ class UniverseConfig:
 
 @dataclass(frozen=True, slots=True)
 class CostConfig:
-    maker_fee_bps: float = 2.0
-    taker_fee_bps: float = 5.5
+    maker_fee_bps: float = field(default_factory=default_maker_fee_bps)
+    taker_fee_bps: float = field(default_factory=default_taker_fee_bps)
     maker_adverse_selection_bps: float = 1.0
     taker_slippage_bps_liquid: float = 2.0
     # Share of fills modeled as passive. Zero models market orders on both legs.

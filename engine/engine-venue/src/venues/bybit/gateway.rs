@@ -653,11 +653,57 @@ impl BybitGateway {
         Ok(())
     }
 
+    fn amend_body(
+        &self,
+        symbol: SymbolId,
+        client_order_id: &str,
+        spec: &AmendSpec,
+    ) -> Result<Value, VenueError> {
+        if let Some(terms) = crate::order_wire::amend_terms(spec)? {
+            let rules = self.exact_specs.get(self.name_of(symbol)?).ok_or_else(|| {
+                VenueError::Unsupported("exact amendment metadata is not installed".into())
+            })?;
+            terms
+                .validate_wire_grid(rules)
+                .map_err(crate::order_wire::error)?;
+        }
+        if spec.px.is_none() && spec.qty.is_none() {
+            return Err(VenueError::BadRequest(
+                "an amend that changes neither price nor size".to_string(),
+            ));
+        }
+        let mut body = Map::new();
+        body.insert("category".into(), CATEGORY.into());
+        body.insert("symbol".into(), self.name_of(symbol)?.into());
+        body.insert("orderLinkId".into(), client_order_id.into());
+        // Only what is changing. Bybit reads an absent field as "leave it",
+        // and a price echoed back unchanged still costs the order its place
+        // in the queue.
+        if let Some(px) = crate::order_wire::amend_price(spec)? {
+            body.insert("price".into(), px.into());
+        }
+        if let Some(qty) = crate::order_wire::amend_quantity(spec)? {
+            body.insert("qty".into(), qty.into());
+        }
+
+        Ok(Value::Object(body))
+    }
+
     fn order_body(&self, req: &OrderRequest) -> Result<Value, VenueError> {
         crate::order_wire::terms(req)?;
-        if req.close_position && (!req.reduce_only || !matches!(req.kind, OrderKind::Market)) {
+        if req.close_position
+            && (!req.reduce_only
+                || !matches!(
+                    req.kind,
+                    OrderKind::Market
+                        | OrderKind::Limit {
+                            tif: TimeInForce::Ioc,
+                            ..
+                        }
+                ))
+        {
             return Err(VenueError::BadRequest(
-                "a full-position close must be a reduce-only market order".into(),
+                "a full-position close must be reduce-only market or IOC limit".into(),
             ));
         }
         let mut body = Map::new();
@@ -1271,41 +1317,14 @@ impl VenueGateway for BybitGateway {
         client_order_id: &str,
         spec: AmendSpec,
     ) -> Result<(), VenueError> {
-        if let Some(terms) = crate::order_wire::amend_terms(&spec)? {
-            let rules = self.exact_specs.get(self.name_of(symbol)?).ok_or_else(|| {
-                VenueError::Unsupported("exact amendment metadata is not installed".into())
-            })?;
-            terms
-                .validate_wire_grid(rules)
-                .map_err(crate::order_wire::error)?;
-        }
         self.last_mutation_timing = None;
         self.last_rate_wait_ns = None;
-        if spec.px.is_none() && spec.qty.is_none() {
-            return Err(VenueError::BadRequest(
-                "an amend that changes neither price nor size".to_string(),
-            ));
-        }
-        let mut body = Map::new();
-        body.insert("category".into(), CATEGORY.into());
-        body.insert("symbol".into(), self.name_of(symbol)?.into());
-        body.insert("orderLinkId".into(), client_order_id.into());
-        // Only what is changing. Bybit reads an absent field as "leave it",
-        // and a price echoed back unchanged still costs the order its place
-        // in the queue.
-        if let Some(px) = crate::order_wire::amend_price(&spec)? {
-            body.insert("price".into(), px.into());
-        }
-        if let Some(qty) = crate::order_wire::amend_quantity(&spec)? {
-            body.insert("qty".into(), qty.into());
-        }
+        let body = self.amend_body(symbol, client_order_id, &spec)?;
 
         self.last_rate_wait_ns =
             Some(reserve_rate_capacity(&mut self.amend_limiter, 1, ORDER_AMENDS_PER_SECOND).await);
         if let Some(trade) = &mut self.trade {
-            let reply = trade
-                .request("order.amend", vec![Value::Object(body)])
-                .await;
+            let reply = trade.request("order.amend", vec![body]).await;
             self.amend_limiter.anchor_completion(Instant::now(), 1);
             let reply = reply?;
             Self::note_quota(
@@ -1320,14 +1339,86 @@ impl VenueGateway for BybitGateway {
             });
             return Ok(());
         }
-        let envelope = self
-            .rest
-            .post_signed(PATH_ORDER_AMEND, &Value::Object(body))
-            .await;
+        let envelope = self.rest.post_signed(PATH_ORDER_AMEND, &body).await;
         self.amend_limiter.anchor_completion(Instant::now(), 1);
         let envelope = envelope?;
         venue_result(envelope)?;
         Ok(())
+    }
+
+    async fn amend_orders(
+        &mut self,
+        requests: &[(SymbolId, String, AmendSpec)],
+    ) -> Vec<Result<(), VenueError>> {
+        self.last_mutation_timing = None;
+        self.last_rate_wait_ns = None;
+        if requests.is_empty() {
+            return Vec::new();
+        }
+        let mut ids = HashSet::new();
+        if requests.len() > ORDER_AMENDS_PER_SECOND
+            || requests.iter().any(|(_, id, _)| !ids.insert(id))
+        {
+            return cancel_batch_error(
+                requests.len(),
+                VenueError::BadRequest("amend group exceeds quota or repeats an order".into()),
+            );
+        }
+        let bodies: Result<Vec<_>, _> = requests
+            .iter()
+            .map(|(symbol, id, spec)| self.amend_body(*symbol, id, spec))
+            .collect();
+        let bodies = match bodies {
+            Ok(bodies) => bodies,
+            Err(error) => return cancel_batch_error(requests.len(), error),
+        };
+        self.last_rate_wait_ns = Some(
+            reserve_rate_capacity(
+                &mut self.amend_limiter,
+                requests.len(),
+                ORDER_AMENDS_PER_SECOND,
+            )
+            .await,
+        );
+        let replies = if let Some(trade) = &mut self.trade {
+            let replies = trade
+                .requests(
+                    "order.amend",
+                    bodies.into_iter().map(|body| vec![body]).collect(),
+                )
+                .await;
+            for reply in replies.iter().filter_map(|reply| reply.as_ref().ok()) {
+                Self::note_quota(
+                    &mut self.amend_limiter,
+                    "order.amend",
+                    ORDER_AMENDS_PER_SECOND,
+                    reply.quota_per_second,
+                );
+                self.last_mutation_timing = Some(match self.last_mutation_timing.take() {
+                    None => VenueMutationTiming {
+                        sent_ns: reply.sent_ns,
+                        ack_ns: reply.ack_ns,
+                    },
+                    Some(old) => VenueMutationTiming {
+                        sent_ns: old.sent_ns.min(reply.sent_ns),
+                        ack_ns: old.ack_ns.max(reply.ack_ns),
+                    },
+                });
+            }
+            replies.into_iter().map(|reply| reply.map(|_| ())).collect()
+        } else {
+            futures_util::future::join_all(bodies.iter().map(|body| async {
+                self.rest
+                    .post_signed(PATH_ORDER_AMEND, body)
+                    .await
+                    .and_then(venue_result)
+                    .map(|_| ())
+            }))
+            .await
+        };
+        self.amend_limiter
+            .anchor_completion(Instant::now(), requests.len());
+        replies
     }
 
     fn take_mutation_timing(&mut self) -> Option<VenueMutationTiming> {

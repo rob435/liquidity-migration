@@ -11,7 +11,7 @@
     "the_backtest": "every fire priced at the registered rule's own book weight that day, entry S-10 open, cover S+60 open, 1m klines: clean net +95.2 mean / +49.9 median / p10 -162.9 / p90 +423.5 per event. Book-weighted overlay +6.13 bp/day over the 1,094-day record (524 fire days), overlay Sharpe 4.3. Klines are a bound, not fills.",
     "the_premature_tail": "the 18 REAL walk-forward premature fires (the rule fired, the print stayed deep) were priced individually: short mean -96.0 gross, median -17.1, worst -944.7 (SOMIUSDT 2025-10-01, a +9.4% squeeze into settlement while the short also pays the deep print). Charged at the measured 18/230 fire-day rate throughout: real_net = (212/230) x clean + (18/230) x (-111.5).",
     "era_shape": "overlay by year: 2023 +0.24, 2024 -0.80 (the honest losing year), 2025 +7.80, 2026 +18.15 bp/day. 2021-24 contributes ~0 by construction of the edge. This is a regime trade on the modern farmer crowd; expect zero-to-slightly-negative outside squeeze regimes while still paying fees.",
-    "the_stop_sweep": "every strategy-level stop LOSES against the time-boxed cover, measured on 1m wicks (highs, not opens) for all 1,130 event windows: +300bp whipsaws 12.9% of clean events (overlay 6.13 -> 3.94), +150bp whipsaws 31.2% (median collapses to +1.2), +1000bp still whipsaws 1.5% and costs 0.37 bp/day while doing nothing for the worst observed event (SOMI peaked +940bp, under it). The registered stop is therefore a 0.35 disaster fence, identical in role to carry's declared stop: the cover clock is the exit.",
+    "the_stop_sweep": "Historical one-minute stop sweep on 1,130 windows reports a 10% stop whipsawing 1.5% of events and costing 0.37 bp/day; current risk policy uses 10%. The time-boxed cover remains the normal exit.",
     "entry_and_cover_are_frozen_from_measurement": "entry at the fire (the pre-settle window, S-15..S-1; the backtest anchor S-10 sits inside it), engine entry window closes at S+5 via book validity - later fills forfeit most of the remaining ride against a full round trip. Cover at S+60 is the measured bottom of the post-settlement curve.",
     "what_is_NOT_modelled": "slippage beyond the taker fee on both legs (shorting into a falling tape may fill better, covering into it worse), partial fills, the engine's flat-first serialization delay after carry's exit (seconds), venue outage during the 75-minute hold."
   },
@@ -37,14 +37,20 @@
       "note": "the short copies the exact carry-attributed venue quantity from the fresh engine reading at the fire. Audit notional is frozen from that quantity and the fire's Bybit mark price; signed target quantity remains authoritative, so partial fills and later price movement do not resize it. No entry without both live owner-health and mark reads. The backtest was priced at these same positions."
     },
     "stop": {
-      "stop_loss_fraction": 0.35,
-      "role": "disaster fence only, never a strategy exit - see the stop sweep above. The engine requires a stop for admissibility and charges the envelope at 0.35 regardless (DISASTER_STOP_FRACTION), so a tighter number buys no capital back and measurably loses money."
+      "stop_loss_fraction": 0.1,
+      "role": "Maximum configured loss distance is 10% at 5x leverage; actual venue liquidation price and cross-margin health also constrain entries."
     }
   },
   "cost_model": {
     "measured_fee_side_bp": 7.78,
     "charging": "15.56 bp round trip per event in the backtest, plus funding paid by the short through the settlement (max(0, -print), ~0 on clean fires by construction, the full deep print on premature fires)",
-    "not_modelled": ["slippage beyond the taker fee", "market impact", "partial fills", "borrow", "venue outage"]
+    "not_modelled": [
+      "slippage beyond the taker fee",
+      "market impact",
+      "partial fills",
+      "borrow",
+      "venue outage"
+    ]
   },
   "scoring_recipe": {
     "metric": "net bp per event and the book-weighted daily overlay, from the engine's own fills (the WAL fills report already attributes per sleeve)",
@@ -56,11 +62,21 @@
   },
   "measured_at_registration": {
     "events": 1112,
-    "clean_net_bp_per_event": { "mean": 95.2, "median": 49.9, "p10": -162.9, "p90": 423.5 },
+    "clean_net_bp_per_event": {
+      "mean": 95.2,
+      "median": 49.9,
+      "p10": -162.9,
+      "p90": 423.5
+    },
     "premature_events_priced": 18,
     "premature_net_bp_mean": -111.5,
     "overlay_bp_per_day": 6.13,
-    "overlay_by_year": { "2023": 0.24, "2024": -0.8, "2025": 7.8, "2026": 18.15 },
+    "overlay_by_year": {
+      "2023": 0.24,
+      "2024": -0.8,
+      "2025": 7.8,
+      "2026": 18.15
+    },
     "curve": "v6 render 22.87x -> v7 estimate 25.65x -> v7+exodus estimate 50.35x on the same 1,094 days",
     "provenance": "all numbers are seen-data selection (Lane-1); the walk-forward that produced the fire population is the v7 entry/exit timing program (2026-08-19). Forward evidence starts at this commit."
   },

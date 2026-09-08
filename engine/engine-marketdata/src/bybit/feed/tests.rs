@@ -87,6 +87,101 @@ fn subscriptions_become_topics_once_each() {
     assert_eq!(feed.symbols().len(), 2);
 }
 
+#[tokio::test]
+async fn a_book_gap_refreshes_only_its_topic_and_invalidates_its_quote() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let request = socket.next().await.unwrap().unwrap();
+        let (id, _) = subscribe_request(&request);
+        socket
+            .send(Message::text(subscribe_reply(&id, true, "")))
+            .await
+            .unwrap();
+        for symbol in ["BTCUSDT", "ETHUSDT"] {
+            socket
+                .send(Message::text(snapshot_for(symbol, 1, 10.0, 10.1)))
+                .await
+                .unwrap();
+        }
+        socket
+            .send(Message::text(
+                snapshot_for("ETHUSDT", 3, 20.0, 20.1).replace("\"snapshot\"", "\"delta\""),
+            ))
+            .await
+            .unwrap();
+        let request = socket.next().await.unwrap().unwrap();
+        let (op, id, topics) = operation_request(&request);
+        assert_eq!(op, "unsubscribe");
+        assert_eq!(topics, ["orderbook.1.ETHUSDT"]);
+        socket
+            .send(Message::text(snapshot_for("BTCUSDT", 2, 30.0, 30.1)))
+            .await
+            .unwrap();
+        socket
+            .send(Message::text(unsubscribe_reply(&id, true, "")))
+            .await
+            .unwrap();
+        let request = socket.next().await.unwrap().unwrap();
+        let (id, topics) = subscribe_request(&request);
+        assert_eq!(topics, ["orderbook.1.ETHUSDT"]);
+        socket
+            .send(Message::text(subscribe_reply(&id, true, "")))
+            .await
+            .unwrap();
+        socket
+            .send(Message::text(snapshot_for("ETHUSDT", 4, 40.0, 40.1)))
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    });
+    let mut feed = BybitPublicFeed::with_url(
+        format!("ws://{address}"),
+        &[
+            Subscription {
+                symbol: "BTCUSDT".into(),
+                feed: Feed::Quote,
+            },
+            Subscription {
+                symbol: "ETHUSDT".into(),
+                feed: Feed::Quote,
+            },
+        ],
+    );
+    let mut healthy_updated = false;
+    let mut invalidated = false;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match feed.next_event().await.unwrap() {
+                MarketEvent::FeedReset { .. } => panic!("one book gap reset every symbol"),
+                MarketEvent::Quote {
+                    symbol: SymbolId(1),
+                    quote,
+                } if quote.bid_px == 0.0 => invalidated = true,
+                MarketEvent::Quote {
+                    symbol: SymbolId(0),
+                    quote,
+                } if quote.bid_px == 30.0 => healthy_updated = true,
+                MarketEvent::Quote {
+                    symbol: SymbolId(1),
+                    quote,
+                } if quote.bid_px == 40.0 => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("one-topic recovery completes");
+    server.abort();
+    assert!(invalidated, "the broken book remained tradable");
+    assert!(
+        healthy_updated,
+        "healthy traffic stopped during resubscription"
+    );
+}
+
 #[test]
 fn l50_and_public_trades_use_the_exact_bybit_topics() {
     assert_eq!(

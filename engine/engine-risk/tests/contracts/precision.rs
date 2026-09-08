@@ -17,6 +17,8 @@ fn canonical_account(available: &str) -> engine_types::AccountView {
     let mut account = flat(250_000.0, SEC);
     account.available_usdt = dec(available).to_f64().unwrap();
     account.exact_amounts = Some(Box::new(AccountAmounts {
+        initial_margin_rate: None,
+        maintenance_margin_rate: None,
         equity_usdt: number("250000"),
         available_usdt: number(available),
     }));
@@ -108,6 +110,8 @@ fn canonical_held_notional_cannot_round_down_onto_the_gross_cap() {
     let mut account = canonical_account("100");
     let mut held = position(BUSDT, Side::Buy, 1.0, 1.0, true);
     held.exact_amounts = Some(Box::new(PositionAmounts {
+        liquidation_price: None,
+        mark_price: None,
         quantity: number("1.0000000000000000001"),
         entry_price: number("1"),
     }));
@@ -130,6 +134,8 @@ fn exact_sleeve_exit_and_private_partial_fill_keep_the_last_native_unit() {
     let mut account = canonical_account("250000");
     let mut held = position(BUSDT, Side::Buy, quantity.to_f64().unwrap(), 1.0, true);
     held.exact_amounts = Some(Box::new(PositionAmounts {
+        liquidation_price: None,
+        mark_price: None,
         quantity: ExactNumber::derived(quantity.clone()),
         entry_price: number("1"),
     }));

@@ -140,6 +140,8 @@ fn captured_venue(symbols: &[String], capture: &Value) -> MockVenue {
                 qty: quantity.parse().unwrap(),
                 entry_px: entry.parse().unwrap(),
                 exact_amounts: Some(Box::new(engine_types::risk::PositionAmounts {
+                    liquidation_price: None,
+                    mark_price: None,
                     quantity: ExactNumber::venue_decimal(quantity).unwrap(),
                     entry_price: ExactNumber::venue_decimal(entry).unwrap(),
                 })),

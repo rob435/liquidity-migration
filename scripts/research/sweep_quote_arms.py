@@ -20,8 +20,8 @@ Cost, per side, positive when it costs us:
   the drift while waiting is what a miss actually costs.
 - crossed: crossing at the *decision* quote plus the taker fee.
 
-Fees are per symbol. Bybit bills 11.0 bp on some contracts against 5.5, and a
-sweep that assumed one rate would rank the arms wrong on the other.
+Fees are read per symbol from the stored authenticated fee snapshot. Missing
+symbol coverage must be refreshed before a sweep can price that symbol.
 
 Usage:
   python scripts/research/sweep_quote_arms.py --tape DIR --ticks ticks.json \
@@ -37,6 +37,7 @@ import math
 import statistics as st
 import subprocess
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -48,10 +49,7 @@ from liquidity_migration.research.execution.quote_lab.shadow import (  # noqa: E
     run_shadow_attempts,
 )
 
-# What the venue bills, per symbol, when it is not the usual rate.
-TAKER_FEE_BP = 5.5
-MAKER_FEE_BP = 2.0
-DEAR_CONTRACTS = {"CAPUSDT": (11.0, 4.0), "BMTUSDT": (11.0, 4.0)}
+from liquidity_migration.core.fee_snapshot import read_fee_rates  # noqa: E402
 
 # Only the fields the replay reads. The tape carries a dozen more per record
 # and keeping them costs gigabytes on a symbol with a busy book.
@@ -74,7 +72,8 @@ _WANTED_KINDS = frozenset({"orderbook_snapshot", "orderbook_delta", "public_trad
 
 
 def fees_for(symbol: str) -> tuple[float, float]:
-    return DEAR_CONTRACTS.get(symbol, (TAKER_FEE_BP, MAKER_FEE_BP))
+    fees = read_fee_rates(symbol)
+    return fees.taker * 10_000, fees.maker * 10_000
 
 
 def _lines(segment: Path) -> Iterator[str]:
@@ -258,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         "attempt_interval_seconds": args.attempt_interval_seconds,
         "max_reprices": args.max_reprices,
         "max_records_per_symbol": args.max_records_per_symbol,
-        "fees": {"taker_bp": TAKER_FEE_BP, "maker_bp": MAKER_FEE_BP, "dear": DEAR_CONTRACTS},
+        "fees": {directory.name: asdict(read_fee_rates(directory.name)) for directory in symbol_dirs},
         "arms": table,
         "per_symbol_conservative": per_symbol,
     }

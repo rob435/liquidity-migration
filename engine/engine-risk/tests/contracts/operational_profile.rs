@@ -9,11 +9,11 @@ use std::path::PathBuf;
 
 use engine_risk::{kernel_config_from_profile, ProfileInputs};
 
-use super::common::{DISASTER_STOP_FRACTION, MAX_VIEW_AGE_NS};
+use super::common::MAX_VIEW_AGE_NS;
 
 fn inputs() -> ProfileInputs {
     ProfileInputs {
-        disaster_stop_fraction: DISASTER_STOP_FRACTION,
+        disaster_stop_fraction: 0.1,
         max_account_view_age_ns: MAX_VIEW_AGE_NS,
     }
 }
@@ -36,7 +36,7 @@ fn the_committed_profile_loads_and_says_what_the_file_says() {
     // 100 is the floor the caps are written at; the reference follows equity.
     assert_eq!(cfg.envelope.reference_usdt, 100.0);
     assert_eq!(cfg.envelope.max_component_gross_notional_usdt, 500.0);
-    assert_eq!(cfg.envelope.max_initial_margin_usdt, 100.0);
+    assert_eq!(cfg.envelope.max_initial_margin_usdt, 70.0);
     assert_eq!(cfg.leverage, 5.0);
     assert_eq!(cfg.qty_tolerance, 1e-12);
 
@@ -64,7 +64,7 @@ fn nothing_in_the_profile_is_pinned_to_a_dollar_figure() {
     );
     assert_eq!(
         cfg.envelope.max_initial_margin_usdt,
-        cfg.envelope.reference_usdt
+        cfg.envelope.reference_usdt * 0.7
     );
     assert_eq!(cfg.envelope.floor_usdt, cfg.envelope.reference_usdt);
 }
@@ -73,14 +73,14 @@ fn nothing_in_the_profile_is_pinned_to_a_dollar_figure() {
 fn a_rendered_carry_stop_widens_the_kernel_ceiling() {
     let mut doc: serde_json::Value =
         serde_json::from_str(&repo_config("operational.json")).unwrap();
-    doc["carry"]["declared_stop_loss_fraction"] = serde_json::json!(0.4);
+    doc["carry"]["declared_stop_loss_fraction"] = serde_json::json!(0.15);
     let cfg = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap();
-    assert_eq!(cfg.envelope.disaster_stop_fraction, 0.4);
+    assert_eq!(cfg.envelope.disaster_stop_fraction, 0.15);
 
-    doc["carry"]["declared_stop_loss_fraction"] = serde_json::json!(0.2);
+    doc["carry"]["declared_stop_loss_fraction"] = serde_json::json!(0.05);
     let cfg = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap();
     assert_eq!(
-        cfg.envelope.disaster_stop_fraction, DISASTER_STOP_FRACTION,
+        cfg.envelope.disaster_stop_fraction, 0.1,
         "a carry-only tightening must not narrow the other sleeves' ceiling"
     );
 }
@@ -178,19 +178,22 @@ fn a_profile_whose_caps_do_not_nest_is_refused_at_load() {
 }
 
 #[test]
-// The key is gone from the schema, and profile.rs refuses a key it does not
-// read rather than ignoring it — so an old profile still carrying the retired
-// per-symbol cap stops the engine instead of booting with a cap nobody
-// enforces.
-fn a_profile_still_carrying_the_retired_symbol_cap_is_refused() {
+fn profile_symbol_cap_is_read_and_invalid_values_are_refused() {
     let mut doc: serde_json::Value =
         serde_json::from_str(&repo_config("operational.json")).unwrap();
     doc["account_risk"]["max_symbol_notional_usdt"] = serde_json::json!(50.0);
-    let err = kernel_config_from_profile(&doc.to_string(), &inputs()).unwrap_err();
-    assert!(
-        err.to_string().contains("max_symbol_notional_usdt"),
-        "{err}"
+    assert_eq!(
+        kernel_config_from_profile(&doc.to_string(), &inputs())
+            .unwrap()
+            .envelope
+            .max_symbol_notional_usdt,
+        50.0
     );
+    doc["account_risk"]["max_symbol_notional_usdt"] = serde_json::json!(0.0);
+    assert!(kernel_config_from_profile(&doc.to_string(), &inputs())
+        .unwrap_err()
+        .to_string()
+        .contains("max_symbol_notional_usdt"));
 }
 
 #[test]

@@ -52,6 +52,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
 
 const ACCOUNT_RISK_KEYS: &[&str] = &[
     "max_component_gross_notional_usdt",
+    "max_symbol_notional_usdt",
     "max_account_gross_notional_usdt",
     "max_initial_margin_usdt",
     "max_leverage",
@@ -298,6 +299,7 @@ pub fn kernel_config_from_profile(
             "account_risk",
         )?,
         max_initial_margin_usdt: number(account, "max_initial_margin_usdt", "account_risk")?,
+        max_symbol_notional_usdt: number(account, "max_symbol_notional_usdt", "account_risk")?,
     };
 
     let config = KernelConfig {
@@ -308,5 +310,13 @@ pub fn kernel_config_from_profile(
         max_rolling_loss_fraction: number(account, "max_rolling_loss_fraction", "account_risk")?,
     };
     config.validate()?;
+    if config.envelope.max_initial_margin_usdt >= config.envelope.reference_usdt {
+        return Err(bad(
+            "operational initial-margin cap must be below capital_reference_usdt",
+        ));
+    }
+    if config.envelope.disaster_stop_fraction * config.leverage >= 1.0 {
+        return Err(bad("operational stop distance must be below 1 / leverage"));
+    }
     Ok(config)
 }

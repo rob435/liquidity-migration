@@ -170,6 +170,7 @@ impl BenchResult {
 pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
     let venue_addr = start_mock_venue_with(options.venue_delay)?;
     let settings = EngineSection {
+        execution_limits: None,
         wal_path: options.wal_path.clone(),
         // Named but unused: the bench builds its own pretend venue below.
         venue: engine_venue::BYBIT_DEMO.to_string(),
@@ -445,6 +446,7 @@ fn benchmark_risk() -> Result<engine_risk::Kernel, EngineError> {
             gross_notional_multiple: 100.0,
             disaster_stop_fraction: 0.35,
             max_component_gross_notional_usdt: 1_000_000.0,
+            max_symbol_notional_usdt: 1_000_000.0,
             max_initial_margin_usdt: 9_000.0,
         },
         leverage: 100.0,

@@ -1930,6 +1930,8 @@ mod tests {
         let records = crate::tests::shared_sleeves::owned_records("1000000000000000000", "0");
         let mut position = held(0, Side::Buy, 1e18, true);
         position.exact_amounts = Some(Box::new(engine_types::risk::PositionAmounts {
+            liquidation_price: None,
+            mark_price: None,
             quantity: engine_types::numeric::ExactNumber::venue_decimal("1000000000000000001")
                 .unwrap(),
             entry_price: engine_types::numeric::ExactNumber::venue_decimal("100").unwrap(),

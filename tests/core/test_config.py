@@ -59,25 +59,13 @@ def test_merge_dataclass_rejects_unknown_keys() -> None:
 
 
 def test_cost_config_default_models_live_100pct_taker() -> None:
-    # The dataclass default must model the deployed 100%-taker market execution
-    # (maker_fill_probability=0.0), NOT a 0.60 maker blend. A maker-blend default
-    # under-costs by ~36% (9.6 vs 15.0 bps) and silently flatters returns on any
-    # consumer that does not pass the YAML — the canonical cost-too-low error.
     assert CostConfig().maker_fill_probability == pytest.approx(0.0)
-    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(
-        2.0 * (5.5 + 2.0)  # 15.0 bps round-trip, 100% taker
-    )
-    assert CostConfig(exit_cost_multiplier=1.0).base_entry_exit_cost_bps == pytest.approx(15.0)
-    # A maker blend must still be expressible when explicitly opted into (E3).
+    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(26.0)
+    assert CostConfig(exit_cost_multiplier=1.0).base_entry_exit_cost_bps == pytest.approx(26.0)
     assert CostConfig(maker_fill_probability=0.60).base_entry_exit_cost_bps == pytest.approx(
-        2.0 * (0.60 * (2.0 + 1.0) + 0.40 * (5.5 + 2.0))  # 9.6 bps
+        2.0 * (0.60 * (4.0 + 1.0) + 0.40 * (11.0 + 2.0))
     )
-    # E4: a costlier cover (exit) leg — only the exit leg scales. Symmetric base
-    # is now the 100%-taker blend (taker_fee+taker_slippage = 7.5 bps/leg).
-    taker_leg = 5.5 + 2.0
-    assert CostConfig(exit_cost_multiplier=2.0).base_entry_exit_cost_bps == pytest.approx(
-        taker_leg * 3.0  # entry(1) + exit(2) legs
-    )
+    assert CostConfig(exit_cost_multiplier=2.0).base_entry_exit_cost_bps == pytest.approx(39.0)
 
 
 def test_ensure_data_root_exists(tmp_path: Path) -> None:
@@ -153,7 +141,7 @@ def test_merge_dataclass_native_values_unchanged() -> None:
 def test_default_config_load_unchanged() -> None:
     # The zero-arg default load must be wholly unaffected by both fixes.
     default = load_config()
-    assert default.costs.base_entry_exit_cost_bps == pytest.approx(15.0)
+    assert default.costs.base_entry_exit_cost_bps == pytest.approx(26.0)
     assert default.exchange.name == "bybit"
 
 
@@ -164,9 +152,9 @@ def test_cost_config_default_is_full_taker_not_maker_blend() -> None:
     # The default must NOT be the 0.60 maker blend (9.6 bps) that under-costs by
     # ~36% and silently flatters returns. It must be the deployed 100%-taker cost.
     assert CostConfig().maker_fill_probability == pytest.approx(0.0)
-    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(15.0)
+    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(26.0)
     # A maker blend must still be expressible when explicitly opted into.
-    assert CostConfig(maker_fill_probability=0.60).base_entry_exit_cost_bps == pytest.approx(9.6)
+    assert CostConfig(maker_fill_probability=0.60).base_entry_exit_cost_bps == pytest.approx(16.4)
     # The default must never be cheaper than the explicit full-taker cost.
     assert CostConfig().base_entry_exit_cost_bps == pytest.approx(
         replace(CostConfig(), maker_fill_probability=0.0).base_entry_exit_cost_bps

@@ -311,6 +311,10 @@ async fn recovered_worked_entry_is_cancelled_with_paced_retries_after_rotation()
         dispatch, request, ..
     } = &mut record
     {
+        request.reduce_only = true;
+        request.sleeve_effect = Some(engine_types::orders::SleeveOrderEffect::Increase {
+            stop: engine_types::StopSpec { trigger_px: 90.0 },
+        });
         *dispatch = Some(Box::new(
             engine_types::order_dispatch::QueuedOrderDispatch {
                 intent: engine_types::Intent {
@@ -358,4 +362,90 @@ async fn recovered_worked_entry_is_cancelled_with_paced_retries_after_rotation()
     recovered.pass(32 * SECOND, &dark, &[], &ledger, &mut actions);
     assert!(actions.is_empty());
     assert!(WorkingOrders::recover(&ledger, &Default::default(), SECOND).is_empty());
+}
+
+#[test]
+fn post_only_deadline_cancels_before_an_ioc_can_cross() {
+    let (mut working, mut ledger) = working_one();
+    ledger.orders.get_mut("a").unwrap().request.kind = OrderKind::Limit {
+        px: 99.0,
+        tif: TimeInForce::PostOnly,
+    };
+    let now = WorkPolicy::default().window_ms * 1_000_000 + SECOND;
+    assert!(
+        matches!(one_pass(&mut working, &ledger, &market(100.0, 102.0), now).as_slice(), [Action::Cancel { client_order_id, .. }] if client_order_id == "a")
+    );
+    working.cancelled("a", true);
+    assert!(one_pass(&mut working, &ledger, &market(100.0, 102.0), now + SECOND).is_empty());
+}
+
+#[test]
+fn crossing_waits_for_terminal_fill_reconciliation_then_sends_only_the_remainder_once() {
+    let (mut working, mut ledger) = working_one();
+    ledger.orders.get_mut("a").unwrap().request.kind = OrderKind::Limit {
+        px: 99.0,
+        tif: TimeInForce::PostOnly,
+    };
+    let now = WorkPolicy::default().window_ms * 1_000_000 + SECOND;
+    one_pass(&mut working, &ledger, &market(100.0, 102.0), now);
+    working.cancelled("a", true);
+    ledger.orders.get_mut("a").unwrap().ending = Some(crate::inflight::Ending::Cancelled);
+    assert!(one_pass(&mut working, &ledger, &market(100.0, 102.0), now + SECOND).is_empty());
+    ledger.orders.get_mut("a").unwrap().fill_quantity =
+        engine_types::wal::OrderFillQuantity::LegacyBinary64 { quantity: 0.375 };
+    working.confirm_cross("a");
+    let actions = one_pass(
+        &mut working,
+        &ledger,
+        &market(101.0, 103.0),
+        now + 2 * SECOND,
+    );
+    let [Action::Place(intent)] = actions.as_slice() else {
+        panic!("{actions:?}")
+    };
+    assert_eq!(
+        intent.quantity().unwrap(),
+        engine_types::numeric::Exact::parse_decimal("0.625").unwrap()
+    );
+    assert_eq!(
+        intent.kind,
+        OrderKind::Limit {
+            px: 103.0,
+            tif: TimeInForce::Ioc
+        }
+    );
+    assert!(intent.work.is_none());
+    assert!(one_pass(
+        &mut working,
+        &ledger,
+        &market(101.0, 103.0),
+        now + 3 * SECOND
+    )
+    .is_empty());
+    let restored = WorkingOrders::recover(&ledger, &Default::default(), now);
+    assert!(
+        restored.is_empty(),
+        "restart cannot recreate the replacement decision"
+    );
+}
+
+#[test]
+fn a_late_cancel_confirmation_does_not_revive_an_expired_cross() {
+    let (mut working, mut ledger) = working_one();
+    ledger.orders.get_mut("a").unwrap().request.kind = OrderKind::Limit {
+        px: 99.0,
+        tif: TimeInForce::PostOnly,
+    };
+    let now = WorkPolicy::default().window_ms * 1_000_000 + SECOND;
+    one_pass(&mut working, &ledger, &market(100.0, 102.0), now);
+    ledger.orders.get_mut("a").unwrap().ending = Some(crate::inflight::Ending::Cancelled);
+    let late = now + WorkPolicy::default().cross_grace_ms * 1_000_000;
+    assert!(one_pass(&mut working, &ledger, &market(100.0, 102.0), late).is_empty());
+    assert!(
+        working.waiting_to_cross("a"),
+        "continue resolving missing fills even after expiry"
+    );
+    working.confirm_cross("a");
+    assert!(one_pass(&mut working, &ledger, &market(100.0, 102.0), late).is_empty());
+    assert!(working.is_empty());
 }

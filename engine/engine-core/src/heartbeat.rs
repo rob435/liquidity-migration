@@ -129,6 +129,7 @@ pub struct Facts<'a> {
     /// assigning it by guess would let one reducer close another sleeve's
     /// holding. Attribution is rebuilt from the WAL before the first beat.
     pub holdings: &'a [(String, Side, f64, f64, Option<String>)],
+    pub account_metrics: Option<&'a engine_types::AccountView>,
     /// Why each asked-for name is not being opened right now, as
     /// (strategy, symbol, reason) rows gathered from the strategies.
     ///
@@ -311,6 +312,7 @@ impl Heartbeat {
                 })
                 .collect(),
             pid: std::process::id(),
+            account_metrics: facts.account_metrics,
             positions: facts
                 .holdings
                 .iter()
@@ -333,7 +335,7 @@ impl Heartbeat {
                 .and_then(|window| amount(window.limit_usdt)),
             rolling_loss_net_usdt: facts
                 .rolling_loss
-                .filter(|window| window.trades > 0)
+                .filter(|window| window.trades > 0 || window.net_usdt != 0.0)
                 .and_then(|window| amount(window.net_usdt)),
             rolling_loss_trades: facts.rolling_loss.map(|window| window.trades),
             rolling_loss_tripped: facts.rolling_loss.is_some_and(|window| window.tripped),
@@ -424,6 +426,8 @@ fn temp_beside(path: &Path) -> PathBuf {
 struct HeartbeatOutput<'a> {
     account_available_usdt: Option<Number>,
     account_equity_usdt: Option<Number>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_metrics: Option<&'a engine_types::AccountView>,
     account_observed_wall_ts_ms: Option<i64>,
     account_user_id: Option<&'a str>,
     ack_p50_ns: Option<u64>,

@@ -1407,6 +1407,7 @@ fn owned_exit_fixture(
 
 fn settings() -> EngineSection {
     EngineSection {
+        execution_limits: None,
         wal_path: "unused-in-mocks.wal".into(),
         // Named but unused: these tests hand the engine a mock venue
         // directly rather than going through assembly.

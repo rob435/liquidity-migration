@@ -206,6 +206,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 account_age_ns: (account.observed_ns != 0)
                     .then(|| now_ns.saturating_sub(account.observed_ns)),
                 holdings: &holdings,
+                account_metrics: Some(account),
                 entry_blockers: &blockers,
                 strategy_errors: &strategy_errors,
                 working_entries: &working_entries,

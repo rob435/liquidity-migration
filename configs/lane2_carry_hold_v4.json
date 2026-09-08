@@ -1,10 +1,9 @@
 {
   "config_id": "lane2_carry_hold_v4",
   "registered": "2026-07-31",
-  "lane": 2,
   "surface": "research-only",
   "authorizes": "nothing; this config has no runtime, no venue access, and no REAL_MONEY implication",
-  "descends_from": "lane2_carry_hold_v3 (which keeps scoring; v3's forward record is NOT superseded and must keep accruing)",
+  "descends_from": "lane2_carry_hold_v3",
   "claim": "v3's book plus two changes. (1) The toxic band's high edge moves -5% -> 0%: the trailing-3d-return cohort in [-5%, 0) earns -34.4 bp/name-day on 10% of v3's held name-days and v3 keeps it. (2) A CROWDING-PERSISTENCE size multiplier: a held name whose last 20 settlements were deep (< -10 bp) at most 10% of the time is cut to zero weight. Persistence is not depth. Depth (v2's ladder, kept) asks how much the crowd is paying now; persistence asks whether this name pays habitually. The isolated deep print is the only losing cohort in the book at -16.7 bp/name-day over a third of held name-days, while every bucket above the cut earns +99 to +135. The two multiply.",
   "read_this_before_citing_a_number": {
     "the_two_books_do_not_span_the_same_record": "v3's record is 1,894 decision days and v4's is 1,756: daily_scores spans first-weighted to last-weighted bar, and v4 does not take a position until later because early-2021 names have not yet printed deep often enough. EVERY comparison below is on the 1,756-day SHARED spine, where v3 reads mean +21.12 bp/day and Sharpe 1.41 rather than the +19.83 / 1.38 its own config records over its own longer window. Both are true; they are different windows.",
@@ -32,7 +31,7 @@
     },
     "filters": {
       "toxic_band_ret_3d": {
-        "lo": -0.30,
+        "lo": -0.3,
         "hi": 0.0,
         "note": "v3 used hi -0.05. The change is the ONLY difference and it blocks 10% more name-days. Plateau: hi in {-0.10, -0.05, -0.02, 0.00} all score within 0.8 bp/day of each other and it degrades at +2% and +5%; lo in {-0.40, -0.30, -0.25} likewise, degrading at -0.50 and -0.20. Zero is also the less-fitted edge - down at all versus not down - so it is a weaker prior than -5%. Capitulation below -30% is still KEPT: the relationship is U-shaped and that cohort earns +336.9 bp/name-day. A null ret_3d fails open."
       },
@@ -42,11 +41,16 @@
     "sizing": {
       "per_name_cap": 0.1,
       "gross_cap": 1.0,
-      "depth_scaling": {"basis": "trail_fund_24h", "ref_bp_per_day": 120.0, "floor": 0.25, "note": "identical to v2/v3"},
+      "depth_scaling": {
+        "basis": "trail_fund_24h",
+        "ref_bp_per_day": 120.0,
+        "floor": 0.25,
+        "note": "identical to v2/v3"
+      },
       "persistence_scaling": {
         "basis": "deep_settlement_share",
         "window_settlements": 20,
-        "cut": 0.10,
+        "cut": 0.1,
         "low_multiplier": 0.0,
         "note": "NEW in v4. Share of the symbol's last 20 SETTLEMENTS printing deeper than the 10 bp entry threshold, measured in the symbol's own settlement sequence and shifted one settlement so a name's first deep print never counts itself. At or below the cut the weight is multiplied by 0.0, i.e. the name is not held that day. Counted in settlements and not on a clock on purpose: Bybit's interval mix went 100% 8h in 2021 -> 52% 4h / 21% 1h in 2025, so an hours-based version reports the symbol's cadence and the confound has an era gradient. A null persistence (fewer than 20 settlements of history) FAILS OPEN at full size so this cannot act as a listing-age screen; measured on the registered book the branch never fires, 0 of 3,314 v3 held name-days have a null."
       },
@@ -64,15 +68,27 @@
     "measured_fee_side_bp": 7.78,
     "charging": "measured one-way turnover x fee per side, per day, identical to v1/v2/v3",
     "funding": "settlement_exact (2026-07-28 corrected detector)",
-    "not_modelled": ["slippage beyond the taker fee", "market impact", "partial fills", "borrow", "margin cost", "venue outage"]
+    "not_modelled": [
+      "slippage beyond the taker fee",
+      "market impact",
+      "partial fills",
+      "borrow",
+      "margin cost",
+      "venue outage"
+    ]
   },
   "scoring_recipe": {
     "metric": "mean net bp per day and annualised Sharpe on the raw daily series",
-    "secondary": ["compounded total return", "max drawdown", "MAR", "mean one-way turnover", "mean gross", "paired daily differentials vs lane2_carry_hold_v3 on shared days, BOTH at own capital and capital-normalised"],
-    "comparator": "lane2_carry_hold_v3's forward rows are the primary comparator; also v2, the retired CONTINUOUS research render (Sharpe 1.84), and zero",
+    "secondary": [
+      "compounded total return",
+      "max drawdown",
+      "MAR",
+      "mean one-way turnover",
+      "mean gross",
+      "paired daily differentials vs lane2_carry_hold_v3 on shared days, BOTH at own capital and capital-normalised"
+    ],
+    "comparator": "Historical paired daily differences against predecessor configs on identical data and costs; all selection and coverage limits reported.",
     "grid": "none; single committed configuration",
-    "cadence": "one row per completed UTC day after the registration commit (scripts/research/score_financed_longs_forward.py)",
-    "eligibility": "only days strictly after the registration commit date count as forward evidence",
     "reproduce_with": "liquidity_migration.research.backtest.financed_longs.score_carry_hold(panel, CarryHoldConfig.from_json(this_file))"
   },
   "measured_at_registration": {
@@ -94,19 +110,75 @@
     },
     "shared_spine_1756_days": {
       "note": "the only fair v3/v4 comparison; mean gross counts flat days as zero capital",
-      "v4": {"mean_gross": 0.0948, "flat_days_pct": 46.2, "mean_net_bp_per_day": 22.19, "sharpe_raw": 1.64, "max_drawdown_raw_pct": -24.46, "mar_raw": 4.14, "annualised_pct": 101.29, "total_return_raw_pct": 2783},
-      "v3": {"mean_gross": 0.1362, "flat_days_pct": 31.4, "mean_net_bp_per_day": 21.12, "sharpe_raw": 1.41, "max_drawdown_raw_pct": -28.69, "mar_raw": 3.08, "annualised_pct": 88.45, "total_return_raw_pct": 2000},
-      "v4_restated_at_v3_capital": {"leverage_factor": 1.437, "mean_net_bp_per_day": 31.88, "sharpe_raw": 1.64, "max_drawdown_raw_pct": -33.52, "mar_raw": 4.67, "annualised_pct": 156.65}
+      "v4": {
+        "mean_gross": 0.0948,
+        "flat_days_pct": 46.2,
+        "mean_net_bp_per_day": 22.19,
+        "sharpe_raw": 1.64,
+        "max_drawdown_raw_pct": -24.46,
+        "mar_raw": 4.14,
+        "annualised_pct": 101.29,
+        "total_return_raw_pct": 2783
+      },
+      "v3": {
+        "mean_gross": 0.1362,
+        "flat_days_pct": 31.4,
+        "mean_net_bp_per_day": 21.12,
+        "sharpe_raw": 1.41,
+        "max_drawdown_raw_pct": -28.69,
+        "mar_raw": 3.08,
+        "annualised_pct": 88.45,
+        "total_return_raw_pct": 2000
+      },
+      "v4_restated_at_v3_capital": {
+        "leverage_factor": 1.437,
+        "mean_net_bp_per_day": 31.88,
+        "sharpe_raw": 1.64,
+        "max_drawdown_raw_pct": -33.52,
+        "mar_raw": 4.67,
+        "annualised_pct": 156.65
+      }
     },
     "era_net_bp_per_day": {
-      "v3_own": {"2021": -1.7, "2022": 4.5, "2023": 10.8, "2024": 8.4, "2025": 41.7, "2026": 64.7},
-      "v4_own": {"2021": -1.2, "2022": 6.7, "2023": 11.6, "2024": 5.8, "2025": 40.9, "2026": 74.1},
-      "v4_at_v3_capital": {"2021": -1.8, "2022": 9.7, "2023": 16.7, "2024": 8.4, "2025": 58.7, "2026": 106.5},
+      "v3_own": {
+        "2021": -1.7,
+        "2022": 4.5,
+        "2023": 10.8,
+        "2024": 8.4,
+        "2025": 41.7,
+        "2026": 64.7
+      },
+      "v4_own": {
+        "2021": -1.2,
+        "2022": 6.7,
+        "2023": 11.6,
+        "2024": 5.8,
+        "2025": 40.9,
+        "2026": 74.1
+      },
+      "v4_at_v3_capital": {
+        "2021": -1.8,
+        "2022": 9.7,
+        "2023": 16.7,
+        "2024": 8.4,
+        "2025": 58.7,
+        "2026": 106.5
+      },
       "note": "all on the shared spine. At equal capital v4 wins 2022/2023/2025/2026, ties 2024, and loses 2021 by 0.1 bp. At its OWN capital it wins only 2022/2023/2026 - the era claim depends on the normalisation and both are shown."
     },
     "benchmark_window_2023_03_13_to_2026_07_16": {
-      "v4": {"sharpe_raw": 1.88, "max_drawdown_raw_pct": -24.46, "mar_raw": 6.11, "annualised_pct": 149.38},
-      "v3": {"sharpe_raw": 1.71, "max_drawdown_raw_pct": -28.69, "mar_raw": 4.85, "annualised_pct": 139.01},
+      "v4": {
+        "sharpe_raw": 1.88,
+        "max_drawdown_raw_pct": -24.46,
+        "mar_raw": 6.11,
+        "annualised_pct": 149.38
+      },
+      "v3": {
+        "sharpe_raw": 1.71,
+        "max_drawdown_raw_pct": -28.69,
+        "mar_raw": 4.85,
+        "annualised_pct": 139.01
+      },
       "note": "1.88 is the first carry-hold render to exceed the retired CONTINUOUS research benchmark of 1.84. Seen-data selection; it grades nothing, and the benchmark itself is a retired research render, not the shipped book (which was 1.45)."
     },
     "paired_differential_vs_v3": {

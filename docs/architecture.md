@@ -6,13 +6,13 @@ System topology, execution boundaries, inter-process communication, and durabili
 
 ## 1. Process Topology & Boundaries
 
-The live trading platform runs natively in Rust. Python is restricted to offline research, backtesting, deployment orchestration, and Telegram notifications.
+The execution engine and signal worker run in Rust; Python runs market-tape capture, research, deployment orchestration and notifications.
 
 | Process / Component | Language | Authority | Credentials | State Root | Systemd Unit |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Trading Engine** (`engine`) | Rust | Sole order authority, WAL, risk kernel, position attribution | Venue API keys (`0600`) | `/var/lib/liquidity-migration-engine[-mainnet]` | `liquidity-migration-engine[-mainnet].service` |
 | **Signal Worker** (`signal-worker`) | Rust | Public market ingestion, feature calculation, observation streaming | None (public data only) | `/var/lib/liquidity-migration-signal-worker-{demo,mainnet}` | `liquidity-migration-signal-worker-{demo,mainnet}.service` |
-| **Market Tape** (`market-tape`) | Rust / Py | Raw tick/book capture, zstd segment compression, manifest logging | None (public WebSocket) | `/var/lib/liquidity-migration/forward-market` | `liquidity-migration-forward-capture[-binance].service` |
+| **Market Tape** (`python -m market_tape`) | Python | Raw tick/book capture, zstd segment compression, manifest logging | None (public WebSocket) | `/var/lib/liquidity-migration/forward-market` | `liquidity-migration-forward-capture[-binance].service` |
 | **Observer / Notifier** | Python | Read-only trade logs, Telegram notifications, heartbeat monitoring | Telegram Bot Token | None (ephemeral) | `liquidity-migration-trade-notify.service` |
 | **Equity Recorder** | Python | Read-only heartbeat and recorder status sampling, one line per minute | None | None | `liquidity-migration-equity-recorder.service` |
 

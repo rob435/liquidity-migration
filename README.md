@@ -10,7 +10,7 @@ Quantitative research, market data capture, and low-latency algorithmic trading 
 | :--- | :--- | :--- | :--- |
 | **Trading Engine** | Rust (`engine/`) | Low-latency single-threaded execution loop, WAL ledger, risk kernel, venue orders | [`docs/engine.md`](docs/engine.md) |
 | **Signal Worker** | Rust (`engine/signal-worker/`) | Credential-free public data ingestion, feature computation, AF_UNIX streaming | [`docs/architecture.md`](docs/architecture.md) |
-| **Market Tape** | Rust / Python (`market_tape/`) | High-throughput tick/L2 recording, zstd compression, Google Drive archive | [`market_tape/README.md`](market_tape/README.md) |
+| **Market Tape** | Python (`market_tape/`) | High-throughput tick/L2 recording, zstd compression, Google Drive archive | [`market_tape/README.md`](market_tape/README.md) |
 | **Operations** | Shell / Python (`scripts/`) | Deployment orchestration, safety stops, liveness monitoring, Telegram alerts | [`docs/operations.md`](docs/operations.md) |
 
 ---
@@ -55,5 +55,5 @@ cargo test --manifest-path engine/Cargo.toml --workspace --all-targets
 | **[docs/trading_logic.md](docs/trading_logic.md)** | Strategy rules: entry/exit formulas, universes, sizing multipliers, LLM entry gate. |
 | **[docs/notifications.md](docs/notifications.md)** | Telegram surfaces, trade alert schemas, liveness matrices, interactive bot commands. |
 | **[docs/strategy_template.md](docs/strategy_template.md)** | Developer contract and boilerplate for implementing new native Rust strategies. |
-| **[docs/research/governance.md](docs/research/governance.md)** | Progressive Evidence Model: Lane-1 exploration vs Lane-2 promotion rules. |
+| **[docs/research/governance.md](docs/research/governance.md)** | Research evidence: causal inputs, costs, reconstructable accounting and shaped-versus-graded scope. |
 | **[docs/research/research_findings.md](docs/research/research_findings.md)** | Empirical research findings and historical evidence log. |

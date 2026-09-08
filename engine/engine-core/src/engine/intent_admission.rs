@@ -301,7 +301,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         state: &engine_types::portfolio_control::PortfolioEmergency,
     ) -> Result<Option<PreparedOrder>, EngineError> {
         use engine_types::numeric::Exact;
-        use engine_types::order_terms::{quantize_portfolio_close, QuantityPolicy};
+        use engine_types::order_terms::{
+            quantize_with_exact_prices, OrderInputPolicy, QuantityPolicy,
+        };
         use engine_types::orders::SleeveOrderEffect;
         let Some(client_order_id) = state.order_id.clone() else {
             return Ok(None);
@@ -348,16 +350,66 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let Some(spec) = self.instrument_specs.get(&state.symbol) else {
             return Ok(None);
         };
-        if let Some(max) = spec.max_market_qty.as_ref() {
+        let mut close_intent = Intent {
+            strategy: owner,
+            symbol: state.symbol,
+            side,
+            qty: quantity
+                .to_f64()
+                .map_err(|e| EngineError::State(e.to_string()))?,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: true,
+            exact_prices: None,
+            exact_quantity: Some(Box::new(quantity.clone())),
+            tag: format!("portfolio-emergency:{}", state.id),
+            decided_ns: clock::now_ns(),
+            work: None,
+            leverage: None,
+        };
+        if let Err(reason) = self.collar_intent(&mut close_intent) {
+            tracing::warn!(
+                symbol = state.symbol.0,
+                reason,
+                "emergency close waits for a usable mark collar"
+            );
+            return Ok(None);
+        }
+        let market = matches!(close_intent.kind, OrderKind::Market);
+        if let Some(max) = (if market {
+            &spec.max_market_qty
+        } else {
+            &spec.max_qty
+        })
+        .as_ref()
+        {
             quantity = quantity.min(max.clone());
         }
-        let reference = self.reference_px(state.symbol, &OrderKind::Market);
+        let reference = self.reference_px(state.symbol, &close_intent.kind);
+        let quantize = |policy| {
+            quantize_with_exact_prices(
+                spec,
+                side,
+                (
+                    quantity.clone(),
+                    OrderInputPolicy::CanonicalPortfolio,
+                    close_intent.exact_prices.as_deref(),
+                ),
+                close_intent.kind,
+                None,
+                reference,
+                policy,
+            )
+        };
         let mut policy = QuantityPolicy::Normal;
-        let mut terms = quantize_portfolio_close(spec, side, &quantity, reference, policy);
-        let below_minimum = spec
-            .market_min_qty
-            .as_ref()
-            .is_some_and(|min| &quantity < min)
+        let mut terms = quantize(policy);
+        let below_minimum = (if market {
+            &spec.market_min_qty
+        } else {
+            &spec.min_qty
+        })
+        .as_ref()
+        .is_some_and(|min| &quantity < min)
             || reference
                 .and_then(|px| engine_types::order_terms::strategy_decimal(px).ok())
                 .is_some_and(|px| {
@@ -372,7 +424,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             && quantity == physical_qty
         {
             policy = QuantityPolicy::CloseEntirePosition;
-            terms = quantize_portfolio_close(spec, side, &quantity, reference, policy);
+            terms = quantize(policy);
         }
         let Ok(terms) = terms else {
             return Ok(None);
@@ -387,7 +439,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             symbol: state.symbol,
             side,
             qty,
-            kind: OrderKind::Market,
+            kind: close_intent.kind,
             stop: None,
             reduce_only: true,
             close_position: policy == QuantityPolicy::CloseEntirePosition,
@@ -404,7 +456,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         let decided_ns = clock::now_ns();
         let intent = Intent {
-            exact_prices: None,
+            exact_prices: request.canonical_intent_prices(),
             exact_quantity: Some(Box::new(terms.quantity.clone())),
             strategy: owner,
             symbol: state.symbol,
@@ -580,6 +632,21 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // nothing.
         let mut intent = intent;
         let work = self.plan_resting_entry(&mut intent);
+        if let Err(reason) = self
+            .collar_intent(&mut intent)
+            .and_then(|()| self.cap_entry_stop_distance(&mut intent))
+        {
+            self.wal.append(&WalRecord::Verdict {
+                client_order_id: None,
+                verdict: RiskVerdict::Deny {
+                    reason: DenyReason::UnknownState {
+                        detail: reason.clone(),
+                    },
+                },
+            })?;
+            self.tell_refused(&intent, &reason, client_order_id.as_deref())?;
+            return Ok(None);
+        }
 
         let mut canonical_allowed = None;
         let verdict = if self.instrument_specs.contains_key(&intent.symbol) {
@@ -732,7 +799,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let held_position = held.next().map(|position| (position.side, position.qty));
         let one_position = held.next().is_none();
         let close_position_candidate = intent.reduce_only
-            && matches!(intent.kind, OrderKind::Market)
+            && matches!(
+                intent.kind,
+                OrderKind::Market
+                    | OrderKind::Limit {
+                        tif: TimeInForce::Ioc,
+                        ..
+                    }
+            )
             && self.venue.caps().close_position_below_minimum
             && one_position
             && held_position.is_some_and(|(side, qty)| {
@@ -871,7 +945,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         );
         if terms.is_err()
             && intent.reduce_only
-            && matches!(intent.kind, OrderKind::Market)
+            && matches!(
+                intent.kind,
+                OrderKind::Market
+                    | OrderKind::Limit {
+                        tif: TimeInForce::Ioc,
+                        ..
+                    }
+            )
             && self.venue.caps().close_position_below_minimum
         {
             let held: Vec<_> = self
@@ -884,7 +965,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             if let [position] = held.as_slice() {
                 let exact_match = position.quantity().is_ok_and(|held| quantity == held);
                 let below_minimum = position.quantity().is_ok_and(|qty| {
-                    spec.market_min_qty.as_ref().is_some_and(|min| &qty < min)
+                    (if matches!(intent.kind, OrderKind::Market) {
+                        &spec.market_min_qty
+                    } else {
+                        &spec.min_qty
+                    })
+                    .as_ref()
+                    .is_some_and(|min| &qty < min)
                         || reference
                             .and_then(|px| strategy_decimal(px).ok())
                             .is_some_and(|px| {
@@ -1081,11 +1168,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .filter_map(|(stop, side)| stop.map(|stop| (side, stop.into_owned()))),
         )?;
         if !plan.reduce_only {
-            if self.stop_repairs_pending.contains(&request.symbol) {
+            if !request.is_sleeve_reduction() && self.stop_repairs_pending.contains(&request.symbol)
+            {
                 return Err("physical growth is waiting for native stop repair".into());
             }
             if !self.private_stream_ready
-                || !self.may_open
+                || (!self.may_open && !request.is_sleeve_reduction())
                 || !self.dispatches.unresolved.is_empty()
             {
                 return Err(
@@ -1510,15 +1598,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .unwrap_or_default();
         match working::plan::opening(intent, touch, &rule) {
             working::plan::Opening::AsWritten => None,
-            working::plan::Opening::WorkAsPriced { policy } => Some(policy),
+            working::plan::Opening::WorkAsPriced { policy } => {
+                if let OrderKind::Limit { ref mut tif, .. } = intent.kind {
+                    *tif = TimeInForce::PostOnly;
+                }
+                Some(policy)
+            }
             working::plan::Opening::Rest { px, policy } => {
-                // Good-till-cancelled, not post-only. The overnight lab that
-                // first measured resting ran post-only into the demo realm's
-                // pretend internal liquidity, which flattered it; the numbers
-                // this recipe is built on are GTC numbers.
                 intent.kind = OrderKind::Limit {
                     px,
-                    tif: TimeInForce::Gtc,
+                    tif: TimeInForce::PostOnly,
                 };
                 Some(policy)
             }

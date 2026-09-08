@@ -437,7 +437,15 @@ async fn run<V: VenueGateway>(
     mut commands: mpsc::Receiver<Command>,
     completions: mpsc::Sender<MutationCompletion>,
 ) {
-    while let Some(command) = commands.recv().await {
+    let mut deferred = None;
+    loop {
+        let command = match deferred.take() {
+            Some(command) => command,
+            None => match commands.recv().await {
+                Some(command) => command,
+                None => break,
+            },
+        };
         match command {
             Command::SendOrders {
                 command_id,
@@ -483,21 +491,54 @@ async fn run<V: VenueGateway>(
                 client_order_id,
                 spec,
             } => {
+                let mut ids = vec![command_id];
+                let mut requests = vec![(symbol, client_order_id, spec)];
+                while requests.len() < 10 {
+                    match commands.try_recv() {
+                        Ok(Command::Amend {
+                            command_id,
+                            symbol,
+                            client_order_id,
+                            spec,
+                        }) if !requests.iter().any(|(_, id, _)| *id == client_order_id) => {
+                            ids.push(command_id);
+                            requests.push((symbol, client_order_id, spec));
+                        }
+                        Ok(command) => {
+                            deferred = Some(command);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
                 let started_ns = engine_types::clock::mono_ns();
-                let reply = venue.amend_order(symbol, &client_order_id, spec).await;
+                let replies = venue.amend_orders(&requests).await;
                 let timing = venue.take_mutation_timing();
-                let rate_wait_ns = venue.take_rate_wait_ns();
+                let mut rate_wait_ns = venue.take_rate_wait_ns();
                 let completed_ns = engine_types::clock::mono_ns();
-                let _ = completions
-                    .send(MutationCompletion::Amend {
-                        command_id,
-                        started_ns,
-                        completed_ns,
-                        timing,
-                        rate_wait_ns,
-                        reply,
-                    })
-                    .await;
+                let replies = if replies.len() == ids.len() {
+                    replies
+                } else {
+                    ids.iter()
+                        .map(|_| {
+                            Err(VenueError::BadReply(
+                                "amend response count differs from request count".into(),
+                            ))
+                        })
+                        .collect()
+                };
+                for (command_id, reply) in ids.into_iter().zip(replies) {
+                    let _ = completions
+                        .send(MutationCompletion::Amend {
+                            command_id,
+                            started_ns,
+                            completed_ns,
+                            timing,
+                            rate_wait_ns: rate_wait_ns.take(),
+                            reply,
+                        })
+                        .await;
+                }
             }
             Command::DispatchStop {
                 command_id,

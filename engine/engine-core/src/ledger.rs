@@ -46,9 +46,7 @@ pub struct Quantiles {
 pub enum Segment {
     Decide,
     Durable,
-    /// What the order path actually waited for the disk, after the barrier
-    /// was moved alongside the send. Usually zero: the venue's round trip
-    /// outlasts the disk's. A number here is the disk winning that race.
+    /// Time waiting for order durability before the venue send.
     BarrierWait,
     /// How long the venue adapter held a command back to stay inside the
     /// venue's request quota. Pacing this engine chose, not latency the venue

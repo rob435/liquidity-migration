@@ -92,15 +92,15 @@ def test_template_names_every_profile_dial_and_its_lines_parse() -> None:
     # proves the template carries no retired one.
     values = parse_systemd_environment_bytes(CREDENTIAL_TEMPLATE.read_bytes(), label="template")
     dials = parse_real_money_dials(values)
-    assert dials.carry_stop_loss_fraction == 0.35
+    assert dials.carry_stop_loss_fraction == 0.10
     assert dials.rolling_loss_fraction == 0.10
 
 
 def test_profile_dials_are_parsed_and_proved() -> None:
-    dials = parse_real_money_dials({"RM_CARRY_STOP_LOSS_FRACTION": "0.25"})
-    assert dials.carry_stop_loss_fraction == 0.25
+    dials = parse_real_money_dials({"RM_CARRY_STOP_LOSS_FRACTION": "0.15"})
+    assert dials.carry_stop_loss_fraction == 0.15
     _data, profile = render_real_money_profile(dials)
-    assert profile.carry.declared_stop_loss_fraction == 0.25
+    assert profile.carry.declared_stop_loss_fraction == 0.15
     with pytest.raises(ValueError, match="must sit in"):
         render_real_money_profile(RealMoneyDials(carry_stop_loss_fraction=1.0))
 

@@ -142,6 +142,15 @@ pub fn build_long_features(
     }
 }
 
+pub(crate) fn carry_decision_at(observed_ts_ms: i64, phase_ms: i64, lag_ms: i64) -> Option<i64> {
+    let day = observed_ts_ms.saturating_sub(observed_ts_ms.rem_euclid(DAY_MS));
+    let mut decision = day.saturating_add(phase_ms);
+    if observed_ts_ms < decision.saturating_add(lag_ms) {
+        decision = decision.saturating_sub(DAY_MS);
+    }
+    (decision > 0).then_some(decision)
+}
+
 pub fn build_carry_features(
     klines: &KlineHistory,
     funding: &FundingHistory,
@@ -150,18 +159,12 @@ pub fn build_carry_features(
     observed_ts_ms: i64,
     cfg: &CarryFeatureConfig,
 ) -> CarryFeatureBuild {
-    let day = observed_ts_ms - observed_ts_ms.rem_euclid(DAY_MS);
-    let mut decision_ts_ms = day + cfg.decision_phase_ms;
-    if observed_ts_ms < decision_ts_ms + cfg.decision_kline_lag_ms {
-        decision_ts_ms -= DAY_MS;
-    }
-    if decision_ts_ms <= 0 {
-        return CarryFeatureBuild {
-            decision_ts_ms: None,
-            rows: Vec::new(),
-            rejections: Vec::new(),
-        };
-    }
+    let decision_ts_ms = carry_decision_at(
+        observed_ts_ms,
+        cfg.decision_phase_ms,
+        cfg.decision_kline_lag_ms,
+    )
+    .unwrap_or(0);
     build_carry_features_at(
         klines,
         funding,

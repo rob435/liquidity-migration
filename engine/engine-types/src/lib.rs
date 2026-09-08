@@ -177,6 +177,21 @@ pub trait VenueGateway: Send + 'static {
         client_order_id: &str,
         spec: AmendSpec,
     ) -> Result<(), VenueError>;
+    /// Amend distinct orders concurrently when the adapter supports request IDs.
+    /// Results retain request order; the default preserves serial venue nonces.
+    async fn amend_orders(
+        &mut self,
+        requests: &[(SymbolId, String, AmendSpec)],
+    ) -> Vec<Result<(), VenueError>> {
+        let mut replies = Vec::with_capacity(requests.len());
+        for (symbol, client_order_id, spec) in requests {
+            replies.push(
+                self.amend_order(*symbol, client_order_id, spec.clone())
+                    .await,
+            );
+        }
+        replies
+    }
     /// Exact timing marks for the most recent cancel or amend when the
     /// transport exposes them. Taking the value clears it so an older
     /// request can never be attributed to a later command.

@@ -152,9 +152,9 @@ def test_backup_unit_defaults_point_at_the_drive_and_the_shared_receipt() -> Non
     assert "EnvironmentFile=-/etc/liquidity-migration/backup.env" in unit
     host = (SYSTEMD / "liquidity-migration-host-liveness.service").read_text(encoding="utf-8")
     assert "--backup-stamp-file /var/lib/liquidity-migration/receipts/backup.last-success" in host
-    assert "--max-backup-age-hours 8" in host
+    assert "--max-backup-age-hours 0.5" in host
     timer = (SYSTEMD / "liquidity-migration-backup.timer").read_text(encoding="utf-8")
-    assert "OnCalendar=*-*-* 03,09,15,21:17:00 UTC" in timer
+    assert "OnCalendar=*-*-* *:02,17,32,47:00 UTC" in timer
 
 
 def test_both_new_units_run_their_committed_scripts() -> None:

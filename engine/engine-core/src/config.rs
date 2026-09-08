@@ -52,6 +52,8 @@ pub struct Config {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineSection {
+    #[serde(default)]
+    pub execution_limits: Option<ExecutionLimits>,
     pub wal_path: PathBuf,
     /// Which venue adapter to run, by name — not an address. Left out means
     /// the Bybit demo account, which is what every config meant before this
@@ -83,7 +85,7 @@ pub struct EngineSection {
     /// `"shared"` (the default, and the behavior every config before this key
     /// meant): a hand may retune a symbol while it sits flat, so the engine
     /// forgets what it set the moment a symbol goes flat and re-confirms with
-    /// the venue before the next entry — one round trip (~172 ms measured)
+    /// the venue before the next entry — one round trip
     /// per entry from flat. `"sole"`: this engine holds the account's single
     /// mutation lease and is the only leverage writer, so what it set stays
     /// trusted across flat spells, entries skip the round trip, and instead
@@ -112,6 +114,28 @@ pub struct EngineSection {
     /// means none is written and the phone falls back to reporting the books.
     #[serde(default)]
     pub trades_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionLimits {
+    pub mark_collar_bps: f64,
+    pub reject_limit: usize,
+    pub reject_window_ms: u64,
+}
+
+impl ExecutionLimits {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.mark_collar_bps.is_finite()
+            || !(0.0..=1000.0).contains(&self.mark_collar_bps)
+            || self.mark_collar_bps == 0.0
+            || self.reject_limit == 0
+            || self.reject_window_ms == 0
+        {
+            return Err("execution limits require a mark collar in (0, 1000] bp and positive reject count/window".into());
+        }
+        Ok(())
+    }
 }
 
 /// See [`EngineSection::leverage_authority`].

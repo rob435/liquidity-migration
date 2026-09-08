@@ -30,6 +30,19 @@ pub(crate) fn plan(
             native_stop: None,
         });
     }
+    if request.is_sleeve_reduction() {
+        let owner = portfolio
+            .positions
+            .iter()
+            .find(|row| row.strategy == request.strategy && row.symbol == request.symbol)
+            .ok_or("sleeve reduction has no owned lot")?;
+        if owner.signed_qty.is_zero()
+            || owner.signed_qty.is_positive() == (request.side == Side::Buy)
+            || quantity > owner.signed_qty.abs()
+        {
+            return Err("sleeve reduction exceeds or opposes its owned lot".into());
+        }
+    }
     let after = before
         .after(request.side, &quantity)
         .map_err(|e| format!("{e:?}"))?;
@@ -104,7 +117,15 @@ pub(crate) fn plan(
     {
         trigger = tighter(side, trigger, Some(stop));
     }
-    let trigger = trigger.ok_or("physical growth has no surviving sleeve protection")?;
+    let Some(trigger) = trigger else {
+        if request.is_sleeve_reduction() && owner_seen {
+            return Ok(ProtectionPlan {
+                reduce_only: false,
+                native_stop: None,
+            });
+        }
+        return Err("physical growth has no surviving sleeve protection".into());
+    };
     let mut reference = reference.clone();
     if let OrderKind::Limit { px, .. } = request.kind {
         let limit = request
@@ -215,6 +236,40 @@ mod tests {
     fn interval(low: f64, high: f64) -> PhysicalExposureInterval {
         PhysicalExposureInterval::try_new(low, high).unwrap()
     }
+    #[test]
+    fn an_owned_exit_behind_a_hand_short_preserves_hand_protection_when_present() {
+        let portfolio = PortfolioState {
+            positions: vec![row(0, "1", "90")],
+            ..Default::default()
+        };
+        for stops in [vec![], vec![(Side::Sell, d("110"))]] {
+            let expected = stops.first().map(|(_, price)| price.clone());
+            let result = plan(
+                &portfolio,
+                &request(0, Side::Sell, "1", None),
+                interval(-2.0, -2.0),
+                &spec(),
+                &d("100"),
+                stops,
+            )
+            .unwrap();
+            assert!(
+                !result.reduce_only,
+                "selling closes the owned long but grows the venue short"
+            );
+            assert_eq!(result.native_stop.map(|s| s.trigger_price), expected);
+        }
+        assert!(plan(
+            &portfolio,
+            &request(0, Side::Sell, "1.1", None),
+            interval(-2.0, -2.0),
+            &spec(),
+            &d("100"),
+            []
+        )
+        .is_err());
+    }
+
     #[test]
     fn closing_one_of_opposite_sleeves_protects_the_surviving_side() {
         let portfolio = PortfolioState {

@@ -67,6 +67,13 @@ impl PortfolioFacts {
         }
         Ok(Self { positions, net })
     }
+    pub(super) fn symbol_gross_quantity(&self, symbol: SymbolId, physical: &Exact) -> Exact {
+        self.positions
+            .iter()
+            .filter(|p| p.symbol == symbol)
+            .fold(Exact::zero(), |sum, p| sum + p.qty.abs())
+            + (physical - self.net.get(&symbol).cloned().unwrap_or_default()).abs()
+    }
     pub(super) fn owned(&self, strategy: StrategyId, symbol: SymbolId) -> Exact {
         self.positions
             .iter()

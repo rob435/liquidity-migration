@@ -34,6 +34,7 @@ fn mainnet_config() -> KernelConfig {
             gross_notional_multiple: 1.75,
             disaster_stop_fraction: DISASTER_STOP_FRACTION,
             max_component_gross_notional_usdt: 175.0,
+            max_symbol_notional_usdt: 175.0,
             max_initial_margin_usdt: 100.0,
         },
         leverage: 2.0,
@@ -454,4 +455,100 @@ fn a_cap_that_is_not_a_positive_number_is_refused() {
         let detail = Kernel::new(cfg).err().expect("must refuse").detail;
         assert!(detail.contains(name), "{name}: got {detail}");
     }
+}
+
+#[test]
+fn symbol_cap_counts_pending_entries_and_preserves_exits() {
+    let mut config = mainnet_config();
+    config.envelope.max_symbol_notional_usdt = 50.0;
+    let mut kernel = kernel(config);
+    let account = flat(100.0, NOW);
+    let first = buy(3.0);
+    assert_eq!(
+        kernel.assess(&first, &account, NOW),
+        RiskVerdict::Allow { qty: 3.0 }
+    );
+    kernel.register_order("pending", &first, 3.0);
+    assert!(matches!(
+        kernel.assess(&buy(2.01), &account, NOW),
+        RiskVerdict::Deny {
+            reason: DenyReason::SymbolNotionalBreached { .. }
+        }
+    ));
+    assert_eq!(
+        kernel.assess(&buy(2.0), &account, NOW),
+        RiskVerdict::Allow { qty: 2.0 }
+    );
+    kernel.complete_order("pending", NOW);
+    let held = view(
+        100.0,
+        vec![position(BUSDT, Side::Buy, 8.0, 10.0, true)],
+        NOW,
+    );
+    assert_eq!(
+        kernel.assess(&exit(CARRY, BUSDT, Side::Sell, 8.0, 10.0, NOW), &held, NOW),
+        RiskVerdict::Allow { qty: 8.0 }
+    );
+}
+
+#[test]
+fn venue_margin_ratios_and_liquidation_prices_bound_growth_but_not_reductions() {
+    use engine_types::numeric::ExactNumber;
+    use engine_types::risk::{AccountAmounts, PositionAmounts};
+    let number = |value: &str| ExactNumber::venue_decimal(value).unwrap();
+    let mut config = mainnet_config();
+    config.envelope.max_initial_margin_usdt = 70.0;
+    let mut k = kernel(config);
+    let mut held = view(
+        100.0,
+        vec![position(BUSDT, Side::Buy, 1.0, 10.0, true)],
+        NOW,
+    );
+    held.positions[0].stop_px = 6.5;
+    held.exact_amounts = Some(Box::new(AccountAmounts {
+        equity_usdt: number("100"),
+        available_usdt: number("100"),
+        initial_margin_rate: Some(number("0.7")),
+        maintenance_margin_rate: Some(number("0.1")),
+    }));
+    assert!(
+        matches!(deny(k.assess(&buy(1.0), &held, NOW)), DenyReason::UnknownState { detail } if detail.contains("margin ratio"))
+    );
+    let amounts = held.exact_amounts.as_deref_mut().unwrap();
+    amounts.initial_margin_rate = Some(number("0.1"));
+    amounts.maintenance_margin_rate = Some(number("1"));
+    assert!(
+        matches!(deny(k.assess(&buy(1.0), &held, NOW)), DenyReason::UnknownState { detail } if detail.contains("margin ratio"))
+    );
+    held.exact_amounts
+        .as_deref_mut()
+        .unwrap()
+        .maintenance_margin_rate = Some(number("0.1"));
+    held.positions[0].exact_amounts = Some(Box::new(PositionAmounts {
+        quantity: number("1"),
+        entry_price: number("10"),
+        mark_price: Some(number("10")),
+        liquidation_price: Some(number("7")),
+    }));
+    assert!(
+        matches!(deny(k.assess(&buy(1.0), &held, NOW)), DenyReason::UnknownState { detail } if detail.contains("liquidation price"))
+    );
+    assert_eq!(
+        k.assess(&exit(CARRY, BUSDT, Side::Sell, 1.0, 10.0, NOW), &held, NOW),
+        RiskVerdict::Allow { qty: 1.0 }
+    );
+    held.positions[0].stop_px = 8.0;
+    assert_eq!(
+        k.assess(&buy(1.0), &held, NOW),
+        RiskVerdict::Allow { qty: 1.0 }
+    );
+    held.positions[0]
+        .exact_amounts
+        .as_deref_mut()
+        .unwrap()
+        .liquidation_price = None;
+    assert_eq!(
+        k.assess(&buy(1.0), &held, NOW),
+        RiskVerdict::Allow { qty: 1.0 }
+    );
 }

@@ -1435,7 +1435,7 @@ def research_equity_chart(
         raw_klines=raw_klines,
         monthly=None,
         png_name=f"{config_id}_equity_btc.png",
-        title=f"RESEARCH {config_id} [{venue}] - registered Lane-2 config",
+        title=f"RESEARCH {config_id} [{venue}] - historical config replay",
         subtitle=(
             (
                 "SIMULATION ON SEEN DATA - opinion, not evidence. Live CARRY reducer replay on the "

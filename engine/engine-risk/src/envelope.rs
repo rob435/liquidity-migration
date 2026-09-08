@@ -92,6 +92,7 @@ mod tests {
             gross_notional_multiple: 10.0,
             disaster_stop_fraction: 0.35,
             max_component_gross_notional_usdt: 10000.0,
+            max_symbol_notional_usdt: 10000.0,
             max_initial_margin_usdt: 1000.0,
         });
         let mut rows = Vec::<(Exact, Exact)>::new();

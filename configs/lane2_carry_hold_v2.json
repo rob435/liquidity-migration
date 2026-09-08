@@ -1,10 +1,9 @@
 {
   "config_id": "lane2_carry_hold_v2",
   "registered": "2026-07-28",
-  "lane": 2,
   "surface": "research-only",
   "authorizes": "nothing; this config has no runtime, no venue access, and no REAL_MONEY implication",
-  "descends_from": "lane2_carry_hold_v1 (which stays registered and keeps scoring; v2 changes SIZING only)",
+  "descends_from": "lane2_carry_hold_v1",
   "claim": "Same book as lane2_carry_hold_v1 (long top-100 Bybit names while their settled funding print is below -10 bp, hysteresis exit above -3 bp), but each held name's weight follows the premium actually being paid: w = 0.10 x clip(|trailing 24h settled funding| / 120 bp-per-day, 0.25, 1.0). Bet size proportional to edge. On corrected settlement-exact accounting over 2021-01..2026-07 this keeps v1's mean (17.0 vs 18.0 bp/day, paired daily differential -1.0 bp/day, t -0.4) while cutting max drawdown -60.0% -> -48.6%, raising Sharpe 1.02 -> 1.11, MAR 0.97 -> 1.25, and cutting turnover 27% (0.197 vs 0.271 one-way/day). This is a risk reallocation, not a mean claim.",
   "rule": {
     "universe": {
@@ -42,16 +41,27 @@
     "measured_fee_side_bp": 7.78,
     "charging": "measured one-way turnover x fee per side, per day, identical to v1",
     "funding": "settlement_exact (corrected 2026-07-28 detector)",
-    "not_modelled": ["slippage beyond the taker fee", "market impact", "partial fills", "borrow", "margin cost", "venue outage"],
+    "not_modelled": [
+      "slippage beyond the taker fee",
+      "market impact",
+      "partial fills",
+      "borrow",
+      "margin cost",
+      "venue outage"
+    ],
     "provenance": "7.78 bp/side measured 2026-07-25 from 85 forward demo fills (all taker)"
   },
   "scoring_recipe": {
     "metric": "mean net bp per day and annualised Sharpe on the raw daily series (vol-targeted reported for recipe comparability, see risk.note)",
-    "secondary": ["compounded total return", "compounded max drawdown", "MAR", "mean one-way turnover", "paired daily differential net_bp(v2) - net_bp(v1) on shared days"],
-    "comparator": "lane2_carry_hold_v1's own forward rows on the same days (the paired differential isolates the sizing change), plus the deployed CONTINUOUS render and zero",
+    "secondary": [
+      "compounded total return",
+      "compounded max drawdown",
+      "MAR",
+      "mean one-way turnover",
+      "paired daily differential net_bp(v2) - net_bp(v1) on shared days"
+    ],
+    "comparator": "Historical paired daily differences against predecessor configs on identical data and costs; all selection and coverage limits reported.",
     "grid": "none; single committed configuration",
-    "cadence": "one row per completed UTC day after the registration commit",
-    "eligibility": "only days strictly after the registration commit date count as forward evidence",
     "reproduce_with": "liquidity_migration.research.backtest.financed_longs.score_carry_hold(panel, CarryHoldConfig.from_json(this_file))"
   },
   "measured_at_registration": {
@@ -65,13 +75,39 @@
     "max_drawdown_raw_pct": -48.6,
     "mar_raw": 1.25,
     "mean_oneway_turnover": 0.197,
-    "era_net_bp_per_day": {"2021": 0.3, "2022": 5.1, "2023": 14.4, "2024": 12.7, "2025": 32.6, "2026": 42.4},
-    "v1_same_basis": {"mean_net_bp_per_day": 18.0, "t_stat": 2.31, "sharpe_raw": 1.02, "max_drawdown_raw_pct": -60.0, "mar_raw": 0.97, "mean_oneway_turnover": 0.271, "era_net_bp_per_day": {"2021": 3.8, "2022": 3.0, "2023": 26.0, "2024": 13.8, "2025": 30.3, "2026": 32.5}},
+    "era_net_bp_per_day": {
+      "2021": 0.3,
+      "2022": 5.1,
+      "2023": 14.4,
+      "2024": 12.7,
+      "2025": 32.6,
+      "2026": 42.4
+    },
+    "v1_same_basis": {
+      "mean_net_bp_per_day": 18.0,
+      "t_stat": 2.31,
+      "sharpe_raw": 1.02,
+      "max_drawdown_raw_pct": -60.0,
+      "mar_raw": 0.97,
+      "mean_oneway_turnover": 0.271,
+      "era_net_bp_per_day": {
+        "2021": 3.8,
+        "2022": 3.0,
+        "2023": 26.0,
+        "2024": 13.8,
+        "2025": 30.3,
+        "2026": 32.5
+      }
+    },
     "benchmark_window_2023_03_13_to_2026_07_16": {
       "sharpe_raw": 1.36,
       "mar_raw": 1.98,
       "max_drawdown_raw_pct": -48.6,
-      "v1_same_basis": {"sharpe_raw": 1.21, "mar_raw": 1.43, "max_drawdown_raw_pct": -60.0}
+      "v1_same_basis": {
+        "sharpe_raw": 1.21,
+        "mar_raw": 1.43,
+        "max_drawdown_raw_pct": -60.0
+      }
     },
     "robustness": {
       "basis_note": "grid/robustness cells below were computed with the review scripts, whose trailing-rate windowing differs from the module on 50/1883 gap-adjacent days (module Sharpe 1.11 vs script 1.13 for this config); orderings are unaffected and the headline numbers above are module-path",

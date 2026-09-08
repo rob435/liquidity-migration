@@ -25,7 +25,7 @@ async fn an_entry_asked_to_be_worked_rests_at_the_touch_instead_of_crossing() {
         sends[0].kind,
         OrderKind::Limit {
             px: 30_000.0,
-            tif: engine_types::TimeInForce::Gtc
+            tif: engine_types::TimeInForce::PostOnly
         },
         "a limit at the bid, not a market order across the spread"
     );

@@ -506,12 +506,14 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// Under SOLE authority (an account this engine exclusively leases and
     /// nobody hand-trades) the forgetting stops: what this engine set stays
     /// trusted across flat spells, entries from flat skip the confirmation
-    /// round trip (~172 ms measured on the box), and every held position's
+    /// round trip, and every held position's
     /// leverage is instead read back off the venue's own position rows — a
     /// mismatch alarms and evicts the trust, so the next entry confirms
     /// inline again.
     leverage_at: BTreeMap<SymbolId, f64>,
     leverage_authority: crate::config::LeverageAuthority,
+    execution_limits: Option<crate::config::ExecutionLimits>,
+    recent_rejections: VecDeque<(u64, String)>,
     ledger: LatencyLedger,
     /// What the fills cost. The latency ledger beside it measures our own side
     /// of the wire; this one measures the price, which is the half that
@@ -588,6 +590,7 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
 
 mod account_recovery;
 mod boot_recovery;
+mod execution_controls;
 mod history_recovery;
 mod intent_admission;
 mod order_dispatch;

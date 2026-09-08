@@ -27,6 +27,7 @@
 
 pub mod execution;
 pub mod feed;
+pub mod fees;
 pub mod instruments;
 pub mod runner;
 pub mod scheduler;

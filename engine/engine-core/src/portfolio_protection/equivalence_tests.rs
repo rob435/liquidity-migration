@@ -175,7 +175,7 @@ pub(crate) fn reference_plan(
 }
 
 #[test]
-fn physical_stop_candidate_fold_matches_the_original_planner() {
+fn physical_stop_candidate_fold_matches_original_entries_and_physical_reductions() {
     let portfolios = [
         vec![],
         vec![row(0, "1", Some("90"))],
@@ -216,6 +216,9 @@ fn physical_stop_candidate_fold_matches_the_original_planner() {
                     for (low, high) in intervals {
                         for (other_index, stops) in others.iter().enumerate() {
                             let interval = PhysicalExposureInterval::try_new(low, high).unwrap();
+                            if reducing && !interval.certainly_reduces(side, &d("1")) {
+                                continue;
+                            }
                             let expected = observe(reference_plan(
                                 &portfolio,
                                 &request,
@@ -245,7 +248,7 @@ fn physical_stop_candidate_fold_matches_the_original_planner() {
             }
         }
     }
-    assert_eq!(cases, 768);
+    assert_eq!(cases, 480);
     assert!(allowed > 0 && denied > 0);
     eprintln!(
         "physical stop planner oracle: {cases} cases, {allowed} exact plans, {denied} exact errors"

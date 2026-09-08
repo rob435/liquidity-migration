@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 use crate::RealmCredentials;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -24,6 +25,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_EVERY: Duration = Duration::from_secs(20);
+const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTH_WINDOW_MS: i64 = 5_000;
 const CHANNEL_DEPTH: usize = 256;
 
@@ -97,6 +99,35 @@ impl TradeClient {
         receive.await.map_err(|_| stopped())?
     }
 
+    pub(crate) async fn requests(
+        &mut self,
+        operation: &'static str,
+        bodies: Vec<Vec<Value>>,
+    ) -> Vec<Result<TradeReply, VenueError>> {
+        let sender = self.sender();
+        let mut receivers = Vec::with_capacity(bodies.len());
+        for args in bodies {
+            let req_id = format!("eng-{}", self.next_request);
+            self.next_request = self.next_request.wrapping_add(1).max(1);
+            let (reply, receive) = oneshot::channel();
+            // Dropping a failed send closes its reply; no uncertain request is retried.
+            let _ = sender
+                .send(Command::Request {
+                    req_id,
+                    operation,
+                    args,
+                    reply,
+                })
+                .await;
+            receivers.push(receive);
+        }
+        futures_util::future::join_all(receivers)
+            .await
+            .into_iter()
+            .map(|reply| reply.map_err(|_| stopped()).and_then(|reply| reply))
+            .collect()
+    }
+
     fn sender(&mut self) -> mpsc::Sender<Command> {
         if let Some(sender) = &self.commands {
             return sender.clone();
@@ -119,83 +150,126 @@ struct Worker {
 
 impl Worker {
     async fn run(self, mut commands: mpsc::Receiver<Command>) {
-        let mut socket: Option<Socket> = None;
-        let mut next_ping = Instant::now() + PING_EVERY;
-        loop {
-            if socket.is_none() {
-                let Some(command) = commands.recv().await else {
-                    return;
-                };
-                match self.connect().await {
-                    Ok(connected) => {
-                        socket = Some(connected);
-                        next_ping = Instant::now() + PING_EVERY;
-                    }
-                    Err(error) => {
-                        answer_error(command, error);
-                        continue;
-                    }
-                }
-                if !self
-                    .handle(command, socket.as_mut().expect("connected"))
-                    .await
-                {
-                    socket = None;
-                }
-                continue;
+        let mut backoff = crate::stream::ReconnectBackoff::default();
+        while !commands.is_closed() {
+            backoff.wait().await;
+            if commands.is_closed() {
+                return;
             }
-
-            let connected = socket.as_mut().expect("checked above");
-            tokio::select! {
-                command = commands.recv() => {
-                    let Some(command) = command else { return; };
-                    if !self.handle(command, connected).await {
-                        socket = None;
+            let mut socket = match self.connect().await {
+                Ok(socket) => socket,
+                Err(error) => {
+                    tracing::warn!(%error, "Bybit trade socket dial failed");
+                    while let Ok(command) = commands.try_recv() {
+                        answer_error(command, VenueError::Transport(error.to_string()));
                     }
+                    continue;
                 }
-                frame = connected.next() => {
-                    if !idle_frame(connected, frame).await {
-                        socket = None;
+            };
+            let opened = Instant::now();
+            let mut pending = HashMap::new();
+            match self.session(&mut socket, &mut commands, &mut pending).await {
+                Ok(()) => return,
+                Err(error) => {
+                    tracing::warn!(%error, "Bybit trade socket reconnecting");
+                    for (_, request) in pending.drain() {
+                        let _ = request
+                            .reply
+                            .send(Err(VenueError::Transport(error.to_string())));
                     }
-                }
-                _ = tokio::time::sleep_until(next_ping) => {
-                    if send(connected, Message::text(r#"{"op":"ping"}"#)).await.is_err() {
-                        socket = None;
-                    }
-                    next_ping = Instant::now() + PING_EVERY;
+                    backoff.completed_session(opened.elapsed());
                 }
             }
         }
     }
 
-    async fn handle(&self, command: Command, socket: &mut Socket) -> bool {
-        match command {
-            Command::Warm(reply) => {
-                let _ = reply.send(Ok(()));
-                true
+    async fn session(
+        &self,
+        socket: &mut Socket,
+        commands: &mut mpsc::Receiver<Command>,
+        pending: &mut HashMap<String, PendingRequest>,
+    ) -> Result<(), VenueError> {
+        let mut next_ping = Instant::now() + PING_EVERY;
+        let mut pong_deadline: Option<Instant> = None;
+        loop {
+            let deadline = pending
+                .values()
+                .map(|r| r.deadline)
+                .chain(pong_deadline)
+                .chain([next_ping])
+                .min()
+                .expect("ping deadline");
+            tokio::select! {
+                // Expired liveness must win over a burst of new orders.
+                biased;
+                _ = tokio::time::sleep_until(deadline) => {
+                    let now = Instant::now();
+                    if pong_deadline.is_some_and(|due| now >= due) {
+                        return Err(VenueError::Transport("trade socket pong timed out".into()));
+                    }
+                    if pending.values().any(|request| now >= request.deadline) {
+                        return Err(VenueError::Transport("trade socket reply timed out".into()));
+                    }
+                    send(socket, Message::text(r#"{"op":"ping"}"#)).await?;
+                    next_ping = Instant::now() + PING_EVERY;
+                    pong_deadline = Some(Instant::now() + PONG_TIMEOUT);
+                }
+                frame = socket.next() => {
+                    let frame = frame.ok_or_else(|| VenueError::Transport("trade socket ended".into()))?
+                        .map_err(|error| VenueError::Transport(error.to_string()))?;
+                    match frame {
+                        Message::Text(text) => {
+                            let value: Value = serde_json::from_str(text.as_str())
+                                .map_err(|error| VenueError::BadReply(error.to_string()))?;
+                            if matches!(value.get("op").and_then(Value::as_str), Some("ping" | "pong")) {
+                                pong_deadline = None;
+                                continue;
+                            }
+                            let Some(id) = value.get("reqId").and_then(Value::as_str) else { continue; };
+                            let Some(request) = pending.remove(id) else { continue; };
+                            let answer = if successful(&value) {
+                                Ok(TradeReply {
+                                    data: value.get("data").cloned().unwrap_or(Value::Null),
+                                    ret_ext_info: value.get("retExtInfo").cloned().unwrap_or(Value::Null),
+                                    sent_ns: request.sent_ns,
+                                    ack_ns: mono_ns(),
+                                    quota_per_second: quota_in(&value),
+                                })
+                            } else {
+                                Err(reply_error(&value, request.operation))
+                            };
+                            let _ = request.reply.send(answer);
+                        }
+                        Message::Ping(payload) => send(socket, Message::Pong(payload)).await?,
+                        Message::Close(_) => return Err(VenueError::Transport("trade socket closed".into())),
+                        _ => {}
+                    }
+                }
+                command = commands.recv(), if pending.len() < CHANNEL_DEPTH => {
+                    let Some(command) = command else { return Ok(()); };
+                    match command {
+                        Command::Warm(reply) => { let _ = reply.send(Ok(())); }
+                        Command::Request { req_id, operation, args, reply } => {
+                            let frame = json!({
+                                "reqId": req_id,
+                                "header": {"X-BAPI-TIMESTAMP": wall_ms().to_string(),
+                                           "X-BAPI-RECV-WINDOW": RECV_WINDOW_MS},
+                                "op": operation,
+                                "args": args,
+                            });
+                            // Sent requests are never replayed here: REST recovery owns uncertainty.
+                            pending.insert(req_id.clone(), PendingRequest {
+                                operation, reply, sent_ns: 0,
+                                deadline: Instant::now() + REPLY_TIMEOUT,
+                            });
+                            send(socket, Message::text(frame.to_string())).await?;
+                            let request = pending.get_mut(&req_id).expect("registered request");
+                            request.sent_ns = mono_ns();
+                            request.deadline = Instant::now() + REPLY_TIMEOUT;
+                        }
+                    }
+                }
             }
-            Command::Request {
-                req_id,
-                operation,
-                args,
-                reply,
-            } => match request(socket, &req_id, operation, args).await {
-                Ok(answer) => {
-                    let _ = reply.send(Ok(answer));
-                    true
-                }
-                Err(error) => {
-                    // A rejection is an answer. The socket carried it, the
-                    // exchange of frames stayed in step, and the next request
-                    // can go down the same connection — so an order the venue
-                    // declined must not cost the one after it a reconnect and
-                    // a re-authentication. Only a transport or decode failure
-                    // leaves the stream in a state worth abandoning.
-                    let keep = matches!(error, VenueError::Rejected { .. });
-                    let _ = reply.send(Err(error));
-                    keep
-                }
-            },
         }
     }
 
@@ -276,43 +350,11 @@ fn ipv4_only(addresses: impl Iterator<Item = SocketAddr>) -> impl Iterator<Item 
     addresses.filter(SocketAddr::is_ipv4)
 }
 
-async fn request(
-    socket: &mut Socket,
-    req_id: &str,
+struct PendingRequest {
     operation: &'static str,
-    args: Vec<Value>,
-) -> Result<TradeReply, VenueError> {
-    let timestamp = wall_ms();
-    let frame = json!({
-        "reqId": req_id,
-        "header": {
-            "X-BAPI-TIMESTAMP": timestamp.to_string(),
-            "X-BAPI-RECV-WINDOW": RECV_WINDOW_MS,
-        },
-        "op": operation,
-        "args": args,
-    });
-    send(socket, Message::text(frame.to_string())).await?;
-    let sent_ns = mono_ns();
-    let deadline = tokio::time::Instant::now() + REPLY_TIMEOUT;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let reply = next_json(socket, remaining).await?;
-        if reply.get("reqId").and_then(Value::as_str) != Some(req_id) {
-            continue;
-        }
-        let ack_ns = mono_ns();
-        if successful(&reply) {
-            return Ok(TradeReply {
-                data: reply.get("data").cloned().unwrap_or(Value::Null),
-                ret_ext_info: reply.get("retExtInfo").cloned().unwrap_or(Value::Null),
-                sent_ns,
-                ack_ns,
-                quota_per_second: quota_in(&reply),
-            });
-        }
-        return Err(reply_error(&reply, operation));
-    }
+    reply: oneshot::Sender<Result<TradeReply, VenueError>>,
+    sent_ns: u64,
+    deadline: Instant,
 }
 
 async fn next_json(socket: &mut Socket, timeout: Duration) -> Result<Value, VenueError> {
@@ -346,17 +388,6 @@ async fn next_json(socket: &mut Socket, timeout: Duration) -> Result<Value, Venu
     })
     .await
     .map_err(|_| VenueError::Transport("trade socket reply timed out".to_string()))?
-}
-
-async fn idle_frame(
-    socket: &mut Socket,
-    frame: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
-) -> bool {
-    match frame {
-        Some(Ok(Message::Ping(payload))) => send(socket, Message::Pong(payload)).await.is_ok(),
-        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => false,
-        _ => true,
-    }
 }
 
 async fn send(socket: &mut Socket, message: Message) -> Result<(), VenueError> {
@@ -426,6 +457,123 @@ mod tests {
     use crate::venues::bybit::realm::VenueRealm;
     use tokio_tungstenite::accept_async;
 
+    #[tokio::test]
+    async fn trade_replies_can_arrive_out_of_order_without_serial_round_trips() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket.next().await.unwrap().unwrap();
+            socket
+                .send(Message::text(r#"{"op":"auth","retCode":0}"#))
+                .await
+                .unwrap();
+            let mut requests = Vec::new();
+            for _ in 0..10 {
+                let text = socket.next().await.unwrap().unwrap().into_text().unwrap();
+                requests.push(serde_json::from_str::<Value>(&text).unwrap());
+            }
+            socket
+                .send(Message::text(r#"{"op":"pong"}"#))
+                .await
+                .unwrap();
+            for request in requests.into_iter().rev() {
+                socket
+                    .send(Message::text(
+                        json!({
+                            "reqId": request["reqId"], "retCode": 0,
+                            "data": {"orderId": request["reqId"]}
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            std::future::pending::<()>().await;
+        });
+        let creds = VenueRealm::Mainnet.credentials_for_test("key", "secret");
+        let mut client = TradeClient::new(&format!("ws://{address}"), creds);
+        client.warm().await.unwrap();
+        let sender = client.sender();
+        let mut replies = Vec::new();
+        for index in 0..10 {
+            let (reply, receive) = oneshot::channel();
+            sender
+                .send(Command::Request {
+                    req_id: index.to_string(),
+                    operation: "order.amend",
+                    args: vec![],
+                    reply,
+                })
+                .await
+                .unwrap();
+            replies.push(receive);
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for (index, receive) in replies.into_iter().enumerate() {
+                let answer = receive.await.unwrap().unwrap();
+                assert_eq!(answer.data["orderId"], index.to_string());
+                assert!(answer.ack_ns >= answer.sent_ns);
+            }
+        })
+        .await
+        .expect("ten requests go on wire before the first acknowledgement");
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn missing_trade_pong_redials_without_an_order() {
+        let _io = crate::test_io::IoProgress::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ping_seen, ping_received) = oneshot::channel();
+        let (redial_seen, mut redial_received) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket.next().await.unwrap().unwrap();
+            socket
+                .send(Message::text(r#"{"op":"auth","retCode":0}"#))
+                .await
+                .unwrap();
+            let ping = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&ping).unwrap()["op"], "ping");
+            ping_seen.send(()).unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut replacement = accept_async(stream).await.unwrap();
+            replacement.next().await.unwrap().unwrap();
+            replacement
+                .send(Message::text(r#"{"op":"auth","retCode":0}"#))
+                .await
+                .unwrap();
+            redial_seen.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let creds = VenueRealm::Mainnet.credentials_for_test("key", "secret");
+        let mut client = TradeClient::new(&format!("ws://{address}"), creds);
+        client.warm().await.unwrap();
+        tokio::time::advance(PING_EVERY).await;
+        ping_received.await.unwrap();
+        tokio::time::advance(Duration::from_secs(11)).await;
+        // Give the loopback handshake progress while the virtual deadline is fixed.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let redialled = loop {
+            if redial_received.try_recv().is_ok() {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::task::yield_now().await;
+        };
+        server.abort();
+        assert!(
+            redialled,
+            "an idle half-dead trade socket waited for a real order"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn one_authenticated_socket_carries_the_warmup_and_order_request() {
         let _io = crate::test_io::IoProgress::new();
@@ -477,7 +625,6 @@ mod tests {
             .await
             .expect("order reply");
         assert_eq!(reply.data["orderId"], "venue-1");
-        assert!(reply.sent_ns > 0);
         assert!(reply.ack_ns >= reply.sent_ns);
         server.await.unwrap();
     }

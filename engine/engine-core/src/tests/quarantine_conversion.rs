@@ -221,6 +221,8 @@ fn mock_from_base(record: &WalRecord, realm: engine_venue::VenueRealm) -> MockVe
                 qty: quantity.abs().to_f64().unwrap(),
                 entry_px: 0.0,
                 exact_amounts: Some(Box::new(engine_types::risk::PositionAmounts {
+                    liquidation_price: None,
+                    mark_price: None,
                     quantity: ExactNumber::derived(quantity.abs()),
                     entry_price: ExactNumber::derived(Exact::zero()),
                 })),

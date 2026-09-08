@@ -708,6 +708,7 @@ fn an_opening_reprice_is_reassessed_without_double_counting_its_old_reservation(
 
 fn narrow_wide_stop_kernel() -> Kernel {
     let mut cfg = demo_config();
+    cfg.leverage = 1.0;
     cfg.envelope.reference_usdt = 100.0;
     cfg.envelope.gross_notional_multiple = 1.0;
     cfg.envelope.max_component_gross_notional_usdt = 100.0;

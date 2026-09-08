@@ -1,13 +1,9 @@
 [Unit]
-Description=Off-box backup of the state that cannot be rebuilt, four times a day
+Description=Off-box backup of the state that cannot be rebuilt, every fifteen minutes
 
 [Timer]
-# Every six hours: the account's log is the one thing on this box that cannot
-# be re-fetched, and a day of it is too much to have on one disk. Persistent so
-# a box that was down at a scheduled time backs up on the next boot instead of
-# skipping a slot.
-OnCalendar=*-*-* 03,09,15,21:17:00 UTC
-AccuracySec=5min
+OnCalendar=*-*-* *:02,17,32,47:00 UTC
+AccuracySec=30s
 Persistent=true
 
 [Install]

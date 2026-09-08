@@ -168,6 +168,8 @@ async fn boot(prior: &[WalRecord], reopened: bool, failure: Option<WriteFailure>
             qty: 0.01,
             entry_px: 110.0,
             exact_amounts: Some(Box::new(engine_types::risk::PositionAmounts {
+                liquidation_price: None,
+                mark_price: None,
                 quantity: ExactNumber::venue_decimal("0.01").unwrap(),
                 entry_price: ExactNumber::venue_decimal("110").unwrap(),
             })),

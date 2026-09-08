@@ -51,10 +51,12 @@ fn pull(h: &mut Harness) {
 }
 
 #[test]
-fn it_claims_only_the_quote_feed_of_its_symbol() {
+fn it_claims_quote_and_mark_feeds_for_its_symbol() {
     let probe = Probe::from_params(StrategyId(0), &config("")).unwrap();
     let subs = probe.subscriptions();
-    assert_eq!(subs.len(), 1);
+    assert_eq!(subs.len(), 2);
+    assert_eq!(subs[1].symbol, "CAKEUSDT");
+    assert_eq!(subs[1].feed, Feed::Ticker);
     assert_eq!(subs[0].symbol, "CAKEUSDT");
     assert_eq!(subs[0].feed, Feed::Quote);
     assert!(probe.configured_entries_enabled());

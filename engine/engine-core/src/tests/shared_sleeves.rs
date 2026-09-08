@@ -14,6 +14,7 @@ pub(crate) fn kernel() -> Kernel {
             gross_notional_multiple: 2.0,
             disaster_stop_fraction: 0.35,
             max_component_gross_notional_usdt: 2000.0,
+            max_symbol_notional_usdt: 2000.0,
             max_initial_margin_usdt: 1000.0,
         },
         leverage: 2.0,
@@ -663,6 +664,8 @@ pub(crate) async fn exact_single_sleeve_engine(
     venue.exact_specs = Some(vec![("BTCUSDT".into(), rules)]);
     let mut positions = physical_long(Exact::parse_decimal(quantity).unwrap().to_f64().unwrap());
     positions[0].exact_amounts = Some(Box::new(engine_types::risk::PositionAmounts {
+        liquidation_price: None,
+        mark_price: None,
         quantity: engine_types::numeric::ExactNumber::venue_decimal(quantity).unwrap(),
         entry_price: engine_types::numeric::ExactNumber::venue_decimal("100").unwrap(),
     }));
@@ -716,6 +719,8 @@ pub(crate) async fn legacy_single_sleeve_recovery(
     venue.exact_specs = Some(vec![("BTCUSDT".into(), rules)]);
     let mut positions = physical_long(native_quantity.parse().unwrap());
     positions[0].exact_amounts = Some(Box::new(engine_types::risk::PositionAmounts {
+        liquidation_price: None,
+        mark_price: None,
         quantity: engine_types::numeric::ExactNumber::venue_decimal(native_quantity).unwrap(),
         entry_price: engine_types::numeric::ExactNumber::venue_decimal("100").unwrap(),
     }));
@@ -743,4 +748,72 @@ pub(crate) async fn legacy_single_sleeve_recovery(
         &prefix.unwrap_or_else(|| vec![prior]),
     )
     .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_foreign_short_latch_cannot_block_the_owned_long_exit_or_clear_the_hand_stop() {
+    let tape = tape();
+    let (wal, records) = MockWal::new(tape.clone());
+    let (mut venue, sends) = MockVenue::new(tape, &["BTCUSDT"]);
+    venue.exact_specs = Some(vec![("BTCUSDT".into(), spec())]);
+    let mut physical = physical_long(2.0);
+    physical[0].side = Side::Sell;
+    physical[0].stop_px = 110.0;
+    venue.account_readings.lock().unwrap().push_back(physical);
+    let mut prior = owned_records("1", "0");
+    prior.push(WalRecord::OrderUpdate {
+        callbacks: None,
+        update: OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
+            exec_id: "hand-short-3".into(),
+            client_order_id: "manual".into(),
+            symbol: SymbolId(0),
+            side: Side::Sell,
+            qty: 3.0,
+            px: 100.0,
+            fee: Some(0.0),
+            is_maker: false,
+            forced_close: None,
+            venue_ts_ms: recent_replay_ms(),
+            recv_ns: 3,
+        },
+    });
+    let mut engine = Engine::boot(
+        &settings(),
+        "0",
+        wal,
+        kernel(),
+        venue,
+        vec![sleeve("left", Side::Sell, None), idle("right")],
+        &prior,
+    )
+    .await
+    .unwrap();
+    engine
+        .run(
+            &mut quote(),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+    let requests = sends.lock().unwrap();
+    assert_eq!(requests.len(), 1, "{:?}", records.lock().unwrap());
+    let request = &requests[0];
+    assert!(request.is_sleeve_reduction());
+    assert!(
+        !request.reduce_only,
+        "the venue order grows the physical short"
+    );
+    assert_eq!(request.side, Side::Sell);
+    assert_eq!(request.qty, 1.0);
+    assert_eq!(request.stop.unwrap().trigger_px, 110.0);
+    assert!(records.lock().unwrap().iter().any(|r| matches!(
+        r,
+        WalRecord::Reconciled {
+            may_open: false,
+            ..
+        }
+    )));
 }

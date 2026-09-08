@@ -671,6 +671,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             heartbeat: None,
             trades: None,
             leverage_authority: settings.leverage_authority,
+            execution_limits: settings
+                .execution_limits
+                .clone()
+                .map(|limits| limits.validate().map(|()| limits))
+                .transpose()
+                .map_err(EngineError::State)?,
+            recent_rejections: VecDeque::new(),
             group_flush: Duration::from_millis(settings.group_flush_ms.max(1)),
             refresh_after_ns: settings.account_view_max_age_ms.saturating_mul(1_000_000) / 2,
             account_refresh_requested_after: None,

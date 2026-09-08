@@ -98,6 +98,23 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         for (id, symbol) in lookups {
             self.start_order_lookup(id, symbol)?;
         }
+        if self.dispatches.lookup_pending.is_empty() {
+            let next = self
+                .working
+                .crossing_candidates()
+                .find(|(id, symbol)| {
+                    !self.busy_symbols.contains_key(symbol)
+                        && self
+                            .dispatches
+                            .lookup_after
+                            .get(*id)
+                            .is_none_or(|deadline| *deadline <= now)
+                })
+                .map(|(id, symbol)| (id.to_owned(), symbol));
+            if let Some((id, symbol)) = next {
+                self.start_order_lookup(id, symbol)?;
+            }
+        }
         Ok(())
     }
 
@@ -149,8 +166,59 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 }
             }
         }
+        if self.working.waiting_to_cross(&id) {
+            self.apply_cross_lookup(&id, &result).await?;
+        }
         if halted {
             self.apply_halt_lookup(&id, result).await?;
+        }
+        Ok(())
+    }
+
+    async fn apply_cross_lookup(
+        &mut self,
+        id: &str,
+        result: &Result<OrderLookup, String>,
+    ) -> Result<(), EngineError> {
+        let Some(order) = self.books.orders.orders.get(id) else {
+            return Ok(());
+        };
+        let name = self.books.market.table.name(order.request.symbol);
+        match result {
+            Ok(OrderLookup::Terminal { status, row })
+                if row.client_order_id == id && row.symbol == name =>
+            {
+                let known = order.filled_exact().map_err(EngineError::State)?;
+                if row.filled_qty.value != known {
+                    self.recovery.history_requested = true;
+                    self.dispatches.unresolved.insert(
+                        id.into(),
+                        "passive cancel fill total differs from recovered executions".into(),
+                    );
+                    return Ok(());
+                }
+                let in_flight = order.in_flight();
+                let update = match status {
+                    TerminalOrderStatus::Rejected => OrderUpdate::Reject {
+                        client_order_id: id.into(),
+                        code: 0,
+                        reason: "passive cancel terminal lookup".into(),
+                    },
+                    _ => OrderUpdate::Cancelled {
+                        client_order_id: id.into(),
+                        recv_ns: clock::now_ns(),
+                    },
+                };
+                if in_flight {
+                    self.take_update(update).await?;
+                }
+                self.dispatches.unresolved.remove(id);
+                self.working.confirm_cross(id);
+            }
+            Ok(OrderLookup::Working(row)) if row.client_order_id == id && row.symbol == name => {
+                self.working.retry_cross_cancel(id);
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -674,6 +742,137 @@ mod tests {
         let completion = engine.recovery.completed.recv().await.unwrap();
         engine.on_recovery_completion(completion).await.unwrap();
         assert!(!engine.recovery.uncommitted());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn passive_cross_waits_for_sub_projection_fills_from_history() {
+        use engine_types::numeric::{Exact, ExactNumber};
+        use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
+        use engine_types::orders::{OrderLookupRow, TimeInForce};
+        let (mut engine, _) = fixture().await;
+        let id = "passive-late-fill";
+        let mut request = OrderRequest {
+            client_order_id: id.into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Sell,
+            qty: 1.0,
+            kind: OrderKind::Limit {
+                px: 101.0,
+                tif: TimeInForce::PostOnly,
+            },
+            stop: Some(engine_types::StopSpec { trigger_px: 110.0 }),
+            reduce_only: false,
+            close_position: false,
+            sleeve_effect: None,
+            exact_terms: None,
+        };
+        ExactOrderTerms {
+            quantity: Exact::one(),
+            limit_price: Some(Exact::from_u64(101)),
+            stop_trigger_price: Some(Exact::from_u64(110)),
+            physical_stop_trigger_price: Some(Exact::from_u64(110)),
+            input_policy: OrderInputPolicy::StrategyShortestDecimal,
+        }
+        .apply_projection(&mut request)
+        .unwrap();
+        let sent = WalRecord::OrderSent {
+            dispatch: None,
+            request,
+            arrival_mid: 100.0,
+            wire_ns: clock::now_ns(),
+        };
+        engine.books.orders.apply(&sent);
+        engine.books.registry.own(id, StrategyId(0));
+        engine.wal.append(&sent).unwrap();
+        engine.books.market.apply(&MarketEvent::Quote {
+            symbol: SymbolId(0),
+            quote: engine_types::Quote {
+                bid_px: 99.0,
+                ask_px: 101.0,
+                recv_ns: clock::now_ns(),
+                ..Default::default()
+            },
+        });
+        let policy = engine_types::WorkPolicy {
+            window_ms: 1,
+            ..Default::default()
+        };
+        let now = clock::now_ns();
+        engine.working.take_on(
+            id,
+            SymbolId(0),
+            policy,
+            crate::working::plan::WorkState::new(Side::Sell, 101.0, 100.0, now),
+        );
+        let pass = |engine: &mut TestEngine| {
+            let mut actions = std::collections::VecDeque::new();
+            engine.working.pass(
+                now + 2_000_000,
+                &engine.books.market,
+                &engine.books.rules,
+                &engine.books.orders,
+                &mut actions,
+            );
+            actions
+        };
+        assert!(matches!(
+            pass(&mut engine).front(),
+            Some(engine_types::Action::Cancel { .. })
+        ));
+        recover_lookup_fill(
+            &mut engine,
+            id,
+            "known-passive",
+            Exact::parse_decimal("0.25").unwrap(),
+        )
+        .await;
+        let lookup = || OrderLookup::Terminal {
+            status: TerminalOrderStatus::Cancelled,
+            row: OrderLookupRow {
+                symbol: "BTCUSDT".into(),
+                client_order_id: id.into(),
+                venue_order_id: "venue-passive".into(),
+                filled_qty: ExactNumber::venue_decimal("0.250000000000000001").unwrap(),
+            },
+        };
+        engine
+            .on_order_lookup(id.into(), Ok(lookup()))
+            .await
+            .unwrap();
+        assert!(engine.dispatches.unresolved.contains_key(id));
+        assert!(engine.recovery.history_requested);
+        assert!(!pass(&mut engine)
+            .iter()
+            .any(|a| matches!(a, engine_types::Action::Place(_))));
+        recover_lookup_fill(
+            &mut engine,
+            id,
+            "late-passive",
+            Exact::parse_decimal("0.000000000000000001").unwrap(),
+        )
+        .await;
+        engine
+            .on_order_lookup(id.into(), Ok(lookup()))
+            .await
+            .unwrap();
+        assert!(!engine.dispatches.unresolved.contains_key(id));
+        let mut actions = pass(&mut engine);
+        let [engine_types::Action::Place(intent)] = actions.make_contiguous() else {
+            panic!("{actions:?}");
+        };
+        assert_eq!(
+            intent.quantity().unwrap(),
+            Exact::parse_decimal("0.749999999999999999").unwrap()
+        );
+        assert_eq!(
+            intent.kind,
+            OrderKind::Limit {
+                px: 99.0,
+                tif: TimeInForce::Ioc
+            }
+        );
+        assert!(pass(&mut engine).is_empty());
     }
 
     async fn exact_terminal_lookup_waits_for_history(halt: bool, known: &str, venue: &str) {

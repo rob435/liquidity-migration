@@ -54,6 +54,7 @@ from liquidity_migration.rules.long_native import (
     LongNativeConfig,
     resolve_long_strategy_profile,
 )
+from liquidity_migration.core.fee_snapshot import default_taker_fee_bps
 from liquidity_migration.rules.rust_strategy_contract import (
     RustLongDecisionReducer,
     RustStrategyContract,
@@ -61,9 +62,7 @@ from liquidity_migration.rules.rust_strategy_contract import (
 
 
 MINUTE_BAR_MS = exact_duration_ms(minutes=1)
-DEFAULT_TAKER_FEE_BPS = 5.5
-DEFAULT_MEASURED_CROSSING_COST_BPS = 7.78
-DEFAULT_SLIPPAGE_BPS = DEFAULT_MEASURED_CROSSING_COST_BPS - DEFAULT_TAKER_FEE_BPS
+DEFAULT_SLIPPAGE_BPS = 2.28  # Historical crossing loss, excluding fees.
 DEFAULT_VENUE_MIN_NOTIONAL_USDT = 5.0
 MAX_MARK_HIGH_SOURCE_REPAIR_BPS = 1.0
 CAPITAL_REFERENCE_CLOSE_REL_TOL = 1e-12
@@ -78,7 +77,7 @@ _SOURCE_SNAPSHOT_ROOTS = (
     "engine/engine-strategies/src/bin/strategy_contract.rs",
     "engine/engine-strategies/src/native_long/plan.rs",
 )
-_SOURCE_SNAPSHOT_SUPPORT = ("pyproject.toml", "requirements.lock")
+_SOURCE_SNAPSHOT_SUPPORT = ("pyproject.toml", "requirements.lock", "configs/bybit_fee_rates.json", "liquidity_migration/core/fee_snapshot.py")
 _GIT_LOCAL_ENV_VARS = (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_COMMON_DIR",
@@ -93,7 +92,6 @@ _GIT_LOCAL_ENV_VARS = (
 class EvidenceProvenance:
     """Which data shaped the rule and which data, if any, grades this run."""
 
-    lane: str = "lane_1_exploratory"
     shaped_data: str = (
         "The LONG rule and this execution rebuild were shaped using prior Bybit "
         "history, including the historical surface replayed here."
@@ -110,12 +108,10 @@ class EvidenceProvenance:
     )
 
     def validate(self) -> None:
-        if self.lane not in {"lane_1_exploratory", "lane_2_forward"}:
-            raise ValueError("evidence lane must be lane_1_exploratory or lane_2_forward")
         if not self.shaped_data.strip() or not self.graded_data.strip():
             raise ValueError("shaped_data and graded_data must be explicit")
-        if self.lane == "lane_1_exploratory" and self.graded_data.strip().lower() == "unseen":
-            raise ValueError("a Lane-1 run cannot label its grading data unseen")
+        if self.graded_data.strip().lower() == "unseen":
+            raise ValueError("graded_data must identify the data and its independence from selection")
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +119,7 @@ class LivePhysicsAssumptions:
     """Execution assumptions that sit outside the pure strategy contract."""
 
     initial_equity_usdt: float = 1_000.0
-    taker_fee_bps: float = DEFAULT_TAKER_FEE_BPS
+    taker_fee_bps: float = field(default_factory=default_taker_fee_bps)
     slippage_bps: float = DEFAULT_SLIPPAGE_BPS
     venue_min_notional_usdt: float = DEFAULT_VENUE_MIN_NOTIONAL_USDT
     evidence: EvidenceProvenance = EvidenceProvenance()
@@ -476,13 +472,15 @@ def resolve_live_physics_configuration(
     *,
     profile_name: str = "v12",
     operational_profile_path: str | Path = "configs/operational.json",
-    taker_fee_bps: float = DEFAULT_TAKER_FEE_BPS,
+    taker_fee_bps: float | None = None,
     slippage_bps: float = DEFAULT_SLIPPAGE_BPS,
 ) -> ResolvedLivePhysicsConfiguration:
     """Read one typed profile once and retain sizing, throttle, and cap sources."""
 
     from liquidity_migration.core.operational_profile import load_operational_profile
 
+    if taker_fee_bps is None:
+        taker_fee_bps = default_taker_fee_bps()
     rule = resolve_long_strategy_profile(profile_name)
     operational = load_operational_profile(operational_profile_path)
     settings = operational.long

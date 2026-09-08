@@ -2,7 +2,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::numeric::{Exact, ExactError, ExactInstrumentSpec, PricePrecision};
-use crate::orders::{AmendSpec, OrderKind, OrderRequest, Side, SleeveOrderEffect, StopSpec};
+use crate::orders::{
+    AmendSpec, OrderKind, OrderRequest, Side, SleeveOrderEffect, StopSpec, TimeInForce,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderInputPolicy {
@@ -256,9 +258,17 @@ pub fn quantize_with_exact_prices(
     input_qty.validate_storage()?;
     let market = matches!(kind, OrderKind::Market);
     let quantity = if policy == QuantityPolicy::CloseEntirePosition {
-        if !market {
+        if !market
+            && !matches!(
+                kind,
+                OrderKind::Limit {
+                    tif: TimeInForce::Ioc,
+                    ..
+                }
+            )
+        {
             return Err(OrderLegalityError::Constraint(
-                "full-position close must be market",
+                "full-position close must be market or IOC limit",
             ));
         }
         input_qty

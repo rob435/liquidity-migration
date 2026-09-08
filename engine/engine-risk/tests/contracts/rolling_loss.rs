@@ -250,3 +250,62 @@ fn the_config_refuses_a_rolling_loss_fraction_outside_its_range() {
     };
     assert!(cfg.validate().is_ok());
 }
+
+#[test]
+fn open_mark_losses_trip_entries_and_survive_account_replay_without_blocking_exits() {
+    use engine_types::numeric::ExactNumber;
+    use engine_types::risk::PositionAmounts;
+    let number = |s: &str| ExactNumber::venue_decimal(s).unwrap();
+    let mut held = position(BUSDT, Side::Buy, 10_000.0, 10.0, true);
+    held.stop_px = 6.0;
+    held.exact_amounts = Some(Box::new(PositionAmounts {
+        quantity: number("10000"),
+        entry_price: number("10"),
+        mark_price: Some(number("7")),
+        liquidation_price: Some(number("5")),
+    }));
+    let account = view(250_000.0, vec![held], NOW);
+    let replay = serde_json::from_slice(&serde_json::to_vec(&account).unwrap()).unwrap();
+    for account in [account, replay] {
+        let mut kernel = kernel();
+        kernel.observe_account_view(&account);
+        assert!(tripped(kernel.assess(
+            &entry(CARRY, CUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW),
+            &account,
+            NOW
+        )));
+        assert!(kernel.rolling_loss().tripped);
+        assert_eq!(kernel.rolling_loss().net_usdt, -30_000.0);
+        assert_eq!(
+            kernel.assess(
+                &exit(CARRY, BUSDT, Side::Sell, 10_000.0, 7.0, NOW),
+                &account,
+                NOW
+            ),
+            RiskVerdict::Allow { qty: 10_000.0 }
+        );
+    }
+}
+
+#[test]
+fn a_stop_beyond_the_leverage_distance_refuses_growth() {
+    let mut cfg = demo_config();
+    cfg.leverage = 5.0;
+    let mut kernel = Kernel::new(cfg).unwrap();
+    assert!(matches!(
+        kernel.assess(
+            &entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 6.5, NOW),
+            &flat(250_000.0, NOW),
+            NOW
+        ),
+        RiskVerdict::Deny { .. }
+    ));
+    assert_eq!(
+        kernel.assess(
+            &entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, NOW),
+            &flat(250_000.0, NOW),
+            NOW
+        ),
+        RiskVerdict::Allow { qty: 1.0 }
+    );
+}

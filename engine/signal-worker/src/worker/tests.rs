@@ -2290,6 +2290,34 @@ fn optional_whale_absence_keeps_carry_live_with_a_null_feature() {
 }
 
 #[test]
+fn carry_twenty_minute_lag_uses_receipt_time_with_midnight_data() {
+    for (lag_offset, expected) in [(-1, 9 * DAY_MS), (0, 10 * DAY_MS), (1, 10 * DAY_MS)] {
+        let mut config = compact_feature_config();
+        config.carry.decision_kline_lag_ms = 1_200_000;
+        let mut worker = SignalWorker::with_universe(config, test_universe()).unwrap();
+        install_compact_history(&mut worker, 10);
+        let observations = worker
+            .apply(WireEvent::CarryWatermark {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                observed_ts_ms: 10 * DAY_MS + 1_200_000 + lag_offset,
+                data_through_ms: 10 * DAY_MS,
+                gap_symbols: Vec::new(),
+            })
+            .unwrap();
+        let carry = observations
+            .iter()
+            .find(|row| row.kind == "carry_feature_batch")
+            .unwrap();
+        let envelope: SignalPayloadEnvelope = serde_json::from_slice(&carry.payload).unwrap();
+        let ObservationPayload::CarryFeatureBatch { decision_ts_ms, .. } = envelope.payload else {
+            panic!("carry");
+        };
+        assert_eq!(decision_ts_ms, expected, "lag offset {lag_offset}");
+    }
+}
+
+#[test]
 fn carry_catchup_uses_instrument_status_at_each_historical_decision() {
     let config = compact_feature_config();
     let mut universe = test_universe();

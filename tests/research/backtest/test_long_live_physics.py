@@ -172,14 +172,14 @@ def test_research_rule_provenance_matches_the_registered_live_profile() -> None:
 
     assert provenance["rule.execution_strategy_id"]["source"] == "registered_profile:v12"
     assert provenance["round_trip_cost_bps"]["source"] == "live_crossing_execution"
-    assert resolved.strategy.round_trip_cost_bps == pytest.approx(15.56)
+    assert resolved.strategy.round_trip_cost_bps == pytest.approx(26.56)
     assert capital.configured_seed_usdt == pytest.approx(100.0)
     assert capital.tracks_equity is True
     assert capital.equity_fraction == pytest.approx(1.0)
     assert capital.floor_usdt == pytest.approx(100.0)
     assert capital.expand_dead_band_fraction == pytest.approx(0.05)
     assert capital.account_gross_cap_multiple_reference == pytest.approx(5.0)
-    assert capital.account_margin_cap_multiple_reference == pytest.approx(1.0)
+    assert capital.account_margin_cap_multiple_reference == pytest.approx(0.7)
     assert capital.source == resolved.operational_profile_source
     assert capital.source_sha256 == resolved.operational_profile_sha256
 

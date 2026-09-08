@@ -44,6 +44,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from liquidity_migration.ops.telegram import as_block, send_telegram_message  # noqa: E402
+from liquidity_migration.core.venue_realm import MAINNET_REST_ENDPOINT  # noqa: E402
 from liquidity_migration.policy.oncall_environment import (  # noqa: E402
     NOTIFICATION_KEYS,
     ONCALL_KEYS,
@@ -749,6 +750,28 @@ def evaluate_host_clock() -> list[Alert]:
     )
     if result.returncode != 0 or result.stdout.strip() != "yes":
         return [Alert("host-clock", "CRITICAL", "host clock is not NTP-synchronised")]
+    try:
+        before = time.time()
+        started = time.monotonic()
+        with urllib.request.urlopen(f"{MAINNET_REST_ENDPOINT}/v5/market/time", timeout=5) as response:
+            body = json.load(response)
+        after = time.time()
+        elapsed = time.monotonic() - started
+        if body.get("retCode") != 0:
+            raise ValueError("venue time request was rejected")
+        venue_time = int(body["result"]["timeNano"]) / 1e9
+        if not math.isfinite(venue_time) or venue_time <= 0:
+            raise ValueError("invalid venue time")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return [Alert("host-clock", "WARNING", f"cannot measure venue clock offset: {error}")]
+    if abs((after - before) - elapsed) > 0.05:
+        return [Alert("host-clock", "CRITICAL", "host clock stepped during venue clock measurement")]
+    if elapsed > 1.0:
+        return [Alert("host-clock", "WARNING", f"venue clock measurement is inconclusive: RTT {elapsed * 1000:.0f}ms")]
+    # The server timestamp lies within the request interval; half RTT bounds its uncertainty.
+    offset = venue_time - (before + after) / 2
+    if abs(offset) - elapsed / 2 > 0.25:
+        return [Alert("host-clock", "CRITICAL", f"venue clock offset {offset * 1000:+.0f}ms, uncertainty {elapsed * 500:.0f}ms exceeds 250ms")]
     return []
 
 
@@ -1252,7 +1275,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--host-clock-check",
         action="store_true",
         help=(
-            "alert when timedatectl reports the box's clock unsynchronised. Off by "
+            "alert on unsynchronised NTP or measured venue clock drift. Off by "
             "default; turn it on in exactly one scope per box, or one cause pages twice"
         ),
     )

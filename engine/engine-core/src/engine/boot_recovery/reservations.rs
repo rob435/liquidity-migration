@@ -77,6 +77,7 @@ mod tests {
                 gross_notional_multiple: 2.0,
                 disaster_stop_fraction: 0.35,
                 max_component_gross_notional_usdt: 2000.0,
+                max_symbol_notional_usdt: 2000.0,
                 max_initial_margin_usdt: 1000.0,
             },
             leverage: 2.0,

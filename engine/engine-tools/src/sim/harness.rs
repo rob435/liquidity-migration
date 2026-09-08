@@ -232,14 +232,17 @@ impl World {
             .map_err(|error| boot(format!("symbol order: {error}")))?;
 
         let defaults = BacktestOptions::default();
+        let fees =
+            crate::backtest::fees::resolve(None, None, &crate::backtest::fees::default_path())
+                .map_err(boot)?;
         let rtt = Duration::from_millis(defaults.order_rtt_ms);
         let private_latency = Duration::from_millis(defaults.private_latency_ms);
         let scheduler = Scheduler::default();
         let venue = Arc::new(Mutex::new(SimulatedVenue::new(
             VenueParams {
                 initial_cash_usdt: defaults.initial_capital_usdt,
-                taker_fee_rate: defaults.taker_fee_rate,
-                maker_fee_rate: defaults.maker_fee_rate,
+                taker_fee_rate: fees.taker,
+                maker_fee_rate: fees.maker,
                 order_rtt_ns: rtt.as_nanos() as u64,
                 private_latency_ns: private_latency.as_nanos() as u64,
                 default_leverage: loaded

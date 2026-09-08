@@ -1,10 +1,9 @@
 {
   "config_id": "lane2_carry_hold_v5",
   "registered": "2026-08-19",
-  "lane": 2,
   "surface": "research-only",
   "authorizes": "nothing; this config has no runtime, no venue access, and no REAL_MONEY implication",
-  "descends_from": "lane2_carry_hold_v4 (which keeps scoring; v4's forward record is NOT superseded and must keep accruing)",
+  "descends_from": "lane2_carry_hold_v4",
   "claim": "v4's book plus two size multipliers on axes deliberately OUTSIDE the funding/price complex. (1) FLOW: a held name whose trailing-24h turnover has grown less than +40% versus 72h earlier is a stale crowd; halve it. (2) WHALE: a held name whose Binance top-trader position long/short ratio fell by more than 0.26 over the last three complete metrics days has the informed side de-longing it; halve it. The two compose multiplicatively with each other and with v4's depth and persistence multipliers. They were chosen because the day's measured lesson (~60 cells, 2026-08-19) is that ANY depth-correlated cut removes the book's payoff days: the deepest-premium-discount name-days alone carry 39% of v4's gross P&L. Flow and whale fire on nearly disjoint name-day sets (27 of ~900 flagged overlap) and cover each other's blind regime: whale is what carries 2022-23, flow is what carries 2026.",
   "read_this_before_citing_a_number": {
     "selection_debt": "Both features were selected on 2026-08-19 from roughly 60 scored in-book cells spanning seven feature axes, all on seen data, and the composite was declared only after each component's own battery. Neither component clears the program bar alone: flow's differential is NEGATIVE in 2022 (-0.9 bp/day) and 2023 (-0.9) taken by itself, and whale's threshold response is a hump peaked at the first-tested cell with a 1-of-20 placebo exceedance and ZERO 2026 contribution. The composite's numbers below are therefore a seen-data selection whose honest grade is the forward record, exactly as v4's registration said of its own numbers.",
@@ -29,18 +28,33 @@
       "note": "identical to v3/v4"
     },
     "filters": {
-      "toxic_band_ret_3d": { "lo": -0.30, "hi": 0.0, "note": "identical to v4" },
+      "toxic_band_ret_3d": {
+        "lo": -0.3,
+        "hi": 0.0,
+        "note": "identical to v4"
+      },
       "min_vol_30d_daily": 0.05,
       "min_vol_note": "identical to v3/v4"
     },
     "sizing": {
       "per_name_cap": 0.1,
       "gross_cap": 1.0,
-      "depth_scaling": { "basis": "trail_fund_24h", "ref_bp_per_day": 120.0, "floor": 0.25, "note": "identical to v2/v3/v4" },
-      "persistence_scaling": { "basis": "deep_settlement_share", "window_settlements": 20, "cut": 0.10, "low_multiplier": 0.0, "note": "identical to v4" },
+      "depth_scaling": {
+        "basis": "trail_fund_24h",
+        "ref_bp_per_day": 120.0,
+        "floor": 0.25,
+        "note": "identical to v2/v3/v4"
+      },
+      "persistence_scaling": {
+        "basis": "deep_settlement_share",
+        "window_settlements": 20,
+        "cut": 0.1,
+        "low_multiplier": 0.0,
+        "note": "identical to v4"
+      },
       "flow_scaling": {
         "basis": "turnover_growth_3d",
-        "cut": 0.40,
+        "cut": 0.4,
         "low_multiplier": 0.5,
         "note": "NEW in v5. turn_growth_3d = adv24(t)/adv24(t-72h) - 1, PIT at bars <= t. The +0.40 cut sits on a measured plateau: every threshold from the book's p20 (+0.15) to p35 (+1.27) crossed with multipliers 0.25/0.5/0.75 is positive (15/15 cells, t +1.98 to +2.46). +0.40 is the round number nearest the p25 boundary the plateau was probed around, frozen here; it is NOT a fitted optimum. A null or non-finite growth (young listing, zero denominator) fails OPEN at full size."
       },
@@ -62,15 +76,27 @@
     "measured_fee_side_bp": 7.78,
     "charging": "measured one-way turnover x fee per side, per day, identical to v1..v4",
     "funding": "settlement_exact (2026-07-28 corrected detector)",
-    "not_modelled": ["slippage beyond the taker fee", "market impact", "partial fills", "borrow", "margin cost", "venue outage"]
+    "not_modelled": [
+      "slippage beyond the taker fee",
+      "market impact",
+      "partial fills",
+      "borrow",
+      "margin cost",
+      "venue outage"
+    ]
   },
   "scoring_recipe": {
     "metric": "mean net bp per day and annualised Sharpe on the raw daily series",
-    "secondary": ["compounded total return", "max drawdown", "MAR", "mean one-way turnover", "mean gross", "paired daily differentials vs lane2_carry_hold_v4 on shared days, BOTH at own capital and capital-normalised"],
-    "comparator": "lane2_carry_hold_v4's forward rows are the primary comparator; zero is the secondary",
+    "secondary": [
+      "compounded total return",
+      "max drawdown",
+      "MAR",
+      "mean one-way turnover",
+      "mean gross",
+      "paired daily differentials vs lane2_carry_hold_v4 on shared days, BOTH at own capital and capital-normalised"
+    ],
+    "comparator": "Historical paired daily differences against predecessor configs on identical data and costs; all selection and coverage limits reported.",
     "grid": "none; single committed configuration",
-    "cadence": "one row per completed UTC day after the registration commit (scripts/research/score_financed_longs_forward.py)",
-    "eligibility": "only days strictly after the registration commit date count as forward evidence",
     "panel_requirement": "a panel built with --metrics-root (bn_tt_ls columns). Scoring this config against a panel without them raises rather than silently degrading to v4-plus-flow.",
     "reproduce_with": "liquidity_migration.research.backtest.financed_longs.score_carry_hold(panel, CarryHoldConfig.from_json(this_file))"
   },
@@ -84,7 +110,7 @@
       "total_return_raw_pct": 3175,
       "annualised_pct": 104.8,
       "max_drawdown_raw_pct": -18.7,
-      "mar_raw": 5.60,
+      "mar_raw": 5.6,
       "mean_gross": 0.075,
       "flat_days_pct": 46.0,
       "mean_oneway_turnover": 0.098
@@ -125,7 +151,7 @@
   },
   "known_weaknesses": [
     "inherits every v1..v4 weakness: concentrated, long-only crash beta, single-venue (Bybit) execution evidence, capacity ~$1M at 1% participation, terminal-day frame caveat, and the midnight-grid decision-hour luck on the LEVEL (the differential is clock-robust, 24/24)",
-    "seen-data selection after ~60 cells in one day; the t +3.30 headline must be discounted for that search, and the forward differential vs v4 is the only number that can rehabilitate it",
+    "seen-data selection after ~60 cells in one day; the t +3.30 headline must be discounted for that search, and a matched comparison against v4 must disclose data reuse",
     "the era gain is concentrated in 2025-26 squeeze regimes; a reader should expect roughly nothing from this overlay in a 2022/2023-like regime and must not project +6 bp/day forward unconditionally",
     "the whale leg adds an external operational dependency (Binance metrics availability and symbol-name alignment; ~6% of archive fetches 404 on renamed tickers) and contributed nothing in 2026 so far; if its forward contribution stays zero the honest v6 is flow-only re-argued from scratch",
     "both cuts (+0.40 flow, -0.26 whale) are frozen from plateaus/quantiles measured on the same seen data; the placebo margin for the composite is thin (best shuffle 3.26 vs real 3.30)",

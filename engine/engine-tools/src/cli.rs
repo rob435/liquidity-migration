@@ -415,10 +415,10 @@ pub(super) fn parse_backtest_options(args: &[String]) -> Result<BacktestOptions,
         options.initial_capital_usdt = v.parse()?;
     }
     if let Some(v) = value(args, "--taker-fee") {
-        options.taker_fee_rate = v.parse()?;
+        options.taker_fee_rate = Some(v.parse()?);
     }
     if let Some(v) = value(args, "--maker-fee") {
-        options.maker_fee_rate = v.parse()?;
+        options.maker_fee_rate = Some(v.parse()?);
     }
     if let Some(v) = value(args, "--rtt-ms") {
         options.order_rtt_ms = v.parse()?;
@@ -547,8 +547,8 @@ mod tests {
         assert_eq!(options.equity_path, Some(PathBuf::from("equity")));
         assert_eq!(options.report_path, Some(PathBuf::from("report")));
         assert_eq!(options.initial_capital_usdt, 1234.0);
-        assert_eq!(options.taker_fee_rate, 0.001);
-        assert_eq!(options.maker_fee_rate, 0.0002);
+        assert_eq!(options.taker_fee_rate, Some(0.001));
+        assert_eq!(options.maker_fee_rate, Some(0.0002));
         assert_eq!(options.order_rtt_ms, 123);
         assert_eq!(options.private_latency_ms, 45);
         assert_eq!(options.maintenance_margin_rate, 0.006);

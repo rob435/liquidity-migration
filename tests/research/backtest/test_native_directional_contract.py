@@ -40,7 +40,7 @@ def test_carry_fixture_calls_rust_and_pins_event_before_state_before_orders() ->
     )
 
     assert report["calls_rust_reducer"] is True
-    assert report["output_sha256"] == ("285c11c06b2d0aa6b39c8246bc41c72b326ffa7b2517c168eddaf0e59f2eb26a")
+    assert report["output_sha256"] == ("c6859172281ab4f7ed69a6722fa262cd8b77c41a843f83489e6ce9a4224d5c3c")
     assert report["effect_order"][:2] == ["append_carry_fire", "persist_checkpoint"]
     assert report["output"]["next_state"]["sizing_anchors"] == {
         "1800000000000": 1000.0,

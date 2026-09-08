@@ -1,6 +1,6 @@
 ---
 name: equity-curve
-description: Produce and interpret the repository-standard equity curves for the LONG profile, and for a registered Lane-2 carry config through the same chart. Use scripts/research/equity_curves.sh or scripts/ops.sh equity for citable outputs, select the correct full-PIT venue root, distinguish modeled leverage from presentation-only chart leverage, and report run scope and limitations. A standard curve is descriptive evidence, not proof of live-runtime parity, promotion, or authorization.
+description: Produce and interpret the repository-standard equity curves for the LONG profile, and for a stored carry config through the same chart. Use scripts/research/equity_curves.sh or scripts/ops.sh equity for citable outputs, select the correct full-PIT venue root, distinguish modeled leverage from presentation-only chart leverage, and report run scope and limitations. A standard curve is descriptive evidence, not proof of live-runtime parity, promotion, or authorization.
 ---
 
 # Equity Curve Generation & Interpretation
@@ -23,7 +23,7 @@ Specify execution parameters, sleeve configurations, output schemas, and interpr
 | `--combined-carry-multiplier`| Float | `3.0` | Sizing multiplier applied to CARRY equity. | Matches live funded deployment dial. |
 | `--combined-weight` | Float | Inverse-vol | Fixed capital allocation weight to CARRY (0.0 to 1.0). | When omitted, defaults to risk parity. |
 | `--combined-scale` | Float | `1.0` | Visual presentation leverage multiplier on blend. | Visual display only; does not model cost. |
-| `--research-config` | Path | None | Explicit registered Lane-2 config (e.g. `configs/lane2_*.json`). | Enforces registered research schema. |
+| `--research-config` | Path | None | Explicit stored config (e.g. `configs/lane2_*.json`). | Uses the stored research schema. |
 | `--out` | Path | `reports/equity_curves/` | Destination root for generated plots and ledgers. | Output directory created automatically. |
 
 ### Sleeve Reconstruction Characteristics
@@ -62,7 +62,7 @@ Specify execution parameters, sleeve configurations, output schemas, and interpr
 # Generate LONG equity curve using full-PIT Bybit data
 bash scripts/research/equity_curves.sh --sleeves long --root ~/SHARED_DATA/bybit_full_pit
 
-# Generate CARRY equity curve for registered Lane-2 v7 config
+# Generate CARRY equity curve for stored v7 config
 bash scripts/research/equity_curves.sh --sleeves carry --root ~/SHARED_DATA/bybit_full_pit
 ```
 

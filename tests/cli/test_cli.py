@@ -26,7 +26,7 @@ def test_resolve_data_root_guards_research_but_not_download_output(tmp_path: Pat
 
 def test_cost_config_zero_maker_models_full_taker(tmp_path: Path) -> None:
     """The deployed runner is 100%% taker: ``maker_fill_probability=0.0`` yields the
-    full taker round trip (2 * (taker_fee + taker_slippage) = 15 bps), and the
+    full taker round trip using the stored account fee, and the
     dataclass default also models 100%% taker so an ad-hoc ``CostConfig()`` does not
     under-cost.
     """
@@ -35,7 +35,7 @@ def test_cost_config_zero_maker_models_full_taker(tmp_path: Path) -> None:
     from liquidity_migration.core.config import CostConfig
 
     taker = replace(CostConfig(), maker_fill_probability=0.0)
-    assert taker.base_entry_exit_cost_bps == pytest.approx(15.0)
+    assert taker.base_entry_exit_cost_bps == pytest.approx(26.0)
     # The default must equal the full-taker cost (no silent maker-blend discount).
     assert CostConfig().base_entry_exit_cost_bps == pytest.approx(taker.base_entry_exit_cost_bps)
     # An explicit maker blend is still cheaper (and must be opted into explicitly).

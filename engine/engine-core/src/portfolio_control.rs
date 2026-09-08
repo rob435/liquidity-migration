@@ -110,7 +110,14 @@ impl PortfolioControls {
         if !owned
             || !request.reduce_only
             || request.stop.is_some()
-            || !matches!(request.kind, engine_types::OrderKind::Market)
+            || !matches!(
+                request.kind,
+                engine_types::OrderKind::Market
+                    | engine_types::OrderKind::Limit {
+                        tif: engine_types::TimeInForce::Ioc,
+                        ..
+                    }
+            )
         {
             return Err("engine net order has no matching durable emergency owner".into());
         }
@@ -200,7 +207,14 @@ impl PortfolioControls {
                                 || numeric_engine_order_id(&order.request.client_order_id))
                             || !order.request.reduce_only
                             || order.request.stop.is_some()
-                            || !matches!(order.request.kind, engine_types::OrderKind::Market)
+                            || !matches!(
+                                order.request.kind,
+                                engine_types::OrderKind::Market
+                                    | engine_types::OrderKind::Limit {
+                                        tif: engine_types::TimeInForce::Ioc,
+                                        ..
+                                    }
+                            )
                         {
                             return Err(
                                 "terminal engine net order has invalid durable lineage".into()

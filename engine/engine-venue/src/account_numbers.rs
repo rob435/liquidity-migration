@@ -15,6 +15,8 @@ fn decode<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, VenueError> {
 }
 fn money(equity: DecimalField, available: DecimalField) -> Result<AccountAmounts, VenueError> {
     Ok(AccountAmounts {
+        initial_margin_rate: None,
+        maintenance_margin_rate: None,
         equity_usdt: equity.required("account equity")?,
         available_usdt: available.required("available margin")?,
     })
@@ -40,6 +42,8 @@ fn held(
         symbol,
         side,
         amounts: PositionAmounts {
+            liquidation_price: None,
+            mark_price: None,
             quantity,
             entry_price: entry.required("entry price")?,
         },
@@ -78,6 +82,21 @@ pub(crate) fn assign(
     Ok(())
 }
 #[cfg(feature = "bybit")]
+fn nonnegative_optional(
+    field: &DecimalField,
+    name: &str,
+) -> Result<Option<ExactNumber>, VenueError> {
+    let value = field.optional(name)?;
+    if value
+        .as_ref()
+        .is_some_and(|number| number.value.is_negative())
+    {
+        return Err(bad(format!("field {name} is negative")));
+    }
+    Ok(value)
+}
+
+#[cfg(feature = "bybit")]
 #[derive(Deserialize)]
 struct BybitWallet {
     result: BybitWalletRows,
@@ -90,6 +109,10 @@ struct BybitWalletRows {
 #[cfg(feature = "bybit")]
 #[derive(Deserialize)]
 struct BybitBalance {
+    #[serde(default, rename = "accountIMRate")]
+    initial_margin_rate: DecimalField,
+    #[serde(default, rename = "accountMMRate")]
+    maintenance_margin_rate: DecimalField,
     #[serde(rename = "totalEquity")]
     equity: DecimalField,
     #[serde(rename = "totalAvailableBalance")]
@@ -104,7 +127,11 @@ pub(crate) fn bybit_wallet(raw: &str) -> Result<AccountAmounts, VenueError> {
         .into_iter()
         .next()
         .ok_or_else(|| bad("wallet has no account"))?;
-    money(row.equity, row.available)
+    let mut amounts = money(row.equity, row.available)?;
+    amounts.initial_margin_rate = nonnegative_optional(&row.initial_margin_rate, "accountIMRate")?;
+    amounts.maintenance_margin_rate =
+        nonnegative_optional(&row.maintenance_margin_rate, "accountMMRate")?;
+    Ok(amounts)
 }
 #[cfg(feature = "bybit")]
 #[derive(Deserialize)]
@@ -119,6 +146,10 @@ struct BybitRows {
 #[cfg(feature = "bybit")]
 #[derive(Deserialize)]
 struct BybitPosition {
+    #[serde(default, rename = "liqPrice")]
+    liquidation_price: DecimalField,
+    #[serde(default, rename = "markPrice")]
+    mark_price: DecimalField,
     symbol: String,
     #[serde(default)]
     side: String,
@@ -143,7 +174,13 @@ pub(crate) fn bybit_positions(raw: &str) -> Result<Vec<NativePosition>, VenueErr
             "Sell" => Side::Sell,
             _ => return Err(bad("position has no side")),
         };
-        out.push(held(row.symbol, side, qty, row.entry)?);
+        let mut position = held(row.symbol, side, qty, row.entry)?;
+        position.amounts.liquidation_price =
+            nonnegative_optional(&row.liquidation_price, "liqPrice")?
+                .filter(|number| number.value.is_positive());
+        position.amounts.mark_price = nonnegative_optional(&row.mark_price, "markPrice")?
+            .filter(|number| number.value.is_positive());
+        out.push(position);
     }
     Ok(out)
 }
@@ -365,6 +402,39 @@ pub(crate) fn mexc_positions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "bybit")]
+    #[test]
+    fn bybit_liquidation_and_margin_metrics_survive_account_decoding() {
+        let wallet = bybit_wallet(r#"{"result":{"list":[{"totalEquity":"100","totalAvailableBalance":"25","accountIMRate":"0.75","accountMMRate":"0.1234567890123456789"}]}}"#).unwrap();
+        let value = serde_json::to_value(wallet).unwrap();
+        assert_eq!(
+            value.get("maintenance_margin_rate"),
+            Some(
+                &serde_json::to_value(ExactNumber::venue_decimal("0.1234567890123456789").unwrap())
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            value.get("initial_margin_rate"),
+            Some(&serde_json::to_value(ExactNumber::venue_decimal("0.75").unwrap()).unwrap())
+        );
+        let positions = bybit_positions(r#"{"result":{"list":[{"symbol":"BTCUSDT","side":"Buy","size":"1","avgPrice":"100","liqPrice":"81.1234567890123456789","markPrice":"95.0"}]}}"#).unwrap();
+        let value = serde_json::to_value(&positions[0].amounts).unwrap();
+        assert_eq!(
+            value.get("liquidation_price"),
+            Some(
+                &serde_json::to_value(
+                    ExactNumber::venue_decimal("81.1234567890123456789").unwrap()
+                )
+                .unwrap()
+            )
+        );
+        assert_eq!(
+            value.get("mark_price"),
+            Some(&serde_json::to_value(ExactNumber::venue_decimal("95.0").unwrap()).unwrap())
+        );
+    }
     #[cfg(feature = "binance")]
     use engine_types::numeric::Exact;
     #[cfg(feature = "binance")]

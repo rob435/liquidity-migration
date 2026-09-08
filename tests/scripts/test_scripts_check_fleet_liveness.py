@@ -67,7 +67,7 @@ def test_backup_manifest_runtime_matches_existing_service_timeout() -> None:
     unit.read(ROOT / "deploy/systemd/liquidity-migration-backup.service")
     rows = (ROOT / "deploy/fleet_manifest.tsv").read_text().splitlines()
     backup = next(row.split("|") for row in rows if row.startswith("liquidity-migration-backup.timer|"))
-    assert int(backup[14]) == unit.getint("Service", "TimeoutStartSec") == 3_600
+    assert int(backup[14]) == unit.getint("Service", "TimeoutStartSec") == 600
 
 
 @pytest.fixture
@@ -1328,3 +1328,17 @@ def test_routine_http_rejection_keeps_status_when_body_read_fails(monkeypatch) -
         liveness.fire_incident_routine("https://example.com/fire", "PRIVATE", "incident")
     assert liveness.transport_error(raised.value) == "HTTP 400 (unreadable error response)"
     assert response.closed
+
+@pytest.mark.parametrize("offset, elapsed, expected", [(2.0, 0.1, "CRITICAL"), (-2.0, 0.1, "CRITICAL"), (0.1, 0.1, None), (0.0, 2.0, "WARNING")])
+def test_synced_ntp_does_not_hide_venue_clock_drift(monkeypatch, offset, elapsed, expected):
+    monkeypatch.setattr(liveness.subprocess, "run", lambda *_a, **_k: SimpleNamespace(returncode=0, stdout="yes\n"))
+    wall = iter([1000.0, 1000.0 + elapsed])
+    mono = iter([100.0, 100.0 + elapsed])
+    monkeypatch.setattr(liveness.time, "time", lambda: next(wall))
+    monkeypatch.setattr(liveness.time, "monotonic", lambda: next(mono))
+    body = {"retCode": 0, "result": {"timeNano": str(int((1000.0 + elapsed / 2 + offset) * 1e9))}}
+    monkeypatch.setattr(liveness.urllib.request, "urlopen", lambda *_a, **_k: io.BytesIO(json.dumps(body).encode()))
+    alerts = liveness.evaluate_host_clock()
+    assert [a.severity for a in alerts] == ([] if expected is None else [expected])
+    if expected == "CRITICAL":
+        assert "venue" in alerts[0].message

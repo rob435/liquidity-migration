@@ -27,6 +27,7 @@ fn beat_with(costs: &Costs) -> serde_json::Value {
         equity_usdt: 100.0,
         available_usdt: 100.0,
         account_age_ns: Some(1),
+        account_metrics: None,
         holdings: &[],
         entry_blockers: &[],
         strategy_errors: &[],

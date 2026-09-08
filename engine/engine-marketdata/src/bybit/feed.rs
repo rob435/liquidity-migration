@@ -433,6 +433,7 @@ impl BybitPublicFeed {
             pong_deadline: None,
             market_idle_deadline: None,
             active_quote_last_event_at: BTreeMap::new(),
+            pending_book_refresh: BTreeSet::new(),
             next_topic_maintenance_at: Instant::now() + self.timing.topic_maintenance_interval,
             maintaining_topics: false,
             timing: self.timing,
@@ -484,6 +485,7 @@ struct FeedWorker {
     pong_deadline: Option<Instant>,
     market_idle_deadline: Option<Instant>,
     active_quote_last_event_at: BTreeMap<String, Instant>,
+    pending_book_refresh: BTreeSet<String>,
     next_topic_maintenance_at: Instant,
     maintaining_topics: bool,
     timing: FeedTiming,
@@ -564,6 +566,7 @@ impl FeedWorker {
             self.subscription_request_sequence = 0;
             self.active_topics.clear();
             self.active_quote_last_event_at.clear();
+            self.pending_book_refresh.clear();
             // The new socket knows nothing of the old book. Merging across the
             // seam would invent prices. Announce that break before subscription
             // setup can emit an accepted topic's first frame.
@@ -956,7 +959,14 @@ impl FeedWorker {
         self.active_topics.remove(&topic);
         self.active_quote_last_event_at.remove(&topic);
         if let Some(symbol) = topic_symbol(&topic) {
-            self.state.reset_quote(symbol);
+            self.state.reset_book(
+                symbol,
+                if topic.starts_with("orderbook.50.") {
+                    50
+                } else {
+                    1
+                },
+            );
         }
         match self
             .subscribe_topics(socket, std::slice::from_ref(&topic))
@@ -980,6 +990,17 @@ impl FeedWorker {
         {
             self.manual_reprobe_window_started = now;
             self.manual_reprobes_in_window = 0;
+        }
+
+        let broken_books = self
+            .pending_book_refresh
+            .iter()
+            .take(MAX_STALE_QUOTE_REFRESHES_PER_SWEEP)
+            .cloned()
+            .collect::<Vec<_>>();
+        for topic in broken_books {
+            self.pending_book_refresh.remove(&topic);
+            self.refresh_stale_quote(socket, topic).await?;
         }
 
         let stale_quotes = self
@@ -1251,8 +1272,42 @@ impl FeedWorker {
                 Ok(Step::Reconnect)
             }
             Applied::Resync(reason) => {
-                warn!(?reason, "market feed lost continuity; resyncing");
-                Ok(Step::Reconnect)
+                let ParsedFrame::Book(book) = frame else {
+                    return Ok(Step::Reconnect);
+                };
+                let Some(topic) = message_topic else {
+                    return Ok(Step::Reconnect);
+                };
+                let Some(symbol) = self.state.symbol_id(book.symbol) else {
+                    return Ok(Step::Idle);
+                };
+                warn!(
+                    ?reason,
+                    topic, "market book lost continuity; refreshing topic"
+                );
+                self.active_topics.remove(topic);
+                self.active_quote_last_event_at.remove(topic);
+                self.pending_book_refresh.insert(topic.to_owned());
+                self.state.reset_book(book.symbol, book.depth);
+                self.next_topic_maintenance_at = Instant::now();
+                let event = if book.depth == 50 {
+                    MarketEvent::Depth {
+                        symbol,
+                        depth: engine_types::Depth {
+                            recv_ns,
+                            ..Default::default()
+                        },
+                    }
+                } else {
+                    MarketEvent::Quote {
+                        symbol,
+                        quote: engine_types::Quote {
+                            recv_ns,
+                            ..Default::default()
+                        },
+                    }
+                };
+                Ok(Step::Event(event))
             }
         }
     }

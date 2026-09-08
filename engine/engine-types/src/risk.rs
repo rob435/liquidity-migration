@@ -6,12 +6,20 @@ use crate::orders::{Intent, OrderUpdate, Side};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PositionAmounts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liquidation_price: Option<ExactNumber>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_price: Option<ExactNumber>,
     pub quantity: ExactNumber,
     pub entry_price: ExactNumber,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountAmounts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_margin_rate: Option<ExactNumber>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_margin_rate: Option<ExactNumber>,
     pub equity_usdt: ExactNumber,
     pub available_usdt: ExactNumber,
 }
@@ -221,9 +229,7 @@ pub enum DenyReason {
     StaleQuote { age_ns: u64, max_age_ns: u64 },
     /// Anything the kernel cannot positively classify. Fail closed.
     UnknownState { detail: String },
-    /// Read from the log, never written. No kernel produces this reason, and
-    /// the shape is frozen by the logs that already hold it: a frame the
-    /// reader cannot parse stops the engine at boot.
+    /// Gross exposure in one symbol exceeds its equity-scaled cap.
     SymbolNotionalBreached {
         symbol: SymbolId,
         notional_usdt: f64,
@@ -322,6 +328,10 @@ pub enum PortfolioRiskVerdict {
 /// Assessment `now_ns` is current monotonic admission time; persisted decision
 /// timestamps can belong to a previous process.
 pub trait RiskKernel {
+    fn stop_distance_cap(&self, _observed_leverage: Option<f64>) -> Option<f64> {
+        None
+    }
+
     fn assess(&mut self, intent: &Intent, account: &AccountView, now_ns: u64) -> RiskVerdict;
     fn assess_portfolio(
         &mut self,

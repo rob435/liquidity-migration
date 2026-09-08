@@ -13,6 +13,7 @@ use crate::bybit_ws::{
     TickerSample,
 };
 use crate::config::SignalWorkerConfig;
+use crate::features::carry_decision_at;
 use crate::http::{percent_encode, wall_ms, PublicHttpClient};
 use crate::model::{
     BinanceWhaleWire, BootstrapCoverage, BybitFundingWire, BybitInstrumentWire, BybitTickerWire,
@@ -1332,7 +1333,7 @@ impl LiveRunner {
         let intervals = Arc::new(state.instruments.clone());
         let lifecycle_current = state
             .last_carry_decision_ts_ms
-            .is_some_and(|last| last >= self.latest_carry_decision(closed_kline_end(now_ms)));
+            .is_some_and(|last| last >= self.latest_carry_decision(now_ms));
         let history_ms = required_carry_history_hours(&self.config, state).saturating_mul(HOUR_MS);
         let mut jobs = Vec::new();
         for symbol in &state.universe.carry_symbols {
@@ -1744,7 +1745,7 @@ impl LiveRunner {
         }
         let now_ms = wall_ms()?;
         let data_through_ms = closed_kline_end(now_ms);
-        let latest_decision_ms = self.latest_carry_decision(data_through_ms);
+        let latest_decision_ms = self.latest_carry_decision(now_ms);
         let source_through_ms = self.carry_source_through(data_through_ms);
         if source_through_ms <= 0 || latest_decision_ms <= 0 {
             return Ok(());
@@ -2071,7 +2072,8 @@ impl LiveRunner {
             ));
         }
         if carry_support {
-            let latest_carry_decision_ms = self.latest_carry_decision(end_ms);
+            let latest_carry_decision_ms =
+                carry_decision_at(end_ms, self.config.carry.decision_phase_ms, 0).unwrap_or(0);
             if carry_end_ms < latest_carry_decision_ms {
                 if instrument_trading_at(state, symbol, carry_end_ms) {
                     ranges.extend(instrument_source_ranges(
@@ -2138,7 +2140,8 @@ impl LiveRunner {
     }
 
     fn carry_source_through(&self, current_end_ms: i64) -> i64 {
-        let latest_decision_ms = self.latest_carry_decision(current_end_ms);
+        let latest_decision_ms =
+            carry_decision_at(current_end_ms, self.config.carry.decision_phase_ms, 0).unwrap_or(0);
         self.durable
             .worker()
             .state()
@@ -2152,15 +2155,13 @@ impl LiveRunner {
             .unwrap_or(current_end_ms)
     }
 
-    fn latest_carry_decision(&self, current_end_ms: i64) -> i64 {
-        let day = current_end_ms - current_end_ms.rem_euclid(DAY_MS);
-        let mut latest_decision_ms = day.saturating_add(self.config.carry.decision_phase_ms);
-        if current_end_ms
-            < latest_decision_ms.saturating_add(self.config.carry.decision_kline_lag_ms)
-        {
-            latest_decision_ms = latest_decision_ms.saturating_sub(DAY_MS);
-        }
-        latest_decision_ms.max(0)
+    fn latest_carry_decision(&self, observed_ts_ms: i64) -> i64 {
+        carry_decision_at(
+            observed_ts_ms,
+            self.config.carry.decision_phase_ms,
+            self.config.carry.decision_kline_lag_ms,
+        )
+        .unwrap_or(0)
     }
 
     fn needs_cold_bootstrap(&self) -> bool {

@@ -147,6 +147,7 @@ fn facts<'a>(
         available_usdt: 4_100.25,
         // Two seconds old, on the engine's own monotonic clock.
         account_age_ns: Some(2_000_000_000),
+        account_metrics: None,
         holdings: held,
         entry_blockers: NO_BLOCKERS.get_or_init(Vec::new),
         strategy_errors: NO_STRATEGY_ERRORS.get_or_init(Vec::new),

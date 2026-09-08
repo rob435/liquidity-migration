@@ -16,7 +16,7 @@ block appends, nothing is inserted, and the two realms' tails differ.
 | **1** | `long_native` | **LONG** | demo, mainnet | Active | Momentum breakouts on top turnover liquid perpetuals. |
 | **2** | `exodus_native` | **EXODUS** | demo, mainnet | Active | Short entry on distressed CARRY pairs prior to settlement. |
 | **3** | `quoter` | **MAKER** | mainnet | Disabled | High-frequency two-sided liquidity provision around fair mid. |
-| **3** | `probe` | **PROBE** | demo | Active | Order-path benchmark, not a trading sleeve: one venue-minimum post-only `BTCUSDT` buy 3% under the bid every 15 min on the wall clock, pulled 2 s later, so `decide`/`durable`/`wire`/`ack`/`end_to_end` are measured on a day no sleeve trades. A fill is closed at market at once and shows only as an entry blocker; it never raises a strategy error or a Telegram message. Skips the symbol while any other sleeve holds it: a Bybit entry's `stopLoss` (`tpslMode: Full`) names the whole position's stop, and the probe's sits far from the market. |
+| **3** | `probe` | **PROBE** | demo | Active | Order-path benchmark, not a trading sleeve: one venue-minimum post-only `BTCUSDT` buy 0.5% under the bid every 15 min on the wall clock, pulled 2 s later, so `decide`/`durable`/`wire`/`ack`/`end_to_end` are measured on a day no sleeve trades. A fill is closed at market at once and shows only as an entry blocker; it never raises a strategy error or a Telegram message. Skips the symbol while any other sleeve holds it: a Bybit entry's `stopLoss` (`tpslMode: Full`) names the whole position's stop, and the probe's sits far from the market. |
 
 ---
 
@@ -27,7 +27,7 @@ Every directional sleeve executes via the same deterministic state loop:
 2. **WAL Barrier**: Engine syncs observation to disk *before* triggering reducers.
 3. **Pure Reducer**: Evaluates current checkpoint + observation $\to$ outputs target state & effects (zero I/O).
 4. **Risk Admission**: Kernel validates gross exposure, quote freshness, and 24h loss ceiling.
-5. **Order Dispatch**: Dispatches signed orders over Bybit private WebSocket.
+5. **Order Dispatch**: Dispatches signed orders over the mainnet trade WebSocket or demo REST; Bybit demo has no trade WebSocket.
 
 ---
 
@@ -48,9 +48,9 @@ Every directional sleeve executes via the same deterministic state loop:
   * **Capacity & Cooldown**: Maximum 10 concurrent positions; symbol must be outside 7-day cooldown.
 
 ### Order Timing & Sizing
-* **Entry Execution**: Arms 1 hour after signal. Executes on a 1% price retrace or at 6-hour deadline. Late entries are cancelled.
+* **Entry Execution**: Arms 1 hour after signal. Executes on a 1% price retrace or at 6-hour deadline. Late entries are cancelled. Both realms rest PostOnly for 30 s, then cancel and reconcile fills before an IOC remainder.
 * **Sizing Formula**: $\text{Target Weight} = \min\left(0.30, \frac{\text{Gross Capital}}{\text{Open Slots}}\right) \times \text{Vol Target} \times \text{Weekend Mult (1.5)}$.
-* **Stop Loss**: Initial stop set at $3 \times \text{ATR}$. Decays to $1.5 \times \text{ATR}$ after 48 hours.
+* **Stop Loss**: Reducer requests $3 \times \text{ATR}$, decaying to $1.5 \times \text{ATR}$ after 48 hours. Account admission caps the actual distance at 10% at 5× and preserves tighter protection.
 * **Time Exit**: Unconditional exit after 3 days. No take-profit order.
 * **Order Limits**: Skip entries $<\$6$ notional; minimum resize $\ge \$1$ and $\ge 5\%$ notional.
 
@@ -83,7 +83,7 @@ $$\text{Size} = \text{Base} \times M_{\text{depth}} \times M_{\text{persistence}
 4. **Whale Positioning Multiplier**: Binance top-trader long/short change $\le -26\% \implies M_{\text{whale}} = 0.5$.
 
 ### Operational Limits & Pre-Settlement Fire
-* **Leverage & Stop**: $5\times$ leverage, $3\times$ notional scaling, $35\%$ catastrophe stop.
+* **Leverage & Stop**: $5\times$ leverage, $3\times$ notional scaling, $10\%$ maximum catastrophe stop.
 * **Pre-Settlement Exit**: Held positions that no longer meet exit criteria within the final 15 minutes before funding settlement are exited.
 * **Exodus Handoff**: Pre-settlement trigger emits a typed `CarryPresettlementFire` event to the engine WAL.
 
@@ -97,7 +97,7 @@ $$\text{Size} = \text{Base} \times M_{\text{depth}} \times M_{\text{persistence}
 * **Trigger**: Consumes `CarryPresettlementFire` event emitted by `carry_native`. Has no independent universe or scoring loop.
 * **Short Entry**: Sells short an exact quantity equal to the CARRY position. Entry window valid from fire time until Settlement + 5 minutes ($S+5\text{m}$).
 * **Cover Exit**: Hard time cover executed unconditionally at Settlement + 60 minutes ($S+60\text{m}$).
-* **Disaster Fence**: $35\%$ stop-loss.
+* **Disaster Fence**: $10\%$ maximum stop-loss.
 
 ---
 
@@ -113,7 +113,7 @@ $$\text{Size} = \text{Base} \times M_{\text{depth}} \times M_{\text{persistence}
 
 ## 7. Account Risk & Collision Rules
 
-1. **Single-Sleeve Symbol Ownership**: Two sleeves cannot hold exposure in the same symbol simultaneously.
+1. **Sleeve Attribution**: Sleeves may hold the same symbol, including opposing lots; the portfolio ledger attributes each lot while the venue holds one physical net position.
    * If a second sleeve signals an entry, it is blocked until the first sleeve is flat and fully reconciled.
 2. **Shared Capital Limits**: All sleeves draw against the shared gross exposure ceiling defined in the operational profile.
 3. **Rolling-Loss Circuit Breaker**: If total realized losses across all closed engine trades inside 24 hours reach the loss ceiling, **all entry orders across all sleeves are immediately blocked**. Existing positions continue to exit normally.

@@ -24,7 +24,7 @@ Directory structure, invocation roles, naming conventions, and decision-parity t
 * `build_*`: Generates a point-in-time data artifact or manifest.
 * `screen_*`: Fast Lane-1 exploratory factor or universe screen.
 * `tune_*`: Parameter sweep or sensitivity analysis.
-* `score_*`: Evaluates a committed rule against forward Lane-2 data.
+* Research scorers compare explicitly selected historical windows and recorded live outcomes.
 * `check_*`: Read-only health, integrity, or drift diagnostic.
 * `probe_*`: Direct read-only venue REST query.
 * **Safety Invariant**: Scripts in `research/` and `data/` **never mutate venue state or place live orders**.

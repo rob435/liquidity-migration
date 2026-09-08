@@ -44,7 +44,7 @@ ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/check_fleet_
     --capture-status-file /var/lib/liquidity-migration/forward-market-binance/status.json \
     --upload-stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success \
     --backup-stamp-file /var/lib/liquidity-migration/receipts/backup.last-success \
-    --max-backup-age-hours 8
+    --max-backup-age-hours 0.5
 SuccessExitStatus=0
 StandardOutput=journal
 StandardError=journal

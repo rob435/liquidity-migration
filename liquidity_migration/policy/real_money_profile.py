@@ -54,12 +54,10 @@ _LONG_MAX_NEW_ENTRIES_PER_CYCLE = 5
 class RealMoneyDials:
     """The two live dials on this surface."""
 
-    #: Venue-native disaster-stop distance on carry entries, armed with the
-    #: entry. Wide on purpose: the funding-normalisation exit is the intended
-    #: exit; this only covers the case where nothing local is running.
-    carry_stop_loss_fraction: float = 0.35
-    #: Share of the capital reference the engine's own closed trades may lose,
-    #: net of venue fees, over any rolling 24 hours before the engine refuses
+    #: Must remain inside 1 / entry leverage; held stops may tighten further at the venue liquidation price.
+    carry_stop_loss_fraction: float = 0.10
+    #: Share of reference the engine's closed net plus current account open losses may lose
+    #: over the rolling window before the engine refuses
     #: new entries and growth. Exits always pass. Emergency last resort, not a
     #: sizing rule.
     rolling_loss_fraction: float = 0.10
@@ -121,8 +119,8 @@ def render_real_money_profile_json(
     """
 
     dials = RealMoneyDials() if dials is None else dials
-    if not 0.0 < dials.carry_stop_loss_fraction < 1.0:
-        raise ValueError("RM_CARRY_STOP_LOSS_FRACTION must sit in (0, 1)")
+    if not 0.0 < dials.carry_stop_loss_fraction < 1.0 / _ENTRY_LEVERAGE:
+        raise ValueError("RM_CARRY_STOP_LOSS_FRACTION must sit in (0, 1 / entry leverage)")
     if not 0.0 < dials.rolling_loss_fraction <= 1.0:
         raise ValueError("RM_ROLLING_LOSS_FRACTION must sit in (0, 1]")
     reference = float(capital_reference_usdt)
@@ -131,11 +129,8 @@ def render_real_money_profile_json(
     if _EQUITY_FLOOR_USDT > reference:
         raise ValueError("the equity floor cannot exceed the declared capital reference")
 
-    # The gross cap is what the reference funds at entry leverage — reachable,
-    # so no load-time proof can call it scenery — and the margin cap is the
-    # wallet itself: margin above the wallet is the venue's business.
     account_gross = reference * _ENTRY_LEVERAGE
-    margin_cap = reference
+    margin_cap = reference * 0.70
 
     return {
         "schema_version": OPERATIONAL_PROFILE_SCHEMA_VERSION,
@@ -148,6 +143,7 @@ def render_real_money_profile_json(
             "expand_dead_band_fraction": _EXPAND_DEAD_BAND_FRACTION,
         },
         "account_risk": {
+            "max_symbol_notional_usdt": reference * 0.50,
             "max_component_gross_notional_usdt": account_gross,
             "max_account_gross_notional_usdt": account_gross,
             "max_initial_margin_usdt": margin_cap,

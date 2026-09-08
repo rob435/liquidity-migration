@@ -92,7 +92,7 @@ The existing reconciliation report includes `observed_window`. Its `complete_pro
 | `liquidity-migration-telegram-controls.service` | Global | `liquidity-controls:liquidity-controls` | `multi-user.target` | Interactive Telegram operator bot. |
 | `liquidity-migration-trade-notify.timer` | Global | `liquidity-observer:liquidity-migration` | Timer (every 1m) | Fills and closed-trade alert dispatcher. |
 | `liquidity-migration-market-tape-upload.timer` | Global | `root:root` | Timer (hourly at :10) | Ships finished tape archives to Google Drive, then deletes shipped hours older than `--keep-hours 24` from both tape roots. |
-| `liquidity-migration-backup.timer` | Global | `root:root` | Timer (every 6h) | Ships engine state & WAL to Google Drive. |
+| `liquidity-migration-backup.timer` | Global | `root:root` | Timer (every 15 min) | Ships engine state & WAL to Google Drive. |
 
 | Independent families | Deploy behavior |
 | --- | --- |
@@ -222,8 +222,8 @@ Configured in `/etc/liquidity-migration/bybit-mainnet.env` (`0600`, root-owned):
 | Environment Dial | Default | Constraint | Meaning |
 | :--- | :--- | :--- | :--- |
 | `REAL_MONEY` | `false` | Required `true` | Master arming switch for the funded engine. |
-| `RM_CARRY_STOP_LOSS_FRACTION` | `0.35` | Positive ratio | Venue-native stop-loss distance on CARRY positions. |
-| `RM_ROLLING_LOSS_FRACTION` | `0.10` | Positive ratio | Maximum fraction of capital reference lost in 24h before rolling-loss trip triggers. |
+| `RM_CARRY_STOP_LOSS_FRACTION` | `0.10` | `0 < fraction < 1/5` | Declared CARRY stop ceiling; the engine may tighten it for leverage or known liquidation price. |
+| `RM_ROLLING_LOSS_FRACTION` | `0.10` | Positive ratio | Maximum fraction of reference lost in closed 24h PnL plus current account open losses before entry admission trips. |
 
 ---
 
@@ -233,7 +233,7 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 
 | Data Payload | Schedule | Destination on Google Drive | Retention |
 | :--- | :--- | :--- | :--- |
-| **Engine State & WAL** | Every 6h (`backup.timer`) | `LiquidityMigration/engine-state/latest/` | 60 days in `history/` |
+| **Engine State & WAL** | Every 15 min (`backup.timer`; completed-copy age alerts after 30 min) | `LiquidityMigration/engine-state/latest/` | 60 days in `history/` |
 | **Market Tape Hours** | Hourly at :10 (`upload.timer`)| `LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/` | Permanent archive; the host keeps a 24 h sliding window of shipped hours ([market_tape/README.md](../market_tape/README.md) §Local Sliding Window) |
 
 | Local backup stage | Contract |

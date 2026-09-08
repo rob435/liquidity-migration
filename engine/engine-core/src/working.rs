@@ -45,6 +45,8 @@ struct Worked {
     policy: WorkPolicy,
     state: WorkState,
     cancel_on_recovery: bool,
+    cross_requested: bool,
+    cross_confirmed: bool,
 }
 
 /// The orders this engine is working, by the client order id it minted.
@@ -67,7 +69,7 @@ impl WorkingOrders {
             else {
                 continue;
             };
-            if request.reduce_only || !venue_ids.contains(&request.client_order_id) {
+            if request.is_sleeve_reduction() || !venue_ids.contains(&request.client_order_id) {
                 continue;
             }
             restored.orders.insert(
@@ -77,6 +79,8 @@ impl WorkingOrders {
                     policy,
                     state: WorkState::new(request.side, px, record.arrival_mid, now_ns),
                     cancel_on_recovery: true,
+                    cross_requested: false,
+                    cross_confirmed: false,
                 },
             );
         }
@@ -99,8 +103,35 @@ impl WorkingOrders {
                 policy,
                 state,
                 cancel_on_recovery: false,
+                cross_requested: false,
+                cross_confirmed: false,
             },
         );
+    }
+
+    pub fn crossing_candidates(&self) -> impl Iterator<Item = (&str, SymbolId)> {
+        self.orders
+            .iter()
+            .filter(|(_, w)| w.cross_requested && !w.cross_confirmed)
+            .map(|(id, w)| (id.as_str(), w.symbol))
+    }
+
+    pub fn waiting_to_cross(&self, id: &str) -> bool {
+        self.orders
+            .get(id)
+            .is_some_and(|w| w.cross_requested && !w.cross_confirmed)
+    }
+
+    pub fn confirm_cross(&mut self, id: &str) {
+        if let Some(worked) = self.orders.get_mut(id) {
+            worked.cross_confirmed = true;
+        }
+    }
+
+    pub fn retry_cross_cancel(&mut self, id: &str) {
+        if let Some(worked) = self.orders.get_mut(id) {
+            worked.state.cancel_requested = false;
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -129,6 +160,34 @@ impl WorkingOrders {
                 done.push(id.clone());
                 continue;
             };
+            if worked.cross_requested {
+                let expired = now_ns.saturating_sub(worked.state.cross_started_ns)
+                    >= worked.policy.cross_grace_ms.saturating_mul(1_000_000);
+                if !record.in_flight() && worked.cross_confirmed {
+                    if !expired && worked.cross_confirmed {
+                        if let Some(intent) = cross_remainder(record, market, now_ns) {
+                            out.push_back(Action::Place(intent));
+                        }
+                    }
+                    done.push(id.clone());
+                } else if record.in_flight()
+                    && !worked.state.cancel_requested
+                    && now_ns.saturating_sub(worked.state.last_cancel_try_ns)
+                        >= worked.policy.reprice_ms.saturating_mul(1_000_000)
+                {
+                    apply(
+                        id,
+                        worked,
+                        WorkDecision {
+                            step: WorkStep::Cancel,
+                            looked: true,
+                        },
+                        now_ns,
+                        out,
+                    );
+                }
+                continue;
+            }
             // Filled, cancelled, rejected, or written down in shadow and
             // never sent: its life is over.
             if !record.in_flight() {
@@ -164,7 +223,21 @@ impl WorkingOrders {
                 .get(worked.symbol.0 as usize)
                 .map(touch_of)
                 .unwrap_or_default();
-            let decision = plan::plan_work(&worked.state, touch, &rule, now_ns, &worked.policy);
+            let mut decision = plan::plan_work(&worked.state, touch, &rule, now_ns, &worked.policy);
+            if matches!(
+                record.request.kind,
+                engine_types::OrderKind::Limit {
+                    tif: engine_types::TimeInForce::PostOnly,
+                    ..
+                }
+            ) && matches!(
+                decision.step,
+                WorkStep::Cross { .. } | WorkStep::CrossUnpriced
+            ) {
+                worked.cross_requested = true;
+                start_crossing(worked, now_ns);
+                decision.step = WorkStep::Cancel;
+            }
             apply(id, worked, decision, now_ns, out);
         }
         for id in done {
@@ -261,6 +334,53 @@ fn apply(
             });
         }
     }
+}
+
+fn cross_remainder(
+    record: &crate::inflight::OrderRec,
+    market: &MarketState,
+    now_ns: u64,
+) -> Option<engine_types::Intent> {
+    let request = &record.request;
+    let quantity = record.remaining_exact().ok()?;
+    if !quantity.is_positive() {
+        return None;
+    }
+    let touch = touch_of(market.quotes.get(request.symbol.0 as usize)?);
+    if !touch.readable() {
+        return None;
+    }
+    let price = match request.side {
+        engine_types::Side::Buy => touch.ask_px,
+        engine_types::Side::Sell => touch.bid_px,
+    };
+    let mut prices = request.canonical_intent_prices().unwrap_or_else(|| {
+        Box::new(engine_types::orders::IntentPrices {
+            limit_price: None,
+            stop_trigger_price: request
+                .sleeve_stop()
+                .and_then(|s| strategy_decimal(s.trigger_px).ok()),
+        })
+    });
+    prices.limit_price = Some(strategy_decimal(price).ok()?);
+    Some(engine_types::Intent {
+        strategy: request.strategy,
+        symbol: request.symbol,
+        side: request.side,
+        qty: quantity.to_f64().ok()?,
+        exact_quantity: Some(Box::new(quantity)),
+        exact_prices: Some(prices),
+        kind: engine_types::OrderKind::Limit {
+            px: price,
+            tif: engine_types::TimeInForce::Ioc,
+        },
+        stop: request.sleeve_stop(),
+        reduce_only: false,
+        tag: format!("work-cross:{}", request.client_order_id),
+        decided_ns: now_ns,
+        work: None,
+        leverage: None,
+    })
 }
 
 /// The grace clock starts at the first cross attempt, priced or not, so an

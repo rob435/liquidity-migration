@@ -254,6 +254,8 @@ mod tests {
                 observed_ns: 1,
                 positions: vec![PositionView {
                     exact_amounts: Some(Box::new(PositionAmounts {
+                        liquidation_price: None,
+                        mark_price: None,
                         quantity: quantity.clone(),
                         entry_price: ExactNumber::venue_decimal("100").unwrap(),
                     })),

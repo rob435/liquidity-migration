@@ -356,6 +356,7 @@ async fn recovery_once(history_rows: usize) -> Result<u64, Error> {
         account,
     };
     let settings = EngineSection {
+        execution_limits: None,
         wal_path: PathBuf::from("account-state-soak.wal"),
         venue: "offline-soak".to_string(),
         group_flush_ms: 250,

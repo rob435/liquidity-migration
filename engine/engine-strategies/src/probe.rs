@@ -371,10 +371,13 @@ impl Strategy for Probe {
     }
 
     fn subscriptions(&self) -> Vec<Subscription> {
-        vec![Subscription {
-            symbol: self.symbol_name.clone(),
-            feed: Feed::Quote,
-        }]
+        [Feed::Quote, Feed::Ticker]
+            .into_iter()
+            .map(|feed| Subscription {
+                symbol: self.symbol_name.clone(),
+                feed,
+            })
+            .collect()
     }
 
     fn configured_entries_enabled(&self) -> bool {

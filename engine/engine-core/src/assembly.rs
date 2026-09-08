@@ -218,6 +218,8 @@ struct EnvelopeSection {
     gross_notional_multiple: f64,
     disaster_stop_fraction: f64,
     max_component_gross_notional_usdt: f64,
+    #[serde(default)]
+    max_symbol_notional_usdt: Option<f64>,
     max_initial_margin_usdt: f64,
 }
 
@@ -266,6 +268,10 @@ pub fn risk(section: &toml::Table) -> Result<Kernel, Box<dyn Error>> {
             gross_notional_multiple: parsed.envelope.gross_notional_multiple,
             disaster_stop_fraction: parsed.envelope.disaster_stop_fraction,
             max_component_gross_notional_usdt: parsed.envelope.max_component_gross_notional_usdt,
+            max_symbol_notional_usdt: parsed
+                .envelope
+                .max_symbol_notional_usdt
+                .unwrap_or(parsed.envelope.max_component_gross_notional_usdt),
             max_initial_margin_usdt: parsed.envelope.max_initial_margin_usdt,
         },
         leverage: parsed.leverage,
@@ -557,7 +563,7 @@ max_initial_margin_usdt = 100.0
             r#"
 operational_profile_path = "../../configs/{profile}"
 max_account_view_age_s = 120
-disaster_stop_fraction = 0.35
+disaster_stop_fraction = 0.1
 "#
         ))
     }
