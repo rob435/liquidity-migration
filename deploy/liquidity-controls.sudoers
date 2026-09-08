@@ -5,4 +5,6 @@ liquidity-controls ALL=(root:root) NOPASSWD: /opt/liquidity-migration-engine/bin
 liquidity-controls ALL=(root:root) NOPASSWD: /opt/liquidity-migration-engine/bin/telegram-control-helper resume-mainnet
 liquidity-controls ALL=(root:root) NOPASSWD: /opt/liquidity-migration-engine/bin/telegram-control-helper pause-mexc
 liquidity-controls ALL=(root:root) NOPASSWD: /opt/liquidity-migration-engine/bin/telegram-control-helper resume-mexc
+liquidity-controls ALL=(root:root) NOPASSWD: /opt/liquidity-migration-engine/bin/telegram-control-helper pause-hyperliquid
+liquidity-controls ALL=(root:root) NOPASSWD: /opt/liquidity-migration-engine/bin/telegram-control-helper resume-hyperliquid
 liquidity-controls ALL=(root:root) NOPASSWD: /opt/liquidity-migration-engine/bin/telegram-control-helper status-fleet

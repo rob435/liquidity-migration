@@ -21,6 +21,9 @@ wal_path = "engine.wal"
 #   bybit_mainnet        Bybit's funded account. REAL MONEY.
 #   hyperliquid_testnet  Hyperliquid's testnet.
 #   hyperliquid_mainnet  Hyperliquid's funded account. REAL MONEY.
+#                        LIVE-CANARY: `engine canary-order` runs here with
+#                        REAL_MONEY armed, and `engine run` is refused until
+#                        that canary's evidence is reviewed.
 #   lighter_testnet      Lighter's testnet rollup.
 #   lighter_mainnet      Lighter's funded account. REAL MONEY.
 #   mexc_mainnet         MEXC's funded futures account. REAL MONEY, and the

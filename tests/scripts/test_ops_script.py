@@ -170,6 +170,24 @@ def test_flatness_control_reaches_the_mexc_account_owner(tmp_path: Path) -> None
     assert "bybit" not in mexc_arm.replace("BYBIT_", "")
 
 
+def test_flatness_control_reaches_the_hyperliquid_account_owner(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+    result = _run("attest-flat", "--environment", "hyperliquid", env=environment)
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert "/etc/liquidity-migration/hyperliquid-mainnet.env" in payload
+    assert "/etc/liquidity-migration/engine-hyperliquid.env" in payload
+    assert "runtime_user=liquidity-engine-hyperliquid" in payload
+    # This arm unsets every other venue's credential and the arming switch for
+    # the read-only run, and reaches no other realm's files.
+    arm = payload.split("  hyperliquid)", 1)[1].split(";;", 1)[0]
+    assert "BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET" in arm
+    assert "MEXC_REAL_API_KEY MEXC_REAL_API_SECRET" in arm
+    assert "REAL_MONEY" in arm
+    assert "bybit" not in arm.replace("BYBIT_", "")
+    assert "mexc" not in arm.replace("MEXC_", "")
+
+
 def test_flatness_control_rejects_incomplete_arguments() -> None:
     assert _run("attest-flat").returncode == 2
     assert _run("attest-flat", "--environment", "prod").returncode == 2
@@ -217,6 +235,16 @@ def test_canary_order_keeps_the_arming_switch_and_refuses_the_funded_bybit_accou
     assert dry.returncode == 0, dry.stderr
     assert "--execute" not in capture.read_text(encoding="utf-8").split("REMOTE_ARGS=(", 1)[1].split(")", 1)[0]
 
+    hyperliquid = _run(
+        "canary-order", "--environment", "hyperliquid", "--symbol", "BTC",
+        "--expected-user-id", "0x" + "ab" * 20, "--execute", env=environment,
+    )
+    assert hyperliquid.returncode == 0, hyperliquid.stderr
+    assert (
+        "REMOTE_ARGS=( hyperliquid canary-order --symbol BTC --expected-user-id "
+        + "0x" + "ab" * 20 + " --execute )"
+    ) in capture.read_text(encoding="utf-8")
+
     for bad in (
         ("canary-order", "--environment", "mainnet", "--symbol", "BTCUSDT", "--expected-user-id", "1"),
         ("canary-order", "--environment", "mexc", "--symbol", "BTCUSDT"),
@@ -234,9 +262,11 @@ def test_real_money_allowlist_covers_the_arming_subcommands(tmp_path: Path) -> N
     assert "liquidity_migration.policy.real_money_arming" in payload
     assert "REMOTE_ARGS=( liquidity_migration.policy.real_money_arming preflight )" in payload
     assert _run("real-money", "set-real-money", env=environment).returncode == 2
-    result = _run("real-money", "preflight-mexc", env=environment)
-    assert result.returncode == 0, result.stderr
-    payload = capture.read_text(encoding="utf-8")
-    assert (
-        "REMOTE_ARGS=( liquidity_migration.policy.real_money_arming preflight-mexc )" in payload
-    )
+    for subcommand in ("preflight-mexc", "preflight-hyperliquid"):
+        result = _run("real-money", subcommand, env=environment)
+        assert result.returncode == 0, result.stderr
+        payload = capture.read_text(encoding="utf-8")
+        assert (
+            f"REMOTE_ARGS=( liquidity_migration.policy.real_money_arming {subcommand} )"
+            in payload
+        )

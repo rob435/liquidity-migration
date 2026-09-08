@@ -186,12 +186,12 @@ fn verify_account_identity(args: &[String]) -> Result<(), Box<dyn Error>> {
     runtime()?.block_on(engine_tools::flatness::verify_account_identity(&config))
 }
 
-#[cfg(not(any(feature = "bybit", feature = "mexc")))]
+#[cfg(not(any(feature = "bybit", feature = "mexc", feature = "hyperliquid")))]
 fn canary_order(_args: &[String]) -> Result<(), Box<dyn Error>> {
-    Err("canary-order requires the bybit or mexc Cargo feature".into())
+    Err("canary-order requires the bybit, mexc or hyperliquid Cargo feature".into())
 }
 
-#[cfg(any(feature = "bybit", feature = "mexc"))]
+#[cfg(any(feature = "bybit", feature = "mexc", feature = "hyperliquid"))]
 fn canary_order(args: &[String]) -> Result<(), Box<dyn Error>> {
     let config = PathBuf::from(
         value(args, "--config")

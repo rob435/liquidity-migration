@@ -45,8 +45,9 @@ fn conformance_local_fixtures_do_not_promote_dormant_realms() {
                 name.require_engine_run_ready().unwrap();
             }
             VenueReadiness::LiveCanary => {
-                // No realm ships in this state today; a venue with no practice
-                // host enters it on the way to live-proven.
+                assert!(matches!(name, VenueName::HyperliquidMainnet));
+                // Funded capital, and the operator canary is the only thing
+                // this state opens.
                 assert!(name.is_real_money());
                 name.require_canary_ready().unwrap();
                 assert!(name.require_engine_run_ready().is_err());

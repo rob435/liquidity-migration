@@ -112,7 +112,7 @@ credential, or socket is opened.
 | `hyperliquid_testnet` | `testnet-canary` | yes | Testnet realm only. |
 | `lighter_testnet` | `testnet-canary` | yes | Testnet realm only. |
 | `mexc_mainnet` | `live-proven` | yes | Funded MEXC futures account, `REAL_MONEY` arming and account lease. Evidence boundary: the 2026-09-08 20:16 UTC canary lifecycle (venue order `852400800159322624`); no fill, stop trigger or `isTaker` push observed yet. |
-| `hyperliquid_mainnet` | `production-blocked` | no | Refused before credential or socket access. |
+| `hyperliquid_mainnet` | `live-canary` | no | Canary permitted with `REAL_MONEY` armed; `engine run` refused until one reviewed `engine canary-order` lifecycle on this exact realm moves it to `live-proven`. `hyperliquid_testnet` is a different chain and a different account, so its evidence does not carry. |
 | `lighter_mainnet` | `production-blocked` | no | Refused before credential or socket access. |
 | `binance_testnet` | `production-blocked` | no | Refused before credential or socket access. |
 | `binance_mainnet` | `production-blocked` | no | Private engine run refused; public market clients are separate. |
@@ -122,16 +122,16 @@ Readiness labels are code policy; this table does not establish current deployme
 
 | Cargo feature | Default build | Contract |
 | --- | --- | --- |
-| `bybit`, `mexc` | Enabled | Public, private, market-data and runtime crates forward these features |
-| `binance`, `hyperliquid`, `lighter`, `variational` | Disabled | Selecting a disabled adapter fails before credentials or sockets; per-feature CI builds and conformance qualify enabled adapters |
-| `hyperliquid` cryptography | Absent by default | `k256` and `sha3` are optional dependencies of this feature |
+| `bybit`, `mexc`, `hyperliquid` | Enabled | Public, private, market-data and runtime crates forward these features |
+| `binance`, `lighter`, `variational` | Disabled | Selecting a disabled adapter fails before credentials or sockets; per-feature CI builds and conformance qualify enabled adapters |
+| `hyperliquid` cryptography | In the default build | `k256` and `sha3` are optional dependencies of the `hyperliquid` feature, and that feature is on by default, so the funded binary links them. No CI step asserts their absence |
 
 #### Operator tooling per realm
 
 | Command | Realms it accepts | Contract |
 | --- | --- | --- |
-| `engine canary-order` | `bybit_demo`, and every `live-canary` realm (`VenueName::require_canary_ready`) | One minimum-lot post-only order away from the touch, cancelled, with two flat account scans; any fill is closed in full and fails the command. Client ids are at most 30 characters, inside MEXC's 32-character `externalOid`. Venue clock: `/v5/market/time` on Bybit, `/api/v1/contract/ping` on MEXC. Terminal proof: Bybit's order receipt, otherwise `VenueGateway::order_status`. |
-| `engine verify-account-identity`, `engine attest-flat` | Realms with an `InventoryProbe`: `bybit_demo`, `bybit_mainnet`, `mexc_mainnet` | Read-only credentials, no order/cancel/amend/stop API on the probe type. MEXC's `AccountIdentity.user_id` is `key-<first 8 bytes of sha256(api key)>`; its scan covers futures balances, positions, working orders and position-bound stop records, and says so in `AccountInventory.scope`. |
+| `engine canary-order` | `bybit_demo`, and every `live-canary` realm (`VenueName::require_canary_ready`) — `hyperliquid_mainnet` today | One minimum-lot post-only order away from the touch, cancelled, with two flat account scans; any fill is closed in full and fails the command. Client ids are at most 30 characters, inside MEXC's 32-character `externalOid`; a Hyperliquid id takes the hashed half of the 16-byte `cloid` scheme (prefix `0x02`) and still looks itself up. The order is sized by the notional term, not the lot, wherever the venue states a minimum notional — 10 USD on Hyperliquid. Venue clock: `/v5/market/time` on Bybit, `/api/v1/contract/ping` on MEXC, `/info {"type": "exchangeStatus"}` → `time` on Hyperliquid. Terminal proof: Bybit's order receipt, otherwise `VenueGateway::order_status`; a Hyperliquid order the venue has already dropped from its retained set answers `unknownOid`, which reaches the canary as an error, not as never-accepted. |
+| `engine verify-account-identity`, `engine attest-flat` | Realms with an `InventoryProbe`: `bybit_demo`, `bybit_mainnet`, `mexc_mainnet`, `hyperliquid_mainnet` | Read-only credentials, no order/cancel/amend/stop API on the probe type. MEXC's `AccountIdentity.user_id` is `key-<first 8 bytes of sha256(api key)>`; its scan covers futures balances, positions, working orders and position-bound stop records. Hyperliquid's is the master account address, lower-case `0x` and 40 hex digits, and its scope reads `credential account: Hyperliquid — every open perpetual position and the cross-margin account value, every working order including the reduce-only trigger orders a stop is kept as, and every spot token balance. Vaults and sub-accounts are separate addresses this scan does not read.` Each says so in `AccountInventory.scope`. |
 
 | Private conformance scope | Verified fixture behavior |
 | --- | --- |
@@ -156,8 +156,11 @@ Readiness labels are code policy; this table does not establish current deployme
 * **Must Never**: real capital reach a `production-blocked` or `read-only`
   realm. The boot gate refuses the run; there is no override flag.
 * **Must Never**: `engine run` start on a `live-canary` realm. That state
-  admits `engine canary-order` and nothing else, and it exists only for a
-  venue with no practice host.
+  admits `engine canary-order` and nothing else, and it exists for a funded
+  realm whose live evidence is still owed. A practice sibling elsewhere on the
+  venue does not settle it: `hyperliquid_testnet` is `testnet-canary` and
+  `hyperliquid_mainnet` is `live-canary` at the same time, because they are a
+  different chain and a different account.
 
 ---
 
@@ -170,7 +173,7 @@ Readiness labels are code policy; this table does not establish current deployme
 | **1. Config** | Parse & Hash | Reads TOML config and hashes exact bytes. | Rejects unknown keys (`deny_unknown_fields`). |
 | **2. Plugs** | Plugs Bind | Resolves compiled venue and strategy reducers by stable sleeve key. | Existing durable slots keep their owners; absent configured sleeves use passive owners restored from committed paged callback state. Pending queue cursors remain for engine recovery. |
 | **3. WAL** | Replay & Lock | Locks `/var/lib/.../engine.wal` and replays the newest trusted segment. | Rebuilds identities and unfinished work; persists `ExecutionPrecisionV1` and a fresh `OrderIdEpoch` before new engine work. |
-| **4. Lease** | Account Lock | Authenticates account and acquires writer lease. | Lock: `/run/lock/liquidity-migration/bybit-<realm>-*.lock`. |
+| **4. Lease** | Account Lock | Authenticates account and acquires writer lease. On Hyperliquid the authentication also checks that the signing key's address is listed in the account's `extraAgents`, and refuses before trading when it is not. | Lock: `/run/lock/liquidity-migration/<venue>-<realm>-user-<id>.lock`. |
 | **5. Private WS**| Stream Watermark| Connects private WebSocket and awaits ready state. | Blocks if auth fails or private queue is cold. |
 | **6. Reconcile**| State Audit | Streams missed executions into canonical orders, sleeve accounting, physical exposure and stops; compares them with the account. | Unknown engine lineage is loaded from retained WAL archives; unresolved ownership, unfinished durable dispatches or account disagreement prevent history-frontier advancement and opening. |
 | **7. Checkpoint**| Restore State | Restores sleeve checkpoints, exact open trade cost basis, loss rows and pending reservations; starts covers empty. | Rejects incompatible schema, fingerprint, quantities, price ranges or payloads; unknown monetary valuation remains explicit. |

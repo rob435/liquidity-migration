@@ -11,9 +11,10 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Surface | Unit / Trigger | Cadence | Destination | Authority |
 | :--- | :--- | :--- | :--- | :--- |
 | Trade updates | `liquidity-migration-trade-notify.timer` | 5 min | Telegram main chat | Read-only openings, closes, and daily digest |
-| Demo liveness | `liquidity-migration-demo-liveness.timer` | 3 min | Telegram alerts + incident routine | Demo engine, signal worker, timers, heartbeats, admission |
-| Mainnet liveness | `liquidity-migration-mainnet-liveness.timer` | 3 min while armed | Telegram alerts + incident routine | Funded Bybit engine, signal worker, timers, heartbeats, admission |
-| MEXC liveness | `liquidity-migration-mexc-liveness.timer` | 3 min while armed | Telegram alerts + incident routine | MEXC engine, signal worker, timers, heartbeats, admission |
+| Demo liveness | `liquidity-migration-demo-liveness.timer` | 30 s | Telegram alerts + incident routine | Demo engine, signal worker, timers, heartbeats, admission |
+| Mainnet liveness | `liquidity-migration-mainnet-liveness.timer` | 30 s while armed | Telegram alerts + incident routine | Funded Bybit engine, signal worker, timers, heartbeats, admission |
+| MEXC liveness | `liquidity-migration-mexc-liveness.timer` | 30 s while armed | Telegram alerts + incident routine | MEXC engine, signal worker, timers, heartbeats, admission |
+| Hyperliquid liveness | `liquidity-migration-hyperliquid-liveness.timer` | 30 s while armed | Telegram alerts + incident routine | Hyperliquid engine, signal worker, timers, heartbeats, admission |
 | Host liveness | `liquidity-migration-host-liveness.timer` | 3 min, independent | Telegram alerts + incident routine + external dead-man | Recorders, upload, backup, equity sampler, disk, clock, realm watchdogs |
 | Operator controls | `liquidity-migration-telegram-controls.service` | Continuous | Telegram main chat | Pause demo, resume demo, pause each running funded realm, status |
 
@@ -50,8 +51,8 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 
 | Route | Retry and Deduplication Contract |
 | :--- | :--- |
-| Telegram | New alert immediately; active alert repeats every 60 min; resolution once; failed delivery retries next 3-min run and does not consume cooldown |
-| Incident routine | One run per active `CRITICAL` reference; failed fire retries next 3-min run; the reference rearms only after resolution |
+| Telegram | New alert immediately; active alert repeats every 60 min; resolution once; failed delivery retries on that scope's next run and does not consume cooldown |
+| Incident routine | One run per active `CRITICAL` reference; failed fire retries on that scope's next run; the reference rearms only after resolution |
 | External dead-man | Host scope alone pings on a run with no `CRITICAL`; no realm scope ever pings it |
 | Systemd result | Health fault with accepted routes exits 0; invalid configuration or failed route exits non-zero |
 
@@ -88,10 +89,10 @@ inaccessible after launch.
 | Opening | Fresh heartbeat contains a newly attributed `LONG`, `CARRY`, or `EXODUS` position |
 | Close | `trades.jsonl` gains a closed round trip; message includes sleeve, symbol, side, hold, net realized PnL, return, and slippage |
 | `maker_canary`, `probe` | Recorded but excluded from Telegram trade messages; neither is a directional sleeve, so neither can produce an Opening |
-| Daily digest | 00:00 UTC realized totals split by account: `DEMO`, `RM` (funded Bybit), `MEXC` |
+| Daily digest | 00:00 UTC realized totals split by account: `DEMO`, `RM` (funded Bybit), `MEXC`, `HL` (funded Hyperliquid) |
 | `/status` | Unit, heartbeat, and entry-permission summary |
 | `/pause_demo` / `/resume_demo` | Disable or restore demo entries; exits and settlement continue |
-| `/pause_mainnet`, `/pause_mexc` | Disable that funded realm's entries while its engine continues managing existing positions. The button appears only while that realm's owner is active |
+| `/pause_mainnet`, `/pause_mexc`, `/pause_hyperliquid` | Disable that funded realm's entries while its engine continues managing existing positions. The button appears only while that realm's owner is active |
 
 ## 3. Invariants
 
@@ -109,7 +110,7 @@ inaccessible after launch.
 - **Must** commit a sink's cooldown state only after that sink accepts delivery.
 - **Must** treat journals and fire payloads as untrusted evidence.
 - **Must Never** raise a restriction the system enforces on purpose to `CRITICAL`: an on-call run can only report back what the limit already says, and a state that crosses its threshold repeatedly would fire one run per crossing.
-- **Must Never** let demo or mainnet ping the host dead-man URL.
+- **Must Never** let a realm scope ping the host dead-man URL.
 - **Must Never** expose `/flatten` or `/resume_mainnet` in Telegram; those require explicit shell authority.
 - **Must Never** let a notifier or watchdog receive venue API keys or `REAL_MONEY`.
 
@@ -142,6 +143,7 @@ scripts/ops.sh logs trade-notify.service 100
 scripts/ops.sh logs demo-liveness.service 100
 scripts/ops.sh logs mainnet-liveness.service 100
 scripts/ops.sh logs mexc-liveness.service 100
+scripts/ops.sh logs hyperliquid-liveness.service 100
 scripts/ops.sh logs host-liveness.service 100
 scripts/ops.sh logs telegram-controls.service 100
 ```

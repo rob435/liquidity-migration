@@ -10,8 +10,8 @@ The execution engine and signal worker run in Rust; Python runs market-tape capt
 
 | Process / Component | Language | Authority | Credentials | State Root | Systemd Unit |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Trading Engine** (`engine`) | Rust | Sole order authority, WAL, risk kernel, position attribution | One venue's API keys (`0600`) | `/var/lib/liquidity-migration-engine[-mainnet\|-mexc]` | `liquidity-migration-engine[-mainnet\|-mexc].service` |
-| **Signal Worker** (`signal-worker`) | Rust | Public market ingestion, feature calculation, observation streaming | None (public data only) | `/var/lib/liquidity-migration-signal-worker-{demo,mainnet,mexc}` | `liquidity-migration-signal-worker-{demo,mainnet,mexc}.service` |
+| **Trading Engine** (`engine`) | Rust | Sole order authority, WAL, risk kernel, position attribution | One venue's API keys (`0600`) | `/var/lib/liquidity-migration-engine[-mainnet\|-mexc\|-hyperliquid]` | `liquidity-migration-engine[-mainnet\|-mexc\|-hyperliquid].service` |
+| **Signal Worker** (`signal-worker`) | Rust | Public market ingestion, feature calculation, observation streaming | None (public data only) | `/var/lib/liquidity-migration-signal-worker-{demo,mainnet,mexc,hyperliquid}` | `liquidity-migration-signal-worker-{demo,mainnet,mexc,hyperliquid}.service` |
 | **Market Tape** (`python -m market_tape`) | Python | Raw tick/book capture, zstd segment compression, manifest logging | None (public WebSocket) | `/var/lib/liquidity-migration/forward-market` | `liquidity-migration-forward-capture[-binance].service` |
 | **Observer / Notifier** | Python | Read-only trade logs, Telegram notifications, heartbeat monitoring | Telegram Bot Token | None (ephemeral) | `liquidity-migration-trade-notify.service` |
 | **Equity Recorder** | Python | Read-only heartbeat and recorder status sampling, one line per minute | None | None | `liquidity-migration-equity-recorder.service` |
@@ -24,9 +24,10 @@ Every account-owning realm is strictly segregated across all resources:
 | `demo` | `bybit_demo` | `bybit` / `demo` | `/run/lock/liquidity-migration/bybit-demo-user-<uid>.lock` |
 | `mainnet` | `bybit_mainnet` | `bybit` / `mainnet` | `/run/lock/liquidity-migration/bybit-mainnet-user-<uid>.lock` |
 | `mexc` | `mexc_mainnet` | `mexc` / `mexc_mainnet` | `/run/lock/liquidity-migration/mexc-mexc_mainnet-user-key-<16 hex>.lock` |
+| `hyperliquid` | `hyperliquid_mainnet` | `hyperliquid` / `hyperliquid_mainnet` | `/run/lock/liquidity-migration/hyperliquid-hyperliquid_mainnet-user-0x<40 hex>.lock` |
 
 * **No Fallback**: No realm can access, inherit, or fall back to another's state, sockets, or credentials.
-* **Leases**: Each engine acquires an exclusive single-writer lockfile named `/run/lock/liquidity-migration/<venue>-<realm>-user-<id>.lock`. Venues added after Bybit qualify the realm with the venue name, and MEXC exposes no numeric account id, so its id is `key-` plus the first eight bytes of `sha256(api key)` in hex.
+* **Leases**: Each engine acquires an exclusive single-writer lockfile named `/run/lock/liquidity-migration/<venue>-<realm>-user-<id>.lock`. Venues added after Bybit qualify the realm with the venue name. MEXC exposes no numeric account id, so its id is `key-` plus the first eight bytes of `sha256(api key)` in hex; Hyperliquid's is the master account address in lower case, and the engine checks the signing key is one of that account's `extraAgents` before it trades.
 * **Public data**: every realm's worker reads Bybit mainnet public data; the realm names the account its observations are consumed by, not the source of the features.
 
 ---
@@ -41,6 +42,7 @@ The signal worker delivers observations to the engine as immutable spool rows, a
 | **Demo doorbell** | `/var/lib/liquidity-migration/signals/demo/stream.sock` | `[u32 len_le][the row's bytes]` | `0770` | `liquidity-engine-demo:liquidity-migration` |
 | **Mainnet doorbell** | `/var/lib/liquidity-migration/signals/mainnet/stream.sock` | `[u32 len_le][the row's bytes]` | `0770` | `liquidity-engine-mainnet:liquidity-migration` |
 | **MEXC doorbell** | `/var/lib/liquidity-migration/signals/mexc/stream.sock` | `[u32 len_le][the row's bytes]` | `0770` | `liquidity-engine-mexc:liquidity-migration` |
+| **Hyperliquid doorbell** | `/var/lib/liquidity-migration/signals/hyperliquid/stream.sock` | `[u32 len_le][the row's bytes]` | `0770` | `liquidity-engine-hyperliquid:liquidity-migration` |
 
 ### Signal Delivery Mechanics
 
@@ -119,7 +121,7 @@ Operator commands are durable engine events submitted through the control spool 
 | **Pause** | **No** | Yes | Active | Sets `entry_permission=false`. Cancels working openings. Existing positions hold or exit normally. |
 | **Resume** | **Yes** | Yes | Active | Restores entry permission (only if committed config allows entries). |
 | **Flatten** | **No** | **Forced** | Active | Cancels all working orders. Emits reduction-only market/limit exits until attributed exposure is zero. |
-| **Disarm** | **No** | No orders | Stopped | Sets `REAL_MONEY=false` in that realm's credential file (`bybit-mainnet.env` or `mexc-mainnet.env`) and stops its units. |
+| **Disarm** | **No** | No orders | Stopped | Sets `REAL_MONEY=false` in that realm's credential file (`bybit-mainnet.env`, `mexc-mainnet.env` or `hyperliquid-mainnet.env`) and stops its units. |
 
 ---
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Liveness watchdog for the deployed fleet and for the host itself.
 
-Scope is ``demo``, ``mainnet``, ``mexc``, or ``host``. The realm scopes read the fleet
+Scope is ``demo``, ``mainnet``, ``mexc``, ``hyperliquid``, or ``host``. The realm
+scopes read the fleet
 manifest, require every always-on unit in the realm to be active, require each
 heartbeat-bearing unit's heartbeat file to be fresh, require each signal worker
 to leave its bounded startup and report ready, and alert when an engine reports
@@ -64,10 +65,10 @@ _DEPLOY_LOCK = Path("/run/liquidity-migration/deploy.lock")
 _MAX_DEPLOY_AGE_SEC = 1_800.0
 _DISK_FORECAST_SEC = 195.0  # Host timer: 180-second cadence plus 15-second accuracy.
 _BOOT_ID_FILE = Path("/proc/sys/kernel/random/boot_id")
-_ACCOUNT_SCOPES = ("demo", "mainnet", "mexc", "host")
+_ACCOUNT_SCOPES = ("demo", "mainnet", "mexc", "hyperliquid", "host")
 #: Realms whose units run only while their own credential file is armed. Their
 #: watchdog timers are expected up only once enabled or once their engine runs.
-_FUNDED_REALMS = ("mainnet", "mexc")
+_FUNDED_REALMS = ("mainnet", "mexc", "hyperliquid")
 _SIGNAL_WORKER_HEARTBEAT_KIND = "liquidity_migration_signal_worker_heartbeat"
 _DEPLOY_TRANSITIONAL_ALERT_PREFIXES = (
     "unit:",
@@ -88,6 +89,7 @@ _ENGINE_UNITS = {
     "liquidity-migration-engine.service",
     "liquidity-migration-engine-mainnet.service",
     "liquidity-migration-engine-mexc.service",
+    "liquidity-migration-engine-hyperliquid.service",
 }
 _ENGINE_WAL_BYTES_PER_SECOND = 1_048_576
 _ENGINE_RSS_BYTES = 1_610_612_736
@@ -878,6 +880,7 @@ def evaluate_watchdog_chain(
     engines = {
         "mainnet": "liquidity-migration-engine-mainnet.service",
         "mexc": "liquidity-migration-engine-mexc.service",
+        "hyperliquid": "liquidity-migration-engine-hyperliquid.service",
     }
     active = unit_states([*timers.values(), *engines.values()])
     alerts: list[Alert] = []

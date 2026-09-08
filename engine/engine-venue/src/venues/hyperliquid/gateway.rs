@@ -27,7 +27,8 @@ use crate::RealmCredentials;
 
 use engine_types::ids::{Symbol, SymbolId};
 use engine_types::orders::{
-    AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side, TimeInForce, VenueOrder,
+    AccountInventory, AmendSpec, InstrumentRule, OrderAck, OrderKind, OrderRequest, Side,
+    TimeInForce, VenueOrder,
 };
 use engine_types::risk::AccountView;
 use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
@@ -37,8 +38,9 @@ use serde_json::{json, Value};
 use super::assets::{venue_px, venue_sz, Asset, Assets};
 use super::cloid;
 use super::parse::{
-    all_accepted, first_status, parse_margin, parse_meta_raw, parse_order_ack, parse_positions,
-    parse_working_orders, stops_by_coin, venue_result,
+    all_accepted, first_status, parse_inventory_orders, parse_inventory_perp_cash,
+    parse_inventory_positions, parse_inventory_spot_balances, parse_margin, parse_meta_raw,
+    parse_order_ack, parse_positions, parse_working_orders, stops_by_coin, venue_result,
 };
 use super::realm::HyperliquidRealm;
 use super::sign::{address_of, address_text, parse_address, parse_key, sign_l1_action};
@@ -222,6 +224,53 @@ impl HyperliquidGateway {
 
     pub fn realm(&self) -> HyperliquidRealm {
         self.realm
+    }
+
+    /// The venue's own millisecond clock, from `exchangeStatus`. Public, so it
+    /// answers before the gateway has signed anything, and it is what bounds
+    /// an execution-history window in the venue's time rather than this host's.
+    pub async fn venue_time_ms(&self) -> Result<i64, VenueError> {
+        let body = self.info(json!({"type": "exchangeStatus"})).await?;
+        match int_field(&body, "time")? {
+            time if time > 0 => Ok(time),
+            _ => Err(VenueError::BadReply(
+                "exchangeStatus carried no millisecond server clock".to_string(),
+            )),
+        }
+    }
+
+    /// Every surface this account can carry, as one scan. Reads only; nothing
+    /// here can create exposure.
+    async fn account_scan(&self) -> Result<AccountInventory, VenueError> {
+        // Stamp the beginning, not the end. The caller's freshness bound then
+        // rejects a scan whose first read has gone stale while the later reads
+        // were still arriving.
+        let observed_ms = wall_ms();
+        let user = self.address_text();
+
+        let state = self
+            .info(json!({"type": "clearinghouseState", "user": user}))
+            .await?;
+        let mut positions = parse_inventory_positions(&state)?;
+        positions.extend(parse_inventory_perp_cash(&state)?);
+
+        let open_orders = parse_inventory_orders(&self.open_orders().await?)?;
+
+        let spot = self
+            .info(json!({"type": "spotClearinghouseState", "user": user}))
+            .await?;
+        positions.extend(parse_inventory_spot_balances(&spot)?);
+
+        Ok(AccountInventory {
+            scope: "credential account: Hyperliquid — every open perpetual position and the \
+                    cross-margin account value, every working order including the reduce-only \
+                    trigger orders a stop is kept as, and every spot token balance. Vaults and \
+                    sub-accounts are separate addresses this scan does not read."
+                .to_string(),
+            positions,
+            open_orders,
+            observed_ms,
+        })
     }
 
     /// Open the TLS session, and load the asset list, before an order needs
@@ -848,6 +897,10 @@ impl VenueGateway for HyperliquidGateway {
         })
     }
 
+    async fn account_inventory(&mut self) -> Result<AccountInventory, VenueError> {
+        self.account_scan().await
+    }
+
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
         engine_types::orders::AccountRecoveryClient::account_view(
             &recovery::RecoveryClient::new(self),
@@ -983,6 +1036,53 @@ fn stop_oids(orders: &Value, coin: &str) -> Result<Vec<i64>, VenueError> {
         out.push(int_field(row, "oid")?);
     }
     Ok(out)
+}
+
+/// A deliberately narrow live capability for deployment attestation.
+///
+/// Its gateway is private and this type exposes no order, cancel, amend,
+/// leverage, stop, or websocket API. That is why it may authenticate a
+/// disarmed funded account: proving old exposure absent is not authority to
+/// create new exposure. Hyperliquid signs with one API wallet key, so the key
+/// that trades is the key that reads — the narrowing is in this type's
+/// surface, not in a second key.
+pub struct HyperliquidInventoryProbe {
+    gateway: HyperliquidGateway,
+}
+
+impl HyperliquidInventoryProbe {
+    pub fn new(realm: HyperliquidRealm) -> Result<Self, VenueError> {
+        let (key_var, secret_var) = realm.credential_vars();
+        let credentials = Credentials::from_env_read_only(
+            realm.as_str(),
+            realm.is_real_money(),
+            key_var,
+            secret_var,
+        )?;
+        Ok(Self {
+            gateway: HyperliquidGateway::build(realm, realm.rest_base(), credentials, Vec::new())?,
+        })
+    }
+
+    /// Point the probe at a local server. Tests only; the live path is
+    /// [`HyperliquidInventoryProbe::new`].
+    pub fn for_test(
+        base_url: &str,
+        realm: HyperliquidRealm,
+        creds: Credentials,
+    ) -> Result<Self, VenueError> {
+        Ok(Self {
+            gateway: HyperliquidGateway::build(realm, base_url, creds, Vec::new())?,
+        })
+    }
+
+    pub async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
+        VenueGateway::account_identity(&mut self.gateway).await
+    }
+
+    pub async fn account_inventory(&mut self) -> Result<AccountInventory, VenueError> {
+        self.gateway.account_scan().await
+    }
 }
 
 #[derive(Debug)]

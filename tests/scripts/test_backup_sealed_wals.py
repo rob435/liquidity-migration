@@ -105,7 +105,7 @@ def test_every_realms_engine_state_and_rendered_config_is_a_default_source() -> 
         for row in manifest
         if not row.startswith("#") and row.split("|")[3] == "owner"
     }
-    assert realms == {"demo", "mainnet", "mexc"}
+    assert realms == {"demo", "mainnet", "mexc", "hyperliquid"}
     for realm in realms:
         suffix = "" if realm == "demo" else f"-{realm}"
         config = "engine.toml" if realm == "demo" else f"engine-{realm}.toml"

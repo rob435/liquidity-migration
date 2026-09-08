@@ -1,0 +1,72 @@
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=5
+Description=liquidity-migration Rust execution engine on the FUNDED Hyperliquid account (runs only while REAL_MONEY is armed)
+Wants=network-online.target liquidity-migration-signal-worker-hyperliquid.service
+After=network-online.target liquidity-migration-signal-worker-hyperliquid.service
+
+# NO `Conflicts=` with anything, deliberately. What stops two processes trading
+# this account is the account's kernel lease, which this engine takes at boot.
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+TimeoutStartSec=180
+User=liquidity-engine-hyperliquid
+Group=liquidity-migration
+# Not the deployed checkout: a relative log path inside /opt/liquidity-migration
+# would write an untracked file into the tree the deploy proves clean. Its own
+# directory, so no two engines share a log, a WAL or a heartbeat.
+StateDirectory=liquidity-migration-engine-hyperliquid
+WorkingDirectory=/var/lib/liquidity-migration-engine-hyperliquid
+
+# The Hyperliquid account's address and API wallet key, and REAL_MONEY.
+#
+# Hyperliquid publishes a testnet, but this realm is the funded mainnet account
+# only. `REAL_MONEY=true` in this file is the single switch that lets anything
+# reach the account, it is set by the owner's own hand, and deploy only ever
+# rewrites it atomically to false during explicit disarm.
+EnvironmentFile=/etc/liquidity-migration/hyperliquid-mainnet.env
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+# This owner receives the Hyperliquid pair and the exact account address the
+# gateway binds at startup. Every Bybit and MEXC credential is removed even if
+# it was in PID 1's environment.
+
+# Config path and heartbeat path; deploy/engine.hyperliquid.env.template is the
+# copy to fill in. No live switch lives here: REAL_MONEY in the credential file
+# is what decides whether this unit runs at all.
+EnvironmentFile=/etc/liquidity-migration/engine-hyperliquid.env
+
+ExecStart=/opt/liquidity-migration-engine/bin/engine run --config ${ENGINE_CONFIG_FILE}
+# 143 is a clean SIGTERM stop.
+SuccessExitStatus=143
+Restart=always
+RestartSec=5
+KillMode=control-group
+# The engine finishes its current write and drops its account lease on the way
+# out; nothing here waits on a venue round trip.
+TimeoutStopSec=30
+
+# This process carries real orders; it does not yield CPU to the signal worker.
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=4
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=true
+UMask=0027
+ReadWritePaths=/run/lock/liquidity-migration /var/lib/liquidity-migration-engine-hyperliquid /var/lib/liquidity-migration/signals/hyperliquid /var/lib/liquidity-migration/controls/hyperliquid
+# Boot replays the newest log segment and holds it decoded, about six times
+# the segment's bytes. The engine config rotates segments at 256 MB, so a
+# segment at its largest needs about 1.5 GB; this cap leaves room above that.
+MemoryMax=2G
+LimitNOFILE=65536
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

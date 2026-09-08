@@ -61,14 +61,16 @@ CONTROL_COMMANDS: dict[str, tuple[str, ...]] = {
         "resume-mainnet",
         "pause-mexc",
         "resume-mexc",
+        "pause-hyperliquid",
+        "resume-hyperliquid",
         "status-fleet",
     )
 }
 CONTROLS_STATE_DIR = Path("/var/lib/liquidity-migration-telegram-controls")
 
-_ENVIRONMENTS = ("demo", "mainnet", "mexc")
+_ENVIRONMENTS = ("demo", "mainnet", "mexc", "hyperliquid")
 #: How each funded realm is named in an operator message.
-_FUNDED_LABELS = {"mainnet": "Real-money", "mexc": "MEXC"}
+_FUNDED_LABELS = {"mainnet": "Real-money", "mexc": "MEXC", "hyperliquid": "Hyperliquid"}
 #: Realms whose owner and worker rows the helper always reports, and whose
 #: entry permissions it must therefore always know. A realm outside this set
 #: reports entry rows only while its engine publishes a heartbeat, which is

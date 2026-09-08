@@ -15,9 +15,9 @@ Research data, live signal state, and execution evidence are strictly separated:
 | Root / Authority | Path | Content | Authority / Access |
 | :--- | :--- | :--- | :--- |
 | **Research Root** | `DATA_ROOT` (e.g. `data/`) | Historical klines, funding, parquet bars, reports | Python offline analytics only. No credentials. |
-| **Signal Worker State**| `/var/lib/liquidity-migration-signal-worker-{demo,mainnet,mexc}` | Public kline history, funding cache, source checkpoints | Rust signal worker only. Public market data. |
-| **Signal Spool** | `/var/lib/liquidity-migration/signals/{demo,mainnet,mexc}` | `stream.sock` IPC socket + fallback `.json` spool | Read by Engine, written by Signal Worker (`0770`). |
-| **Execution WAL** | `/var/lib/liquidity-migration-engine[-mainnet\|-mexc]` | `engine.wal`, `heartbeat.json`, `trades.jsonl` | Sole execution & accounting authority. |
+| **Signal Worker State**| `/var/lib/liquidity-migration-signal-worker-{demo,mainnet,mexc,hyperliquid}` | Public kline history, funding cache, source checkpoints | Rust signal worker only. Public market data. |
+| **Signal Spool** | `/var/lib/liquidity-migration/signals/{demo,mainnet,mexc,hyperliquid}` | `stream.sock` IPC socket + fallback `.json` spool | Read by Engine, written by Signal Worker (`0770`). |
+| **Execution WAL** | `/var/lib/liquidity-migration-engine[-mainnet\|-mexc\|-hyperliquid]` | `engine.wal`, `heartbeat.json`, `trades.jsonl` | Sole execution & accounting authority. |
 | **Market Tape Root** | `/var/lib/liquidity-migration/forward-market[-binance]` | Compressed `.jsonl.zst` segments, manifests | Public tape capture only. Independent units. |
 
 ---

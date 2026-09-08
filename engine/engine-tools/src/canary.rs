@@ -1,8 +1,8 @@
 //! One bounded order lifecycle on a realm the readiness table admits.
 //!
 //! This is an operator proof, not a strategy. It runs on the Bybit practice
-//! account and on the `live-canary` realms whose venue publishes no practice
-//! host, takes the fleet's account lease, proves the exact account id, rests
+//! account and on the `live-canary` realms that still owe their live evidence,
+//! takes the fleet's account lease, proves the exact account id, rests
 //! one minimum-value post-only order away from the touch, cancels it, and
 //! reads the account twice before letting go. Any fill is closed in full and
 //! makes the command fail after cleanup.
@@ -200,12 +200,9 @@ impl CanaryGateway for Venue {
             Venue::Bybit(gateway) => gateway.venue_time_ms().await,
             #[cfg(feature = "mexc")]
             Venue::Mexc(gateway) => gateway.venue_time_ms().await,
-            #[cfg(any(
-                feature = "binance",
-                feature = "hyperliquid",
-                feature = "lighter",
-                feature = "variational"
-            ))]
+            #[cfg(feature = "hyperliquid")]
+            Venue::Hyperliquid(gateway) => gateway.venue_time_ms().await,
+            #[cfg(any(feature = "binance", feature = "lighter", feature = "variational"))]
             _ => Err(VenueError::BadRequest(
                 "this venue publishes no clock read the canary can bound its history with"
                     .to_string(),
@@ -1313,6 +1310,17 @@ mod tests {
             assert!(VenueName::MexcMainnet.require_canary_ready().is_err());
             VenueName::MexcMainnet.require_engine_run_ready().unwrap();
         }
+        #[cfg(feature = "hyperliquid")]
+        {
+            // The realm this command exists to gather evidence for; `engine
+            // run` on it stays refused.
+            VenueName::HyperliquidMainnet
+                .require_canary_ready()
+                .unwrap();
+            assert!(VenueName::HyperliquidMainnet
+                .require_engine_run_ready()
+                .is_err());
+        }
     }
 
     #[test]
@@ -1463,6 +1471,43 @@ mod tests {
             ..mexc_rule
         };
         assert!(validate_rule(broken).is_err());
+    }
+
+    #[test]
+    fn a_ten_dollar_floor_is_cleared_by_the_size_the_plan_asks_for() {
+        // Hyperliquid's BTC: szDecimals 5, so the step and the minimum lot are
+        // both 1e-5, and the venue refuses anything under 10 USD of notional.
+        // One minimum lot is nowhere near that, so the notional term is what
+        // sizes this order.
+        let hyperliquid_rule = InstrumentRule {
+            tick_size: 0.1,
+            qty_step: 1e-5,
+            min_qty: 1e-5,
+            min_notional: 10.0,
+        };
+        let quote = Quote {
+            bid_px: 95_000.0,
+            bid_qty: 5.0,
+            ask_px: 95_000.1,
+            ask_qty: 5.0,
+            venue_ts_ms: 1_000_000,
+            recv_ns: 1,
+            seq: 1,
+        };
+        validate_rule(hyperliquid_rule).unwrap();
+        let plan = make_plan("BTCUSDT", hyperliquid_rule, quote, 1_000_100).unwrap();
+        let px = limit_px(&plan.request);
+        assert!(px < quote.bid_px);
+        assert!(plan.request.qty > hyperliquid_rule.min_qty);
+        assert!(
+            plan.request.qty * px >= hyperliquid_rule.min_notional,
+            "{} x {px} is under the venue's floor",
+            plan.request.qty
+        );
+        assert_eq!(
+            steps(plan.request.qty, hyperliquid_rule.qty_step).fract(),
+            0.0
+        );
     }
 
     #[test]

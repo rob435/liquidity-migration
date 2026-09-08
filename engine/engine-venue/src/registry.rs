@@ -44,7 +44,9 @@ use crate::venues::binance::{BinanceGateway, BinanceOrderFeed, BinanceRealm};
 #[cfg(feature = "bybit")]
 use crate::venues::bybit::{BybitGateway, BybitInventoryProbe, BybitOrderFeed, VenueRealm};
 #[cfg(feature = "hyperliquid")]
-use crate::venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed, HyperliquidRealm};
+use crate::venues::hyperliquid::{
+    HyperliquidGateway, HyperliquidInventoryProbe, HyperliquidOrderFeed, HyperliquidRealm,
+};
 #[cfg(feature = "lighter")]
 use crate::venues::lighter::{LighterGateway, LighterOrderFeed, LighterRealm};
 #[cfg(feature = "mexc")]
@@ -85,6 +87,8 @@ pub enum InventoryProbe {
     Bybit(BybitInventoryProbe),
     #[cfg(feature = "mexc")]
     Mexc(MexcInventoryProbe),
+    #[cfg(feature = "hyperliquid")]
+    Hyperliquid(HyperliquidInventoryProbe),
 }
 
 impl InventoryProbe {
@@ -99,6 +103,10 @@ impl InventoryProbe {
             }
             #[cfg(feature = "mexc")]
             VenueName::MexcMainnet => Ok(Self::Mexc(MexcInventoryProbe::new(MexcRealm::Mainnet)?)),
+            #[cfg(feature = "hyperliquid")]
+            VenueName::HyperliquidMainnet => Ok(Self::Hyperliquid(HyperliquidInventoryProbe::new(
+                HyperliquidRealm::Mainnet,
+            )?)),
             other => Err(VenueError::BadRequest(format!(
                 "{} has no credential-wide inventory probe; flatness cannot be attested",
                 other.as_str()
@@ -112,6 +120,8 @@ impl InventoryProbe {
             Self::Bybit(ref mut probe) => probe.account_identity().await,
             #[cfg(feature = "mexc")]
             Self::Mexc(ref mut probe) => probe.account_identity().await,
+            #[cfg(feature = "hyperliquid")]
+            Self::Hyperliquid(ref mut probe) => probe.account_identity().await,
         }
     }
 
@@ -121,6 +131,8 @@ impl InventoryProbe {
             Self::Bybit(ref mut probe) => probe.account_inventory().await,
             #[cfg(feature = "mexc")]
             Self::Mexc(ref mut probe) => probe.account_inventory().await,
+            #[cfg(feature = "hyperliquid")]
+            Self::Hyperliquid(ref mut probe) => probe.account_inventory().await,
         }
     }
 }
@@ -1010,8 +1022,13 @@ mod tests {
                     assert_eq!(venue.readiness(), VenueReadiness::TestnetCanary);
                     venue.require_engine_run_ready().unwrap();
                 }
-                VenueName::HyperliquidMainnet
-                | VenueName::LighterMainnet
+                VenueName::HyperliquidMainnet => {
+                    assert_eq!(venue.readiness(), VenueReadiness::LiveCanary);
+                    let error = venue.require_engine_run_ready().unwrap_err().to_string();
+                    assert!(error.contains("live-canary"), "{error}");
+                    assert!(error.contains("canary-order"), "{error}");
+                }
+                VenueName::LighterMainnet
                 | VenueName::BinanceTestnet
                 | VenueName::BinanceMainnet => {
                     assert_eq!(venue.readiness(), VenueReadiness::ProductionBlocked);

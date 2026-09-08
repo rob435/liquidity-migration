@@ -33,7 +33,7 @@ WorkingDirectory=/var/lib/liquidity-migration-engine-mainnet
 # build a mainnet gateway at all — it fails at the credential read, before a
 # socket is opened, and says which switch is missing.
 EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env
-UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP MEXC_REAL_API_KEY MEXC_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
 # This owner receives its write-key family plus the exact account user id that
 # the gateway binds at startup. Demo and read-only attestor credentials are
 # removed even if they were present in PID 1's environment.

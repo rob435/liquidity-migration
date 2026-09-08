@@ -37,6 +37,14 @@ def test_the_mexc_account_matches_the_venue_qualified_realm_its_engine_writes() 
     assert account.trades.endswith("/liquidity-migration-engine-mexc/trades.jsonl")
 
 
+def test_the_hyperliquid_account_matches_the_venue_qualified_realm_its_engine_writes() -> None:
+    account = next(account for account in notify.ACCOUNTS if account.name == "hyperliquid")
+    assert account.realm == "hyperliquid_mainnet"
+    assert account.tag == "HL "
+    assert account.heartbeat.endswith("/liquidity-migration-engine-hyperliquid/heartbeat.json")
+    assert account.trades.endswith("/liquidity-migration-engine-hyperliquid/trades.jsonl")
+
+
 def _heartbeat(tmp: Path, rows: list[dict], *, realm: str = "demo") -> str:
     p = tmp / "heartbeat.json"
     p.write_text(

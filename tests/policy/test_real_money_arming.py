@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration.policy.real_money_arming import main, preflight, preflight_mexc
+from liquidity_migration.policy.real_money_arming import (
+    main,
+    preflight,
+    preflight_hyperliquid,
+    preflight_mexc,
+)
 from liquidity_migration.policy.real_money_profile import (
     RealMoneyDials,
     dial_environment_keys,
@@ -19,6 +24,11 @@ CREDENTIAL_TEMPLATE = REPO / "deploy" / "bybit-mainnet.env.template"
 SIGNAL_TEMPLATE = REPO / "deploy" / "signal-worker-mainnet.env.template"
 MEXC_CREDENTIAL_TEMPLATE = REPO / "deploy" / "mexc-mainnet.env.template"
 MEXC_SIGNAL_TEMPLATE = REPO / "deploy" / "signal-worker-mexc.env.template"
+HYPERLIQUID_CREDENTIAL_TEMPLATE = REPO / "deploy" / "hyperliquid-mainnet.env.template"
+HYPERLIQUID_SIGNAL_TEMPLATE = REPO / "deploy" / "signal-worker-hyperliquid.env.template"
+#: A syntactically valid pair that authenticates nothing.
+HYPERLIQUID_ADDRESS = "0x" + "ab" * 20
+HYPERLIQUID_WALLET_KEY = "0x" + "cd" * 32
 
 
 def _private_file(path: Path, body: bytes | str) -> Path:
@@ -137,6 +147,122 @@ def test_mexc_preflight_reads_the_mexc_files_by_default(tmp_path: Path, capsys) 
     )
     assert code == 1
     assert "before MEXC can trade" in capsys.readouterr().out
+
+
+def _hyperliquid_credential(tmp_path: Path, **overrides: str) -> Path:
+    values = parse_systemd_environment_bytes(
+        HYPERLIQUID_CREDENTIAL_TEMPLATE.read_bytes(), label="template"
+    )
+    values.update(
+        {
+            "HYPERLIQUID_REAL_ACCOUNT_ADDRESS": HYPERLIQUID_ADDRESS,
+            "HYPERLIQUID_REAL_API_WALLET_KEY": HYPERLIQUID_WALLET_KEY,
+            "REAL_MONEY": "true",
+            "TELEGRAM_BOT_TOKEN": "test-token",
+            "TELEGRAM_CHAT_ID": "test-chat",
+            **overrides,
+        }
+    )
+    return _private_file(
+        tmp_path / "hyperliquid-mainnet.env",
+        "".join(f"{key}={value}\n" for key, value in values.items()),
+    )
+
+
+def _hyperliquid_signal_source(
+    tmp_path: Path, profile: Path, *, realm: str = "hyperliquid"
+) -> Path:
+    return _private_file(
+        tmp_path / "signal-worker-hyperliquid-source.env",
+        f"SIGNAL_WORKER_REALM={realm}\nOPERATIONAL_PROFILE_FILE={profile.as_posix()}\n",
+    )
+
+
+def test_hyperliquid_preflight_passes_on_a_complete_armed_pair(tmp_path: Path) -> None:
+    profile = _private_file(tmp_path / "operational-profile.json", "{}")
+    results = preflight_hyperliquid(
+        credential_env=_hyperliquid_credential(tmp_path),
+        signal_env=_hyperliquid_signal_source(tmp_path, profile),
+    )
+    assert [row.name for row in results if not row.ok] == []
+    # No dials here either: they live in the funded Bybit file and render one
+    # profile for every realm.
+    assert "dials" not in {row.name for row in results}
+
+
+def test_hyperliquid_preflight_never_prints_the_address_or_the_key(tmp_path: Path) -> None:
+    profile = _private_file(tmp_path / "operational-profile.json", "{}")
+    results = preflight_hyperliquid(
+        credential_env=_hyperliquid_credential(tmp_path),
+        signal_env=_hyperliquid_signal_source(tmp_path, profile),
+    )
+    rendered = "\n".join(row.render() for row in results)
+    assert HYPERLIQUID_ADDRESS not in rendered
+    assert HYPERLIQUID_WALLET_KEY not in rendered
+
+
+def test_hyperliquid_preflight_takes_the_address_in_either_case(tmp_path: Path) -> None:
+    # The venue's interface shows EIP-55 mixed case; the gateway lowercases it.
+    profile = _private_file(tmp_path / "operational-profile.json", "{}")
+    results = preflight_hyperliquid(
+        credential_env=_hyperliquid_credential(
+            tmp_path, HYPERLIQUID_REAL_ACCOUNT_ADDRESS="0x" + "aB" * 20
+        ),
+        signal_env=_hyperliquid_signal_source(tmp_path, profile),
+    )
+    assert all(result.ok for result in results), results
+
+
+@pytest.mark.parametrize(
+    ("overrides", "failing"),
+    [
+        ({"HYPERLIQUID_REAL_ACCOUNT_ADDRESS": ""}, "HYPERLIQUID_REAL_ACCOUNT_ADDRESS"),
+        # The master account address, not the 0x-less form and not a key.
+        ({"HYPERLIQUID_REAL_ACCOUNT_ADDRESS": "ab" * 20}, "HYPERLIQUID_REAL_ACCOUNT_ADDRESS"),
+        ({"HYPERLIQUID_REAL_API_WALLET_KEY": ""}, "HYPERLIQUID_REAL_API_WALLET_KEY"),
+        ({"HYPERLIQUID_REAL_API_WALLET_KEY": "0x" + "cd" * 20}, "HYPERLIQUID_REAL_API_WALLET_KEY"),
+        ({"REAL_MONEY": "false"}, "REAL_MONEY"),
+        ({"BYBIT_REAL_API_KEY": "stale"}, "other venue keys"),
+        ({"MEXC_REAL_API_KEY": "stale"}, "other venue keys"),
+        ({"TELEGRAM_CHAT_ID": ""}, "notifications"),
+    ],
+)
+def test_hyperliquid_preflight_names_each_missing_input(
+    tmp_path: Path, overrides: dict[str, str], failing: str
+) -> None:
+    profile = _private_file(tmp_path / "operational-profile.json", "{}")
+    results = preflight_hyperliquid(
+        credential_env=_hyperliquid_credential(tmp_path, **overrides),
+        signal_env=_hyperliquid_signal_source(tmp_path, profile),
+    )
+    assert [row.name for row in results if not row.ok] == [failing]
+
+
+def test_hyperliquid_preflight_requires_its_own_worker_realm(tmp_path: Path) -> None:
+    profile = _private_file(tmp_path / "operational-profile.json", "{}")
+    results = preflight_hyperliquid(
+        credential_env=_hyperliquid_credential(tmp_path),
+        signal_env=_hyperliquid_signal_source(tmp_path, profile, realm="mexc"),
+    )
+    failed = {row.name: row for row in results if not row.ok}
+    assert set(failed) == {"SIGNAL_WORKER_REALM"}
+    assert "set SIGNAL_WORKER_REALM=hyperliquid" in failed["SIGNAL_WORKER_REALM"].fix
+
+
+def test_hyperliquid_preflight_reads_the_hyperliquid_files_by_default(
+    tmp_path: Path, capsys
+) -> None:
+    code = main(
+        [
+            "preflight-hyperliquid",
+            "--credential-env",
+            str(tmp_path / "absent.env"),
+            "--signal-env",
+            str(tmp_path / "absent-source.env"),
+        ]
+    )
+    assert code == 1
+    assert "before Hyperliquid can trade" in capsys.readouterr().out
 
 
 def test_committed_profile_is_the_default_render() -> None:

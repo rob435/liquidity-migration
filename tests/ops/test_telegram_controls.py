@@ -149,17 +149,20 @@ def test_panel_grows_mainnet_rows_when_owner_is_active(tmp_path: Path) -> None:
     flat = json.dumps(api.sent[-1]["keyboard"])
     assert "pause:mainnet" in flat
     assert "pause:mexc" not in flat
+    assert "pause:hyperliquid" not in flat
 
 
 def test_panel_grows_one_row_per_running_funded_realm(tmp_path: Path) -> None:
-    panel, api, _, _ = make_panel(tmp_path, funded=("mainnet", "mexc"))
+    panel, api, _, _ = make_panel(tmp_path, funded=("mainnet", "mexc", "hyperliquid"))
     panel.send_panel()
     flat = json.dumps(api.sent[-1]["keyboard"])
     assert "pause:mainnet" in flat
     assert "pause:mexc" in flat
+    assert "pause:hyperliquid" in flat
     # Resume stays a shell action for every funded realm.
     assert "resume:mainnet" not in flat
     assert "resume:mexc" not in flat
+    assert "resume:hyperliquid" not in flat
     assert "resume:mainnet" not in flat
     assert "close" not in flat
 
@@ -235,10 +238,12 @@ def fleet_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                     "unit|demo|signal|directional|liquidity-migration-signal-worker-demo.service|active\n"
                     "unit|mainnet|owner|-|liquidity-migration-engine-mainnet.service|active\n"
                     "unit|mainnet|signal|directional|liquidity-migration-signal-worker-mainnet.service|active\n"
-                    # The mexc realm is in the manifest and unarmed: unit rows,
-                    # no heartbeat, therefore no entry rows.
+                    # The mexc and hyperliquid realms are in the manifest and
+                    # unarmed: unit rows, no heartbeat, therefore no entry rows.
                     "unit|mexc|owner|-|liquidity-migration-engine-mexc.service|inactive\n"
                     "unit|mexc|signal|directional|liquidity-migration-signal-worker-mexc.service|inactive\n"
+                    "unit|hyperliquid|owner|-|liquidity-migration-engine-hyperliquid.service|inactive\n"
+                    "unit|hyperliquid|signal|directional|liquidity-migration-signal-worker-hyperliquid.service|inactive\n"
                 ),
                 stderr="",
             )
@@ -324,6 +329,17 @@ def test_mexc_pause_and_resume_each_reach_exactly_their_own_action(fleet_env) ->
     assert "REAL_MONEY is not touched" in message
 
 
+def test_hyperliquid_pause_and_resume_each_reach_exactly_their_own_action(fleet_env) -> None:
+    _config, fleet, commands = fleet_env
+    fleet.pause("hyperliquid")
+    message = fleet.resume("hyperliquid")
+    assert commands == [
+        list(tc.CONTROL_COMMANDS["pause-hyperliquid"]),
+        list(tc.CONTROL_COMMANDS["resume-hyperliquid"]),
+    ]
+    assert "REAL_MONEY is not touched" in message
+
+
 def test_an_unarmed_funded_realm_reports_units_without_entry_rows(fleet_env) -> None:
     """An unarmed realm publishes no heartbeat, so the helper reports no entry
     permissions for it. That is a status line, not a broken panel."""
@@ -331,6 +347,7 @@ def test_an_unarmed_funded_realm_reports_units_without_entry_rows(fleet_env) -> 
     _config, fleet, _commands = fleet_env
     status = fleet.status_text()
     assert "mexc: owner inactive; signal inactive; not armed" in status
+    assert "hyperliquid: owner inactive; signal inactive; not armed" in status
     assert fleet.funded_present() == ("mainnet",)
 
 
@@ -346,6 +363,8 @@ def test_control_action_allowlist_cannot_forward_paths_units_or_environment(flee
         "resume-mainnet",
         "pause-mexc",
         "resume-mexc",
+        "pause-hyperliquid",
+        "resume-hyperliquid",
         "status-fleet",
     }
     for action, command in tc.CONTROL_COMMANDS.items():

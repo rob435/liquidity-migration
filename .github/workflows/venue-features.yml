@@ -45,11 +45,3 @@ jobs:
       - name: Run public catalog and market feed tests
         working-directory: engine
         run: cargo +1.90.0 test --locked -p engine-marketdata -p engine-public --no-default-features --features '${{ matrix.venue }}'
-      - name: Default binary excludes Hyperliquid cryptography
-        if: matrix.venue == 'bybit'
-        working-directory: engine
-        run: |
-          if cargo +1.90.0 tree --locked -p engine-tools --edges normal | grep -Eq ' (k256|sha3) v'; then
-            echo 'Default funded binary includes Hyperliquid cryptography' >&2
-            exit 1
-          fi

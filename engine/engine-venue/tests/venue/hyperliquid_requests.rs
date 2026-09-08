@@ -14,7 +14,7 @@ use engine_types::{
     AmendSpec, OrderKind, OrderRequest, Side, StopSpec, StrategyId, SymbolId, TimeInForce,
     VenueError, VenueGateway,
 };
-use engine_venue::{HyperliquidGateway, HyperliquidRealm};
+use engine_venue::{HyperliquidGateway, HyperliquidInventoryProbe, HyperliquidRealm};
 use serde_json::Value;
 
 /// The published test key from the venue's own SDK, and an address that is
@@ -925,4 +925,247 @@ async fn independent_account_recovery_uses_requested_ids_and_preserves_protectio
         !view.positions[0].stop_attached,
         "a position with no stop order read as protected"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_venue_clock_comes_from_exchange_status_and_a_missing_one_is_never_a_zero() {
+    let server = TestServer::start(|request, count| {
+        let body: Value = request.json();
+        if request.path == "/info" && body["type"] == "exchangeStatus" {
+            // Observed live: the reply is the bare object, not the
+            // `{"status":...,"response":...}` envelope `/exchange` uses.
+            return if count == 0 {
+                (
+                    200,
+                    r#"{"specialStatuses":null,"time":1788899787840}"#.to_string(),
+                )
+            } else {
+                (200, r#"{"specialStatuses":null}"#.to_string())
+            };
+        }
+        answer(request)
+    })
+    .await;
+    let gw = gateway(&server);
+    assert_eq!(gw.venue_time_ms().await.unwrap(), 1_788_899_787_840);
+    // A clock the venue did not state is never a zero the caller can subtract.
+    assert!(gw.venue_time_ms().await.is_err());
+    let sent = server.to_path("/info");
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].method, "POST");
+}
+
+/// Answers the three reads one account scan makes. Everything else panics, so
+/// a scan that grew a fourth endpoint fails here rather than silently.
+fn inventory_answer(request: &Recorded) -> (u16, String) {
+    let body: Value = request.json();
+    let payload = match body.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "clearinghouseState" => {
+            r#"{
+            "marginSummary":{"accountValue":"1500.25","totalMarginUsed":"300"},
+            "withdrawable":"1200.5",
+            "assetPositions":[
+                {"position":{"coin":"BTC","szi":"0.01","entryPx":"95000"}},
+                {"position":{"coin":"kPEPE","szi":"-40","entryPx":"0.01"}},
+                {"position":{"coin":"SOL","szi":"0.0","entryPx":"0"}}
+            ]
+        }"#
+        }
+        "frontendOpenOrders" => {
+            r#"[
+            {"coin":"BTC","side":"B","sz":"0.01","origSz":"0.01","oid":77,
+             "reduceOnly":false,"isTrigger":false,"orderType":"Limit",
+             "cloid":"0x0100000000010000000000010000000000"},
+            {"coin":"kPEPE","side":"B","sz":"40","origSz":"40","oid":91,
+             "reduceOnly":true,"isTrigger":true,"orderType":"Stop Market",
+             "triggerPx":"0.02"}
+        ]"#
+        }
+        "spotClearinghouseState" => {
+            r#"{"balances":[
+            {"coin":"USDC","token":0,"hold":"0.0","total":"14.6"},
+            {"coin":"HYPE","token":1,"hold":"0.0","total":"3.5"},
+            {"coin":"PURR","token":2,"hold":"0.0","total":"0"}
+        ]}"#
+        }
+        other => panic!("the account scan must not read {other}"),
+    };
+    (200, payload.to_string())
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_account_scan_covers_perps_working_orders_standing_stops_and_spot() {
+    let server = TestServer::start(|request, _| inventory_answer(request)).await;
+    let mut gw = gateway(&server);
+    let scan = VenueGateway::account_inventory(&mut gw).await.unwrap();
+
+    // Both perpetual positions, including the coin no config named. The flat
+    // row the venue still lists is not a position.
+    let perps: Vec<_> = scan
+        .positions
+        .iter()
+        .filter(|p| p.product == "linear")
+        .collect();
+    assert_eq!(perps.len(), 2);
+    assert_eq!(perps[0].symbol, "BTCUSDT");
+    assert_eq!(perps[0].side, Side::Buy);
+    assert_eq!(perps[0].qty, 0.01);
+    assert_eq!(perps[1].symbol, "KPEPEUSDT");
+    assert_eq!(perps[1].side, Side::Sell);
+    assert_eq!(perps[1].qty, 40.0);
+
+    // A stop on this venue is a standing reduce-only trigger order, so it is
+    // an open order and blocks a flatness claim like any other.
+    assert_eq!(scan.open_orders.len(), 2);
+    assert_eq!(scan.open_orders[0].product, "linear");
+    assert_eq!(scan.open_orders[0].symbol, "BTCUSDT");
+    assert_eq!(scan.open_orders[1].product, "trigger");
+    assert_eq!(scan.open_orders[1].symbol, "KPEPEUSDT");
+    // No cloid on the stop, so the venue's own order number names it.
+    assert_eq!(scan.open_orders[1].client_order_id, "oid-91");
+
+    // Spot sits on the same address. Settle cash is not exposure; a token is.
+    let wallet: Vec<_> = scan
+        .positions
+        .iter()
+        .filter(|p| p.product == "wallet_asset")
+        .collect();
+    assert_eq!(wallet.len(), 1);
+    assert_eq!(wallet[0].symbol, "HYPE");
+    assert_eq!(wallet[0].qty, 3.5);
+
+    assert!(!scan.is_flat());
+    assert!(scan.scope.contains("perpetual"));
+    assert!(scan.scope.contains("trigger"));
+    assert!(scan.scope.contains("spot"));
+    assert!(scan.observed_ms > 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_empty_account_scans_flat_and_a_negative_account_value_does_not() {
+    let server = TestServer::start(|request, _| {
+        let body: Value = request.json();
+        let payload = match body.get("type").and_then(Value::as_str).unwrap_or_default() {
+            "clearinghouseState" => {
+                r#"{"marginSummary":{"accountValue":"0"},"withdrawable":"0","assetPositions":[]}"#
+            }
+            "frontendOpenOrders" => "[]",
+            "spotClearinghouseState" => r#"{"balances":[]}"#,
+            other => panic!("the account scan must not read {other}"),
+        };
+        (200, payload.to_string())
+    })
+    .await;
+    let mut gw = gateway(&server);
+    assert!(VenueGateway::account_inventory(&mut gw)
+        .await
+        .unwrap()
+        .is_flat());
+
+    // Money owed is exposure a flatness proof has to show.
+    let owed = TestServer::start(|request, _| {
+        let body: Value = request.json();
+        let payload = match body.get("type").and_then(Value::as_str).unwrap_or_default() {
+            "clearinghouseState" => {
+                r#"{"marginSummary":{"accountValue":"-4.5"},"withdrawable":"0","assetPositions":[]}"#
+            }
+            "frontendOpenOrders" => "[]",
+            "spotClearinghouseState" => r#"{"balances":[]}"#,
+            other => panic!("the account scan must not read {other}"),
+        };
+        (200, payload.to_string())
+    })
+    .await;
+    let mut gw = gateway(&owed);
+    let scan = VenueGateway::account_inventory(&mut gw).await.unwrap();
+    assert!(!scan.is_flat());
+    assert_eq!(scan.positions.len(), 1);
+    assert_eq!(scan.positions[0].product, "wallet_asset");
+    assert_eq!(scan.positions[0].symbol, "USDC");
+    assert_eq!(scan.positions[0].side, Side::Sell);
+    assert_eq!(scan.positions[0].qty, 4.5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_inventory_probe_reads_the_same_account_and_never_signs_a_mutation() {
+    let agent = {
+        let idle = TestServer::start(|request, _| answer(request)).await;
+        gateway(&idle).signer_address()
+    };
+    let server = TestServer::start(move |request, _| {
+        let body: Value = request.json();
+        if body["type"] == "extraAgents" {
+            return (
+                200,
+                format!(r#"[{{"address":"{agent}","name":"engine","validUntil":0}}]"#),
+            );
+        }
+        if body["type"] == "exchangeStatus" || request.path == "/exchange" {
+            panic!("the probe must not reach {}", request.path);
+        }
+        inventory_answer(request)
+    })
+    .await;
+    let creds = HyperliquidRealm::Testnet.credentials_for_test(ACCOUNT, WALLET_KEY);
+    let mut probe =
+        HyperliquidInventoryProbe::for_test(&server.base_url(), HyperliquidRealm::Testnet, creds)
+            .expect("test credentials");
+
+    let who = probe.account_identity().await.unwrap();
+    assert_eq!(who.venue, "hyperliquid");
+    assert_eq!(who.realm, "hyperliquid_testnet");
+    // The account is its address, lower-case `0x` and forty hex digits. This
+    // is what EXPECTED_ENGINE_ACCOUNT_USER_ID holds.
+    assert_eq!(who.user_id, ACCOUNT);
+    assert_eq!(who.user_id.len(), 42);
+    assert_eq!(who.user_id, who.user_id.to_ascii_lowercase());
+
+    let scan = probe.account_inventory().await.unwrap();
+    assert_eq!(scan.open_orders.len(), 2);
+    assert!(server.to_path("/exchange").is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_canary_client_id_hashes_into_the_cloid_and_still_looks_itself_up() {
+    // The canary mints `lmcan-…`, not `eng-<ms>-<n>`, so it takes the hashed
+    // half of the cloid scheme rather than the packed one. The derivation is
+    // still a function of the id, which is all the lookup needs: what the
+    // packed form buys — recognising the engine's own orders across a restart
+    // — no canary order lives long enough to want.
+    let canary_id = "lmcan-1997d1b5cc0-1a2b-0000";
+    let server = TestServer::start(move |request, count| {
+        let body: Value = request.json();
+        if body["type"] == "orderStatus" {
+            let cloid = body["oid"].as_str().expect("a cloid, not an oid").to_string();
+            assert!(cloid.starts_with("0x02"), "canary ids hash: {cloid}");
+            assert_eq!(cloid.len(), 34);
+            return (
+                200,
+                format!(
+                    r#"{{"status":"order","order":{{"status":"{}","order":{{"coin":"BTC","cloid":"{cloid}","oid":77,"sz":"0.0","origSz":"0.00012"}}}}}}"#,
+                    if count == 0 { "open" } else { "canceled" }
+                ),
+            );
+        }
+        answer(request)
+    })
+    .await;
+    let mut gw = gateway(&server);
+    let working = VenueGateway::order_status(&mut gw, SymbolId(0), canary_id)
+        .await
+        .unwrap();
+    assert!(matches!(
+        working,
+        engine_types::orders::OrderLookup::Working(_)
+    ));
+    let cancelled = VenueGateway::order_status(&mut gw, SymbolId(0), canary_id)
+        .await
+        .unwrap();
+    match cancelled {
+        engine_types::orders::OrderLookup::Terminal { status, row } => {
+            assert_eq!(status, engine_types::orders::TerminalOrderStatus::Cancelled);
+            assert_eq!(row.client_order_id, canary_id);
+        }
+        other => panic!("a cancelled canary read as {other:?}"),
+    }
 }

@@ -32,15 +32,18 @@ RSYNC="${RSYNC_BIN:-rsync}"
 DEFAULT_SOURCES="/var/lib/liquidity-migration-engine \
 /var/lib/liquidity-migration-engine-mainnet \
 /var/lib/liquidity-migration-engine-mexc \
+/var/lib/liquidity-migration-engine-hyperliquid \
 /var/lib/liquidity-migration-signal-worker-demo \
 /var/lib/liquidity-migration-signal-worker-mainnet \
 /var/lib/liquidity-migration-signal-worker-mexc \
+/var/lib/liquidity-migration-signal-worker-hyperliquid \
 /var/lib/liquidity-migration/targets \
 /var/lib/liquidity-migration/signals \
 /var/lib/liquidity-migration/controls \
 /etc/liquidity-migration/engine.toml \
 /etc/liquidity-migration/engine-mainnet.toml \
-/etc/liquidity-migration/engine-mexc.toml"
+/etc/liquidity-migration/engine-mexc.toml \
+/etc/liquidity-migration/engine-hyperliquid.toml"
 SOURCES="${BACKUP_SOURCES:-$DEFAULT_SOURCES}"
 
 case "$REMOTE" in

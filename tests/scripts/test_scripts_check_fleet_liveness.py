@@ -305,19 +305,28 @@ def test_manifest_loads_and_scopes_are_disjoint() -> None:
     demo = {row.unit for row in liveness.scope_units("demo", rows)}
     mainnet = {row.unit for row in liveness.scope_units("mainnet", rows)}
     mexc = {row.unit for row in liveness.scope_units("mexc", rows)}
-    assert demo and mainnet and mexc
-    assert not demo & mainnet and not demo & mexc and not mainnet & mexc
+    hyperliquid = {row.unit for row in liveness.scope_units("hyperliquid", rows)}
+    scopes = (demo, mainnet, mexc, hyperliquid)
+    assert all(scopes)
+    for index, left in enumerate(scopes):
+        for right in scopes[index + 1 :]:
+            assert not left & right
     assert "liquidity-migration-engine.service" in demo
     assert "liquidity-migration-engine-mainnet.service" in mainnet
     assert "liquidity-migration-engine-mexc.service" in mexc
     assert "liquidity-migration-signal-worker-mexc.service" in mexc
+    assert "liquidity-migration-engine-hyperliquid.service" in hyperliquid
+    assert "liquidity-migration-signal-worker-hyperliquid.service" in hyperliquid
     # Demo never watches funded units; one cause must not page two scopes.
-    assert all("mainnet" not in unit and "mexc" not in unit for unit in demo)
+    assert all(
+        not any(realm in unit for realm in liveness._FUNDED_REALMS) for unit in demo
+    )
     assert liveness._ENGINE_UNITS >= {
         "liquidity-migration-engine-mexc.service",
         "liquidity-migration-engine-mainnet.service",
+        "liquidity-migration-engine-hyperliquid.service",
     }
-    assert "mexc" in liveness._ACCOUNT_SCOPES
+    assert {"mexc", "hyperliquid"} <= set(liveness._ACCOUNT_SCOPES)
 
 
 def test_inactive_unit_is_a_critical_alert(monkeypatch) -> None:
@@ -1227,32 +1236,31 @@ def test_active_deploy_age_reads_the_kernel_lock_table(tmp_path: Path) -> None:
     assert liveness.active_deploy_age(lock, now=1_000.0, lock_table=lock_table) is None
 
 
-def test_host_watchdog_chain_covers_every_funded_realms_timer(monkeypatch) -> None:
-    """A second funded realm gets the same supervision as the first: its
+@pytest.mark.parametrize("realm", ["mexc", "hyperliquid"])
+def test_host_watchdog_chain_covers_every_funded_realms_timer(monkeypatch, realm) -> None:
+    """Every funded realm past the first gets the same supervision: its
     watchdog is required while its own engine runs, even with its timer off."""
 
     queried: list[str] = []
+    timer = f"liquidity-migration-{realm}-liveness.timer"
 
     def states(units: list[str]) -> dict[str, str]:
         queried.extend(units)
-        return {
-            unit: ("inactive" if unit == "liquidity-migration-mexc-liveness.timer" else "active")
-            for unit in units
-        }
+        return {unit: ("inactive" if unit == timer else "active") for unit in units}
 
     monkeypatch.setattr(liveness, "active_deploy_age", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(liveness, "unit_states", states)
     monkeypatch.setattr(
         liveness,
         "unit_enabled_state",
-        lambda unit: "disabled" if "mexc" in unit else "enabled",
+        lambda unit: "disabled" if realm in unit else "enabled",
     )
     monkeypatch.setattr(liveness, "unit_result", lambda _unit: "success")
 
     alerts = liveness.evaluate_watchdog_chain()
 
-    assert {alert.key for alert in alerts} == {"watchdog:mexc"}
-    assert "liquidity-migration-engine-mexc.service" in queried
+    assert {alert.key for alert in alerts} == {f"watchdog:{realm}"}
+    assert f"liquidity-migration-engine-{realm}.service" in queried
 
 
 def test_a_disabled_watchdog_for_a_stopped_funded_realm_is_not_a_fault(monkeypatch) -> None:

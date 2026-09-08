@@ -8,8 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 #: Every realm that owns a venue account, in the order the operator surfaces
 #: report them.
-REALMS = ("demo", "mainnet", "mexc")
-FUNDED_REALMS = ("mainnet", "mexc")
+REALMS = ("demo", "mainnet", "mexc", "hyperliquid")
+FUNDED_REALMS = ("mainnet", "mexc", "hyperliquid")
 MANIFEST = ROOT / "deploy" / "fleet_manifest.tsv"
 SYSTEMD = ROOT / "deploy" / "systemd"
 
@@ -85,6 +85,9 @@ def test_directional_runtime_units_are_manifest_derived() -> None:
     assert _helper("lm_owner_unit demo") == ["liquidity-migration-engine.service"]
     assert _helper("lm_owner_unit mainnet") == ["liquidity-migration-engine-mainnet.service"]
     assert _helper("lm_owner_unit mexc") == ["liquidity-migration-engine-mexc.service"]
+    assert _helper("lm_owner_unit hyperliquid") == [
+        "liquidity-migration-engine-hyperliquid.service"
+    ]
 
 
 def test_heartbeat_artifacts_are_manifest_derived() -> None:
@@ -172,7 +175,10 @@ def test_realm_units_cover_the_funded_stop_surface() -> None:
     # One stop surface per funded realm, taken from the manifest.
     assert 'lm_realm_units "$realm"' in deploy
     assert 'stop_funded_units "${MODE#stop-}"' in deploy
-    assert 'disarm-mainnet|disarm-mexc) disarm_funded_mode "${MODE#disarm-}"' in deploy
+    assert (
+        'disarm-mainnet|disarm-mexc|disarm-hyperliquid) disarm_funded_mode "${MODE#disarm-}"'
+        in deploy
+    )
 
 
 def test_each_realm_has_one_credential_free_signal_worker() -> None:
@@ -196,6 +202,7 @@ def test_each_realm_has_one_credential_free_signal_worker() -> None:
         # account owner trades.
         assert "BYBIT_REAL_API_KEY" in unit
         assert "MEXC_REAL_API_KEY" in unit
+        assert "HYPERLIQUID_REAL_API_WALLET_KEY" in unit
         assert (
             "ExecStart=/opt/liquidity-migration-engine/bin/signal-worker live" in unit
         )

@@ -16,6 +16,7 @@ SIGNAL_WORKER_USER=liquidity-signal-worker
 DEMO_ENGINE_USER=liquidity-engine-demo
 MAINNET_ENGINE_USER=liquidity-engine-mainnet
 MEXC_ENGINE_USER=liquidity-engine-mexc
+HYPERLIQUID_ENGINE_USER=liquidity-engine-hyperliquid
 OBSERVER_USER=liquidity-observer
 LLM_USER=liquidity-llm
 CAPTURE_USER=liquidity-capture
@@ -52,15 +53,21 @@ ENGINE_MEXC_ENVIRONMENT=/etc/liquidity-migration/engine-mexc.env
 ENGINE_MEXC_CONFIG=/etc/liquidity-migration/engine-mexc.toml
 MEXC_CREDENTIAL_ENV=/etc/liquidity-migration/mexc-mainnet.env
 MEXC_TELEGRAM_ENV=/etc/liquidity-migration/telegram-mexc.env
+ENGINE_HYPERLIQUID_ENVIRONMENT=/etc/liquidity-migration/engine-hyperliquid.env
+ENGINE_HYPERLIQUID_CONFIG=/etc/liquidity-migration/engine-hyperliquid.toml
+HYPERLIQUID_CREDENTIAL_ENV=/etc/liquidity-migration/hyperliquid-mainnet.env
+HYPERLIQUID_TELEGRAM_ENV=/etc/liquidity-migration/telegram-hyperliquid.env
 NOTIFICATIONS_ENVIRONMENT=/etc/liquidity-migration/notifications.env
 ONCALL_ENVIRONMENT=/etc/liquidity-migration/oncall.env
 LEGACY_LIVENESS_ENVIRONMENT=/etc/liquidity-migration/liveness.env
 SIGNAL_WORKER_DEMO_ENV=/etc/liquidity-migration/signal-worker-demo.env
 SIGNAL_WORKER_MAINNET_ENV=/etc/liquidity-migration/signal-worker-mainnet.env
 SIGNAL_WORKER_MEXC_ENV=/etc/liquidity-migration/signal-worker-mexc.env
+SIGNAL_WORKER_HYPERLIQUID_ENV=/etc/liquidity-migration/signal-worker-hyperliquid.env
 DEMO_SIGNAL_SOURCE_ENV=/etc/liquidity-migration/signal-worker-demo-source.env
 MAINNET_SIGNAL_SOURCE_ENV=/etc/liquidity-migration/signal-worker-mainnet-source.env
 MEXC_SIGNAL_SOURCE_ENV=/etc/liquidity-migration/signal-worker-mexc-source.env
+HYPERLIQUID_SIGNAL_SOURCE_ENV=/etc/liquidity-migration/signal-worker-hyperliquid-source.env
 
 # Every realm's worker reads Bybit mainnet public data; the realm in the name is
 # the account owner it feeds, not the source of the features.
@@ -73,6 +80,9 @@ EXODUS_MAINNET_ROOT=/opt/liquidity-migration/data/bybit-exodus-mainnet-event
 LONG_MEXC_ROOT=/opt/liquidity-migration/data/bybit-long-mexc-event
 CARRY_MEXC_ROOT=/opt/liquidity-migration/data/bybit-carry-mexc-event
 EXODUS_MEXC_ROOT=/opt/liquidity-migration/data/bybit-exodus-mexc-event
+LONG_HYPERLIQUID_ROOT=/opt/liquidity-migration/data/bybit-long-hyperliquid-event
+CARRY_HYPERLIQUID_ROOT=/opt/liquidity-migration/data/bybit-carry-hyperliquid-event
+EXODUS_HYPERLIQUID_ROOT=/opt/liquidity-migration/data/bybit-exodus-hyperliquid-event
 
 # What the mexc render permits. CARRY scores Bybit funding and MEXC funding is
 # set per symbol on a different schedule, so CARRY and the EXODUS follow-on it
@@ -80,6 +90,13 @@ EXODUS_MEXC_ROOT=/opt/liquidity-migration/data/bybit-exodus-mexc-event
 MEXC_LONG_ENTRIES=true
 MEXC_CARRY_ENTRIES=false
 MEXC_EXODUS_ENTRIES=false
+
+# What the hyperliquid render permits. CARRY scores Bybit's eight-hourly
+# funding and Hyperliquid funds hourly, so CARRY and the EXODUS follow-on it
+# feeds stay closed on this realm until Hyperliquid funding evidence exists.
+HYPERLIQUID_LONG_ENTRIES=true
+HYPERLIQUID_CARRY_ENTRIES=false
+HYPERLIQUID_EXODUS_ENTRIES=false
 SIGNAL_SPOOL_ROOT=/var/lib/liquidity-migration/signals
 CONTROL_SPOOL_ROOT=/var/lib/liquidity-migration/controls
 # What `verify_mode` breaks the filesystem down by. A `capture-disk` page turns
@@ -167,6 +184,7 @@ credential_armed() {
 
 mainnet_armed() { credential_armed "$MAINNET_CREDENTIAL_ENV"; }
 mexc_armed() { credential_armed "$MEXC_CREDENTIAL_ENV"; }
+hyperliquid_armed() { credential_armed "$HYPERLIQUID_CREDENTIAL_ENV"; }
 
 # The installed engine's own evidence gate for one funded realm. `engine run`
 # refuses a realm whose source readiness is not live-proven, so starting its
@@ -177,6 +195,7 @@ realm_run_ready() {
     local realm="$1" venue_name
     case "$realm" in
         mexc) venue_name=mexc_mainnet ;;
+        hyperliquid) venue_name=hyperliquid_mainnet ;;
         *) fail "unsupported readiness realm: $realm" ;;
     esac
     FUNDED_REALM_READINESS="$(
@@ -192,6 +211,7 @@ funded_credential_env() {
     case "$1" in
         mainnet) printf '%s\n' "$MAINNET_CREDENTIAL_ENV" ;;
         mexc) printf '%s\n' "$MEXC_CREDENTIAL_ENV" ;;
+        hyperliquid) printf '%s\n' "$HYPERLIQUID_CREDENTIAL_ENV" ;;
         *) fail "unsupported funded realm: $1" ;;
     esac
 }
@@ -360,7 +380,8 @@ ensure_runtime_identities() {
             --shell /usr/sbin/nologin --gid "$CONTROLS_GROUP" "$CONTROLS_USER"
     local user
     for user in "$SIGNAL_WORKER_USER" "$DEMO_ENGINE_USER" "$MAINNET_ENGINE_USER" \
-        "$MEXC_ENGINE_USER" "$OBSERVER_USER" "$LLM_USER" "$CAPTURE_USER"; do
+        "$MEXC_ENGINE_USER" "$HYPERLIQUID_ENGINE_USER" "$OBSERVER_USER" "$LLM_USER" \
+        "$CAPTURE_USER"; do
         id -u "$user" >/dev/null 2>&1 \
             || useradd --system --no-create-home --home-dir /nonexistent \
                 --shell /usr/sbin/nologin --gid "$RUNTIME_GROUP" "$user"
@@ -374,23 +395,28 @@ ensure_runtime_identities() {
         /var/lib/liquidity-migration/targets
     local path
     for path in "$SIGNAL_SPOOL_ROOT" "$SIGNAL_SPOOL_ROOT/demo" "$SIGNAL_SPOOL_ROOT/mainnet" \
-        "$SIGNAL_SPOOL_ROOT/mexc"; do
+        "$SIGNAL_SPOOL_ROOT/mexc" "$SIGNAL_SPOOL_ROOT/hyperliquid"; do
         install -d -o "$SIGNAL_WORKER_USER" -g "$RUNTIME_GROUP" -m 0770 "$path"
     done
     install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$CONTROL_SPOOL_ROOT"
     install -d -o "$DEMO_ENGINE_USER" -g "$RUNTIME_GROUP" -m 0750 "$CONTROL_SPOOL_ROOT/demo"
     install -d -o "$MAINNET_ENGINE_USER" -g "$RUNTIME_GROUP" -m 0750 "$CONTROL_SPOOL_ROOT/mainnet"
     install -d -o "$MEXC_ENGINE_USER" -g "$RUNTIME_GROUP" -m 0750 "$CONTROL_SPOOL_ROOT/mexc"
+    install -d -o "$HYPERLIQUID_ENGINE_USER" -g "$RUNTIME_GROUP" -m 0750 \
+        "$CONTROL_SPOOL_ROOT/hyperliquid"
     install -d -o "$SIGNAL_WORKER_USER" -g "$RUNTIME_GROUP" -m 0750 \
         /var/lib/liquidity-migration-signal-worker-demo \
         /var/lib/liquidity-migration-signal-worker-mainnet \
-        /var/lib/liquidity-migration-signal-worker-mexc
+        /var/lib/liquidity-migration-signal-worker-mexc \
+        /var/lib/liquidity-migration-signal-worker-hyperliquid
     install -d -o "$DEMO_ENGINE_USER" -g "$RUNTIME_GROUP" -m 0750 \
         /var/lib/liquidity-migration-engine
     install -d -o "$MAINNET_ENGINE_USER" -g "$RUNTIME_GROUP" -m 0750 \
         /var/lib/liquidity-migration-engine-mainnet
     install -d -o "$MEXC_ENGINE_USER" -g "$RUNTIME_GROUP" -m 0750 \
         /var/lib/liquidity-migration-engine-mexc
+    install -d -o "$HYPERLIQUID_ENGINE_USER" -g "$RUNTIME_GROUP" -m 0750 \
+        /var/lib/liquidity-migration-engine-hyperliquid
     install -d -o "$LLM_USER" -g "$RUNTIME_GROUP" -m 0750 \
         /var/lib/liquidity-migration/llm-driver-ledger
     install -d -o "$CAPTURE_USER" -g "$RUNTIME_GROUP" -m 0750 \
@@ -400,7 +426,8 @@ ensure_runtime_identities() {
     install -d -o "$SIGNAL_WORKER_USER" -g "$RUNTIME_GROUP" -m 0750 \
         "$LONG_DEMO_ROOT" "$CARRY_DEMO_ROOT" "$EXODUS_DEMO_ROOT" \
         "$LONG_MAINNET_ROOT" "$CARRY_MAINNET_ROOT" "$EXODUS_MAINNET_ROOT" \
-        "$LONG_MEXC_ROOT" "$CARRY_MEXC_ROOT" "$EXODUS_MEXC_ROOT"
+        "$LONG_MEXC_ROOT" "$CARRY_MEXC_ROOT" "$EXODUS_MEXC_ROOT" \
+        "$LONG_HYPERLIQUID_ROOT" "$CARRY_HYPERLIQUID_ROOT" "$EXODUS_HYPERLIQUID_ROOT"
 }
 
 # ------------------------------------------------------------ build/install
@@ -482,6 +509,12 @@ pin_realm_runtime() {
             owner_unit=liquidity-migration-engine-mexc.service
             worker_unit=liquidity-migration-signal-worker-mexc.service
             ;;
+        hyperliquid)
+            engine_config="$ENGINE_HYPERLIQUID_CONFIG"
+            worker_env="$SIGNAL_WORKER_HYPERLIQUID_ENV"
+            owner_unit=liquidity-migration-engine-hyperliquid.service
+            worker_unit=liquidity-migration-signal-worker-hyperliquid.service
+            ;;
         *) fail "unsupported pinned realm: $realm" ;;
     esac
     credential_armed "$(funded_credential_env "$realm")" || return 0
@@ -560,7 +593,7 @@ EOF
 
 pin_funded_runtimes() {
     local realm
-    for realm in mainnet mexc; do
+    for realm in mainnet mexc hyperliquid; do
         pin_realm_runtime "$realm"
     done
 }
@@ -719,6 +752,7 @@ realm_fingerprint() {
         demo) source_env="$DEMO_SIGNAL_SOURCE_ENV" ;;
         mainnet) source_env="$MAINNET_SIGNAL_SOURCE_ENV" ;;
         mexc) source_env="$MEXC_SIGNAL_SOURCE_ENV" ;;
+        hyperliquid) source_env="$HYPERLIQUID_SIGNAL_SOURCE_ENV" ;;
     esac
     if [ -f "$source_env" ]; then
         profile="$(
@@ -740,6 +774,11 @@ realm_fingerprint() {
             mexc)
                 cat "$ENGINE_MEXC_CONFIG" "$ENGINE_MEXC_ENVIRONMENT" "$SIGNAL_WORKER_MEXC_ENV" \
                     "$MEXC_TELEGRAM_ENV" "$MEXC_CREDENTIAL_ENV" 2>/dev/null || true
+                ;;
+            hyperliquid)
+                cat "$ENGINE_HYPERLIQUID_CONFIG" "$ENGINE_HYPERLIQUID_ENVIRONMENT" \
+                    "$SIGNAL_WORKER_HYPERLIQUID_ENV" "$HYPERLIQUID_TELEGRAM_ENV" \
+                    "$HYPERLIQUID_CREDENTIAL_ENV" 2>/dev/null || true
                 ;;
         esac
         if [ -n "$profile" ]; then cat "$profile" 2>/dev/null || true; fi
@@ -772,7 +811,7 @@ seed_realm_fingerprints() {
     local realm deployed worker_unit owner_unit
     deployed="$(cat "$DEPLOYED_COMMIT_FILE" 2>/dev/null || true)"
     [ -n "$deployed" ] || return 0
-    for realm in demo mainnet mexc; do
+    for realm in demo mainnet mexc hyperliquid; do
         [ -f "$RELEASE_DIR/$realm.fingerprint" ] && continue
         worker_unit="$(lm_signal_worker_unit "$realm" 2>/dev/null)" || continue
         owner_unit="$(lm_owner_unit "$realm" 2>/dev/null)" || continue
@@ -853,8 +892,10 @@ target = Path(sys.argv[2])
 allowed = {"OPERATIONAL_PROFILE_FILE", "SIGNAL_WORKER_REALM"}
 values = load_private_systemd_environment(source)
 filtered = {key: value for key, value in values.items() if key in allowed}
-if filtered.get("SIGNAL_WORKER_REALM") not in {"demo", "mainnet", "mexc"}:
-    raise SystemExit(f"{source}: SIGNAL_WORKER_REALM must be demo, mainnet or mexc")
+if filtered.get("SIGNAL_WORKER_REALM") not in {"demo", "mainnet", "mexc", "hyperliquid"}:
+    raise SystemExit(
+        f"{source}: SIGNAL_WORKER_REALM must be demo, mainnet, mexc or hyperliquid"
+    )
 value = str(filtered.get("OPERATIONAL_PROFILE_FILE") or "")
 if not value or not Path(value).is_absolute():
     raise SystemExit(f"{source}: OPERATIONAL_PROFILE_FILE must be an absolute path")
@@ -931,10 +972,20 @@ render_engine_config() {
             long_entries="$MEXC_LONG_ENTRIES"
             carry_entries="$MEXC_CARRY_ENTRIES"
             ;;
+        hyperliquid)
+            # No maker rule: the hyperliquid template has no maker block either.
+            template="$REPO_DIR/deploy/engine.hyperliquid.toml.template"
+            signal_config="$REPO_DIR/configs/signal-worker.hyperliquid.json"
+            long_entries="$HYPERLIQUID_LONG_ENTRIES"
+            carry_entries="$HYPERLIQUID_CARRY_ENTRIES"
+            ;;
         *) fail "unsupported engine realm: $realm" ;;
     esac
     local exodus_entries=true
-    [ "$realm" != mexc ] || exodus_entries="$MEXC_EXODUS_ENTRIES"
+    case "$realm" in
+        mexc) exodus_entries="$MEXC_EXODUS_ENTRIES" ;;
+        hyperliquid) exodus_entries="$HYPERLIQUID_EXODUS_ENTRIES" ;;
+    esac
     local staged
     staged="$(mktemp "${output}.new.XXXXXX")" || fail "cannot stage $realm engine config"
     if ! "$ENGINE_BINARY" render-native-config \
@@ -999,6 +1050,11 @@ run_engine_takeover_command() {
             engine_env="$ENGINE_MEXC_ENVIRONMENT"
             credential_env="$MEXC_CREDENTIAL_ENV"
             ;;
+        hyperliquid)
+            runtime_user="$HYPERLIQUID_ENGINE_USER"
+            engine_env="$ENGINE_HYPERLIQUID_ENVIRONMENT"
+            credential_env="$HYPERLIQUID_CREDENTIAL_ENV"
+            ;;
         *) fail "unsupported takeover realm: $realm" ;;
     esac
     (
@@ -1008,6 +1064,7 @@ run_engine_takeover_command() {
             BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY \
             BYBIT_INVENTORY_CREDENTIAL_SET \
             MEXC_REAL_API_KEY MEXC_REAL_API_SECRET \
+            HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY \
             EXPECTED_ENGINE_ACCOUNT_USER_ID EXPECTED_ENGINE_VENUE EXPECTED_ENGINE_REALM
         case "$realm" in
             demo)
@@ -1027,6 +1084,10 @@ run_engine_takeover_command() {
                 lm_load_private_systemd_environment "$PYTHON" "$credential_env" \
                     MEXC_REAL_API_KEY MEXC_REAL_API_SECRET REAL_MONEY
                 ;;
+            hyperliquid)
+                lm_load_private_systemd_environment "$PYTHON" "$credential_env" \
+                    HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY REAL_MONEY
+                ;;
         esac
         lm_load_private_systemd_environment "$PYTHON" "$engine_env" \
             EXPECTED_ENGINE_ACCOUNT_USER_ID EXPECTED_ENGINE_VENUE EXPECTED_ENGINE_REALM
@@ -1044,6 +1105,7 @@ retire_legacy_signal_sources() {
         demo) config="$ENGINE_DEMO_CONFIG" ;;
         mainnet) config="$ENGINE_MAINNET_CONFIG" ;;
         mexc) config="$ENGINE_MEXC_CONFIG" ;;
+        hyperliquid) config="$ENGINE_HYPERLIQUID_CONFIG" ;;
         *) fail "unsupported legacy retirement realm: $realm" ;;
     esac
     plan="/etc/liquidity-migration/legacy-signal-retirements.$realm.json"
@@ -1058,6 +1120,7 @@ clear_reconciliation_if_requested() {
         demo) config="$ENGINE_DEMO_CONFIG" ;;
         mainnet) config="$ENGINE_MAINNET_CONFIG" ;;
         mexc) config="$ENGINE_MEXC_CONFIG" ;;
+        hyperliquid) config="$ENGINE_HYPERLIQUID_CONFIG" ;;
         *) fail "unsupported reconciliation realm: $realm" ;;
     esac
     pending="/etc/liquidity-migration/reconcile-clear.$realm.note"
@@ -1092,6 +1155,12 @@ ensure_native_strategy_state() {
             wal=/var/lib/liquidity-migration-engine-mexc/engine.wal
             carry_root="$CARRY_MEXC_ROOT"
             exodus_root="$EXODUS_MEXC_ROOT"
+            ;;
+        hyperliquid)
+            config="$ENGINE_HYPERLIQUID_CONFIG"
+            wal=/var/lib/liquidity-migration-engine-hyperliquid/engine.wal
+            carry_root="$CARRY_HYPERLIQUID_ROOT"
+            exodus_root="$EXODUS_HYPERLIQUID_ROOT"
             ;;
         *) fail "unsupported native strategy-state realm: $realm" ;;
     esac
@@ -1218,6 +1287,31 @@ provision_mexc() {
     render_engine_config mexc "$OPERATIONAL_PROFILE_FILE" "$ENGINE_MEXC_CONFIG"
 }
 
+# ------------------------------------------------------------- hyperliquid
+
+provision_hyperliquid() {
+    [ -f "$HYPERLIQUID_SIGNAL_SOURCE_ENV" ] || install -o root -g root -m 0600 \
+        "$REPO_DIR/deploy/signal-worker-hyperliquid.env.template" \
+        "$HYPERLIQUID_SIGNAL_SOURCE_ENV"
+    "$PYTHON" -m liquidity_migration.policy.real_money_arming default-telegram \
+        --credential-env "$HYPERLIQUID_CREDENTIAL_ENV" \
+        --from-env /etc/liquidity-migration/bybit-demo.env --execute \
+        || fail "cannot default the hyperliquid Telegram pair"
+    unset SIGNAL_WORKER_REALM OPERATIONAL_PROFILE_FILE
+    lm_load_private_systemd_environment "$PYTHON" "$HYPERLIQUID_SIGNAL_SOURCE_ENV" \
+        SIGNAL_WORKER_REALM OPERATIONAL_PROFILE_FILE
+    [ "$SIGNAL_WORKER_REALM" = hyperliquid ] \
+        || fail "hyperliquid signal-worker source must declare SIGNAL_WORKER_REALM=hyperliquid"
+    # The dials stay in the funded Bybit credential file; every realm installs
+    # the same rendered bytes.
+    render_operational_profile "$OPERATIONAL_PROFILE_FILE"
+    write_signal_worker_environment "$HYPERLIQUID_SIGNAL_SOURCE_ENV" "$SIGNAL_WORKER_HYPERLIQUID_ENV"
+    project_realm_telegram "$HYPERLIQUID_CREDENTIAL_ENV" "$HYPERLIQUID_TELEGRAM_ENV"
+    "$PYTHON" -m liquidity_migration.policy.real_money_arming preflight-hyperliquid \
+        || fail "hyperliquid preflight has outstanding steps"
+    render_engine_config hyperliquid "$OPERATIONAL_PROFILE_FILE" "$ENGINE_HYPERLIQUID_CONFIG"
+}
+
 # ------------------------------------------------------------------- start
 
 start_realm() {
@@ -1303,9 +1397,12 @@ verify_mode() {
     echo "rollback-target $(rollback_target 2>/dev/null || echo none)"
     if mainnet_armed; then echo "real-money armed"; else echo "real-money off"; fi
     if mexc_armed; then echo "mexc armed"; else echo "mexc off"; fi
+    if hyperliquid_armed; then echo "hyperliquid armed"; else echo "hyperliquid off"; fi
     if [ -x "$ENGINE_BINARY" ]; then
         realm_run_ready mexc || true
         echo "mexc readiness=$FUNDED_REALM_READINESS"
+        realm_run_ready hyperliquid || true
+        echo "hyperliquid readiness=$FUNDED_REALM_READINESS"
     fi
     local unit state heartbeat age now
     now="$(date +%s)"
@@ -1434,11 +1531,12 @@ retain_native_checkpoint_configs() {
     local deployed realm source destination staged
     deployed="$(cat "$DEPLOYED_COMMIT_FILE" 2>/dev/null || true)"
     [ -n "$deployed" ] || return 0
-    for realm in demo mainnet mexc; do
+    for realm in demo mainnet mexc hyperliquid; do
         case "$realm" in
             demo) source="$ENGINE_DEMO_CONFIG" ;;
             mainnet) source="$ENGINE_MAINNET_CONFIG" ;;
             mexc) source="$ENGINE_MEXC_CONFIG" ;;
+            hyperliquid) source="$ENGINE_HYPERLIQUID_CONFIG" ;;
         esac
         [ -f "$source" ] || continue
         destination="$RELEASE_DIR/checkpoint-configs/$deployed/engine.$realm.toml"
@@ -1512,6 +1610,23 @@ deploy_mode() {
             handover_realm mexc
         fi
     fi
+    if ! hyperliquid_armed; then
+        echo "real-money off: hyperliquid units stay stopped"
+    else
+        # Rendered and projected whenever armed, so the canary has the config it
+        # runs against; started only once the engine itself would boot.
+        echo "staging hyperliquid configuration while live engines continue trading"
+        provision_hyperliquid
+        if ! realm_run_ready hyperliquid; then
+            echo "hyperliquid armed but the installed engine reports hyperliquid_mainnet readiness=$FUNDED_REALM_READINESS: units stay stopped until the canary evidence promotes it"
+        elif realm_unchanged hyperliquid; then
+            clear_realm_soak_overrides hyperliquid
+            echo "hyperliquid-ok result=unchanged-left-running"
+        else
+            echo "atomic hyperliquid handover: swapping binaries and state"
+            handover_realm hyperliquid
+        fi
+    fi
     record_generation
     echo "deploy-ok commit=$EXPECTED_COMMIT"
     verify_mode
@@ -1536,11 +1651,11 @@ case "$MODE" in
     deploy) deploy_mode ;;
     rollback) rollback_mode ;;
     verify) verify_mode ;;
-    stop-mainnet|stop-mexc)
+    stop-mainnet|stop-mexc|stop-hyperliquid)
         stop_funded_units "${MODE#stop-}"
         echo "${MODE}-ok"
         echo "note: this stopped publication only; exposure is unchanged. Flatten through the account owner."
         ;;
-    disarm-mainnet|disarm-mexc) disarm_funded_mode "${MODE#disarm-}" ;;
+    disarm-mainnet|disarm-mexc|disarm-hyperliquid) disarm_funded_mode "${MODE#disarm-}" ;;
     *) fail "unknown deploy mode: $MODE" ;;
 esac

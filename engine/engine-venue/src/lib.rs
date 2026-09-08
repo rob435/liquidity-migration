@@ -39,7 +39,9 @@ pub use venues::bybit::{
     API_SECRET_ENV,
 };
 #[cfg(feature = "hyperliquid")]
-pub use venues::hyperliquid::{HyperliquidGateway, HyperliquidOrderFeed};
+pub use venues::hyperliquid::{
+    HyperliquidGateway, HyperliquidInventoryProbe, HyperliquidOrderFeed,
+};
 #[cfg(feature = "lighter")]
 pub use venues::lighter::{LighterGateway, LighterOrderFeed};
 #[cfg(feature = "mexc")]

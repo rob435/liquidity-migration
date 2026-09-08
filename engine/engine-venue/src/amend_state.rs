@@ -1,6 +1,8 @@
 use engine_public::numeric_wire::DecimalField;
 #[cfg(any(test, feature = "binance", feature = "hyperliquid"))]
-use engine_types::numeric::{Exact, ExactNumber};
+use engine_types::numeric::Exact;
+#[cfg(any(test, feature = "binance"))]
+use engine_types::numeric::ExactNumber;
 use engine_types::order_terms::ExactAmendedTerms;
 use engine_types::{OrderUpdate, VenueError};
 use serde::Deserialize;

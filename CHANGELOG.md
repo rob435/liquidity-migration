@@ -10,6 +10,73 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-08 — Wire Hyperliquid perpetuals as the fleet's fourth realm.**
+  - Owner direction: trade Hyperliquid alongside Bybit and MEXC. The funded
+    account's base fees today are 4.5 bp taker and 1.5 bp maker (`userFees`:
+    `userCrossRate 0.00045`, `userAddRate 0.00015`). On that direction
+    `hyperliquid` joins the default Cargo features of engine-venue,
+    engine-public, engine-marketdata, engine-core and engine-tools, so `k256`
+    and `sha3` are now in the funded binary and the `venue-features.yml` step
+    that asserted their absence is deleted.
+  - Two latent `cfg` bugs the flip exposed, both fixed: `engine-venue`'s
+    `amend_state.rs` imported `ExactNumber` under a gate that included
+    `hyperliquid`, where it is unused; and `tests/venue/exact_account_stops.rs`
+    built `hyperliquid_coverage` on the `hyperliquid` feature alone when its
+    only callers are the two-venue tests that also need `lighter`.
+  - Engine: `hyperliquid_mainnet` moves from `production-blocked` to
+    `live-canary`. `engine canary-order` may run with `REAL_MONEY` armed;
+    `engine run` refuses until one reviewed canary lifecycle on this exact
+    realm moves it to `live-proven`. `hyperliquid_testnet` stays
+    `testnet-canary` and is not a fleet realm — a different chain and a
+    different account, so its evidence does not carry. The canary reads the
+    venue clock from `/info {"type": "exchangeStatus"}` → `time` and proves
+    terminal state through `VenueGateway::order_status`; an order the venue has
+    already dropped from its retained set answers `unknownOid`, which the
+    canary reports as an error rather than as never-accepted. Canary ids take
+    the hashed half of the 16-byte `cloid` scheme, not the packed form, and
+    still look themselves up. The order is sized by the venue's 10 USD minimum
+    notional, not by the lot. A `/exchange` refusal worded as a rate limit
+    ("rate limit", "too many", "cumulative requests") is a `Transport` error,
+    not the venue's answer, so account recovery retries it instead of latching
+    the engine off, as MEXC's `510` did the same day.
+  - Identity and probe: `AccountIdentity.user_id` is the master account
+    address, lower-case `0x` and 40 hex. At boot the gateway checks the signing
+    key's address against the account's `extraAgents` and refuses before
+    trading when it is not listed. `HyperliquidInventoryProbe` gives
+    `verify-account-identity` and `attest-flat` a GET-only reader covering open
+    perpetual positions, the cross-margin account value, working orders
+    including the reduce-only trigger orders a stop is kept as, and spot token
+    balances; vaults and sub-accounts are separate addresses it does not read.
+    Spot balances and a negative account value arrive as `wallet_asset` rows:
+    they do not block the canary's derivative-flat precheck, but they do block
+    `attest-flat`.
+  - Signals: the worker and the native config renderer accept realm
+    `hyperliquid` (`configs/signal-worker.hyperliquid.json`, Bybit mainnet
+    public data). LONG entries render on; CARRY and EXODUS entries render off
+    because they score Bybit's eight-hourly funding rate and Hyperliquid funds
+    hourly and quotes the hourly rate. A symbol Hyperliquid does not list, and
+    an order under its 10 USD minimum notional, are refused at admission.
+  - Fleet: `liquidity-migration-engine-hyperliquid`,
+    `signal-worker-hyperliquid` and `hyperliquid-liveness` units, user
+    `liquidity-engine-hyperliquid`, spool and control directories,
+    `hyperliquid-mainnet.env` as the only arming file (master address plus an
+    API wallet key the account approved, which trades and cannot withdraw),
+    `engine-hyperliquid.env` and `engine.hyperliquid.toml.template`; deploy
+    provisions the realm whenever its switch is armed and starts it only when
+    the installed engine reports `hyperliquid_mainnet` as `live-proven`;
+    `stop-hyperliquid` / `disarm-hyperliquid`,
+    `ops.sh curve|flatten|attest-flat|verify-account-identity|canary-order`
+    for `hyperliquid` and `real-money preflight-hyperliquid`, liveness scope
+    `hyperliquid`, Telegram pause/resume, trade notifier tag `HL`, backup
+    sources and the equity recorder follow the manifest.
+  - Evidence boundary: offline fixtures and today's public reads only. The
+    funded master account was read — `extraAgents` lists the approved agent,
+    the perpetual account value is 0, and 52.41 USDC sits in SPOT, which the
+    owner must move to Perps before any order can rest. No live order, cancel,
+    identity binding on the host, or private-stream login has been observed on
+    Hyperliquid; the realm stays `live-canary` and its units stay stopped
+    through deploy.
+
 - **2026-09-08 — Reclassify the rolling-loss restriction: a `NOTICE`, not a page.**
   - Owner direction: `CRITICAL` means a program fault somebody has to fix. A
     24-hour loss limit doing its job is an alert, not a fault, and must not wake

@@ -15,7 +15,8 @@ figure already says what moved. Returns read as percent of the position,
 never basis points. Builders write plain text; `as_block` escapes it.
 
 Every message names its account: RM is the funded Bybit account (real money),
-MEXC is the funded MEXC account, DEMO is the demo.
+MEXC is the funded MEXC account, HL is the funded Hyperliquid account, DEMO is
+the demo.
 
 **Net here is after the venue's fees and nothing else.** The crowd fee
 (funding) is settled into the wallet on the venue's own clock and the engine
@@ -102,6 +103,13 @@ ACCOUNTS = (
         realm="mexc_mainnet",
         heartbeat="/var/lib/liquidity-migration-engine-mexc/heartbeat.json",
         trades="/var/lib/liquidity-migration-engine-mexc/trades.jsonl",
+    ),
+    Account(
+        name="hyperliquid",
+        tag="HL ",
+        realm="hyperliquid_mainnet",
+        heartbeat="/var/lib/liquidity-migration-engine-hyperliquid/heartbeat.json",
+        trades="/var/lib/liquidity-migration-engine-hyperliquid/trades.jsonl",
     ),
 )
 

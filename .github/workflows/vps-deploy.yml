@@ -16,7 +16,7 @@ on:
         required: true
         default: verify
         type: choice
-        options: [deploy, qualify, rollback, verify, diagnose, disarm-mainnet, disarm-mexc]
+        options: [deploy, qualify, rollback, verify, diagnose, disarm-mainnet, disarm-mexc, disarm-hyperliquid]
 
 permissions:
   contents: read
@@ -204,7 +204,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$DISARM_MODE_INPUT" in
-            disarm-mainnet|disarm-mexc) ;;
+            disarm-mainnet|disarm-mexc|disarm-hyperliquid) ;;
             *) exit 2 ;;
           esac
           EXPECTED_COMMIT="$GITHUB_SHA" \

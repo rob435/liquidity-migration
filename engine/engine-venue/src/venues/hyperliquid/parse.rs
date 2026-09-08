@@ -20,7 +20,7 @@
 use engine_types::VenueExecution;
 use std::collections::HashMap;
 
-use engine_types::orders::{OrderAck, VenueOrder};
+use engine_types::orders::{AccountOrder, AccountPosition, OrderAck, VenueOrder};
 use engine_types::risk::PositionView;
 use engine_types::{Side, SymbolId, VenueError};
 use serde_json::Value;
@@ -43,6 +43,14 @@ pub(crate) fn venue_result(envelope: Value) -> Result<Value, VenueError> {
             Some(other) => other.to_string(),
             None => "no response field".to_string(),
         };
+        // A refusal for timing alone: the venue did not act on the request and
+        // takes it again later. Read as the venue's answer it would latch the
+        // engine off during account recovery, as MEXC's did on 2026-09-08.
+        if is_rate_limited(&message) {
+            return Err(VenueError::Transport(format!(
+                "venue rate limit: {message}"
+            )));
+        }
         // Hyperliquid sends no numeric codes; zero is "the venue said no and
         // did not number it", which is what `Rejected` means without a code.
         return Err(VenueError::Rejected { code: 0, message });
@@ -52,6 +60,15 @@ pub(crate) fn venue_result(envelope: Value) -> Result<Value, VenueError> {
         .and_then(|r| r.get("data"))
         .cloned()
         .unwrap_or(Value::Null))
+}
+
+/// The venue's rate-limit refusals carry no code, only words; these are the
+/// words its IP and address limits use.
+fn is_rate_limited(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("rate limit")
+        || lower.contains("too many")
+        || lower.contains("cumulative requests")
 }
 
 /// The per-order status inside an accepted request. This is where a refused
@@ -387,6 +404,133 @@ fn is_supported_native_stop(row: &Value) -> Result<bool, VenueError> {
     )
 }
 
+/// The currency the perpetual account is margined and settled in.
+pub(crate) const SETTLE_CURRENCY: &str = "USDC";
+
+/// Every open perpetual position on the account, whichever coin it is on.
+///
+/// Unlike [`parse_positions`] this resolves nothing against the engine's
+/// configured symbol table — an account-wide scan has to see the coins nobody
+/// configured, which are exactly the ones a flatness proof would otherwise
+/// miss.
+pub(crate) fn parse_inventory_positions(
+    result: &Value,
+) -> Result<Vec<AccountPosition>, VenueError> {
+    let rows = result
+        .get("assetPositions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            VenueError::BadReply("no assetPositions in the account reply".to_string())
+        })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let position = row.get("position").ok_or_else(|| {
+            VenueError::BadReply("an assetPosition carries no position".to_string())
+        })?;
+        let coin = str_field(position, "coin")?;
+        let signed = num_field(position, "szi")?;
+        if signed == 0.0 {
+            continue;
+        }
+        out.push(AccountPosition {
+            product: "linear".to_string(),
+            symbol: symbol_of(&coin),
+            side: if signed > 0.0 { Side::Buy } else { Side::Sell },
+            qty: signed.abs(),
+        });
+    }
+    Ok(out)
+}
+
+/// The perpetual account's cash, reported only when it is a liability.
+///
+/// Positive settle cash is not exposure. A negative account value is money
+/// owed, so a flatness proof has to show it.
+pub(crate) fn parse_inventory_perp_cash(
+    result: &Value,
+) -> Result<Vec<AccountPosition>, VenueError> {
+    let summary = result
+        .get("marginSummary")
+        .ok_or_else(|| VenueError::BadReply("no marginSummary in the account reply".to_string()))?;
+    let equity = num_field(summary, "accountValue")?;
+    Ok(if equity < 0.0 {
+        vec![AccountPosition {
+            product: "wallet_asset".to_string(),
+            symbol: SETTLE_CURRENCY.to_string(),
+            side: Side::Sell,
+            qty: equity.abs(),
+        }]
+    } else {
+        Vec::new()
+    })
+}
+
+/// Every spot token the account holds that is not deployable settle cash.
+///
+/// Spot sits on the same address as the perpetual account, so it is inside
+/// this scan rather than outside it. A balance in any other token carries
+/// price risk, and a negative settle balance is a liability.
+pub(crate) fn parse_inventory_spot_balances(
+    result: &Value,
+) -> Result<Vec<AccountPosition>, VenueError> {
+    let rows = result
+        .get("balances")
+        .and_then(Value::as_array)
+        .ok_or_else(|| VenueError::BadReply("no balances in the spot account reply".to_string()))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let coin = str_field(row, "coin")?;
+        if coin.trim().is_empty() {
+            return Err(VenueError::BadReply(
+                "a spot balance carries an unnamed token".to_string(),
+            ));
+        }
+        let total = num_field(row, "total")?;
+        let is_cash = coin == SETTLE_CURRENCY;
+        if total != 0.0 && (!is_cash || total < 0.0) {
+            out.push(AccountPosition {
+                product: "wallet_asset".to_string(),
+                symbol: coin,
+                side: if total > 0.0 { Side::Buy } else { Side::Sell },
+                qty: total.abs(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Every order the venue is working for the account, whoever placed it.
+///
+/// A stop on this venue is a standing reduce-only trigger order rather than a
+/// field on the position, so it arrives in this same list and counts as an
+/// open order. An order with no readable client id is named by the venue's own
+/// order number: an unattributable order still has to appear in the refusal.
+pub(crate) fn parse_inventory_orders(orders: &Value) -> Result<Vec<AccountOrder>, VenueError> {
+    let rows = orders
+        .as_array()
+        .ok_or_else(|| VenueError::BadReply("the open-order reply is not a list".to_string()))?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let coin = str_field(row, "coin")?;
+        let is_trigger = row
+            .get("isTrigger")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let client_order_id = match row.get("cloid") {
+            Some(Value::String(raw)) if !raw.trim().is_empty() => {
+                cloid::from_cloid(raw).unwrap_or_else(|| raw.to_string())
+            }
+            _ => format!("oid-{}", int_field(row, "oid")?),
+        };
+        out.push(AccountOrder {
+            product: if is_trigger { "trigger" } else { "linear" }.to_string(),
+            symbol: symbol_of(&coin),
+            client_order_id,
+        });
+    }
+    Ok(out)
+}
+
 /// Fills out of a `userFillsByTime` reply.
 #[cfg(test)]
 pub(crate) fn parse_executions(fills: &Value) -> Result<Vec<VenueExecution>, VenueError> {
@@ -432,6 +576,30 @@ mod tests {
             }
             other => panic!("expected a rejection, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_rate_limit_refusal_is_a_transport_failure_not_the_venues_answer() {
+        for words in [
+            "Rate limit exceeded",
+            "Too many cumulative requests sent from this address",
+            "Too many requests",
+        ] {
+            let envelope = json!({"status": "err", "response": words});
+            match venue_result(envelope) {
+                Err(VenueError::Transport(message)) => {
+                    assert!(message.contains(words), "{message}");
+                }
+                other => panic!("a rate limit read as the venue's answer: {other:?}"),
+            }
+        }
+        // The same words inside an order-level refusal are the venue's answer
+        // to that order and stay a rejection.
+        let envelope = json!({"status": "err", "response": "Insufficient margin to place order."});
+        assert!(matches!(
+            venue_result(envelope),
+            Err(VenueError::Rejected { .. })
+        ));
     }
 
     #[test]

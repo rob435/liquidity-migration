@@ -36,19 +36,20 @@ Operator commands:
   execution-study [--json]     read the latest paired execution cost report
   curve [REALM] [SAMPLES]      the live account's recorded equity curve, read
                                on the host (default: mainnet, 240 minutes;
-                               REALM is demo, mainnet or mexc)
-  flatten --environment demo|mainnet|mexc [--reason TEXT] [--execute]
+                               REALM is demo, mainnet, mexc or hyperliquid)
+  flatten --environment demo|mainnet|mexc|hyperliquid
+          [--reason TEXT] [--execute]
                                ask each native directional reducer to close its
                                attributed exposure through durable Rust control
                                commands. Reports without --execute; the signal
                                worker stays live while exits complete
-  attest-flat --environment demo|mainnet|mexc
+  attest-flat --environment demo|mainnet|mexc|hyperliquid
                                run the installed Rust adapter's credential-wide
                                two-scan flatness proof (read-only)
-  verify-account-identity --environment demo|mainnet|mexc
+  verify-account-identity --environment demo|mainnet|mexc|hyperliquid
                                authenticate the realm's read-only probe and
                                print the account id the engine binds
-  canary-order --environment demo|mexc --symbol SYMBOL
+  canary-order --environment demo|mexc|hyperliquid --symbol SYMBOL
                --expected-user-id ID [--execute]
                                one bounded live order lifecycle on the realm's
                                account: rest one minimum post-only order away
@@ -58,13 +59,16 @@ Operator commands:
   real-money preflight         report every remaining arming step for the
                                funded Bybit account (read-only)
   real-money preflight-mexc    the same for the MEXC account (read-only)
+  real-money preflight-hyperliquid
+                               the same for the Hyperliquid account (read-only)
   real-money render-profile [--execute --output PATH]
                                render the operational profile from the
                                RM_* dials in the funded credential file
   deploy [MODE]                MODE is deploy (default)|rollback|verify|
                                stop-mainnet|disarm-mainnet|stop-mexc|
-                               disarm-mexc; rollback deploys the last commit
-                               whose deploy finished
+                               disarm-mexc|stop-hyperliquid|
+                               disarm-hyperliquid; rollback deploys the last
+                               commit whose deploy finished
   help                         show this help and do nothing else
 
 A UNIT that does not already start with `liquidity-migration-` gets the prefix:
@@ -150,7 +154,7 @@ case "$realm" in
     inventory_credential_set=demo
     runtime_user=liquidity-engine-demo
     state_dir=/var/lib/liquidity-migration-engine
-    unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+    unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
     ;;
   mainnet)
     env_file=/etc/liquidity-migration/engine-mainnet.env
@@ -163,9 +167,9 @@ case "$realm" in
     runtime_user=liquidity-engine-mainnet
     state_dir=/var/lib/liquidity-migration-engine-mainnet
     if [ "$inventory_credential_set" = attestor ]; then
-      unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET MEXC_REAL_API_KEY MEXC_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+      unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
     else
-      unset_environment="BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET MEXC_REAL_API_KEY MEXC_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+      unset_environment="BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
     fi
     ;;
   mexc)
@@ -176,7 +180,18 @@ case "$realm" in
     inventory_credential_set=execution
     runtime_user=liquidity-engine-mexc
     state_dir=/var/lib/liquidity-migration-engine-mexc
-    unset_environment="BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+    unset_environment="BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
+    ;;
+  hyperliquid)
+    env_file=/etc/liquidity-migration/engine-hyperliquid.env
+    credential_file=/etc/liquidity-migration/hyperliquid-mainnet.env
+    # The API wallet the account approved is the only credential this realm
+    # has; it cannot withdraw, and the Rust inventory type the read-only
+    # modes reach exposes no mutation method.
+    inventory_credential_set=execution
+    runtime_user=liquidity-engine-hyperliquid
+    state_dir=/var/lib/liquidity-migration-engine-hyperliquid
+    unset_environment="BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
     ;;
   *) echo "invalid engine-control realm: $realm" >&2; exit 2 ;;
 esac
@@ -268,8 +283,8 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     # research backtests -- that is `equity` above.
     curve_realm="${1:-mainnet}"
     case "$curve_realm" in
-      demo|mainnet|mexc) ;;
-      *) die_usage "curve realm must be demo, mainnet or mexc" ;;
+      demo|mainnet|mexc|hyperliquid) ;;
+      *) die_usage "curve realm must be demo, mainnet, mexc or hyperliquid" ;;
     esac
     curve_samples="${2:-240}"
     [[ "$curve_samples" =~ ^[1-9][0-9]*$ ]] || die_usage "curve samples must be a positive integer"
@@ -300,8 +315,8 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
       set -- preflight
     fi
     case "${1:-}" in
-      preflight|preflight-mexc|render-profile) ;;
-      *) die_usage "real-money subcommand must be preflight, preflight-mexc or render-profile" ;;
+      preflight|preflight-mexc|preflight-hyperliquid|render-profile) ;;
+      *) die_usage "real-money subcommand must be preflight, preflight-mexc, preflight-hyperliquid or render-profile" ;;
     esac
     # LOCAL=1 runs it against this checkout instead of the VPS, so the dials
     # can be proved before anything is copied to the host.
@@ -333,19 +348,19 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     ;;
   attest-flat)
     [[ "$#" -eq 2 && "$1" == "--environment" ]] \
-      || die_usage "attest-flat requires --environment demo|mainnet|mexc"
+      || die_usage "attest-flat requires --environment demo|mainnet|mexc|hyperliquid"
     case "$2" in
-      demo|mainnet|mexc) ;;
-      *) die_usage "attest-flat environment must be demo, mainnet or mexc" ;;
+      demo|mainnet|mexc|hyperliquid) ;;
+      *) die_usage "attest-flat environment must be demo, mainnet, mexc or hyperliquid" ;;
     esac
     remote_engine_control "$2" attest-flat
     ;;
   verify-account-identity)
     [[ "$#" -eq 2 && "$1" == "--environment" ]] \
-      || die_usage "verify-account-identity requires --environment demo|mainnet|mexc"
+      || die_usage "verify-account-identity requires --environment demo|mainnet|mexc|hyperliquid"
     case "$2" in
-      demo|mainnet|mexc) ;;
-      *) die_usage "verify-account-identity environment must be demo, mainnet or mexc" ;;
+      demo|mainnet|mexc|hyperliquid) ;;
+      *) die_usage "verify-account-identity environment must be demo, mainnet, mexc or hyperliquid" ;;
     esac
     remote_engine_control "$2" verify-account-identity
     ;;
@@ -360,11 +375,11 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
         *) die_usage "canary-order does not take '$1'" ;;
       esac
     done
-    # bybit_mainnet is live-proven and never the canary's account; the engine
-    # refuses it too, but a typo should stop here, before the host.
+    # A live-proven realm is never the canary's account; the engine refuses it
+    # too, but a typo should stop here, before the host.
     case "$canary_environment" in
-      demo|mexc) ;;
-      *) die_usage "canary-order requires --environment demo|mexc" ;;
+      demo|mexc|hyperliquid) ;;
+      *) die_usage "canary-order requires --environment demo|mexc|hyperliquid" ;;
     esac
     [[ -n "$canary_symbol" && -n "$canary_user_id" ]] \
       || die_usage "canary-order requires --symbol SYMBOL and --expected-user-id ID"
@@ -378,8 +393,8 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
       shift
     fi
     case "${1:-deploy}" in
-      deploy|rollback|verify|stop-mainnet|disarm-mainnet|stop-mexc|disarm-mexc) ;;
-      *) die_usage "deploy mode must be deploy, rollback, verify, stop-mainnet, disarm-mainnet, stop-mexc, or disarm-mexc" ;;
+      deploy|rollback|verify|stop-mainnet|disarm-mainnet|stop-mexc|disarm-mexc|stop-hyperliquid|disarm-hyperliquid) ;;
+      *) die_usage "deploy mode must be deploy, rollback, verify, stop-mainnet, disarm-mainnet, stop-mexc, disarm-mexc, stop-hyperliquid, or disarm-hyperliquid" ;;
     esac
     exec "$ROOT_DIR/scripts/deploy_vps_live.sh" "${1:-deploy}"
     ;;

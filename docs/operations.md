@@ -30,13 +30,14 @@ Entry-point wrapper for all operational workflows. Prefix `liquidity-migration-`
 | **Units** | `scripts/ops.sh units` | Read-only | Lists all fleet systemd units and timers. |
 | **Logs** | `scripts/ops.sh logs <unit> [lines]` | Read-only | Tails journal for a specific unit (default 100 lines). |
 | **Start / Stop** | `scripts/ops.sh <start\|stop\|restart> <unit...>` | Mutating | Controls individual fleet units. |
-| **Flatten** | `scripts/ops.sh flatten --environment <demo\|mainnet\|mexc> [--execute]` | Mutating | Orders reducers to close attributed exposure. Read-only without `--execute`. |
-| **Attest Flat** | `scripts/ops.sh attest-flat --environment <demo\|mainnet\|mexc>` | Read-only | Two-scan venue proof that the account holds zero open positions. Bybit and MEXC implement the GET-only credential-wide probe; MEXC's scan covers the futures account (assets, positions, open orders, position stops). |
+| **Flatten** | `scripts/ops.sh flatten --environment <demo\|mainnet\|mexc\|hyperliquid> [--execute]` | Mutating | Orders reducers to close attributed exposure. Read-only without `--execute`. |
+| **Attest Flat** | `scripts/ops.sh attest-flat --environment <demo\|mainnet\|mexc\|hyperliquid>` | Read-only | Two-scan venue proof that the account holds zero open positions. Bybit, MEXC and Hyperliquid implement the GET-only credential-wide probe; MEXC's scan covers the futures account (assets, positions, open orders, position stops), Hyperliquid's covers perpetual positions, the cross-margin account value, working orders including reduce-only triggers, and spot token balances. |
 | **Preflight** | `scripts/ops.sh real-money preflight` | Read-only | Validates all funded Bybit credentials, IP bindings, and profile dials. |
 | **MEXC preflight** | `scripts/ops.sh real-money preflight-mexc` | Read-only | Validates the MEXC credential file, its arming switch, and the mexc worker source. |
-| **Verify Identity** | `scripts/ops.sh verify-account-identity --environment <demo\|mainnet\|mexc>` | Read-only | Authenticates the realm's GET-only probe and binds it to `EXPECTED_ENGINE_ACCOUNT_USER_ID`; a mismatch prints the id the credentials answered as. |
-| **Canary Order** | `scripts/ops.sh canary-order --environment <demo\|mexc> --symbol SYMBOL --expected-user-id ID [--execute]` | Mutating with `--execute` | One bounded live order lifecycle through the realm's own credential file: one venue-minimum post-only order 0.5% under the bid, cancelled, the account proved clean twice. The engine accepts it on the Bybit demo and on `live-canary` realms only; `mexc_mainnet` is `live-proven`, so it is refused there today. |
-| **Deploy** | `scripts/ops.sh deploy [mode]` | Mutating | Executes exact-commit deployment (`deploy`, `rollback`, `verify`, `stop-mainnet`, `disarm-mainnet`, `stop-mexc`, `disarm-mexc`). |
+| **Hyperliquid preflight** | `scripts/ops.sh real-money preflight-hyperliquid` | Read-only | Validates the Hyperliquid credential file (address shape, API wallet key shape, no other venue's keys), its arming switch, and the hyperliquid worker source. |
+| **Verify Identity** | `scripts/ops.sh verify-account-identity --environment <demo\|mainnet\|mexc\|hyperliquid>` | Read-only | Authenticates the realm's GET-only probe and binds it to `EXPECTED_ENGINE_ACCOUNT_USER_ID`; a mismatch prints the id the credentials answered as. |
+| **Canary Order** | `scripts/ops.sh canary-order --environment <demo\|mexc\|hyperliquid> --symbol SYMBOL --expected-user-id ID [--execute]` | Mutating with `--execute` | One bounded live order lifecycle through the realm's own credential file: one venue-minimum post-only order 0.5% under the bid, cancelled, the account proved clean twice. The engine accepts it on the Bybit demo and on `live-canary` realms only; `hyperliquid_mainnet` is the one `live-canary` realm today, and `mexc_mainnet` is `live-proven`, so it is refused there. |
+| **Deploy** | `scripts/ops.sh deploy [mode]` | Mutating | Executes exact-commit deployment (`deploy`, `rollback`, `verify`, `stop-mainnet`, `disarm-mainnet`, `stop-mexc`, `disarm-mexc`, `stop-hyperliquid`, `disarm-hyperliquid`). |
 
 ### Venue-Confirmed Trade Accounting
 Reconciles engine WAL fills, orders, and fees against authenticated venue history:
@@ -89,10 +90,13 @@ The existing reconciliation report includes `observed_window`. Its `complete_pro
 | `liquidity-migration-engine.service` | Demo | `liquidity-engine-demo:liquidity-migration` | `multi-user.target` | Execution engine on demo account. |
 | `liquidity-migration-engine-mainnet.service` | Mainnet | `liquidity-engine-mainnet:liquidity-migration`| `manual` (requires `REAL_MONEY`) | Execution engine on funded Bybit account. |
 | `liquidity-migration-engine-mexc.service` | MEXC | `liquidity-engine-mexc:liquidity-migration` | `manual` (requires `REAL_MONEY` in `mexc-mainnet.env`) | Execution engine on the MEXC USDT-perp account. |
+| `liquidity-migration-engine-hyperliquid.service` | Hyperliquid | `liquidity-engine-hyperliquid:liquidity-migration` | `manual` (requires `REAL_MONEY` in `hyperliquid-mainnet.env`) | Execution engine on the funded Hyperliquid account. |
 | `liquidity-migration-signal-worker-demo.service` | Demo | `liquidity-signal-worker:liquidity-migration`| `multi-user.target` | Public feature ingestion & IPC. |
 | `liquidity-migration-signal-worker-mainnet.service`| Mainnet | `liquidity-signal-worker:liquidity-migration`| `multi-user.target` | Public feature ingestion & IPC. |
 | `liquidity-migration-signal-worker-mexc.service` | MEXC | `liquidity-signal-worker:liquidity-migration`| `manual` (with its realm) | Public feature ingestion & IPC; the features are Bybit mainnet's. |
+| `liquidity-migration-signal-worker-hyperliquid.service` | Hyperliquid | `liquidity-signal-worker:liquidity-migration`| `manual` (with its realm) | Public feature ingestion & IPC; the features are Bybit mainnet's. |
 | `liquidity-migration-mexc-liveness.timer` | MEXC | `liquidity-observer:liquidity-migration` | Timer (every 30 s while armed) | MEXC engine and worker watchdog. |
+| `liquidity-migration-hyperliquid-liveness.timer` | Hyperliquid | `liquidity-observer:liquidity-migration` | Timer (every 30 s while armed) | Hyperliquid engine and worker watchdog. |
 | `liquidity-migration-forward-capture.service` | Global | `liquidity-capture:liquidity-migration` | `independent` (boot) | Continuous Bybit tick & L2 capture. |
 | `liquidity-migration-forward-capture-binance.service`| Global | `liquidity-capture:liquidity-migration` | `independent` (boot) | Continuous Binance tick & L2 capture. |
 | `liquidity-migration-telegram-controls.service` | Global | `liquidity-controls:liquidity-controls` | `multi-user.target` | Interactive Telegram operator bot. |
@@ -124,7 +128,7 @@ EXPECTED_COMMIT=<40-hex-commit> scripts/ops.sh deploy
 | Dispatch `deploy` | Python gate, Rust debug gate, release artifact, VPS deploy | Installs the exact `main` SHA after every gate succeeds |
 | Dispatch `qualify` | Rust debug gate, release tests, soak, benchmark | None |
 | Dispatch `verify`, `rollback` | No build | Reads or restores production through the pinned VPS job |
-| Dispatch `diagnose`, `disarm-mainnet`, `disarm-mexc` | No build | Reads incident state or persistently disarms one funded realm |
+| Dispatch `diagnose`, `disarm-mainnet`, `disarm-mexc`, `disarm-hyperliquid` | No build | Reads incident state or persistently disarms one funded realm |
 
 - **Must** keep account state, credentials and private operational evidence outside the public repository.
 - **Must** run `scripts/dev.sh check` before a direct push to `main`.
@@ -216,15 +220,17 @@ Persistently stops one funded realm and disables its arming switch:
 ```bash
 scripts/ops.sh deploy disarm-mainnet
 scripts/ops.sh deploy disarm-mexc
+scripts/ops.sh deploy disarm-hyperliquid
 ```
 
 | Mode | Sets `REAL_MONEY=false` in | Stops and disables |
 | :--- | :--- | :--- |
 | `disarm-mainnet` | `/etc/liquidity-migration/bybit-mainnet.env` | every `mainnet` realm unit |
 | `disarm-mexc` | `/etc/liquidity-migration/mexc-mainnet.env` | every `mexc` realm unit |
+| `disarm-hyperliquid` | `/etc/liquidity-migration/hyperliquid-mainnet.env` | every `hyperliquid` realm unit |
 
-`stop-mainnet` and `stop-mexc` stop the same units without touching the switch.
-Neither mode flattens exposure.
+`stop-mainnet`, `stop-mexc` and `stop-hyperliquid` stop the same units without
+touching the switch. No mode flattens exposure.
 
 ---
 
@@ -240,8 +246,8 @@ Configured in `/etc/liquidity-migration/bybit-mainnet.env` (`0600`, root-owned):
 
 These dials serve every realm: deploy renders one operational profile from this
 file and installs the identical bytes in each realm's signal-worker source
-directory. `mexc-mainnet.env` holds no dials and a dial written there is read by
-nothing.
+directory. `mexc-mainnet.env` and `hyperliquid-mainnet.env` hold no dials and a
+dial written in either is read by nothing.
 
 ---
 
@@ -303,6 +309,90 @@ read-only modes drop `REAL_MONEY`, the canary keeps it.
 
 ---
 
+### Hyperliquid Realm
+
+| Property | Value |
+| :--- | :--- |
+| Fleet realm | `hyperliquid` |
+| Engine venue name | `hyperliquid_mainnet` (`venue` in `deploy/engine.hyperliquid.toml.template`) |
+| Heartbeat realm / lease realm | `hyperliquid_mainnet`; heartbeat venue is `hyperliquid` |
+| Lease file | `/run/lock/liquidity-migration/hyperliquid-hyperliquid_mainnet-user-0x<40 hex>.lock` |
+| Practice realm | `hyperliquid_testnet` exists on the venue at `testnet-canary` and is not a fleet realm. Every order this realm can place is real |
+| Credential file | `/etc/liquidity-migration/hyperliquid-mainnet.env`, root-owned `0600`, written by hand, and the only arming file |
+| Credential keys | `HYPERLIQUID_REAL_ACCOUNT_ADDRESS` (the master account, `0x` + 40 hex in either case; the engine lower-cases it), `HYPERLIQUID_REAL_API_WALLET_KEY` (an API wallet — the venue calls it an agent — the account approved, `0x` + 64 hex; it trades and cannot withdraw), `REAL_MONEY`, optional Telegram trio |
+| Unit environment | `/etc/liquidity-migration/engine-hyperliquid.env`, root-owned `0600`, written by hand |
+| Rendered config | `/etc/liquidity-migration/engine-hyperliquid.toml`, rendered by deploy |
+| Sleeves | LONG entries on; CARRY and EXODUS entries rendered off. Both score Bybit's eight-hourly funding rate and Hyperliquid funds hourly. No maker, no probe |
+| Public data | Bybit mainnet, exactly as the other realms (`configs/signal-worker.hyperliquid.json`, `public_market_realm` `mainnet`). The engine prices against Hyperliquid's own `bbo` / `activeAssetCtx` socket |
+| Source readiness | `hyperliquid_mainnet` is `live-canary`: `engine canary-order` runs, `engine run` refuses. `engine venues` prints the current value |
+
+| Venue fact | Where it changes a decision |
+| :--- | :--- |
+| Funding settles and is quoted hourly | A carry number taken from Bybit's eight-hourly rate is out by a factor of eight, so CARRY and EXODUS entries are rendered off |
+| A stop is a separate reduce-only trigger order, not a field on the position | It appears in the working-order list of every scan, and a position with no such order reads as unprotected |
+| Minimum order notional 10 USD | An order under it is refused at admission (`engine/engine-core/src/engine/intent_admission.rs`), not sent |
+| Limit orders only | A market intent goes to the venue as an IOC limit through the book |
+| Symbols the venue does not list | Refused at admission; the worker's universe is Bybit mainnet's |
+| Base fees on the funded account today | 4.5 bp taker, 1.5 bp maker (`userFees`: `userCrossRate 0.00045`, `userAddRate 0.00015`) |
+
+**Must** set `EXPECTED_ENGINE_ACCOUNT_USER_ID` to the MASTER account address,
+lower-case `0x` plus 40 hex — never the API wallet's own address.
+`/info {"type": "userRole", "user": <agent address>}` names the master the
+agent signs for. At boot the gateway reads the account's `extraAgents` and
+refuses before trading if the signing key is not listed.
+**Must** hold the account's USDC in Perps, not Spot. A spot balance and a
+negative account value show up as `wallet_asset` rows: they do not block the
+canary's derivative-flat precheck, but they do block `attest-flat`.
+**Must** arm `REAL_MONEY=true` in `hyperliquid-mainnet.env` before the canary:
+the gateway refuses to build unarmed. Deploy provisions the realm whenever the
+switch is armed and starts its units only when the installed `engine venues`
+reports `live-proven`; `verify` prints `hyperliquid armed|off` and
+`hyperliquid readiness=...`.
+**Must Never** set the switch without explicit owner instruction.
+
+Arming, in order:
+
+```sh
+# 1. On Hyperliquid, in the venue's own interface: approve an API wallet
+#    (agent) for the master account, and move the account's USDC from Spot to
+#    Perps. Nothing on this host can do either.
+# 2. On the host, by hand:
+install -o root -g root -m 0600 deploy/hyperliquid-mainnet.env.template \
+  /etc/liquidity-migration/hyperliquid-mainnet.env
+install -o root -g root -m 0600 deploy/engine.hyperliquid.env.template \
+  /etc/liquidity-migration/engine-hyperliquid.env
+# fill in HYPERLIQUID_REAL_ACCOUNT_ADDRESS (the master),
+# HYPERLIQUID_REAL_API_WALLET_KEY and REAL_MONEY=true; the realm stays stopped
+# until the source is promoted, whatever this says.
+
+# 3. Deploy once: with the switch armed, deploy renders
+#    engine-hyperliquid.toml and projects the worker env, and leaves every
+#    hyperliquid unit stopped while the realm is live-canary.
+scripts/ops.sh real-money preflight-hyperliquid
+gh workflow run vps-deploy.yml --ref main -f mode=deploy
+
+# 4. Read the account id the gateway binds. The template's placeholder `0x`
+#    mismatches on purpose; the message prints the id the credentials answered
+#    as. Write it into engine-hyperliquid.env and rerun until it passes.
+scripts/ops.sh verify-account-identity --environment hyperliquid
+
+# 5. The live evidence step: one 10-USD post-only BTCUSDT order, its cancel,
+#    and two clean account scans, through the realm's credential file.
+scripts/ops.sh canary-order --environment hyperliquid --symbol BTCUSDT \
+  --expected-user-id 0x<40 hex> --execute
+
+# 6. Record the canary receipt in CHANGELOG.md, move hyperliquid_mainnet to
+#    live-proven in engine/engine-public/src/registry.rs, push, and deploy
+#    again; that deploy starts the realm.
+```
+
+Both engine subcommands run on the host under `systemd-run` as
+`liquidity-engine-hyperliquid` with `hyperliquid-mainnet.env` and
+`engine-hyperliquid.env` loaded; the identity check drops `REAL_MONEY`, the
+canary keeps it.
+
+---
+
 ### Off-Box Google Drive Backups
 
 Configured via `/etc/liquidity-migration/rclone.conf`:
@@ -355,7 +445,7 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | Accepted legacy cursor already skipped history | The missing history is not recoverable from the cursor; assess the producer/account evidence separately |
 | Binary rollback | Required WAL records and `segment_base_v7` make incompatible readers refuse; deployment permits predecessor recovery only when its runtime inputs match. Preserve all durable state and repair forward otherwise |
 
-Must never delete later-generation rows, rewrite accepted hashes, or edit a live cursor to clear a gap. Inspect logs read-only before selecting a recovery action (`<realm>` is `demo`, `mainnet`, or `mexc`):
+Must never delete later-generation rows, rewrite accepted hashes, or edit a live cursor to clear a gap. Inspect logs read-only before selecting a recovery action (`<realm>` is `demo`, `mainnet`, `mexc`, or `hyperliquid`):
 
 ```bash
 journalctl -u liquidity-migration-signal-worker-<realm> -n 100 --no-pager

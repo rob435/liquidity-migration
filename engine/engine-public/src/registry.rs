@@ -74,19 +74,19 @@ pub enum VenueName {
 /// A compiled adapter is not production evidence. Moving a realm to
 /// `LiveProven` is a reviewed source change made only after the smallest
 /// permitted order and cancel/fill lifecycle has been observed on that exact
-/// venue. `LiveCanary` is the state between: the realm has no practice
-/// sibling, so `engine canary-order` is the only way to obtain that
-/// lifecycle, and it is permitted with `REAL_MONEY` armed while the execution
-/// engine stays refused.
+/// venue. `LiveCanary` is the state between: a funded realm that still owes
+/// that lifecycle. A practice sibling's evidence is another chain and another
+/// account and does not carry, so `engine canary-order` is permitted here with
+/// `REAL_MONEY` armed while the execution engine stays refused.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub enum VenueReadiness {
     LiveProven,
     /// Offline conformance is green; this practice realm exists to gather the
     /// missing live evidence with test funds.
     TestnetCanary,
-    /// Offline conformance is green and the venue publishes no practice host,
-    /// so the missing evidence can only be taken on funded capital.
-    /// `engine canary-order` may run here; `engine run` may not.
+    /// Offline conformance is green and the live evidence this funded realm
+    /// owes has not been taken. `engine canary-order` may run here; `engine
+    /// run` may not.
     LiveCanary,
     /// Real capital is blocked until exact-venue live evidence exists.
     ProductionBlocked,
@@ -272,10 +272,14 @@ impl VenueName {
             VenueName::HyperliquidTestnet | VenueName::LighterTestnet => {
                 VenueReadiness::TestnetCanary
             }
-            VenueName::HyperliquidMainnet
-            | VenueName::LighterMainnet
-            | VenueName::BinanceTestnet
-            | VenueName::BinanceMainnet => VenueReadiness::ProductionBlocked,
+            // `hyperliquid_mainnet`: the missing evidence is one reviewed
+            // `engine canary-order` lifecycle on the funded account. The
+            // testnet realm's evidence is a different chain and a different
+            // account, so it does not carry.
+            VenueName::HyperliquidMainnet => VenueReadiness::LiveCanary,
+            VenueName::LighterMainnet | VenueName::BinanceTestnet | VenueName::BinanceMainnet => {
+                VenueReadiness::ProductionBlocked
+            }
             VenueName::VariationalMainnet => VenueReadiness::ReadOnly,
         }
     }

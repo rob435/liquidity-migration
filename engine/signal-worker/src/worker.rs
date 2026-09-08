@@ -368,8 +368,8 @@ pub struct SignalWorker {
 
 /// The venue host whose instrument list bounds what this realm's account may
 /// trade. Demo observes mainnet market data but can only trade what the demo
-/// venue lists. `mexc` is bounded by Bybit mainnet's list; the MEXC engine
-/// refuses any symbol its own contract table lacks.
+/// venue lists. `mexc` and `hyperliquid` are bounded by Bybit mainnet's list;
+/// each of those engines refuses any symbol its own venue does not list.
 pub fn realm_endpoint(config: &SignalWorkerConfig) -> &str {
     match config.live.environment.as_str() {
         "demo" => config.sources.bybit_demo_host.as_str(),

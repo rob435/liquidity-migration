@@ -7,9 +7,10 @@
 # rollback: deploy the last commit whose deploy finished (or, when the current
 #   one finished, the one before it).
 # verify: read-only fleet summary.
-# stop-mainnet, stop-mexc: stop that funded realm's units; exposure is unchanged.
-# disarm-mainnet, disarm-mexc: stop that realm's units and set REAL_MONEY=false
-#   in its own credential file.
+# stop-mainnet, stop-mexc, stop-hyperliquid: stop that funded realm's units;
+#   exposure is unchanged.
+# disarm-mainnet, disarm-mexc, disarm-hyperliquid: stop that realm's units and
+#   set REAL_MONEY=false in its own credential file.
 #
 # Units the manifest marks independent (the market recorder, its upload, the
 # state backup, the host watchdog) are never stopped by any mode here; deploy
@@ -18,7 +19,7 @@ set -euo pipefail
 
 deploy_usage() {
     cat >&2 <<'USAGE'
-usage: deploy_vps_live.sh {deploy|rollback|verify|stop-mainnet|disarm-mainnet|stop-mexc|disarm-mexc}
+usage: deploy_vps_live.sh {deploy|rollback|verify|stop-mainnet|disarm-mainnet|stop-mexc|disarm-mexc|stop-hyperliquid|disarm-hyperliquid}
   EXPECTED_COMMIT=<40-hex>   exact commit to deploy (default: origin/main tip)
 USAGE
     exit 2
@@ -27,7 +28,7 @@ USAGE
 MODE="${1:-verify}"
 [ "$#" -le 1 ] || deploy_usage
 case "$MODE" in
-    deploy|rollback|verify|stop-mainnet|disarm-mainnet|stop-mexc|disarm-mexc) ;;
+    deploy|rollback|verify|stop-mainnet|disarm-mainnet|stop-mexc|disarm-mexc|stop-hyperliquid|disarm-hyperliquid) ;;
     *) deploy_usage ;;
 esac
 

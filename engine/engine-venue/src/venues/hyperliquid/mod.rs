@@ -20,7 +20,7 @@ mod sign;
 mod wire;
 mod ws;
 
-pub use gateway::HyperliquidGateway;
+pub use gateway::{HyperliquidGateway, HyperliquidInventoryProbe};
 pub use realm::HyperliquidRealm;
 pub use ws::HyperliquidOrderFeed;
 

@@ -6,6 +6,7 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import stat
 import sys
 from dataclasses import asdict, dataclass
@@ -22,7 +23,13 @@ from liquidity_migration.policy.real_money_profile import (
 )
 from liquidity_migration.policy.systemd_environment import parse_systemd_environment_bytes
 
-__all__ = ["CheckResult", "preflight", "preflight_mexc", "main"]
+__all__ = [
+    "CheckResult",
+    "preflight",
+    "preflight_mexc",
+    "preflight_hyperliquid",
+    "main",
+]
 
 MAINNET_CREDENTIAL_ENV = Path("/etc/liquidity-migration/bybit-mainnet.env")
 MAINNET_SIGNAL_SOURCE_ENV = Path(
@@ -30,6 +37,10 @@ MAINNET_SIGNAL_SOURCE_ENV = Path(
 )
 MEXC_CREDENTIAL_ENV = Path("/etc/liquidity-migration/mexc-mainnet.env")
 MEXC_SIGNAL_SOURCE_ENV = Path("/etc/liquidity-migration/signal-worker-mexc-source.env")
+HYPERLIQUID_CREDENTIAL_ENV = Path("/etc/liquidity-migration/hyperliquid-mainnet.env")
+HYPERLIQUID_SIGNAL_SOURCE_ENV = Path(
+    "/etc/liquidity-migration/signal-worker-hyperliquid-source.env"
+)
 
 _CREDENTIAL_KEYS = ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET")
 _MEXC_CREDENTIAL_KEYS = ("MEXC_REAL_API_KEY", "MEXC_REAL_API_SECRET")
@@ -362,6 +373,114 @@ def preflight_mexc(
     return results
 
 
+def _hyperliquid_credential_checks(values: Mapping[str, str]) -> list[CheckResult]:
+    results: list[CheckResult] = []
+    address = values.get("HYPERLIQUID_REAL_ACCOUNT_ADDRESS", "").strip()
+    # 0x + 40 hex in either case: the gateway lowercases it. Neither value is
+    # ever printed.
+    address_ok = bool(re.fullmatch(r"0x[0-9a-fA-F]{40}", address))
+    results.append(
+        CheckResult(
+            "HYPERLIQUID_REAL_ACCOUNT_ADDRESS",
+            address_ok,
+            "one master account address is set"
+            if address_ok
+            else "empty"
+            if not address
+            else "not a 0x-prefixed 40-hex address",
+            ""
+            if address_ok
+            else "set the master account address as 0x + 40 hex characters",
+        )
+    )
+    key = values.get("HYPERLIQUID_REAL_API_WALLET_KEY", "").strip()
+    key_ok = bool(re.fullmatch(r"0x[0-9a-fA-F]{64}", key))
+    results.append(
+        CheckResult(
+            "HYPERLIQUID_REAL_API_WALLET_KEY",
+            key_ok,
+            "one API wallet key is set"
+            if key_ok
+            else "empty"
+            if not key
+            else "not a 0x-prefixed 64-hex private key",
+            ""
+            if key_ok
+            else "set the API wallet (agent) key the account approved, as 0x + 64 hex characters",
+        )
+    )
+    stray = sorted(
+        name for name in values if name.startswith(("BYBIT_", "MEXC_"))
+    )
+    results.append(
+        CheckResult(
+            "other venue keys",
+            not stray,
+            "absent, as required" if not stray else f"present: {', '.join(stray)}",
+            ""
+            if not stray
+            else "remove every BYBIT_ and MEXC_ key from the Hyperliquid credential file",
+        )
+    )
+    raw = values.get("REAL_MONEY", "").strip().lower()
+    armed = raw in TRUE_ENV_VALUES
+    if raw and not armed and raw not in FALSE_ENV_VALUES:
+        detail, fix = (
+            "REAL_MONEY has an unrecognised value",
+            f"use one of {sorted(TRUE_ENV_VALUES)} to arm",
+        )
+    elif armed:
+        detail, fix = "armed by the owner", ""
+    else:
+        detail, fix = (
+            "not armed",
+            "set REAL_MONEY=true by hand when Hyperliquid trading is intended",
+        )
+    results.append(CheckResult("REAL_MONEY", armed, detail, fix))
+    missing_alert = [
+        key_name
+        for key_name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+        if not values.get(key_name, "").strip()
+    ]
+    results.append(
+        CheckResult(
+            "notifications",
+            not missing_alert,
+            "Telegram is configured"
+            if not missing_alert
+            else f"missing: {', '.join(missing_alert)}",
+            "" if not missing_alert else "set both values before activation",
+        )
+    )
+    return results
+
+
+def preflight_hyperliquid(
+    *,
+    credential_env: Path = HYPERLIQUID_CREDENTIAL_ENV,
+    signal_env: Path = HYPERLIQUID_SIGNAL_SOURCE_ENV,
+) -> list[CheckResult]:
+    """Read every Hyperliquid arming input and report all failures.
+
+    The credential is an address plus an API wallet key the account approved in
+    the venue's interface; that key cannot withdraw. Like the MEXC preflight
+    this takes no operational dials — they live in the funded Bybit credential
+    file and render one profile for every realm.
+    """
+
+    results: list[CheckResult] = []
+    credentials, credential_result = _read_environment(credential_env)
+    results.append(credential_result)
+    if credentials is not None:
+        results.extend(_hyperliquid_credential_checks(credentials))
+
+    signal, signal_result = _read_environment(signal_env)
+    results.append(signal_result)
+    if signal is not None:
+        results.extend(_signal_checks(signal, expected_realm="hyperliquid"))
+    return results
+
+
 def _default_telegram(args: argparse.Namespace) -> int:
     credential = Path(args.credential_env)
     source = Path(args.from_env)
@@ -484,6 +603,13 @@ def main(argv: list[str] | None = None) -> int:
     mexc.add_argument("--signal-env", default=str(MEXC_SIGNAL_SOURCE_ENV))
     mexc.add_argument("--json", action="store_true")
 
+    hyperliquid = subparsers.add_parser(
+        "preflight-hyperliquid", help="Report every Hyperliquid arming input"
+    )
+    hyperliquid.add_argument("--credential-env", default=str(HYPERLIQUID_CREDENTIAL_ENV))
+    hyperliquid.add_argument("--signal-env", default=str(HYPERLIQUID_SIGNAL_SOURCE_ENV))
+    hyperliquid.add_argument("--json", action="store_true")
+
     render = subparsers.add_parser("render-profile", help="Render the operational profile")
     render.add_argument("--from-env", default=str(MAINNET_CREDENTIAL_ENV))
     render.add_argument("--execute", action="store_true")
@@ -513,7 +639,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"render failed: {exc}", file=sys.stderr)
             return 2
 
-    reader = preflight_mexc if args.command == "preflight-mexc" else preflight
+    reader = {
+        "preflight-mexc": preflight_mexc,
+        "preflight-hyperliquid": preflight_hyperliquid,
+    }.get(args.command, preflight)
     results = reader(
         credential_env=Path(args.credential_env),
         signal_env=Path(args.signal_env),
@@ -525,7 +654,10 @@ def main(argv: list[str] | None = None) -> int:
             print(row.render())
         print()
         outstanding = sum(not row.ok for row in results)
-        realm = "MEXC" if args.command == "preflight-mexc" else "real money"
+        realm = {
+            "preflight-mexc": "MEXC",
+            "preflight-hyperliquid": "Hyperliquid",
+        }.get(args.command, "real money")
         print(
             f"{outstanding} step(s) remaining before {realm} can trade."
             if outstanding

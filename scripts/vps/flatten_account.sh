@@ -7,7 +7,7 @@ set -Eeuo pipefail
 
 usage() {
     cat >&2 <<'USAGE'
-usage: flatten_account.sh --environment demo|mainnet|mexc [--reason TEXT] [--execute]
+usage: flatten_account.sh --environment demo|mainnet|mexc|hyperliquid [--reason TEXT] [--execute]
 
   Without --execute: show the durable controls that would be submitted.
   With --execute:    disable entries for LONG, CARRY, and Exodus, submit one
@@ -68,7 +68,15 @@ case "$ENVIRONMENT" in
         ENGINE_ENV="${FLATTEN_ENGINE_ENV_PATH:-/etc/liquidity-migration/engine-mexc.env}"
         HEARTBEAT="${FLATTEN_HEARTBEAT_PATH:-/var/lib/liquidity-migration-engine-mexc/heartbeat.json}"
         ;;
-    *) echo "--environment must be demo, mainnet or mexc, and has no default" >&2; usage ;;
+    hyperliquid)
+        ENGINE_UNIT=liquidity-migration-engine-hyperliquid.service
+        ENGINE_USER=liquidity-engine-hyperliquid
+        ENGINE_REALM=hyperliquid_mainnet
+        ENGINE_CONFIG="${FLATTEN_ENGINE_CONFIG_PATH:-/etc/liquidity-migration/engine-hyperliquid.toml}"
+        ENGINE_ENV="${FLATTEN_ENGINE_ENV_PATH:-/etc/liquidity-migration/engine-hyperliquid.env}"
+        HEARTBEAT="${FLATTEN_HEARTBEAT_PATH:-/var/lib/liquidity-migration-engine-hyperliquid/heartbeat.json}"
+        ;;
+    *) echo "--environment must be demo, mainnet, mexc or hyperliquid, and has no default" >&2; usage ;;
 esac
 
 case "$WAIT_SECONDS" in

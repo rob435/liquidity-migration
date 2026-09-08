@@ -26,12 +26,15 @@ RUNTIME_GROUP=liquidity-migration
 DEMO_ENGINE_USER=liquidity-engine-demo
 MAINNET_ENGINE_USER=liquidity-engine-mainnet
 MEXC_ENGINE_USER=liquidity-engine-mexc
+HYPERLIQUID_ENGINE_USER=liquidity-engine-hyperliquid
 DEMO_ENGINE_CONFIG=/etc/liquidity-migration/engine.toml
 MAINNET_ENGINE_CONFIG=/etc/liquidity-migration/engine-mainnet.toml
 MEXC_ENGINE_CONFIG=/etc/liquidity-migration/engine-mexc.toml
+HYPERLIQUID_ENGINE_CONFIG=/etc/liquidity-migration/engine-hyperliquid.toml
 DEMO_HEARTBEAT=/var/lib/liquidity-migration-engine/heartbeat.json
 MAINNET_HEARTBEAT=/var/lib/liquidity-migration-engine-mainnet/heartbeat.json
 MEXC_HEARTBEAT=/var/lib/liquidity-migration-engine-mexc/heartbeat.json
+HYPERLIQUID_HEARTBEAT=/var/lib/liquidity-migration-engine-hyperliquid/heartbeat.json
 
 refuse() {
     echo "telegram control helper refused: $*" >&2
@@ -54,7 +57,8 @@ if [ "${1:-}" != --worker ]; then
     [ "$#" -eq 1 ] || refuse "expected one fixed action"
     ACTION="$1"
     case "$ACTION" in
-        pause-demo|resume-demo|pause-mainnet|resume-mainnet|pause-mexc|resume-mexc|status-fleet) ;;
+        pause-demo|resume-demo|pause-mainnet|resume-mainnet|pause-mexc|resume-mexc \
+            |pause-hyperliquid|resume-hyperliquid|status-fleet) ;;
         *) refuse "unsupported action" ;;
     esac
     [ "${SUDO_USER:-}" = "$CALLER" ] \
@@ -76,7 +80,7 @@ if [ "${1:-}" != --worker ]; then
         --property=ProtectSystem=true \
         --property=RestrictAddressFamilies=AF_UNIX \
         --property=UMask=0077 \
-        --property="InaccessiblePaths=-/etc/liquidity-migration/notifications.env -/etc/liquidity-migration/oncall.env -/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env -/etc/liquidity-migration/bybit-mainnet-attestor.env -/etc/liquidity-migration/mexc-mainnet.env -/etc/liquidity-migration/engine.env -/etc/liquidity-migration/engine-mainnet.env -/etc/liquidity-migration/engine-mexc.env -/etc/liquidity-migration/signal-worker-demo.env -/etc/liquidity-migration/signal-worker-mainnet.env -/etc/liquidity-migration/signal-worker-mexc.env -/etc/liquidity-migration/telegram-mainnet.env -/etc/liquidity-migration/telegram-mexc.env" \
+        --property="InaccessiblePaths=-/etc/liquidity-migration/notifications.env -/etc/liquidity-migration/oncall.env -/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env -/etc/liquidity-migration/bybit-mainnet-attestor.env -/etc/liquidity-migration/mexc-mainnet.env -/etc/liquidity-migration/hyperliquid-mainnet.env -/etc/liquidity-migration/engine.env -/etc/liquidity-migration/engine-mainnet.env -/etc/liquidity-migration/engine-mexc.env -/etc/liquidity-migration/engine-hyperliquid.env -/etc/liquidity-migration/signal-worker-demo.env -/etc/liquidity-migration/signal-worker-mainnet.env -/etc/liquidity-migration/signal-worker-mexc.env -/etc/liquidity-migration/signal-worker-hyperliquid.env -/etc/liquidity-migration/telegram-mainnet.env -/etc/liquidity-migration/telegram-mexc.env -/etc/liquidity-migration/telegram-hyperliquid.env" \
         /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             "$HELPER" --worker "$ACTION"
 fi
@@ -85,7 +89,8 @@ fi
     || refuse "invalid privileged worker invocation"
 ACTION="$2"
 case "$ACTION" in
-    pause-demo|resume-demo|pause-mainnet|resume-mainnet|pause-mexc|resume-mexc|status-fleet) ;;
+    pause-demo|resume-demo|pause-mainnet|resume-mainnet|pause-mexc|resume-mexc \
+        |pause-hyperliquid|resume-hyperliquid|status-fleet) ;;
     *) refuse "unsupported privileged worker action" ;;
 esac
 [ -z "${SUDO_USER:-}" ] && [ -z "${BASH_ENV:-}" ] && [ -z "${ENV:-}" ] \
@@ -133,6 +138,8 @@ MAINNET_OWNER_UNIT="$(lm_owner_unit mainnet)" \
     || refuse "fleet manifest has no funded account owner"
 MEXC_OWNER_UNIT="$(lm_owner_unit mexc)" \
     || refuse "fleet manifest has no mexc account owner"
+HYPERLIQUID_OWNER_UNIT="$(lm_owner_unit hyperliquid)" \
+    || refuse "fleet manifest has no hyperliquid account owner"
 
 validate_private_state_file() {
     local path="$1"
@@ -212,6 +219,10 @@ runtime_control() {
         mexc)
             user="$MEXC_ENGINE_USER"
             config="$MEXC_ENGINE_CONFIG"
+            ;;
+        hyperliquid)
+            user="$HYPERLIQUID_ENGINE_USER"
+            config="$HYPERLIQUID_ENGINE_CONFIG"
             ;;
         *) refuse "unknown runtime-control realm" ;;
     esac
@@ -352,6 +363,7 @@ funded_entries() {
     case "$realm" in
         mainnet) owner_unit="$MAINNET_OWNER_UNIT"; heartbeat="$MAINNET_HEARTBEAT" ;;
         mexc) owner_unit="$MEXC_OWNER_UNIT"; heartbeat="$MEXC_HEARTBEAT" ;;
+        hyperliquid) owner_unit="$HYPERLIQUID_OWNER_UNIT"; heartbeat="$HYPERLIQUID_HEARTBEAT" ;;
         *) refuse "unknown funded control realm" ;;
     esac
     /usr/bin/systemctl is-active --quiet "$owner_unit" \
@@ -386,17 +398,28 @@ resume_mexc() {
     printf 'resumed=mexc\n'
 }
 
+pause_hyperliquid() {
+    funded_entries hyperliquid false
+    echo "paused=hyperliquid"
+}
+
+resume_hyperliquid() {
+    funded_entries hyperliquid true
+    printf 'resumed=hyperliquid\n'
+}
+
 status_fleet() {
     local paused=false unit realm role sleeve active demo_entries mainnet_entries
-    local mexc_entries
+    local mexc_entries hyperliquid_entries
     lm_load_sleeve_toggles || refuse "cannot resolve demo sleeve state"
     demo_entries="$(heartbeat_entries "$DEMO_HEARTBEAT")" \
         || refuse "demo heartbeat has no exact strategy entry permissions"
     mainnet_entries="$(heartbeat_entries "$MAINNET_HEARTBEAT")" \
         || refuse "funded heartbeat has no exact strategy entry permissions"
-    # An unarmed mexc realm publishes no heartbeat at all; its rows are absent
-    # rather than a refusal, and the panel reads that as "not armed".
+    # An unarmed funded realm publishes no heartbeat at all; its rows are
+    # absent rather than a refusal, and the panel reads that as "not armed".
     mexc_entries="$(heartbeat_entries "$MEXC_HEARTBEAT" 2>/dev/null || true)"
+    hyperliquid_entries="$(heartbeat_entries "$HYPERLIQUID_HEARTBEAT" 2>/dev/null || true)"
     if [ "$demo_entries" = $'long|false\ncarry|false\nexodus|false' ]; then
         paused=true
     fi
@@ -414,6 +437,11 @@ status_fleet() {
         while IFS='|' read -r sleeve active; do
             printf 'entries|mexc|%s|%s\n' "$sleeve" "$active"
         done <<< "$mexc_entries"
+    fi
+    if [ -n "$hyperliquid_entries" ]; then
+        while IFS='|' read -r sleeve active; do
+            printf 'entries|hyperliquid|%s|%s\n' "$sleeve" "$active"
+        done <<< "$hyperliquid_entries"
     fi
     while IFS='|' read -r unit realm role sleeve; do
         [ -n "$unit" ] || continue
@@ -434,5 +462,7 @@ case "$ACTION" in
     resume-mainnet) resume_mainnet ;;
     pause-mexc) pause_mexc ;;
     resume-mexc) resume_mexc ;;
+    pause-hyperliquid) pause_hyperliquid ;;
+    resume-hyperliquid) resume_hyperliquid ;;
     status-fleet) status_fleet ;;
 esac

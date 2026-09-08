@@ -928,9 +928,10 @@ fn f64_at(value: &Value, key: &str) -> Result<f64, WorkerError> {
     Ok(out)
 }
 
-/// The realms a worker may publish for. `mexc` reads the same Bybit mainnet
-/// public data as `mainnet` and feeds the engine that trades MEXC.
-pub const REALMS: [&str; 3] = ["demo", "mainnet", "mexc"];
+/// The realms a worker may publish for. `mexc` and `hyperliquid` read the
+/// same Bybit mainnet public data as `mainnet` and feed the engines that trade
+/// those venues.
+pub const REALMS: [&str; 4] = ["demo", "mainnet", "mexc", "hyperliquid"];
 
 pub fn is_realm(value: &str) -> bool {
     REALMS.contains(&value)

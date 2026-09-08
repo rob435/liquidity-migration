@@ -20,7 +20,7 @@ use crate::native_long::plan::{
 const HOUR_MS: i64 = 3_600_000;
 /// The realms a native config can be rendered for; each has a
 /// `configs/signal-worker.<realm>.json` and a `deploy/engine.<realm>.toml.template`.
-pub const NATIVE_REALMS: [&str; 3] = ["demo", "mainnet", "mexc"];
+pub const NATIVE_REALMS: [&str; 4] = ["demo", "mainnet", "mexc", "hyperliquid"];
 pub const NATIVE_BLOCKS_BEGIN: &str = "# BEGIN GENERATED NATIVE DIRECTIONAL STRATEGIES";
 pub const NATIVE_BLOCKS_END: &str = "# END GENERATED NATIVE DIRECTIONAL STRATEGIES";
 pub const MAKER_RULE_BEGIN: &str =
@@ -64,7 +64,7 @@ pub fn render_native_config(
     sources: NativeConfigSources<'_>,
 ) -> Result<NativeConfigRender, String> {
     if !NATIVE_REALMS.contains(&sources.realm) {
-        return Err("native config realm must be demo, mainnet or mexc".to_owned());
+        return Err("native config realm must be demo, mainnet, mexc or hyperliquid".to_owned());
     }
     let signal = parse_json(sources.signal_config, "signal config")?;
     validate_signal(&signal, sources.realm)?;

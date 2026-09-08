@@ -192,7 +192,8 @@ async fn mexc_account_amounts_and_stop_preserve_bare_native_decimal() {
     );
 }
 
-#[cfg(feature = "hyperliquid")]
+// Built for the two-venue coverage tests below, which need both adapters.
+#[cfg(all(feature = "lighter", feature = "hyperliquid"))]
 async fn hyperliquid_coverage(
     orders: String,
     short: bool,

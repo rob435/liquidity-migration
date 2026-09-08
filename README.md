@@ -1,6 +1,6 @@
 # liquidity-migration
 
-Quantitative research, market data capture, and low-latency algorithmic trading platform for crypto perpetuals (Bybit and MEXC execution; Bybit and Binance data).
+Quantitative research, market data capture, and low-latency algorithmic trading platform for crypto perpetuals (Bybit, MEXC and Hyperliquid execution; Bybit and Binance data).
 
 ---
 

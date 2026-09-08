@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration MEXC Rust owner and signal-worker liveness watchdog
+Description=liquidity-migration Hyperliquid Rust owner and signal-worker liveness watchdog
 Wants=network-online.target
 # No Requires= on the owner: the observer must still run when the owner is
 # stopped or failed, which is exactly what it alerts on.
@@ -19,8 +19,8 @@ Group=liquidity-migration
 SupplementaryGroups=systemd-journal
 WorkingDirectory=/opt/liquidity-migration
 # Detection reads the manifest and published artifacts. Delivery reads only
-# dedicated route files; the MEXC account key and REAL_MONEY switch never
-# enter the observer's environment.
+# dedicated route files; the Hyperliquid API wallet key and REAL_MONEY switch
+# never enter the observer's environment.
 EnvironmentFile=/etc/liquidity-migration/notifications.env
 EnvironmentFile=/etc/liquidity-migration/oncall.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY
@@ -32,15 +32,15 @@ ProtectProc=invisible
 ProtectSystem=strict
 ProtectHome=true
 InaccessiblePaths=-/etc/liquidity-migration/notifications.env -/etc/liquidity-migration/oncall.env -/etc/liquidity-migration/bybit-demo.env -/etc/liquidity-migration/bybit-mainnet.env -/etc/liquidity-migration/mexc-mainnet.env -/etc/liquidity-migration/hyperliquid-mainnet.env
-StateDirectory=liquidity-migration/liveness-mexc
-Environment=LIVENESS_STATE_FILE=/var/lib/liquidity-migration/liveness-mexc/state.json
-ReadWritePaths=/var/lib/liquidity-migration/liveness-mexc
+StateDirectory=liquidity-migration/liveness-hyperliquid
+Environment=LIVENESS_STATE_FILE=/var/lib/liquidity-migration/liveness-hyperliquid/state.json
+ReadWritePaths=/var/lib/liquidity-migration/liveness-hyperliquid
 MemoryMax=512M
 # An observer must not preempt the Rust worker it observes (it runs Nice=3,
 # the owners Nice=-5).
 Nice=10
 ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/check_fleet_liveness.py \
-    --account-scope mexc --cooldown-min 60 --require-oncall --engine-rates
+    --account-scope hyperliquid --cooldown-min 60 --require-oncall --engine-rates
 SuccessExitStatus=0
 StandardOutput=journal
 StandardError=journal
