@@ -77,6 +77,15 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     arrival notional, retaining rebates. Regressions for mixed missing inputs,
     buy/sell signs, empty data and partial coverage fail before the change and
     pass afterward. Hypothetical policies and funded trading are unchanged.
+    Deploy `329ba5dc` in run
+    [`34203614326`](https://github.com/rob435/liquidity-migration/actions/runs/34203614326)
+    at 08:33:55 UTC after 31 healthy demo observations over 300 s. All 23
+    order records and policy outcomes remain identical; installed actual costs
+    match the independent venue/dollar calculation. The new report succeeds
+    at 08:35:08 and 08:38:02, with twelve cache hits on the repeat run. Loaded
+    images match the release; both workers are ready and all twenty-one native
+    stops match. Local / Linux Rust totals are 2,037 / 2,039, Python 1,715,
+    zero failures; eight Rust ignores and one root/systemd Python skip remain.
 
 - **2026-09-07 22:56 UTC — The `capture-disk` page returns, and the read-only
   diagnostic still cannot name the writer holding the disk. The recorders are
