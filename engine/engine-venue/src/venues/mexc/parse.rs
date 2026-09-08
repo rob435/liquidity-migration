@@ -52,20 +52,27 @@ pub(crate) fn venue_result(body: &Value) -> Result<&Value, VenueError> {
         .and_then(Value::as_str)
         .unwrap_or("(no message)")
         .to_string();
+    Err(refusal(code, message))
+}
+
+/// MEXC's own code for a request refused only for its timing.
+const RATE_LIMITED: i64 = 510;
+
+/// Classify a refused envelope. Every reader of the
+/// `{"success": …, "code": …, "message": …}` shape goes through here, not
+/// only [`venue_result`]: the deals sweep and the order lookup decode the
+/// envelope into their own types, and the sweep is the reader whose result
+/// decides whether account recovery latches openings.
+pub(crate) fn refusal(code: i64, message: String) -> VenueError {
     if code == RATE_LIMITED {
         // "Requests are too frequent": the venue did not act on the request
         // and will take it again later. Every caller already treats a
         // transport failure that way; a rejection here would be read as the
         // venue's answer and, during recovery, latched.
-        return Err(VenueError::Transport(format!(
-            "venue rate limit ({code}): {message}"
-        )));
+        return VenueError::Transport(format!("venue rate limit ({code}): {message}"));
     }
-    Err(VenueError::Rejected { code, message })
+    VenueError::Rejected { code, message }
 }
-
-/// MEXC's own code for a request refused only for its timing.
-const RATE_LIMITED: i64 = 510;
 
 /// An id that may arrive as a JSON string or as a JSON number.
 pub(crate) fn id_text(obj: &Value, name: &str) -> Option<String> {
@@ -444,6 +451,36 @@ mod tests {
 
     fn ids() -> HashMap<String, SymbolId> {
         HashMap::from([("BTCUSDT".to_string(), SymbolId(0))])
+    }
+
+    /// The reply that latched the funded MEXC engine at 2026-09-08 21:08 UTC.
+    /// It arrived on the deals sweep, which reads the envelope itself rather
+    /// than through [`venue_result`], so the quota rule has to hold on every
+    /// reader that can carry it — the sweep is the one that decides whether
+    /// openings latch.
+    #[test]
+    fn the_request_quota_stays_transport_on_every_envelope_reader() {
+        let message = "Requests are too frequent, please try again later";
+        let body = json!({"success": false, "code": 510, "message": message}).to_string();
+
+        let history: super::super::execution::HistoryReply = serde_json::from_str(&body).unwrap();
+        let err = history.executions(&contracts()).unwrap_err();
+        assert!(
+            matches!(&err, VenueError::Transport(_)),
+            "execution history read a rate limit as the venue's answer: {err:?}"
+        );
+
+        let err = super::super::lookup::parse(
+            &body,
+            "BTC_USDT",
+            "eng-1",
+            contracts().any("BTCUSDT").unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, VenueError::Transport(_)),
+            "order lookup read a rate limit as the venue's answer: {err:?}"
+        );
     }
 
     #[test]

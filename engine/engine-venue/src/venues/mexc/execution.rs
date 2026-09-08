@@ -34,10 +34,10 @@ impl HistoryReply {
     ) -> Result<(Vec<VenueExecution>, usize), VenueError> {
         let code = self.code.0.unwrap_or(-1);
         if self.success.0 != Some(true) || code != 0 {
-            return Err(VenueError::Rejected {
+            return Err(super::parse::refusal(
                 code,
-                message: self.message.0.unwrap_or_else(|| "(no message)".to_owned()),
-            });
+                self.message.0.unwrap_or_else(|| "(no message)".to_owned()),
+            ));
         }
         let raw = self
             .data

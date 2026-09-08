@@ -149,7 +149,17 @@ fn answer(
 ) -> (u16, String) {
     if mutation(name, r) {
         if scenario == Scenario::RateLimit {
-            return (429, json!({"code":-1003,"msg":"rate limit"}).to_string());
+            // MEXC states a breached quota in band, HTTP 200 carrying its own
+            // 510, so the status alone never reveals it.
+            return match name.venue() {
+                "mexc" => (
+                    200,
+                    json!({"success":false,"code":510,
+                           "message":"Requests are too frequent, please try again later"})
+                    .to_string(),
+                ),
+                _ => (429, json!({"code":-1003,"msg":"rate limit"}).to_string()),
+            };
         }
         if matches!(scenario, Scenario::Reject | Scenario::ClockSkew) {
             let message = if scenario == Scenario::ClockSkew {

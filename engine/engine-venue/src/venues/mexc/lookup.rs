@@ -33,10 +33,7 @@ pub(crate) fn parse(
 ) -> Result<OrderLookup, VenueError> {
     let reply: Reply = decode_object(raw).map_err(|e| VenueError::BadReply(e.to_string()))?;
     if !reply.success || reply.code != 0 {
-        return Err(VenueError::Rejected {
-            code: reply.code,
-            message: reply.message,
-        });
+        return Err(super::parse::refusal(reply.code, reply.message));
     }
     let Some(data) = reply.data else {
         return Ok(crate::order_lookup::unknown(

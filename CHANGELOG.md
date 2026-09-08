@@ -88,10 +88,35 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     200-row page through `MexcGateway`; 510 is a `Transport`. Both catalog
     tests fail without the sort. A `reconcile-clear` note clears the latch on
     the redeploy: the log and the venue agree at zero.
+  - Fix, completed. Mapping 510 inside `venue_result` did not reach the reply
+    that latched the engine. The deals sweep decodes the envelope into
+    `HistoryReply` and `order_lookup` into its own `Reply`; both built
+    `VenueError::Rejected` directly, and the sweep is the execution-history
+    read whose result `account_recovery` latches on — so a 510 there still
+    latched after that change. The classifier is now `parse::refusal`, and
+    `venue_result`, `HistoryReply::executions` and `lookup::parse` all go
+    through it. `the_request_quota_stays_transport_on_every_envelope_reader`
+    replays the incident's exact reply through the sweep and the lookup; it
+    fails on the preceding commit and passes here. The venue conformance
+    fixture now answers `RateLimit` for MEXC with its real in-band shape
+    (HTTP 200 carrying 510) rather than the HTTP 429 the other adapters send,
+    so the order path's in-band quota is covered too. Engine workspace 1,388
+    tests pass in this container, Rust formatting and strict Clippy clean;
+    `engine-tools failed_tape_decompression_cannot_report_successful_eof`
+    fails here on the pristine tree as well — it shells out to `zstd`, absent
+    in this container — and the Python half of `scripts/dev.sh check` cannot
+    run here for want of the interpreter's environment. CI runs both.
   - Not fixed, proposed: Bybit's `10006` rate limit reaches the same
-    history-recovery latch (`execution.rs` keeps it `Rejected`); admission
-    retries a failed catalog every second with no backoff; `LookupClient::lookup`
+    history-recovery latch; the MEXC deals sweep issues one signed request per
+    followed symbol with no pacing, unlike Bybit's `RollingRateLimiter`, which
+    is what spends the budget the refetch storm shares; admission retries a
+    failed catalog every second with no backoff; `LookupClient::lookup`
     fetches the whole contract table per order lookup.
+  - Host action. The mexc units stay stopped and their timer disabled from the
+    21:10:40 holding action; this commit changes that state not at all. No
+    deploy is dispatched from the on-call routine: starting the funded MEXC
+    realm again is the owner's call, and a redeploy would clear the latch and
+    resume entries on it.
 
 - **2026-09-08 — Wire MEXC USDT perpetuals as the fleet's third realm.**
   - Owner direction: trade MEXC alongside Bybit because Bybit's 3.6 / 10 bp
