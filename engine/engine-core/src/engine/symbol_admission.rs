@@ -52,6 +52,9 @@ pub(super) struct SymbolAdmission {
     installed: bool,
     refresh_required: bool,
     listed: std::collections::BTreeSet<String>,
+    /// Wanted names the venue's table does not carry, each said once. A
+    /// refreshed table clears it, since a listing may have appeared.
+    unlisted: std::collections::BTreeSet<String>,
     pub(super) checkpoint: Option<Box<InstrumentCatalogCheckpoint>>,
     phase: Phase,
     retry_after_ns: u64,
@@ -72,6 +75,7 @@ impl SymbolAdmission {
         };
         Self {
             listed,
+            unlisted: Default::default(),
             catalog,
             client,
             checkpoint,
@@ -264,6 +268,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.identities = identities;
                 self.symbol_admission.checkpoint = checkpoint;
                 self.symbol_admission.listed = refreshed.listed;
+                self.symbol_admission.unlisted.clear();
                 self.symbol_admission.catalog = refreshed.catalog;
                 self.symbol_admission.installed = false;
                 self.symbol_admission.failure = None;
@@ -473,6 +478,24 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .specs
                 .iter()
                 .any(|(name, _)| name == &wanted.name);
+            // A name the venue's own table does not carry is not missing
+            // metadata: another fetch of the same table cannot supply it. The
+            // signal waits, said once, and nothing is asked of the venue.
+            // Observed live on 2026-09-08: seven Bybit names MEXC does not list
+            // drove a catalog refetch every second.
+            if !known
+                && self.symbol_admission.checkpoint.is_some()
+                && !self.symbol_admission.listed(&wanted.name)
+            {
+                if self.symbol_admission.unlisted.insert(wanted.name.clone()) {
+                    tracing::warn!(
+                        symbol = %wanted.name,
+                        "the venue does not list this instrument; its signals wait and nothing is sent"
+                    );
+                }
+                self.wanted_symbols.push(wanted);
+                continue;
+            }
             if (!known && !self.symbol_admission.listed(&wanted.name))
                 || !rule
                 || (self.require_exact_instruments && !spec)

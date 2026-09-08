@@ -106,12 +106,39 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     fails here on the pristine tree as well — it shells out to `zstd`, absent
     in this container — and the Python half of `scripts/dev.sh check` cannot
     run here for want of the interpreter's environment. CI runs both.
-  - Not fixed, proposed: Bybit's `10006` rate limit reaches the same
-    history-recovery latch; the MEXC deals sweep issues one signed request per
-    followed symbol with no pacing, unlike Bybit's `RollingRateLimiter`, which
-    is what spends the budget the refetch storm shares; admission retries a
-    failed catalog every second with no backoff; `LookupClient::lookup`
-    fetches the whole contract table per order lookup.
+  - Redeploy [run `34282588846`](https://github.com/rob435/liquidity-migration/actions/runs/34282588846)
+    on `3fd10dc4`, `deploy-ok` 22:06:25 UTC. The first start exits at 22:05:50
+    (`boot: cannot read execution history for the recovery interval: venue
+    transport: venue rate limit (510)`); the restart at 22:05:56 stays up and
+    publishes, but in two minutes logs 497 `has no authoritative native symbol
+    binding` lines for the same seven names and four `execution history
+    recovery retained for retry ... 510` plus three `stopped making progress`,
+    and reads `may_open=false` with `account_equity_usdt=0`: recovery never
+    completes. Two remaining causes. (a) A wanted name absent from the venue's
+    table was treated as missing metadata, so admission refetched the 1,194-row
+    table every second and said each name again each pass; the table cannot
+    supply a name it does not carry. (b) The execution-history sweep is one
+    signed `order_deals/v3` call per followed symbol — MEXC requires `symbol` —
+    132 unpaced calls against a quota of 20 per 2 seconds, repeated every
+    `CONNECTED_RESYNC` of 60 s. Holding action at 22:09: engine and watchdog
+    timer disabled again (`orders_sent: 0`, account still empty).
+  - Fix. `RestClient` paces every signed request through one shared rolling
+    window of 16 per 2 s (`Pacer`, a test proves the 17th waits the window);
+    `CONNECTED_RESYNC` is 600 s now that the private stream is observed live;
+    admission treats a name absent from a loaded table as waiting, said once,
+    with no refetch (a test proves the fetch count stays put), and a refreshed
+    table clears that memory. Interim: `configs/signal-worker.mexc.json`
+    excludes the seven names, because a LONG batch that names an unlisted
+    symbol stays pending in the engine and, with strict per-source sequencing,
+    would hold every later batch from that source.
+  - Not fixed, proposed: the durable form of that interim is a venue-listing
+    filter in the mexc signal worker's universe (read MEXC's public contract
+    table, keep the Bybit names it lists), so a future entrant MEXC does not
+    list never reaches the engine; until then such an entrant stalls the LONG
+    source on MEXC until it is excluded. Also: Bybit's `10006` rate limit
+    reaches the same history-recovery latch; boot still exits on a transport
+    failure of the first history read; `LookupClient::lookup` fetches the whole
+    contract table per order lookup.
   - Host action. The mexc units stay stopped and their timer disabled from the
     21:10:40 holding action; this commit changes that state not at all. No
     deploy is dispatched from the on-call routine: starting the funded MEXC

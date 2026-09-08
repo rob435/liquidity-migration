@@ -60,8 +60,10 @@ const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How often the engine is told to re-read while the socket is up. The socket
 /// is the fast path; the venue's execution history stays the authority, and
-/// this is how often it is consulted anyway.
-pub const CONNECTED_RESYNC: Duration = Duration::from_secs(60);
+/// this is how often it is consulted anyway. Each re-read is one signed
+/// request per followed symbol against a quota of 20 per 2 seconds, so this
+/// is minutes, not seconds: at 60 s the sweep alone ate the budget.
+pub const CONNECTED_RESYNC: Duration = Duration::from_secs(600);
 
 /// The cadence while there is no socket — the whole feed when a login is
 /// refused. It sits inside MEXC's own budget for the history call it

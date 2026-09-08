@@ -470,6 +470,69 @@ impl InstrumentCatalogClient for DelistedCatalog {
     }
 }
 
+/// A venue table that lists BTCUSDT and nothing else, counting every fetch.
+struct BtcOnlyCatalog(Arc<AtomicUsize>);
+#[engine_types::async_trait]
+impl InstrumentCatalogClient for BtcOnlyCatalog {
+    async fn fetch(&self) -> Result<InstrumentCatalog, VenueError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::tests::test_instrument_catalog(&["BTCUSDT"]))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_name_the_venue_does_not_list_waits_without_refetching_the_table() {
+    // Observed live on 2026-09-08: seven Bybit names MEXC does not list kept
+    // the catalog refetching every second. The table is fresh and authoritative;
+    // asking for it again cannot list them. The signal simply waits.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (mut engine, _records, _sends) = crate::tests::catalog_restart_test_fixture(
+        Box::new(Consumer),
+        None,
+        Arc::new(BtcOnlyCatalog(calls.clone())),
+    )
+    .await;
+    let (mut market, mut orders) = (Feeds::btc(), Feeds::btc());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while engine.symbol_admission.busy() {
+            engine.symbol_admission.retry_after_ns = 0;
+            engine.admit_wanted(&mut market, &mut orders).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let fetched_once = calls.load(Ordering::SeqCst);
+    assert!(fetched_once >= 1);
+    assert!(engine.symbol_admission.listed("BTCUSDT"));
+    assert!(!engine.symbol_admission.listed("ETHUSDT"));
+
+    // ETHUSDT is wanted by a signal and absent from the venue's table.
+    let mut signals = Signals::default();
+    engine
+        .queue_signal_observation(row(), &mut signals)
+        .unwrap();
+    for _ in 0..40 {
+        engine.symbol_admission.retry_after_ns = 0;
+        engine.admit_wanted(&mut market, &mut orders).await.unwrap();
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        fetched_once,
+        "an unlisted name refetched the venue table"
+    );
+    assert!(engine
+        .wanted_symbols
+        .iter()
+        .any(|wanted| wanted.name == "ETHUSDT"));
+    assert!(
+        engine.symbol_admission.failure.is_none(),
+        "an unlisted name was reported as a metadata failure: {:?}",
+        engine.symbol_admission.failure
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn refreshed_catalog_retains_omitted_native_exit_metadata_without_reopening_growth() {
     let (mut engine, records, sends) = crate::tests::catalog_restart_test_fixture(
