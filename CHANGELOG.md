@@ -100,7 +100,29 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `engine/signal-worker/src/live/tests.rs` reproduces the 126 s heartbeat and
     fails with the pre-fix decision — `degraded` where `recovering` is required
     — then holds the 10-minute bound, the close to `ready`, and the 2-minute
-    window for the next reconnect.
+    window for the next reconnect. Local: `cargo fmt --check`, workspace
+    `cargo clippy --all-targets` and the 142 `signal-worker` library tests
+    green; Ruff and the 84 `check_fleet_liveness` tests green. Two checks
+    cannot run in this container — `zstd` is absent, so
+    `failed_tape_decompression_cannot_report_successful_eof` fails there, and
+    no pinned `.venv` means no mypy or ShellCheck; none touches the signal
+    worker, and the deploy gate runs them.
+  - Deployed and read back. [Deploy `34251758369`](https://github.com/rob435/liquidity-migration/actions/runs/34251758369)
+    on `0e2827af` replaces demo at 16:47:13, passes all 31 soak observations to
+    300 s, replaces mainnet at 16:52:50 and records `deploy-ok` at 16:53:21.
+    Its first attempt failed outside the change: `Failed to FinalizeArtifact:
+    Received non-retryable error: Failed request: (403) Forbidden: Error from
+    intermediary` in `Upload release binaries` at 16:38:29, after the release
+    build and green `ci`/`rust`; one re-run of the failed jobs carried it.
+    [Diagnose `34253894947`](https://github.com/rob435/liquidity-migration/actions/runs/34253894947),
+    read 16:54:49 through 16:54:58, has both workers `status=ready` with
+    `bybit_ws_gap_open=false` and complete coverage 124 s after the mainnet
+    worker's boot, no failed units, every manifest timer active, and the
+    mainnet watchdog's 16:53:31, 16:54:02 and 16:54:32 passes carrying only the
+    standing `rolling-loss` reference — no `worker-status` page through the
+    handover. That receipt shows the boot healthy; the behaviour past 120 s is
+    established by the regression test, not by this window, because the boot
+    repair closed inside it.
 
 - **2026-09-08 — Incident `host-51b05439c4f09794`: a failed handover leaves the
   realm unwatched. The failure path now restores the realm's timers.**
