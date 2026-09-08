@@ -10,6 +10,22 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-08 — Restore CARRY daily holding at owner direction.**
+  - Render both realms with intraday funding and pre-settlement exits disabled.
+    Hold durable quantity targets until the next daily decision; upcoming-book
+    omissions no longer close positions early. Keep native v7 selection, sizing,
+    entry execution, stops, and explicit reductions. No new CARRY exit fires feed
+    EXODUS; existing event consumption and timed covers remain intact.
+  - Read old checkpoints without quantity anchors and adopt existing holdings at
+    boot. Already-fired exits remain suppressed for their original decision day.
+    Research native replay reads the same policy and quantity targets; retained
+    legacy lifecycle fixtures still exercise the intraday path.
+  - Two behavioral regressions fail before the change; five daily-hold tests
+    cover early drops, funding observations, partial fills, price moves, restart,
+    delayed prices, working-order continuity and next-day rebalancing.
+    This changes the holding policy; it does not reproduce the old daily
+    diagnostic curve's future-return-filtered population or establish its profit.
+
 - **2026-09-08 — Repair execution recovery, account limits and research costs.**
   - Research defaults read `configs/bybit_fee_rates.json` or
     `LIQUIDITY_MIGRATION_FEE_SNAPSHOT`. The authenticated sample contains

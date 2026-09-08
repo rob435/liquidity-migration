@@ -257,7 +257,8 @@ class TestLiveContractReplay:
             "daily_scorer_authority": "rust_carry_native"
         }
 
-    def test_native_v7_scores_the_daily_book_inside_rust(self) -> None:
+    @pytest.mark.parametrize("hourly_price_step", [0.0, 1.0])
+    def test_native_v7_scores_the_daily_book_inside_rust(self, hourly_price_step: float) -> None:
         import liquidity_migration.research.backtest.financed_longs as financed_longs
 
         cfg = CarryHoldConfig.from_json(CONFIG_DIR / "lane2_carry_hold_v7.json")
@@ -294,7 +295,7 @@ class TestLiveContractReplay:
                     {
                         "symbol": symbol,
                         "bar_ts_ms": ts,
-                        "by_close": 100.0,
+                        "by_close": 100.0 + hour * hourly_price_step,
                         "by_funding": -0.002,
                         "by_funding_age_h": float(hour % 8),
                     }
@@ -307,6 +308,15 @@ class TestLiveContractReplay:
                 self.inner = inner
 
             def request(self, payload: dict[str, object]) -> dict[str, object]:
+                config = payload["config"]
+                assert isinstance(config, dict)
+                assert config["early_exit_enabled"] is False
+                assert config["presettlement_exit_enabled"] is False
+                prior = payload["prior"]
+                inputs = payload["input"]
+                assert isinstance(prior, dict) and isinstance(inputs, dict)
+                for symbol, held in inputs["facts"]["held"].items():
+                    assert held["qty"] == pytest.approx(prior["desired_targets"][symbol]["target_qty"])
                 batch = payload["signal_batch"]
                 if isinstance(batch, dict):
                     signal_batches.append(batch)

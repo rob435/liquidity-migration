@@ -210,8 +210,6 @@ def _native_carry_replay_config(
             "environment": replay_settings.environment,
             "entries_enabled": True,
             "exit_bp": float(cfg.exit_bp),
-            "early_exit_enabled": True,
-            "presettlement_exit_enabled": True,
             "notional_multiplier": replay_settings.notional_multiplier,
             "entry_leverage": replay_settings.entry_leverage,
             "stop_loss_fraction": replay_settings.stop_loss_fraction,
@@ -224,6 +222,8 @@ def _native_carry_replay_config(
         # still binds durable CARRY fire ids, but does not claim scorer parity.
         native["rule"]["config_id"] = cfg.config_id
         native["rule"]["exit_bp"] = float(cfg.exit_bp)
+        native["early_exit_enabled"] = True
+        native["presettlement_exit_enabled"] = True
     return native
 
 
@@ -859,7 +859,9 @@ def _live_contract_scores_with_contract(
                 unpriced_execution_skip_count += 1
                 continue
             target_notional = float(target["notional_usdt"])
-            target_qty = target_notional / target_mark
+            anchored_qty = target.get("target_qty")
+            target_qty = target_notional / target_mark if anchored_qty is None else float(anchored_qty)
+            target_notional = target_qty * target_mark
             standing_holding = active_holdings.get(symbol)
             if standing_holding is None:
                 if abs(target_notional) < float(
@@ -880,7 +882,7 @@ def _live_contract_scores_with_contract(
                 * abs(standing_notional),
             )
             delta = target_notional - standing_notional
-            if abs(delta) <= resize_floor:
+            if abs(delta) <= (1e-9 if anchored_qty is not None else resize_floor):
                 continue
             entry_px = standing_holding.entry_px
             if target_qty > standing_holding.qty:
@@ -1234,15 +1236,19 @@ def _live_contract_scores_with_contract(
         "idle_cadence_wakes": cadence_wake_count,
         "hourly_mark_wakes": hourly_mark_wake_count,
         "holding_state": "carried_quantity_entry_and_current_mark",
+        "holding_policy": (
+            "intraday_funding_exits_and_notional_rebalancing"
+            if contract_config["early_exit_enabled"]
+            else "daily_quantity_hold"
+        ),
         "execution_model": "modeled_immediate_target_fill_at_observed_hourly_mark",
         "live_parity": False,
         "boundary": (
             "Rust owns the v7 daily scorer and lifecycle reducer. The reducer wakes on the configured "
-            "idle cadence and carries modeled quantities through the Rust $1/5% resize deadband. "
-            "Hourly marks approximate the quote-driven follower and "
+            "idle cadence with the renderer-selected holding policy. Daily holding retains "
+            "quantity targets until the next daily decision. "
             "target fills are assumed at those marks; venue queue, event-driven fill wakes, "
-            "quantization, and intrahour prices are not reconstructed. Exact "
-            "v7 pre-settlement returns require typed running-rate observations with fire-time marks."
+            "quantization, and intrahour prices are not reconstructed."
             if decision_source == "rust_signal_batch"
             else "The daily decision is a supplied lifecycle fixture. Rust owns every lifecycle "
             "transition and target effect, but this mode is not a daily-scorer parity claim."

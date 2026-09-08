@@ -135,8 +135,8 @@ pub fn render_native_config(
         exodus_sleeve_name: EXODUS_SLEEVE_NAME.to_owned(),
         exit_bp: carry_rule.exit_bp,
         rule: carry_rule,
-        early_exit_enabled: true,
-        presettlement_exit_enabled: true,
+        early_exit_enabled: false,
+        presettlement_exit_enabled: false,
         notional_multiplier: f64_field(carry_operational, "notional_multiplier")?,
         entry_leverage: f64_field(carry_operational, "entry_leverage")?,
         stop_loss_fraction: f64_field(carry_operational, "declared_stop_loss_fraction")?,
@@ -809,6 +809,8 @@ mod tests {
             assert_eq!(rendered.carry.rule_sha256, rendered.carry_rule_sha256);
             assert_eq!(rendered.exodus.rule_sha256, rendered.exodus_rule_sha256);
             assert_eq!(rendered.carry.exodus_sleeve_name, EXODUS_SLEEVE_NAME);
+            assert!(!rendered.carry.early_exit_enabled);
+            assert!(!rendered.carry.presettlement_exit_enabled);
             assert_eq!(rendered.exodus.carry_sleeve_name, CARRY_SLEEVE_NAME);
             assert!(rendered.long.rest_entries);
             assert_eq!(

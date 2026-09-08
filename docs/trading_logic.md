@@ -12,7 +12,7 @@ block appends, nothing is inserted, and the two realms' tails differ.
 
 | ID | Crate / Reducer | Sleeve | Realm | Deployed State | Core Mandate |
 | :---: | :--- | :--- | :--- | :--- | :--- |
-| **0** | `carry_native` | **CARRY** | demo, mainnet | Active | Captures extreme negative funding crowd fees (sticky 48h hold). |
+| **0** | `carry_native` | **CARRY** | demo, mainnet | Active | Holds the daily negative-funding book until the next daily decision. |
 | **1** | `long_native` | **LONG** | demo, mainnet | Active | Momentum breakouts on top turnover liquid perpetuals. |
 | **2** | `exodus_native` | **EXODUS** | demo, mainnet | Active | Short entry on distressed CARRY pairs prior to settlement. |
 | **3** | `quoter` | **MAKER** | mainnet | Disabled | High-frequency two-sided liquidity provision around fair mid. |
@@ -82,10 +82,17 @@ $$\text{Size} = \text{Base} \times M_{\text{depth}} \times M_{\text{persistence}
 3. **Turnover Growth Multiplier**: 3-day turnover growth $\le 40\% \implies M_{\text{flow}} = 0.5$.
 4. **Whale Positioning Multiplier**: Binance top-trader long/short change $\le -26\% \implies M_{\text{whale}} = 0.5$.
 
-### Operational Limits & Pre-Settlement Fire
-* **Leverage & Stop**: $5\times$ leverage, $3\times$ notional scaling, $10\%$ maximum catastrophe stop.
-* **Pre-Settlement Exit**: Held positions that no longer meet exit criteria within the final 15 minutes before funding settlement are exited.
-* **Exodus Handoff**: Pre-settlement trigger emits a typed `CarryPresettlementFire` event to the engine WAL.
+### Holding & Execution
+
+| Setting | Behavior |
+| --- | --- |
+| Daily book | The native v7 scorer selects names and weights once per UTC day after the configured data lag |
+| Quantity | Anchor each target at the first usable decision price; retain it through price moves, partial fills and restart until the next daily decision |
+| Funding exits | `early_exit_enabled=false`, `presettlement_exit_enabled=false`; no intraday settled-rate, running-rate or upcoming-book drop exit |
+| Daily exits | A name omitted by the current daily decision closes; existing risk stops and explicit reductions remain active |
+| Leverage and stop | 5× entry leverage, 3× notional scaling, 10% maximum stop |
+| Existing checkpoint | Adopt held quantities on boot when the old target has no quantity anchor; retain already-fired exits until the next daily decision |
+| EXODUS handoff | Daily holding emits no new `CarryPresettlementFire`; existing durable events and cover obligations remain available to EXODUS |
 
 ---
 
@@ -95,6 +102,7 @@ $$\text{Size} = \text{Base} \times M_{\text{depth}} \times M_{\text{persistence}
 * **Reducer**: `engine/engine-strategies/src/native_exodus/`
 
 * **Trigger**: Consumes `CarryPresettlementFire` event emitted by `carry_native`. Has no independent universe or scoring loop.
+* **Daily CARRY mode**: No new source fires; existing EXODUS positions retain their cover and protection paths.
 * **Short Entry**: Sells short an exact quantity equal to the CARRY position. Entry window valid from fire time until Settlement + 5 minutes ($S+5\text{m}$).
 * **Cover Exit**: Hard time cover executed unconditionally at Settlement + 60 minutes ($S+60\text{m}$).
 * **Disaster Fence**: $10\%$ maximum stop-loss.

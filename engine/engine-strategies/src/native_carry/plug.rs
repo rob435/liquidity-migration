@@ -1497,6 +1497,7 @@ pub(crate) mod tests {
             desired_targets: BTreeMap::from([(
                 "AUSDT".into(),
                 super::super::plan::StoredTarget {
+                    target_qty: None,
                     notional_usdt: 100.0,
                     stop_loss_fraction: config.stop_loss_fraction,
                     leverage: config.entry_leverage,

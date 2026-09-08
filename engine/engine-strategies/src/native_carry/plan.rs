@@ -64,6 +64,7 @@ pub struct StrategyConfig {
     pub exodus_sleeve_name: String,
     pub rule: CarryRuleConfig,
     pub exit_bp: f64,
+    /// False holds daily quantities and disables intraday funding/drop exits.
     pub early_exit_enabled: bool,
     pub presettlement_exit_enabled: bool,
     pub notional_multiplier: f64,
@@ -259,6 +260,8 @@ mod i64_key_map {
 #[serde(deny_unknown_fields)]
 pub struct StoredTarget {
     pub notional_usdt: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_qty: Option<f64>,
     pub stop_loss_fraction: f64,
     pub leverage: f64,
     pub entry_valid_until_ms: i64,
@@ -283,6 +286,9 @@ impl SleeveState {
                 !valid_symbol(symbol)
                     || !target.notional_usdt.is_finite()
                     || target.notional_usdt == 0.0
+                    || target
+                        .target_qty
+                        .is_some_and(|qty| !qty.is_finite() || qty <= 0.0)
                     || !target.stop_loss_fraction.is_finite()
                     || !(0.0..1.0).contains(&target.stop_loss_fraction)
                     || target.stop_loss_fraction == 0.0
@@ -735,7 +741,7 @@ pub fn reduce_lifecycle_with_mode(
                         notional_usdt: stored.notional_usdt,
                         stop_loss_fraction: stored.stop_loss_fraction,
                         entry_valid_until_ms: Some(stored.entry_valid_until_ms),
-                        target_qty: None,
+                        target_qty: stored.target_qty,
                     },
                     leverage: stored.leverage,
                 });
@@ -755,13 +761,55 @@ pub fn reduce_lifecycle_with_mode(
                     }
                 }
             }
+            let mut target_qty = if config.early_exit_enabled {
+                None
+            } else {
+                let retained = (!new_generation)
+                    .then(|| previous_targets.get(symbol))
+                    .flatten();
+                retained
+                    .and_then(|target| target.target_qty)
+                    .or_else(|| {
+                        if retained.is_some()
+                            && replan_mode == ReplanMode::BootRecovery
+                            && !input.owned_working_symbols.contains(symbol)
+                        {
+                            input
+                                .facts
+                                .held
+                                .get(symbol)
+                                .filter(|held| held.side == Side::Buy)
+                                .map(|held| held.qty)
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| {
+                        input
+                            .facts
+                            .prices
+                            .get(symbol)
+                            .filter(|px| px.is_finite() && **px > 0.0)
+                            .map(|px| notional / px)
+                    })
+            };
+            if !config.entries_enabled || mismatch {
+                if let Some(held) = input
+                    .facts
+                    .held
+                    .get(symbol)
+                    .filter(|held| held.side == Side::Buy)
+                {
+                    target_qty = target_qty.map(|qty| qty.min(held.qty));
+                }
+            }
             targets.push(PlannedTarget {
                 target: Target {
                     symbol: symbol.clone(),
                     notional_usdt: notional,
                     stop_loss_fraction: config.stop_loss_fraction,
                     entry_valid_until_ms: Some(entry_valid_until_ms),
-                    target_qty: None,
+                    target_qty,
                 },
                 leverage: config.entry_leverage,
             });
@@ -800,6 +848,7 @@ pub fn reduce_lifecycle_with_mode(
                 target.target.symbol.clone(),
                 StoredTarget {
                     notional_usdt: target.target.notional_usdt,
+                    target_qty: target.target.target_qty,
                     stop_loss_fraction: target.target.stop_loss_fraction,
                     leverage: target.leverage,
                     entry_valid_until_ms: target.target.entry_valid_until_ms.unwrap_or(decision_ts),
@@ -1012,7 +1061,11 @@ fn apply_funding_exits(
         effective.weights.remove(symbol);
     }
     let mut drop_fires = Vec::new();
-    if let Some(upcoming) = &input.upcoming_decision {
+    if let Some(upcoming) = input
+        .upcoming_decision
+        .as_ref()
+        .filter(|_| config.early_exit_enabled)
+    {
         if upcoming.decision_ts_ms == decision_ts + DAY_MS {
             let dropped = effective
                 .weights
@@ -1127,6 +1180,10 @@ pub fn carry_event_id(
 }
 
 #[cfg(test)]
+#[path = "daily_hold_tests.rs"]
+mod daily_hold_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::position_plan::{Held, Skipped};
@@ -1136,7 +1193,7 @@ mod tests {
         "/../../tests/fixtures/carry_native_replay_v1.json"
     ));
 
-    fn config() -> StrategyConfig {
+    pub(super) fn config() -> StrategyConfig {
         StrategyConfig {
             schema_version: 1,
             profile_name: "carry_hold_v7_live_v1".into(),
@@ -1303,6 +1360,7 @@ mod tests {
                     (
                         (*symbol).to_owned(),
                         StoredTarget {
+                            target_qty: None,
                             notional_usdt: 100.0,
                             stop_loss_fraction: config().stop_loss_fraction,
                             leverage: config().entry_leverage,
@@ -1506,6 +1564,7 @@ mod tests {
             desired_targets: BTreeMap::from([(
                 "AUSDT".into(),
                 StoredTarget {
+                    target_qty: None,
                     notional_usdt: 100.0,
                     stop_loss_fraction: config().stop_loss_fraction,
                     leverage: config().entry_leverage,
@@ -1560,6 +1619,7 @@ mod tests {
             desired_targets: BTreeMap::from([(
                 "KEEPUSDT".into(),
                 StoredTarget {
+                    target_qty: None,
                     notional_usdt: 20.0,
                     stop_loss_fraction: 0.35,
                     leverage: 2.0,
@@ -1970,6 +2030,7 @@ mod tests {
                     (
                         (*symbol).to_owned(),
                         StoredTarget {
+                            target_qty: None,
                             notional_usdt: 100.0,
                             stop_loss_fraction: cfg.stop_loss_fraction,
                             leverage: cfg.entry_leverage,
@@ -2091,6 +2152,7 @@ mod tests {
             desired_targets: BTreeMap::from([(
                 "AUSDT".into(),
                 StoredTarget {
+                    target_qty: None,
                     notional_usdt: 100.0,
                     stop_loss_fraction: config().stop_loss_fraction,
                     leverage: config().entry_leverage,
