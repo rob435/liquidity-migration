@@ -2530,8 +2530,8 @@ fn transient_recovery_acceptable(
     now_ms.saturating_sub(started_at_ms) < TRANSIENT_RECOVERY_MAX_MS
 }
 
-/// The boot repair on a sound transport: the gap this process opened at its
-/// first epoch, never yet closed, with coverage already full. It outlives the
+/// The cold-start repair on a sound transport: a gap or repair on a process
+/// that has never reported `ready`, with coverage already full. It outlives the
 /// cycle warmup the `starting` grace keys on, so it needs its own bound.
 fn boot_repair_acceptable(
     health: &StreamHealth,
