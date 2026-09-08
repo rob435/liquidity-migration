@@ -551,6 +551,7 @@ fn durable_effect_identity_and_suffix_survive_rotation() {
 fn v5_open_orders_require_typed_fill_progress_without_truncating() {
     use engine_types::{OrderKind, OrderRequest, Side, StrategyId, SymbolId};
     let order = engine_types::wal::OpenOrderState {
+        entry_work: None,
         request: OrderRequest {
             client_order_id: "fill-frontier".into(),
             strategy: StrategyId(0),

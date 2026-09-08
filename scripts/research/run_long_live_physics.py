@@ -29,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-root", required=True, help="Bybit full-PIT root")
     parser.add_argument("--start", required=True, help="Signal start date, inclusive")
     parser.add_argument("--end", required=True, help="Signal end date, exclusive")
+    parser.add_argument("--execution-end", default=None, help="Optional execution end, exclusive; omit to follow the selected signals through their holding periods")
     parser.add_argument("--profile", choices=LONG_STRATEGY_PROFILE_CHOICES, default="v12")
     parser.add_argument(
         "--operational-profile",
@@ -94,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
         report_dir=args.report_dir,
         assumptions=assumptions,
         command=command,
+        execution_end=args.execution_end,
     )
     print(
         json.dumps(

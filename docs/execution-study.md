@@ -30,6 +30,7 @@ Compare execution costs for actual directional order intentions using recorded b
 | --- | --- |
 | `cross` | Cross finite displayed L50 liquidity at simulated arrival |
 | `current` | Original request kind/price and existing native working planner; GTC can take liquidity |
+| `passive_entry_30s` | LONG openings join even a one-tick spread; native GTC working planner, 30 s window, 15 s reprice, at most one passive amend, no lean/urgency improvement, then bounded cross and 20 s cross grace. Other sleeves and reductions retain `current` behavior |
 | `post_only5s`, `post_only30s`, `post_only120s` | Join the decision-time near touch; post-only rejection if marketable on arrival; retry rejected quotes at 5 s observations; deadline cancel then cross the remaining quantity |
 | `adaptive120s` | Re-evaluate every 5 s; join, improve one tick, or retreat one tick from touch using current side lean and decayed aggressive flow; cancel/replace loses priority; cross remaining quantity at 120 s |
 | `passive_skip120s` | Join touch; cancel at 120 s; value unfilled quantity at the common horizon |
@@ -58,6 +59,16 @@ Compare execution costs for actual directional order intentions using recorded b
 | Markouts | Signed midpoint move from fill price at +1/+15/+60/+300 s, each within 2 s; actual fills use exchange execution time against recorder wall time; this retains cross-clock uncertainty |
 | Decision features | Book time, bid/ask prices and sizes, spread bp, side lean and signed aggressive-flow score; features use observations available before the decision |
 | Adaptive parameters | Side lean `bid_share - 0.5` for buys, opposite for sells; thresholds ±0.15; signed trade flow decays over 3 s, scales by touch depth and clips to ±4; attacked-side score >0.5 retreats |
+
+| Runtime execution | Contract |
+| --- | --- |
+| LONG demo openings | `WorkPolicy::passive_entry_30s()` selected by `render-native-config`; the generated demo template carries the complete policy |
+| LONG mainnet openings | Market entries; no `entry_work_policy` override |
+| Order type | GTC at the near touch, not PostOnly; a moving book can make the initial order or an amend take liquidity |
+| Reductions / other sleeves | Existing policy selection; protective exits and LONG reductions do not acquire the new entry patience |
+| Restart | `OrderSent.dispatch.intent.work` is retained in `OpenOrderState.entry_work` across rotation. Boot schedules cancellation of the venue-confirmed worked opening remainder through the existing paced cancel path without waiting for a quote; the old monotonic deadline is not resumed |
+| Older snapshots | Missing `entry_work` remains readable as unknown; boot does not invent a policy for an old snapshot that discarded it |
+| Evidence boundary | Demo selection is an execution experiment. Recorded-book comparisons are seen data; annual bar returns do not establish maker fill probability or realized savings |
 
 ## Invariants
 

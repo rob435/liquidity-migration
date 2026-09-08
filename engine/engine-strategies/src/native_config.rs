@@ -114,7 +114,9 @@ pub fn render_native_config(
         resize_floor_usdt: 1.0,
         resize_floor_fraction: 0.05,
         engine_entry_cutoff_ms: 900_000,
-        rest_entries: false,
+        rest_entries: sources.realm == "demo",
+        entry_work_policy: (sources.realm == "demo")
+            .then(engine_types::WorkPolicy::passive_entry_30s),
         hold_decision_price: false,
         give_up_instead_of_crossing: false,
     };
@@ -798,6 +800,15 @@ mod tests {
             assert_eq!(rendered.exodus.rule_sha256, rendered.exodus_rule_sha256);
             assert_eq!(rendered.carry.exodus_sleeve_name, EXODUS_SLEEVE_NAME);
             assert_eq!(rendered.exodus.carry_sleeve_name, CARRY_SLEEVE_NAME);
+            assert_eq!(rendered.long.rest_entries, realm == "demo");
+            assert_eq!(
+                rendered.long.entry_work_policy,
+                (realm == "demo").then(engine_types::WorkPolicy::passive_entry_30s)
+            );
+            let mut market_long = rendered.long.clone();
+            market_long.rest_entries = false;
+            market_long.entry_work_policy = None;
+            assert_eq!(market_long.fingerprint(), rendered.long.fingerprint());
         }
     }
 

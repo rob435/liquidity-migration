@@ -1247,6 +1247,7 @@ mod tests {
             let row = &books.orders.orders["canonical"];
             if let WalRecord::SegmentBase { open_orders, .. } = &mut base {
                 open_orders.push(engine_types::OpenOrderState {
+                    entry_work: None,
                     request: row.request.clone(),
                     wire_ns: row.wire_ns,
                     arrival_mid: row.arrival_mid,

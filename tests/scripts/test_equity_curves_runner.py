@@ -80,3 +80,27 @@ def test_main_returns_nonzero_when_a_requested_sleeve_fails(monkeypatch, tmp_pat
     )
 
     assert equity_curves.main() == 1
+
+
+def test_explicit_all_in_cost_is_charged_per_side_without_legacy_multiplier(monkeypatch, tmp_path: Path) -> None:
+    from liquidity_migration.research.backtest import long_native
+    observed = {}
+
+    def run(_root, **kwargs):
+        observed.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(long_native, "run_long_native_research", run)
+    equity_curves._run_long(
+        str(tmp_path), SimpleNamespace(base_entry_exit_cost_bps=15.0),
+        "2025-09-08", "2026-09-08", tmp_path, 0.0,
+        all_in_cost_bps=14.35751876,
+    )
+    assert observed["effective_config"].round_trip_cost_bps == 28.71503752
+    assert observed["config"].cost_multiplier == 3.0
+
+
+def test_delisted_trades_do_not_turn_failed_pit_coverage_into_a_pass() -> None:
+    verdict = equity_curves._pit_verdict("pit_membership_filtered_current_universe", 27)
+    assert "[OK]" not in verdict
+    assert "coverage failed" in verdict

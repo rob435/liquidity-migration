@@ -58,6 +58,10 @@ pub struct StopSpec {
 /// The defaults are that recipe.
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkPolicy {
+    /// Fee savings can justify joining a one-tick spread. Old WAL policies
+    /// retain their spread filter when this field is absent.
+    #[serde(default)]
+    pub rest_on_tight_spread: bool,
     /// How long the order may rest before it crosses the spread and takes
     /// whatever is left.
     pub window_ms: u64,
@@ -118,6 +122,7 @@ pub struct WorkPolicy {
 impl Default for WorkPolicy {
     fn default() -> Self {
         WorkPolicy {
+            rest_on_tight_spread: false,
             window_ms: 120_000,
             reprice_ms: 15_000,
             cross_grace_ms: 20_000,
@@ -129,6 +134,22 @@ impl Default for WorkPolicy {
             drift_cross_fee_bp: 0.0,
             hold_decision_px: false,
             give_up_instead_of_crossing: false,
+        }
+    }
+}
+
+impl WorkPolicy {
+    pub fn passive_entry_30s() -> Self {
+        Self {
+            rest_on_tight_spread: true,
+            window_ms: 30_000,
+            reprice_ms: 15_000,
+            max_amends: 1,
+            improve_lean: 0.0,
+            back_lean: 0.0,
+            urgency_join_frac: 1.0,
+            urgency_improve_frac: 1.0,
+            ..Self::default()
         }
     }
 }

@@ -563,6 +563,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
         let registry =
             restore_order_reservations(&mut risk, &orders, order_id_epoch_ms, &account, &working)?;
+        let recovered_work = WorkingOrders::recover(&orders, &working, clock::now_ns());
         if recovered > 0 {
             tracing::warn!(
                 count = recovered,
@@ -626,12 +627,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             runtime_control_requests,
             runtime_control_consumed,
             pending_signal_deliveries: VecDeque::new(),
-            // Deliberately not restored from the log. The window is measured
-            // from a monotonic clock that does not survive a restart, and the
-            // venue's own creation time is not something this engine can ask
-            // for — so a recovered order is left alone rather than worked
-            // from a made-up deadline.
-            working: WorkingOrders::default(),
+            working: recovered_work,
             halt_cancels: BTreeMap::new(),
             amends_awaiting_price: BTreeMap::new(),
             amends_confirmed: 0,

@@ -651,6 +651,8 @@ def extract_signal_candidates(
 
 def candidate_execution_intervals(
     candidates: Sequence[_Candidate],
+    *,
+    execution_end_ms: int | None = None,
 ) -> dict[str, list[tuple[int, int]]]:
     """Return merged minute windows that can affect any candidate or fill."""
 
@@ -659,7 +661,10 @@ def candidate_execution_intervals(
         # A capacity-blocked deadline candidate can remain eligible until the
         # signal turns stale, then needs its complete fill-anchored hold path.
         end = candidate.stale_ts_ms + candidate.max_hold_duration_ms + MINUTE_BAR_MS
-        raw.setdefault(candidate.symbol, []).append((candidate.first_check_ts_ms, end))
+        if execution_end_ms is not None:
+            end = min(end, execution_end_ms)
+        if candidate.first_check_ts_ms < end:
+            raw.setdefault(candidate.symbol, []).append((candidate.first_check_ts_ms, end))
     output: dict[str, list[tuple[int, int]]] = {}
     for symbol, intervals in raw.items():
         merged: list[tuple[int, int]] = []
@@ -677,6 +682,7 @@ def load_candidate_minute_tape(
     candidates: Sequence[_Candidate],
     *,
     dataset: str = "klines_1m",
+    execution_end_ms: int | None = None,
 ) -> tuple[pl.DataFrame, MinuteTapeReceipt]:
     """Load and hash one reachable trade- or mark-price minute dataset."""
 
@@ -684,7 +690,7 @@ def load_candidate_minute_tape(
     if dataset not in {"klines_1m", "mark_price_1m"}:
         raise ValueError("candidate minute dataset must be 'klines_1m' or 'mark_price_1m'")
     dataset_root = root / dataset
-    intervals = candidate_execution_intervals(candidates)
+    intervals = candidate_execution_intervals(candidates, execution_end_ms=execution_end_ms)
     requested_pairs: set[tuple[str, str]] = set()
     for symbol, spans in intervals.items():
         for start, end in spans:
@@ -720,6 +726,8 @@ def load_candidate_minute_tape(
         )
     else:
         minute_bars = _empty_minute_bars()
+    if execution_end_ms is not None and not minute_bars.is_empty():
+        minute_bars = minute_bars.filter(pl.col("ts_ms") < execution_end_ms)
     minute_bars, high_repairs = _canonical_minute_bars(
         minute_bars,
         dataset=dataset,
@@ -768,12 +776,14 @@ def load_candidate_minute_tape(
 def funding_frame_for_candidates(
     funding_lookup: Mapping[str, Mapping[str, Any]] | None,
     candidates: Sequence[_Candidate],
+    *,
+    execution_end_ms: int | None = None,
 ) -> tuple[pl.DataFrame, dict[str, tuple[tuple[int, int], ...]], str]:
     """Select exact settlement rows for candidate execution windows."""
 
     if funding_lookup is None:
         return _empty_funding(), {}, hashlib.sha256(b"").hexdigest()
-    intervals = candidate_execution_intervals(candidates)
+    intervals = candidate_execution_intervals(candidates, execution_end_ms=execution_end_ms)
     rows: list[dict[str, Any]] = []
     coverage: dict[str, tuple[tuple[int, int], ...]] = {}
     for symbol, spans in sorted(intervals.items()):
@@ -809,6 +819,8 @@ def funding_frame_for_candidates(
 def load_funding_download_coverage(
     data_root: str | Path,
     candidates: Sequence[_Candidate],
+    *,
+    execution_end_ms: int | None = None,
 ) -> tuple[dict[str, tuple[tuple[int, int], ...]], FundingTapeReceipt]:
     """Prove candidate windows from completed funding-download markers.
 
@@ -820,7 +832,7 @@ def load_funding_download_coverage(
 
     root = Path(data_root).expanduser()
     marker_root = root / "_download_markers" / "funding"
-    intervals = candidate_execution_intervals(candidates)
+    intervals = candidate_execution_intervals(candidates, execution_end_ms=execution_end_ms)
     coverage: dict[str, list[tuple[int, int]]] = {}
     selected: set[Path] = set()
     missing: list[str] = []
@@ -842,15 +854,19 @@ def load_funding_download_coverage(
             if marker_start < marker_end:
                 parsed.append((marker_start, marker_end, marker))
         for start, end in spans:
-            choices = [row for row in parsed if row[0] <= start and row[1] >= end]
-            if not choices:
+            cursor = start
+            chosen_markers: set[Path] = set()
+            while cursor < end:
+                choices = [row for row in parsed if row[0] <= cursor < row[1]]
+                if not choices:
+                    break
+                chosen = max(choices, key=lambda row: (row[1], -row[0], row[2].name))
+                chosen_markers.add(chosen[2])
+                cursor = chosen[1]
+            if cursor < end:
                 missing.append(f"{symbol}:{_iso_ts(start)}..{_iso_ts(end)}")
                 continue
-            chosen = min(
-                choices,
-                key=lambda row: (row[1] - row[0], row[0], row[1], row[2].name),
-            )
-            selected.add(chosen[2])
+            selected.update(chosen_markers)
             coverage.setdefault(symbol, []).append((start, end))
             covered += 1
 
@@ -1377,11 +1393,15 @@ def run_long_live_physics_research(
     report_dir: str | Path | None = None,
     assumptions: LivePhysicsAssumptions | None = None,
     command: Sequence[str] = (),
+    execution_end: str | None = None,
 ) -> dict[str, Any]:
     """Build PIT signals, load candidate minute paths, simulate, and report."""
 
     if not start or not end or date_ms(start) >= date_ms(end):
         raise ValueError("start and end-exclusive end must define a positive window")
+    execution_end_ms = date_ms(execution_end) if execution_end is not None else None
+    if execution_end_ms is not None and execution_end_ms < date_ms(end):
+        raise ValueError("execution end must be on or after the exclusive signal end")
     physics = assumptions or LivePhysicsAssumptions()
     physics.validate()
     resolved = resolve_live_physics_configuration(
@@ -1416,19 +1436,23 @@ def run_long_live_physics_research(
             root,
             candidates,
             dataset="klines_1m",
+            execution_end_ms=execution_end_ms,
         )
         mark_minute, mark_minute_receipt = load_candidate_minute_tape(
             root,
             candidates,
             dataset="mark_price_1m",
+            execution_end_ms=execution_end_ms,
         )
         funding, _row_span_coverage, funding_sha256 = funding_frame_for_candidates(
             inputs["funding_lookup"],
             candidates,
+            execution_end_ms=execution_end_ms,
         )
         funding_coverage, funding_receipt = load_funding_download_coverage(
             root,
             candidates,
+            execution_end_ms=execution_end_ms,
         )
         result = simulate_long_live_physics(
             features=features,
@@ -1470,6 +1494,7 @@ def run_long_live_physics_research(
             "population": "archive-manifest point-in-time members",
             "signal_start": start,
             "signal_end_exclusive": end,
+            "execution_end_exclusive": execution_end,
             "initial_equity_usdt": physics.initial_equity_usdt,
         },
         "configuration_resolution": {

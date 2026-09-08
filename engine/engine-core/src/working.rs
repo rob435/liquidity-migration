@@ -44,6 +44,7 @@ struct Worked {
     symbol: SymbolId,
     policy: WorkPolicy,
     state: WorkState,
+    cancel_on_recovery: bool,
 }
 
 /// The orders this engine is working, by the client order id it minted.
@@ -53,6 +54,35 @@ pub struct WorkingOrders {
 }
 
 impl WorkingOrders {
+    pub fn recover(
+        ledger: &LedgerOfOrders,
+        venue_ids: &std::collections::BTreeSet<String>,
+        now_ns: u64,
+    ) -> Self {
+        let mut restored = Self::default();
+        for record in ledger.in_flight() {
+            let request = &record.request;
+            let (Some(policy), engine_types::OrderKind::Limit { px, .. }) =
+                (record.entry_work, request.kind)
+            else {
+                continue;
+            };
+            if request.reduce_only || !venue_ids.contains(&request.client_order_id) {
+                continue;
+            }
+            restored.orders.insert(
+                request.client_order_id.clone(),
+                Worked {
+                    symbol: request.symbol,
+                    policy,
+                    state: WorkState::new(request.side, px, record.arrival_mid, now_ns),
+                    cancel_on_recovery: true,
+                },
+            );
+        }
+        restored
+    }
+
     /// Start working an order that has just gone out. Build the state with
     /// [`WorkState::new`], from the price that is actually resting.
     pub fn take_on(
@@ -68,6 +98,7 @@ impl WorkingOrders {
                 symbol,
                 policy,
                 state,
+                cancel_on_recovery: false,
             },
         );
     }
@@ -102,6 +133,27 @@ impl WorkingOrders {
             // never sent: its life is over.
             if !record.in_flight() {
                 done.push(id.clone());
+                continue;
+            }
+            // The old monotonic deadline is gone. Cancel the recovered
+            // remainder and let the strategy re-evaluate after its ending.
+            if worked.cancel_on_recovery {
+                if !worked.state.cancel_requested
+                    && (worked.state.last_cancel_try_ns == 0
+                        || now_ns.saturating_sub(worked.state.last_cancel_try_ns)
+                            >= worked.policy.reprice_ms.saturating_mul(1_000_000))
+                {
+                    apply(
+                        id,
+                        worked,
+                        WorkDecision {
+                            step: WorkStep::Cancel,
+                            looked: true,
+                        },
+                        now_ns,
+                        out,
+                    );
+                }
                 continue;
             }
             let Some(rule) = rules.get(worked.symbol.0 as usize).copied().flatten() else {

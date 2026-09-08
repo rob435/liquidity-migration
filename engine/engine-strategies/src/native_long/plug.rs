@@ -969,6 +969,10 @@ impl SleeveConfig for StrategyConfig {
         self.rest_entries
     }
 
+    fn entry_work_policy(&self) -> Option<engine_types::WorkPolicy> {
+        self.entry_work_policy
+    }
+
     fn hold_decision_price(&self) -> bool {
         self.hold_decision_price
     }
@@ -1622,5 +1626,21 @@ pub(crate) mod tests {
             .unwrap_err()
             .contains("outer and inner signal kinds"));
         assert_eq!(restart_ctx.emitted.len(), emitted_before);
+    }
+    #[test]
+    fn passive_entry_policy_survives_runtime_restore_without_changing_signal_identity() {
+        let mut cfg = config();
+        let fingerprint = cfg.fingerprint();
+        cfg.rest_entries = true;
+        cfg.entry_work_policy = Some(engine_types::WorkPolicy::passive_entry_30s());
+        assert_eq!(cfg.fingerprint(), fingerprint);
+        let plug = NativeLong::new(cfg, SleeveState::default()).unwrap();
+        assert_eq!(
+            plug.core.entry_work(),
+            Some(engine_types::WorkPolicy::passive_entry_30s())
+        );
+        let runtime = plug.runtime_state().unwrap().unwrap();
+        let restored = crate::runtime::restore(&runtime).unwrap();
+        assert_eq!(restored.runtime_state().unwrap().unwrap(), runtime);
     }
 }

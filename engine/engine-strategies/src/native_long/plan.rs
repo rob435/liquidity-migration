@@ -93,6 +93,8 @@ pub struct StrategyConfig {
     pub resize_floor_fraction: f64,
     pub engine_entry_cutoff_ms: i64,
     pub rest_entries: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_work_policy: Option<engine_types::WorkPolicy>,
     pub hold_decision_price: bool,
     pub give_up_instead_of_crossing: bool,
 }
@@ -1655,6 +1657,7 @@ mod tests {
             resize_floor_fraction: 0.05,
             engine_entry_cutoff_ms: 900_000,
             rest_entries: false,
+            entry_work_policy: None,
             hold_decision_price: false,
             give_up_instead_of_crossing: false,
         }

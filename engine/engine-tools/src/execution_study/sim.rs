@@ -13,6 +13,8 @@ const NS_MS: u64 = 1_000_000;
 pub enum Policy {
     Cross,
     Current,
+    #[serde(rename = "passive_entry_30s")]
+    PassiveEntry30s,
     PostOnly5s,
     PostOnly30s,
     PostOnly120s,
@@ -25,6 +27,7 @@ impl Policy {
         match self {
             Self::Cross => "cross",
             Self::Current => "current",
+            Self::PassiveEntry30s => "passive_entry_30s",
             Self::PostOnly5s => "post_only_5s",
             Self::PostOnly30s => "post_only_30s",
             Self::PostOnly120s => "post_only_120s",
@@ -32,6 +35,10 @@ impl Policy {
             Self::PassiveSkip120s => "passive_skip_120s",
         }
     }
+    fn native_work(self) -> bool {
+        matches!(self, Self::Current | Self::PassiveEntry30s)
+    }
+
     fn window_ns(self) -> u64 {
         (match self {
             Self::Cross => 0,
@@ -128,6 +135,7 @@ pub struct Trial {
     fees: Fees,
     prewire_ns: u64,
     original: OrderKind,
+    passive_entry_candidate: bool,
     work_policy: Option<WorkPolicy>,
     work: Option<WorkState>,
     resting: Option<Resting>,
@@ -177,6 +185,9 @@ impl Trial {
         {
             return Err("invalid trial quantity, anchor, instrument or fees".into());
         }
+        let candidate = policy == Policy::PassiveEntry30s
+            && order.sleeve == "long"
+            && !order.request.reduce_only;
         Ok(Self {
             policy,
             queue_model,
@@ -192,8 +203,17 @@ impl Trial {
                 .socket_write_ns
                 .and_then(|at| at.checked_sub(start))
                 .unwrap_or_default(),
-            original: order.request.kind,
-            work_policy: order.intent.as_ref().and_then(|i| i.work),
+            original: if candidate {
+                OrderKind::Market
+            } else {
+                order.request.kind
+            },
+            passive_entry_candidate: candidate,
+            work_policy: if candidate {
+                Some(WorkPolicy::passive_entry_30s())
+            } else {
+                order.intent.as_ref().and_then(|i| i.work)
+            },
             work: None,
             resting: None,
             pending: Vec::new(),
@@ -227,7 +247,7 @@ impl Trial {
         let pending = self.pending.first().map(|p| p.0);
         let mut wake = pending;
         if !self.deadline_started {
-            let deadline = if self.policy == Policy::Current {
+            let deadline = if self.policy.native_work() {
                 self.work
                     .as_ref()
                     .zip(self.work_policy)
@@ -394,9 +414,18 @@ impl Trial {
             };
             let (price, post_only) = if self.policy == Policy::Cross {
                 (None, false)
-            } else if self.policy == Policy::Current {
+            } else if self.policy.native_work() {
                 match self.original {
-                    OrderKind::Market => (None, false),
+                    OrderKind::Market => (
+                        if self.passive_entry_candidate {
+                            self.work_policy.and_then(|p| {
+                                plan::resting_px(self.side, Self::touch(d), &self.rule, &p)
+                            })
+                        } else {
+                            None
+                        },
+                        false,
+                    ),
                     OrderKind::Limit { px, tif } => (Some(px), tif == TimeInForce::PostOnly),
                 }
             } else {
@@ -424,13 +453,13 @@ impl Trial {
                         .exp(),
             });
             let placement = self.start_ns + self.prewire_ns + self.hop();
-            if self.policy == Policy::Current {
+            if self.policy.native_work() {
                 if let Some(px) = price {
                     self.work = Some(WorkState::new(self.side, px, self.anchor, placement));
                 }
             }
             self.schedule(placement, Action::Place { price, post_only });
-            self.next_look_ns = if self.policy == Policy::Current {
+            self.next_look_ns = if self.policy.native_work() {
                 self.work_policy
                     .map(|p| placement + p.reprice_ms * NS_MS)
                     .unwrap_or(self.start_ns + 5_000 * NS_MS)
@@ -465,7 +494,7 @@ impl Trial {
             return;
         }
         let deadline = self.start_ns + self.policy.window_ns();
-        if self.policy != Policy::Current
+        if !self.policy.native_work()
             && !self.deadline_started
             && at >= deadline
             && self.policy != Policy::Cross
@@ -498,7 +527,7 @@ impl Trial {
         let Some(d) = Self::fresh(book, at) else {
             return;
         };
-        if self.policy == Policy::Current {
+        if self.policy.native_work() {
             if let (Some(work), Some(policy)) = (&mut self.work, self.work_policy) {
                 let decision = plan::plan_work(work, Self::touch(d), &self.rule, at, &policy);
                 if decision.looked {
@@ -664,7 +693,9 @@ impl Trial {
             sign * (self.qty - filled).max(0.0) * (mid - self.anchor) / notional * 1e4
         });
         let needs_trades = self.policy != Policy::Cross
-            && !(self.policy == Policy::Current && matches!(self.original, OrderKind::Market));
+            && !(self.policy.native_work()
+                && self.work.is_none()
+                && matches!(self.original, OrderKind::Market));
         let incomplete = self
             .incomplete
             .or_else(|| {
@@ -920,5 +951,69 @@ mod tests {
         let outcome = t.outcome();
         assert_eq!(outcome.filled_qty, 2.0);
         assert!((outcome.total_shortfall_bp.unwrap() - 3.6).abs() < 1e-9);
+    }
+    #[test]
+    fn passive_entry_uses_native_deadline_and_crosses_only_the_unfilled_remainder() {
+        let fees = Fees {
+            maker: 0.00036,
+            taker: 0.001,
+            observed_ns: 0,
+        };
+        let mut t = Trial::new(
+            &order(),
+            Policy::PassiveEntry30s,
+            QueueModel::TradesOnly,
+            100,
+            fees,
+        )
+        .unwrap();
+        let d = depth(1_000_000_000, 99.0, 100.0, 10.0);
+        t.advance(1_000_000_000, Some(&d));
+        t.advance(1_100_000_000, Some(&d));
+        assert_eq!(t.remaining(), 2.0);
+        t.trade(1_200_000_000, 99.0, 11.0, false, Some(&d));
+        assert_eq!(t.remaining(), 1.0);
+        assert!(t.fills[0].maker);
+        let d = depth(31_100_000_000, 99.0, 100.0, 10.0);
+        t.advance(d.recv_ns, Some(&d));
+        assert_eq!(t.remaining(), 1.0);
+        t.advance(31_200_000_000, Some(&d));
+        assert_eq!(t.remaining(), 0.0);
+        assert!(!t.fills[1].maker);
+        assert_eq!(t.fills.iter().map(|f| f.qty).sum::<f64>(), 2.0);
+        assert_eq!(t.fills[1].price, 100.0);
+        for (sleeve, reduce_only) in [("long", true), ("exodus", false), ("carry", false)] {
+            let mut o = order();
+            o.sleeve = sleeve.into();
+            o.request.reduce_only = reduce_only;
+            o.intent = Some(engine_types::Intent {
+                exact_prices: None,
+                exact_quantity: None,
+                strategy: o.request.strategy,
+                symbol: o.request.symbol,
+                side: o.request.side,
+                qty: o.request.qty,
+                kind: OrderKind::Market,
+                stop: None,
+                reduce_only,
+                tag: "scope".into(),
+                decided_ns: 0,
+                work: Some(WorkPolicy::default()),
+                leverage: None,
+            });
+            let mut t = Trial::new(
+                &o,
+                Policy::PassiveEntry30s,
+                QueueModel::TradesOnly,
+                100,
+                fees,
+            )
+            .unwrap();
+            let d = depth(1_000_000_000, 98.0, 100.0, 10.0);
+            t.advance(1_000_000_000, Some(&d));
+            t.advance(1_100_000_000, Some(&d));
+            assert_eq!(t.remaining(), 0.0);
+            assert!(!t.fills[0].maker);
+        }
     }
 }

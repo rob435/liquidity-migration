@@ -1072,6 +1072,7 @@ mod tests {
             )
             .unwrap();
         let long = LongStrategyConfig {
+            entry_work_policy: None,
             schema_version: 1,
             profile_name: "v12".into(),
             environment: realm.into(),

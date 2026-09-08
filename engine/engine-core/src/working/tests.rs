@@ -303,3 +303,59 @@ fn an_answer_about_an_order_nobody_is_working_changes_nothing() {
     working.cancelled("someone-elses", true);
     assert_eq!(working.len(), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn recovered_worked_entry_is_cancelled_with_paced_retries_after_rotation() {
+    let mut record = sent("a");
+    if let WalRecord::OrderSent {
+        dispatch, request, ..
+    } = &mut record
+    {
+        *dispatch = Some(Box::new(
+            engine_types::order_dispatch::QueuedOrderDispatch {
+                intent: engine_types::Intent {
+                    exact_prices: None,
+                    exact_quantity: None,
+                    strategy: request.strategy,
+                    symbol: request.symbol,
+                    side: request.side,
+                    qty: request.qty,
+                    kind: OrderKind::Market,
+                    stop: None,
+                    reduce_only: false,
+                    tag: "worked".into(),
+                    decided_ns: 1,
+                    work: Some(WorkPolicy::passive_entry_30s()),
+                    leverage: None,
+                },
+                origin_ns: 1,
+            },
+        ));
+    }
+    let ledger = LedgerOfOrders::from_records(&[record]);
+    let snapshot = ledger.orders["a"].snapshot(100);
+    let snapshot = serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    let (engine, _) = crate::tests::lifecycle_test_fixture(vec![]).await;
+    let mut base = engine.rotation_base(100);
+    if let WalRecord::SegmentBase { open_orders, .. } = &mut base {
+        open_orders.push(snapshot);
+    }
+    let ledger = LedgerOfOrders::from_records(&[base]);
+    let venue_ids = ["a".to_owned()].into_iter().collect();
+    let mut recovered = WorkingOrders::recover(&ledger, &venue_ids, SECOND);
+    let dark = MarketState::default();
+    let mut actions = VecDeque::new();
+    recovered.pass(SECOND, &dark, &[], &ledger, &mut actions);
+    assert!(
+        matches!(actions.pop_front(), Some(Action::Cancel { client_order_id, .. }) if client_order_id == "a")
+    );
+    recovered.cancelled("a", false);
+    recovered.pass(2 * SECOND, &dark, &[], &ledger, &mut actions);
+    assert!(actions.is_empty());
+    recovered.pass(16 * SECOND, &dark, &[], &ledger, &mut actions);
+    assert!(matches!(actions.pop_front(), Some(Action::Cancel { .. })));
+    recovered.cancelled("a", true);
+    recovered.pass(32 * SECOND, &dark, &[], &ledger, &mut actions);
+    assert!(actions.is_empty());
+    assert!(WorkingOrders::recover(&ledger, &Default::default(), SECOND).is_empty());
+}

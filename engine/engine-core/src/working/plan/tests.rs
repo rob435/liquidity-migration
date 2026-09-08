@@ -796,3 +796,39 @@ fn a_cancel_the_venue_took_is_not_asked_for_twice() {
         "the venue took it; the order is on its way out"
     );
 }
+
+#[test]
+fn passive_entry_30s_joins_tight_books_without_lean_or_urgency_improvement() {
+    let p = WorkPolicy::passive_entry_30s();
+    let touch = Touch {
+        bid_px: 10_000.0,
+        ask_px: 10_000.5,
+        bid_qty: 99.0,
+        ask_qty: 1.0,
+    };
+    assert_eq!(resting_px(Side::Buy, touch, &RULE, &p), Some(10_000.0));
+    assert_eq!(resting_px(Side::Sell, touch, &RULE, &p), Some(10_000.5));
+    assert_eq!(
+        resting_px(Side::Buy, touch, &RULE, &WorkPolicy::default()),
+        None
+    );
+    let w = WorkState::new(Side::Buy, 10_000.0, 10_000.25, SECOND);
+    assert_eq!(
+        plan_work(&w, touch, &RULE, 30 * SECOND, &p).step,
+        WorkStep::Hold
+    );
+    assert!(matches!(
+        plan_work(&w, touch, &RULE, 31 * SECOND, &p).step,
+        WorkStep::Cross { .. }
+    ));
+    assert_eq!(
+        resting_px(Side::Buy, wide(99.0, 1.0), &RULE, &p),
+        Some(99.0)
+    );
+    let mut old = serde_json::to_value(WorkPolicy::default()).unwrap();
+    old.as_object_mut().unwrap().remove("rest_on_tight_spread");
+    assert_eq!(
+        serde_json::from_value::<WorkPolicy>(old).unwrap(),
+        WorkPolicy::default()
+    );
+}

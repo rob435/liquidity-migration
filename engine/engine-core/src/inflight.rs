@@ -25,6 +25,7 @@ pub use engine_types::wal::OrderEnding as Ending;
 #[derive(Clone, Debug)]
 pub struct OrderRec {
     pub request: OrderRequest,
+    pub entry_work: Option<engine_types::WorkPolicy>,
     pub wire_ns: u64,
     pub acked: bool,
     pub fill_quantity: engine_types::wal::OrderFillQuantity,
@@ -62,6 +63,7 @@ impl OrderRec {
     pub fn snapshot(&self, now_ms: i64) -> engine_types::OpenOrderState {
         engine_types::OpenOrderState {
             request: self.request.clone(),
+            entry_work: self.entry_work,
             wire_ns: self.wire_ns,
             arrival_mid: self.arrival_mid,
             acked: self.acked,
@@ -165,6 +167,7 @@ impl LedgerOfOrders {
         match record {
             WalRecord::Boot { .. } => self.boots += 1,
             WalRecord::OrderSent {
+                dispatch,
                 request,
                 wire_ns,
                 arrival_mid,
@@ -175,6 +178,7 @@ impl LedgerOfOrders {
                     request.client_order_id.clone(),
                     OrderRec {
                         request: request.clone(),
+                        entry_work: dispatch.as_ref().and_then(|d| d.intent.work),
                         wire_ns: *wire_ns,
                         acked: false,
                         fill_quantity: quantities::initial(request),
@@ -396,6 +400,7 @@ impl LedgerOfOrders {
             open.request.client_order_id.clone(),
             OrderRec {
                 request: open.request.clone(),
+                entry_work: open.entry_work,
                 wire_ns: open.wire_ns,
                 acked: open.acked,
                 fill_quantity: quantities::restore(open),
@@ -1014,6 +1019,7 @@ mod tests {
         let mut base = engine.rotation_base(engine_types::clock::wall_ms());
         if let WalRecord::SegmentBase { open_orders, .. } = &mut base {
             open_orders.push(engine_types::OpenOrderState {
+                entry_work: None,
                 request: order.request.clone(),
                 wire_ns: order.wire_ns,
                 acked: order.acked,
@@ -1446,6 +1452,7 @@ mod tests {
         let mut base = engine.rotation_base(engine_types::clock::wall_ms());
         if let WalRecord::SegmentBase { open_orders, .. } = &mut base {
             open_orders.push(engine_types::OpenOrderState {
+                entry_work: None,
                 request: order.request.clone(),
                 wire_ns: order.wire_ns,
                 arrival_mid: order.arrival_mid,

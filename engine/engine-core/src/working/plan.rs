@@ -237,7 +237,10 @@ pub fn resting_px(
     policy: &WorkPolicy,
 ) -> Option<f64> {
     let tick = rule.tick_size;
-    if !worth_resting(touch, tick) {
+    if tick <= 0.0 || !tick.is_finite() || !touch.readable() {
+        return None;
+    }
+    if !policy.rest_on_tight_spread && !worth_resting(touch, tick) {
         return None;
     }
     if policy.hold_decision_px {

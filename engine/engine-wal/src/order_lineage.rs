@@ -634,6 +634,7 @@ mod tests {
             unreachable!()
         };
         let order = OpenOrderState {
+            entry_work: None,
             request,
             wire_ns: 1,
             arrival_mid: 100.0,

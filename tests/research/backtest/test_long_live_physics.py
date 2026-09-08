@@ -1382,3 +1382,40 @@ def test_git_identity_ignores_foreign_repository_bindings(
 
     assert identity["git_commit"] == expected
     assert identity["git_dirty"] is expected_dirty
+
+
+def test_adjacent_funding_downloads_cover_a_window_but_a_gap_does_not(tmp_path) -> None:
+    signal = date_ms("2026-01-01")
+    candidates = extract_signal_candidates(pl.DataFrame([_signal_row(ts_ms=signal)]), config=_config())
+    start, end = candidate_execution_intervals(candidates)["AAAUSDT"][0]
+    middle = start + (end - start) // 2
+    root = tmp_path / "_download_markers" / "funding"
+    root.mkdir(parents=True)
+    first = root / f"AAAUSDT_{start}_{middle}.done"
+    second = root / f"AAAUSDT_{middle}_{end}.done"
+    first.write_text("10")
+    second.write_text("20")
+    coverage, receipt = load_funding_download_coverage(tmp_path, candidates)
+    assert receipt.complete
+    assert receipt.selected_markers == 2
+    assert coverage == {"AAAUSDT": ((start, end),)}
+    second.rename(root / f"AAAUSDT_{middle + 1}_{end}.done")
+    _, receipt = load_funding_download_coverage(tmp_path, candidates)
+    assert not receipt.complete
+
+
+def test_explicit_execution_end_excludes_future_minutes_from_data_and_coverage(tmp_path) -> None:
+    signal = date_ms("2026-01-01")
+    candidates = extract_signal_candidates(pl.DataFrame([_signal_row(ts_ms=signal)]), config=_config())
+    start, _ = candidate_execution_intervals(candidates)["AAAUSDT"][0]
+    end = start + 60_000
+    partition = tmp_path / "klines_1m/date=2026-01-01/symbol=AAAUSDT"
+    partition.mkdir(parents=True)
+    pl.DataFrame({"ts_ms": [start, end], "symbol": ["AAAUSDT"] * 2,
+                  "open": [100.0, 900.0], "high": [100.0, 900.0],
+                  "low": [100.0, 900.0], "close": [100.0, 900.0]}).write_parquet(partition / "part.parquet")
+    tape, receipt = load_candidate_minute_tape(tmp_path, candidates, execution_end_ms=end)
+    assert receipt.complete
+    assert receipt.requested_symbol_days == 1
+    assert tape["ts_ms"].to_list() == [start]
+    assert tape["close"].to_list() == [100.0]

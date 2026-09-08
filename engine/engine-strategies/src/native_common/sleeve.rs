@@ -21,6 +21,9 @@ pub trait SleeveConfig {
     fn validate(&self) -> Result<(), &'static str>;
     fn fingerprint(&self) -> String;
     fn rest_entries(&self) -> bool;
+    fn entry_work_policy(&self) -> Option<WorkPolicy> {
+        None
+    }
     fn hold_decision_price(&self) -> bool;
     fn give_up_instead_of_crossing(&self) -> bool;
 }
@@ -127,7 +130,7 @@ impl<C: SleeveConfig, S: SleeveState> SleeveCore<C, S> {
         self.config.rest_entries().then_some(WorkPolicy {
             hold_decision_px: self.config.hold_decision_price(),
             give_up_instead_of_crossing: self.config.give_up_instead_of_crossing(),
-            ..WorkPolicy::default()
+            ..self.config.entry_work_policy().unwrap_or_default()
         })
     }
 

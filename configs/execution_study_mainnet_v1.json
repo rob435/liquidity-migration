@@ -13,6 +13,7 @@
   "policies": [
     "cross",
     "current",
+    "passive_entry_30s",
     "post_only5s",
     "post_only30s",
     "post_only120s",

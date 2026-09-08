@@ -525,6 +525,91 @@ async fn a_recovered_in_flight_order_is_registered_with_the_kernel() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn boot_cancels_a_confirmed_worked_entry_without_waiting_for_a_quote() {
+    crate::test_clock::with_engine_clock(async {
+        let id = "eng-1700000000000-6";
+        let request = OrderRequest {
+            client_order_id: id.into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 0.25,
+            kind: OrderKind::Limit {
+                px: 100.0,
+                tif: engine_types::TimeInForce::Gtc,
+            },
+            stop: None,
+            reduce_only: false,
+            exact_terms: None,
+            sleeve_effect: None,
+            close_position: false,
+        };
+        let intent = Intent {
+            exact_prices: None,
+            exact_quantity: None,
+            strategy: request.strategy,
+            symbol: request.symbol,
+            side: request.side,
+            qty: request.qty,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: false,
+            tag: "worked".into(),
+            decided_ns: 1,
+            work: Some(engine_types::WorkPolicy::passive_entry_30s()),
+            leverage: None,
+        };
+        let replayed = named_buyer_history(&[
+            WalRecord::OrderSent {
+                dispatch: Some(Box::new(
+                    engine_types::order_dispatch::QueuedOrderDispatch {
+                        intent,
+                        origin_ns: 1,
+                    },
+                )),
+                request,
+                wire_ns: 3,
+                arrival_mid: 100.25,
+            },
+            WalRecord::OrderDispatchCompleted {
+                client_order_id: id.into(),
+            },
+        ]);
+        let (buyer, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+        let tape = tape();
+        let (wal, _) = MockWal::new(tape.clone());
+        let (mut venue, sends) = MockVenue::new(tape, &["BTCUSDT"]);
+        venue.working = vec![still_working(id, "BTCUSDT", 0.25)];
+        let cancels = venue.cancels.clone();
+        let (risk, _) = MockRisk::with(allow_all());
+        let mut settings = settings();
+        settings.group_flush_ms = 5;
+        let mut engine = Engine::boot(
+            &settings,
+            "0000000000000000",
+            wal,
+            risk,
+            venue,
+            vec![Box::new(buyer)],
+            &replayed,
+        )
+        .await
+        .expect("boot");
+        engine
+            .run(
+                &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+                &mut ScriptOrderFeed::empty(),
+                tokio::time::sleep(Duration::from_millis(30)),
+            )
+            .await
+            .expect("run");
+        assert_eq!(*cancels.lock().unwrap(), vec![(SymbolId(0), id.to_owned())]);
+        assert!(sends.lock().unwrap().is_empty());
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_part_filled_recovered_order_reserves_only_its_remainder() {
     let id = "eng-1700000000000-5";
     let replayed = vec![

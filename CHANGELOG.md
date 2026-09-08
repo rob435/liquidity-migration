@@ -10,6 +10,28 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-08 — Work LONG demo entries for 30 seconds and recover resting entries after restart.**
+  - LONG demo joins the near touch, including one-tick spreads, for 30 s with
+    at most one passive amend at the existing 15 s cadence. The remaining
+    quantity crosses through the existing bounded GTC planner and 20 s grace.
+    GTC can take on arrival. Mainnet LONG entry selection, reductions, capital
+    and other sleeves' policies are unchanged. The exact native policy joins
+    all eight latency/queue cells in the mainnet execution study.
+  - Boot discards the working-order supervisor while the venue may still hold
+    its entries. At 09:45 UTC the new boot regression reproduces the missing
+    cancellation: `left: []`, `right: [(SymbolId(0), "eng-1700000000000-6")]`.
+    Preserve the originating work policy in order snapshots, and cancel the
+    confirmed worked remainder after boot through the existing paced path.
+    Regression coverage includes rotation, a dark book, refused-cancel retries,
+    accepted-cancel latching, partial passive fills and the native cross deadline.
+  - Annual research accepts an explicit execution cutoff and unions adjacent
+    funding download intervals. Missing historical prices still fail PIT
+    coverage; trading delisted names cannot override that failure. The curve
+    CLI accepts a stated all-in cost per side without applying its legacy
+    multiplier again. The September 8 annual artifacts live at
+    `~/SHARED_DATA/bybit_full_pit/reports/annual_20260908/`; these are seen-data
+    reconstructions, not evidence that the new execution policy earns the return.
+
 - **2026-09-08 — Check clock units without assuming sub-millisecond scheduling.**
   - The local push gate fails `wall_stamps_share_the_unix_epoch` at
     `ns / 1_000_000 <= ms.saturating_add(1)`. A forced 3 ms scheduling gap

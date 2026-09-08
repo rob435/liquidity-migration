@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
+import math
 import shutil
 import sys
 from dataclasses import replace
@@ -69,6 +71,7 @@ def _run_long(
     pit_tol: float,
     long_notional: float | None = None,
     long_profile: str = "v12",
+    all_in_cost_bps: float | None = None,
 ) -> dict[str, Any]:
     # LONG records its own PIT pass/taint label; pit_tol does not apply.
     del pit_tol
@@ -79,7 +82,10 @@ def _run_long(
     profile = {"v11a": long_v11a_profile, "v12": long_v12_profile}[long_profile]
     cfg = replace(profile(), start_date=start, end_date=end)
     execution_values = {
-        "round_trip_cost_bps": costs.base_entry_exit_cost_bps * cfg.cost_multiplier
+        "round_trip_cost_bps": (
+            2.0 * all_in_cost_bps if all_in_cost_bps is not None
+            else costs.base_entry_exit_cost_bps * cfg.cost_multiplier
+        )
     }
     if long_notional is not None:
         # Research convention is 1x; this option draws pure leverage on the same signal.
@@ -126,6 +132,7 @@ def _run_carry(
     end: str,
     out: Path,
     presettlement_event_tape: str | None = None,
+    all_in_cost_bps: float | None = None,
 ) -> dict[str, Any]:
     """Replay the registered CARRY rule through its live decision contract.
 
@@ -169,9 +176,19 @@ def _run_carry(
             else operational.capital_reference_usdt
         ),
     )
+    config_path = CARRY_CONFIG_PATH
+    if all_in_cost_bps is not None:
+        effective = json.loads(CARRY_CONFIG_PATH.read_text())
+        effective["cost_model"] = {
+            "measured_fee_side_bp": all_in_cost_bps,
+            "charging": "CLI all-in cost per executed side, including fees and slippage",
+            "funding": "settlement_exact",
+        }
+        config_path = out / "effective_carry_cost_config.json"
+        config_path.write_text(json.dumps(effective, indent=2) + "\n")
     return research_equity_chart(
         panel,
-        CARRY_CONFIG_PATH,
+        config_path,
         out,
         start=start,
         end=end,
@@ -540,7 +557,10 @@ def _delisted_traded(out: Path, root: str) -> int | None:
     except Exception:
         return None
     recent: set[str] = set()
-    for d in sorted(os.listdir(kroot))[-30:]:
+    dates = sorted(d for d in os.listdir(kroot) if d.startswith("date="))
+    if not dates:
+        return None
+    for d in dates[-30:]:
         for s in glob.glob(os.path.join(kroot, d, "symbol=*")):
             try:
                 recent.add(decode_symbol_partition(s.split("symbol=")[-1]))
@@ -553,12 +573,7 @@ def _pit_verdict(label: str, delisted: int | None) -> str:
     if "missing_manifest" in label:
         return "  [!] NOT clean full-PIT (manifest empty - do not cite)"
     if "current_universe" in label:
-        if delisted and delisted > 0:
-            return (
-                f"  [OK] effectively full-PIT - {delisted} delisted names traded "
-                "(no survivorship; label is conservative over a listing-boundary gap)"
-            )
-        return "  [!] current-universe (no delisted names traded - possible survivorship; treat as biased)"
+        return "  [!] full-PIT coverage failed; observed delisted trades do not close missing inputs"
     return ""
 
 
@@ -624,6 +639,10 @@ def main() -> int:
     p.add_argument("--end", default=None, help="Window end YYYY-MM-DD (exclusive; default tomorrow UTC).")
     p.add_argument("--root", default=DEFAULT_ROOT, help="Per-venue full-PIT data root.")
     p.add_argument("--config", default=DEFAULT_CONFIG, help="Cost-model config.")
+    p.add_argument(
+        "--all-in-cost-bps", type=float, default=None,
+        help="Override fees plus slippage per executed side for both sleeves; LONG round trip is twice this value, without its legacy cost multiplier. Funding remains separate.",
+    )
     p.add_argument("--out", default=None, help="Report dir (default <root>/reports/equity_curves).")
     p.add_argument(
         "--fresh-output",
@@ -706,6 +725,10 @@ def main() -> int:
         help="Which LONG profile was used for the right-hand LONG leg. (default: v12)",
     )
     args = p.parse_args()
+    if args.all_in_cost_bps is not None and (
+        not math.isfinite(args.all_in_cost_bps) or args.all_in_cost_bps < 0.0
+    ):
+        p.error("--all-in-cost-bps must be finite and nonnegative")
 
     sleeves = [s.strip() for s in args.sleeves.split(",") if s.strip()]
     bad = [s for s in sleeves if s not in RUNNERS]
@@ -746,6 +769,7 @@ def main() -> int:
                     0.0,
                     long_notional=args.long_notional_multiplier,
                     long_profile=args.long_profile,
+                    all_in_cost_bps=args.all_in_cost_bps,
                 )
             else:
                 payload = _run_carry(
@@ -754,6 +778,7 @@ def main() -> int:
                     end,
                     out,
                     args.carry_presettlement_event_tape,
+                    all_in_cost_bps=args.all_in_cost_bps,
                 )
         except Exception as exc:  # noqa: BLE001 - report per-sleeve, keep going
             print(f"  [X] {s} failed: {type(exc).__name__}: {exc}\n", flush=True)

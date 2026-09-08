@@ -612,7 +612,7 @@ mod tests {
             "../../../../configs/execution_study_mainnet_v1.json"
         ))
         .unwrap();
-        assert_eq!(config.policies.len(), 7);
+        assert_eq!(config.policies.len(), 8);
         assert_eq!(civil_date(0), (1970, 1, 1));
         assert_eq!(civil_date(19782), (2024, 2, 29));
     }

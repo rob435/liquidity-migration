@@ -870,6 +870,8 @@ pub struct ExactPriceRange {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OpenOrderState {
     pub request: OrderRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_work: Option<crate::WorkPolicy>,
     pub wire_ns: u64,
     #[serde(default)]
     pub arrival_mid: f64,
