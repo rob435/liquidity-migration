@@ -49,11 +49,21 @@ pub(crate) fn decode(
     }
     Ok(wire.pages)
 }
+/// The rows are a set keyed by symbol, not a sequence: an adapter may
+/// enumerate its table in any order, and a checkpoint written by an earlier
+/// binary in another order must still restore.
 pub(crate) fn check(
     checkpoint: &InstrumentCatalogCheckpoint,
     catalog: InstrumentCatalog,
 ) -> Result<InstrumentCatalog, VenueError> {
-    if checkpoint.rules != catalog.rules || checkpoint.specs != catalog.specs {
+    fn by_symbol<T: Clone>(rows: &[(engine_types::Symbol, T)]) -> Vec<(engine_types::Symbol, T)> {
+        let mut rows = rows.to_vec();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    }
+    if by_symbol(&checkpoint.rules) != by_symbol(&catalog.rules)
+        || by_symbol(&checkpoint.specs) != by_symbol(&catalog.specs)
+    {
         return Err(bad("catalog checkpoint rows disagree with native metadata"));
     }
     Ok(catalog)
@@ -235,6 +245,51 @@ pub(crate) fn merge_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_checkpoint_restores_whatever_order_its_rows_were_written_in() {
+        // Observed live on 2026-09-08: the mexc engine's WAL held a checkpoint
+        // written in hash-map order, the fixed binary rebuilt the rows sorted,
+        // and boot refused its own checkpoint.
+        let rule = |tick: f64| engine_types::InstrumentRule {
+            tick_size: tick,
+            qty_step: 1.0,
+            min_qty: 1.0,
+            min_notional: 0.0,
+        };
+        let rows = vec![
+            ("BTCUSDT".to_string(), rule(0.1)),
+            ("ETHUSDT".to_string(), rule(0.01)),
+            ("XRPUSDT".to_string(), rule(0.0001)),
+        ];
+        let mut reversed = rows.clone();
+        reversed.reverse();
+        let checkpoint = InstrumentCatalogCheckpoint {
+            schema_version: 1,
+            rules: reversed,
+            specs: Vec::new(),
+            cache: InstrumentCatalogCacheSnapshot {
+                kind: "test".into(),
+                payload: Vec::new(),
+            },
+        };
+        let catalog = InstrumentCatalog {
+            cache: None,
+            rules: rows.clone(),
+            specs: Vec::new(),
+        };
+        check(&checkpoint, catalog).unwrap();
+
+        // A row that changed is still a disagreement.
+        let mut changed = rows;
+        changed[1].1.tick_size = 0.05;
+        let catalog = InstrumentCatalog {
+            cache: None,
+            rules: changed,
+            specs: Vec::new(),
+        };
+        assert!(check(&checkpoint, catalog).is_err());
+    }
     #[test]
     fn native_row_union_retains_missing_symbols_and_lexical_values() {
         for (kind, old, fresh) in [
