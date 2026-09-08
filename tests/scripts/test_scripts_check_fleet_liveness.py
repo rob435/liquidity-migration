@@ -586,7 +586,7 @@ def test_signal_worker_incident_carries_its_journal(monkeypatch) -> None:
     assert "journal for liquidity-migration-signal-worker-mainnet.service" in text
 
 
-def test_rolling_loss_trip_pages_with_its_numbers(tmp_path: Path) -> None:
+def test_rolling_loss_trip_reports_its_numbers_as_a_notice(tmp_path: Path) -> None:
     heartbeat = tmp_path / "heartbeat.json"
     heartbeat.write_text(
         json.dumps(
@@ -601,12 +601,42 @@ def test_rolling_loss_trip_pages_with_its_numbers(tmp_path: Path) -> None:
         )
     )
     alerts = liveness.evaluate_engine_heartbeat("engine", heartbeat)
-    assert [alert.key for alert in alerts] == ["rolling-loss:engine"]
-    assert alerts[0].severity == "CRITICAL"
+    assert [(alert.key, alert.severity) for alert in alerts] == [("rolling-loss:engine", "NOTICE")]
     assert alerts[0].message == (
         "engine rolling-loss trip is on: rolling loss is 12.34 USDT "
         "inside 24h against a 10.00 USDT limit; entries refused"
     )
+
+
+def test_an_enforced_restriction_reaches_telegram_and_no_agent(tmp_path: Path) -> None:
+    """The breaker refusing entries is a state, not a defect: Telegram carries it
+    and resolves it, the incident routine never takes it, and no journal rides
+    along for it."""
+    heartbeat = tmp_path / "heartbeat.json"
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "may_open": True,
+                "rolling_loss_tripped": True,
+                "rolling_loss_net_usdt": -163.91,
+                "rolling_loss_limit_usdt": 161.82,
+                "rolling_loss_window_ms": 86_400_000,
+                "rolling_loss_trades": 4,
+            }
+        )
+    )
+    alerts = liveness.evaluate_engine_heartbeat("liquidity-migration-engine.service", heartbeat)
+
+    lines, state = liveness.select_alerts_to_send(alerts, state={}, now=1_000.0, cooldown_sec=1_800)
+    due, routine_state = liveness.select_incidents_to_fire(alerts, state={}, now=1_000.0)
+
+    assert len(lines) == 1
+    assert lines[0].startswith("NOTICE liquidity-migration-engine.service rolling-loss trip is on")
+    assert lines[0].endswith("ref rolling-loss:liquidity-migration-engine.service")
+    assert due == [] and routine_state == {}
+    assert liveness._incident_units("demo", alerts) == []
+    cleared, _ = liveness.select_alerts_to_send([], state=state, now=4_000.0, cooldown_sec=1_800)
+    assert cleared == ["RESOLVED rolling-loss:liquidity-migration-engine.service"]
 
 
 def test_rolling_loss_trip_pages_with_no_numbers_to_report(tmp_path: Path) -> None:
@@ -642,7 +672,7 @@ def test_an_untripped_or_older_engine_stays_quiet(tmp_path: Path) -> None:
     assert liveness.evaluate_engine_heartbeat("worker", heartbeat) == []
 
 
-def test_a_latched_engine_and_a_trip_page_under_separate_keys(tmp_path: Path) -> None:
+def test_a_latched_engine_pages_while_its_trip_only_reports(tmp_path: Path) -> None:
     heartbeat = tmp_path / "heartbeat.json"
     heartbeat.write_text(
         json.dumps(
@@ -657,8 +687,13 @@ def test_a_latched_engine_and_a_trip_page_under_separate_keys(tmp_path: Path) ->
         )
     )
     alerts = liveness.evaluate_engine_heartbeat("engine", heartbeat)
-    assert sorted(alert.key for alert in alerts) == ["may-open:engine", "rolling-loss:engine"]
-    assert {alert.severity for alert in alerts} == {"CRITICAL"}
+    assert sorted((alert.key, alert.severity) for alert in alerts) == [
+        ("may-open:engine", "CRITICAL"),
+        ("rolling-loss:engine", "NOTICE"),
+    ]
+    # The latch is what an agent can act on; the restriction rides along in the page.
+    due, _ = liveness.select_incidents_to_fire(alerts, state={}, now=1_000.0)
+    assert [alert.key for alert in due] == ["may-open:engine"]
 
 
 def test_strategy_errors_page_while_entries_remain_open_and_use_existing_incident_lifetime(
@@ -1079,6 +1114,67 @@ def test_failed_telegram_retries_without_launching_a_second_agent(tmp_path: Path
     assert state_file.exists()
     assert len(routine_calls) == 1, "the accepted incident must not launch twice"
     assert "cannot deliver alerts" in capsys.readouterr().out
+
+
+def test_a_restricted_realm_run_is_healthy_and_wakes_nobody(tmp_path: Path, monkeypatch, capsys) -> None:
+    heartbeat = tmp_path / "engine.json"
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "may_open": True,
+                "rolling_loss_tripped": True,
+                "rolling_loss_net_usdt": -163.91,
+                "rolling_loss_limit_usdt": 161.82,
+                "rolling_loss_window_ms": 86_400_000,
+                "strategy_errors": [],
+            }
+        )
+    )
+    row = liveness.FleetUnit(
+        unit="liquidity-migration-engine.service",
+        kind="service",
+        realm="demo",
+        activation="always",
+        health="active",
+        output_artifact=str(heartbeat),
+    )
+    monkeypatch.setattr(liveness, "load_fleet_manifest", lambda: [row])
+    monkeypatch.setattr(liveness, "unit_states", lambda units: {unit: "active" for unit in units})
+    monkeypatch.setattr(liveness, "active_deploy_age", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(liveness, "send_telegram_message", lambda *_args, **_kwargs: True)
+    fired: list[str] = []
+    monkeypatch.setattr(
+        liveness,
+        "fire_incident_routine",
+        lambda _url, _token, text: fired.append(text) or "session",
+    )
+    for key, value in {
+        "TELEGRAM_BOT_TOKEN": "123:token",
+        "TELEGRAM_ALERT_CHAT_ID": "-1001",
+        "INCIDENT_ROUTINE_FIRE_URL": "https://api.anthropic.com/v1/claude_code/routines/trig_1/fire",
+        "INCIDENT_ROUTINE_FIRE_TOKEN": "sk-ant-test",
+        "ONCALL_DEADMAN_URL": "https://hc-ping.com/check-id",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_fleet_liveness.py",
+            "--account-scope",
+            "demo",
+            "--require-oncall",
+            "--state-file",
+            str(tmp_path / "state.json"),
+        ],
+    )
+
+    assert liveness.main() == 0
+
+    out = capsys.readouterr().out
+    assert "NOTICE rolling-loss:liquidity-migration-engine.service" in out
+    assert "ok scope=demo warnings-present-no-critical" in out
+    assert fired == [], "an enforced restriction must not launch an on-call run"
 
 
 def test_host_supervises_realm_watchdog_results(monkeypatch) -> None:

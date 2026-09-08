@@ -10,6 +10,46 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-08 — Reclassify the rolling-loss restriction: a `NOTICE`, not a page.**
+  - Owner direction: `CRITICAL` means a program fault somebody has to fix. A
+    24-hour loss limit doing its job is an alert, not a fault, and must not wake
+    the on-call routine.
+  - Why it mattered. Demo's window net crossed its `161.823347183` USDT limit
+    repeatedly: `-164.05594128` at 19:00:00, `-162.45804528` at 19:15:00,
+    `-161.15274328` (untripped) at 19:19:10, `-163.91228928` at 19:21:59 UTC.
+    Every re-crossing was a new critical reference, so the routine fired again
+    and each run dispatched its own read-only diagnostic — runs `34265554737`,
+    `34267144935`, `34268002131`, `34268213075` and `34268492368` between 18:51
+    and 19:22 UTC. No run could do anything but restate the limit.
+  - Change. `evaluate_engine_heartbeat` emits `rolling-loss:<unit>` as `NOTICE`.
+    Telegram still carries it on the cooldown and still reports `RESOLVED`;
+    `select_incidents_to_fire` never takes it, no journal rides along for it in a
+    payload, and it is no longer a dead-man or exit-code input. `may-open:`,
+    `strategy-errors:`, unit, heartbeat, worker and route faults stay `CRITICAL`.
+    `deployment_blockers` already exempted the key, so readiness, the demo soak
+    and handover are unchanged; those lines now print the alert's own severity.
+    The severity taxonomy is written down in
+    [notifications](docs/notifications.md): `CRITICAL` is a fault to fix,
+    `WARNING` a reading heading the wrong way, `NOTICE` a restriction enforced on
+    purpose. Risk behaviour is untouched — the kernel refuses entries at the same
+    threshold and still admits `reduce_only` exits ahead of the check.
+  - Proof. Five regressions across
+    `tests/scripts/test_scripts_check_fleet_liveness.py` and
+    `tests/scripts/test_demo_soak.py` fail before the change and pass after: the
+    trip's severity, its Telegram-and-no-agent routing, a latched engine paging
+    while its trip only reports, a whole realm run that reports the restriction
+    and stays `warnings-present-no-critical`, and the soak's retained
+    restriction. Ruff over the tracked trees, mypy on the script and
+    `tests/scripts` plus `tests/policy` (636 passed) run in this container; seven
+    failures there — `test_ci_ssh`, `test_backup_sealed_wals`,
+    `test_observability_hygiene`, `test_host_runtime_dependencies` — reproduce on
+    the pristine tree from missing host tooling and an unpinned interpreter, and
+    ShellCheck and the Rust suites did not run here. CI runs all of them.
+  - Host action. The watchdog runs from the deployed tree, so the host keeps
+    paging on the trip until the next sanctioned deploy. No deploy is dispatched
+    for a notification change while both engines hold positions and mainnet's
+    restriction stands at `-12.25522256` USDT against its `10` USDT limit.
+
 - **2026-09-08 — Wire MEXC USDT perpetuals as the fleet's third realm.**
   - Owner direction: trade MEXC alongside Bybit because Bybit's 3.6 / 10 bp
     maker / taker fees are too high; MEXC charges 0 maker and 0–2 bp taker on

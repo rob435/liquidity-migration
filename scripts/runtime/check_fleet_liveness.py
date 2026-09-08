@@ -11,9 +11,16 @@ market recorder, its hourly upload, the state backup — plus disk space, the
 off-box backup stamp, the recorder's own status file, the upload receipt, and
 the host clock. It runs whether or not the trading fleet is up.
 
+Severity says who has to act. ``CRITICAL`` is a fault somebody must fix: a dead
+unit, a stale or contract-breaking heartbeat, a degraded worker, a broken route.
+``WARNING`` is a reading heading the wrong way. ``NOTICE`` is a restriction the
+system is enforcing on purpose, such as a rolling-loss trip — real, worth
+reading, and nothing to repair. Only ``CRITICAL`` fires the incident routine and
+holds back the dead-man ping; every severity reaches Telegram and resolves there.
+
 Telegram alerts repeat at most every --cooldown-min, while the incident routine
-fires once per active fault and rearms only after resolution. Each sink keeps
-its own delivery state: a failed call retries on the next timer run. The host
+fires once per active CRITICAL fault and rearms only after resolution. Each sink
+keeps its own delivery state: a failed call retries on the next timer run. The host
 scope alone pings ONCALL_DEADMAN_URL on healthy runs so an external check catches
 a dead box or watchdog plane without one surviving realm masking another.
 
@@ -375,10 +382,12 @@ def evaluate_engine_heartbeat(unit: str, path: Path, *, now: float | None = None
     if "may_open" in payload and payload.get("may_open") is not True:
         alerts.append(Alert(f"may-open:{unit}", "CRITICAL", f"{unit} cannot open positions"))
     if payload.get("rolling_loss_tripped") is True:
+        # The breaker doing its job is not a fault: NOTICE reports it and leaves
+        # the incident routine for things a fix can change.
         alerts.append(
             Alert(
                 f"rolling-loss:{unit}",
-                "CRITICAL",
+                "NOTICE",
                 f"{unit} rolling-loss trip is on: {_rolling_loss_detail(payload)}; entries refused",
             )
         )
@@ -658,7 +667,7 @@ def evaluate_engine_rates(
 
 def deployment_blockers(alerts: list[Alert]) -> list[Alert]:
     # A rolling-loss restriction must not prevent replacing a running engine.
-    # The risk kernel still refuses entries; routine liveness still pages the trip.
+    # The risk kernel still refuses entries; routine liveness still reports the trip.
     return [alert for alert in alerts if not alert.key.startswith("rolling-loss:")]
 
 
@@ -675,7 +684,7 @@ def run_demo_soak() -> int:
         alerts.extend(evaluate_engine_rates(rows, now=now, counters=counters))
         for alert in alerts:
             if alert.key.startswith("rolling-loss:") and alert.key not in reported_restrictions:
-                print(f"CRITICAL {alert.key}: {alert.message}", flush=True)
+                print(f"{alert.severity} {alert.key}: {alert.message}", flush=True)
                 reported_restrictions.add(alert.key)
         alerts = deployment_blockers(alerts)
         if alerts:
@@ -1101,7 +1110,6 @@ def _incident_units(scope: str, alerts: list[Alert]) -> list[str]:
         "heartbeat-parse:",
         "heartbeat-contract:",
         "may-open:",
-        "rolling-loss:",
         "strategy-errors:",
         "worker-status:",
         "worker-spool:",

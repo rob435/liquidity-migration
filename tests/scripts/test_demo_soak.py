@@ -367,7 +367,7 @@ def test_demo_soak_retains_risk_halt_without_mistaking_it_for_a_runtime_fault(re
     assert module.run_demo_soak() == 0
     assert observed["now"] - started == 300
     alerts = module.evaluate_engine_heartbeat(row.unit, Path(row.output_artifact), now=observed["now"])
-    assert [(alert.key, alert.severity) for alert in alerts] == [(f"rolling-loss:{row.unit}", "CRITICAL")]
+    assert [(alert.key, alert.severity) for alert in alerts] == [(f"rolling-loss:{row.unit}", "NOTICE")]
     assert "entries refused" in capsys.readouterr().out
 
 

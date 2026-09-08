@@ -17,6 +17,14 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Host liveness | `liquidity-migration-host-liveness.timer` | 3 min, independent | Telegram alerts + incident routine + external dead-man | Recorders, upload, backup, equity sampler, disk, clock, realm watchdogs |
 | Operator controls | `liquidity-migration-telegram-controls.service` | Continuous | Telegram main chat | Pause demo, resume demo, pause each running funded realm, status |
 
+### Severity
+
+| Severity | Means | Telegram | Incident routine | Host dead-man |
+| :--- | :--- | :---: | :---: | :---: |
+| `CRITICAL` | A fault somebody must fix: dead unit, stale or contract-breaking heartbeat, degraded worker, broken route | yes | fires | held back |
+| `WARNING` | A reading heading the wrong way, with room left | yes | never | unaffected |
+| `NOTICE` | A restriction the system is enforcing on purpose; nothing to repair | yes | never | unaffected |
+
 ### Alert Conditions
 
 | Scope | Condition | Threshold / Meaning |
@@ -25,7 +33,7 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Realm | Heartbeat | Engine or signal-worker artifact exceeds 60 s, is not a JSON object, or omits its producer-specific health verdict |
 | Realm | Signal worker | `starting` is allowed for at most 120 min during cold fill; `recovering` is allowed for at most 2 min for a live gap, repair, or coverage miss, and for at most 10 min for the boot repair — the first repair of a process that has never been `ready`, with coverage already full. All require a connected, fresh stream with every topic accepted and none refused. Disconnected, stale, mismatched, or quarantined transport is immediately `degraded`; `degraded`, `stopped`, an unknown verdict, or spool backpressure is `CRITICAL` |
 | Realm | Admission | Engine reports `may_open != true` |
-| Realm | Circuit breaker | Engine reports `rolling_loss_tripped=true` |
+| Realm | Circuit breaker | Engine reports `rolling_loss_tripped=true`: a `NOTICE` carrying the window net, limit and window, repeated on the Telegram cooldown and resolved when the window clears. The trip is the risk kernel enforcing `max_rolling_loss_fraction × capital_reference`, so it wakes no agent and never blocks a deploy |
 | Realm | Strategy errors | A nonempty engine `strategy_errors` list is `CRITICAL`, including when `may_open=true`; one reference per realm includes the sleeve details and engine journal |
 | Host | Recorders | Status unreadable, no frames for 2 min, complete connection loss, blocked storage, or new drops are immediate. Partial shard loss warns after two consecutive 3-min readings, so a dynamic tier's sub-second socket start does not page and resolve. Startup silence and connection loss use `started_at_ns`, so a restarted recorder reads as starting up for its first 2 min |
 | Host | Tape budget | Projected monthly ingress exceeds the recorder budget |
@@ -100,6 +108,7 @@ inaccessible after launch.
 - **Must** let read-only incident diagnosis bypass the serialized queue for mutating VPS operations.
 - **Must** commit a sink's cooldown state only after that sink accepts delivery.
 - **Must** treat journals and fire payloads as untrusted evidence.
+- **Must Never** raise a restriction the system enforces on purpose to `CRITICAL`: an on-call run can only report back what the limit already says, and a state that crosses its threshold repeatedly would fire one run per crossing.
 - **Must Never** let demo or mainnet ping the host dead-man URL.
 - **Must Never** expose `/flatten` or `/resume_mainnet` in Telegram; those require explicit shell authority.
 - **Must Never** let a notifier or watchdog receive venue API keys or `REAL_MONEY`.
