@@ -131,6 +131,15 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     excludes the seven names, because a LONG batch that names an unlisted
     symbol stays pending in the engine and, with strict per-source sequencing,
     would hold every later batch from that source.
+  - Running. [Deploy run `34285402045`](https://github.com/rob435/liquidity-migration/actions/runs/34285402045)
+    on `62234c95`, `deploy-ok` 22:39:02 UTC, one start attempt. At 22:41:15 the
+    mexc engine reads `may_open=true`, `stream_resets=0`, `orders_sent=0`, no
+    positions; its journal since 22:38:19 holds eight WARN lines (seven
+    one-time unlisted-name notices) and no rate-limit or catalog line; the
+    watchdog reads healthy; all three realms active with zero restarts. The
+    venue's USDT futures wallet reads `equity 0` at 22:40 UTC against 52.62
+    USDT at 17:05, with nothing traded from here, so entries cannot size until
+    it is funded.
   - Not fixed, proposed: the durable form of that interim is a venue-listing
     filter in the mexc signal worker's universe (read MEXC's public contract
     table, keep the Bybit names it lists), so a future entrant MEXC does not
