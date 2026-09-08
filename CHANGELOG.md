@@ -223,6 +223,28 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     being its own mount or sealed segments stop being staged at all is an
     owner decision, and until one lands the recorders' floor is held by
     duplicated backup and paid for out of tape.
+  - **Deployed at 01:42:31 UTC in run
+    [`34176429460`](https://github.com/rob435/liquidity-migration/actions/runs/34176429460),
+    and the block returns while the duplicate blocks stay.** No backup run has
+    started since, so the unit still carries the 01:04:05 failure and the fix
+    is unproven until the 03:17 UTC slot. Free space fell back under the floor
+    as the deploy staged its release and the tape regrew: both recorders are
+    `CRITICAL` again at 01:43:24 and 01:46:25 UTC, dropping 1,522,375 then
+    528,243 frames (Bybit) and 442,267 then 155,989 (Binance) per interval.
+    Retention frees tape, tape regrows, the floor is reached again — with
+    31.77 GiB of duplicated stage, 32.2 GiB of live WAL and 7.3 GiB of
+    `wal-quarantine` on 118G there is no headroom left to hold. The funded
+    engine is unaffected throughout: `engine-mainnet` active, both workers
+    `ready`, `spool_backpressured=false`, no failed engine unit.
+  - **Open, and the owner's call.** Three ways to give the recorders room, in
+    the order they cost: stop the stage being its own mount so the existing
+    reclaim runs (drop `StateDirectory=` from
+    `deploy/systemd/liquidity-migration-backup.service`, which the script's
+    own `install -d -m 0700` already covers); stage only the growing segment
+    and upload sealed ones from the live directory, which is what the stage
+    exists for; or give the stage a filesystem with room. Deleting the staged
+    copies by hand frees 31.77 GiB and the next `rsync` restores them. None of
+    these is a read-only diagnostic, so none is the routine's to choose.
   - **Open, not this incident's:**
     `liquidity-migration-execution-study.service` exited `1/FAILURE` at
     01:08:39 UTC on its first run after the deploy: `engine: tape line 8263:
