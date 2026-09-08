@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh one-sided execution comparisons every fifteen minutes
+
+[Timer]
+OnBootSec=120
+OnUnitInactiveSec=900
+AccuracySec=30
+Unit=liquidity-migration-execution-study.service
+
+[Install]
+WantedBy=timers.target

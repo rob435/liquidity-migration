@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "wal_path": "/var/lib/liquidity-migration-engine-mainnet/engine.wal",
+  "tape_root": "/var/lib/liquidity-migration/forward-market",
+  "output_dir": "/var/lib/liquidity-migration/execution-study",
+  "lookback_hours": 48,
+  "hop_ms": [
+    5,
+    25,
+    100,
+    250
+  ],
+  "policies": [
+    "cross",
+    "current",
+    "post_only5s",
+    "post_only30s",
+    "post_only120s",
+    "adaptive120s",
+    "passive_skip120s"
+  ],
+  "sleeves": [
+    "carry",
+    "long",
+    "exodus"
+  ],
+  "fee_realm": "mainnet"
+}

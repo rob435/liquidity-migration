@@ -260,6 +260,17 @@ fn use_execution_inventory_credential(
 }
 
 impl BybitInventoryProbe {
+    /// Account-specific linear trading fees; this reader has no mutation methods.
+    pub async fn fee_rates(&self, symbol: &str) -> Result<(f64, f64), VenueError> {
+        let query = format!("category=linear&symbol={}", percent_encode(symbol));
+        let reply = self
+            .gateway
+            .rest
+            .get_signed("/v5/account/fee-rate", &query)
+            .await?;
+        parse_fee_rates(venue_result(reply)?, symbol)
+    }
+
     pub fn new(realm: VenueRealm) -> Result<Self, VenueError> {
         let requested = std::env::var("BYBIT_INVENTORY_CREDENTIAL_SET").ok();
         let execution = use_execution_inventory_credential(realm, requested.as_deref())?;
@@ -280,6 +291,48 @@ impl BybitInventoryProbe {
 
     pub async fn account_inventory(&mut self) -> Result<AccountInventory, VenueError> {
         self.gateway.account_inventory().await
+    }
+}
+
+fn parse_fee_rates(result: Value, symbol: &str) -> Result<(f64, f64), VenueError> {
+    let rows = result
+        .get("list")
+        .and_then(Value::as_array)
+        .ok_or_else(|| VenueError::BadReply("fee-rate reply lacks list".into()))?;
+    let rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.get("symbol").and_then(Value::as_str) == Some(symbol))
+        .collect();
+    if rows.len() != 1 {
+        return Err(VenueError::BadReply(format!(
+            "fee-rate reply needs one row for {symbol}"
+        )));
+    }
+    let rate = |field: &str| -> Result<f64, VenueError> {
+        rows[0]
+            .get(field)
+            .and_then(Value::as_str)
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && (-0.01..=0.1).contains(v))
+            .ok_or_else(|| VenueError::BadReply(format!("invalid {field} for {symbol}")))
+    };
+    Ok((rate("makerFeeRate")?, rate("takerFeeRate")?))
+}
+
+#[cfg(test)]
+mod fee_rate_tests {
+    use super::*;
+
+    #[test]
+    fn fees_are_symbol_specific_and_absence_never_becomes_zero() {
+        let reply = serde_json::json!({"list":[{"symbol":"XUSDT","makerFeeRate":"0.00036","takerFeeRate":"0.001"}]});
+        assert_eq!(
+            parse_fee_rates(reply.clone(), "XUSDT").unwrap(),
+            (0.00036, 0.001)
+        );
+        assert!(parse_fee_rates(reply, "OTHERUSDT").is_err());
+        assert!(parse_fee_rates(serde_json::json!({"list":[{"symbol":"XUSDT","makerFeeRate":"NaN","takerFeeRate":"0.001"}]}),"XUSDT").is_err());
+        assert!(parse_fee_rates(serde_json::json!({"list":[{"symbol":"XUSDT","makerFeeRate":0,"takerFeeRate":"0.001"}]}),"XUSDT").is_err());
     }
 }
 

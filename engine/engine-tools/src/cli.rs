@@ -11,6 +11,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
         "sim" => sim(args),
         "bench" => bench(args),
         "record-equity" => runtime()?.block_on(engine_tools::equity_recorder::run(&args[1..])),
+        "execution-study" => engine_tools::execution_study::run(&args[1..]),
         "wal-cost" => wal_cost(args),
         "wal-convert-v5" => wal_convert_v5(args),
         "venue-key" => venue_key(args),

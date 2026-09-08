@@ -53,6 +53,10 @@ engine — the execution loop
       Append fleet equity and health observations, then optionally push metrics.
       --show reads the existing local curve without sampling or pushing.
 
+  engine-tools execution-study --config PATH
+      Compare one-sided execution policies on observed order intentions and
+      recorded market tape. Read account fee rates; write a local research report.
+
   engine wal-convert-v5 --wal PATH --output-dir NEW_DIRECTORY
       Convert v5 restatements into a separate WAL family with explicit v7
       cost-basis and source-retirement state. The input must be stopped.

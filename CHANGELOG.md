@@ -10,6 +10,29 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-08 — Measure one-sided execution against actual order intentions.**
+  - Add the Rust `execution-study` command and a fifteen-minute mainnet timer:
+    incremental CRC-checked WAL reads, account-specific fee observations,
+    paired closed-hour tape replay, persistent per-order reports and replay cache.
+    Compare crossing, the existing working planner, 5/30/120 s post-only
+    patience, an exploratory book/flow quote, and passive expiry. Keep both
+    queue scenarios and all 5/25/100/250 ms latency cells; show price, fee,
+    missed-opportunity costs, actual/hypothetical markouts and crossing error.
+  - The authenticated fee read confirms 10/3.6 bp taker/maker on the five
+    sampled directional symbols and BTC; CAP is 11/4 bp. Five Sep 7 orders
+    match 14 venue/WAL fills. Four crossing prices match closely at 5 ms;
+    ARB is 21.62 bp cheaper than the observed fill at that latency, so this
+    model cannot justify a live execution change. In the two early opening
+    orders, waiting 120 s loses 35.28 bp versus crossing at 100 ms; missing
+    the trade loses 10.35 bp. These are seen-data diagnostics, not alpha.
+  - Recovered tape members verify against the Drive archive manifests.
+    Tests cover finite queue/partial fills, post-only rejection, cancellation
+    races, replacement priority, native deadlines, missing observations,
+    same-process clock alignment, recovered-fill deduplication, fee absence,
+    actual-fill calibration and cache reuse after tape expiry. Source and
+    deployment status are recorded in [the study contract](docs/execution-study.md)
+    and [STATE](STATE.md); no directional policy or arming setting is changed.
+
 - **2026-09-07 22:56 UTC — The `capture-disk` page returns, and the read-only
   diagnostic still cannot name the writer holding the disk. The recorders are
   correct; the filesystem is genuinely at their reserved floor. `mode=diagnose`

@@ -14,6 +14,8 @@ liquidity-migration-chaos-drill.timer|timer|demo|downstream|50|always|none|liqui
 liquidity-migration-chaos-drill.service|service|demo|downstream|60|job|none|liquidity-migration-engine.service|none|-|-|-|-|-|-|-
 liquidity-migration-demo-liveness.timer|timer|demo|downstream|80|always|direct|liquidity-migration-demo-liveness.service|timer|-|liquidity-migration-demo-liveness.service|10|30|1|120|-
 liquidity-migration-mainnet-liveness.timer|timer|mainnet|downstream|90|mainnet|funded|liquidity-migration-mainnet-liveness.service|timer|-|liquidity-migration-mainnet-liveness.service|10|30|1|120|-
+liquidity-migration-execution-study.timer|timer|mainnet|downstream|92|mainnet|funded|liquidity-migration-execution-study.service|timer|-|liquidity-migration-execution-study.service|120|900|30|600|-
+liquidity-migration-execution-study.service|service|mainnet|downstream|94|job|funded|liquidity-migration-engine-mainnet.service|none|-|-|-|-|-|-|-
 liquidity-migration-llm-ledger.timer|timer|shared|downstream|100|always|direct|liquidity-migration-llm-ledger.service|timer|-|liquidity-migration-llm-ledger.service|3600|3600|120|600|-
 liquidity-migration-llm-ledger.service|service|shared|downstream|110|job|direct|-|none|-|-|-|-|-|-|-
 liquidity-migration-trade-notify.timer|timer|shared|downstream|120|always|direct|liquidity-migration-trade-notify.service|timer|-|liquidity-migration-trade-notify.service|300|300|30|120|-

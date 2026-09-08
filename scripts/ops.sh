@@ -33,6 +33,7 @@ Operator commands:
   stop UNIT...                 stop units
   start UNIT...                start units
   equity [ARGS...]             standard descriptive equity curves (research)
+  execution-study [--json]     read the latest paired execution cost report
   curve [REALM] [SAMPLES]      the live account's recorded equity curve, read
                                on the host (default: mainnet, 240 minutes)
   flatten --environment demo|mainnet [--reason TEXT] [--execute]
@@ -231,6 +232,15 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     [[ "$curve_samples" =~ ^[1-9][0-9]*$ ]] || die_usage "curve samples must be a positive integer"
     remote_exec 'exec /opt/liquidity-migration-engine/bin/engine-tools record-equity \
       --show "${REMOTE_ARGS[0]}" --samples "${REMOTE_ARGS[1]}"' "$curve_realm" "$curve_samples"
+    ;;
+  execution-study)
+    [[ "$#" -le 1 ]] || die_usage "execution-study accepts only --json"
+    study_file=latest.txt
+    if [[ "$#" -eq 1 ]]; then
+      [[ "$1" == --json ]] || die_usage "execution-study accepts only --json"
+      study_file=latest.json
+    fi
+    remote_exec 'cat -- "/var/lib/liquidity-migration/execution-study/${REMOTE_ARGS[0]}"' "$study_file"
     ;;
   research-refresh)
     exec bash "$ROOT_DIR/scripts/research/research_refresh.sh" "$@"

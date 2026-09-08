@@ -1,0 +1,31 @@
+[Unit]
+Description=Paired one-sided execution research from recorded orders and market tape
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=liquidity-engine-mainnet
+Group=liquidity-migration
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env
+EnvironmentFile=/etc/liquidity-migration/engine-mainnet.env
+Environment=BYBIT_INVENTORY_CREDENTIAL_SET=execution
+UnsetEnvironment=BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+ExecStart=/opt/liquidity-migration-engine/bin/engine-tools execution-study --config /opt/liquidity-migration/configs/execution_study_mainnet_v1.json
+TimeoutStartSec=600
+KillMode=control-group
+StateDirectory=liquidity-migration/execution-study
+StateDirectoryMode=0750
+ReadWritePaths=/var/lib/liquidity-migration/execution-study
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=true
+MemoryMax=384M
+CPUQuota=100%
+Nice=15
+IOSchedulingClass=idle

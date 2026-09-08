@@ -73,6 +73,17 @@ def test_deploy_allowlists_the_four_modes() -> None:
     assert "deploy mode must be" in result.stderr
 
 
+def test_execution_study_reads_only_the_selected_report(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+    for args, filename in (((), "latest.txt"), (("--json",), "latest.json")):
+        result = _run("execution-study", *args, env=environment)
+        assert result.returncode == 0, result.stderr
+        payload = capture.read_text()
+        assert f"REMOTE_ARGS=( {filename} )" in payload
+        assert 'cat -- "/var/lib/liquidity-migration/execution-study/${REMOTE_ARGS[0]}"' in payload
+    assert _run("execution-study", "--execute", env=environment).returncode == 2
+
+
 def test_unit_verbs_reach_systemd_and_qualify_short_names(tmp_path: Path) -> None:
     capture, environment = _ssh_capture(tmp_path)
 

@@ -22,6 +22,7 @@ All family names below have the `liquidity-migration-` prefix; the group is `liq
 | `host-liveness` | Shared | Independent | Every 180 s | `liquidity-observer` | Host, independent units, watchdog plane, external dead-man |
 | `demo-liveness` | Demo | Downstream | Every 180 s | `liquidity-observer` | Demo and shared downstream health |
 | `mainnet-liveness` | Mainnet | Downstream | Every 180 s while funded activation is enabled | `liquidity-observer` | Mainnet health |
+| `execution-study` | Mainnet | Downstream | Every 900 s after completion while funded activation is enabled | `liquidity-engine-mainnet` | Read account fees, compare one-sided execution on recorded orders/tape; [contract](../../docs/execution-study.md) |
 | `trade-notify` | Shared | Downstream | Every 5 minutes, second 30 | `liquidity-observer` | Attributed entries and realized exits to Telegram |
 | `telegram-controls` | Shared | Downstream | Boot | `liquidity-controls:liquidity-controls` | Control requests through the account owner |
 | `llm-ledger` | Shared | Downstream | Hourly, minute 05 | `liquidity-llm` | Public research nominations and judgments |
@@ -47,7 +48,7 @@ All family names below have the `liquidity-migration-` prefix; the group is `liq
 - Must preserve independent units through realm handover, stop, and disarm; changed capture inputs restart only the affected recorder.
 - Must start each realm's signal worker before its engine and verify the new processes' heartbeats during handover.
 - Must keep writes inside each unit's declared writable paths and state directories.
-- Must keep venue credentials out of public workers, recorders, observers, controls, and research units.
+- Must keep venue credentials out of public workers, recorders, observers and controls; execution-study uses the account user's GET-only probe with `REAL_MONEY` unset.
 - Must never infer funded authorization from a unit being installed or enabled.
 
 ## Operational Recipes
