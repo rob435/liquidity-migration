@@ -228,8 +228,8 @@ def _rolling_loss_detail(payload: dict[str, object]) -> str:
     net = _number(payload.get("rolling_loss_net_usdt"))
     limit = _number(payload.get("rolling_loss_limit_usdt"))
     if net is None or limit is None:
-        return f"own closed trades are past the limit inside {window}"
-    return f"own closed trades lost {abs(net):.2f} USDT inside {window} against a {limit:.2f} USDT limit"
+        return f"rolling loss is past the limit inside {window}"
+    return f"rolling loss is {abs(net):.2f} USDT inside {window} against a {limit:.2f} USDT limit"
 
 
 def _transport_reasons(payload: dict[str, object], *, now: float) -> list[str]:

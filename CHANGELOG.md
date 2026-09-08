@@ -37,7 +37,8 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     enforced entry restriction from process failure. The risk state and limit
     remain unchanged, ordinary liveness alerts remain critical, and all other
     heartbeat/resource failures still block deployment. Both failing readiness
-    regressions pass after the correction.
+    regressions pass after the correction. Alert wording reflects rolling loss,
+    which includes negative open P&L, rather than attributing it all to closes.
 
 - **2026-09-08 — Repair execution recovery, account limits and research costs.**
   - Research defaults read `configs/bybit_fee_rates.json` or

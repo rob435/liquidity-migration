@@ -596,7 +596,7 @@ def test_rolling_loss_trip_pages_with_its_numbers(tmp_path: Path) -> None:
     assert [alert.key for alert in alerts] == ["rolling-loss:engine"]
     assert alerts[0].severity == "CRITICAL"
     assert alerts[0].message == (
-        "engine rolling-loss trip is on: own closed trades lost 12.34 USDT "
+        "engine rolling-loss trip is on: rolling loss is 12.34 USDT "
         "inside 24h against a 10.00 USDT limit; entries refused"
     )
 
@@ -620,6 +620,7 @@ def test_rolling_loss_trip_pages_with_no_numbers_to_report(tmp_path: Path) -> No
     assert "trip is on" in alerts[0].message
     assert "entries refused" in alerts[0].message
     assert "USDT" not in alerts[0].message
+    assert "closed trades" not in alerts[0].message
 
 
 def test_an_untripped_or_older_engine_stays_quiet(tmp_path: Path) -> None:
