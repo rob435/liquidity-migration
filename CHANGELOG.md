@@ -54,11 +54,31 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     fix, and the pre-fix trace is the incident's shape —
     `stop-realm-units mainnet`, `start-realm mainnet`,
     `rollback-after-failure mainnet`, no restore.
+  - The study timer carries it too, and the watch is back.
+    [Diagnose run `34245849679`](https://github.com/rob435/liquidity-migration/actions/runs/34245849679),
+    read 15:36:46 through 15:36:58 UTC, has
+    `liquidity-migration-mainnet-liveness.timer` active again and
+    `liquidity-migration-execution-study.timer` inactive — the second mainnet
+    timer `stop_realm_units` took down at 15:10:16 and nothing restarted. The
+    watchdog's first pass after its own return, 15:36:10, pages `CRITICAL
+    unit:liquidity-migration-execution-study.timer:
+    liquidity-migration-execution-study.timer is inactive` beside the standing
+    `may-open` and `rolling-loss` pages; `check_fleet_liveness` could not report
+    it while the watchdog itself was stopped, so the fifteen-minute study has
+    been idle unreported since 15:10:16. The last `watchdog:mainnet` page is
+    15:35:28 and no host-mutating workflow ran in that window — `diagnose` only
+    reads, and the Telegram helper starts no units — so the liveness timer came
+    back from outside the workflow log. `restore_realm_timers` covers both
+    timers (`lm_realm_units mainnet` lists the liveness and study timers), and
+    `5e8d46e` is not on the host: it runs `30feb6df`.
   - Still required from the owner: this restores the watch, not the engine. The
     funded engine remains reduce-only with `may_open=false` and its rolling-loss
     trip on; clearing the latched reconciliation halt is
     `mainnet-ac90e31c207bc0da` below and needs an operator. Until then every
-    mainnet handover refuses and every deploy exits non-zero at that gate.
+    mainnet handover refuses and every deploy exits non-zero at that gate, so
+    the study timer needs `scripts/ops.sh start
+    liquidity-migration-execution-study.timer` — the deployed `30feb6df` has no
+    restore path, and the merged one only runs on the next mainnet handover.
 
 - **2026-09-08 — Incident `mainnet-ac90e31c207bc0da`: the funded engine is latched reduce-only.**
   - From 15:00:23 UTC the mainnet watchdog pages `CRITICAL
