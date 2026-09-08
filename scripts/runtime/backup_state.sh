@@ -103,6 +103,10 @@ RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 "$RCLONE" check "$STAGE" "$REMOTE/latest" \
     --config "$CONFIG" \
     --one-way
+# The remote copy is verified before discarding duplicate local blocks. rsync
+# uses replacement files, never --inplace; the growing WAL stays a real copy.
+python3 "$(dirname "${BASH_SOURCE[0]}")/link_sealed_backup_wals.py" \
+    --stage "$STAGE" "${present[@]}"
 "$RCLONE" delete "$REMOTE/history" \
     --config "$CONFIG" \
     --min-age "${HISTORY_DAYS}d" \

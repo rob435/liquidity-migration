@@ -49,18 +49,25 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
   - **Fix.** `report_disk_usage` (`scripts/vps/deploy_remote.sh`), called from
     `verify_mode`, prints `disk <bytes> <path>` for one level under
     `/var/lib/liquidity-migration`, `/var/log/journal` and `/opt`, largest
-    first, capped at 20 lines. `du -x --block-size=1 --max-depth=1`: never
-    crosses a filesystem, never descends past the directory, prints no file
-    name, so no tape content is exposed. A missing root is skipped.
+    first, capped at 20 lines. `du -kx -d 1` reports allocated bytes rounded to KiB, stays on one
+    filesystem and prints only directory totals. A missing root is skipped.
+    The GNU-only form silently returned no totals on macOS; four existing
+    regressions fail there before the portable command and pass afterward.
   - **Tests.** `tests/scripts/test_diagnose_disk_report.py`, five cases
     driving the extracted function over a built tree: directories named with
     their bytes largest first, one level deep with no file name, a missing
     root skipped, the line cap honoured, and `verify_mode` taking the reading.
     All five fail on the previous `deploy_remote.sh` and pass on this one.
-  - **Still required from the owner.** The disk is genuinely full to the
-    reserve; this change measures the fault, it does not clear it. Read the
-    next diagnose run's `disk` lines and then either lower `max_disk_gb` on
-    the two recorders or clear the foreign consumer they name.
+  - **Root cause and repair.** The execution-study host read identifies
+    `34,115,301,376` bytes in `backup/stage`, versus `4,305,788,928` in Bybit
+    tape. The local backup duplicates sealed WALs indefinitely. After the
+    existing remote checksum check, replace byte-identical sealed segment
+    copies with hard links; exclude the highest numbered, growing segment.
+    Keep other state independent and preserve rsync replacement semantics.
+    The complete backup regression fails on the original script and passes
+    with the fix; active appends, unequal snapshots and repeat runs are tested.
+    No live WAL or remote backup is pruned. Host activation and measured
+    space recovery remain in the deployment verification.
 
 - **2026-09-07 — Historical source adapters and explicit sparse-data execution.**
   - Separate recorder decoding/Bybit book reconstruction, normalized events,

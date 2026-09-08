@@ -1126,16 +1126,13 @@ verify_mode() {
     report_disk_usage
 }
 
-# `du` in bytes of actual blocks, one level under each root, largest first, as
-# `disk <bytes> <path>`. Never crosses a filesystem, never descends past the
-# directory, and prints no file name, so a diagnose run exposes no tape
-# contents. A root that does not exist is skipped rather than failing the read.
+# Allocated bytes rounded to KiB; only directory totals reach diagnostics.
 report_disk_usage() {
     local root
     for root in $DISK_REPORT_ROOTS; do
         [ -d "$root" ] || continue
-        du -x --block-size=1 --max-depth=1 "$root" 2>/dev/null || true
-    done | sort -rn | head -n "$DISK_REPORT_LINES" | awk '{printf "disk %s %s\n", $1, $2}'
+        du -kx -d 1 "$root" 2>/dev/null || true
+    done | sort -rn | head -n "$DISK_REPORT_LINES" | awk '{printf "disk %.0f %s\n", $1 * 1024, $2}'
 }
 
 # ----------------------------------------------------------- mainnet stops

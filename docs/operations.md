@@ -235,6 +235,13 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | :--- | :--- | :--- | :--- |
 | **Engine State & WAL** | Every 6h (`backup.timer`) | `LiquidityMigration/engine-state/latest/` | 60 days in `history/` |
 | **Market Tape Hours** | Hourly at :10 (`upload.timer`)| `LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/` | Permanent archive; the host keeps a 24 h sliding window of shipped hours ([market_tape/README.md](../market_tape/README.md) §Local Sliding Window) |
+
+| Local backup stage | Contract |
+| --- | --- |
+| Sealed WAL segments | After successful remote checksum verification, byte-identical staged copies of numbered segments below the current maximum become hard links to the immutable source on the same filesystem |
+| Growing WAL / other state | Remain independent copies; rsync uses replacement files, never `--inplace`; a later append cannot change the active segment's staged snapshot |
+| Physical disk usage | Linking releases duplicate blocks without pruning the live WAL or cloud history; `du` on the stage alone still counts shared blocks |
+| Implementation | `scripts/runtime/backup_state.sh`, `scripts/runtime/link_sealed_backup_wals.py`; the existing backup lock covers staging, verification and linking |
 * **Security Invariant**: Backup scripts explicitly reject `*.env` files to prevent credentials from ever leaving the host.
 
 ---
