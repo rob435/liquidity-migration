@@ -27,7 +27,7 @@ Catalog of 35 backtesting, execution, and statistical traps identified across qu
 | :-: | :--- | :--- | :--- |
 | **3** | **Instantaneous Fills** | Assuming order fills at the exact signal price. | Model execution latency, queue position, and post-signal price impact. |
 | **5** | **Ignoring Capacity** | Assuming fills at scales exceeding market depth or ADV. | Bound notional to $\le 1-2\%$ of historical hourly volume. |
-| **6** | **Ignoring Venue Fees** | Overlooking exchange taker fees, VIP tiers, and rebates. | Apply conservative venue fee tiers (e.g. 5.5–7.8 bp per side). |
+| **6** | **Ignoring Venue Fees** | Overlooking exchange taker fees, VIP tiers, and rebates. | Read the authenticated account fee snapshot; retain symbol, observation time and source hash. Label explicit historical fee scenarios. |
 | **7** | **Ignoring Slippage** | Assuming execution at mid-price or closing print. | Model spread crossing and volume-dependent slippage penalties. |
 | **8** | **Ignoring Market Impact** | Assuming infinite liquidity without adverse price shift. | Apply square-root participation models for large order baskets. |
 | **9** | **Short-Access Fantasy** | Assuming unrestricted shorting on illiquid or margin-restricted coins. | Check historical short-sale eligibility and borrow availability. |

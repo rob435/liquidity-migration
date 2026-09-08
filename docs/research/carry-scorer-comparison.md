@@ -48,7 +48,7 @@ All returns below are compounded percentages. Gross includes modeled funding and
 - Must preserve missing observations and scorer refusals as coverage limits.
 - Must report the hourly path’s negative 2022 and 2026 results alongside the daily path’s positive results.
 - Must never interpret these normalized returns as the funded account’s ledger or proof that the current 3× allocation is profitable.
-- Must keep the frozen 0.35-stop experiment separate from the current 0.10-stop risk policy.
+- Must keep the frozen 0.35-stop, intraday-exit experiment separate from the current 0.10-stop risk policy and daily quantity holding.
 
 ## Operational Recipes
 

@@ -427,7 +427,7 @@ The live loop — `Engine::boot_as_exact`, the risk kernel, the strategy reducer
 | Dial | Default | Meaning |
 | :--- | :--- | :--- |
 | `--capital` | 10000 | Starting USDT |
-| `--taker-fee` / `--maker-fee` | 0.00055 / 0.0002 | Bybit VIP0 linear |
+| `--taker-fee` / `--maker-fee` | Maximum observed rate from `configs/bybit_fee_rates.json` or `LIQUIDITY_MIGRATION_FEE_SNAPSHOT` | Decimal fee rates; explicit flags select a scenario. Report retains snapshot hash and observation time; unobserved symbols have no fee coverage claim |
 | `--rtt-ms` | 175 | Order command round trip; half each way, matched at arrival |
 | `--private-latency-ms` | 60 | Private-stream hop for fills, cancels, amends |
 | `--mmr` | 0.005 | Maintenance margin fraction; equity ≤ Σ maintenance liquidates |

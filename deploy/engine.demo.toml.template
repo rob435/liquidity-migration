@@ -53,13 +53,9 @@ account_view_max_age_ms = 5000
 # way). Exits use a fresh mark price for the configured IOC collar.
 max_quote_age_ms = 30000
 
-# Who else writes leverage on this account. This engine holds the demo
-# account's single mutation lease and nothing else trades it, so what the
-# engine set stays trusted across flat spells (entries skip a ~172 ms
-# confirmation round trip, measured live 2026-08-18) and every held
-# position's leverage is verified against the venue's own position rows
-# instead — a mismatch alarms and turns the confirmation back on for that
-# symbol. If a hand ever starts trading this account, set "shared".
+# Sole demo authority caches leverage across flat spells; an observed
+# position-leverage mismatch revokes that cache. Use "shared" if another
+# actor trades this account.
 leverage_authority = "sole"
 
 # ---------------------------------------------------------------------------

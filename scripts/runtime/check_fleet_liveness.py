@@ -893,7 +893,7 @@ def evaluate_backup_stamp(*, stamp_path: Path, now: float, max_age_hours: float)
             Alert(
                 "backup",
                 "WARNING",
-                f"last completed backup is {age_hours:.1f}h old (limit {max_age_hours:.0f}h)",
+                f"last completed backup is {age_hours:.1f}h old (limit {max_age_hours:g}h)",
             )
         ]
     return []

@@ -788,6 +788,8 @@ def test_backup_stamp_ages_into_a_warning(tmp_path: Path) -> None:
     now = time.time()
     stamp.write_text("done")
     assert liveness.evaluate_backup_stamp(stamp_path=stamp, now=now, max_age_hours=26) == []
+    alerts = liveness.evaluate_backup_stamp(stamp_path=stamp, now=now + 1801, max_age_hours=0.5)
+    assert "limit 0.5h" in alerts[0].message
     os.utime(stamp, (now - 30 * 3600, now - 30 * 3600))
     alerts = liveness.evaluate_backup_stamp(stamp_path=stamp, now=now, max_age_hours=26)
     assert [alert.severity for alert in alerts] == ["WARNING"]
