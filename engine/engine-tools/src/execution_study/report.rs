@@ -23,6 +23,8 @@ pub fn metrics(results: &[OrderResult]) -> Value {
     let mut paired: BTreeMap<String, Paired> = BTreeMap::new();
     let mut failures: BTreeMap<String, usize> = BTreeMap::new();
     let mut actual: BTreeMap<String, Vec<&OrderResult>> = BTreeMap::new();
+    let mut slices: BTreeMap<String, Vec<&OrderResult>> =
+        BTreeMap::from([("all".into(), Vec::new())]);
     let mut calibration: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     for result in results {
         let order = &result.observed;
@@ -35,6 +37,19 @@ pub fn metrics(results: &[OrderResult]) -> Value {
             .entry(format!("{}|{}|{action}", order.sleeve, order.symbol))
             .or_default()
             .push(result);
+        for slice in [
+            "all".to_string(),
+            format!("sleeve|{}", order.sleeve),
+            format!("action|{action}"),
+        ] {
+            slices.entry(slice).or_default().push(result);
+        }
+        if let Some(at) = order.decision_ns {
+            slices
+                .entry(format!("day|{}", &timestamp(at)[..10]))
+                .or_default()
+                .push(result);
+        }
         if let Some(reason) = &result.unavailable {
             *failures.entry(reason.clone()).or_default() += 1;
         }
@@ -117,68 +132,152 @@ pub fn metrics(results: &[OrderResult]) -> Value {
         "filled_fraction":p.filled/p.weight,"maker_fraction_of_requested":p.maker/p.weight,
         "requests_per_order":p.requests as f64/p.orders as f64
     }))).collect();
-    let actual:BTreeMap<_,_>=actual.into_iter().map(|(key,orders)|{
-        let mut fills=0; let mut notional=0.0; let mut maker_notional=0.0;
-        let mut fee=0.0; let mut fee_notional=0.0; let mut unknown_fees=0;
-        let mut mark_sum=[0.0;4]; let mut mark_weight=[0.0;4]; let mut mark_counts=[0_u64;4];
-        let mut price_cost=0.0; let mut price_weight=0.0;
-        let mut rtts=Vec::new(); let mut prewires=Vec::new();
-        for result in &orders {
-            let o=&result.observed;
-            rtts.extend(o.transport_rtt_ns);
-            prewires.extend(o.socket_write_ns.zip(o.decision_ns).and_then(|(w,d)|w.checked_sub(d)));
-            for (id,f) in &o.fills {
-                fills+=1;let w=f.qty*f.price;notional+=w;
-                if f.maker {maker_notional+=w;}
-                if let Some(value)=f.fee {fee+=value;fee_notional+=w;} else {unknown_fees+=1;}
-                if o.arrival_mid>0.0 {
-                    let sign=if o.request.side==engine_types::Side::Buy{1.0}else{-1.0};
-                    price_cost+=sign*f.qty*(f.price-o.arrival_mid);
-                    price_weight+=f.qty*o.arrival_mid;
-                }
-                if let Some(marks)=result.actual_markouts_bp.get(id) {
-                    for i in 0..4 {if let Some(mark)=marks[i]{mark_sum[i]+=mark*w;mark_weight[i]+=w;mark_counts[i]+=1;}}
-                }
-            }
-        }
-        rtts.sort_unstable();prewires.sort_unstable();
-        let ratio=|a:f64,b:f64|if b>0.0 {Some(a/b)}else{None};
-        let percentile=|v:&[u64],p:usize|v.get((v.len().saturating_sub(1))*p/100).map(|n|*n as f64/1e6);
-        (key,json!({"orders":orders.len(),"fills":fills,"filled_notional_usdt":notional,
-            "unidentified_fill_rows":orders.iter().map(|o|o.observed.unidentified_fill_rows).sum::<u64>(),
-            "maker_notional_fraction":ratio(maker_notional,notional),"known_fee_usdt":fee,
-            "known_fee_bp":ratio(fee*1e4,fee_notional),"fills_without_fee":unknown_fees,
-            "filled_price_shortfall_bp":ratio(price_cost*1e4,price_weight),
-            "markout_horizons_s":[1,15,60,300],"signed_markouts_bp":(0..4).map(|i|ratio(mark_sum[i],mark_weight[i])).collect::<Vec<_>>(),"markout_fill_counts":mark_counts,
-            "transport_rtt_p50_ms":percentile(&rtts,50),"transport_rtt_p90_ms":percentile(&rtts,90),
-            "decision_to_socket_p50_ms":percentile(&prewires,50),"decision_to_socket_p90_ms":percentile(&prewires,90)
-        }))
-    }).collect();
+    let actual: BTreeMap<_, _> = actual
+        .into_iter()
+        .map(|(key, orders)| (key, actual_metrics(&orders)))
+        .collect();
+    let actual_by_slice: BTreeMap<_, _> = slices
+        .into_iter()
+        .map(|(key, orders)| (key, actual_metrics(&orders)))
+        .collect();
+    let actual_by_order: BTreeMap<_, _> = results
+        .iter()
+        .map(|result| {
+            let order = &result.observed;
+            let mut costs = actual_metrics(&[result]);
+            costs["symbol"] = json!(order.symbol);
+            costs["sleeve"] = json!(order.sleeve);
+            costs["side"] = json!(order.request.side);
+            costs["reduce_only"] = json!(order.request.reduce_only);
+            costs["decision_ns"] = json!(order.decision_ns);
+            (order.request.client_order_id.clone(), costs)
+        })
+        .collect();
     let calibration:BTreeMap<_,_>=calibration.into_iter().map(|(key,errors)|(key,json!({
         "orders":errors.len(),"mean_signed_price_error_bp":errors.iter().sum::<f64>()/errors.len() as f64,
         "mean_absolute_price_error_bp":errors.iter().map(|e|e.abs()).sum::<f64>()/errors.len() as f64,
         "max_absolute_price_error_bp":errors.iter().map(|e|e.abs()).fold(0.0,f64::max)
     }))).collect();
-    json!({"actual":actual,"paired_by_slice":paired,"market_calibration":calibration,"unavailable_order_or_arm_counts":failures})
+    json!({"actual":actual,"actual_by_slice":actual_by_slice,"actual_by_order":actual_by_order,"paired_by_slice":paired,"market_calibration":calibration,"unavailable_order_or_arm_counts":failures})
+}
+
+fn actual_metrics(orders: &[&OrderResult]) -> Value {
+    let mut fills = 0;
+    let mut notional = 0.0;
+    let mut maker_notional = 0.0;
+    let mut fee = 0.0;
+    let mut fee_notional = 0.0;
+    let mut unknown_fees = 0;
+    let mut mark_sum = [0.0; 4];
+    let mut mark_weight = [0.0; 4];
+    let mut mark_counts = [0_u64; 4];
+    let mut price_cost = 0.0;
+    let mut price_weight = 0.0;
+    let mut missing_mid = 0;
+    let mut costed_fills = 0;
+    let mut costed_reference = 0.0;
+    let mut costed_notional = 0.0;
+    let mut costed_price = 0.0;
+    let mut costed_fee = 0.0;
+    let mut rtts = Vec::new();
+    let mut prewires = Vec::new();
+    for result in orders {
+        let o = &result.observed;
+        rtts.extend(o.transport_rtt_ns);
+        prewires.extend(
+            o.socket_write_ns
+                .zip(o.decision_ns)
+                .and_then(|(w, d)| w.checked_sub(d)),
+        );
+        for (id, f) in &o.fills {
+            fills += 1;
+            let w = f.qty * f.price;
+            notional += w;
+            if f.maker {
+                maker_notional += w;
+            }
+            if let Some(value) = f.fee {
+                fee += value;
+                fee_notional += w;
+            } else {
+                unknown_fees += 1;
+            }
+            if o.arrival_mid.is_finite() && o.arrival_mid > 0.0 {
+                let sign = if o.request.side == engine_types::Side::Buy {
+                    1.0
+                } else {
+                    -1.0
+                };
+                price_cost += sign * f.qty * (f.price - o.arrival_mid);
+                price_weight += f.qty * o.arrival_mid;
+                if let Some(fee) = f.fee {
+                    costed_fills += 1;
+                    costed_reference += f.qty * o.arrival_mid;
+                    costed_notional += w;
+                    costed_price += sign * f.qty * (f.price - o.arrival_mid);
+                    costed_fee += fee;
+                }
+            } else {
+                missing_mid += 1;
+            }
+            if let Some(marks) = result.actual_markouts_bp.get(id) {
+                for i in 0..4 {
+                    if let Some(mark) = marks[i] {
+                        mark_sum[i] += mark * w;
+                        mark_weight[i] += w;
+                        mark_counts[i] += 1;
+                    }
+                }
+            }
+        }
+    }
+    rtts.sort_unstable();
+    prewires.sort_unstable();
+    let ratio = |a: f64, b: f64| if b > 0.0 { Some(a / b) } else { None };
+    let percentile = |v: &[u64], p: usize| {
+        v.get((v.len().saturating_sub(1)) * p / 100)
+            .map(|n| *n as f64 / 1e6)
+    };
+    json!({"orders":orders.len(),"fills":fills,"filled_notional_usdt":notional,
+        "unidentified_fill_rows":orders.iter().map(|o|o.observed.unidentified_fill_rows).sum::<u64>(),
+        "maker_notional_fraction":ratio(maker_notional,notional),"known_fee_usdt":fee,
+        "known_fee_bp":ratio(fee*1e4,fee_notional),"fills_without_fee":unknown_fees,
+        "filled_price_shortfall_bp":ratio(price_cost*1e4,price_weight),
+        "fills_without_arrival_mid":missing_mid,
+        "costed":{
+            "fills":costed_fills,"reference_notional_usdt":costed_reference,
+            "filled_notional_usdt":costed_notional,"fill_notional_coverage":ratio(costed_notional,notional),
+            "price_cost_usdt":(costed_fills>0).then_some(costed_price),
+            "fee_usdt":(costed_fills>0).then_some(costed_fee),
+            "total_cost_usdt":(costed_fills>0).then_some(costed_price+costed_fee),
+            "price_shortfall_bp":ratio(costed_price*1e4,costed_reference),
+            "fee_bp":ratio(costed_fee*1e4,costed_reference),
+            "total_shortfall_bp":ratio((costed_price+costed_fee)*1e4,costed_reference)
+        },
+        "markout_horizons_s":[1,15,60,300],"signed_markouts_bp":(0..4).map(|i|ratio(mark_sum[i],mark_weight[i])).collect::<Vec<_>>(),"markout_fill_counts":mark_counts,
+        "transport_rtt_p50_ms":percentile(&rtts,50),"transport_rtt_p90_ms":percentile(&rtts,90),
+        "decision_to_socket_p50_ms":percentile(&prewires,50),"decision_to_socket_p90_ms":percentile(&prewires,90)
+    })
 }
 
 pub fn text(report: &Value) -> Result<String, std::fmt::Error> {
     let mut out=format!("One-sided execution study\nGenerated: {} | commit: {}\nWindow starts: {} | aligned orders: {} | cached: {}\n\n",
         timestamp(report["generated_ns"].as_u64().unwrap_or_default()),report["code_commit"].as_str().unwrap_or("unknown"),timestamp(report["window_start_ns"].as_u64().unwrap_or_default()),report["orders"].as_array().map_or(0,Vec::len),report["cached_orders"]);
-    out.push_str("IDENTIFIED ACTUAL FILLS (WAL-matched orders; not whole-account P&L)\nSleeve/symbol/action | orders | fills | notional USDT | fee bp | maker % | unidentified rows\n");
+    out.push_str("MEASURED EXECUTION COSTS (identified WAL fills; not whole-account P&L)\nSlippage includes spread crossing and price movement from the recorded order-arrival midpoint.\nCost components use the same fills and arrival-notional denominator. Funding is separate.\nSlice | orders | fills | costed % | slippage bp | fee bp | all-in bp | cost USDT | maker %\n");
+    if let Some(rows) = report["metrics"]["actual_by_slice"].as_object() {
+        for (key, r) in rows {
+            cost_row(&mut out, key, r)?;
+        }
+    }
+    out.push_str("\nBY SYMBOL AND ACTION\nSleeve/symbol/action | orders | fills | costed % | slippage bp | fee bp | all-in bp | cost USDT | maker %\n");
     if let Some(rows) = report["metrics"]["actual"].as_object() {
         for (key, r) in rows {
-            writeln!(
-                out,
-                "{key} | {} | {} | {:.2} | {} | {} | {}",
-                r["orders"],
-                r["fills"],
-                r["filled_notional_usdt"].as_f64().unwrap_or_default(),
-                number(&r["known_fee_bp"], 1.0),
-                number(&r["maker_notional_fraction"], 100.0),
-                r["unidentified_fill_rows"]
-            )?;
+            cost_row(&mut out, key, r)?;
         }
+    }
+    if let Some(total) = report["metrics"]["actual_by_slice"].get("all") {
+        writeln!(out,"\nKnown fees across all identified fills: {} USDT; missing fee: {} fills; missing midpoint: {} fills; unidentified legacy rows: {}.",
+            number(&total["known_fee_usdt"],1.0),total["fills_without_fee"],total["fills_without_arrival_mid"],total["unidentified_fill_rows"])?;
     }
     out.push_str("\nCROSSING CALIBRATION: simulated minus actual signed price cost\nSymbol/hop | orders | mean error bp | largest absolute error bp\n");
     if let Some(rows) = report["metrics"]["market_calibration"].as_object() {
@@ -230,6 +329,22 @@ pub fn text(report: &Value) -> Result<String, std::fmt::Error> {
     Ok(out)
 }
 
+fn cost_row(out: &mut String, key: &str, row: &Value) -> Result<(), std::fmt::Error> {
+    let cost = &row["costed"];
+    writeln!(
+        out,
+        "{key} | {} | {} | {} | {} | {} | {} | {} | {}",
+        row["orders"],
+        row["fills"],
+        number(&cost["fill_notional_coverage"], 100.0),
+        number(&cost["price_shortfall_bp"], 1.0),
+        number(&cost["fee_bp"], 1.0),
+        number(&cost["total_shortfall_bp"], 1.0),
+        number(&cost["total_cost_usdt"], 1.0),
+        number(&row["maker_notional_fraction"], 100.0)
+    )
+}
+
 fn number(value: &Value, scale: f64) -> String {
     value
         .as_f64()
@@ -245,4 +360,82 @@ fn timestamp(at: u64) -> String {
         seconds / 60 % 60,
         seconds % 60
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn order(
+        id: &str,
+        side: &str,
+        qty: f64,
+        price: f64,
+        mid: f64,
+        fee: Option<f64>,
+    ) -> OrderResult {
+        serde_json::from_value(json!({
+            "observed": {
+                "request":{"client_order_id":id,"strategy":0,"symbol":0,"side":side,"qty":qty,"kind":"Market","stop":null,"reduce_only":side=="Sell"},
+                "intent":null,"symbol":"XUSDT","sleeve":"long","engine_commit":"fixture",
+                "source_segment":0,"source_offset":8,"process_epoch_ms":1,"wire_mono_ns":1,
+                "decision_ns":1_000_000_000_u64,"socket_write_ns":null,"transport_rtt_ns":null,
+                "arrival_mid":mid,"rule":null,"fills":{id:{"exec_id":id,"at_ns":2_000_000_000_u64,"qty":qty,"price":price,"fee":fee,"maker":false}},
+                "unidentified_fill_rows":0,"terminal":null,"amends":0,"cancels":0
+            },
+            "hypothetical":[],"unavailable":"no_tape","actual_markouts_bp":{}
+        })).unwrap()
+    }
+
+    #[test]
+    fn actual_all_in_uses_dollars_and_the_same_measured_fills_for_both_components() {
+        let results = [
+            order("buy", "Buy", 2.0, 110.0, 100.0, Some(0.22)),
+            order("sell", "Sell", 1.0, 99.0, 100.0, Some(-0.01)),
+            order("missing-fee", "Buy", 3.0, 120.0, 100.0, None),
+            order("missing-mid", "Buy", 1.0, 50.0, 0.0, Some(5.0)),
+        ];
+        let m = metrics(&results);
+        let total = &m["actual_by_slice"]["all"];
+        let cost = &total["costed"];
+        assert_eq!(cost["fills"], 2);
+        assert_eq!(cost["reference_notional_usdt"], 300.0);
+        assert_eq!(cost["filled_notional_usdt"], 319.0);
+        assert_eq!(cost["price_cost_usdt"], 21.0);
+        assert!((cost["fee_usdt"].as_f64().unwrap() - 0.21).abs() < 1e-12);
+        assert!((cost["total_shortfall_bp"].as_f64().unwrap() - 707.0).abs() < 1e-10);
+        assert!((cost["fill_notional_coverage"].as_f64().unwrap() - 319.0 / 729.0).abs() < 1e-12);
+        assert_eq!(total["fills_without_fee"], 1);
+        assert_eq!(total["fills_without_arrival_mid"], 1);
+        assert_eq!(
+            m["actual_by_order"]["buy"]["costed"]["total_shortfall_bp"],
+            1011.0
+        );
+        assert_eq!(
+            m["actual_by_order"]["sell"]["costed"]["total_shortfall_bp"],
+            99.0
+        );
+        assert!(m["actual_by_order"]["missing-fee"]["costed"]["total_shortfall_bp"].is_null());
+        assert!(m["actual_by_order"]["missing-mid"]["costed"]["total_shortfall_bp"].is_null());
+        assert_eq!(m["actual_by_slice"]["sleeve|long"], *total);
+        assert_eq!(m["actual_by_slice"]["day|1970-01-01"], *total);
+        let report = json!({"metrics":m});
+        let text = text(&report).unwrap();
+        assert!(text.contains("slippage bp | fee bp | all-in bp"));
+        assert!(text.contains("707.000"));
+        assert!(text.contains("Funding is separate"));
+    }
+
+    #[test]
+    fn empty_and_unmeasured_costs_do_not_report_free_execution() {
+        let m = metrics(&[order("blind", "Buy", 1.0, 100.0, 0.0, None)]);
+        let cost = &m["actual_by_slice"]["all"]["costed"];
+        assert_eq!(cost["fills"], 0);
+        assert!(cost["total_cost_usdt"].is_null());
+        assert!(cost["total_shortfall_bp"].is_null());
+        assert_eq!(cost["fill_notional_coverage"], 0.0);
+        assert!(
+            metrics(&[])["actual_by_slice"]["all"]["costed"]["fill_notional_coverage"].is_null()
+        );
+    }
 }

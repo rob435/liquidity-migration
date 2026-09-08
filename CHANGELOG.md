@@ -63,6 +63,20 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     reads verify all four loaded images against the release, healthy workers
     and nineteen exact full-size native stops. Local / Linux Rust totals are
     2,035 / 2,037; Python is 1,715 with one root/systemd skip; zero failures.
+  - The 07:47:54 UTC report contains 23 orders / 54 fills and twelve complete
+    counterfactuals; older XCN orders leave the rolling window. All 54 trades
+    match authenticated Bybit execution IDs, order IDs, prices, quantities,
+    fees, maker flags and timestamps. Their measured arrival cost is
+    `1.14046812` USDT fees plus `0.442607` USDT slippage: `14.357519` bp over
+    `1102.610518` USDT reference notional. The same account window has 55
+    funding settlements and `0.34536423` USDT net funding credit, kept separate
+    from execution cost. Artifacts: `/tmp/execution-study-review-20260908/`.
+  - Add actual all-in cost dollars, basis points, coverage and missing-input
+    counts to the text report; expose all/sleeve/action/day and per-order
+    breakdowns in JSON. Compute fees and price cost over the same fills and
+    arrival notional, retaining rebates. Regressions for mixed missing inputs,
+    buy/sell signs, empty data and partial coverage fail before the change and
+    pass afterward. Hypothetical policies and funded trading are unchanged.
 
 - **2026-09-07 22:56 UTC — The `capture-disk` page returns, and the read-only
   diagnostic still cannot name the writer holding the disk. The recorders are
