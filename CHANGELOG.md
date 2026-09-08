@@ -254,6 +254,27 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     15-minute timer re-fires the failure. Whether the study tolerates,
     reorders or refuses an out-of-order row decides what it measures; the
     on-call routine does not choose that.
+  - **Resolved 02:03 UTC: the reclaim ran and the floor is gone.** The unit
+    fix ships in `06220e5`, deployed 01:56:25 UTC in run
+    [`34177470521`](https://github.com/rob435/liquidity-migration/actions/runs/34177470521).
+    Diagnose
+    [`34178684761`](https://github.com/rob435/liquidity-migration/actions/runs/34178684761)
+    at 02:02:55 UTC reads `/dev/sda2 118G 54G 59G 48% /` — 25G free to 59G —
+    and `/` falls from 93 674 799 104 to 57 639 882 752 bytes. The stage still
+    reads 35 217 141 760 while the two engine state directories read
+    532 520 960 and 462 704 640: `du` charges a hard-linked inode to whichever
+    path it walks first, so the sealed segments now hold one copy of their
+    blocks, counted under the stage. `systemctl --failed` lists no units;
+    `backup.service` is `activating` mid-run and the execution study is clear.
+    The host watchdog reads `ok scope=host units-and-heartbeats-healthy` at
+    02:00:19 UTC with no `capture-disk` ref and no dropped-frame warning; both
+    recorders are active on 15 s and 29 s heartbeats and the tape is regrowing
+    at 765 MB Bybit and 128 MB Binance. `engine-mainnet` is active on a 3 s
+    heartbeat and `engine` on 0 s, both workers `ready` with
+    `spool_backpressured=false`, real money armed throughout.
+    `/var/lib/liquidity-migration-wal-quarantine` still holds 7 851 503 616
+    bytes no current source names; with 59G free that is the owner's call and
+    not this incident's.
 
 - **2026-09-07 — Historical source adapters and explicit sparse-data execution.**
   - Separate recorder decoding/Bybit book reconstruction, normalized events,
