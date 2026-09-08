@@ -114,11 +114,6 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     while the account leg retries the identical error. That asymmetry is why
     demo stayed open and mainnet latched under one network event.
     `MUTATION_DRAIN_TIMEOUT` is 10 s against a measured 15 s venue round trip.
-  - `liquidity-migration-demo-liveness.timer` is inactive from about 14:33,
-    after the deploy that failed its readiness check at 14:34:16, so the demo
-    realm went unwatched and the host watchdog paged `CRITICAL watchdog:demo:
-    demo watchdog timer is inactive (enabled)` at 14:52:51, 14:55:53 and
-    14:59:12. Diagnosed and fixed as `host-51b05439c4f09794` above.
 
 - **2026-09-08 — Restore CARRY daily holding at owner direction.**
   - Render both realms with intraday funding and pre-settlement exits disabled.
