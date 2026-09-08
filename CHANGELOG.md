@@ -42,8 +42,9 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     14:34:16 leaves `liquidity-migration-demo-liveness.timer` inactive from about
     14:33, and it comes back only because run `34241185290`'s demo handover
     succeeds at 15:05:14 — the `RESOLVED watchdog:demo` above. Mainnet has no
-    such recovery: its handover refuses again on every deploy while the
-    reconciliation halt stands, so the funded realm stays blind.
+    such recovery while the reconciliation halt stands: every handover refuses
+    at the same gate, so the funded realm stays blind until either the halt
+    clears or the timers are started by hand.
   - Fix. `restore_realm_timers` re-enables the realm's own manifest timers on the
     failed-handover path, before `rollback_after_failure` decides anything. It is
     non-fatal: a restore failure warns and leaves the handover's own error
@@ -69,16 +70,34 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     15:35:28 and no host-mutating workflow ran in that window — `diagnose` only
     reads, and the Telegram helper starts no units — so the liveness timer came
     back from outside the workflow log. `restore_realm_timers` covers both
-    timers (`lm_realm_units mainnet` lists the liveness and study timers), and
-    `5e8d46e` is not on the host: it runs `30feb6df`.
-  - Still required from the owner: this restores the watch, not the engine. The
-    funded engine remains reduce-only with `may_open=false` and its rolling-loss
-    trip on; clearing the latched reconciliation halt is
-    `mainnet-ac90e31c207bc0da` below and needs an operator. Until then every
-    mainnet handover refuses and every deploy exits non-zero at that gate, so
-    the study timer needs `scripts/ops.sh start
-    liquidity-migration-execution-study.timer` — the deployed `30feb6df` has no
-    restore path, and the merged one only runs on the next mainnet handover.
+    timers: `lm_realm_units mainnet` lists the liveness and study timers.
+  - Resolved on the host, both timers.
+    [Deploy run `34246230385`](https://github.com/rob435/liquidity-migration/actions/runs/34246230385)
+    (`ce2b129`), `Run VPS mode` 15:47:36-15:54:10 UTC, succeeds. An
+    operator-placed `/etc/liquidity-migration/reconcile-clear.mainnet.note`
+    drives `clear_reconciliation_if_requested` during the handover — `latch
+    may_open = false`, `standing findings: none — the log and the venue agree`,
+    six symbols restated, `cleared: the latch resets and the exposure ledger is
+    restated` — so the owner's gate passes at 15:54:02 with `rolling-loss`
+    printed and not blocking, and `deploy-ok commit=ce2b1299…`. The verify table
+    at 15:54:03 has every fleet timer active, `mainnet-liveness.timer` and
+    `execution-study.timer` included, which closes the study timer above.
+  - Diagnostic receipt.
+    [Diagnose run `34248345738`](https://github.com/rob435/liquidity-migration/actions/runs/34248345738),
+    read 16:00:33 through 16:00:47 UTC. `liquidity-migration-mainnet-liveness.service`
+    runs its 30-second passes again at 15:59:19, 15:59:50 and 16:00:21 with
+    `Result=success` and `ExecMainStatus=0`; the host watchdog reads `ok
+    scope=host units-and-heartbeats-healthy` at 15:55:04 and 15:58:04 with no
+    `watchdog:mainnet`. The funded engine is active from 15:53:38 on `ce2b129`
+    with `may_open=true` and six positions.
+  - What is not proven. That handover succeeded, so `restore_realm_timers` never
+    ran on the host: both timers came back through `start_realm`'s ordinary path.
+    The fix is proven in CI only, and its first host exercise is the next failed
+    handover.
+  - Still required from the owner: `rolling_loss_tripped=true` at
+    `-10.30624956` against the `10` USDT limit, so every mainnet sleeve reads
+    `entries_enabled=false` and the restored watchdog pages `rolling-loss:` every
+    30 seconds. Only the limit or the window clears that.
 
 - **2026-09-08 — Incident `mainnet-ac90e31c207bc0da`: the funded engine is latched reduce-only.**
   - From 15:00:23 UTC the mainnet watchdog pages `CRITICAL
