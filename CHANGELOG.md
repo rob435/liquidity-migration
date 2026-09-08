@@ -25,6 +25,12 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     delayed prices, working-order continuity and next-day rebalancing.
     This changes the holding policy; it does not reproduce the old daily
     diagnostic curve's future-return-filtered population or establish its profit.
+  - Deployment retains each realm's installed configuration before rendering its
+    replacement. A stopped-state conversion preserves checkpoint payloads across
+    unchanged CARRY rules with edited source metadata and EXODUS stop tightening.
+    Probe offset changes retain counters, timers, subscriptions, callback IDs and
+    pending work in a durable runtime record. Boot recovery checks the result;
+    retries resume after partial appends without clearing strategy state.
 
 - **2026-09-08 — Repair execution recovery, account limits and research costs.**
   - Research defaults read `configs/bybit_fee_rates.json` or

@@ -24,6 +24,12 @@ pub struct RecoveredCallbacks {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 pub enum WalRecord {
+    /// A stopped-runtime configuration change; callback identity and queues stay intact.
+    StrategyRuntimeReconfigured {
+        strategy: StrategyId,
+        previous_configuration_sha256: String,
+        runtime: crate::strategy_process::StrategyRuntimeState,
+    },
     OrderIdEpoch {
         epoch_ms: i64,
     },

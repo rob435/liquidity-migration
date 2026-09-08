@@ -991,6 +991,17 @@ ensure_native_strategy_state() {
         return 0
     fi
 
+    local deployed previous_config
+    deployed="$(cat "$DEPLOYED_COMMIT_FILE" 2>/dev/null || true)"
+    previous_config="$RELEASE_DIR/checkpoint-configs/$deployed/engine.$realm.toml"
+    if [ -n "$deployed" ] && [ -f "$previous_config" ]; then
+        run_engine_takeover_command "$realm" "$config" rebind-native-strategy-state \
+            --previous-config "$previous_config" --execute \
+            && run_engine_takeover_command "$realm" "$config" verify-native-strategy-state \
+            && return 0
+        fail "$realm native checkpoint configuration change is incompatible"
+    fi
+
     for source in \
         "$long_state" "$carry_checkpoint" "$carry_book" "$exodus_identity" "$exodus_state"; do
         [ -e "$source" ] && required_present=$((required_present + 1))
@@ -1237,8 +1248,29 @@ PY
 
 # ------------------------------------------------------------------ deploy
 
+retain_native_checkpoint_configs() {
+    local deployed realm source destination staged
+    deployed="$(cat "$DEPLOYED_COMMIT_FILE" 2>/dev/null || true)"
+    [ -n "$deployed" ] || return 0
+    for realm in demo mainnet; do
+        case "$realm" in
+            demo) source="$ENGINE_DEMO_CONFIG" ;;
+            mainnet) source="$ENGINE_MAINNET_CONFIG" ;;
+        esac
+        [ -f "$source" ] || continue
+        destination="$RELEASE_DIR/checkpoint-configs/$deployed/engine.$realm.toml"
+        [ ! -f "$destination" ] || continue
+        install -d -o root -g "$RUNTIME_GROUP" -m 0750 "$(dirname "$destination")"
+        staged="$(mktemp "${destination}.new.XXXXXX")" || fail "cannot stage $realm checkpoint configuration"
+        install -o root -g "$RUNTIME_GROUP" -m 0640 "$source" "$staged" \
+            && mv -- "$staged" "$destination" \
+            || fail "cannot retain $realm checkpoint source configuration"
+    done
+}
+
 deploy_mode() {
     seed_generation_record
+    retain_native_checkpoint_configs
     build_engine
     pin_mainnet_runtime
     fetch_exact_commit

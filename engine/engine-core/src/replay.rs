@@ -183,6 +183,7 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             "callback   {input_id} committed for {} with {} effects",
             names.strategy(process.strategy), transition.as_ref().map_or(0, |row| row.effects.len())
         ),
+        WalRecord::StrategyRuntimeReconfigured { strategy, runtime, .. } => format!("runtime reconfigured {} {}", names.strategy(*strategy), runtime.configuration_sha256),
         WalRecord::InstrumentCatalogCheckpoint { checkpoint, .. } => format!("instrument catalog: {} exact instruments", checkpoint.specs.len()),
         WalRecord::ExecutionPrecisionV1 => "execution precision: exact quantities and risk amounts".into(),
         WalRecord::OrderIdEpoch { epoch_ms } => format!("order ID epoch {epoch_ms}"),

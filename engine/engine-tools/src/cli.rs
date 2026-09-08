@@ -27,6 +27,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
         "reconcile-clear" => reconcile_clear(args),
         "initialize-native-strategy-state" => initialize_native_strategy_state(args),
         "verify-native-strategy-state" => verify_native_strategy_state(args),
+        "rebind-native-strategy-state" => rebind_native_strategy_state(args),
         "retire-legacy-signal-sources" => retire_legacy_signal_sources(args),
         "set-strategy-entry-permission" => set_strategy_entry_permission(args),
         "flatten-strategy" => flatten_strategy(args),
@@ -298,6 +299,19 @@ fn initialize_native_strategy_state(args: &[String]) -> Result<(), Box<dyn Error
 fn verify_native_strategy_state(args: &[String]) -> Result<(), Box<dyn Error>> {
     let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
     engine_tools::takeover::verify_native_strategy_state(&config)
+}
+
+fn rebind_native_strategy_state(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let previous = PathBuf::from(
+        value(args, "--previous-config").ok_or("checkpoint rebind needs --previous-config PATH")?,
+    );
+    let config =
+        PathBuf::from(value(args, "--config").ok_or("checkpoint rebind needs --config PATH")?);
+    runtime()?.block_on(engine_tools::takeover::rebind_native_strategy_state(
+        &previous,
+        &config,
+        args.iter().any(|arg| arg == "--execute"),
+    ))
 }
 
 fn retire_legacy_signal_sources(args: &[String]) -> Result<(), Box<dyn Error>> {

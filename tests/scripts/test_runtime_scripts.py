@@ -556,7 +556,7 @@ def _native_state_paths(tmp_path: Path, realm: str) -> tuple[Path, list[Path]]:
 
 def _ensure_native_state(
     tmp_path: Path, realm: str, *, verify_status: int = 1,
-    initialize_status: int = 0, final_verify_status: int = 0,
+    initialize_status: int = 0, final_verify_status: int = 0, rebind_status: int = 0,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     helper = _function(_remote_script(), "ensure_native_strategy_state")
     # Relocate the host's absolute state paths; the function's control flow is unchanged.
@@ -579,6 +579,7 @@ def _ensure_native_state(
             '  if [ "$3" = initialize-native-strategy-state ]; then',
             '    return "$INITIALIZE_STATUS"',
             "  fi",
+            '  if [ "$3" = rebind-native-strategy-state ]; then return "$REBIND_STATUS"; fi',
             "  verify_count=$((verify_count + 1))",
             '  if [ "$verify_count" -eq 1 ]; then return "$VERIFY_STATUS"; fi',
             '  return "$FINAL_VERIFY_STATUS"',
@@ -592,6 +593,9 @@ def _ensure_native_state(
         env={
             **os.environ,
             "STATE_ROOT": str(tmp_path),
+            "DEPLOYED_COMMIT_FILE": str(tmp_path / "deployed"),
+            "RELEASE_DIR": str(tmp_path / "release"),
+            "REBIND_STATUS": str(rebind_status),
             "STATE_TRACE": str(trace),
             "VERIFY_STATUS": str(verify_status),
             "INITIALIZE_STATUS": str(initialize_status),
@@ -1227,3 +1231,21 @@ def test_an_explicit_older_deploy_cannot_bypass_rollback_compatibility(tmp_path:
     assert head == current, result.stdout + result.stderr
     assert result.returncode != 0
     assert "forward repair" in result.stderr
+
+
+@pytest.mark.parametrize("realm", ["demo", "mainnet"])
+@pytest.mark.parametrize("rebind_status", [0, 19])
+def test_native_rebind_uses_retained_config_without_initializing_state(
+    tmp_path: Path, realm: str, rebind_status: int,
+) -> None:
+    (tmp_path / "deployed").write_text("a" * 40)
+    source = tmp_path / "release/checkpoint-configs" / ("a" * 40) / f"engine.{realm}.toml"
+    source.parent.mkdir(parents=True)
+    source.write_text("retained source configuration\n")
+    result, calls = _ensure_native_state(tmp_path, realm, rebind_status=rebind_status)
+    assert (result.returncode == 0) == (rebind_status == 0), result.stderr
+    assert calls[:2] == [f"{realm} {realm}.toml verify-native-strategy-state",
+                         f"{realm} {realm}.toml rebind-native-strategy-state"]
+    assert len(calls) == (3 if rebind_status == 0 else 2)
+    assert not any("initialize-native" in call for call in calls)
+    assert source.read_text() == "retained source configuration\n"

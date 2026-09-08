@@ -19,6 +19,22 @@ pub struct CallbackHost {
 }
 
 impl CallbackHost {
+    /// Apply boot's process checks without fetching historical callback pages.
+    pub fn validate_recovery(
+        strategies: &[Box<dyn Strategy>],
+        records: &[WalRecord],
+    ) -> Result<(), String> {
+        let (state, pages) = CallbackPages::replay(records, strategies.len(), 1)?;
+        Self::build(
+            CallbackExecution::Embedded,
+            strategies,
+            records,
+            state,
+            pages,
+        )?;
+        Ok(())
+    }
+
     pub fn new(
         execution: CallbackExecution,
         strategies: &[Box<dyn Strategy>],

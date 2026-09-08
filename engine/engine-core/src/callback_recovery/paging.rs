@@ -238,6 +238,16 @@ impl CallbackPages {
                 offset: 0,
             };
             match record {
+                WalRecord::StrategyRuntimeReconfigured {
+                    strategy,
+                    previous_configuration_sha256,
+                    runtime,
+                } => state.reconfigure_runtime(
+                    *strategy,
+                    previous_configuration_sha256,
+                    runtime,
+                    count,
+                )?,
                 WalRecord::SegmentBase {
                     strategy_processes,
                     strategy_callbacks,

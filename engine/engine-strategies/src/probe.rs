@@ -88,6 +88,35 @@ pub struct Probe {
 }
 
 impl Probe {
+    pub fn reconfigure_offset(
+        retained: &engine_types::strategy_process::StrategyRuntimeState,
+        previous: &engine_types::strategy_process::StrategyRuntimeState,
+        next: &engine_types::strategy_process::StrategyRuntimeState,
+    ) -> Result<engine_types::strategy_process::StrategyRuntimeState, String> {
+        for state in [retained, previous, next] {
+            if state.kind != NAME {
+                return Err("offset reconfiguration requires a probe runtime".into());
+            }
+            crate::runtime::restore(state)?;
+        }
+        if retained.configuration_sha256 != previous.configuration_sha256 {
+            return Err("probe runtime disagrees with the previous configuration".into());
+        }
+        let decode = |state: &engine_types::strategy_process::StrategyRuntimeState| {
+            serde_json::from_slice::<Self>(&state.payload).map_err(|error| error.to_string())
+        };
+        let configured = decode(next)?;
+        let mut restored = decode(retained)?;
+        restored.offset = configured.offset;
+        let result = restored
+            .runtime_state()?
+            .ok_or("probe runtime is missing")?;
+        if result.configuration_sha256 != next.configuration_sha256 {
+            return Err("probe reconfiguration changes more than its quote offset".into());
+        }
+        Ok(result)
+    }
+
     pub fn from_params(id: StrategyId, params: &toml::Value) -> Result<Self, BuildError> {
         let p = Params::new(NAME, params)?;
         p.reject_unknown(KNOWN_PARAMS)?;

@@ -27,7 +27,7 @@ def test_demo_gate_precedes_every_mainnet_candidate_change(tmp_path: Path, soak_
     for name in ("lib_sleeves.sh", "lib_systemd_environment.sh"):
         (tmp_path / "deploy" / name).write_text("")
     noop = (
-        "seed_generation_record build_engine fetch_exact_commit ensure_runtime_identities "
+        "seed_generation_record retain_native_checkpoint_configs build_engine fetch_exact_commit ensure_runtime_identities "
         "install_python_environment seed_realm_fingerprints prepare_oncall_inputs install_units "
         "start_independent_units prepare_demo_inputs record_generation verify_mode "
         "stage_demo_candidate pin_mainnet_runtime clear_demo_candidate_override clear_recorder_runtime"
@@ -162,7 +162,7 @@ def recorder_handover(tmp_path: Path):
         for name, data in baseline.items():
             (expected / name).write_bytes(data)
         noop = (
-            "seed_generation_record pin_mainnet_runtime install_python_environment "
+            "seed_generation_record retain_native_checkpoint_configs pin_mainnet_runtime install_python_environment "
             "seed_realm_fingerprints prepare_oncall_inputs prepare_demo_inputs record_generation "
             "verify_mode clear_demo_candidate_override"
         ).split()
@@ -461,3 +461,31 @@ def test_failed_incumbent_snapshot_does_not_publish_a_partial_directory_and_retr
     result = run_pin(environment)
     assert result.returncode == 0, result.stderr
     assert (release / "incumbent-mainnet/worker-inputs.conf").exists()
+
+
+def test_checkpoint_source_config_survives_deploy_retries(tmp_path: Path) -> None:
+    deployed = tmp_path / "deployed"
+    deployed.write_text("a" * 40)
+    source = tmp_path / "engine.toml"
+    source.write_text("incumbent bytes\n")
+    harness = "\n".join([
+        "set -euo pipefail",
+        'fail() { echo "$*" >&2; exit 1; }',
+        'install() { local -a args=(); while [ "$#" -gt 0 ]; do '
+        'case "$1" in -o|-g) shift 2 ;; *) args+=("$1"); shift ;; esac; '
+        'done; command install "${args[@]}"; }',
+        function("retain_native_checkpoint_configs"),
+        "retain_native_checkpoint_configs",
+    ])
+    env = {**os.environ, "DEPLOYED_COMMIT_FILE": str(deployed), "RELEASE_DIR": str(tmp_path),
+           "ENGINE_DEMO_CONFIG": str(source), "ENGINE_MAINNET_CONFIG": str(source),
+           "RUNTIME_GROUP": "unused"}
+    subprocess.run(["bash", "-c", harness], env=env, check=True, capture_output=True, text=True)
+    source.write_text("candidate bytes\n")
+    subprocess.run(["bash", "-c", harness], env=env, check=True, capture_output=True, text=True)
+    for realm in ("demo", "mainnet"):
+        saved = tmp_path / "checkpoint-configs" / ("a" * 40) / f"engine.{realm}.toml"
+        assert saved.read_text() == "incumbent bytes\n"
+    deployed.write_text("b" * 40)
+    subprocess.run(["bash", "-c", harness], env=env, check=True, capture_output=True, text=True)
+    assert (tmp_path / "checkpoint-configs" / ("b" * 40) / "engine.demo.toml").read_text() == "candidate bytes\n"

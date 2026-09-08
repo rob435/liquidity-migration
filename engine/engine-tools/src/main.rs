@@ -139,7 +139,13 @@ engine — the execution loop
 
   engine verify-native-strategy-state --config engine.toml
       Lock and read the stopped engine WAL, then verify exact strategy names,
-      current checkpoint identities and payloads, and completed provenance.
+      current checkpoint identities and payloads, completed provenance, and
+      retained callback configurations through the boot recovery checks.
+
+  engine rebind-native-strategy-state --previous-config PATH --config PATH [--execute]
+      Preserve native checkpoint payloads across CARRY metadata changes and
+      EXODUS stop tightening; retain probe counters and queued work across
+      offset changes under the stopped WAL lock and account lease.
 
   engine retire-legacy-signal-sources --config engine.toml --plan PATH [--execute]
       Read an operator retirement plan for permanently stopped legacy sources.

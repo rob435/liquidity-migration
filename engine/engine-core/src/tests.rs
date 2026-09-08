@@ -62,6 +62,7 @@ fn recent_replay_ms() -> i64 {
 
 fn kind_of(record: &WalRecord) -> String {
     match record {
+        WalRecord::StrategyRuntimeReconfigured { .. } => "strategy_runtime_reconfigured",
         WalRecord::PortfolioExitChanged { .. } => "portfolio_exit_changed",
         WalRecord::PortfolioExitCompleted { .. } => "portfolio_exit_completed",
         WalRecord::PortfolioEmergencyChanged { .. } => "portfolio_emergency_changed",

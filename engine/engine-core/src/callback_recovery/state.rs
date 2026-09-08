@@ -300,6 +300,16 @@ impl CallbackState {
         let mut state = Self::default();
         for record in records {
             match record {
+                WalRecord::StrategyRuntimeReconfigured {
+                    strategy,
+                    previous_configuration_sha256,
+                    runtime,
+                } => state.reconfigure_runtime(
+                    *strategy,
+                    previous_configuration_sha256,
+                    runtime,
+                    strategy_count,
+                )?,
                 WalRecord::SegmentBase {
                     strategy_processes,
                     strategy_callbacks,
@@ -384,6 +394,27 @@ impl CallbackState {
             }
         }
         Ok(state)
+    }
+
+    pub(super) fn reconfigure_runtime(
+        &mut self,
+        strategy: StrategyId,
+        previous_configuration_sha256: &str,
+        runtime: &engine_types::strategy_process::StrategyRuntimeState,
+        count: usize,
+    ) -> Result<(), String> {
+        let mut process = self
+            .committed
+            .get(&strategy)
+            .ok_or("runtime reconfiguration has no saved process")?
+            .clone();
+        if process.runtime.configuration_sha256 != previous_configuration_sha256
+            || process.runtime.kind != runtime.kind
+        {
+            return Err("runtime reconfiguration changes its source authority".into());
+        }
+        process.runtime = runtime.clone();
+        self.restore_process(process, count)
     }
 
     pub(super) fn validate_input(

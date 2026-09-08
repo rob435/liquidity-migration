@@ -12,6 +12,9 @@ use crate::{assembly, clock, config};
 
 const INITIALIZE_LEASE_ROLE: &str = "strategy-state-initialize";
 
+mod rebind;
+pub use rebind::rebind_native_strategy_state;
+
 fn validate_checkpoint_contract(
     strategy: &dyn engine_types::Strategy,
     identity: &StrategyCheckpointIdentity,
@@ -365,6 +368,7 @@ pub fn verify_native_strategy_state(config_path: &Path) -> Result<(), Box<dyn Er
     let strategies =
         assembly::strategies_for_registry(&loaded.config.strategies, &plan, &replayed)?;
     verify_records(&configured, &strategies, &replayed)?;
+    engine_core::callback_recovery::host::CallbackHost::validate_recovery(&strategies, &replayed)?;
     println!("log       {}", settings.wal_path.display());
     println!("result    native strategy state verified");
     Ok(())
