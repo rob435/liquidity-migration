@@ -114,9 +114,8 @@ $$\text{Size} = \text{Base} \times M_{\text{depth}} \times M_{\text{persistence}
 ## 7. Account Risk & Collision Rules
 
 1. **Sleeve Attribution**: Sleeves may hold the same symbol, including opposing lots; the portfolio ledger attributes each lot while the venue holds one physical net position.
-   * If a second sleeve signals an entry, it is blocked until the first sleeve is flat and fully reconciled.
 2. **Shared Capital Limits**: All sleeves draw against the shared gross exposure ceiling defined in the operational profile.
-3. **Rolling-Loss Circuit Breaker**: If total realized losses across all closed engine trades inside 24 hours reach the loss ceiling, **all entry orders across all sleeves are immediately blocked**. Existing positions continue to exit normally.
-4. **Own-Fills Sizing**: A sleeve plans exits and resizes against its own filled quantity plus its in-flight orders, capped by the account reading (`native_common::planner_facts`).
+3. **Rolling-Loss Circuit Breaker**: If closed 24-hour engine PnL plus current account open losses reaches the loss ceiling, **all entry orders across all sleeves are immediately blocked**. Existing positions continue to exit normally.
+4. **Own-Fills Sizing**: An allocated sleeve plans exits and resizes against its exact owned quantity plus its pending orders (`native_common::planner_facts`); the physical net does not erase an opposing sleeve lot.
    * Exposure no engine order opened — the owner's hand trades included — is nobody's: never resized, never exited, never counted as the sleeve's. A venue position on the other side of the sleeve's own fills is not its holding.
-   * The fill sum is shaved of float dust at the `qty_step`'s decimal precision; where it then covers the venue's figure, the venue's exact quantity is used.
+   * The compatibility path without allocated lots retains its scalar grid cleanup and venue cap; it does not define the current exact sleeve allocation.

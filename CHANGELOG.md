@@ -35,11 +35,12 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     alone cannot cross. Restart cancels recovered worked sleeve openings even
     when they reduce an opposing physical position. Mainnet remains WS and
     demo REST because Bybit does not offer demo trade WS. The observed sample
-    has six LONG opening orders/17 fills, all taker; 14 measured order RTTs
+    has six LONG opening orders/16 fills, all taker; 14 measured order RTTs
     have a 9.77 ms median. That sample does not establish future maker share.
   - Account reads retain exact liquidation/mark prices and IM/MM ratios.
     Initial-margin cap is 70% of reference; per-symbol gross cap is 50%.
     Opening and held stops use at most half inverse leverage (10% at 5×),
+    including higher observed venue leverage on a shared symbol,
     tighten further for known liquidation proximity, and never loosen existing
     protection. EXODUS/CARRY defaults move from 35% to 10%; LONG ATR requests
     are capped at admission. Closed 24-hour loss includes current account open

@@ -8,7 +8,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if intent.reduce_only {
             return Ok(());
         }
-        let Some(cap) = self.risk.stop_distance_cap(intent.leverage) else {
+        let leverage = self
+            .books
+            .account
+            .positions
+            .iter()
+            .filter(|position| position.symbol == intent.symbol)
+            .filter_map(|position| position.leverage)
+            .chain(intent.leverage)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .reduce(f64::max);
+        let Some(cap) = self.risk.stop_distance_cap(leverage) else {
             return Ok(());
         };
         let Some(stop) = intent.stop_price().map_err(|e| e.to_string())? else {
@@ -269,26 +279,31 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_incoming_wide_stop_is_capped_before_the_risk_reservation() {
-        let mut engine = crate::tests::shared_sleeves::exact_single_sleeve_engine("1", None).await;
-        priced(&mut engine);
-        let mut request = intent(Side::Buy, false);
-        request.stop = Some(StopSpec { trigger_px: 60.0 });
-        let prepared = engine
-            .prepare_intent(
-                request,
-                None,
-                clock::now_ns(),
-                None,
-                &mut Default::default(),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            prepared.request.sleeve_stop().unwrap().trigger_px,
-            75.8,
-            "2x fixture policy caps 40% to 25%, then rounds protection inward"
-        );
+        for (observed_leverage, expected) in [(None, 75.8), (Some(10.0), 96.0)] {
+            let mut engine =
+                crate::tests::shared_sleeves::exact_single_sleeve_engine("1", None).await;
+            priced(&mut engine);
+            engine.enforce_position_stop_intent().await.unwrap();
+            engine.books.account.positions[0].leverage = observed_leverage;
+            let mut request = intent(Side::Buy, false);
+            request.stop = Some(StopSpec { trigger_px: 60.0 });
+            let prepared = engine
+                .prepare_intent(
+                    request,
+                    None,
+                    clock::now_ns(),
+                    None,
+                    &mut Default::default(),
+                )
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("entry refused: {:?}", engine.wal.snapshot_records()));
+            assert_eq!(
+                prepared.request.sleeve_stop().unwrap().trigger_px,
+                expected,
+                "stop distance uses configured and observed leverage, then rounds inward"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
