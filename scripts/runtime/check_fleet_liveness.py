@@ -652,16 +652,28 @@ def evaluate_engine_rates(
     return alerts
 
 
+def deployment_blockers(alerts: list[Alert]) -> list[Alert]:
+    # A rolling-loss restriction must not prevent replacing a running engine.
+    # The risk kernel still refuses entries; routine liveness still pages the trip.
+    return [alert for alert in alerts if not alert.key.startswith("rolling-loss:")]
+
+
 def run_demo_soak() -> int:
     rows = [row for row in load_fleet_manifest()
             if row.realm == "demo" and (row.unit in _ENGINE_UNITS or "signal-worker" in row.unit)]
     counters: dict[str, float] = {}
+    reported_restrictions: set[str] = set()
     started = time.monotonic()
     while True:
         now = time.time()
         alerts = evaluate_units("demo", rows)
         alerts.extend(evaluate_heartbeats(rows, now=now, max_age_sec=30))
         alerts.extend(evaluate_engine_rates(rows, now=now, counters=counters))
+        for alert in alerts:
+            if alert.key.startswith("rolling-loss:") and alert.key not in reported_restrictions:
+                print(f"CRITICAL {alert.key}: {alert.message}", flush=True)
+                reported_restrictions.add(alert.key)
+        alerts = deployment_blockers(alerts)
         if alerts:
             lines = [f"CRITICAL {alert.key}: {alert.message}" for alert in alerts]
             message = "demo soak refused; mainnet remains on its incumbent runtime\n" + "\n".join(lines)
@@ -1350,7 +1362,7 @@ def main() -> int:
             heartbeat_alerts = evaluate_engine_heartbeat(unit, path, now=now)
             for alert in heartbeat_alerts:
                 print(f"{alert.severity} {alert.key}: {alert.message}")
-            return int(bool(heartbeat_alerts))
+            return int(bool(deployment_blockers(heartbeat_alerts)))
         except (OSError, ValueError, AttributeError) as heartbeat_error:
             print(f"heartbeat readiness failed: {heartbeat_error}", file=sys.stderr)
             return 1

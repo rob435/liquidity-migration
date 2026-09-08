@@ -31,6 +31,13 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     Probe offset changes retain counters, timers, subscriptions, callback IDs and
     pending work in a durable runtime record. Boot recovery checks the result;
     retries resume after partial appends without clearing strategy state.
+  - At 14:34:16 UTC, demo starts with preserved quantities but the deployment
+    readiness check rejects `rolling-loss trip is on`: 164.54 USDT rolling
+    loss against a 162.70 USDT limit. Startup and soak checks now distinguish that
+    enforced entry restriction from process failure. The risk state and limit
+    remain unchanged, ordinary liveness alerts remain critical, and all other
+    heartbeat/resource failures still block deployment. Both failing readiness
+    regressions pass after the correction.
 
 - **2026-09-08 — Repair execution recovery, account limits and research costs.**
   - Research defaults read `configs/bybit_fee_rates.json` or

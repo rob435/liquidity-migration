@@ -307,7 +307,7 @@ def resources(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(module.time, "monotonic", lambda: observed["now"])
 
     def heartbeat_update():
-        heartbeat.write_text(json.dumps({"may_open": True, "rolling_loss_tripped": False, "strategy_errors": []}))
+        heartbeat.write_text(json.dumps({"may_open": True, "rolling_loss_tripped": observed.get("loss", False), "strategy_errors": []}))
         os.utime(heartbeat, (observed["now"], observed["now"]))
 
     def advance(seconds):
@@ -347,6 +347,37 @@ def test_demo_soak_requires_all_five_minutes(resources) -> None:
     started = observed["now"]
     assert module.run_demo_soak() == 0
     assert observed["now"] - started == 300
+
+
+def test_demo_soak_retains_risk_halt_without_mistaking_it_for_a_runtime_fault(resources, monkeypatch, capsys) -> None:
+    module, row, _wal, observed, advance = resources
+    observed["loss"] = True
+    advance(0)
+    monkeypatch.setattr(module, "send_telegram_message", lambda *_args, **_kwargs: False)
+    started = observed["now"]
+    assert module.run_demo_soak() == 0
+    assert observed["now"] - started == 300
+    alerts = module.evaluate_engine_heartbeat(row.unit, Path(row.output_artifact), now=observed["now"])
+    assert [(alert.key, alert.severity) for alert in alerts] == [(f"rolling-loss:{row.unit}", "CRITICAL")]
+    assert "entries refused" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("may_open,expected", [(True, 0), (False, 1)])
+def test_started_process_retains_rolling_loss_restriction(resources, monkeypatch, capsys, may_open, expected) -> None:
+    import json
+    import sys
+
+    module, row, _wal, observed, _advance = resources
+    heartbeat = Path(row.output_artifact)
+    payload = {"pid": 101, "wall_ts_ms": int(observed["now"] * 1000), "may_open": may_open,
+               "rolling_loss_tripped": True, "rolling_loss_net_usdt": -164.54,
+               "rolling_loss_limit_usdt": 162.70, "rolling_loss_window_ms": 86_400_000, "strategy_errors": []}
+    heartbeat.write_text(json.dumps(payload))
+    original = heartbeat.read_bytes()
+    monkeypatch.setattr(sys, "argv", ["liveness", "--check-heartbeat", row.unit, str(heartbeat), "101", str(observed["now"] - 1)])
+    assert module.main() == expected
+    assert heartbeat.read_bytes() == original
+    assert "entries refused" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("fault, expected", [
